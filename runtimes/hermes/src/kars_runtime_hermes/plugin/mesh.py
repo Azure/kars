@@ -23,6 +23,7 @@ import json
 import logging
 import os
 import threading
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -42,6 +43,98 @@ _MESH_SINGLETON: MeshClient | None = None
 _MESH_LOCK = threading.Lock()
 _BACKGROUND_LOOP: asyncio.AbstractEventLoop | None = None
 _BACKGROUND_THREAD: threading.Thread | None = None
+_PENDING_TASK_REQUESTS: dict[str, str] = {}
+_PENDING_TASK_EXPIRY: dict[str, float] = {}
+_PENDING_TASK_LOCK = threading.Lock()
+
+
+def _clear_request_locked(request_id: str) -> None:
+    for name, pending_id in list(_PENDING_TASK_REQUESTS.items()):
+        if pending_id == request_id:
+            _PENDING_TASK_REQUESTS.pop(name, None)
+    _PENDING_TASK_EXPIRY.pop(request_id, None)
+
+
+def _expire_stale_requests_locked() -> None:
+    now = time.monotonic()
+    for request_id, expires_at in list(_PENDING_TASK_EXPIRY.items()):
+        if now >= expires_at:
+            _clear_request_locked(request_id)
+
+
+def _pending_request(name: str) -> str | None:
+    with _PENDING_TASK_LOCK:
+        _expire_stale_requests_locked()
+        return _PENDING_TASK_REQUESTS.get(name)
+
+
+def _reserve_request(
+    logical_name: str,
+    registry_name: str,
+    request_id: str,
+) -> str | None:
+    with _PENDING_TASK_LOCK:
+        _expire_stale_requests_locked()
+        existing = (
+            _PENDING_TASK_REQUESTS.get(logical_name)
+            or _PENDING_TASK_REQUESTS.get(registry_name)
+        )
+        if existing is not None:
+            return existing
+        _PENDING_TASK_REQUESTS[logical_name] = request_id
+        _PENDING_TASK_REQUESTS[registry_name] = request_id
+        _PENDING_TASK_EXPIRY[request_id] = time.monotonic() + 20 * 60
+        return None
+
+
+def _clear_request(request_id: str) -> None:
+    with _PENDING_TASK_LOCK:
+        _clear_request_locked(request_id)
+
+
+def clear_pending_for_agent(logical_name: str, registry_name: str | None = None) -> None:
+    with _PENDING_TASK_LOCK:
+        request_ids = {
+            pending_id
+            for name, pending_id in _PENDING_TASK_REQUESTS.items()
+            if name == logical_name or (registry_name is not None and name == registry_name)
+        }
+        for request_id in request_ids:
+            _clear_request_locked(request_id)
+
+
+def _logical_sender_for_pending(
+    sender_name: str,
+    expected_names: set[str],
+) -> tuple[str, str] | None:
+    pending_id = _pending_request(sender_name)
+    if pending_id is None:
+        return None
+    logical_name = next(
+        (
+            expected_name
+            for expected_name in expected_names
+            if _pending_request(expected_name) == pending_id
+        ),
+        None,
+    )
+    return (logical_name, pending_id) if logical_name is not None else None
+
+
+def _parse_task_response(
+    payload: bytes,
+    request_id: str | None = None,
+) -> tuple[str, bool] | None:
+    try:
+        envelope = json.loads(payload.decode("utf-8", errors="replace"))
+    except (json.JSONDecodeError, ValueError):
+        return None
+    if not isinstance(envelope, dict) or envelope.get("type") != "task_response":
+        return None
+    correlation = envelope.get("in_reply_to_id") or envelope.get("in_reply_to")
+    if request_id is not None and str(correlation or "") != request_id:
+        return None
+    return str(envelope.get("content", "")), bool(envelope.get("ok", True))
 
 
 def _get_or_init_loop() -> asyncio.AbstractEventLoop:
@@ -322,16 +415,28 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
             "type": "task_request",
             "content": content_text,
             "request_id": request_id,
+            "message_id": request_id,
             "timestamp": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
         }
     ).encode("utf-8")
+    existing_request = _reserve_request(peer, registry_peer, request_id)
+    if existing_request is not None:
+        return json.dumps({
+            "ok": False,
+            "status": "assigned_in_progress",
+            "to_agent": peer,
+            "request_id": existing_request,
+            "message": (
+                "This agent already has an unresolved assignment. Do not resend; "
+                "call kars_mesh_await and then kars_mesh_inbox."
+            ),
+        })
 
-    # How long to await the sub-agent's reply. Matches OpenClaw's ~5.5 min
-    # patience for a child doing real work; overridable per call.
-    wait_seconds = float(args.get("timeout_seconds", 330))
-    # Budget the first slice of the window to LANDING the send (peer may still
-    # be booting), then spend the remainder awaiting the reply.
-    send_budget = min(max(wait_seconds * 0.5, 90.0), 240.0)
+    # Keep each synchronous tool call below the host's stuck-session watchdog.
+    # Long work continues through kars_mesh_await using the retained request id.
+    total_budget = min(max(float(args.get("timeout_seconds", 150)), 30.0), 150.0)
+    send_budget = min(max(total_budget * 0.4, 20.0), 60.0)
+    wait_seconds = max(10.0, total_budget - send_budget)
 
     async def _send_and_wait() -> dict[str, Any]:
         # Resolve the peer's DID first so we can match its reply (the reply's
@@ -411,41 +516,63 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
         assert peer_did is not None
         _ = last_exc  # retained for clarity; only used in the give-up branch
         deadline = asyncio.get_event_loop().time() + wait_seconds
-        async for msg in client.tool_inbox():
-            if msg.from_did != peer_did:
-                # Not from our peer — put it back for whoever awaits it.
-                await client._tool_inbox.put(msg)  # noqa: SLF001
-                await asyncio.sleep(0.05)
-            else:
-                text = msg.payload.decode("utf-8", errors="replace")
-                content = text
-                ok = True
+        deferred: list[InboundMessage] = []
+        inbox = client.tool_inbox().__aiter__()
+        try:
+            while True:
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    return {
+                        "ok": False,
+                        "to_agent": peer,
+                        "error": f"no correlated reply from {peer!r} within "
+                        f"{wait_seconds:.0f}s (task delivered; call "
+                        "kars_mesh_await, then kars_mesh_inbox)",
+                        "pending": True,
+                        "request_id": request_id,
+                    }
                 try:
-                    env = json.loads(text)
-                    if isinstance(env, dict) and env.get("type") == "task_response":
-                        content = str(env.get("content", ""))
-                        ok = bool(env.get("ok", True))
-                except (json.JSONDecodeError, ValueError):
-                    pass
-                return {"ok": ok, "from_agent": peer, "reply": content}
-            if asyncio.get_event_loop().time() >= deadline:
-                return {
-                    "ok": False,
-                    "to_agent": peer,
-                    "error": f"no reply from {peer!r} within {wait_seconds:.0f}s "
-                    "(task delivered; check kars_mesh_inbox later)",
-                }
-        return {"error": "mesh inbox closed"}
+                    msg = await asyncio.wait_for(anext(inbox), timeout=remaining)
+                except asyncio.TimeoutError:
+                    return {
+                        "ok": False,
+                        "to_agent": peer,
+                        "error": f"no correlated reply from {peer!r} within "
+                        f"{wait_seconds:.0f}s (task delivered; call "
+                        "kars_mesh_await, then kars_mesh_inbox)",
+                        "pending": True,
+                        "request_id": request_id,
+                    }
+                except StopAsyncIteration:
+                    return {"error": "mesh inbox closed"}
+                parsed = (
+                    _parse_task_response(msg.payload, request_id)
+                    if msg.from_did == peer_did
+                    else None
+                )
+                if parsed is not None:
+                    content, ok = parsed
+                    _clear_request(request_id)
+                    return {"ok": ok, "from_agent": peer, "reply": content}
+                deferred.append(msg)
+        finally:
+            for deferred_msg in deferred:
+                await client._tool_inbox.put(deferred_msg)  # noqa: SLF001
 
     try:
         future = asyncio.run_coroutine_threadsafe(_send_and_wait(), loop)
-        result = future.result(timeout=send_budget + wait_seconds + 30.0)
+        result = future.result(timeout=total_budget + 10.0)
+        if result.get("error") and not result.get("pending"):
+            _clear_request(request_id)
         return json.dumps(result)
     except MeshPeerNotFoundError as exc:
+        _clear_request(request_id)
         return json.dumps({"error": f"Peer {peer!r} not found: {exc}"})
     except MeshTransportError as exc:
+        _clear_request(request_id)
         return json.dumps({"error": f"Transport error: {exc}"})
     except Exception as exc:  # noqa: BLE001
+        _clear_request(request_id)
         return json.dumps({"error": f"send failed: {exc}"})
 
 
@@ -468,15 +595,30 @@ def _kars_mesh_inbox(_args: dict[str, Any], **_kwargs: Any) -> str:
         queue = client._tool_inbox  # noqa: SLF001 — internal but stable
         while not queue.empty():
             msg: InboundMessage = await queue.get()
-            drained.append(
-                {
-                    "from_did": msg.from_did,
-                    "from_display_name": msg.from_display_name,
-                    "payload_b64": base64.b64encode(msg.payload).decode("ascii"),
-                    "message_id": msg.message_id,
-                    "received_at": msg.received_at.isoformat(),
-                }
+            sender = msg.from_display_name or ""
+            pending_id = _pending_request(sender)
+            parsed = (
+                _parse_task_response(msg.payload, pending_id)
+                if pending_id is not None
+                else None
             )
+            entry = {
+                "from_did": msg.from_did,
+                "from_display_name": msg.from_display_name,
+                "payload_b64": base64.b64encode(msg.payload).decode("ascii"),
+                "message_id": msg.message_id,
+                "received_at": msg.received_at.isoformat(),
+            }
+            if parsed is not None:
+                content, ok = parsed
+                entry.update({
+                    "content": content,
+                    "ok": ok,
+                    "in_reply_to": pending_id,
+                    "assignment_resolved": True,
+                })
+                _clear_request(pending_id)
+            drained.append(entry)
 
     future = asyncio.run_coroutine_threadsafe(_drain(), loop)
     future.result(timeout=5.0)
@@ -493,40 +635,67 @@ def _kars_mesh_await(args: dict[str, Any], **_kwargs: Any) -> str:
         return json.dumps({"error": f"Mesh client init failed: {exc}"})
 
     senders = list(args.get("senders") or [])
-    timeout = float(args.get("timeout_seconds", 300))
+    timeout = min(float(args.get("timeout_seconds", 150)), 150.0)
     expected: set[str] = set(senders)
 
     loop = _get_or_init_loop()
     drained: list[dict[str, Any]] = []
+    seen_names: set[str] = set()
 
     async def _wait() -> None:
         deadline = asyncio.get_event_loop().time() + timeout
-        seen_names: set[str] = set()
-        async for msg in client.tool_inbox():
-            drained.append(
-                {
-                    "from_did": msg.from_did,
-                    "from_display_name": msg.from_display_name,
-                    "payload_b64": base64.b64encode(msg.payload).decode("ascii"),
-                    "message_id": msg.message_id,
-                }
-            )
-            if msg.from_display_name:
-                seen_names.add(msg.from_display_name)
-            if expected and seen_names.issuperset(expected):
-                return
-            remaining = deadline - asyncio.get_event_loop().time()
-            if remaining <= 0:
-                return
+        deferred: list[InboundMessage] = []
+        inbox = client.tool_inbox().__aiter__()
+        try:
+            while not expected or not seen_names.issuperset(expected):
+                remaining = deadline - asyncio.get_event_loop().time()
+                if remaining <= 0:
+                    return
+                try:
+                    msg = await asyncio.wait_for(anext(inbox), timeout=remaining)
+                except (asyncio.TimeoutError, StopAsyncIteration):
+                    return
+                sender = msg.from_display_name or ""
+                pending_sender = _logical_sender_for_pending(sender, expected)
+                if pending_sender is None:
+                    deferred.append(msg)
+                    continue
+                logical_sender, pending_id = pending_sender
+                parsed = _parse_task_response(msg.payload, pending_id)
+                if parsed is None:
+                    deferred.append(msg)
+                    continue
+                content, ok = parsed
+                drained.append(
+                    {
+                        "from_did": msg.from_did,
+                        "from_display_name": sender,
+                        "logical_sender": logical_sender,
+                        "payload_b64": base64.b64encode(msg.payload).decode("ascii"),
+                        "message_id": msg.message_id,
+                        "content": content,
+                        "ok": ok,
+                        "in_reply_to": pending_id,
+                    }
+                )
+                seen_names.add(logical_sender)
+                _clear_request(pending_id)
+        finally:
+            for deferred_msg in deferred:
+                await client._tool_inbox.put(deferred_msg)  # noqa: SLF001
 
     future = asyncio.run_coroutine_threadsafe(_wait(), loop)
     try:
         future.result(timeout=timeout + 5.0)
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"await failed: {exc}", "partial": drained})
-    return json.dumps(
-        {"messages": drained, "count": len(drained), "completed": True}
-    )
+    missing = sorted(expected - seen_names)
+    return json.dumps({
+        "messages": drained,
+        "count": len(drained),
+        "completed": not missing,
+        "missing": missing,
+    })
 
 
 def _kars_mesh_transfer_file(args: dict[str, Any], **_kwargs: Any) -> str:

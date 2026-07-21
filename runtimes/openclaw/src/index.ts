@@ -165,7 +165,17 @@ let agtIdentity: any = null;
 let agtInitialized = false; // Module-level guard (supplemented by process-level guard below)
 
 // AGT message buffer — filled by onMessage handler, drained by mesh_inbox tool
-const agtInbox: Array<{ from_amid: string; from_agent: string; content: any; timestamp: string; id: string; message_type?: string; read_at?: string }> = [];
+const agtInbox: Array<{
+  from_amid: string;
+  from_agent: string;
+  content: any;
+  timestamp: string;
+  id: string;
+  message_type?: string;
+  in_reply_to_id?: string;
+  task_ok?: boolean;
+  read_at?: string;
+}> = [];
 let activeTaskProgressHeartbeat: ((() => void) & {
   report?: (stage: string, details?: Record<string, unknown>) => void;
 }) | null = null;
@@ -302,6 +312,8 @@ function pushInbox(entry: {
   timestamp: string;
   id: string;
   message_type?: string;
+  in_reply_to_id?: string;
+  task_ok?: boolean;
 }): void {
   agtInbox.push(entry);
   inboxStats.received_total += 1;
@@ -970,6 +982,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
         from_agent: fromName,
         content,
         message_type: message?.type || "message",
+        in_reply_to_id: typeof message?.in_reply_to_id === "string"
+          ? message.in_reply_to_id
+          : typeof message?.in_reply_to === "string"
+            ? message.in_reply_to
+            : undefined,
+        task_ok: typeof message?.ok === "boolean" ? message.ok : undefined,
         timestamp: new Date().toISOString(),
         id: `agt-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
       };
@@ -999,6 +1017,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       // Governance failures use the configured grace, then fail closed.
       // This runs AFTER E2E decryption (handled by SDK) — encryption is not affected.
       if (message?.type === "task_request") {
+        const assignmentId =
+          (message?.message_id as string) ||
+          (message?.request_id as string) ||
+          crypto.randomUUID();
         try {
           // Look up sender's trust score via router (which forwards with admin token)
           let senderTrustScore = 0;
@@ -1020,6 +1042,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                   try {
                     await agtMeshClient.send(fromAmid, {
                       type: "task_response",
+                      in_reply_to_id: assignmentId,
+                      in_reply_to: assignmentId,
                       content: "Request denied: this agent requires verified identity tier (OAuth/Entra). Register with a verification token.",
                       ok: false,
                       from_agent: agtSandboxName,
@@ -1045,6 +1069,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
               try {
                 await agtMeshClient.send(fromAmid, {
                   type: "task_response",
+                  in_reply_to_id: assignmentId,
+                  in_reply_to: assignmentId,
                   content: `Request denied by governance policy: ${evalData.reason}`,
                   ok: false,
                   from_agent: agtSandboxName,
@@ -1087,6 +1113,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             await agtMeshClient.send(fromAmid, {
               type: "task_response",
               in_reply_to_id: assignmentId,
+              in_reply_to: assignmentId,
               content: `Task denied by AGT governance: ${evalData.reason}`,
               ok: false,
               from_agent: agtSandboxName,
@@ -1241,6 +1268,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           await agtMeshClient.send(fromAmid, {
             type: "task_response",
             in_reply_to_id: assignmentId,
+            in_reply_to: assignmentId,
             content: latin1Safe(llmResponse),
             ok: true,
             artifacts: artifactManifest,
@@ -1276,6 +1304,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             await agtMeshClient.send(fromAmid, {
               type: "task_response",
               in_reply_to_id: assignmentId,
+              in_reply_to: assignmentId,
               content: latin1Safe(`Error processing task: ${replyErr.message}`),
               ok: false,
               from_agent: agtSandboxName,

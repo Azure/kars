@@ -183,14 +183,28 @@ def _kars_spawn_destroy(args: dict[str, Any], **_kwargs: Any) -> str:
     except Exception as exc:  # noqa: BLE001
         return json.dumps({"error": f"destroy failed: {exc}"})
 
-    # Drop the torn-down sibling from the roster so the next outbound
-    # kars_mesh_send doesn't list it as a reachable peer.
-    _remove_from_roster(name)
-
+    registry_name = _MESH_NAMES.get(name)
     if resp.status_code == 404:
+        _remove_from_roster(name)
+        try:
+            from . import mesh as _mesh  # noqa: PLC0415
+
+            _mesh.clear_pending_for_agent(name, registry_name)
+        except Exception:  # noqa: BLE001
+            pass
         return json.dumps({"warning": f"sub-agent '{name}' was already gone"})
     if resp.status_code >= 400:
         return json.dumps({"error": f"HTTP {resp.status_code}: {resp.text[:200]}"})
+
+    # Drop state only after deletion is confirmed. A failed DELETE can leave the
+    # worker running, so clearing its reservation would permit duplicate work.
+    _remove_from_roster(name)
+    try:
+        from . import mesh as _mesh  # noqa: PLC0415
+
+        _mesh.clear_pending_for_agent(name, registry_name)
+    except Exception:  # noqa: BLE001
+        pass
 
     # Best-effort cleanup of router-side trust entry; failure is non-fatal.
     try:

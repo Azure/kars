@@ -202,40 +202,7 @@ pub async fn materialize(
         "networkPolicy": { "defaultDeny": true },
     });
 
-    let endpoints: Vec<serde_json::Value> = blueprint
-        .egress
-        .iter()
-        .map(|e| match e.port {
-            Some(p) => json!({ "host": e.host, "port": p }),
-            None => json!({ "host": e.host }),
-        })
-        .collect();
-    match blueprint.egress_mode.as_deref() {
-        Some("strict" | "Strict") => {
-            sandbox_spec["networkPolicy"] = json!({
-                "defaultDeny": true,
-                "egressMode": "Strict",
-                "allowedEndpoints": endpoints,
-            });
-        }
-        Some("learning" | "learn" | "Learning" | "Learn") => {
-            sandbox_spec["networkPolicy"] = json!({
-                "defaultDeny": true,
-                "egressMode": "Learn",
-                "allowedEndpoints": [],
-            });
-        }
-        _ if !endpoints.is_empty() => {
-            // Backwards compatibility: an older blueprint with endpoints but no
-            // explicit mode was always intended as strict.
-            sandbox_spec["networkPolicy"] = json!({
-                "defaultDeny": true,
-                "egressMode": "Strict",
-                "allowedEndpoints": endpoints,
-            });
-        }
-        _ => {}
-    }
+    sandbox_spec["networkPolicy"] = network_policy_spec(&blueprint);
 
     // Agent instructions (the system prompt) — combine the objective with any
     // standing instructions the blueprint carries, so the agent knows both
@@ -339,6 +306,39 @@ pub async fn materialize(
         sandbox_name: task_name,
         detail,
     })
+}
+
+fn network_policy_spec(blueprint: &TaskBlueprint) -> serde_json::Value {
+    let endpoints: Vec<serde_json::Value> = blueprint
+        .egress
+        .iter()
+        .map(|e| match e.port {
+            Some(p) => json!({ "host": e.host, "port": p }),
+            None => json!({ "host": e.host }),
+        })
+        .collect();
+    match blueprint.egress_mode.as_deref() {
+        Some("strict" | "Strict") => json!({
+            "defaultDeny": true,
+            "egressMode": "Strict",
+            "allowedEndpoints": endpoints,
+        }),
+        Some("learning" | "learn" | "Learning" | "Learn") => json!({
+            "defaultDeny": true,
+            "egressMode": "Learn",
+            "allowedEndpoints": endpoints,
+        }),
+        _ if !endpoints.is_empty() => {
+            // Backwards compatibility: an older blueprint with endpoints but no
+            // explicit mode was always intended as strict.
+            json!({
+                "defaultDeny": true,
+                "egressMode": "Strict",
+                "allowedEndpoints": endpoints,
+            })
+        }
+        _ => json!({ "defaultDeny": true }),
+    }
 }
 
 /// Tear down the materialized sandbox + inference policy when a task is
@@ -582,6 +582,47 @@ mod tests {
         assert_eq!(g["toolPolicyRef"]["name"], "eng-tools");
         assert_eq!(g["mcpServerRefs"][0]["name"], "docs-index");
         assert_eq!(g["mcpServerRefs"][1]["name"], "jira");
+    }
+
+    #[test]
+    fn learning_egress_preserves_previously_approved_endpoints() {
+        let bp = TaskBlueprint {
+            egress_mode: Some("Learn".into()),
+            egress: vec![
+                crate::kars_task::TaskEgress {
+                    host: "api.github.com".into(),
+                    port: Some(443),
+                },
+                crate::kars_task::TaskEgress {
+                    host: "pypi.org".into(),
+                    port: Some(443),
+                },
+            ],
+            ..Default::default()
+        };
+
+        let network = network_policy_spec(&bp);
+        assert_eq!(network["egressMode"], "Learn");
+        assert_eq!(network["allowedEndpoints"].as_array().unwrap().len(), 2);
+        assert_eq!(network["allowedEndpoints"][0]["host"], "api.github.com");
+        assert_eq!(network["allowedEndpoints"][1]["host"], "pypi.org");
+    }
+
+    #[test]
+    fn strict_egress_preserves_approved_endpoints() {
+        let bp = TaskBlueprint {
+            egress_mode: Some("Strict".into()),
+            egress: vec![crate::kars_task::TaskEgress {
+                host: "example.com".into(),
+                port: Some(8443),
+            }],
+            ..Default::default()
+        };
+
+        let network = network_policy_spec(&bp);
+        assert_eq!(network["egressMode"], "Strict");
+        assert_eq!(network["allowedEndpoints"][0]["host"], "example.com");
+        assert_eq!(network["allowedEndpoints"][0]["port"], 8443);
     }
 
     #[test]

@@ -58,6 +58,65 @@ const terminalMeshAssignments = new Map<string, {
   reason: string;
   at: string;
 }>();
+const pendingMeshAssignments = new Map<string, {
+  logicalAgentName: string;
+  messageId: string;
+  agentName: string;
+  targetAmid: string;
+  startedAt: string;
+  expiresAt: number;
+  nextProbeAt: number;
+}>();
+const activeMeshSends = new Map<string, {
+  messageId: string;
+  startedAt: string;
+}>();
+
+export function canonicalLogicalAgentName(
+  name: string,
+  aliases: ReadonlyMap<string, string> = spawnedMeshNames,
+): string {
+  for (const [logicalName, registryName] of aliases) {
+    if (registryName === name) return logicalName;
+  }
+  return name;
+}
+export const MESH_SEND_WAIT_SLICE_MS = 150_000;
+
+async function withinDeadline<T>(
+  promise: Promise<T>,
+  deadline: number,
+  label: string,
+): Promise<T> {
+  const remaining = deadline - Date.now();
+  if (remaining <= 0) {
+    throw new Error(`${label} exceeded the mesh-send deadline`);
+  }
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      promise,
+      new Promise<T>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`${label} exceeded the mesh-send deadline`)),
+          remaining,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+export function assignmentWaitWindowOpen(
+  now: number,
+  idleLeaseStartedAt: number,
+  overallStartedAt: number,
+  idleLeaseMs: number,
+  waitSliceMs = MESH_SEND_WAIT_SLICE_MS,
+): boolean {
+  return now - idleLeaseStartedAt < idleLeaseMs && now - overallStartedAt < waitSliceMs;
+}
 
 // 2-arg wrapper around the canonical resolveAmidByName(name, routerUrl, opts?).
 // Kept local so existing tool bodies don't have to thread routerUrl.
@@ -85,6 +144,15 @@ const AUXILIARY_MESH_TYPES = new Set([
   "task_progress",
   "file_transfer",
 ]);
+const MESH_AWAIT_INTERNAL_TYPES = new Set([
+  "handoff_transfer", "handoff_verification", "handoff_ready",
+  "handoff:interrupt", "handoff:interrupt_ack",
+  "handoff:workspace_request", "handoff:workspace_response",
+  "handoff:workspace_inject", "handoff:workspace_inject_ack",
+  "handoff:resume", "handoff:resume_ack",
+  "file_transfer", "file_transfer_ack",
+  "task_progress", "offload_progress",
+]);
 
 function parsedMessageContent(message: AgtInboxEntry): Record<string, unknown> | null {
   if (typeof message.content === "object" && message.content !== null) {
@@ -110,14 +178,14 @@ export function isReplyForAssignment(
   const parsed = parsedMessageContent(message);
   const type = typeof parsed?.type === "string" ? parsed.type : "";
   if (AUXILIARY_MESH_TYPES.has(type)) return false;
-  if (
-    type === "task_response" &&
-    typeof parsed?.in_reply_to_id === "string" &&
-    parsed.in_reply_to_id !== messageId
-  ) {
-    return false;
-  }
-  return true;
+  if (message.message_type !== "task_response" && type !== "task_response") return false;
+  const correlationId = message.in_reply_to_id ??
+    (typeof parsed?.in_reply_to_id === "string"
+      ? parsed.in_reply_to_id
+      : typeof parsed?.in_reply_to === "string"
+        ? parsed.in_reply_to
+        : undefined);
+  return correlationId === messageId;
 }
 
 function isAuxiliaryMeshMessage(message: AgtInboxEntry): boolean {
@@ -129,6 +197,12 @@ function isAuxiliaryMeshMessage(message: AgtInboxEntry): boolean {
 export function isTaskProgressMessage(message: AgtInboxEntry): boolean {
   if (message.message_type === "task_progress") return true;
   return parsedMessageContent(message)?.type === "task_progress";
+}
+
+export function isMeshAwaitContentMessage(message: AgtInboxEntry): boolean {
+  if (message.message_type && MESH_AWAIT_INTERNAL_TYPES.has(message.message_type)) return false;
+  const parsed = parsedMessageContent(message);
+  return !(typeof parsed?.type === "string" && MESH_AWAIT_INTERNAL_TYPES.has(parsed.type));
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -825,7 +899,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
   api.registerTool({
     name: "kars_mesh_send",
     label: "Send Mesh Task",
-    description: "Send a TEXT/JSON task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any data the agent needs directly in the message body. To send a FILE / IMAGE / BINARY, use `kars_mesh_transfer_file` instead — peer agents cannot read your /sandbox or /tmp paths, so a hand-crafted file_transfer envelope with dummy file_data will be rejected by the payload guard. Plain JSON metadata and free-form text are accepted. Automatically retries registry discovery and prekey exchange for as long as the sub-agent pod is alive; aborts only if the pod reaches Failed/Terminating/Exited, the sandbox is deleted, or meshSend returns a non-transient error. Then waits up to 5.5 minutes for the reply. If no reply arrives, check kars_mesh_inbox later.",
+    description: "Send a TEXT/JSON task to a sub-agent via AGT mesh (E2E encrypted relay). Sub-agents have isolated filesystems — include any data the agent needs directly in the message body. To send a FILE / IMAGE / BINARY, use `kars_mesh_transfer_file` instead — peer agents cannot read your /sandbox or /tmp paths, so a hand-crafted file_transfer envelope with dummy file_data will be rejected by the payload guard. Plain JSON metadata and free-form text are accepted. Automatically retries registry discovery and prekey exchange for as long as the sub-agent pod is alive; aborts only if the pod reaches Failed/Terminating/Exited, the sandbox is deleted, or meshSend returns a non-transient error. Waits for a reply in a bounded 3-minute slice so the host does not kill a healthy long-running tool call. If it returns assigned_in_progress, do NOT resend; continue with kars_mesh_await and then read the handback with kars_mesh_inbox.",
     parameters: {
       type: "object",
       properties: {
@@ -835,11 +909,79 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       required: ["to_agent", "content"],
     },
     async execute(_id: string, params: Record<string, unknown>) {
+      const toolStartedAt = Date.now();
+      const toolDeadline = toolStartedAt + MESH_SEND_WAIT_SLICE_MS;
       let agentName = params.to_agent as string;
       let msgContent = params.content as string;
-      const originalAgentName = agentName;
-      terminalMeshAssignments.delete(originalAgentName.toLowerCase());
-      const assignmentDigest = evidenceDigest(msgContent);
+      const originalAgentName = canonicalLogicalAgentName(agentName);
+      const assignmentKey = originalAgentName.toLowerCase();
+      const activeSend = activeMeshSends.get(assignmentKey);
+      if (activeSend) {
+        return {
+          content: [{
+            type: "text",
+            text: safeJson({
+              status: "send_in_progress",
+              to_agent: originalAgentName,
+              message_id: activeSend.messageId,
+              note:
+                "A send to this agent is already in progress. Do not start a concurrent or replacement assignment.",
+            }),
+          }],
+        };
+      }
+      const messageId = crypto.randomUUID();
+      activeMeshSends.set(assignmentKey, {
+        messageId,
+        startedAt: new Date(toolStartedAt).toISOString(),
+      });
+      try {
+        const existingPending = [...pendingMeshAssignments.values()].find(
+          (assignment) =>
+            assignment.logicalAgentName.toLowerCase() === assignmentKey,
+        );
+        if (existingPending) {
+          const probe = await withinDeadline(
+            probeSubAgentAlive(existingPending.logicalAgentName),
+            toolDeadline,
+            "pending worker probe",
+          ).catch(() => null);
+          const stale = Date.now() >= existingPending.expiresAt || probe?.alive === false;
+          if (stale) {
+            pendingMeshAssignments.delete(existingPending.messageId);
+            terminalMeshAssignments.set(assignmentKey, {
+              outcome: "failed",
+              reason: Date.now() >= existingPending.expiresAt
+                ? "Pending assignment expired before a correlated handback arrived."
+                : probe?.reason ?? "Worker entered a terminal phase before handback.",
+              at: new Date().toISOString(),
+            });
+            deps.reportTaskProgress?.("child_lease_expired", {
+              child_task_id: existingPending.messageId,
+              child_role: existingPending.logicalAgentName,
+              child_agent: existingPending.agentName,
+              outcome: "failed",
+              reason: terminalMeshAssignments.get(assignmentKey)?.reason,
+            });
+          } else {
+            return {
+              content: [{
+                type: "text",
+                text: safeJson({
+                  status: "assigned_in_progress",
+                  to_agent: existingPending.agentName,
+                  message_id: existingPending.messageId,
+                  note:
+                    "This agent already has an unresolved assignment. Do not resend or replace it. " +
+                    `Call kars_mesh_await with senders=['${originalAgentName}'] and then ` +
+                    "kars_mesh_inbox to read the correlated handback.",
+                }),
+              }],
+            };
+          }
+        }
+        terminalMeshAssignments.delete(assignmentKey);
+        const assignmentDigest = evidenceDigest(msgContent);
 
       // OFFLOAD HARDENING: native agents in offload sandboxes may call this
       // tool with their own sandbox name or an arbitrary sibling. Force
@@ -931,23 +1073,33 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
       }
 
       // ── Primary path: AGT SDK relay (E2E encrypted) ──
-      if (deps.meshClient() && deps.identity()) {
-        // Ensure we're connected (reconnect if initial connect was deferred)
-        if (!deps.meshClient().isConnected) {
-          try {
-            log.info("AGT relay: reconnecting before send...");
-            // Force disconnect first to clear stale "Already connected" state
-            try { await deps.meshClient().disconnect(); } catch { /* ignore */ }
-            await deps.meshClient().connect({
-              displayName: deps.sandboxName(),
-              capabilities: ["kars-agent", "task-execution", deps.sandboxName()],
-            });
-            log.info("AGT relay: reconnected successfully");
-          } catch (reconErr: any) {
-            log.warn(`AGT relay: reconnect failed: ${reconErr.message}`);
+        if (deps.meshClient() && deps.identity()) {
+          // Ensure we're connected (reconnect if initial connect was deferred)
+          if (!deps.meshClient().isConnected) {
+            try {
+              log.info("AGT relay: reconnecting before send...");
+              // Force disconnect first to clear stale "Already connected" state
+              try {
+                await withinDeadline(
+                  deps.meshClient().disconnect(),
+                  toolDeadline,
+                  "mesh disconnect",
+                );
+              } catch { /* ignore */ }
+              await withinDeadline(
+                deps.meshClient().connect({
+                  displayName: deps.sandboxName(),
+                  capabilities: ["kars-agent", "task-execution", deps.sandboxName()],
+                }),
+                toolDeadline,
+                "mesh reconnect",
+              );
+              log.info("AGT relay: reconnected successfully");
+            } catch (reconErr: any) {
+              log.warn(`AGT relay: reconnect failed: ${reconErr.message}`);
+            }
           }
-        }
-        try {
+          try {
           // Discover the target sub-agent's AMID and send — retry continuously while
           // the sub-agent's pod is alive. The only terminal conditions are:
           //   • pod reaches Failed/Terminating/Exited (or CRD is gone)
@@ -962,15 +1114,35 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             log.info(`AGT relay: using cached AMID for '${agentName}' (${targetAmid.slice(0, 12)}...)`);
           }
 
-          const waitStart = Date.now();
-          const messageId = crypto.randomUUID();
+          const waitStart = toolStartedAt;
           let nextHeartbeatAt = waitStart + 10_000;
           let sendSucceeded = false;
+          let sendOutcomeUnknown = false;
           let finalSendErr: Error | null = null;
 
           while (!sendSucceeded) {
+            if (Date.now() - waitStart >= MESH_SEND_WAIT_SLICE_MS) {
+              return {
+                content: [{
+                  type: "text",
+                  text: safeJson({
+                    status: "send_not_delivered_timeout",
+                    to_agent: agentName,
+                    message_id: messageId,
+                    note:
+                      "The child is still starting, but the assignment was not delivered within " +
+                      `${MESH_SEND_WAIT_SLICE_MS / 1000}s. It is safe to retry kars_mesh_send; ` +
+                      "no pending assignment was created.",
+                  }),
+                }],
+              };
+            }
             // (a) Is the sub-agent still alive? Bail only on terminal phases.
-            const probe = await probeSubAgentAlive(agentName);
+            const probe = await withinDeadline(
+              probeSubAgentAlive(agentName),
+              toolDeadline,
+              "worker liveness probe",
+            );
             if (probe && probe.alive === false) {
               log.warn(`AGT relay: aborting send to '${agentName}' — ${probe.reason}`);
               return { content: [{ type: "text", text: JSON.stringify({
@@ -984,7 +1156,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
 
             // (b) Discover AMID via registry search if we don't have one yet.
             if (!targetAmid) {
-              targetAmid = await resolveAmidByName(agentName);
+              targetAmid = await withinDeadline(
+                resolveAmidByName(agentName),
+                toolDeadline,
+                "mesh registry discovery",
+              );
             }
 
             if (!targetAmid) {
@@ -999,17 +1175,27 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
 
             // (c) Try to send. Bail only on non-transient errors.
             try {
-              await meshSend(deps.meshClient(), targetAmid, {
-                type: "task_request",
-                message_id: messageId,
-                content: msgContent,
-                from_agent: process.env.SANDBOX_NAME || "unknown",
-                timestamp: new Date().toISOString(),
-              }, log);
+              await withinDeadline(
+                meshSend(deps.meshClient(), targetAmid, {
+                  type: "task_request",
+                  message_id: messageId,
+                  request_id: messageId,
+                  content: msgContent,
+                  from_agent: process.env.SANDBOX_NAME || "unknown",
+                  timestamp: new Date().toISOString(),
+                }, log),
+                toolDeadline,
+                "encrypted mesh send",
+              );
               sendSucceeded = true;
               break;
             } catch (e: any) {
               const msg = (e && e.message) || "";
+              if (msg.includes("encrypted mesh send exceeded the mesh-send deadline")) {
+                sendOutcomeUnknown = true;
+                finalSendErr = e;
+                break;
+              }
               // Only retry on transient "prekey bundle not yet published"
               // errors — NOT on permanent X3DH/Signal failures (signature
               // verification, bundle malformed, identity-key mismatch).
@@ -1047,6 +1233,45 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           }
 
           if (!sendSucceeded) {
+            if (sendOutcomeUnknown && targetAmid) {
+              pendingMeshAssignments.set(messageId, {
+                logicalAgentName: originalAgentName,
+                messageId,
+                agentName,
+                targetAmid,
+                startedAt: new Date(toolStartedAt).toISOString(),
+                expiresAt: Date.now() + 5 * 60_000,
+                nextProbeAt: Date.now(),
+              });
+              appendCollaborationEvent({
+                event: "assignment_delivery_unknown",
+                member: originalAgentName,
+                mesh_name: agentName,
+                message_id: messageId,
+                outcome: "running",
+                reason: finalSendErr?.message,
+              });
+              deps.reportTaskProgress?.("child_assigned", {
+                child_task_id: messageId,
+                child_role: originalAgentName,
+                child_agent: agentName,
+                child_stage: "delivery_unknown",
+              });
+              return {
+                content: [{
+                  type: "text",
+                  text: safeJson({
+                    status: "delivery_unknown",
+                    to_agent: agentName,
+                    message_id: messageId,
+                    note:
+                      "The encrypted send exceeded its local deadline and may still complete. " +
+                      "Do not resend. Call kars_mesh_await for this sender; the exact correlated " +
+                      "task_response will resolve the assignment, otherwise it expires safely.",
+                  }),
+                }],
+              };
+            }
             log.warn(`AGT relay send failed: ${finalSendErr?.message}`);
             return { content: [{ type: "text", text: JSON.stringify({
               error: "E2E encrypted send failed — message NOT delivered",
@@ -1062,7 +1287,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           // ultimately exposes the router's trust_states. Without this, the parent
           // would show "no peer agents yet" until a reply arrives (and never at all
           // for fire-and-forget sends).
-          try { await pushTrustToRouter(agentName, 0.0); } catch { /* best-effort */ }
+          void pushTrustToRouter(agentName, 0.0).catch(() => undefined);
           const sendStart = new Date().toISOString();
           appendCollaborationEvent({
             event: "assignment_sent",
@@ -1102,8 +1327,10 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           );
           const pollIntervalMs = 500;
           let replyContent: string | null = null;
+          let replyOk = true;
           let leaseFailureReason: string | null = null;
-          const overallStart = Date.now();
+          let waitSliceExpired = false;
+          const overallStart = waitStart;
 
           {
             let replyWaitStart = Date.now();
@@ -1112,7 +1339,14 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               `(${leaseTimeoutMs / 1000}s TTL) for reply from '${agentName}'...`,
             );
 
-            while (Date.now() - replyWaitStart < leaseTimeoutMs) {
+            while (
+              assignmentWaitWindowOpen(
+                Date.now(),
+                replyWaitStart,
+                overallStart,
+                leaseTimeoutMs,
+              )
+            ) {
               // Check inbox for a reply from this target, skipping protocol messages
               const replyIdx = agtInbox.findIndex((message) =>
                 isReplyForAssignment(message, targetAmid!, agentName, messageId)
@@ -1123,6 +1357,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                 replyContent = typeof reply.content === "string"
                   ? reply.content
                   : JSON.stringify(reply.content);
+                replyOk = reply.task_ok !== false;
                 log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - overallStart) / 1000).toFixed(1)}s`);
                 break;
               }
@@ -1194,26 +1429,40 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             }
 
             if (replyContent === null) {
-              const probe = await probeSubAgentAlive(agentName);
-              leaseFailureReason = probe?.alive === false
-                ? probe.reason ?? `worker entered terminal phase ${probe.phase ?? "unknown"}`
-                : `worker progress lease expired after ${leaseTimeoutMs / 1000}s without renewal`;
-              log.warn(
-                `AGT relay: assignment ${messageId} for '${agentName}' failed: ` +
-                leaseFailureReason,
-              );
+              waitSliceExpired = Date.now() - overallStart >= MESH_SEND_WAIT_SLICE_MS;
+              if (waitSliceExpired) {
+                log.info(
+                  `AGT relay: assignment ${messageId} for '${agentName}' is still active ` +
+                  `after ${MESH_SEND_WAIT_SLICE_MS / 1000}s; returning control to continue via kars_mesh_await`,
+                );
+              } else {
+                const probe = await probeSubAgentAlive(agentName);
+                leaseFailureReason = probe?.alive === false
+                  ? probe.reason ?? `worker entered terminal phase ${probe.phase ?? "unknown"}`
+                  : `worker progress lease expired after ${leaseTimeoutMs / 1000}s without renewal`;
+                log.warn(
+                  `AGT relay: assignment ${messageId} for '${agentName}' failed: ` +
+                  leaseFailureReason,
+                );
+              }
             }
           }
 
           const result: any = {
-            status: replyContent ? "delivered_and_replied" : "assignment_lease_expired",
+            status: replyContent !== null
+              ? replyOk
+                ? "delivered_and_replied"
+                : "replied_with_failure"
+              : waitSliceExpired
+                ? "assigned_in_progress"
+                : "assignment_lease_expired",
             to_agent: agentName,
             to_amid: targetAmid,
             from_amid: deps.identity().amid,
             protocol: "AGT E2E encrypted (Signal Protocol)",
             message_id: messageId,
           };
-          if (replyContent) {
+          if (replyContent !== null && replyOk) {
             terminalMeshAssignments.set(originalAgentName.toLowerCase(), {
               outcome: "success",
               reason: "Handback already returned by kars_mesh_send.",
@@ -1239,12 +1488,74 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             // Parent rates sub-agent — only meaningful for long-lived sub-agents
             // whose reputation will be queried again. Short-lived ones will die
             // and their score is lost, but the audit trail remains.
-            try {
-              const ok = await deps.meshClient().submitReputation(targetAmid!, messageId, 0.9, ["fast_response", "reliable"]);
-              pushTrustToRouter(agentName, 0.9);
-              await recordMeshSession(targetAmid!, messageId, "mesh_send", "success", sendStart);
-              log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
-            } catch (repErr: any) { log.warn(`AGT reputation submit failed: ${repErr.message}`); }
+            void (async () => {
+              try {
+                const ok = await deps.meshClient().submitReputation(
+                  targetAmid!,
+                  messageId,
+                  0.9,
+                  ["fast_response", "reliable"],
+                );
+                void pushTrustToRouter(agentName, 0.9).catch(() => undefined);
+                await recordMeshSession(targetAmid!, messageId, "mesh_send", "success", sendStart);
+                log.info(`AGT reputation: submitted +0.9 for '${agentName}' (accepted=${ok})`);
+              } catch (repErr: any) {
+                log.warn(`AGT reputation submit failed: ${repErr.message}`);
+              }
+            })();
+          } else if (replyContent !== null) {
+            terminalMeshAssignments.set(originalAgentName.toLowerCase(), {
+              outcome: "failed",
+              reason: "The worker returned a correlated task_response with ok=false.",
+              at: new Date().toISOString(),
+            });
+            result.reply = replyContent;
+            result.error = "worker returned a failed task response";
+            appendCollaborationEvent({
+              event: "handback_received",
+              member: originalAgentName,
+              mesh_name: agentName,
+              message_id: messageId,
+              outcome: "failed",
+              reply_digest: evidenceDigest(replyContent),
+              reply_preview: evidencePreview(replyContent),
+              elapsed_ms: Date.now() - overallStart,
+            });
+            deps.reportTaskProgress?.("child_handback", {
+              child_task_id: messageId,
+              child_role: originalAgentName,
+              child_agent: agentName,
+              outcome: "failed",
+              reason: result.error,
+            });
+          } else if (waitSliceExpired) {
+            pendingMeshAssignments.set(messageId, {
+              logicalAgentName: originalAgentName,
+              messageId,
+              agentName,
+              targetAmid: targetAmid!,
+              startedAt: sendStart,
+              expiresAt: Date.now() + 20 * 60_000,
+              nextProbeAt: Date.now(),
+            });
+            result.note =
+              "The worker is healthy and still sending progress. Do not resend this task. " +
+              `Call kars_mesh_await with senders=['${originalAgentName}'] and then ` +
+              "kars_mesh_inbox to read the handback.";
+            appendCollaborationEvent({
+              event: "assignment_in_progress",
+              member: originalAgentName,
+              mesh_name: agentName,
+              message_id: messageId,
+              outcome: "running",
+              elapsed_ms: Date.now() - overallStart,
+            });
+            deps.reportTaskProgress?.("child_progress", {
+              child_task_id: messageId,
+              child_role: originalAgentName,
+              child_agent: agentName,
+              child_stage: "awaiting_handback",
+            });
           } else {
             terminalMeshAssignments.set(originalAgentName.toLowerCase(), {
               outcome: "failed",
@@ -1286,13 +1597,18 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             hint: "Retry after confirming the sub-agent is Running.",
           }, null, 2) }] };
         }
-      }
+        }
 
-      // No AGT mesh client available — cannot send without E2E encryption
-      return { content: [{ type: "text", text: JSON.stringify({
-        error: "AGT mesh not initialized — cannot send without E2E encryption",
-        hint: "The mesh client failed to start. Check gateway logs for AGT initialization errors.",
-      }, null, 2) }] };
+        // No AGT mesh client available — cannot send without E2E encryption
+        return { content: [{ type: "text", text: JSON.stringify({
+          error: "AGT mesh not initialized — cannot send without E2E encryption",
+          hint: "The mesh client failed to start. Check gateway logs for AGT initialization errors.",
+        }, null, 2) }] };
+      } finally {
+        if (activeMeshSends.get(assignmentKey)?.messageId === messageId) {
+          activeMeshSends.delete(assignmentKey);
+        }
+      }
     },
   });
 
@@ -1369,7 +1685,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           "handoff:workspace_request", "handoff:workspace_response",
           "handoff:workspace_inject", "handoff:workspace_inject_ack",
           "handoff:resume", "handoff:resume_ack",
-          "file_transfer_ack",
+          "file_transfer", "file_transfer_ack",
           // Heartbeats — drained by mesh_send wait loop; never user-visible.
           "task_progress", "offload_progress",
         ]);
@@ -1582,7 +1898,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         },
         timeout_seconds: {
           type: "number",
-          description: "Maximum seconds to block. Default 180, capped at 600 (10 minutes).",
+          description: "Maximum seconds to block. Default 150 and capped at 150 so the host cannot kill a healthy wait. Call again if workers are still active.",
         },
         mark_read: {
           type: "boolean",
@@ -1605,38 +1921,23 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         }
         const wantedSet = new Set(wantedSenders.map((s) => s.toLowerCase()));
         const timeoutSeconds = typeof params.timeout_seconds === "number" && params.timeout_seconds > 0
-          ? Math.min(Math.floor(params.timeout_seconds), 600)
-          : 180;
+          ? Math.min(Math.floor(params.timeout_seconds), MESH_SEND_WAIT_SLICE_MS / 1000)
+          : MESH_SEND_WAIT_SLICE_MS / 1000;
         const markReadOnResolve = params.mark_read === true;
-
-        // Same internal-types filter as mesh_inbox — only content messages count.
-        const INTERNAL_TYPES = new Set([
-          "handoff_transfer", "handoff_verification", "handoff_ready",
-          "handoff:interrupt", "handoff:interrupt_ack",
-          "handoff:workspace_request", "handoff:workspace_response",
-          "handoff:workspace_inject", "handoff:workspace_inject_ack",
-          "handoff:resume", "handoff:resume_ack",
-          "file_transfer_ack",
-          "task_progress", "offload_progress",
-        ]);
-
-        const isInternal = (m: typeof agtInbox[number]): boolean => {
-          if (m.message_type && INTERNAL_TYPES.has(m.message_type)) return true;
-          try {
-            const parsed = typeof m.content === "string" ? JSON.parse(m.content) : m.content;
-            if (parsed?.type && INTERNAL_TYPES.has(parsed.type)) return true;
-          } catch { /* not JSON */ }
-          return false;
-        };
 
         // Returns map of sender -> matched-message-ids[] (unread, non-internal).
         const computeMatches = (): Map<string, string[]> => {
           const out = new Map<string, string[]>();
+          const pendingSenders = new Set(
+            [...pendingMeshAssignments.values()]
+              .map((assignment) => assignment.logicalAgentName.toLowerCase()),
+          );
           for (const m of agtInbox) {
             if (m.read_at) continue;
-            if (isInternal(m)) continue;
+            if (!isMeshAwaitContentMessage(m)) continue;
             const fromName = (m.from_agent || "").toLowerCase();
             if (!wantedSet.has(fromName)) continue;
+            if (pendingSenders.has(fromName)) continue;
             const list = out.get(fromName) ?? [];
             list.push(m.id);
             out.set(fromName, list);
@@ -1670,18 +1971,111 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           }
           return unresolved;
         };
+        const startedAt = Date.now();
+        const awaitDeadline = startedAt + timeoutSeconds * 1000;
+        const reconcilePendingHandbacks = async (): Promise<void> => {
+          for (const [messageId, pending] of [...pendingMeshAssignments.entries()]) {
+            const wanted = pending.logicalAgentName.toLowerCase();
+            if (!wantedSet.has(wanted) || terminalMeshAssignments.has(wanted)) continue;
+            const reply = agtInbox.find((message) =>
+              isReplyForAssignment(
+                message,
+                pending.targetAmid,
+                pending.agentName,
+                pending.messageId,
+              )
+            );
+            if (!reply) {
+              const now = Date.now();
+              const expired = now >= pending.expiresAt;
+              if (!expired && now < pending.nextProbeAt) continue;
+              pending.nextProbeAt = now + 15_000;
+              const probe = await withinDeadline(
+                probeSubAgentAlive(pending.logicalAgentName),
+                Math.min(awaitDeadline, Date.now() + 5_000),
+                "pending worker probe",
+              ).catch(() => null);
+              if (!expired && probe?.alive !== false) continue;
 
+              terminalMeshAssignments.set(wanted, {
+                outcome: "failed",
+                reason: expired
+                  ? "Pending assignment expired before a correlated handback arrived."
+                  : probe?.reason ?? "Worker entered a terminal phase before handback.",
+                at: new Date().toISOString(),
+              });
+              pendingMeshAssignments.delete(messageId);
+              appendCollaborationEvent({
+                event: "assignment_lease_expired",
+                member: pending.logicalAgentName,
+                mesh_name: pending.agentName,
+                message_id: pending.messageId,
+                outcome: "failed",
+                reason: terminalMeshAssignments.get(wanted)?.reason,
+                continued_via: "kars_mesh_await",
+              });
+              deps.reportTaskProgress?.("child_lease_expired", {
+                child_task_id: pending.messageId,
+                child_role: pending.logicalAgentName,
+                child_agent: pending.agentName,
+                outcome: "failed",
+                reason: terminalMeshAssignments.get(wanted)?.reason,
+              });
+              continue;
+            }
+
+            const replyContent = typeof reply.content === "string"
+              ? reply.content
+              : JSON.stringify(reply.content);
+            const outcome = reply.task_ok === false ? "failed" : "success";
+            const reason = outcome === "success"
+              ? "Handback arrived after kars_mesh_send returned assigned_in_progress."
+              : "The worker returned a correlated task_response with ok=false.";
+            terminalMeshAssignments.set(wanted, {
+              outcome,
+              reason,
+              at: new Date().toISOString(),
+            });
+            pendingMeshAssignments.delete(messageId);
+            appendCollaborationEvent({
+              event: "handback_received",
+              member: pending.logicalAgentName,
+              mesh_name: pending.agentName,
+              message_id: pending.messageId,
+              outcome,
+              reply_digest: evidenceDigest(replyContent),
+              reply_preview: evidencePreview(replyContent),
+              continued_via: "kars_mesh_await",
+            });
+            deps.reportTaskProgress?.("child_handback", {
+              child_task_id: pending.messageId,
+              child_role: pending.logicalAgentName,
+              child_agent: pending.agentName,
+              outcome,
+              ...(outcome === "failed" ? { reason } : {}),
+            });
+            void recordMeshSession(
+              pending.targetAmid,
+              pending.messageId,
+              "mesh_await",
+              outcome,
+              pending.startedAt,
+            ).catch((error: any) => {
+              log.warn(`AGT mesh-await session record failed: ${error?.message || error}`);
+            });
+          }
+        };
+
+        await reconcilePendingHandbacks();
         let matches = computeMatches();
         let terminal = terminalForWanted();
-        const startedAt = Date.now();
         if (unresolvedCount(matches, terminal) > 0 && deps.waitForInbox) {
-          const deadline = startedAt + timeoutSeconds * 1000;
-          while (unresolvedCount(matches, terminal) > 0 && Date.now() < deadline) {
-            const remaining = Math.max(1, deadline - Date.now());
-            const woke = await deps.waitForInbox(remaining);
+          while (unresolvedCount(matches, terminal) > 0 && Date.now() < awaitDeadline) {
+            const remaining = Math.max(1, Math.min(5_000, awaitDeadline - Date.now()));
+            await deps.waitForInbox(remaining);
+            await reconcilePendingHandbacks();
             matches = computeMatches();
             terminal = terminalForWanted();
-            if (!woke) break;
           }
         }
 
@@ -2022,7 +2416,26 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
     },
     async execute(_id: string, params: Record<string, unknown>) {
       try {
-        const result = await routerCall("DELETE", `/sandbox/${encodeURIComponent(params.name as string)}`);
+        let result: any;
+        try {
+          result = await routerCallStrict(
+            "DELETE",
+            `/sandbox/${encodeURIComponent(params.name as string)}`,
+          );
+        } catch (error: any) {
+          if (/HTTP 404\b/.test(String(error?.message || error))) {
+            result = {
+              warning: `sub-agent '${String(params.name)}' was already gone`,
+            };
+          } else {
+            return {
+              content: [{
+                type: "text",
+                text: `Destroy failed: ${error?.message || String(error)}`,
+              }],
+            };
+          }
+        }
 
         // Clean up stale trust state for the destroyed agent
         try {
@@ -2037,8 +2450,27 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         }
         // Drop the destroyed sibling from the roster so future mesh_send
         // calls don't advertise a peer that no longer exists.
-        spawnedRoster.delete(params.name as string);
-        spawnedMeshNames.delete(params.name as string);
+        const destroyedName = params.name as string;
+        spawnedRoster.delete(destroyedName);
+        spawnedMeshNames.delete(destroyedName);
+        for (const [messageId, pending] of pendingMeshAssignments) {
+          if (pending.logicalAgentName !== destroyedName && pending.agentName !== destroyedName) {
+            continue;
+          }
+          pendingMeshAssignments.delete(messageId);
+          terminalMeshAssignments.set(pending.logicalAgentName.toLowerCase(), {
+            outcome: "failed",
+            reason: "The assigned worker was explicitly destroyed before handback.",
+            at: new Date().toISOString(),
+          });
+          deps.reportTaskProgress?.("child_lease_expired", {
+            child_task_id: pending.messageId,
+            child_role: pending.logicalAgentName,
+            child_agent: pending.agentName,
+            outcome: "failed",
+            reason: "worker destroyed before handback",
+          });
+        }
 
         return { content: [{ type: "text", text: safeJson(result) }] };
       } catch (e: any) {

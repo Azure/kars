@@ -23,8 +23,12 @@ from kars_runtime_hermes.plugin import mesh, spawn
 def _clear_roster() -> None:
     """Each test starts with an empty process-local roster."""
     spawn._SPAWNED_ROSTER.clear()
+    mesh._PENDING_TASK_REQUESTS.clear()
+    mesh._PENDING_TASK_EXPIRY.clear()
     yield
     spawn._SPAWNED_ROSTER.clear()
+    mesh._PENDING_TASK_REQUESTS.clear()
+    mesh._PENDING_TASK_EXPIRY.clear()
 
 
 @pytest.fixture()
@@ -180,12 +184,19 @@ def test_send_prefixes_payload_when_roster_populated(
 
         async def send_by_did(self, *, to: str, payload: bytes) -> None:
             self.sent.append((to, payload))
+            request = json.loads(payload.decode("utf-8"))
             # Simulate the sub-agent executing + replying with a task_response.
             await self._tool_inbox.put(
                 _Msg(
                     _Rec.did,
                     json.dumps(
-                        {"type": "task_response", "content": "brief done", "ok": True}
+                        {
+                            "type": "task_response",
+                            "content": "brief done",
+                            "ok": True,
+                            "in_reply_to_id": request["message_id"],
+                            "in_reply_to": request["request_id"],
+                        }
                     ).encode("utf-8"),
                 )
             )
@@ -213,6 +224,68 @@ def test_send_prefixes_payload_when_roster_populated(
     assert to_did == _Rec.did
     envelope = json.loads(payload.decode("utf-8"))
     assert envelope["type"] == "task_request"
+    assert envelope["message_id"] == envelope["request_id"]
     assert envelope["content"].startswith("Peer roster")
     assert "analyst — data analyst" in envelope["content"]
     assert "write the brief" in envelope["content"]
+
+
+def test_task_response_parser_requires_exact_correlation() -> None:
+    request_id = "request-123"
+    assert mesh._parse_task_response(  # noqa: SLF001
+        json.dumps({
+            "type": "task_response",
+            "content": "done",
+            "ok": True,
+            "in_reply_to_id": request_id,
+        }).encode(),
+        request_id,
+    ) == ("done", True)
+    assert mesh._parse_task_response(  # noqa: SLF001
+        json.dumps({
+            "type": "task_response",
+            "content": "wrong",
+            "ok": True,
+            "in_reply_to": "other-request",
+        }).encode(),
+        request_id,
+    ) is None
+    assert mesh._parse_task_response(  # noqa: SLF001
+        json.dumps({"type": "file_transfer", "file_name": "result.json"}).encode(),
+        request_id,
+    ) is None
+
+
+def test_pending_request_reservation_covers_logical_and_registry_names() -> None:
+    request_id = "request-123"
+    assert mesh._reserve_request(  # noqa: SLF001
+        "writer",
+        "team-run-writer-a1b2c3",
+        request_id,
+    ) is None
+    assert mesh._pending_request("writer") == request_id  # noqa: SLF001
+    assert mesh._pending_request("team-run-writer-a1b2c3") == request_id  # noqa: SLF001
+    assert mesh._logical_sender_for_pending(  # noqa: SLF001
+        "team-run-writer-a1b2c3",
+        {"writer"},
+    ) == ("writer", request_id)
+    assert mesh._reserve_request(  # noqa: SLF001
+        "writer",
+        "team-run-writer-a1b2c3",
+        "replacement",
+    ) == request_id
+    mesh._clear_request(request_id)  # noqa: SLF001
+    assert mesh._pending_request("writer") is None  # noqa: SLF001
+    assert mesh._pending_request("team-run-writer-a1b2c3") is None  # noqa: SLF001
+
+
+def test_pending_request_expires_and_releases_all_aliases() -> None:
+    request_id = "request-expired"
+    assert mesh._reserve_request(  # noqa: SLF001
+        "writer",
+        "team-run-writer-a1b2c3",
+        request_id,
+    ) is None
+    mesh._PENDING_TASK_EXPIRY[request_id] = 0
+    assert mesh._pending_request("writer") is None  # noqa: SLF001
+    assert mesh._pending_request("team-run-writer-a1b2c3") is None  # noqa: SLF001

@@ -44,6 +44,8 @@ export interface AgtInboxEntry {
   timestamp: string;
   id: string;
   message_type?: string;
+  in_reply_to_id?: string;
+  task_ok?: boolean;
   /**
    * ISO timestamp of when this entry was first surfaced to the LLM via
    * kars_mesh_inbox. Undefined while still unread. Used by the inbox

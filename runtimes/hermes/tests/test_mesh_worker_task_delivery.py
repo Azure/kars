@@ -106,7 +106,7 @@ async def test_task_request_runs_inprocess_and_wraps_task_response(
 
     client = _FakeClient(plaintext_dids={CONTROLLER_DID})
     envelope = json.dumps(
-        {"type": "task_request", "content": "Summarize the repo", "request_id": "r1"}
+        {"type": "task_request", "content": "Summarize the repo", "message_id": "r1"}
     ).encode("utf-8")
     await mesh_worker._handle_message(client, _FakeMsg(CONTROLLER_DID, envelope))
 
@@ -121,6 +121,8 @@ async def test_task_request_runs_inprocess_and_wraps_task_response(
     assert reply["type"] == "task_response"
     assert reply["content"] == "the deliverable"
     assert reply["ok"] is True
+    assert reply["in_reply_to"] == "r1"
+    assert reply["in_reply_to_id"] == "r1"
     assert reply["from_agent"] == "hermes-run-1"
     # Real telemetry + trace ride along so the controller scores the run as
     # substantive work (not 'low yield') and the Activity tab renders it.

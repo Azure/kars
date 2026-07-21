@@ -650,6 +650,7 @@ async def _execute_task_request(
                 "content": reply,
                 "ok": reply_ok,
                 "in_reply_to": task_request_id or prompt_text[:256],
+                "in_reply_to_id": task_request_id or prompt_text[:256],
                 "from_agent": from_agent,
                 "artifacts": artifacts,
                 "telemetry": telemetry,
@@ -722,7 +723,7 @@ async def _handle_message(client: Any, msg: Any) -> None:
     if isinstance(_envelope, dict) and _envelope.get("type") == "task_request":
         _envelope_is_task = True
         prompt_text = str(_envelope.get("content") or "")
-        _rid = _envelope.get("request_id")
+        _rid = _envelope.get("request_id") or _envelope.get("message_id")
         task_request_id = str(_rid) if _rid is not None else None
         logger.info(
             "mesh_worker: parsed task_request (request_id=%s content[:120]=%r)",
@@ -793,6 +794,7 @@ async def _handle_message(client: Any, msg: Any) -> None:
                 "content": "WORKER_BUSY: Hermes is already executing another task",
                 "ok": False,
                 "in_reply_to": task_request_id or prompt_text[:256],
+                "in_reply_to_id": task_request_id or prompt_text[:256],
                 "from_agent": from_agent,
                 "artifacts": [],
                 "telemetry": None,
