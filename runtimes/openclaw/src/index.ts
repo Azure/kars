@@ -1043,7 +1043,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                     await agtMeshClient.send(fromAmid, {
                       type: "task_response",
                       in_reply_to_id: assignmentId,
-                      in_reply_to: assignmentId,
                       content: "Request denied: this agent requires verified identity tier (OAuth/Entra). Register with a verification token.",
                       ok: false,
                       from_agent: agtSandboxName,
@@ -1070,7 +1069,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
                 await agtMeshClient.send(fromAmid, {
                   type: "task_response",
                   in_reply_to_id: assignmentId,
-                  in_reply_to: assignmentId,
                   content: `Request denied by governance policy: ${evalData.reason}`,
                   ok: false,
                   from_agent: agtSandboxName,
@@ -1113,7 +1111,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             await agtMeshClient.send(fromAmid, {
               type: "task_response",
               in_reply_to_id: assignmentId,
-              in_reply_to: assignmentId,
               content: `Task denied by AGT governance: ${evalData.reason}`,
               ok: false,
               from_agent: agtSandboxName,
@@ -1268,7 +1265,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           await agtMeshClient.send(fromAmid, {
             type: "task_response",
             in_reply_to_id: assignmentId,
-            in_reply_to: assignmentId,
             content: latin1Safe(llmResponse),
             ok: true,
             artifacts: artifactManifest,
@@ -1304,7 +1300,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             await agtMeshClient.send(fromAmid, {
               type: "task_response",
               in_reply_to_id: assignmentId,
-              in_reply_to: assignmentId,
               content: latin1Safe(`Error processing task: ${replyErr.message}`),
               ok: false,
               from_agent: agtSandboxName,
