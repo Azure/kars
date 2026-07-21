@@ -66,23 +66,23 @@ COPY runtimes/openclaw/skills/ /opt/kars-plugin/skills/
 # which resolves to /mesh-plugin. Stage the prebuilt mesh-plugin there so the
 # symlink is not dangling at runtime. Without this the runtime falls back to
 # the vendored SDK silently (`mesh provider swap failed, staying on vendored`).
-COPY mesh-plugin/package.json /mesh-plugin/package.json
+COPY mesh-plugin/package.json mesh-plugin/package-lock.json /mesh-plugin/
 COPY mesh-plugin/dist/ /mesh-plugin/dist/
-RUN node -e "const f='/mesh-plugin/package.json'; const p=require(f); delete p.scripts.prepare; require('fs').writeFileSync(f, JSON.stringify(p,null,2));"
+RUN node -e "const f='/mesh-plugin/package.json'; const p=require(f); delete p.scripts.prepare; require('fs').writeFileSync(f, JSON.stringify(p,null,2));" && \
+    cd /mesh-plugin && npm ci --omit=dev --ignore-scripts
 
 # Install plugin runtime dependencies
 RUN cd /opt/kars-plugin && npm ci --omit=dev --ignore-scripts
 
-# Optional: install upstream Microsoft AGT SDK when MESH_PROVIDER=agt build arg
-# is passed. Not installed by default so vendored builds stay slim and offline.
-# AGT_SDK_TARBALL: when set (dev mode pinning a locally-patched AGT branch) the
+# Install the exact revision-pinned Microsoft AGT SDK.
+# AGT_SDK_TARBALL: the
 # build context must contain `.agt-sdk/<tarball-name>`. The CLI stages this for
 # `kars dev --mesh-provider agt --build`. The directory always exists with
 # at least a .keep file so the COPY never fails.
-ARG MESH_PROVIDER=vendored
+ARG MESH_PROVIDER=agt
 ARG AGT_SDK_TARBALL=
 COPY .agt-sdk/ /opt/kars-agt-sdk/
-RUN cd /opt/kars-plugin && \
+RUN cd /mesh-plugin && \
     if [ -n "$AGT_SDK_TARBALL" ]; then \
       if [ ! -f "/opt/kars-agt-sdk/$AGT_SDK_TARBALL" ]; then \
         echo "::error:: AGT_SDK_TARBALL=$AGT_SDK_TARBALL was requested but" >&2; \
@@ -96,9 +96,9 @@ RUN cd /opt/kars-plugin && \
       npm install --omit=dev --ignore-scripts --no-save \
         "/opt/kars-agt-sdk/$AGT_SDK_TARBALL" ; \
     else \
-      echo "Installing AGT SDK from npm: @microsoft/agent-governance-sdk@^3.5.0" && \
-      npm install --omit=dev --ignore-scripts --no-save \
-        '@microsoft/agent-governance-sdk@^3.5.0' ; \
+      echo "::error:: AGT_SDK_TARBALL is required for the AGT mesh provider." >&2; \
+      echo "  Build with 'kars push --only sandbox' so the exact pinned SDK is packed and staged." >&2; \
+      exit 1 ; \
     fi
 
 # Harden image-level code: root-owned, read-only — prevents agent from tampering

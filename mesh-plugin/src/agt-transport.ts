@@ -172,7 +172,7 @@ async function loadAgtSdk(): Promise<AgtSdkModule> {
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(
         `@microsoft/agent-governance-sdk is required for AGT mesh transport. ` +
-          `Install: npm i @microsoft/agent-governance-sdk@^3.5.0. ` +
+          `Build through kars so the revision-pinned AGT SDK tarball is installed. ` +
           `Underlying error: ${msg}`,
       );
     }

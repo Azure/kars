@@ -12,7 +12,7 @@
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{
     Client, ResourceExt,
-    api::{Api, Patch, PatchParams},
+    api::{Api, PostParams},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -75,28 +75,73 @@ pub fn has_active(tasks: &[TeamTask]) -> bool {
     tasks.iter().any(|t| t.status == "active")
 }
 
-/// Persist the full task list (server-side apply; the ConfigMap is small).
-async fn write_tasks(client: &Client, team: &str, tasks: &[TeamTask]) -> Result<(), kube::Error> {
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &namespace());
+const MAX_TASK_UPDATE_RETRIES: usize = 8;
+
+async fn persist_tasks(
+    cms: &Api<ConfigMap>,
+    team: &str,
+    existing: Option<ConfigMap>,
+    tasks: &[TeamTask],
+) -> Result<(), kube::Error> {
     let name = tasks_cm_name(team);
     let mut data = BTreeMap::new();
     data.insert(
         "tasks.json".to_string(),
         serde_json::to_string(tasks).unwrap_or_else(|_| "[]".into()),
     );
-    let patch = json!({
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": { "name": name, "labels": { "kars.azure.com/team-tasks": team } },
-        "data": data,
-    });
-    cms.patch(
-        &name,
-        &PatchParams::apply(crate::field_managers::CLAW_TEAM).force(),
-        &Patch::Apply(patch),
-    )
-    .await?;
-    Ok(())
+    if let Some(mut cm) = existing {
+        cm.data = Some(data);
+        cm.metadata
+            .labels
+            .get_or_insert_with(BTreeMap::new)
+            .insert("kars.azure.com/team-tasks".into(), team.into());
+        cms.replace(&name, &PostParams::default(), &cm)
+            .await
+            .map(|_| ())
+    } else {
+        let cm: ConfigMap = serde_json::from_value(json!({
+            "apiVersion": "v1",
+            "kind": "ConfigMap",
+            "metadata": {
+                "name": name,
+                "namespace": namespace(),
+                "labels": { "kars.azure.com/team-tasks": team }
+            },
+            "data": data,
+        }))
+        .expect("team task ConfigMap is valid");
+        cms.create(&PostParams::default(), &cm).await.map(|_| ())
+    }
+}
+
+async fn mutate_tasks<R, F>(client: &Client, team: &str, mutator: F) -> Result<R, kube::Error>
+where
+    F: Fn(&mut Vec<TeamTask>) -> (R, bool),
+{
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &namespace());
+    let name = tasks_cm_name(team);
+    let mut last_conflict = None;
+    for _ in 0..MAX_TASK_UPDATE_RETRIES {
+        let existing = cms.get_opt(&name).await?;
+        let mut tasks = existing
+            .as_ref()
+            .and_then(|cm| cm.data.as_ref())
+            .and_then(|data| data.get("tasks.json"))
+            .and_then(|raw| serde_json::from_str::<Vec<TeamTask>>(raw).ok())
+            .unwrap_or_default();
+        let (result, changed) = mutator(&mut tasks);
+        if !changed {
+            return Ok(result);
+        }
+        match persist_tasks(&cms, team, existing, &tasks).await {
+            Ok(()) => return Ok(result),
+            Err(kube::Error::Api(error)) if error.code == 409 => {
+                last_conflict = Some(kube::Error::Api(error));
+            }
+            Err(error) => return Err(error),
+        }
+    }
+    Err(last_conflict.expect("a retry loop exits only after conflicts"))
 }
 
 /// Mark a task `active` and bind it to the run that will work it. Returns the
@@ -106,17 +151,26 @@ pub async fn mark_active(
     team: &str,
     task_id: &str,
     run: &str,
-) -> Result<(), kube::Error> {
+) -> Result<bool, kube::Error> {
     let now = chrono::Utc::now().to_rfc3339();
-    let mut tasks = read_tasks(client, team).await;
-    for t in tasks.iter_mut() {
-        if t.id == task_id {
-            t.status = "active".into();
-            t.run = Some(run.to_string());
-            t.stuck_since = Some(now.clone());
-        }
-    }
-    write_tasks(client, team, &tasks).await
+    mutate_tasks(client, team, |tasks| {
+        let changed = claim_task(tasks, task_id, run, &now);
+        (changed, changed)
+    })
+    .await
+}
+
+fn claim_task(tasks: &mut [TeamTask], task_id: &str, run: &str, now: &str) -> bool {
+    let Some(task) = tasks
+        .iter_mut()
+        .find(|task| task.id == task_id && task.status == "pending")
+    else {
+        return false;
+    };
+    task.status = "active".into();
+    task.run = Some(run.to_string());
+    task.stuck_since = Some(now.to_string());
+    true
 }
 
 /// A task active longer than this (with its run still present) is treated as
@@ -133,50 +187,67 @@ const STUCK_TASK_TIMEOUT_MINS: i64 = 60;
 /// Returns true if any task was reset. Best-effort per-task run lookups.
 pub async fn reset_stale_active_tasks(client: &Client, team: &str) -> Result<bool, kube::Error> {
     use crate::kars_task::KarsTask;
-    let mut tasks = read_tasks(client, team).await;
-    if !tasks.iter().any(|t| t.status == "active") {
-        return Ok(false);
-    }
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &namespace());
+    let name = tasks_cm_name(team);
     let runs: Api<KarsTask> = Api::namespaced(client.clone(), &namespace());
-    let now = chrono::Utc::now();
-    let mut changed = false;
-    for t in tasks.iter_mut() {
-        if t.status != "active" {
-            continue;
+    let mut last_conflict = None;
+    for _ in 0..MAX_TASK_UPDATE_RETRIES {
+        let existing = cms.get_opt(&name).await?;
+        let mut tasks = existing
+            .as_ref()
+            .and_then(|cm| cm.data.as_ref())
+            .and_then(|data| data.get("tasks.json"))
+            .and_then(|raw| serde_json::from_str::<Vec<TeamTask>>(raw).ok())
+            .unwrap_or_default();
+        if !tasks.iter().any(|task| task.status == "active") {
+            return Ok(false);
         }
-        let (run_exists, run_halted) = match &t.run {
-            Some(r) => match runs.get_opt(r).await? {
-                Some(run) => (
-                    true,
-                    run.annotations()
-                        .get("kars.azure.com/halted")
-                        .is_some_and(|decision| !decision.trim().is_empty()),
-                ),
+        let now = chrono::Utc::now();
+        let mut changed = false;
+        for task in tasks.iter_mut() {
+            if task.status != "active" {
+                continue;
+            }
+            let (run_exists, run_halted) = match &task.run {
+                Some(run_name) => match runs.get_opt(run_name).await? {
+                    Some(run) => (
+                        true,
+                        run.annotations()
+                            .get("kars.azure.com/halted")
+                            .is_some_and(|decision| !decision.trim().is_empty()),
+                    ),
+                    None => (false, false),
+                },
                 None => (false, false),
-            },
-            None => (false, false),
-        };
-        let stuck_mins = t
-            .stuck_since
-            .as_deref()
-            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            .map(|s| (now - s.with_timezone(&chrono::Utc)).num_minutes())
-            .unwrap_or(0);
-        if should_requeue(run_exists, run_halted, stuck_mins) {
-            t.status = "pending".into();
-            t.run = None;
-            t.stuck_since = None;
-            changed = true;
-        } else if t.stuck_since.is_none() {
-            // Legacy active task (pre-field) — start its clock now.
-            t.stuck_since = Some(now.to_rfc3339());
-            changed = true;
+            };
+            let stuck_mins = task
+                .stuck_since
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|started| (now - started.with_timezone(&chrono::Utc)).num_minutes())
+                .unwrap_or(0);
+            if should_requeue(run_exists, run_halted, stuck_mins) {
+                task.status = "pending".into();
+                task.run = None;
+                task.stuck_since = None;
+                changed = true;
+            } else if task.stuck_since.is_none() {
+                task.stuck_since = Some(now.to_rfc3339());
+                changed = true;
+            }
+        }
+        if !changed {
+            return Ok(false);
+        }
+        match persist_tasks(&cms, team, existing, &tasks).await {
+            Ok(()) => return Ok(true),
+            Err(kube::Error::Api(error)) if error.code == 409 => {
+                last_conflict = Some(kube::Error::Api(error));
+            }
+            Err(error) => return Err(error),
         }
     }
-    if changed {
-        write_tasks(client, team, &tasks).await?;
-    }
-    Ok(changed)
+    Err(last_conflict.expect("a retry loop exits only after conflicts"))
 }
 
 fn should_requeue(run_exists: bool, run_halted: bool, stuck_mins: i64) -> bool {
@@ -191,24 +262,22 @@ pub async fn mark_done_for_run(
     run: &str,
     now: &str,
 ) -> Result<bool, kube::Error> {
-    let mut tasks = read_tasks(client, team).await;
-    let changed = mark_done(&mut tasks, run, now);
-    if changed {
-        write_tasks(client, team, &tasks).await?;
-    }
-    Ok(changed)
+    mutate_tasks(client, team, |tasks| {
+        let changed = mark_done(tasks, run, now);
+        (changed, changed)
+    })
+    .await
 }
 
 /// Requeue the `active` backlog task bound to a failed run. The failed run stays
 /// linked in its own durable evidence, while the work item returns to `pending`
 /// for an explicit Run now or the next cadence tick.
 pub async fn requeue_for_run(client: &Client, team: &str, run: &str) -> Result<bool, kube::Error> {
-    let mut tasks = read_tasks(client, team).await;
-    let changed = requeue_run(&mut tasks, run);
-    if changed {
-        write_tasks(client, team, &tasks).await?;
-    }
-    Ok(changed)
+    mutate_tasks(client, team, |tasks| {
+        let changed = requeue_run(tasks, run);
+        (changed, changed)
+    })
+    .await
 }
 
 fn mark_done(tasks: &mut [TeamTask], run: &str, now: &str) -> bool {
@@ -277,6 +346,35 @@ mod tests {
     #[test]
     fn tasks_cm_name_is_stable() {
         assert_eq!(tasks_cm_name("finance"), "kars-team-tasks-finance");
+    }
+
+    #[test]
+    fn claim_only_transitions_the_expected_pending_task() {
+        let mut tasks = vec![
+            t("pending", "pending", None),
+            t("active", "active", Some("run-old")),
+        ];
+        assert!(claim_task(
+            &mut tasks,
+            "pending",
+            "run-new",
+            "2026-07-20T12:00:00Z"
+        ));
+        assert_eq!(tasks[0].status, "active");
+        assert_eq!(tasks[0].run.as_deref(), Some("run-new"));
+        assert!(!claim_task(
+            &mut tasks,
+            "active",
+            "run-rebind",
+            "2026-07-20T12:01:00Z"
+        ));
+        assert_eq!(tasks[1].run.as_deref(), Some("run-old"));
+        assert!(!claim_task(
+            &mut tasks,
+            "missing",
+            "run-missing",
+            "2026-07-20T12:01:00Z"
+        ));
     }
 
     #[test]

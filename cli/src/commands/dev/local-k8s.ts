@@ -27,7 +27,11 @@ import { loadConfig, getSecret, type KarsConfig } from "../../config.js";
 import { loadAgtProfile } from "../../refs.js";
 import { stageRustBinaries, type RustArch } from "../../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../../lib/stage-mesh-plugin.js";
-import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
+import {
+  ensureAgtRepo,
+  ensureAgtSdkTarball,
+  ensureAgtWheels,
+} from "../../lib/agt-bootstrap.js";
 import { resolveBundledAsset, requireBundledAsset, findRepoRootOrNull } from "../../lib/repo-assets.js";
 import { buildCopilotFallbackChain } from "../../github-copilot.js";
 
@@ -566,64 +570,28 @@ async function rebuildDevImages(
   agtRepo?: string,
 ): Promise<string[]> {
   const platform = `linux/${archToken}`;
-  // Resolve the AGT SDK tarball path. The Dockerfile's `AGT_SDK_TARBALL`
-  // build-arg, when non-empty, swaps the stock npm install of
-  // @microsoft/agent-governance-sdk@^3.5.0 (which is missing
-  // MeshClient.registerSelf / autoRegister / registry-client.js — i.e.
-  // sub-agents never POST /v1/agents, so peers cannot discover them and
-  // mesh communication silently fails) for a local tarball that ships
-  // those pieces. Mirrors the auto-discovery logic dev.ts uses for the
-  // docker target so local-k8s isn't second-class on the mesh path.
+  // Stage the revision-matched AGT SDK tarball for the sandbox build. The
+  // Dockerfile fails closed without it; local-k8s uses the same stamped helper
+  // as push/up/docker dev so stale packed output cannot drift from source.
   let agtSdkTarballBasename: string | undefined;
   let agtSdkTarballHostPath: string | undefined;
   if (agtRepo) {
     const fsMod = await import("node:fs");
-    const tsDir = path.join(agtRepo, "agent-governance-typescript");
-    const findTarball = (): string | undefined => {
-      try {
-        const hits = fsMod
-          .readdirSync(tsDir)
-          .filter((f) => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"))
-          .sort();
-        return hits.length > 0 ? hits[hits.length - 1] : undefined;
-      } catch { return undefined; }
-    };
-
-    let picked = findTarball();
-    if (!picked && fsMod.existsSync(path.join(tsDir, "package.json"))) {
-      // No pre-packed tarball. Build & pack the SDK from source so the
-      // sandbox image gets the patched MeshClient (stock npm 3.5.0
-      // lacks registerSelf/autoRegister → sub-agents never register).
-      console.log(chalk.dim(`  No microsoft-agent-governance-sdk-*.tgz under ${tsDir} — packing from source (one-time)...\n`));
-      try {
-        await execa("npm", ["install", "--prefer-offline", "--no-audit", "--no-fund"], { cwd: tsDir, stdio: "inherit" });
-        await execa("npm", ["run", "build"], { cwd: tsDir, stdio: "inherit" });
-        await execa("npm", ["pack"], { cwd: tsDir, stdio: "inherit" });
-        picked = findTarball();
-      } catch (e) {
-        console.log(chalk.yellow(`  Could not pack AGT SDK: ${(e as Error).message}\n  Continuing with npm @^3.5.0 (mesh registration will not work).\n`));
+    const tarball = await ensureAgtSdkTarball(agtRepo, repoRoot);
+    const picked = path.basename(tarball);
+    const stagingDir = path.join(repoRoot, ".agt-sdk");
+    if (!fsMod.existsSync(stagingDir)) fsMod.mkdirSync(stagingDir, { recursive: true });
+    for (const f of fsMod.readdirSync(stagingDir)) {
+      if (f.endsWith(".tgz") || f.endsWith(".tar.gz")) {
+        fsMod.unlinkSync(path.join(stagingDir, f));
       }
     }
-
-    if (picked) {
-      const stagingDir = path.join(repoRoot, ".agt-sdk");
-      if (!fsMod.existsSync(stagingDir)) fsMod.mkdirSync(stagingDir, { recursive: true });
-      for (const f of fsMod.readdirSync(stagingDir)) {
-        if (f.endsWith(".tgz") || f.endsWith(".tar.gz")) {
-          fsMod.unlinkSync(path.join(stagingDir, f));
-        }
-      }
-      fsMod.copyFileSync(path.join(tsDir, picked), path.join(stagingDir, picked));
-      agtSdkTarballBasename = picked;
-      agtSdkTarballHostPath = path.join(tsDir, picked);
-    }
+    fsMod.copyFileSync(tarball, path.join(stagingDir, picked));
+    agtSdkTarballBasename = picked;
+    agtSdkTarballHostPath = tarball;
   }
   if (agtSdkTarballBasename) {
     console.log(chalk.dim(`  Using patched AGT SDK tarball: ${agtSdkTarballHostPath}\n`));
-  } else if (agtRepo) {
-    console.log(chalk.yellow(
-      `  Warning: AGT SDK tarball unavailable under ${path.join(agtRepo, "agent-governance-typescript")} — falling back to npm @^3.5.0 (mesh registration will not work).\n`,
-    ));
   }
   type Spec = { name: string; tag: string; build: () => Promise<void> };
   const specs: Spec[] = [

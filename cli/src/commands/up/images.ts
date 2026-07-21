@@ -19,9 +19,15 @@
  */
 
 import { execa } from "execa";
+import * as fs from "node:fs";
 import * as path from "path";
 import type { Stepper } from "../../stepper.js";
-import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
+import {
+  ensureAgtRepo,
+  ensureAgtSdkTarball,
+  ensureAgtWheels,
+} from "../../lib/agt-bootstrap.js";
+import { stageMeshPlugin } from "../../lib/stage-mesh-plugin.js";
 import { stageRustBinaries } from "../../lib/stage-rust-bin.js";
 import { isPhaseSkippable, markPhaseDone, type ResumeTopology } from "./resume.js";
 
@@ -137,10 +143,14 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
       const args = [
         "build", "--platform", "linux/amd64",
         "--provenance=false", "--sbom=false",
-        "-f", path.join(repoRoot, dockerfile),
+        "-f", path.isAbsolute(dockerfile) ? dockerfile : path.join(repoRoot, dockerfile),
         "-t", `${acrLoginServer}/${tag}`,
         ...buildArgs,
-        context ? path.join(repoRoot, context) : repoRoot,
+        context
+          ? path.isAbsolute(context)
+            ? context
+            : path.join(repoRoot, context)
+          : repoRoot,
       ];
       await execa("docker", args, { stdio: "pipe" });
       // Push with retry — ACR tokens/connections can go stale after long builds
@@ -201,11 +211,30 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
       );
     }
 
+    stepper.update("Bootstrapping revision-pinned AGT SDK...");
+    await stageMeshPlugin(repoRoot);
+    const agtRepo = await ensureAgtRepo(undefined, repoRoot);
+    const agtSdkTarball = await ensureAgtSdkTarball(agtRepo, repoRoot);
+    const agtSdkStagingDir = path.join(repoRoot, ".agt-sdk");
+    fs.mkdirSync(agtSdkStagingDir, { recursive: true });
+    for (const file of fs.readdirSync(agtSdkStagingDir)) {
+      if (file.endsWith(".tgz") || file.endsWith(".tar.gz")) {
+        fs.unlinkSync(path.join(agtSdkStagingDir, file));
+      }
+    }
+    const agtSdkBasename = path.basename(agtSdkTarball);
+    fs.copyFileSync(
+      agtSdkTarball,
+      path.join(agtSdkStagingDir, agtSdkBasename),
+    );
+
     await buildPush(
       "sandbox-images/openclaw/Dockerfile",
       "openclaw-sandbox:latest",
       ["--build-arg", `SANDBOX_BASE_IMAGE=${acrLoginServer}/kars-sandbox-base:latest`,
-        "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/kars-inference-router:latest`],
+        "--build-arg", `INFERENCE_ROUTER_IMAGE=${acrLoginServer}/kars-inference-router:latest`,
+        "--build-arg", "MESH_PROVIDER=agt",
+        "--build-arg", `AGT_SDK_TARBALL=${agtSdkBasename}`],
     );
 
     // Multi-runtime adapter images. Tags must match the controller's
@@ -216,7 +245,6 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
       // auto-clones the pinned AGT repo if missing and builds the wheels into
       // runtimes/wheels/. No-op when the cache stamp matches the current pin.
       stepper.update("Bootstrapping AGT toolkit + Python wheels...");
-      const agtRepo = await ensureAgtRepo(undefined, repoRoot);
       await ensureAgtWheels(agtRepo, repoRoot);
       for (const rt of [
         { dir: "openai-agents", tag: "kars-runtime-openai-agents:latest" },
@@ -231,23 +259,22 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
       }
     }
 
-    // AgentMesh relay+registry images: kars does not build these (vendored
-    // forks removed in Phase 5.2). Import the pre-built AGT-compatible images
-    // from the public source ACR — the deploy/agentmesh-agt.yaml manifest
-    // references them by tag.
-    for (const tag of ["agentmesh-relay-agt:latest", "agentmesh-registry-agt:latest"]) {
-      stepper.update(`Importing ${tag} from ${options.sourceAcr}...`);
-      await execa("az", [
-        "acr", "import",
-        "--name", acr,
-        "--source", `${options.sourceAcr}/${tag}`,
-        "--image", tag,
-        "--force",
-      ], { stdio: "pipe" }).then(() => {
-        stepper.detail("ok", tag);
-      }).catch((e: { message?: string }) => {
-        stepper.detail("skip", `${tag} — import failed (${(e.message ?? "").split("\n")[0].slice(0, 80)})`);
-      });
+    const agtDockerfile = path.join(
+      agtRepo,
+      "agent-governance-python/agent-mesh/docker/Dockerfile",
+    );
+    for (const component of ["relay", "registry"]) {
+      await buildPush(
+        agtDockerfile,
+        `agentmesh-${component}-agt:latest`,
+        [
+          "--build-arg",
+          `COMPONENT=${component}`,
+          "--build-arg",
+          `CACHE_BUST=${Date.now()}`,
+        ],
+        agtRepo,
+      );
     }
 
     stepper.done("Images built and pushed to ACR");

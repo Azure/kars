@@ -154,10 +154,15 @@ image-sandbox-base: ## Build sandbox base image (heavy deps — rebuild when upg
 		-t $(REGISTRY)/kars-sandbox-base:latest \
 		-f sandbox-images/openclaw/Dockerfile.base .
 
-image-sandbox: image-router ## Build sandbox Docker image (slim overlay — fast per-commit rebuild)
+stage-agt-sdk:
+	bash scripts/stage-agt-sdk.sh
+
+image-sandbox: image-router stage-agt-sdk ## Build sandbox Docker image (slim overlay — fast per-commit rebuild)
 	docker build --platform linux/amd64 \
 		--build-arg SANDBOX_BASE_IMAGE=$(REGISTRY)/kars-sandbox-base:latest \
 		--build-arg INFERENCE_ROUTER_IMAGE=$(REGISTRY)/kars-inference-router:latest \
+		--build-arg MESH_PROVIDER=agt \
+		--build-arg AGT_SDK_TARBALL=$$(cat .agt-sdk/name) \
 		-t $(REGISTRY)/openclaw-sandbox:$(IMAGE_TAG) \
 		-t $(REGISTRY)/openclaw-sandbox:latest \
 		-f sandbox-images/openclaw/Dockerfile .

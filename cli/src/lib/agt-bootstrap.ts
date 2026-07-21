@@ -7,15 +7,9 @@
  * work out-of-the-box on a fresh machine without the user having to know
  * about the AGT-main-vs-released schema gap.
  *
- * The pin lives in `vendor/agt/pin.json` (single source of truth, also
- * referenced from `Cargo.toml [patch.crates-io]` and the `file:` deps
- * in `mesh-plugin/package.json` and `runtimes/openclaw/package.json`).
- * When upstream AGT cuts a release containing PR
- * https://github.com/microsoft/agent-governance-toolkit/pull/2772, the
- * pin file is deleted and the CLI no longer auto-clones — `kars push`
- * then refuses to build relay/registry from source because the
- * published `ghcr.io/microsoft/agentmesh/{relay,registry}:X.Y.Z`
- * images are usable directly.
+ * The exact temporary fork revision is embedded below so fresh checkouts do
+ * not depend on generated vendor tarballs. An optional `vendor/agt/pin.json`
+ * can override it while developing a replacement pin.
  *
  * Why we ship a fork pin instead of just published packages right now:
  *
@@ -24,10 +18,9 @@
  *      @microsoft/agent-governance-sdk@4.0.0` does NOT yet sign.
  *      Mismatch is documented; #2772 is the SDK-side fix.
  *
- *   2. Our kars-built relay/registry images (`kars push --only
- *      relay/registry`) are now built from the same SHA as the SDK
- *      tarball under `vendor/agt/`, so the wire protocol is
- *      consistent edge-to-edge.
+ *   2. Relay/registry images, the packed TypeScript SDK, and Python wheels are
+ *      all built from this same SHA, so the wire protocol is consistent
+ *      edge-to-edge.
  *
  *   3. Setting `KARS_AGT_REPO=/path/to/your/clone` still wins — the
  *      auto-clone is purely a fresh-machine convenience.
@@ -46,16 +39,33 @@ interface AgtPin {
 }
 
 const DEFAULT_AGT_REPO = path.join(os.homedir(), "agent-governance-toolkit");
+const FALLBACK_AGT_PIN: AgtPin = {
+  url: "https://github.com/pallakatos/agent-governance-toolkit.git",
+  branch: "kars-sdk-pop-signing",
+  sha: "c1ef74efdadd46546bc772053487c379dd825ae5",
+  shortSha: "c1ef74e",
+};
+
+function readAgtPin(repoRoot: string): AgtPin {
+  const pinPath = path.join(repoRoot, "vendor", "agt", "pin.json");
+  return fs.existsSync(pinPath)
+    ? (JSON.parse(fs.readFileSync(pinPath, "utf-8")) as AgtPin)
+    : FALLBACK_AGT_PIN;
+}
 
 async function agtRevision(agtRepo: string, repoRoot: string): Promise<string> {
-  const pinPath = path.join(repoRoot, "vendor", "agt", "pin.json");
-  if (fs.existsSync(pinPath)) {
-    return (JSON.parse(fs.readFileSync(pinPath, "utf-8")) as AgtPin).sha;
-  }
+  const pin = readAgtPin(repoRoot);
   const { stdout } = await execa("git", ["rev-parse", "HEAD"], {
     cwd: agtRepo,
   });
-  return stdout.trim();
+  const revision = stdout.trim();
+  if (revision !== pin.sha) {
+    throw new Error(
+      `AGT checkout is ${revision.slice(0, 8)}, expected ${pin.shortSha}. ` +
+        `Update ${agtRepo} or set KARS_AGT_REPO to the pinned checkout.`,
+    );
+  }
+  return revision;
 }
 
 /**
@@ -78,15 +88,7 @@ export async function ensureAgtRepo(
   }
 
   const root = repoRoot || process.cwd();
-  const pinPath = path.join(root, "vendor", "agt", "pin.json");
-  if (!fs.existsSync(pinPath)) {
-    throw new Error(
-      `vendor/agt/pin.json not found at ${pinPath}; can't auto-clone AGT.\n` +
-        `  Either run from the kars repo root, or set KARS_AGT_REPO to an ` +
-        `existing AGT toolkit checkout.`,
-    );
-  }
-  const pin = JSON.parse(fs.readFileSync(pinPath, "utf-8")) as AgtPin;
+  const pin = readAgtPin(root);
 
   process.stderr.write(
     `[kars] AGT clone missing at ${agtRepo} — auto-cloning ${pin.url}@${pin.shortSha}\n`,
@@ -108,6 +110,14 @@ export async function ensureAgtRepo(
     ],
     { stdio: "inherit" },
   );
+  await execa("git", ["fetch", "--depth", "1", "origin", pin.sha], {
+    cwd: agtRepo,
+    stdio: "inherit",
+  });
+  await execa("git", ["checkout", "--detach", pin.sha], {
+    cwd: agtRepo,
+    stdio: "inherit",
+  });
   // The SDK build step (`cd agent-governance-typescript && npm run build`)
   // needs the dependency tree, but it isn't required for the relay/
   // registry Dockerfile build. The vendored `.tgz` under `vendor/agt/`

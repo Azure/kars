@@ -64,9 +64,14 @@ const ANNOT_RUN_REQUESTED: &str = "kars.azure.com/run-requested";
 /// on a KarsTeam, the reconciler mints one immediate run and clears it — the
 /// only run path for a cadence-less team.
 const RUN_NOW_ANNOTATION: &str = "kars.azure.com/run-now";
+const BACKLOG_RUN_NOW_ANNOTATION: &str = "kars.azure.com/backlog-run-now";
 /// Cap on concurrently-executing standing-operation runs per team, so the
 /// charter loop never floods the cluster faster than runs complete + retire.
 const MAX_CONCURRENT_RUNS: usize = 2;
+
+fn run_trigger_can_mint(manual: bool, backlog: bool, has_claimable_task: bool) -> bool {
+    manual || !backlog || has_claimable_task
+}
 
 #[derive(thiserror::Error, Debug)]
 enum ReconcileError {
@@ -295,22 +300,34 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             // builds on prior ticks instead of starting cold.
             let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
             let assigned = assigned_task.take();
-            mint_taskforce(
-                &tasks,
-                &team,
-                &principal_name,
-                &canonical,
-                &prior,
-                assigned.as_ref(),
-                channel_enabled,
-            )
-            .await?;
-            if let Some(t) = &assigned {
-                let _ = crate::team_tasks::mark_active(&ctx.client, &name, &t.id, &canonical).await;
+            let claimed = match &assigned {
+                Some(task) => {
+                    crate::team_tasks::mark_active(&ctx.client, &name, &task.id, &canonical).await?
+                }
+                None => true,
+            };
+            if claimed {
+                if let Err(error) = mint_taskforce(
+                    &tasks,
+                    &team,
+                    &principal_name,
+                    &canonical,
+                    &prior,
+                    assigned.as_ref(),
+                    channel_enabled,
+                )
+                .await
+                {
+                    if assigned.is_some() {
+                        let _ = crate::team_tasks::requeue_for_run(&ctx.client, &name, &canonical)
+                            .await;
+                    }
+                    return Err(error);
+                }
+                generated += 1;
+                last_generated = Some(canonical.clone());
+                last_run_at = Some(now.to_rfc3339());
             }
-            generated += 1;
-            last_generated = Some(canonical.clone());
-            last_run_at = Some(now.to_rfc3339());
         }
         // Advance the UI's "next check" to the start of the next window.
         next_run_at = Some(
@@ -332,32 +349,58 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .and_then(|a| a.get(RUN_NOW_ANNOTATION))
         .map(|v| !v.trim().is_empty())
         .unwrap_or(false);
-    if run_now {
-        let mut consumed = false;
-        if !paused && active_runs < MAX_CONCURRENT_RUNS && cap_gate.is_none() && !budget_exhausted {
+    let backlog_run_now = team
+        .annotations()
+        .get(BACKLOG_RUN_NOW_ANNOTATION)
+        .is_some_and(|value| !value.trim().is_empty());
+    if run_now || backlog_run_now {
+        let mut consumed_manual = false;
+        let mut consumed_backlog = false;
+        let backlog_can_mint =
+            run_trigger_can_mint(run_now, backlog_run_now, assigned_task.is_some());
+        if backlog_can_mint
+            && !paused
+            && active_runs < MAX_CONCURRENT_RUNS
+            && cap_gate.is_none()
+            && !budget_exhausted
+        {
             let canonical = format!("{name}-run-{}", now.timestamp());
             if tasks.get_opt(&canonical).await.ok().flatten().is_none() {
                 let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
                 let assigned = assigned_task.take();
-                mint_taskforce(
-                    &tasks,
-                    &team,
-                    &principal_name,
-                    &canonical,
-                    &prior,
-                    assigned.as_ref(),
-                    channel_enabled,
-                )
-                .await?;
-                if let Some(t) = &assigned {
-                    let _ =
-                        crate::team_tasks::mark_active(&ctx.client, &name, &t.id, &canonical).await;
+                let claimed = match &assigned {
+                    Some(task) => {
+                        crate::team_tasks::mark_active(&ctx.client, &name, &task.id, &canonical)
+                            .await?
+                    }
+                    None => true,
+                };
+                if claimed {
+                    if let Err(error) = mint_taskforce(
+                        &tasks,
+                        &team,
+                        &principal_name,
+                        &canonical,
+                        &prior,
+                        assigned.as_ref(),
+                        channel_enabled,
+                    )
+                    .await
+                    {
+                        if assigned.is_some() {
+                            let _ =
+                                crate::team_tasks::requeue_for_run(&ctx.client, &name, &canonical)
+                                    .await;
+                        }
+                        return Err(error);
+                    }
+                    generated += 1;
+                    last_generated = Some(canonical.clone());
+                    last_run_at = Some(now.to_rfc3339());
+                    consumed_manual = run_now;
+                    consumed_backlog = backlog_run_now && assigned.is_some();
                 }
-                generated += 1;
-                last_generated = Some(canonical.clone());
-                last_run_at = Some(now.to_rfc3339());
             }
-            consumed = true;
         } else {
             tracing::info!(
                 team = %name,
@@ -365,15 +408,24 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                 active_runs,
                 capability_gate = cap_gate.as_deref().unwrap_or("none"),
                 budget_exhausted,
-                "Run now remains armed until the team is ready to mint"
+                backlog_waiting_for_claim = backlog_run_now && assigned_task.is_none(),
+                "run trigger remains armed until the team is ready to mint"
             );
         }
         // Consume the trigger only after a run exists for this request. Transient
         // readiness, concurrency, or budget gates must not silently drop the
         // user's Run now action.
-        if consumed {
+        if consumed_manual || consumed_backlog {
             let mut ann = serde_json::Map::new();
-            ann.insert(RUN_NOW_ANNOTATION.to_string(), serde_json::Value::Null);
+            if consumed_manual {
+                ann.insert(RUN_NOW_ANNOTATION.to_string(), serde_json::Value::Null);
+            }
+            if consumed_backlog {
+                ann.insert(
+                    BACKLOG_RUN_NOW_ANNOTATION.to_string(),
+                    serde_json::Value::Null,
+                );
+            }
             let clear = json!({ "metadata": { "annotations": ann } });
             let _ = teams
                 .patch(&name, &PatchParams::default(), &Patch::Merge(clear))
@@ -398,22 +450,34 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         if tasks.get_opt(&canonical).await.ok().flatten().is_none() {
             let prior = crate::team_commons::prior_knowledge(&ctx.client, &commons).await;
             let assigned = assigned_task.take();
-            mint_taskforce(
-                &tasks,
-                &team,
-                &principal_name,
-                &canonical,
-                &prior,
-                assigned.as_ref(),
-                channel_enabled,
-            )
-            .await?;
-            if let Some(t) = &assigned {
-                let _ = crate::team_tasks::mark_active(&ctx.client, &name, &t.id, &canonical).await;
+            let claimed = match &assigned {
+                Some(task) => {
+                    crate::team_tasks::mark_active(&ctx.client, &name, &task.id, &canonical).await?
+                }
+                None => true,
+            };
+            if claimed {
+                if let Err(error) = mint_taskforce(
+                    &tasks,
+                    &team,
+                    &principal_name,
+                    &canonical,
+                    &prior,
+                    assigned.as_ref(),
+                    channel_enabled,
+                )
+                .await
+                {
+                    if assigned.is_some() {
+                        let _ = crate::team_tasks::requeue_for_run(&ctx.client, &name, &canonical)
+                            .await;
+                    }
+                    return Err(error);
+                }
+                generated += 1;
+                last_generated = Some(canonical.clone());
+                last_run_at = Some(now.to_rfc3339());
             }
-            generated += 1;
-            last_generated = Some(canonical.clone());
-            last_run_at = Some(now.to_rfc3339());
         }
     }
 
@@ -2371,6 +2435,14 @@ mod tests {
             ..Default::default()
         }));
         assert_eq!(bp.tool_policy.as_deref(), Some("my-strict-policy"));
+    }
+
+    #[test]
+    fn backlog_trigger_waits_for_an_atomic_task_claim() {
+        assert!(!run_trigger_can_mint(false, true, false));
+        assert!(run_trigger_can_mint(false, true, true));
+        assert!(run_trigger_can_mint(true, true, false));
+        assert!(run_trigger_can_mint(true, false, false));
     }
 
     #[test]

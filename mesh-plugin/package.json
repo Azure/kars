@@ -44,7 +44,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "@microsoft/agent-governance-sdk": "file:../vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-3322175d.tgz",
+    "@noble/curves": "^2.2.0",
     "ws": "^8.21.0"
   },
   "devDependencies": {

@@ -42,6 +42,8 @@ permissions:
 env:
   VERSION: ${{ github.event.inputs.version != '' && github.event.inputs.version || (startsWith(github.ref, 'refs/tags/') && github.ref_name || format('interim-{0}', github.sha)) }}
   REGISTRY: ghcr.io/azure
+  AGT_REPO: https://github.com/pallakatos/agent-governance-toolkit.git
+  AGT_SHA: c1ef74efdadd46546bc772053487c379dd825ae5
 
 jobs:
   # ─── Stage 1: multi-arch Rust binaries ─────────────────────────
@@ -300,31 +302,25 @@ jobs:
             runner: ubuntu-24.04-arm
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
+        with:
+          node-version: '22'
 
       - name: Stage patched AGT SDK (release-build correctness guard)
         run: |
-          # A release sandbox image MUST bundle the kars-patched AGT SDK
-          # (POP signing + X3DH KDF fix). The Dockerfile falls back to the
-          # UNPATCHED public npm SDK if .agt-sdk/<tarball> is absent.
-          #
-          # The Dockerfile's `COPY .agt-sdk/` resolves against the BUILD
-          # CONTEXT root (the repo root — `context: .` below), NOT the
-          # Dockerfile's directory. Stage into <repo-root>/.agt-sdk/ to match,
-          # exactly like the CLI from-source dev build does
-          # (cli/src/commands/dev.ts -> path.join(repoRoot, ".agt-sdk")).
-          TARBALL=$(find vendor/agt -maxdepth 1 -name 'microsoft-agent-governance-sdk-*.tgz' | head -1 || true)
-          if [ -z "$TARBALL" ]; then
-            echo "::error::No vendored patched AGT SDK tarball under vendor/agt/."
-            exit 1
-          fi
+          git clone --filter=blob:none "$AGT_REPO" /tmp/agt
+          git -C /tmp/agt checkout "$AGT_SHA"
+          cd /tmp/agt/agent-governance-typescript
+          npm ci
+          npm run build
+          npm pack --silent
+          TARBALL=$(find "$PWD" -maxdepth 1 -name 'microsoft-agent-governance-sdk-*.tgz' | head -1)
+          test -n "$TARBALL"
+          cd "$GITHUB_WORKSPACE"
           mkdir -p .agt-sdk
           cp "$TARBALL" .agt-sdk/
           echo "AGT_SDK_TARBALL=$(basename "$TARBALL")" >> "$GITHUB_ENV"
 
-      - name: Build mesh-plugin (openclaw Dockerfile COPYs mesh-plugin/dist)
-        uses: actions/setup-node@1d0ff469b7ec7b3cb9d8673fde0c81c44821de2a # v4
-        with:
-          node-version: '22'
       - name: npm ci + build mesh-plugin
         working-directory: mesh-plugin
         run: |
@@ -446,7 +442,7 @@ jobs:
   # governance packages) AND runtimes/agt-mesh-python/ (kars's own
   # spec-compliant Python MeshClient — in-repo source, bundled hermetically
   # from the checkout). Only the upstream wheels need building here; they
-  # come from the pinned AGT checkout (vendor/agt/pin.json).
+  # come from the exact AGT checkout pinned in the workflow environment.
   build-agt-wheels:
     name: Build AGT Python wheels (from pinned AGT)
     runs-on: ubuntu-22.04
@@ -460,11 +456,9 @@ jobs:
           python-version: '3.12'
       - name: Clone pinned AGT + build wheels
         run: |
-          URL=$(jq -r .url vendor/agt/pin.json)
-          SHA=$(jq -r .sha vendor/agt/pin.json)
-          echo "::notice::Cloning $URL @ $SHA for AGT-Python wheels"
-          git clone --filter=blob:none "$URL" /tmp/agt
-          git -C /tmp/agt checkout "$SHA"
+          echo "::notice::Cloning $AGT_REPO @ $AGT_SHA for AGT-Python wheels"
+          git clone --filter=blob:none "$AGT_REPO" /tmp/agt
+          git -C /tmp/agt checkout "$AGT_SHA"
           AGT_PYTHON_DIR=/tmp/agt/agent-governance-python ./runtimes/build-agt-wheels.sh
           echo "Built wheels:" && ls -la runtimes/wheels/
       - name: Guard — wheels present
@@ -627,10 +621,8 @@ jobs:
 
       - name: Clone pinned AGT
         run: |
-          URL=$(jq -r .url vendor/agt/pin.json)
-          SHA=$(jq -r .sha vendor/agt/pin.json)
-          git clone --filter=blob:none "$URL" /tmp/agt
-          git -C /tmp/agt checkout "$SHA"
+          git clone --filter=blob:none "$AGT_REPO" /tmp/agt
+          git -C /tmp/agt checkout "$AGT_SHA"
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@988b5a0280414f521da01fcc63a27aeeb4b104db # v3
