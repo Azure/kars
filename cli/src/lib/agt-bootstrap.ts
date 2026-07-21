@@ -47,6 +47,17 @@ interface AgtPin {
 
 const DEFAULT_AGT_REPO = path.join(os.homedir(), "agent-governance-toolkit");
 
+async function agtRevision(agtRepo: string, repoRoot: string): Promise<string> {
+  const pinPath = path.join(repoRoot, "vendor", "agt", "pin.json");
+  if (fs.existsSync(pinPath)) {
+    return (JSON.parse(fs.readFileSync(pinPath, "utf-8")) as AgtPin).sha;
+  }
+  const { stdout } = await execa("git", ["rev-parse", "HEAD"], {
+    cwd: agtRepo,
+  });
+  return stdout.trim();
+}
+
 /**
  * Return the path to the AGT clone, auto-cloning the pinned fork
  * SHA when it doesn't exist. Honors `KARS_AGT_REPO` and an explicit
@@ -135,7 +146,6 @@ export async function ensureAgtWheels(
 ): Promise<void> {
   const wheelDir = path.join(repoRoot, "runtimes", "wheels");
   const buildScript = path.join(repoRoot, "runtimes", "build-agt-wheels.sh");
-  const pinPath = path.join(repoRoot, "vendor", "agt", "pin.json");
   const cacheStamp = path.join(wheelDir, ".agt-sha");
 
   if (!fs.existsSync(buildScript)) {
@@ -147,9 +157,7 @@ export async function ensureAgtWheels(
 
   // Cache check: skip if the pin SHA matches what produced the
   // current wheels.
-  const pinSha = fs.existsSync(pinPath)
-    ? (JSON.parse(fs.readFileSync(pinPath, "utf-8")) as AgtPin).sha
-    : "no-pin";
+  const pinSha = await agtRevision(agtRepo, repoRoot);
   if (!force && fs.existsSync(cacheStamp) && fs.existsSync(wheelDir)) {
     const stamp = fs.readFileSync(cacheStamp, "utf-8").trim();
     const hasWheels = fs
@@ -178,6 +186,58 @@ export async function ensureAgtWheels(
     stdio: "inherit",
   });
   fs.writeFileSync(cacheStamp, pinSha + "\n");
+}
+
+/**
+ * Return an SDK tarball built from the exact AGT checkout revision. A packed
+ * tarball can outlive source changes, so file existence alone is not a valid
+ * cache key; stamp the producing git SHA and rebuild on every revision change.
+ */
+export async function ensureAgtSdkTarball(
+  agtRepo: string,
+  repoRoot: string,
+  force = false,
+): Promise<string> {
+  const tsDir = path.join(agtRepo, "agent-governance-typescript");
+  const packageJson = path.join(tsDir, "package.json");
+  if (!fs.existsSync(packageJson)) {
+    throw new Error(`AGT TypeScript SDK tree not found at ${tsDir}`);
+  }
+
+  const revision = await agtRevision(agtRepo, repoRoot);
+  const stampPath = path.join(tsDir, ".kars-sdk-sha");
+  const candidates = () =>
+    fs
+      .readdirSync(tsDir)
+      .filter(
+        (file) =>
+          file.startsWith("microsoft-agent-governance-sdk-") &&
+          file.endsWith(".tgz"),
+      )
+      .sort();
+  const stamp = fs.existsSync(stampPath)
+    ? fs.readFileSync(stampPath, "utf-8").trim()
+    : "";
+  const existing = candidates();
+  if (!force && stamp === revision && existing.length > 0) {
+    return path.join(tsDir, existing.at(-1)!);
+  }
+
+  process.stderr.write(
+    `[kars] Building AGT TypeScript SDK tarball (revision: ${revision.slice(0, 8)})...\n`,
+  );
+  await execa("npm", ["ci"], { cwd: tsDir, stdio: "inherit" });
+  await execa("npm", ["run", "build"], { cwd: tsDir, stdio: "inherit" });
+  for (const file of existing) {
+    fs.unlinkSync(path.join(tsDir, file));
+  }
+  await execa("npm", ["pack", "--silent"], { cwd: tsDir, stdio: "inherit" });
+  const packed = candidates();
+  if (packed.length === 0) {
+    throw new Error(`npm pack produced no AGT SDK tarball under ${tsDir}`);
+  }
+  fs.writeFileSync(stampPath, revision + "\n");
+  return path.join(tsDir, packed.at(-1)!);
 }
 
 export { DEFAULT_AGT_REPO };

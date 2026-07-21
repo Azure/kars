@@ -10,7 +10,11 @@ import os from "os";
 import { loadContext } from "../config.js";
 import { stageRustBinaries } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
-import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
+import {
+  ensureAgtRepo,
+  ensureAgtSdkTarball,
+  ensureAgtWheels,
+} from "../lib/agt-bootstrap.js";
 
 const DEFAULT_AGT_REPO = path.join(os.homedir(), "agent-governance-toolkit");
 
@@ -182,21 +186,25 @@ export function pushCommand(): Command {
             }
           } catch { /* no vendored dir */ }
 
-          // 2. Fall back to the AGT clone's packed output. Used when developers
-          //    re-pack the SDK locally (`npm pack`) without copying it back
-          //    into vendor/agt/ — keeps the inner-loop fast without forcing a
-          //    `git add` step.
+          // 2. Build or reuse a tarball stamped with the AGT checkout revision.
+          //    Merely finding an old .tgz is unsafe: source-level wire fixes can
+          //    land after it was packed, producing cross-runtime crypto drift.
           if (!tarballPath && !agtRepoMissing) {
             try {
-              const tsDir = path.join(agtRepo, "agent-governance-typescript");
-              const candidates = fs.readdirSync(tsDir).filter(
-                f => f.startsWith("microsoft-agent-governance-sdk-") && f.endsWith(".tgz"),
+              tarballPath = await ensureAgtSdkTarball(agtRepo, repoRoot);
+              console.log(
+                chalk.dim(
+                  `  Revision-matched AGT SDK tarball: ${path.basename(tarballPath)}`,
+                ),
               );
-              if (candidates.length > 0) {
-                tarballPath = path.join(tsDir, candidates[0]);
-                console.log(chalk.dim(`  Auto-discovered AGT SDK tarball from clone: ${candidates[0]}`));
-              }
-            } catch { /* AGT repo missing TS dir — fall through to npm install */ }
+            } catch (error) {
+              console.error(
+                chalk.red(
+                  `\n  Failed to build the AGT SDK tarball:\n    ${(error as Error).message}\n`,
+                ),
+              );
+              process.exit(1);
+            }
           }
         }
         if (tarballPath) {
