@@ -39,6 +39,96 @@ fn kars_sandbox_api_resource() -> ApiResource {
     }
 }
 
+fn kars_api_resource(kind: &str, plural: &str) -> ApiResource {
+    ApiResource {
+        group: "kars.azure.com".into(),
+        version: "v1alpha1".into(),
+        api_version: "kars.azure.com/v1alpha1".into(),
+        kind: kind.into(),
+        plural: plural.into(),
+    }
+}
+
+async fn is_verified_team_roster_spawn(
+    client: &Client,
+    namespace: &str,
+    parent: &DynamicObject,
+    role: Option<&str>,
+) -> Option<bool> {
+    if parent
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get("kars.azure.com/team-role"))
+        .map(String::as_str)
+        == Some("member")
+    {
+        return Some(false);
+    }
+    let Some(task_name) = parent
+        .metadata
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get("kars.azure.com/karstask"))
+    else {
+        return None;
+    };
+    let tasks: Api<DynamicObject> = Api::namespaced_with(
+        client.clone(),
+        namespace,
+        &kars_api_resource("KarsTask", "karstasks"),
+    );
+    let Ok(task) = tasks.get(task_name).await else {
+        return Some(false);
+    };
+    let annotations = task.metadata.annotations.as_ref();
+    let team_associated = annotations
+        .and_then(|annotations| annotations.get("kars.azure.com/team"))
+        .is_some();
+    let taskforce = annotations
+        .and_then(|annotations| annotations.get("kars.azure.com/team-role"))
+        .map(String::as_str)
+        == Some("taskforce");
+    if !team_associated {
+        return None;
+    }
+    if !taskforce {
+        return Some(false);
+    }
+    let Some(owner) = task.metadata.owner_references.as_ref().and_then(|owners| {
+        owners
+            .iter()
+            .find(|owner| owner.kind == "KarsTeam" && owner.controller == Some(true))
+    }) else {
+        return Some(false);
+    };
+    let teams: Api<DynamicObject> = Api::namespaced_with(
+        client.clone(),
+        namespace,
+        &kars_api_resource("KarsTeam", "karsteams"),
+    );
+    let Ok(team) = teams.get(&owner.name).await else {
+        return Some(false);
+    };
+    if team.metadata.uid.as_deref() != Some(owner.uid.as_str()) {
+        return Some(false);
+    }
+    let Some(roster) = task
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get("kars.azure.com/effective-roster"))
+        .and_then(|raw| serde_json::from_str::<Vec<String>>(raw).ok())
+    else {
+        return Some(false);
+    };
+    Some(
+        role.map(str::trim)
+            .filter(|role| !role.is_empty())
+            .is_some_and(|role| roster.iter().any(|member| member == role)),
+    )
+}
+
 const LOGICAL_AGENT_ID_ANNOTATION: &str = "kars.azure.com/logical-agent-id";
 
 fn scoped_child_name(parent_name: &str, logical_agent_id: &str) -> String {
@@ -173,6 +263,10 @@ pub struct SpawnRequest {
     /// access unless the principal explicitly delegates existing network scope.
     #[serde(default)]
     pub inherit_parent_egress: bool,
+    /// Inherit only when the router verifies that a KarsTeam taskforce is
+    /// spawning an exact role declared in its roster.
+    #[serde(default)]
+    pub auto_inherit_team_egress: bool,
     /// Isolation level: standard | enhanced | confidential.
     pub isolation: Option<String>,
     /// Daily token budget.
@@ -316,7 +410,7 @@ pub async fn create_sandbox(
 
     let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let api: Api<DynamicObject> =
-        Api::namespaced_with(client, &namespace, &kars_sandbox_api_resource());
+        Api::namespaced_with(client.clone(), &namespace, &kars_sandbox_api_resource());
 
     // Sub-agents inherit the parent's model unless the spawn request explicitly
     // overrides it. The controller plumbs the parent's resolved
@@ -384,6 +478,7 @@ pub async fn create_sandbox(
         parent_endpoints,
         parent_egress_mode,
         parent_uid,
+        verified_team_roster_spawn,
     ): (
         BTreeMap<String, String>,
         Vec<serde_json::Value>,
@@ -392,8 +487,16 @@ pub async fn create_sandbox(
         Vec<serde_json::Value>,
         Option<String>,
         String,
+        Option<bool>,
     ) = match api.get(parent_name).await {
         Ok(parent_obj) => {
+            let verified_team_roster_spawn = is_verified_team_roster_spawn(
+                &client,
+                &namespace,
+                &parent_obj,
+                req.role.as_deref(),
+            )
+            .await;
             let labels = parent_obj.metadata.labels.clone().unwrap_or_default();
             let uid = parent_obj
                 .metadata
@@ -429,6 +532,7 @@ pub async fn create_sandbox(
                 endpoints,
                 egress_mode,
                 uid,
+                verified_team_roster_spawn,
             )
         }
         Err(e) => {
@@ -436,6 +540,12 @@ pub async fn create_sandbox(
                 "Could not fetch parent KarsSandbox '{parent_name}' for secure spawn: {e}"
             ));
         }
+    };
+    let inherit_parent_egress = match verified_team_roster_spawn {
+        Some(role_is_declared) => {
+            role_is_declared && (req.inherit_parent_egress || req.auto_inherit_team_egress)
+        }
+        None => req.inherit_parent_egress,
     };
 
     let mut crd = build_sub_agent_crd_with_labels(
@@ -446,12 +556,22 @@ pub async fn create_sandbox(
         req,
         &parent_labels,
     );
+    if verified_team_roster_spawn == Some(true)
+        && let Some(labels) = crd
+            .pointer_mut("/metadata/labels")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        labels.insert(
+            "kars.azure.com/team-role".into(),
+            serde_json::Value::String("member".into()),
+        );
+    }
     let child_resource_name = scoped_child_name(parent_name, &req.agent_id);
     apply_spawn_identity(&mut crd, &child_resource_name, &req.agent_id);
     crd["metadata"]["annotations"]["kars.azure.com/spawn-parent-uid"] =
         serde_json::Value::String(parent_uid.clone());
     crd["metadata"]["annotations"]["kars.azure.com/egress-inheritance"] = serde_json::Value::String(
-        if req.inherit_parent_egress {
+        if inherit_parent_egress {
             "inherit"
         } else {
             "request"
@@ -494,7 +614,7 @@ pub async fn create_sandbox(
         &mut crd,
         &parent_endpoints,
         parent_egress_mode.as_deref(),
-        req.inherit_parent_egress,
+        inherit_parent_egress,
     );
 
     // Keyless git write (§14): a sub-agent inherits the principal's typed
@@ -974,6 +1094,7 @@ pub async fn collect_sub_agent_snapshots(
                 .and_then(|a| a.get("kars.azure.com/egress-inheritance"))
                 .and_then(|value| value.as_str())
                 == Some("inherit"),
+            auto_inherit_team_egress: false,
             isolation,
             token_budget_daily,
             token_budget_per_request,
@@ -1598,6 +1719,7 @@ mod tests {
             trust_threshold: None,
             learn_egress: false,
             inherit_parent_egress: false,
+            auto_inherit_team_egress: false,
             isolation: None,
             token_budget_daily: None,
             token_budget_per_request: None,

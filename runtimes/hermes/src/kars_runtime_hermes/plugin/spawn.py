@@ -99,6 +99,9 @@ def _kars_spawn(args: dict[str, Any], **_kwargs: Any) -> str:
     role = args.get("role")
     if role:
         body["role"] = str(role)
+    egress = args.get("egress")
+    body["inherit_parent_egress"] = egress == "inherit"
+    body["auto_inherit_team_egress"] = egress is None
     # KARS_DEV_PROFILE → relaxed sub-agent defaults
     if os.environ.get("KARS_DEV_PROFILE") == "true":
         body["learn_egress"] = True
@@ -258,7 +261,16 @@ _SPAWN_SCHEMA = {
             },
             "role": {
                 "type": "string",
-                "description": "Short persona/role description",
+                "description": "Short persona/role description. For standing teams, pass the exact roster role name.",
+            },
+            "egress": {
+                "type": "string",
+                "enum": ["request", "inherit"],
+                "description": (
+                    "Normal sub-agents default to request mode. For a verified team "
+                    "roster spawn, omit this field so approved team endpoints are "
+                    "inherited automatically. Explicit request remains isolated."
+                ),
             },
             "runtime": {
                 "type": "string",

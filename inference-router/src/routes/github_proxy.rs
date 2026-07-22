@@ -73,7 +73,7 @@ fn owner_repo_from_git(path: &str) -> Option<(String, String)> {
     let mut it = path.trim_start_matches('/').splitn(3, '/');
     let owner = it.next()?;
     let repo = it.next()?;
-    if owner.is_empty() || repo.is_empty() {
+    if !is_safe_repo_segment(owner) || !is_safe_repo_segment(repo) {
         return None;
     }
     let rest = it.next().unwrap_or("");
@@ -88,10 +88,52 @@ fn owner_repo_from_api(path: &str) -> Option<String> {
     }
     let owner = it.next()?;
     let repo = it.next()?;
-    if owner.is_empty() || repo.is_empty() {
+    if !is_safe_repo_segment(owner) || !is_safe_repo_segment(repo) {
         return None;
     }
     Some(format!("{owner}/{repo}"))
+}
+
+fn is_safe_repo_segment(segment: &str) -> bool {
+    !segment.is_empty()
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.'))
+}
+
+fn decoded_segment(mut segment: String) -> Option<String> {
+    for _ in 0..2 {
+        let bytes = segment.as_bytes();
+        let mut decoded = Vec::with_capacity(bytes.len());
+        let mut index = 0;
+        while index < bytes.len() {
+            if bytes[index] != b'%' {
+                decoded.push(bytes[index]);
+                index += 1;
+                continue;
+            }
+            if index + 2 >= bytes.len() {
+                return None;
+            }
+            let hex = std::str::from_utf8(&bytes[index + 1..index + 3]).ok()?;
+            decoded.push(u8::from_str_radix(hex, 16).ok()?);
+            index += 3;
+        }
+        segment = String::from_utf8(decoded).ok()?;
+    }
+    Some(segment)
+}
+
+fn has_unsafe_path_segment(path: &str) -> bool {
+    path.split('/').any(|raw| {
+        let Some(segment) = decoded_segment(raw.to_string()) else {
+            return true;
+        };
+        matches!(segment.as_str(), "." | "..")
+            || segment.contains('/')
+            || segment.contains('\\')
+            || segment.as_bytes().contains(&0)
+    })
 }
 
 fn deny(status: StatusCode, msg: &str) -> Response {
@@ -170,6 +212,9 @@ async fn git_handler(
     };
     let (parts, body) = req.into_parts();
     let full_path = parts.uri.path().strip_prefix("/git/").unwrap_or("");
+    if has_unsafe_path_segment(full_path) {
+        return deny(StatusCode::BAD_REQUEST, "unsafe git path");
+    }
     let Some((owner_repo, rest)) = owner_repo_from_git(full_path) else {
         return deny(StatusCode::BAD_REQUEST, "expected /git/{owner}/{repo}/…");
     };
@@ -218,6 +263,9 @@ async fn api_handler(
     };
     let (parts, body) = req.into_parts();
     let api_path = parts.uri.path().strip_prefix("/gh-api/").unwrap_or("");
+    if has_unsafe_path_segment(api_path) {
+        return deny(StatusCode::BAD_REQUEST, "unsafe GitHub API path");
+    }
     let Some(owner_repo) = owner_repo_from_api(api_path) else {
         return deny(
             StatusCode::FORBIDDEN,
@@ -573,6 +621,21 @@ mod tests {
         assert_eq!(owner_repo_from_api("repos/o/r/pulls"), Some("o/r".into()));
         assert_eq!(owner_repo_from_api("user/repos"), None);
         assert_eq!(owner_repo_from_api("orgs/x/repos"), None);
+    }
+
+    #[test]
+    fn rejects_dot_segments_and_encoded_separators() {
+        for path in [
+            "repos/allowed/repo/../../victim/repo/issues",
+            "repos/allowed/repo/%2e%2e/%2e%2e/victim/repo/issues",
+            "repos/allowed/repo/%252e%252e/victim/repo/issues",
+            "repos/allowed/repo/%2f/victim/repo/issues",
+            "repos/allowed/repo/%5c/victim/repo/issues",
+        ] {
+            assert!(has_unsafe_path_segment(path), "{path}");
+        }
+        assert!(!has_unsafe_path_segment("repos/allowed/repo/pulls/42"));
+        assert_eq!(owner_repo_from_api("repos/owner%2frepo/x"), None);
     }
 
     #[test]

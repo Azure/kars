@@ -109,6 +109,9 @@ def test_spawn_calls_router_with_validated_body() -> None:
     assert body["model"] == "gpt-4o"
     assert body["trust_threshold"] == 500
     assert body["governance"] is True
+    assert body["role"] == "writer"
+    assert body["auto_inherit_team_egress"] is True
+    assert body["inherit_parent_egress"] is False
 
     parsed = json.loads(result)
     assert parsed["phase"] == "Running"
@@ -135,6 +138,27 @@ def test_spawn_dev_profile_injects_learn_egress(monkeypatch: pytest.MonkeyPatch)
         spawn._kars_spawn({"name": "child"})
 
     assert captured["body"]["learn_egress"] is True
+
+
+def test_spawn_explicit_request_disables_auto_inheritance() -> None:
+    captured: dict[str, Any] = {}
+
+    def fake_call_json(method: str, path: str, **kwargs: Any) -> dict[str, Any]:
+        captured["body"] = kwargs.get("json")
+        return {"status": "created"}
+
+    def fake_call(method: str, path: str, **_kwargs: Any) -> httpx.Response:
+        return _mock_response(200, {"phase": "Running"})
+
+    with (
+        mock.patch.object(spawn.router_client, "call_json", side_effect=fake_call_json),
+        mock.patch.object(spawn.router_client, "call", side_effect=fake_call),
+        mock.patch.object(spawn.time, "sleep", lambda _s: None),
+    ):
+        spawn._kars_spawn({"name": "child", "role": "reviewer", "egress": "request"})
+
+    assert captured["body"]["auto_inherit_team_egress"] is False
+    assert captured["body"]["inherit_parent_egress"] is False
 
 
 def test_spawn_returns_warning_if_not_running(monkeypatch: pytest.MonkeyPatch) -> None:

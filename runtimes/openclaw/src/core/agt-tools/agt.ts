@@ -552,7 +552,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         egress: {
           type: "string",
           enum: ["request", "inherit"],
-          description: "Network authority for the child. 'request' (default) starts with no inherited business egress so the child must ask for access. 'inherit' deliberately delegates the parent's already-approved endpoint set; use only when this role needs those same sources.",
+          description: "Network authority for the child. Normal sub-agents default to 'request'. For a verified KarsTeam taskforce spawning an exact declared roster role, omit this field and the router automatically inherits only the team's already-approved endpoints. Explicit 'request' remains zero-trust; explicit 'inherit' deliberately delegates the parent's approved endpoint set.",
         },
         role: { type: "string", description: "Short persona/role description for this sub-agent (e.g. 'data analyst', 'visualization engineer', 'technical writer'). Used by the platform to build a Peer roster shared with siblings so they can resolve role references to canonical names." },
         runtime: { type: "string", description: "Optional runtime/harness for the sub-agent — 'OpenClaw' (default), 'Hermes', etc. Omit to inherit this agent's own runtime. Use this to delegate a subtask to a different harness (e.g. an OpenClaw principal spawning a Hermes specialist). The sub-agent still communicates over the same E2E mesh regardless of harness." },
@@ -613,6 +613,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           governance: params.governance !== false,
           trust_threshold: 500,
           inherit_parent_egress: params.egress === "inherit",
+          auto_inherit_team_egress: params.egress == null,
           // Cross-harness spawn: forward the optional runtime override as
           // `runtime_kind` (the router's SpawnRequest field — deny_unknown_fields,
           // so the key name must match exactly). When omitted the router falls
@@ -620,6 +621,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           // spawns are unaffected. This is what lets an OpenClaw principal spawn a
           // Hermes sub-agent (and vice versa) — see inference-router/src/spawn/mod.rs.
           ...(params.runtime ? { runtime_kind: String(params.runtime) } : {}),
+          ...(params.role ? { role: String(params.role) } : {}),
           // Dev profile (docker / local-k8s) — propagate learn_egress
           // so the sub-agent CRD lands with egressMode=Learn even
           // before reaching the router's own KARS_DEV_PROFILE-gated
