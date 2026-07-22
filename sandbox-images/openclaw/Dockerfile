@@ -80,10 +80,13 @@ RUN cd /opt/kars-plugin && npm ci --omit=dev --ignore-scripts
 # `kars dev --mesh-provider agt --build`. The directory always exists with
 # at least a .keep file so the COPY never fails.
 ARG MESH_PROVIDER=agt
+ARG AGT_SKIP_INIT=0
 ARG AGT_SDK_TARBALL=
 COPY .agt-sdk/ /opt/kars-agt-sdk/
 RUN cd /mesh-plugin && \
-    if [ -n "$AGT_SDK_TARBALL" ]; then \
+    if [ "$AGT_SKIP_INIT" = "1" ] || [ "${AGT_SKIP_INIT}" = "true" ]; then \
+      echo "Skipping AGT SDK install (AGT_SKIP_INIT=$AGT_SKIP_INIT)"; \
+    elif [ -n "$AGT_SDK_TARBALL" ]; then \
       if [ ! -f "/opt/kars-agt-sdk/$AGT_SDK_TARBALL" ]; then \
         echo "::error:: AGT_SDK_TARBALL=$AGT_SDK_TARBALL was requested but" >&2; \
         echo "  /opt/kars-agt-sdk/$AGT_SDK_TARBALL is missing from the build context." >&2; \

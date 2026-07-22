@@ -15,6 +15,11 @@ controller:
     tag: "latest"
     pullPolicy: Always
   replicas: 2
+  # Standing-team admission controls. Each team may have at most this many
+  # active task-force runs, and all teams together may have at most the global
+  # limit. Runs remain queued and resume automatically as capacity frees.
+  teamMaxConcurrentRuns: 1
+  globalActiveRunsLimit: 6
   # When true, BYO sandboxes whose
   # spec.runtime.byo.contractVersion is missing or unknown, OR whose
   # byo.image is shape-invalid, are rejected with Degraded=True

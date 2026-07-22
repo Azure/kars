@@ -38,6 +38,10 @@ spec:
           env:
             - name: RUST_LOG
               value: "info,kars_controller=debug"
+            - name: KARS_TEAM_MAX_CONCURRENT_RUNS
+              value: {{ .Values.controller.teamMaxConcurrentRuns | default 1 | quote }}
+            - name: KARS_TEAM_GLOBAL_ACTIVE_RUNS_LIMIT
+              value: {{ .Values.controller.globalActiveRunsLimit | default 6 | quote }}
             # Downward API — used by leader-election + S12.d
             # SignerPolicy watcher to scope to the controller's own
             # namespace without cluster-wide watch RBAC.

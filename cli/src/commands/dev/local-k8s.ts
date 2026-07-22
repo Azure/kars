@@ -567,6 +567,7 @@ async function rebuildDevImages(
   repoRoot: string,
   archToken: string,
   forceAll: boolean,
+  noMesh: boolean,
   agtRepo?: string,
 ): Promise<string[]> {
   const platform = `linux/${archToken}`;
@@ -575,20 +576,20 @@ async function rebuildDevImages(
   // as push/up/docker dev so stale packed output cannot drift from source.
   let agtSdkTarballBasename: string | undefined;
   let agtSdkTarballHostPath: string | undefined;
-  if (agtRepo) {
-    const fsMod = await import("node:fs");
-    const tarball = await ensureAgtSdkTarball(agtRepo, repoRoot);
-    const picked = path.basename(tarball);
-    const stagingDir = path.join(repoRoot, ".agt-sdk");
-    if (!fsMod.existsSync(stagingDir)) fsMod.mkdirSync(stagingDir, { recursive: true });
-    for (const f of fsMod.readdirSync(stagingDir)) {
-      if (f.endsWith(".tgz") || f.endsWith(".tar.gz")) {
-        fsMod.unlinkSync(path.join(stagingDir, f));
-      }
-    }
-    fsMod.copyFileSync(tarball, path.join(stagingDir, picked));
-    agtSdkTarballBasename = picked;
-    agtSdkTarballHostPath = tarball;
+  if (agtRepo && !noMesh) {
+   const fsMod = await import("node:fs");
+   const tarball = await ensureAgtSdkTarball(agtRepo, repoRoot);
+   const picked = path.basename(tarball);
+   const stagingDir = path.join(repoRoot, ".agt-sdk");
+   if (!fsMod.existsSync(stagingDir)) fsMod.mkdirSync(stagingDir, { recursive: true });
+   for (const f of fsMod.readdirSync(stagingDir)) {
+     if (f.endsWith(".tgz") || f.endsWith(".tar.gz")) {
+       fsMod.unlinkSync(path.join(stagingDir, f));
+     }
+   }
+   fsMod.copyFileSync(tarball, path.join(stagingDir, picked));
+   agtSdkTarballBasename = picked;
+   agtSdkTarballHostPath = tarball;
   }
   if (agtSdkTarballBasename) {
     console.log(chalk.dim(`  Using patched AGT SDK tarball: ${agtSdkTarballHostPath}\n`));
@@ -666,6 +667,7 @@ async function rebuildDevImages(
           "--build-arg", `SANDBOX_BASE_IMAGE=${baseTag}`,
           "--build-arg", `INFERENCE_ROUTER_IMAGE=kars-inference-router:dev`,
           "--build-arg", `MESH_PROVIDER=agt`,
+          ...(noMesh ? ["--build-arg", "AGT_SKIP_INIT=1"] : []),
           ...(agtSdkTarballBasename
             ? ["--build-arg", `AGT_SDK_TARBALL=${agtSdkTarballBasename}`]
             : []),
@@ -675,7 +677,9 @@ async function rebuildDevImages(
         ], { stdio: "inherit" });
       },
     },
-    {
+  ];
+  if (!noMesh) {
+    specs.push({
       // Hermes runtime image. Built so the operator's `n` → spawn
       // dialog can launch a Hermes sandbox without the user having
       // to know about `docker build -t kars-runtime-hermes …`. The
@@ -705,8 +709,8 @@ async function rebuildDevImages(
           repoRoot,
         ], { stdio: "inherit" });
       },
-    },
-  ];
+    });
+  }
 
   const built: string[] = [];
   // Specs whose image is cheap to rebuild relative to the source-vs-image
@@ -889,6 +893,7 @@ async function provisionDevCreds(
   kubectl: string,
   creds: KarsConfig,
   mcpGithub: GithubMcpDecision = { enabled: false, envVarName: "COPILOT_GITHUB_TOKEN" },
+  noMesh = false,
 ): Promise<string> {
   const SECRET_NAME = "kars-dev-creds";
   const NS = "kars-system";
@@ -976,6 +981,12 @@ async function provisionDevCreds(
     "          key: api-key",
     ...(isCopilot || isGithubModels
       ? ["    - name: KARS_PROVIDER", `      value: "${creds.provider}"`]
+      : []),
+    ...(noMesh
+      ? [
+          "    - name: KARS_NO_MESH",
+          '      value: "1"',
+        ]
       : []),
     ...(isCopilot
       ? [
@@ -1320,6 +1331,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
       repoRootForBuild,
       archToken,
       opts.forceRebuild === true,
+      opts.noMesh === true,
       opts.agtRepo,
     );
     if (built.length === 0) {
@@ -1444,7 +1456,9 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
         aliases: ["kars-runtime-hermes:latest", "kars-runtime-hermes:dev"],
       },
     ];
-    images.push(...runtimeImages);
+    if (!opts.noMesh) {
+      images.push(...runtimeImages);
+    }
 
     const missing: string[] = [];
     const missingRuntimes: string[] = [];
@@ -1547,7 +1561,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // Provision the dev-creds Secret + per-run overlay BEFORE helm-applying,
   // so the controller deployment picks up the secretKeyRef on its first
   // rollout (no second restart needed).
-  const credsOverlay = await provisionDevCreds(tools.kubectl, creds, mcpGithub);
+  const credsOverlay = await provisionDevCreds(tools.kubectl, creds, mcpGithub, opts.noMesh === true);
   try {
     const meshProvider = opts.meshProvider ?? "agt";
     await helmInstall(tools.helm, tools.kubectl, opts.name, chartDir, [
@@ -1650,6 +1664,17 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     );
   }
   stepper.done("controller rollout check finished");
+
+  if (opts.noMesh === true) {
+    console.log("");
+    console.log(chalk.green("  ✓ Controller-only smoke test complete."));
+    console.log(
+      chalk.dim(
+        "  Mesh, sandbox, and WebUI were intentionally skipped (--no-mesh).",
+      ),
+    );
+    return;
+  }
 
   // Phase 4–5b: Headlamp dashboard + kars plugin + Prometheus/Grafana.
   // These are observability extras — make them BEST-EFFORT so a hiccup

@@ -2099,6 +2099,11 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         {
             openclaw_env.push(json!({"name": "KARS_STRICT_TOOLS", "value": "1"}));
         }
+        if let Ok(no_mesh) = std::env::var("KARS_NO_MESH")
+            && (no_mesh == "1" || no_mesh.eq_ignore_ascii_case("true"))
+        {
+            openclaw_env.push(json!({"name": "AGT_SKIP_INIT", "value": "1"}));
+        }
 
         // AGT is the only supported mesh provider in this phase. Keep the
         // env var explicit so OpenClaw and the router agree on the protocol.

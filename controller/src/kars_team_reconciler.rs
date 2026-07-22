@@ -38,6 +38,7 @@ use kube::{
 };
 use serde_json::json;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::time::Duration;
 
 use crate::kars_profile::KarsProfile;
@@ -65,12 +66,91 @@ const ANNOT_RUN_REQUESTED: &str = "kars.azure.com/run-requested";
 /// only run path for a cadence-less team.
 const RUN_NOW_ANNOTATION: &str = "kars.azure.com/run-now";
 const BACKLOG_RUN_NOW_ANNOTATION: &str = "kars.azure.com/backlog-run-now";
-/// Cap on concurrently-executing standing-operation runs per team, so the
-/// charter loop never floods the cluster faster than runs complete + retire.
-const MAX_CONCURRENT_RUNS: usize = 2;
+const DEFAULT_TEAM_MAX_CONCURRENT_RUNS: usize = 1;
+const DEFAULT_GLOBAL_ACTIVE_RUNS_LIMIT: usize = 6;
+
+fn parse_limit_value(value: Option<&str>, default: usize, max: usize) -> usize {
+    value
+        .and_then(|raw| raw.trim().parse::<usize>().ok())
+        .filter(|value| *value >= 1)
+        .map(|value| value.min(max))
+        .unwrap_or(default)
+}
+
+fn configured_limit(name: &str, default: usize, max: usize) -> usize {
+    parse_limit_value(std::env::var(name).ok().as_deref(), default, max)
+}
+
+fn team_admission_lock() -> &'static tokio::sync::Mutex<()> {
+    static LOCK: OnceLock<tokio::sync::Mutex<()>> = OnceLock::new();
+    LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
+}
+
+fn capacity_reason(
+    active_team_runs: usize,
+    team_limit: usize,
+    active_global_runs: usize,
+    global_limit: usize,
+) -> Option<String> {
+    if active_team_runs >= team_limit {
+        Some(format!(
+            "team capacity full: {active_team_runs}/{team_limit} active runs"
+        ))
+    } else if active_global_runs >= global_limit {
+        Some(format!(
+            "cluster team-run capacity full: {active_global_runs}/{global_limit} active runs"
+        ))
+    } else {
+        None
+    }
+}
 
 fn run_trigger_can_mint(manual: bool, backlog: bool, has_claimable_task: bool) -> bool {
     manual || !backlog || has_claimable_task
+}
+
+fn taskforce_run_is_active(task: &KarsTask) -> bool {
+    if !task
+        .annotations()
+        .get(ANNOT_TEAM_ROLE)
+        .is_some_and(|role| role == "taskforce")
+        || !task
+            .spec
+            .execution
+            .as_ref()
+            .is_some_and(|execution| execution.launch)
+    {
+        return false;
+    }
+    let assignment_active = task
+        .status
+        .as_ref()
+        .and_then(|status| status.assignment.as_ref())
+        .is_some_and(|assignment| matches!(assignment.state.as_str(), "Assigned" | "Running"));
+    let execution_active = task
+        .status
+        .as_ref()
+        .and_then(|status| status.execution_phase.as_deref())
+        .is_some_and(|phase| matches!(phase, "Launching" | "Running"));
+    let annotations = task.annotations();
+    let delivery_pending = matches!(
+        (
+            annotations.get(ANNOT_RUN_REQUESTED),
+            annotations.get("kars.azure.com/run-completed"),
+        ),
+        (Some(requested), Some(completed)) if requested != completed
+    ) || (annotations.get(ANNOT_RUN_REQUESTED).is_some()
+        && annotations.get("kars.azure.com/run-completed").is_none());
+    delivery_pending || assignment_active || execution_active
+}
+
+async fn global_active_taskforce_runs(tasks: &Api<KarsTask>) -> Result<usize, kube::Error> {
+    tasks.list(&ListParams::default()).await.map(|list| {
+        list.items
+            .iter()
+            .filter(|task| taskforce_run_is_active(task))
+            .count()
+    })
 }
 
 #[derive(thiserror::Error, Debug)]
@@ -92,9 +172,14 @@ impl ReconcileError {
 
 struct Ctx {
     client: Client,
+    team_max_concurrent_runs: usize,
+    global_active_runs_limit: usize,
 }
 
 async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
+    // One controller leader owns all reconcilers; serialize team admission so
+    // global capacity check + run creation is atomic within that leader.
+    let _admission_guard = team_admission_lock().lock().await;
     let name = team.name_any();
     let ns = team.namespace().unwrap_or_else(|| "default".into());
     let teams: Api<KarsTeam> = Api::namespaced(ctx.client.clone(), &ns);
@@ -137,6 +222,12 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // member blueprint. Everything downstream operates on this effective team,
     // so a profile-instantiated team materializes exactly as a hand-written one.
     let team = effective_team(&ctx.client, &ns, team).await;
+    let principal_name = format!("{name}-principal");
+
+    // Promotion must remain reachable even when the current envelope is too low
+    // to execute the configured roster. Keep the team degraded until approval
+    // lands, but still create/consume the governed tier-raise request.
+    process_promotion(&ctx.client, &ns, &team, &principal_name).await;
 
     // 1. Validate the team envelope + roster attenuation.
     let errors = team.validation_errors();
@@ -176,15 +267,17 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let stats = harvest_and_retire_runs(&ctx.client, &tasks, &team, &commons).await;
 
     let active_runs = stats.active;
+    let all_tasks: Api<KarsTask> = Api::all(ctx.client.clone());
+    let global_active_runs = global_active_taskforce_runs(&all_tasks).await?;
+    let capacity_gate = capacity_reason(
+        active_runs,
+        ctx.team_max_concurrent_runs,
+        global_active_runs,
+        ctx.global_active_runs_limit,
+    );
 
     // 2. Materialize the org: principal + members as KarsTasks.
-    let principal_name = format!("{name}-principal");
     materialize_principal(&tasks, &team, &principal_name).await?;
-
-    // Governed promotion (§12): when a higher tier is requested, open a human
-    // approval and only widen the envelope once it is approved — controller-only,
-    // human-approved, ledgered via the principal's receipt.
-    process_promotion(&ctx.client, &ns, &team, &principal_name).await;
 
     // Deliver any answered clarifications into the commons so the principal's
     // next run reads the human's answer as prior knowledge (principal-driven HITL).
@@ -262,9 +355,8 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // one task runs at a time — if a task is already in flight we run the charter
     // (or wait). `take()`n by the first mint path that fires so cadence + run-now
     // can't double-claim the same task in one reconcile.
-    // Requeue any hung `active` task (its run died / was GC'd) BEFORE reading the
-    // backlog, so a stuck task can't block the queue forever — has_active() below
-    // then reflects only genuinely in-flight work.
+    // Requeue any hung `active` task before reading the backlog so a dead run
+    // cannot block the queue forever.
     if let Err(e) = crate::team_tasks::reset_stale_active_tasks(&ctx.client, &name).await {
         tracing::warn!(team = %name, err = %format!("{e:#}"), "failed to reset stale active tasks");
     }
@@ -275,6 +367,7 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         } else {
             crate::team_tasks::next_pending(&team_task_list).cloned()
         };
+    let mut minted_this_reconcile = false;
     if let Some(every_min) = every {
         // The cadence WINDOW (epoch floored to the interval) names the run. A new
         // window opens each interval; the run is minted once per window
@@ -292,7 +385,7 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         if !paused
             && due
             && !canonical_exists
-            && active_runs < MAX_CONCURRENT_RUNS
+            && capacity_gate.is_none()
             && cap_gate.is_none()
             && !budget_exhausted
         {
@@ -327,6 +420,7 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                 generated += 1;
                 last_generated = Some(canonical.clone());
                 last_run_at = Some(now.to_rfc3339());
+                minted_this_reconcile = true;
             }
         }
         // Advance the UI's "next check" to the start of the next window.
@@ -339,9 +433,8 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     // On-demand run trigger (Bridge "Run now"). The ONLY way a cadence-less team
     // ("run on demand") ever produces work — and a manual kick for cadenced teams
-    // too. Fires exactly once per request: an operator sets the `run-now`
-    // annotation, we mint a fresh run under the same readiness gates as a cadence
-    // tick, then clear the annotation so it can't re-fire on the next reconcile.
+    // too. `run-now` is one-shot; `backlog-run-now` is durable so a standing team
+    // keeps draining queued work until an operator explicitly disarms it.
     let run_now = team
         .metadata
         .annotations
@@ -355,12 +448,12 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .is_some_and(|value| !value.trim().is_empty());
     if run_now || backlog_run_now {
         let mut consumed_manual = false;
-        let mut consumed_backlog = false;
         let backlog_can_mint =
             run_trigger_can_mint(run_now, backlog_run_now, assigned_task.is_some());
         if backlog_can_mint
+            && !minted_this_reconcile
             && !paused
-            && active_runs < MAX_CONCURRENT_RUNS
+            && capacity_gate.is_none()
             && cap_gate.is_none()
             && !budget_exhausted
         {
@@ -397,8 +490,8 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                     generated += 1;
                     last_generated = Some(canonical.clone());
                     last_run_at = Some(now.to_rfc3339());
+                    minted_this_reconcile = true;
                     consumed_manual = run_now;
-                    consumed_backlog = backlog_run_now && assigned.is_some();
                 }
             }
         } else {
@@ -406,6 +499,10 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                 team = %name,
                 paused,
                 active_runs,
+                global_active_runs,
+                team_limit = ctx.team_max_concurrent_runs,
+                global_limit = ctx.global_active_runs_limit,
+                capacity_gate = capacity_gate.as_deref().unwrap_or("none"),
                 capability_gate = cap_gate.as_deref().unwrap_or("none"),
                 budget_exhausted,
                 backlog_waiting_for_claim = backlog_run_now && assigned_task.is_none(),
@@ -415,16 +512,10 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         // Consume the trigger only after a run exists for this request. Transient
         // readiness, concurrency, or budget gates must not silently drop the
         // user's Run now action.
-        if consumed_manual || consumed_backlog {
+        if consumed_manual {
             let mut ann = serde_json::Map::new();
             if consumed_manual {
                 ann.insert(RUN_NOW_ANNOTATION.to_string(), serde_json::Value::Null);
-            }
-            if consumed_backlog {
-                ann.insert(
-                    BACKLOG_RUN_NOW_ANNOTATION.to_string(),
-                    serde_json::Value::Null,
-                );
             }
             let clear = json!({ "metadata": { "annotations": ann } });
             let _ = teams
@@ -440,9 +531,10 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // Guarded by last_run_at so it fires exactly once; afterwards the team is
     // on-demand (Run now) or on its cadence.
     if every.is_none()
+        && !minted_this_reconcile
         && !paused
         && last_run_at.is_none()
-        && active_runs < MAX_CONCURRENT_RUNS
+        && capacity_gate.is_none()
         && cap_gate.is_none()
         && !budget_exhausted
     {
@@ -491,16 +583,27 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // Health — the autonomous-monitoring signal. Computed from run outcomes +
     // cadence punctuality, so the operator can tell at a glance whether the
     // standing operation is actually producing, not merely scheduled.
-    let last_success_at = stats
-        .last_success_at
-        .clone()
-        .or_else(|| prior.last_success_at.clone());
+    let commons_last_success_at =
+        match crate::team_commons::latest_entry_at(&ctx.client, &commons).await {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::debug!(
+                    team = %name,
+                    %error,
+                    "could not read latest commons entry; preserving prior success timestamp"
+                );
+                prior.last_success_at.clone()
+            }
+        };
+    let last_success_at = stats.last_success_at.clone().or(commons_last_success_at);
     let overdue = matches!(
         (every, next_run_at.as_deref().and_then(parse_rfc3339)),
         (Some(m), Some(next)) if now > next + chrono::Duration::minutes(2 * m as i64)
     );
     let health = if paused {
         "Hibernating"
+    } else if capacity_gate.is_some() {
+        "CapacityLimited"
     } else if generated == 0 {
         "Watching"
     } else if overdue {
@@ -514,7 +617,6 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     };
 
     let commons_entry_count = crate::team_commons::entry_count(&ctx.client, &commons).await;
-
     // Daily digest (§20): publish a periodic standing report to the steering
     // inbox when the digest interval has elapsed. This is the autonomous-
     // monitoring report — the team tells you how it's doing without being asked.
@@ -554,6 +656,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     let detail = if paused {
         "Team hibernating — members governed-but-idle; charter loop paused.".to_string()
+    } else if let Some(reason) = &capacity_gate {
+        format!(
+            "Standing operation capacity-limited — {reason}. Limits: per-team={}, global={}. Will resume automatically as runs retire.",
+            ctx.team_max_concurrent_runs, ctx.global_active_runs_limit
+        )
     } else if budget_exhausted {
         format!(
             "BudgetExhausted — {} tokens spent meets the team's lifetime cap; no new runs will be minted until the cap is raised.",
@@ -584,12 +691,14 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     // Machine-readable Ready condition for kubectl wait / alerting (the health
     // string is human-only). Ready iff active and not capability-gated/exhausted.
-    let ready = !paused && cap_gate.is_none() && !budget_exhausted;
+    let ready = !paused && capacity_gate.is_none() && cap_gate.is_none() && !budget_exhausted;
     let condition = Condition {
         type_: PHASE_READY.into(),
         status: if ready { "True" } else { "False" }.into(),
         reason: if budget_exhausted {
             "BudgetExhausted".into()
+        } else if capacity_gate.is_some() {
+            "CapacityPressure".into()
         } else if cap_gate.is_some() {
             "CapabilityNotReady".into()
         } else if paused {
@@ -1344,8 +1453,7 @@ fn ensure_governing_tool_policy(blueprint: Option<TaskBlueprint>) -> TaskBluepri
 
 /// Materialize (SSA, idempotent) the **principal** task — the org apex holding
 /// the team's full charter envelope. Governed-but-idle by default; the charter
-/// loop is what produces *running* work, so the principal itself is a stable
-/// authority root, not a running agent (no launch).
+/// loop produces the running work.
 async fn materialize_principal(
     tasks: &Api<KarsTask>,
     team: &KarsTeam,
@@ -1374,8 +1482,7 @@ async fn materialize_principal(
 }
 
 /// Materialize (SSA, idempotent) a **member** task — a roster seat holding an
-/// attenuated subset of the team envelope, parented to the principal so the
-/// existing attenuation + lineage machinery enforces the org topology.
+/// attenuated subset of the team envelope, parented to the principal.
 async fn materialize_member(
     tasks: &Api<KarsTask>,
     team: &KarsTeam,
@@ -1419,6 +1526,33 @@ async fn materialize_member(
 /// harvester treats it as a quiet tick (no commons entry, no new deliverable).
 pub const NO_CHANGE_SENTINEL: &str = "[[NO_MATERIAL_CHANGE]]";
 
+fn is_banner_only(prefix: &str) -> bool {
+    prefix.lines().all(|raw| {
+        let line = raw
+            .trim()
+            .trim_start_matches(|character: char| {
+                character.is_whitespace() || matches!(character, '*' | '#' | '-' | '•')
+            })
+            .trim_end_matches(|character: char| {
+                character.is_whitespace() || matches!(character, '*' | '#' | '-' | '•')
+            })
+            .trim();
+        if line.is_empty() {
+            return true;
+        }
+        let lower = line.to_ascii_lowercase();
+        lower.contains("kars sandbox")
+            || lower.starts_with("foundry project:")
+            || lower.starts_with("provider:")
+            || lower.starts_with("model:")
+            || lower.starts_with("sandbox id:")
+            || lower.starts_with("security:")
+            || lower.starts_with("capabilities:")
+            || lower.starts_with("egress:")
+            || lower.starts_with("comms:")
+    })
+}
+
 /// Whether a run's output is a no-op (agent reported no material change).
 fn is_no_change(output: &str) -> bool {
     // A genuine no-change reply LEADS with the sentinel — the operating contract
@@ -1428,7 +1562,23 @@ fn is_no_change(output: &str) -> bool {
     // NOT be misread as a no-op, or it is silently dropped instead of harvested
     // into the team's memory — breaking progressive run-to-run continuity.
     let head = output.trim_start();
-    head.starts_with(NO_CHANGE_SENTINEL)
+    if head.starts_with(NO_CHANGE_SENTINEL) {
+        return true;
+    }
+
+    // A native OpenClaw session may prepend its fixed first-message security
+    // banner before the actual task reply. Accept the sentinel after that known
+    // banner only; do not accept arbitrary prose before it.
+    let Some(sentinel_at) = head.find(NO_CHANGE_SENTINEL) else {
+        return false;
+    };
+    let prefix = &head[..sentinel_at];
+    sentinel_at <= 1_200
+        && prefix.contains("kars Sandbox")
+        && prefix.contains("Sandbox ID:")
+        && prefix.contains("Security:")
+        && prefix.contains("Capabilities:")
+        && is_banner_only(prefix)
 }
 
 /// Appended to a team run's operating contract when the team has communication
@@ -1487,8 +1637,8 @@ async fn ensure_team_approval_owner(
         .await;
 }
 
-/// tick. Parented to the principal (attenuated under the charter) and launched
-/// so the existing mesh agent loop runs it autonomously.
+/// tick. Parented to the principal and launched so the existing mesh agent loop
+/// runs it autonomously.
 async fn mint_taskforce(
     tasks: &Api<KarsTask>,
     team: &KarsTeam,
@@ -1567,6 +1717,39 @@ async fn mint_taskforce(
     apply_task(tasks, team, tf_name, spec, "taskforce").await
 }
 
+fn standing_monitoring_roles(team: &KarsTeam) -> Vec<String> {
+    team.spec
+        .roster
+        .iter()
+        .filter_map(|role| {
+            let name = role.name.trim();
+            if name.is_empty() {
+                return None;
+            }
+            let prompt = role
+                .system_prompt
+                .as_deref()
+                .unwrap_or_default()
+                .to_lowercase();
+            let lname = name.to_lowercase();
+            if lname.contains("monitor")
+                || lname.contains("watch")
+                || lname.contains("watcher")
+                || lname.contains("scanner")
+                || lname.contains("alert")
+                || prompt.contains("continuously watch")
+                || prompt.contains("track ci")
+                || prompt.contains("keep pr")
+                || prompt.contains("monitor")
+            {
+                Some(name.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
 /// The roster + spawn-orchestration contract, injected into the principal run's
 /// objective when the team has members. This is what makes the standing run a
 /// LIVE orchestrator: it names each member role and instructs the principal to
@@ -1578,8 +1761,9 @@ fn orchestration_contract(team: &KarsTeam) -> String {
     if team.spec.roster.is_empty() {
         return String::new();
     }
-    const CONTRACT_MAX: usize = 1450;
-    const CHARGE_MAX: usize = 120;
+    const CONTRACT_MAX: usize = 1600;
+    const CHARGE_MAX: usize = 70;
+    let monitoring_roles = standing_monitoring_roles(team);
     let names = team
         .spec
         .roster
@@ -1587,9 +1771,34 @@ fn orchestration_contract(team: &KarsTeam) -> String {
         .map(|r| r.name.as_str())
         .collect::<Vec<_>>()
         .join(", ");
+    let monitoring = if monitoring_roles.is_empty() {
+        String::new()
+    } else {
+        format!(
+            "\nMandatory standing roles every cadence tick: {}. Spawn them before any GitHub, issue, \
+             PR, alert, or repository query. Keep fix roles skipped until a monitoring handback finds \
+             concrete remediation.",
+            monitoring_roles.join(", ")
+        )
+    };
     let mut roster = format!(
-        "\n\nYou are the team PRINCIPAL. Members: {}.\nRole charges:",
-        truncate_middle(&names, 360, " [member names truncated] ")
+        "\n\nYou are the team PRINCIPAL. Members: {}.\
+         {monitoring}\nSelect roles that add real value; record selected and skipped roles.\
+         \nRequired workflow:\
+         \n1. First write `/sandbox/.openclaw/workspace/role-plan.json` with exact roster role + reason \
+         in `selected_roles` and `skipped_roles`. Never spawn a skipped role.\
+         \n2. For every selected role call `kars_spawn` with DNS-safe `name`, exact roster `role`, and \
+         listed runtime/model. Never substitute `agents_list`, `sessions_spawn`, or principal-only work. \
+         Spawn failure makes the run incomplete. Only you may spawn roster members; members must return \
+         expansion needs to you instead of calling `kars_spawn`.\
+         \n3. Wait for mesh-ready; send a stable work-packet ID via `kars_mesh_send`; collect the result \
+         via `kars_mesh_await` and files via `kars_mesh_transfer_file`.\
+         \n4. Final delivery requires a successful structured handback from every selected role. Missing \
+         spawn, assignment, or handback means incomplete.\
+         \n5. Use `egress: inherit` only for approved hosts; otherwise `egress: request`. Never direct a \
+         request-mode child to a parent-approved host.\
+         \nRole charges:",
+        truncate_middle(&names, 300, " [member names truncated] ")
     );
     for r in &team.spec.roster {
         let charge = r
@@ -1611,29 +1820,14 @@ fn orchestration_contract(team: &KarsTeam) -> String {
             model,
             truncate_middle(&charge, CHARGE_MAX, " [charge truncated] ")
         );
-        if roster.chars().count() + line.chars().count() > CONTRACT_MAX - 930 {
+        if roster.chars().count() + line.chars().count() > CONTRACT_MAX - 60 {
             roster.push_str("\n[additional role charges omitted; use the member names above]");
             break;
         }
         roster.push_str(&line);
     }
-    roster.push_str(
-        "\nOrchestration contract: plan the task against the roster and select the roles that add real \
-         value; do not wake every member mechanically. Record selected and skipped roles with reasons. \
-         For each selected member, call `kars_spawn` with the role's listed runtime and model. Then assign \
-         a stable work-packet ID with dependencies \
-         through `kars_mesh_send` (or `kars_mesh_transfer_file`), require acknowledgement, run independent \
-         work in parallel, collect the handbacks, and synthesize the deliverable. Use the full roster only \
-         when the task genuinely spans every role. Do not silently perform a selected specialist's work \
-         yourself unless spawn is unavailable; record failures and continue honestly. Propagate any charter \
-         LOOP and its success criteria to every selected member. Before spawning, write \
-         `/sandbox/.openclaw/workspace/role-plan.json` with `selected_roles` and `skipped_roles` arrays \
-         containing role + reason; never spawn a skipped role. For each selected role whose work packet uses \
-         ANY host in approved egress, call `kars_spawn` with `egress: inherit`; otherwise use `egress: request`. \
-         Never tell a request-mode child to use a parent-approved host. Assign every selected role through \
-         `kars_mesh_send` and collect its mesh handback before final delivery.",
-    );
-    truncate_middle(&roster, CONTRACT_MAX, " [orchestration detail truncated] ")
+    debug_assert!(roster.chars().count() <= CONTRACT_MAX);
+    roster
 }
 
 /// Build the standing-run objective, bounded to the `KarsTask.spec.objective`
@@ -1758,6 +1952,164 @@ fn truncate_middle(value: &str, max_chars: usize, marker: &str) -> String {
     format!("{head}{marker}{tail}")
 }
 
+fn planned_roles(plan: &serde_json::Value, key: &str) -> Result<Vec<String>, String> {
+    let entries = plan
+        .get(key)
+        .and_then(serde_json::Value::as_array)
+        .ok_or_else(|| format!("role-plan.json is missing the {key} array"))?;
+    entries
+        .iter()
+        .map(|entry| {
+            entry
+                .get("role")
+                .or_else(|| entry.get("name"))
+                .and_then(serde_json::Value::as_str)
+                .map(str::trim)
+                .filter(|role| !role.is_empty())
+                .map(str::to_string)
+                .ok_or_else(|| {
+                    format!("role-plan.json contains a {key} entry without a role or name")
+                })
+        })
+        .collect()
+}
+
+/// Validate that the durable role plan matches actual child spawn, mesh
+/// assignment, and successful handback evidence.
+fn validate_collaboration_evidence(
+    role_plan: Option<&str>,
+    collaboration: Option<&str>,
+    roster_roles: &[String],
+    mandatory_roles: &[String],
+) -> Result<(), String> {
+    let role_plan = role_plan.ok_or_else(|| "role-plan.json was not retained".to_string())?;
+    let plan: serde_json::Value = serde_json::from_str(role_plan)
+        .map_err(|error| format!("invalid role-plan.json: {error}"))?;
+    let selected = planned_roles(&plan, "selected_roles")?;
+    let skipped = planned_roles(&plan, "skipped_roles")?;
+    let selected_set: std::collections::HashSet<&str> =
+        selected.iter().map(String::as_str).collect();
+    let skipped_set: std::collections::HashSet<&str> = skipped.iter().map(String::as_str).collect();
+    let roster_set: std::collections::HashSet<&str> =
+        roster_roles.iter().map(String::as_str).collect();
+    if selected_set.len() != selected.len() || skipped_set.len() != skipped.len() {
+        return Err("role plan contains duplicate selected/skipped roles".to_string());
+    }
+
+    for role in &selected {
+        if !roster_set.contains(role.as_str()) {
+            return Err(format!("selected role '{role}' is not in the team roster"));
+        }
+        if skipped_set.contains(role.as_str()) {
+            return Err(format!("role '{role}' is both selected and skipped"));
+        }
+    }
+    for role in mandatory_roles {
+        if !selected_set.contains(role.as_str()) {
+            return Err(format!("mandatory standing role '{role}' was not selected"));
+        }
+    }
+    for role in &roster_set {
+        if !selected_set.contains(role) && !skipped_set.contains(role) {
+            return Err(format!(
+                "roster role '{role}' is missing from the role plan"
+            ));
+        }
+    }
+    if selected.is_empty() {
+        return Err("team run selected no roster role".to_string());
+    }
+
+    let collaboration =
+        collaboration.ok_or_else(|| "collaboration.jsonl was not retained".to_string())?;
+    let mut events = Vec::new();
+    for (index, line) in collaboration.lines().enumerate() {
+        if line.trim().is_empty() {
+            continue;
+        }
+        let event: serde_json::Value = serde_json::from_str(line).map_err(|error| {
+            format!(
+                "invalid collaboration.jsonl event at line {}: {error}",
+                index + 1
+            )
+        })?;
+        events.push(event);
+    }
+    // Restarts can append another execution attempt to the same artifact. Stale
+    // handbacks from an earlier attempt must not satisfy the latest deliverable.
+    let attempt_start = events
+        .iter()
+        .rposition(|event| {
+            event.get("event").and_then(serde_json::Value::as_str) == Some("assignment_received")
+        })
+        .unwrap_or(0);
+
+    let mut spawned: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut assigned = std::collections::HashSet::new();
+    let mut handed_back = std::collections::HashSet::new();
+    for event in &events[attempt_start..] {
+        let event_name = event
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default();
+        let member = event
+            .get("member")
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty());
+        match (event_name, member) {
+            ("member_spawn_requested", Some(member)) => {
+                let role = event
+                    .get("role")
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .unwrap_or(member);
+                spawned.insert(role.to_string(), member.to_string());
+            }
+            ("assignment_sent", Some(member)) => {
+                assigned.insert(member.to_string());
+            }
+            ("handback_received", Some(member))
+                if event.get("outcome").and_then(serde_json::Value::as_str) == Some("success") =>
+            {
+                handed_back.insert(member.to_string());
+            }
+            _ => {}
+        }
+    }
+
+    for (role, member) in &spawned {
+        if !selected_set.contains(role.as_str()) {
+            return Err(format!(
+                "unselected or skipped role '{role}' was spawned as '{member}'"
+            ));
+        }
+    }
+    let mut selected_members = std::collections::HashSet::new();
+    for role in &selected {
+        let member = spawned
+            .get(role)
+            .ok_or_else(|| format!("selected role '{role}' has no kars_spawn evidence"))?;
+        if !selected_members.insert(member.as_str()) {
+            return Err(format!(
+                "multiple selected roles map to the same member '{member}'"
+            ));
+        }
+        if !assigned.contains(member) {
+            return Err(format!(
+                "selected role '{role}' has no mesh assignment evidence"
+            ));
+        }
+        if !handed_back.contains(member) {
+            return Err(format!(
+                "selected role '{role}' has no successful structured handback"
+            ));
+        }
+    }
+    Ok(())
+}
+
 /// Aggregate outcome of a harvest pass — the autonomous-operation health signal.
 #[derive(Default)]
 struct RunStats {
@@ -1800,6 +2152,13 @@ async fn harvest_and_retire_runs(
     };
     let ns = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let cms: Api<k8s_openapi::api::core::v1::ConfigMap> = Api::namespaced(client.clone(), &ns);
+    let roster_roles = team
+        .spec
+        .roster
+        .iter()
+        .map(|role| role.name.clone())
+        .collect::<Vec<_>>();
+    let mandatory_roles = standing_monitoring_roles(team);
 
     for task in &list.items {
         // Only standing-operation runs deposit knowledge (members/principal are
@@ -1850,6 +2209,49 @@ async fn harvest_and_retire_runs(
             .unwrap_or(0);
         stats.tokens_total += tokens.max(0);
         let output = data.get("output").map(String::as_str).unwrap_or_default();
+        let collaboration_error = if roster_roles.is_empty() {
+            None
+        } else {
+            let artifacts_cm = format!("kars-mission-artifacts-{run}");
+            let artifact = match cms.get_opt(&artifacts_cm).await {
+                Ok(artifact) => artifact,
+                Err(error) => {
+                    tracing::debug!(
+                        team = %team_name,
+                        run = %run,
+                        %error,
+                        "deferring run harvest while collaboration artifacts are unreadable"
+                    );
+                    if launched {
+                        stats.active += 1;
+                    }
+                    continue;
+                }
+            };
+            let artifact_data = artifact.and_then(|config_map| config_map.data);
+            validate_collaboration_evidence(
+                artifact_data
+                    .as_ref()
+                    .and_then(|entries| entries.get("role-plan.json"))
+                    .map(String::as_str),
+                artifact_data
+                    .as_ref()
+                    .and_then(|entries| entries.get("collaboration.jsonl"))
+                    .map(String::as_str),
+                &roster_roles,
+                &mandatory_roles,
+            )
+            .err()
+        };
+        if let Some(error) = &collaboration_error {
+            tracing::warn!(
+                team = %team_name,
+                run = %run,
+                %error,
+                "team run rejected — selected roles lack consistent collaboration evidence"
+            );
+        }
+        let collaboration_valid = collaboration_error.is_none();
         // A *substantive* deliverable did real work. Prefer the harness-reported
         // signal (tokens spent or artifacts produced), but some harnesses (e.g.
         // Hermes) don't populate token/artifact counts — so also accept a
@@ -1864,10 +2266,11 @@ async fn harvest_and_retire_runs(
         // the standing team stays quiet instead of emitting a report every
         // interval when nothing happened.
         let no_change = is_no_change(output);
-        let successful = ok && (no_change || (did_work && !output.trim().is_empty()));
-        if no_change {
+        let successful =
+            collaboration_valid && ok && (no_change || (did_work && !output.trim().is_empty()));
+        if no_change && collaboration_valid {
             stats.quiet += 1;
-        } else if did_work && ok && !output.trim().is_empty() {
+        } else if collaboration_valid && did_work && ok && !output.trim().is_empty() {
             stats.succeeded += 1;
             let finished = data.get("finishedAt").cloned();
             if let Some(f) = finished {
@@ -2315,7 +2718,26 @@ pub async fn run(client: Client) -> Result<()> {
             return Ok(());
         }
     }
-    let ctx = Arc::new(Ctx { client });
+    let team_max_concurrent_runs = configured_limit(
+        "KARS_TEAM_MAX_CONCURRENT_RUNS",
+        DEFAULT_TEAM_MAX_CONCURRENT_RUNS,
+        16,
+    );
+    let global_active_runs_limit = configured_limit(
+        "KARS_TEAM_GLOBAL_ACTIVE_RUNS_LIMIT",
+        DEFAULT_GLOBAL_ACTIVE_RUNS_LIMIT,
+        32,
+    );
+    tracing::info!(
+        team_max_concurrent_runs,
+        global_active_runs_limit,
+        "KarsTeam capacity controls configured"
+    );
+    let ctx = Arc::new(Ctx {
+        client,
+        team_max_concurrent_runs,
+        global_active_runs_limit,
+    });
     Controller::new(teams, crate::watch_config::bounded())
         .run(
             |x, ctx| async move {
@@ -2398,6 +2820,24 @@ mod tests {
         assert!(is_no_change(
             "  \n[[NO_MATERIAL_CHANGE]] stars/forks static."
         ));
+        assert!(is_no_change(
+            "**? kars Sandbox - Secure AI Runtime on Azure**\n\n\
+             - **Foundry Project:** `project`\n\
+             - **Model:** `gpt-5.6-sol`\n\
+             - **Sandbox ID:** `run-123`\n\
+             - **Security:** Isolated container.\n\
+             - **Capabilities:** Code execution and sub-agent orchestration.\n\n\
+             [[NO_MATERIAL_CHANGE]] - PR #20 remains green."
+        ));
+        assert!(is_no_change(
+            "**🔒 kars Sandbox — Local Dev (GitHub Copilot)**\n\
+             - **Provider:** `GitHub Copilot`\n\
+             - **Model:** `gpt-5.6-sol`\n\
+             - **Sandbox ID:** `run-456`\n\
+             - **Security:** Isolated container.\n\
+             - **Capabilities:** Code execution and sub-agent orchestration.\n\n\
+             [[NO_MATERIAL_CHANGE]] no repository changes."
+        ));
         assert!(!is_no_change("Here is a full briefing with real findings."));
         // A substantive report that merely MENTIONS the sentinel deep in its
         // body must NOT be misread as a no-op (it would be dropped from memory).
@@ -2405,6 +2845,15 @@ mod tests {
             Next run will diff against this baseline and reply [[NO_MATERIAL_CHANGE]] \
             if stars/forks/issues are static.";
         assert!(!is_no_change(report));
+        assert!(!is_no_change(
+            "**? kars Sandbox - Secure AI Runtime on Azure**\n\
+             - **Model:** `gpt-5.6-sol`\n\
+             - **Sandbox ID:** `run-123`\n\
+             - **Security:** Isolated container.\n\
+             - **Capabilities:** Code execution.\n\n\
+             Substantive finding: CI is red.\n\
+             [[NO_MATERIAL_CHANGE]] mentioned incorrectly."
+        ));
     }
 
     #[test]
@@ -2443,6 +2892,23 @@ mod tests {
         assert!(run_trigger_can_mint(false, true, true));
         assert!(run_trigger_can_mint(true, true, false));
         assert!(run_trigger_can_mint(true, false, false));
+    }
+
+    #[test]
+    fn capacity_limits_are_bounded_and_explain_pressure() {
+        assert_eq!(parse_limit_value(None, 2, 16), 2);
+        assert_eq!(parse_limit_value(Some("0"), 2, 16), 2);
+        assert_eq!(parse_limit_value(Some("99"), 2, 16), 16);
+        assert_eq!(parse_limit_value(Some(" 4 "), 2, 16), 4);
+        assert_eq!(
+            capacity_reason(2, 2, 3, 6).as_deref(),
+            Some("team capacity full: 2/2 active runs")
+        );
+        assert_eq!(
+            capacity_reason(1, 2, 6, 6).as_deref(),
+            Some("cluster team-run capacity full: 6/6 active runs")
+        );
+        assert!(capacity_reason(1, 2, 5, 6).is_none());
     }
 
     #[test]
@@ -2550,9 +3016,270 @@ mod tests {
         assert!(contract.contains("runtime: Hermes"));
         assert!(contract.contains("model: gpt-oss-120b"));
         assert!(contract.contains("egress: inherit"));
-        assert!(contract.contains("ANY host in approved egress"));
+        assert!(contract.contains("approved hosts"));
         assert!(contract.contains("role-plan.json"));
-        assert!(contract.contains("never spawn a skipped role"));
+        assert!(contract.contains("Never spawn a skipped role"));
+        assert!(contract.contains("Never substitute `agents_list`"));
+        assert!(contract.contains("successful structured handback"));
+    }
+
+    #[test]
+    fn orchestration_contract_marks_monitoring_roles_as_standing() {
+        let team = KarsTeam::new(
+            "continuous-repo-maintenance",
+            crate::kars_team::KarsTeamSpec {
+                charter: "Continuously maintain a repository".into(),
+                envelope: team_env(),
+                roster: vec![
+                    TeamRole {
+                        name: "alert-monitor".into(),
+                        system_prompt: Some(
+                            "Continuously watch Dependabot and scanning alerts for the repository."
+                                .into(),
+                        ),
+                        ..Default::default()
+                    },
+                    TeamRole {
+                        name: "pr-watcher".into(),
+                        system_prompt: Some(
+                            "Track CI status of open PRs and keep them green.".into(),
+                        ),
+                        ..Default::default()
+                    },
+                    TeamRole {
+                        name: "fix-generator".into(),
+                        system_prompt: Some(
+                            "Generate safe code changes when there is a fix item.".into(),
+                        ),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let contract = orchestration_contract(&team);
+        assert!(
+            contract
+                .contains("Mandatory standing roles every cadence tick: alert-monitor, pr-watcher"),
+            "{contract}"
+        );
+        assert!(
+            contract.contains("Spawn them before any GitHub, issue, PR, alert"),
+            "{contract}"
+        );
+        assert!(
+            contract.contains("Keep fix roles skipped until a monitoring handback"),
+            "{contract}"
+        );
+    }
+
+    #[test]
+    fn maintenance_objective_preserves_load_bearing_spawn_contract() {
+        let team = KarsTeam::new(
+            "continuous-repo-maintenance",
+            crate::kars_team::KarsTeamSpec {
+                charter: "I want to bring up an extended engineering team to continuously maintain \
+                    pallakatos/kars-pr-e2e-demo, especially Dependabot pull requests, vulnerability \
+                    alerts, code-quality findings, and secret-scanning findings. The team must make \
+                    safe fixes, run tests, keep CI green, and never merge automatically."
+                    .into(),
+                envelope: team_env(),
+                roster: vec![
+                    TeamRole {
+                        name: "alert-monitor".into(),
+                        system_prompt: Some(
+                            "Continuously watch Dependabot and scanning alerts for remediation work."
+                                .into(),
+                        ),
+                        ..Default::default()
+                    },
+                    TeamRole {
+                        name: "fix-generator".into(),
+                        system_prompt: Some(
+                            "Generate safe fixes, run tests, and open or update pull requests.".into(),
+                        ),
+                        ..Default::default()
+                    },
+                    TeamRole {
+                        name: "pr-watcher".into(),
+                        system_prompt: Some(
+                            "Track CI and review feedback and keep pull requests green.".into(),
+                        ),
+                        ..Default::default()
+                    },
+                ],
+                ..Default::default()
+            },
+        );
+        let prior = format!(
+            "{}- [prior-run] {}\n{}",
+            crate::team_commons::PRIOR_KNOWLEDGE_HEADER,
+            "previous maintenance evidence ".repeat(120),
+            crate::team_commons::PRIOR_KNOWLEDGE_FOOTER,
+        );
+        let objective = build_run_objective(
+            &team,
+            &operating_contract(
+                "kars-default",
+                "github",
+                "api.github.com:443, raw.githubusercontent.com:443, pypi.org:443",
+            ),
+            &prior,
+            None,
+        );
+
+        assert!(objective.chars().count() <= 4096);
+        assert!(objective.contains("call `kars_spawn`"), "{objective}");
+        assert!(
+            objective.contains("Never substitute `agents_list`"),
+            "{objective}"
+        );
+        assert!(
+            objective
+                .contains("Mandatory standing roles every cadence tick: alert-monitor, pr-watcher"),
+            "{objective}"
+        );
+        assert!(
+            objective.contains("Final delivery requires a successful structured handback"),
+            "{objective}"
+        );
+        assert!(!objective.contains("[orchestration detail truncated]"));
+    }
+
+    #[test]
+    fn collaboration_evidence_requires_selected_role_handbacks() {
+        let plan = r#"{
+            "selected_roles": [{"role":"alert-monitor"}, {"role":"pr-watcher"}],
+            "skipped_roles": [{"role":"fix-generator"}]
+        }"#;
+        let collaboration = r#"
+{"event":"member_spawn_requested","member":"alert-monitor","role":"alert-monitor"}
+{"event":"assignment_sent","member":"alert-monitor"}
+{"event":"handback_received","member":"alert-monitor","outcome":"success"}
+{"event":"member_spawn_requested","member":"pr-watcher","role":"pr-watcher"}
+{"event":"assignment_sent","member":"pr-watcher"}
+{"event":"handback_received","member":"pr-watcher","outcome":"success"}
+"#;
+        let roster = vec![
+            "alert-monitor".to_string(),
+            "fix-generator".to_string(),
+            "pr-watcher".to_string(),
+        ];
+        let mandatory = vec!["alert-monitor".to_string(), "pr-watcher".to_string()];
+        assert!(
+            validate_collaboration_evidence(Some(plan), Some(collaboration), &roster, &mandatory)
+                .is_ok()
+        );
+
+        let missing_handback = collaboration.replace(
+            "{\"event\":\"handback_received\",\"member\":\"pr-watcher\",\"outcome\":\"success\"}",
+            "",
+        );
+        let error = validate_collaboration_evidence(
+            Some(plan),
+            Some(&missing_handback),
+            &roster,
+            &mandatory,
+        )
+        .unwrap_err();
+        assert!(error.contains("pr-watcher"));
+        assert!(error.contains("handback"));
+    }
+
+    #[test]
+    fn collaboration_evidence_requires_unique_members_per_role() {
+        let plan = r#"{
+            "selected_roles": [{"role":"reviewer"}, {"role":"tester"}],
+            "skipped_roles": []
+        }"#;
+        let collaboration = r#"
+{"event":"member_spawn_requested","member":"worker","role":"reviewer"}
+{"event":"member_spawn_requested","member":"worker","role":"tester"}
+{"event":"assignment_sent","member":"worker"}
+{"event":"handback_received","member":"worker","outcome":"success"}
+"#;
+        let error = validate_collaboration_evidence(
+            Some(plan),
+            Some(collaboration),
+            &["reviewer".into(), "tester".into()],
+            &[],
+        )
+        .unwrap_err();
+        assert!(error.contains("same member"), "{error}");
+    }
+
+    #[test]
+    fn collaboration_evidence_accepts_name_alias_in_role_plan() {
+        let plan = r#"{
+            "selected_roles": [{"name":"alert-monitor"}],
+            "skipped_roles": [{"name":"fix-generator"}]
+        }"#;
+        let collaboration = r#"
+{"event":"assignment_received"}
+{"event":"member_spawn_requested","member":"alert-monitor","role":"alert-monitor"}
+{"event":"assignment_sent","member":"alert-monitor"}
+{"event":"handback_received","member":"alert-monitor","outcome":"success"}
+"#;
+        assert!(
+            validate_collaboration_evidence(
+                Some(plan),
+                Some(collaboration),
+                &["alert-monitor".into(), "fix-generator".into()],
+                &["alert-monitor".into()],
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn collaboration_evidence_rejects_spawned_skipped_roles() {
+        let plan = r#"{
+            "selected_roles": [{"role":"repository-researcher"}],
+            "skipped_roles": [{"role":"policy-comparer"}]
+        }"#;
+        let collaboration = r#"
+{"event":"member_spawn_requested","member":"repo-researcher","role":"repository-researcher"}
+{"event":"assignment_sent","member":"repo-researcher"}
+{"event":"handback_received","member":"repo-researcher","outcome":"success"}
+{"event":"member_spawn_requested","member":"policy-comparer","role":"policy-comparer"}
+"#;
+        let roster = vec![
+            "repository-researcher".to_string(),
+            "policy-comparer".to_string(),
+        ];
+        let error = validate_collaboration_evidence(Some(plan), Some(collaboration), &roster, &[])
+            .unwrap_err();
+        assert!(error.contains("policy-comparer"));
+        assert!(error.contains("spawned"));
+    }
+
+    #[test]
+    fn collaboration_evidence_ignores_prior_attempt_handbacks() {
+        let plan = r#"{
+            "selected_roles": [{"role":"alert-monitor"}, {"role":"pr-watcher"}],
+            "skipped_roles": []
+        }"#;
+        let collaboration = r#"
+{"event":"assignment_received"}
+{"event":"member_spawn_requested","member":"alert-monitor","role":"alert-monitor"}
+{"event":"assignment_sent","member":"alert-monitor"}
+{"event":"handback_received","member":"alert-monitor","outcome":"success"}
+{"event":"member_spawn_requested","member":"pr-watcher","role":"pr-watcher"}
+{"event":"assignment_sent","member":"pr-watcher"}
+{"event":"handback_received","member":"pr-watcher","outcome":"success"}
+{"event":"assignment_received"}
+{"event":"member_spawn_requested","member":"alert-monitor","role":"alert-monitor"}
+{"event":"assignment_sent","member":"alert-monitor"}
+{"event":"assignment_lease_expired","member":"alert-monitor","outcome":"failed"}
+{"event":"member_spawn_requested","member":"pr-watcher","role":"pr-watcher"}
+{"event":"assignment_sent","member":"pr-watcher"}
+{"event":"assignment_lease_expired","member":"pr-watcher","outcome":"failed"}
+"#;
+        let roster = vec!["alert-monitor".to_string(), "pr-watcher".to_string()];
+        let error =
+            validate_collaboration_evidence(Some(plan), Some(collaboration), &roster, &roster)
+                .unwrap_err();
+        assert!(error.contains("handback"));
     }
 
     #[test]
@@ -2626,8 +3353,16 @@ mod tests {
         assert!(objective.contains("reliability-reviewer"));
         assert!(objective.contains("browser-investigator"));
         assert!(objective.contains("kars_spawn"), "{objective}");
+        assert!(
+            objective.contains("Only you may spawn roster members"),
+            "{objective}"
+        );
+        assert!(
+            objective.contains("Never substitute `agents_list`"),
+            "{objective}"
+        );
         assert!(objective.contains("kars_mesh_send"));
-        assert!(objective.contains("select the roles that add real value"));
+        assert!(objective.contains("Select roles that add real value"));
         assert!(objective.contains("selected and skipped roles"));
         assert!(objective.contains("approved egress=example.com:443"));
         assert!(objective.contains("role-plan.json"));

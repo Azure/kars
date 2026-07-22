@@ -65,6 +65,10 @@ interface CrdDescriptor {
 
 const KARS_CRDS: CrdDescriptor[] = [
   { plural: "karssandboxes",    singular: "karssandbox",    kind: "KarsSandbox",     label: "Sandboxes",         phaseField: "phase" },
+  { plural: "karsteams",        singular: "karsteam",        kind: "KarsTeam",        label: "Teams",             phaseField: "phase" },
+  { plural: "karstasks",        singular: "karstask",        kind: "KarsTask",        label: "Tasks",              phaseField: "phase" },
+  { plural: "karsapprovals",    singular: "karsapproval",    kind: "KarsApproval",    label: "Approvals",         phaseField: "phase" },
+  { plural: "karsreceipts",     singular: "karsreceipt",     kind: "KarsReceipt",     label: "Receipts",          phaseField: "phase" },
   { plural: "inferencepolicies", singular: "inferencepolicy", kind: "InferencePolicy", label: "Inference Policies" },
   { plural: "karsmemories",     singular: "karsmemory",     kind: "KarsMemory",      label: "Memories",          phaseField: "phase" },
   { plural: "mcpservers",       singular: "mcpserver",      kind: "McpServer",       label: "MCP Servers",       phaseField: "phase" },
@@ -314,6 +318,43 @@ function phaseChip(phase: string | undefined, reason?: string) {
 function chipForItem(item: KubeObject, phaseField: string) {
   const phase = (getStatus(item) as any)[phaseField] as string | undefined;
   return phaseChip(phase, readyReason(item));
+}
+
+function KarsLifecycleCard({
+  teamCount,
+  taskCount,
+  approvalCount,
+  receiptCount,
+}: {
+  teamCount: number | string;
+  taskCount: number | string;
+  approvalCount: number | string;
+  receiptCount: number | string;
+}) {
+  return (
+    <SectionBox title="Kars lifecycle">
+      <SimpleTable
+        data={[
+          { k: "Intake", v: "Plain-language mission or team request" },
+          { k: "Standing org", v: `KarsTeam (${teamCount})` },
+          { k: "One run / task force", v: `KarsTask (${taskCount})` },
+          { k: "Human gate", v: `KarsApproval (${approvalCount})` },
+          { k: "Signed record", v: `KarsReceipt (${receiptCount})` },
+        ]}
+        columns={[
+          { label: "Stage", getter: (r: any) => r.k },
+          { label: "Maps to", getter: (r: any) => r.v },
+        ]}
+      />
+      <p style={{ padding: "0.5rem", fontSize: "0.85rem", opacity: 0.75 }}>
+        Intake may create a one-off KarsTask mission or a standing KarsTeam. Teams can mint
+        task-force runs; tasks produce activity and artifacts, approvals provide human gates,
+        and receipts give the signed delivery trail. Mission outputs and traces live next to
+        the task as ConfigMaps; this dashboard surfaces the governing CRDs that tie the chain
+        together.
+      </p>
+    </SectionBox>
+  );
 }
 
 function urlParams(re: RegExp): RegExpMatchArray | null {
@@ -650,6 +691,10 @@ function computeMetrics(sandboxes: KubeObject[] | null, secrets: KubeObject[] | 
 
 function Overview() {
   const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
+  const [teams] = (CRD_CLASSES.karsteams as any).useList() as [KubeObject[] | null];
+  const [tasks] = (CRD_CLASSES.karstasks as any).useList() as [KubeObject[] | null];
+  const [approvals] = (CRD_CLASSES.karsapprovals as any).useList() as [KubeObject[] | null];
+  const [receipts] = (CRD_CLASSES.karsreceipts as any).useList() as [KubeObject[] | null];
   const [secrets] = (Secret as any).useList() as [KubeObject[] | null];
   const [inferencePolicies] = (CRD_CLASSES.inferencepolicies as any).useList() as [KubeObject[] | null];
   const [toolPolicies] = (CRD_CLASSES.toolpolicies as any).useList() as [KubeObject[] | null];
@@ -765,6 +810,10 @@ function Overview() {
           <Stat label="Egress: Learn / Strict" value={`${metrics.egressLearn} / ${metrics.egressStrict}`} />
         </div>
         <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(160px, 1fr))", gap: "0.5rem", padding: "0 0 1rem 0" }}>
+          <Stat label="Teams" value={teams?.length ?? "…"} />
+          <Stat label="Tasks" value={tasks?.length ?? "…"} />
+          <Stat label="Approvals" value={approvals?.length ?? "…"} />
+          <Stat label="Receipts" value={receipts?.length ?? "…"} />
           <Stat label="Inference Policies" value={inferencePolicies?.length ?? "…"} />
           <Stat label="Tool Policies" value={toolPolicies?.length ?? "…"} />
           <Stat label="Memories" value={memories?.length ?? "…"} />
@@ -772,6 +821,13 @@ function Overview() {
           <Stat label="A2A Agents" value={a2aAgents?.length ?? "…"} />
         </div>
       </SectionBox>
+
+      <KarsLifecycleCard
+        teamCount={teams?.length ?? "…"}
+        taskCount={tasks?.length ?? "…"}
+        approvalCount={approvals?.length ?? "…"}
+        receiptCount={receipts?.length ?? "…"}
+      />
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: "1rem" }}>
         <SectionBox title="Sandboxes by Phase">

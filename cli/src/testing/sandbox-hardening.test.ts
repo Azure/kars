@@ -132,6 +132,18 @@ describe("sandbox entrypoint.sh hardening — static invariants (s7)", () => {
       /chown -R sandbox:sandbox \/sandbox[^\n]*\|\|\s*true/,
     );
   });
+
+  it("keeps platform MCP tools separate from external server catalogs", () => {
+    const platformEntry = entrypoint
+      .split("\n")
+      .find((line) => line.includes('_MCP_ENTRIES=') && line.includes("kars-router"));
+    const externalEntry = entrypoint
+      .split("\n")
+      .find((line) => line.includes('_MCP_ENTRIES=') && line.includes("_mcp_name"));
+    expect(platformEntry).toContain("http://127.0.0.1:8443/platform/mcp");
+    expect(externalEntry).toContain("http://127.0.0.1:8443/mcp");
+    expect(externalEntry).not.toContain("/platform/mcp");
+  });
 });
 
 describe("sandbox Dockerfile — image-level hardening (s7)", () => {

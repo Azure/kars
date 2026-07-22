@@ -767,12 +767,15 @@ ANTHEOF
   # against `<name>` is governed, signed, allow-listed and audited by the
   # router before ever leaving the pod.
   # Always register the router itself as an MCP source ("kars-router")
-  # so the agent gets the platform tools the inference-router exposes
-  # at /mcp (memory_*, foundry_*, etc) without needing a McpServer CR
+  # so the agent gets only the platform tools exposed at /platform/mcp
+  # (memory_*, foundry_*, etc) without needing a McpServer CR. Do not
+  # point this entry at /mcp: that endpoint aggregates external McpServer
+  # tools, duplicating catalogs such as GitHub and crowding out required
+  # kars_spawn / kars_mesh_* tools in the native agent tool list.
   # for the loopback router. This is independent of KARS_MCP_SERVERS,
   # which is the list of EXTERNAL servers the operator wired via CRDs.
   _MCP_BLOCK=""
-  _MCP_ENTRIES="\"kars-router\": { \"transport\": \"streamable-http\", \"url\": \"http://127.0.0.1:8443/mcp\", \"headers\": { \"x-kars-sandbox\": \"${HOSTNAME:-dev-agent}\" } }"
+  _MCP_ENTRIES="\"kars-router\": { \"transport\": \"streamable-http\", \"url\": \"http://127.0.0.1:8443/platform/mcp\", \"headers\": { \"x-kars-sandbox\": \"${HOSTNAME:-dev-agent}\" } }"
   _MCP_SEP=", "
   if [ -n "${KARS_MCP_SERVERS:-}" ]; then
     OLDIFS="$IFS"; IFS=','

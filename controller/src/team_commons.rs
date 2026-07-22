@@ -413,6 +413,26 @@ pub async fn entry_count(client: &Client, commons: &str) -> i64 {
     }
 }
 
+fn latest_substantive_entry_at(entries: Vec<CommonsEntry>) -> Option<String> {
+    entries
+        .into_iter()
+        .filter(|entry| !entry.id.starts_with("clarify-"))
+        .map(|entry| entry.created_at)
+        .max()
+}
+
+/// Newest substantive commons-entry timestamp, used as the durable source of
+/// truth for a team's last successful delivery.
+pub async fn latest_entry_at(client: &Client, commons: &str) -> Result<Option<String>> {
+    let ns = namespace();
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &ns);
+    let name = commons_cm_name(commons);
+    let Some(cm) = cms.get_opt(&name).await.context("get commons cm")? else {
+        return Ok(None);
+    };
+    Ok(latest_substantive_entry_at(read_index(&cm)))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +449,50 @@ mod tests {
     #[test]
     fn commons_cm_name_is_stable() {
         assert_eq!(commons_cm_name("repo-watch"), "kars-commons-repo-watch");
+    }
+
+    #[test]
+    fn newest_commons_entry_timestamp_is_selected() {
+        let cm = ConfigMap {
+            data: Some(BTreeMap::from([(
+                "index.json".into(),
+                serde_json::to_string(&vec![
+                    CommonsEntry {
+                        id: "old".into(),
+                        title: "old".into(),
+                        author: "old".into(),
+                        source_task: "old".into(),
+                        created_at: "2026-07-21T11:40:00+00:00".into(),
+                        digest: "sha256:old".into(),
+                        size_bytes: 1,
+                    },
+                    CommonsEntry {
+                        id: "new".into(),
+                        title: "new".into(),
+                        author: "new".into(),
+                        source_task: "new".into(),
+                        created_at: "2026-07-21T11:42:00+00:00".into(),
+                        digest: "sha256:new".into(),
+                        size_bytes: 1,
+                    },
+                    CommonsEntry {
+                        id: "clarify-human".into(),
+                        title: "clarification".into(),
+                        author: "human".into(),
+                        source_task: "approval".into(),
+                        created_at: "2026-07-21T11:45:00+00:00".into(),
+                        digest: "sha256:clarification".into(),
+                        size_bytes: 1,
+                    },
+                ])
+                .unwrap(),
+            )])),
+            ..Default::default()
+        };
+        assert_eq!(
+            latest_substantive_entry_at(read_index(&cm)).as_deref(),
+            Some("2026-07-21T11:42:00+00:00")
+        );
     }
 
     #[test]

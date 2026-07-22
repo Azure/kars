@@ -450,15 +450,14 @@ pub async fn create_sandbox(
     apply_spawn_identity(&mut crd, &child_resource_name, &req.agent_id);
     crd["metadata"]["annotations"]["kars.azure.com/spawn-parent-uid"] =
         serde_json::Value::String(parent_uid.clone());
-    crd["metadata"]["annotations"]["kars.azure.com/egress-inheritance"] =
-        serde_json::Value::String(
-            if req.inherit_parent_egress {
-                "inherit"
-            } else {
-                "request"
-            }
-            .into(),
-        );
+    crd["metadata"]["annotations"]["kars.azure.com/egress-inheritance"] = serde_json::Value::String(
+        if req.inherit_parent_egress {
+            "inherit"
+        } else {
+            "request"
+        }
+        .into(),
+    );
 
     // main: additive overlay — copy inherited MCP refs onto the child's
     // governance (the builder always emits `spec.governance`).
