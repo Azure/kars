@@ -603,6 +603,8 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     );
     let health = if paused {
         "Hibernating"
+    } else if active_runs > 0 {
+        "Working"
     } else if capacity_gate.is_some() {
         "CapacityLimited"
     } else if generated == 0 {
@@ -657,6 +659,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     let detail = if paused {
         "Team hibernating — members governed-but-idle; charter loop paused.".to_string()
+    } else if active_runs > 0 {
+        format!(
+            "Team working — {active_runs} governed run(s) active. Additional work queues behind the per-team limit of {}.",
+            ctx.team_max_concurrent_runs
+        )
     } else if let Some(reason) = &capacity_gate {
         format!(
             "Standing operation capacity-limited — {reason}. Limits: per-team={}, global={}. Will resume automatically as runs retire.",
@@ -692,12 +699,15 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     // Machine-readable Ready condition for kubectl wait / alerting (the health
     // string is human-only). Ready iff active and not capability-gated/exhausted.
-    let ready = !paused && capacity_gate.is_none() && cap_gate.is_none() && !budget_exhausted;
+    let capacity_blocks_idle_team = active_runs == 0 && capacity_gate.is_some();
+    let ready = !paused && !capacity_blocks_idle_team && cap_gate.is_none() && !budget_exhausted;
     let condition = Condition {
         type_: PHASE_READY.into(),
         status: if ready { "True" } else { "False" }.into(),
         reason: if budget_exhausted {
             "BudgetExhausted".into()
+        } else if active_runs > 0 {
+            "Working".into()
         } else if capacity_gate.is_some() {
             "CapacityPressure".into()
         } else if cap_gate.is_some() {
