@@ -73,6 +73,7 @@ async fn is_verified_team_roster_spawn(
     namespace: &str,
     parent: &DynamicObject,
     role: Option<&str>,
+    logical_agent_id: &str,
 ) -> Option<bool> {
     if parent
         .metadata
@@ -141,11 +142,19 @@ async fn is_verified_team_roster_spawn(
     else {
         return Some(false);
     };
-    Some(
-        role.map(str::trim)
-            .filter(|role| !role.is_empty())
-            .is_some_and(|role| roster.iter().any(|member| member == role)),
-    )
+    Some(is_declared_roster_member(&roster, role, logical_agent_id))
+}
+
+fn is_declared_roster_member(
+    roster: &[String],
+    role: Option<&str>,
+    logical_agent_id: &str,
+) -> bool {
+    [role.unwrap_or_default(), logical_agent_id]
+        .into_iter()
+        .map(str::trim)
+        .filter(|candidate| !candidate.is_empty())
+        .any(|candidate| roster.iter().any(|member| member == candidate))
 }
 
 const LOGICAL_AGENT_ID_ANNOTATION: &str = "kars.azure.com/logical-agent-id";
@@ -514,6 +523,7 @@ pub async fn create_sandbox(
                 &namespace,
                 &parent_obj,
                 req.role.as_deref(),
+                &req.agent_id,
             )
             .await;
             let labels = parent_obj.metadata.labels.clone().unwrap_or_default();
@@ -1547,6 +1557,21 @@ mod tests {
             crd["metadata"]["annotations"]["kars.azure.com/model"],
             "gpt-oss-120b"
         );
+    }
+
+    #[test]
+    fn roster_verification_accepts_exact_logical_id_when_role_is_descriptive() {
+        let roster = vec!["alert-monitor".to_string(), "pr-watcher".to_string()];
+        assert!(is_declared_roster_member(
+            &roster,
+            Some("alert-monitor -- monitor Dependabot alerts"),
+            "alert-monitor",
+        ));
+        assert!(!is_declared_roster_member(
+            &roster,
+            Some("security-reviewer"),
+            "ad-hoc-reviewer",
+        ));
     }
 
     #[test]
