@@ -34,4 +34,41 @@ spec:
   agtProfile:
     inline: |
 {{ .Files.Get "files/kars-default-agt-profile.yaml" | indent 6 }}
+---
+{{- $spawnAllow := `  - name: spawn-allow
+    type: capability
+    allowed_actions:
+      - "spawn:*"
+    priority: 80` -}}
+{{- $spawnDeny := `  - name: spawn-deny
+    type: capability
+    denied_actions:
+      - "spawn:*"
+      - "tool:kars_spawn"
+    priority: 100` -}}
+{{- $teamMemberProfile := .Files.Get "files/kars-default-agt-profile.yaml" | replace "agent: kars-default" "agent: kars-team-member" | replace $spawnAllow $spawnDeny -}}
+# Verified standing-team roster members use the normal tool surface but cannot
+# create another delegation layer. Expansion requests must return to the
+# principal, which keeps role selection, egress inheritance, and attribution
+# anchored to the declared KarsTeam roster.
+apiVersion: kars.azure.com/v1alpha1
+kind: ToolPolicy
+metadata:
+  name: kars-team-member
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: system
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    kars.azure.com/profile: team-member
+    helm.sh/hook: post-install,post-upgrade
+    helm.sh/hook-weight: "-5"
+spec:
+  appliesTo:
+    sandboxMatchLabels:
+      kars.azure.com/team-role: member
+  agtProfile:
+    inline: |
+{{ $teamMemberProfile | indent 6 }}
 {{- end }}

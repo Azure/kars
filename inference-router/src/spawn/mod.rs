@@ -49,6 +49,25 @@ fn kars_api_resource(kind: &str, plural: &str) -> ApiResource {
     }
 }
 
+async fn require_team_member_policy(client: &Client, namespace: &str) -> Result<String, String> {
+    let name =
+        std::env::var("KARS_TEAM_MEMBER_TOOL_POLICY").unwrap_or_else(|_| "kars-team-member".into());
+    let policies: Api<DynamicObject> = Api::namespaced_with(
+        client.clone(),
+        namespace,
+        &kars_api_resource("ToolPolicy", "toolpolicies"),
+    );
+    policies
+        .get(&name)
+        .await
+        .map_err(|error| {
+            format!(
+                "verified team roster spawn requires ToolPolicy '{name}', but it is unavailable: {error}"
+            )
+        })?;
+    Ok(name)
+}
+
 async fn is_verified_team_roster_spawn(
     client: &Client,
     namespace: &str,
@@ -566,6 +585,11 @@ pub async fn create_sandbox(
             serde_json::Value::String("member".into()),
         );
     }
+    let team_member_policy = if verified_team_roster_spawn == Some(true) {
+        Some(require_team_member_policy(&client, &namespace).await?)
+    } else {
+        None
+    };
     let child_resource_name = scoped_child_name(parent_name, &req.agent_id);
     apply_spawn_identity(&mut crd, &child_resource_name, &req.agent_id);
     crd["metadata"]["annotations"]["kars.azure.com/spawn-parent-uid"] =
@@ -610,6 +634,9 @@ pub async fn create_sandbox(
         parent_tool_policy.as_deref(),
         parent_inference.as_deref(),
     );
+    if let Some(policy) = team_member_policy {
+        crd["spec"]["governance"]["toolPolicyRef"]["name"] = serde_json::Value::String(policy);
+    }
     apply_parent_network_policy(
         &mut crd,
         &parent_endpoints,

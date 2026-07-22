@@ -175,7 +175,7 @@ rules:
   # The spawn router verifies team ownership and effective roster membership
   # before automatically inheriting a standing team's approved egress.
   - apiGroups: ["kars.azure.com"]
-    resources: ["karstasks", "karsteams"]
+    resources: ["karstasks", "karsteams", "toolpolicies"]
     verbs: ["get"]
 ---
 # Egress approver ClusterRole — authority lane for Slice 5e-thin
