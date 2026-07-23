@@ -1476,8 +1476,9 @@ fn team_execution_contract(team: &KarsTeam, manifest: &str) -> String {
     format!(
         "# Kars Team Execution Contract\nversion: {TEAM_EXECUTION_CONTRACT_VERSION}\n\
          This contract is authoritative for this run and is persisted by the runtime as execution-contract.json. \
-         For milestone work, persist task-checkpoint.json using schema kars.checkpoint/v1 with milestone_id, \
-         status, summary, acceptance_criteria, artifacts, and next_steps whenever progress starts, completes, or blocks.\
+         For milestone work, BEFORE any spawn or task tool call, call the `checkpoint` tool with status=in_progress. \
+         Call it again with status=completed or blocked before final delivery. The checkpoint uses schema \
+         kars.checkpoint/v1 with milestone_id, status, summary, acceptance_criteria, artifacts, and next_steps.\
          {}{}",
         orchestration_contract(team),
         manifest

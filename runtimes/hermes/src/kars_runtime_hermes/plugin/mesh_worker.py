@@ -746,6 +746,7 @@ async def _execute_task_request(
                 "artifacts": artifacts,
                 "telemetry": telemetry,
                 "trace": trace,
+                "checkpoint": final_checkpoint,
                 "timestamp": _utc_now_iso(),
             }
         ).encode("utf-8")

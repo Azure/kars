@@ -413,7 +413,7 @@ import { delegateToNativeAgent, extractNativeDeliverable } from "./core/agt-task
 import { fetchTelemetryCursor, fetchTaskTrace } from "./core/router-telemetry.js";
 import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MESH_CHUNK_THRESHOLD, MESH_CHUNK_SIZE, MESH_MAX_CHUNKS, MESH_TRANSFER_TTL, type PendingMeshTransfer } from "./core/mesh-transport.js";
 import { TASK_TOOLS } from "./core/agt-task-tools.js";
-import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
+import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, readDurableTaskCheckpoint, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
 import {
   createAGTPolicyEvaluator,
@@ -1288,6 +1288,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             ok: true,
             artifacts: artifactManifest,
             trace,
+            checkpoint: readDurableTaskCheckpoint(),
             telemetry: {
               prompt_tokens: promptTokens,
               completion_tokens: completionTokens,

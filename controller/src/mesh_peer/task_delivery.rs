@@ -678,18 +678,20 @@ async fn deliver_for_task(
     // Stop tracking liveness for this delivery regardless of outcome.
     state.pending_progress.lock().await.remove(&agent_did);
 
-    let (content, artifact_count, trace, telemetry, ok) = match outcome {
+    let (content, artifact_count, trace, telemetry, checkpoint, ok) = match outcome {
         DeliveryOutcome::Reply(reply) => (
             reply.content,
             reply.artifact_count,
             reply.trace,
             reply.telemetry,
+            reply.checkpoint,
             reply.ok,
         ),
         DeliveryOutcome::ChannelClosed => (
             "mesh task delivery channel closed before a reply arrived".to_string(),
             0,
             Vec::new(),
+            None,
             None,
             false,
         ),
@@ -703,10 +705,20 @@ async fn deliver_for_task(
                 0,
                 Vec::new(),
                 None,
+                None,
                 false,
             )
         }
     };
+    if let Some(checkpoint) = checkpoint
+        && let Err(error) = write_mission_progress(state, &pending_progress, &checkpoint).await
+    {
+        tracing::warn!(
+            task = %name,
+            %error,
+            "terminal task_response checkpoint could not be persisted"
+        );
+    }
 
     // The artifact `file_transfer` frames are independent relay messages; a few
     // may still be in flight when the task_response lands. Wait briefly for the
@@ -871,6 +883,7 @@ pub(super) async fn resolve_pending(
     artifact_count: usize,
     trace: Vec<serde_json::Value>,
     telemetry: Option<RunTelemetry>,
+    checkpoint: Option<serde_json::Value>,
     ok: bool,
 ) {
     let waiter = state.pending_tasks.lock().await.remove(from_amid);
@@ -882,6 +895,7 @@ pub(super) async fn resolve_pending(
                     artifact_count,
                     trace,
                     telemetry,
+                    checkpoint,
                     ok,
                 })
                 .is_err()
@@ -920,6 +934,16 @@ pub(super) async fn resolve_pending(
                             task_name: task_name.clone(),
                             task_id: task_id.clone(),
                         };
+                        if let Some(checkpoint) = checkpoint.as_ref()
+                            && let Err(error) =
+                                write_mission_progress(state, &pending, checkpoint).await
+                        {
+                            tracing::warn!(
+                                task = %task_name,
+                                %error,
+                                "late task_response checkpoint could not be persisted"
+                            );
+                        }
                         if let Err(error) = persist_assignment_transition(
                             state,
                             &pending,

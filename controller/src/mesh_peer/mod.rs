@@ -615,6 +615,10 @@ enum FederationMessage {
         /// Aggregated real token + round/tool counts for the run.
         #[serde(default)]
         telemetry: Option<RunTelemetry>,
+        /// Latest durable milestone checkpoint. Runtimes include this on the
+        /// terminal response so persistence does not depend on a heartbeat race.
+        #[serde(default)]
+        checkpoint: Option<serde_json::Value>,
         /// Whether the agent considers the run a success. Agents that hit an
         /// execution error (native-agent crash, empty output, runtime failure)
         /// set this `false` so the controller records `status=error` instead of
@@ -805,6 +809,7 @@ pub(super) struct TaskReply {
     pub artifact_count: usize,
     pub trace: Vec<serde_json::Value>,
     pub telemetry: Option<RunTelemetry>,
+    pub checkpoint: Option<serde_json::Value>,
     /// Agent-reported success. `false` when the agent hit an execution error,
     /// so the controller persists `status=error` rather than a fake success.
     pub ok: bool,
@@ -1637,6 +1642,7 @@ async fn handle_peer_message(
             artifacts,
             trace,
             telemetry,
+            checkpoint,
             ok,
             ..
         } => {
@@ -1656,6 +1662,7 @@ async fn handle_peer_message(
                 artifacts.len(),
                 trace,
                 telemetry,
+                checkpoint,
                 ok,
             )
             .await;
@@ -2014,12 +2021,21 @@ mod tests {
 
     #[test]
     fn task_response_accepts_runtime_correlation_field() {
-        let wire =
-            r#"{"type":"task_response","in_reply_to_id":"run-1","content":"done","ok":true}"#;
+        let wire = r#"{"type":"task_response","in_reply_to_id":"run-1","content":"done","ok":true,"checkpoint":{"schema":"kars.checkpoint/v1","milestone_id":"architecture","status":"completed","summary":"done"}}"#;
         let decoded: FederationMessage = serde_json::from_str(wire).unwrap();
         match decoded {
-            FederationMessage::TaskResponse { in_reply_to, .. } => {
+            FederationMessage::TaskResponse {
+                in_reply_to,
+                checkpoint,
+                ..
+            } => {
                 assert_eq!(in_reply_to.as_deref(), Some("run-1"));
+                assert_eq!(
+                    checkpoint
+                        .as_ref()
+                        .and_then(|value| value.get("milestone_id")),
+                    Some(&serde_json::json!("architecture"))
+                );
             }
             _ => panic!("Wrong variant — task_response must parse"),
         }
