@@ -37,12 +37,14 @@ use crate::egress_approval_reconciler::parse_iso8601_duration_secs;
 use crate::kars_approval::{ApprovalOutcome, KarsApproval, KarsApprovalStatus, evaluate};
 use crate::kars_task::KarsTask;
 use crate::status::conditions::{self, reason as cond_reason, status as cond_status};
+use crate::status::phase::PHASE_FAILED;
 
 const FIELD_MANAGER: &str = "kars-controller/karsapproval";
 const FINALIZER: &str = "kars.azure.com/karsapproval-cleanup";
 
 /// The `Decided` condition type — `True` when terminal, `False` while pending.
 const TYPE_DECIDED: &str = "Decided";
+const ASSIGNMENT_COMPLETED: &str = "Completed";
 
 /// Default TTL when `spec.ttl` is omitted.
 const DEFAULT_TTL: &str = "PT1H";
@@ -197,13 +199,19 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
 }
 
 fn task_is_completed(task: &KarsTask) -> bool {
-    if task
-        .status
-        .as_ref()
-        .and_then(|status| status.delivered_at.as_ref())
-        .is_some()
-    {
-        return true;
+    if let Some(status) = task.status.as_ref() {
+        if status.delivered_at.is_some() {
+            return true;
+        }
+        if status.assignment.as_ref().is_some_and(|assignment| {
+            assignment.completed_at.is_some()
+                && matches!(
+                    assignment.state.as_str(),
+                    ASSIGNMENT_COMPLETED | PHASE_FAILED
+                )
+        }) {
+            return true;
+        }
     }
 
     let annotations = task.annotations();
@@ -217,11 +225,14 @@ fn task_is_completed(task: &KarsTask) -> bool {
 }
 
 fn survives_task_completion(metadata: &kube::core::ObjectMeta) -> bool {
-    metadata.owner_references.as_ref().is_some_and(|references| {
-        references
-            .iter()
-            .any(|reference| reference.kind == "KarsTeam" && reference.controller == Some(true))
-    })
+    metadata
+        .owner_references
+        .as_ref()
+        .is_some_and(|references| {
+            references
+                .iter()
+                .any(|reference| reference.kind == "KarsTeam" && reference.controller == Some(true))
+        })
 }
 
 /// Resolve the effective TTL in seconds, clamped to [`MAX_TTL_SECS`], falling
@@ -420,6 +431,16 @@ mod tests {
             .into(),
         );
         assert!(task_is_completed(&acknowledged));
+
+        let mut failed = KarsTask::new("failed", Default::default());
+        failed.status = Some(Default::default());
+        failed.status.as_mut().unwrap().assignment = Some(crate::kars_task::TaskAssignmentStatus {
+            task_id: "failed".into(),
+            state: PHASE_FAILED.into(),
+            completed_at: Some(Utc::now().to_rfc3339()),
+            ..Default::default()
+        });
+        assert!(task_is_completed(&failed));
 
         let pending = KarsTask::new("pending", Default::default());
         assert!(!task_is_completed(&pending));
