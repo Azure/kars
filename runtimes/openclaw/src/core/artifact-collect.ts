@@ -19,14 +19,16 @@ const WORKSPACE_ROOT = "/sandbox/.openclaw/workspace";
 /// payloads with `btoa(JSON.stringify(...))`. `btoa` throws "Invalid character"
 /// on any code point > 0xFF, so LLM output containing em-dashes, smart quotes,
 /// arrows, … breaks the send. We transliterate the common typographic
-/// offenders to ASCII and replace any remaining >0xFF code point with '?'. This
+/// offenders to ASCII and drop remaining decorative >0xFF code points. This
 /// only touches the short chat summary on the mesh wire — artifact file bytes
 /// travel base64-encoded and keep their full Unicode intact.
 export function latin1Safe(input: string): string {
   const map: Record<string, string> = {
-    "\u2014": "-", "\u2013": "-", "\u2012": "-", "\u2015": "-",
+    "\u2010": "-", "\u2011": "-", "\u2012": "-", "\u2013": "-",
+    "\u2014": "-", "\u2015": "-", "\u2212": "-",
     "\u2018": "'", "\u2019": "'", "\u201A": "'", "\u201B": "'",
     "\u201C": "\"", "\u201D": "\"", "\u201E": "\"", "\u2033": "\"",
+    "\u02BC": "'", "\u2032": "'",
     "\u2026": "...", "\u2022": "*", "\u00B7": "*", "\u2192": "->",
     "\u2190": "<-", "\u2194": "<->", "\u00D7": "x", "\u2260": "!=",
     "\u2264": "<=", "\u2265": ">=", "\u00A0": " ", "\u200B": "",
@@ -37,7 +39,9 @@ export function latin1Safe(input: string): string {
     if (ch in map) {
       out += map[ch];
     } else if (ch.codePointAt(0)! > 0xff) {
-      out += "?";
+      // Decorative emoji/symbols are safer omitted than persisted as confusing
+      // question marks. Semantic punctuation is transliterated above.
+      continue;
     } else {
       out += ch;
     }
