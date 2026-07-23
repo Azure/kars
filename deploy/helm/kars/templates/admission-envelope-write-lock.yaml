@@ -60,10 +60,14 @@ spec:
         variables.newEnv.?delegationDepth.orValue(0) > variables.oldEnv.?delegationDepth.orValue(0)
     - name: tokenBudgetRaised
       expression: >-
-        variables.newEnv.?budget.?tokens.orValue(0) > variables.oldEnv.?budget.?tokens.orValue(0)
+        variables.oldEnv.?budget.?tokens.orValue(0) > 0 &&
+        (variables.newEnv.?budget.?tokens.orValue(0) == 0 ||
+         variables.newEnv.?budget.?tokens.orValue(0) > variables.oldEnv.?budget.?tokens.orValue(0))
     - name: usdBudgetRaised
       expression: >-
-        variables.newEnv.?budget.?usdMicros.orValue(0) > variables.oldEnv.?budget.?usdMicros.orValue(0)
+        variables.oldEnv.?budget.?usdMicros.orValue(0) > 0 &&
+        (variables.newEnv.?budget.?usdMicros.orValue(0) == 0 ||
+         variables.newEnv.?budget.?usdMicros.orValue(0) > variables.oldEnv.?budget.?usdMicros.orValue(0))
     - name: toolPolicyChanged
       expression: >-
         has(oldObject.spec.envelope.toolPolicyRef) &&
