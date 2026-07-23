@@ -1494,6 +1494,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               mesh_name: agentName,
               message_id: messageId,
               outcome: replyOk ? "success" : "failed",
+              reply_preview: evidencePreview(replyContent),
               telemetry: replyTelemetry ?? null,
               artifacts: replyArtifacts,
               trace_event_count: replyTrace.length,
@@ -1550,6 +1551,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               }
             })();
           } else if (replyContent !== null) {
+            const failurePreview = evidencePreview(replyContent);
             terminalMeshAssignments.set(originalAgentName.toLowerCase(), {
               outcome: "failed",
               reason: "The worker returned a correlated task_response with ok=false.",
@@ -1572,7 +1574,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               child_role: originalAgentName,
               child_agent: agentName,
               outcome: "failed",
-              reason: result.error,
+              reason: failurePreview || result.error,
             });
           } else if (waitSliceExpired) {
             pendingMeshAssignments.set(messageId, {

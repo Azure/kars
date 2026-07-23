@@ -713,6 +713,10 @@ PROMPTEOF
   # multi-turn conversations). Image generation + embeddings always go via
   # `azure-openai` shape — Copilot has no image/embedding endpoints, but the
   # router transparently rejects/forwards those.
+  _MODEL_REQUEST_TIMEOUT_SECONDS="${KARS_MODEL_REQUEST_TIMEOUT_SECONDS:-600}"
+  case "$_MODEL_REQUEST_TIMEOUT_SECONDS" in
+    ''|*[!0-9]*) _MODEL_REQUEST_TIMEOUT_SECONDS=600 ;;
+  esac
   _PRIMARY_MODEL_REF="azure-openai/${MODEL}"
   _ANTHROPIC_PROVIDER_BLOCK=""
   case "$MODEL" in
@@ -739,6 +743,7 @@ PROMPTEOF
       "anthropic": {
         "baseUrl": "http://127.0.0.1:8443",
         "apiKey": "routed-via-inference-router",
+        "timeoutSeconds": ${_MODEL_REQUEST_TIMEOUT_SECONDS},
         "headers": { "x-kars-sandbox": "${HOSTNAME:-dev-agent}" },
         "models": [{"id":"${MODEL}","name":"${MODEL} (${_PROVIDER_LABEL})","api":"anthropic-messages","baseUrl":"http://127.0.0.1:8443","reasoning":true}]
       }
@@ -813,6 +818,7 @@ MCPEOF
       "azure-openai": {
         "baseUrl": "http://127.0.0.1:8443/v1",
         "apiKey": "routed-via-inference-router",
+        "timeoutSeconds": ${_MODEL_REQUEST_TIMEOUT_SECONDS},
         "api": "openai-completions",
         "authHeader": false,
         "headers": { "x-kars-sandbox": "${HOSTNAME:-dev-agent}" },
