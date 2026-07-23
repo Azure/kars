@@ -650,6 +650,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         const meshName = typeof result?.mesh_name === "string" && result.mesh_name
           ? result.mesh_name
           : agentName;
+        terminalMeshAssignments.delete(agentName.toLowerCase());
         spawnedMeshNames.set(agentName, meshName);
         log.info(`Waiting for sub-agent '${agentName}' to be Running + registered...`);
 
@@ -999,7 +1000,26 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             };
           }
         }
-        terminalMeshAssignments.delete(assignmentKey);
+        const terminal = terminalMeshAssignments.get(assignmentKey);
+        if (terminal) {
+          return {
+            content: [{
+              type: "text",
+              text: safeJson({
+                status: terminal.outcome === "success"
+                  ? "already_completed"
+                  : "previous_assignment_failed",
+                to_agent: originalAgentName,
+                outcome: terminal.outcome,
+                reason: terminal.reason,
+                at: terminal.at,
+                note: terminal.outcome === "success"
+                  ? "This role already returned a successful correlated handback. Reuse the retained result; do not resend the assignment."
+                  : "The previous worker generation failed. Destroy and respawn the role before assigning replacement work.",
+              }),
+            }],
+          };
+        }
         const assignmentDigest = evidenceDigest(msgContent);
 
       // OFFLOAD HARDENING: native agents in offload sandboxes may call this
