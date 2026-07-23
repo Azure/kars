@@ -16,6 +16,7 @@
 //   wrapped LLM sees pending peer messages in its next round.
 
 import { routerUrl } from "./router-client.js";
+import { readFileSync, statSync } from "node:fs";
 
 interface MeshIdentity {
   amid: string;
@@ -39,6 +40,33 @@ type MeshLogger = { info: (m: string) => void; warn: (m: string) => void };
 export type TaskProgressHeartbeat = (() => void) & {
   report: (stage: string, details?: Record<string, unknown>) => void;
 };
+
+export function readDurableTaskCheckpoint(
+  workspaceRoot =
+    process.env.KARS_WORKSPACE_ROOT || "/sandbox/.openclaw/workspace",
+): Record<string, unknown> | null {
+  const path = `${workspaceRoot}/task-checkpoint.json`;
+  try {
+    const stat = statSync(path);
+    if (!stat.isFile() || stat.size <= 0 || stat.size > 256 * 1024) return null;
+    const value = JSON.parse(readFileSync(path, "utf8")) as Record<string, unknown>;
+    if (
+      value.schema !== "kars.checkpoint/v1"
+      || typeof value.milestone_id !== "string"
+      || !value.milestone_id.trim()
+      || !["pending", "in_progress", "completed", "blocked"].includes(
+        String(value.status),
+      )
+      || typeof value.summary !== "string"
+      || !value.summary.trim()
+    ) {
+      return null;
+    }
+    return value;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Post a completed mesh session record to the AGT registry so reputation /
@@ -159,6 +187,7 @@ export function startTaskProgressHeartbeat(
   const startedAt = Date.now();
   let tick = 0;
   let cancelled = false;
+  let lastCheckpointJson = "";
 
   const fire = (
     stage: string,
@@ -166,6 +195,15 @@ export function startTaskProgressHeartbeat(
   ): void => {
     if (cancelled || !meshClient) return;
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
+    const checkpoint = "checkpoint" in details
+      ? details.checkpoint
+      : readDurableTaskCheckpoint();
+    const checkpointJson = checkpoint == null ? "" : JSON.stringify(checkpoint);
+    const checkpointDetails =
+      checkpointJson && checkpointJson !== lastCheckpointJson
+        ? { checkpoint }
+        : {};
+    if (checkpointJson) lastCheckpointJson = checkpointJson;
     try {
       meshClient.send(originatorAmid, {
         type: "task_progress",
@@ -177,6 +215,7 @@ export function startTaskProgressHeartbeat(
         elapsed_seconds: elapsedSec,
         from_agent: fromAgent,
         timestamp: new Date().toISOString(),
+        ...checkpointDetails,
         ...details,
         // eslint-disable-next-line @typescript-eslint/no-explicit-any
       }).catch((e: any) => {

@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { startTaskProgressHeartbeat } from "./agt-heartbeat.js";
 
 describe("startTaskProgressHeartbeat", () => {
@@ -17,6 +20,7 @@ describe("startTaskProgressHeartbeat", () => {
 
   afterEach(() => {
     vi.useRealTimers();
+    delete process.env.KARS_WORKSPACE_ROOT;
   });
 
   it("fires an initial 'started' ping synchronously", () => {
@@ -92,6 +96,35 @@ describe("startTaskProgressHeartbeat", () => {
       child_role: "researcher",
     });
     heartbeat();
+  });
+
+  it("forwards a durable checkpoint file on the next heartbeat", () => {
+    const root = mkdtempSync(join(tmpdir(), "kars-heartbeat-"));
+    process.env.KARS_WORKSPACE_ROOT = root;
+    writeFileSync(
+      join(root, "task-checkpoint.json"),
+      JSON.stringify({
+        schema: "kars.checkpoint/v1",
+        milestone_id: "architecture",
+        status: "completed",
+        summary: "Architecture accepted.",
+      }),
+    );
+    const send = vi.fn().mockResolvedValue(undefined);
+    const cancel = startTaskProgressHeartbeat(
+      "did:mesh:parent",
+      { send },
+      "sub-agent-x",
+      "assignment-1",
+      log,
+    );
+
+    expect(send.mock.calls[0][1].checkpoint).toMatchObject({
+      milestone_id: "architecture",
+      status: "completed",
+    });
+    cancel();
+    rmSync(root, { recursive: true, force: true });
   });
 
   it("stops firing after cancel()", () => {
