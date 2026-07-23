@@ -112,6 +112,27 @@ RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
 ARG HERMES_VERSION=0.16.0
 RUN pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"
 
+# Hermes 0.16 unconditionally fetches OpenRouter's public model catalogue even
+# when Kars pins a different provider and explicit context length. Add a
+# fail-fast, version-pinned opt-out so governed sandboxes do not emit irrelevant
+# egress requests. A Hermes version bump must revalidate this exact source seam.
+RUN python3 - <<'PY'
+from pathlib import Path
+import agent.model_metadata as model_metadata
+
+path = Path(model_metadata.__file__)
+source = path.read_text()
+needle = '''def fetch_model_metadata(force_refresh: bool = False) -> Dict[str, Dict[str, Any]]:
+    """Fetch model metadata from OpenRouter (cached for 1 hour)."""
+'''
+replacement = needle + '''    if os.getenv("HERMES_DISABLE_OPENROUTER_METADATA", "").lower() in {"1", "true", "yes"}:
+        return {}
+'''
+if source.count(needle) != 1:
+    raise SystemExit(f"unexpected Hermes model_metadata.py shape at {path}")
+path.write_text(source.replace(needle, replacement))
+PY
+
 # ---- Channel adapter libraries -----------------------------------------
 # Hermes auto-detects channels (Telegram / Slack / Discord) from env
 # vars (TELEGRAM_BOT_TOKEN, SLACK_BOT_TOKEN, DISCORD_BOT_TOKEN) and
