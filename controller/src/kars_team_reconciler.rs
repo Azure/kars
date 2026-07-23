@@ -1107,6 +1107,18 @@ async fn process_milestone_review(
             .and_then(|decision| decision.reason.as_deref());
         match phase {
             Some("Approved") => {
+                if let Err(error) =
+                    record_approved_milestone(client, ns, team, run, milestone).await
+                {
+                    tracing::warn!(
+                        team = %team.name_any(),
+                        milestone = %milestone.id,
+                        run,
+                        %error,
+                        "approved milestone could not be promoted into team commons"
+                    );
+                    return;
+                }
                 let _ = crate::team_tasks::resolve_review_for_run(
                     client,
                     &team.name_any(),
@@ -1179,6 +1191,36 @@ async fn process_milestone_review(
             "failed to create milestone checkpoint approval"
         );
     }
+}
+
+async fn record_approved_milestone(
+    client: &Client,
+    ns: &str,
+    team: &KarsTeam,
+    run: &str,
+    milestone: &crate::team_tasks::TeamTask,
+) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use k8s_openapi::api::core::v1::ConfigMap;
+
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), ns);
+    let output_cm = cms
+        .get(&format!("kars-mission-output-{run}"))
+        .await
+        .context("read approved milestone output")?;
+    let data = output_cm.data.unwrap_or_default();
+    if data.get("status").map(String::as_str) != Some("ok") {
+        anyhow::bail!("approved milestone output is not successful");
+    }
+    let output = data.get("output").map(String::as_str).unwrap_or_default();
+    if output.trim().is_empty() || is_failure_shaped_output(output) {
+        anyhow::bail!("approved milestone output is empty or failure-shaped");
+    }
+    let title = crate::team_commons::derive_title(output, &milestone.title);
+    crate::team_commons::record_entry(client, &team.commons_name(), run, &title, run, run, output)
+        .await
+        .context("record approved milestone in team commons")?;
+    Ok(())
 }
 
 /// A short, stable id for a clarification question so the same unanswered
@@ -2487,6 +2529,9 @@ async fn harvest_and_retire_runs(
                 .await;
         }
         let collaboration_valid = collaboration_error.is_none();
+        let review_required = crate::team_tasks::task_for_run(client, &team_name, &run)
+            .await
+            .is_some_and(|task| task.review_required);
         if collaboration_valid
             && data.contains_key("collaborationError")
             && !data.contains_key("failureShape")
@@ -2559,11 +2604,17 @@ async fn harvest_and_retire_runs(
                     "refusing to harvest run output into commons — possible memory-poisoning payload"
                 );
                 stats.poisoned += 1;
-            } else {
+            } else if !review_required {
                 let _ = crate::team_commons::record_entry(
                     client, commons, &run, &title, &run, &run, output,
                 )
                 .await;
+            } else {
+                tracing::info!(
+                    team = %team.name_any(),
+                    run = %run,
+                    "deferring team commons promotion until milestone review is approved"
+                );
             }
         } else {
             stats.barren += 1;

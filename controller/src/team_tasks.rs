@@ -305,6 +305,13 @@ pub async fn awaiting_review_for_run(client: &Client, team: &str, run: &str) -> 
         .find(|task| task.status == "awaiting_review" && task.run.as_deref() == Some(run))
 }
 
+pub async fn task_for_run(client: &Client, team: &str, run: &str) -> Option<TeamTask> {
+    read_tasks(client, team)
+        .await
+        .into_iter()
+        .find(|task| task.run.as_deref() == Some(run))
+}
+
 pub async fn resolve_review_for_run(
     client: &Client,
     team: &str,
