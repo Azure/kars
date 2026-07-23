@@ -53,7 +53,56 @@ use crate::mcp::initialize::{InitializeConfig, OsRngSessionMinter, SessionMinter
 use crate::mcp::oauth::OAuthVerifierConfig;
 use crate::mcp::oauth_layer::OAuthLayer;
 use crate::mcp::pipeline::{ProcessOutcome, process_request_async};
-use crate::mcp::tools::{AsyncToolDispatcher, EchoDispatcher, SyncToAsync};
+use crate::mcp::tools::{
+    AsyncToolDispatcher, DispatchError, EchoDispatcher, SyncToAsync, ToolCallOutput, ToolCatalog,
+};
+
+const MCP_SERVER_SCOPE_HEADER: &str = "x-kars-mcp-server";
+
+struct ScopedToolDispatcher {
+    inner: Arc<dyn AsyncToolDispatcher>,
+    catalog: ToolCatalog,
+    prefix: String,
+}
+
+impl ScopedToolDispatcher {
+    fn new(inner: Arc<dyn AsyncToolDispatcher>, server_name: &str) -> Self {
+        let prefix = crate::mcp::forwarder::server_name_to_prefix(server_name);
+        let qualified_prefix = format!("{prefix}.");
+        let tools = inner
+            .catalog()
+            .tools()
+            .iter()
+            .filter(|tool| tool.name.starts_with(&qualified_prefix))
+            .cloned()
+            .collect();
+        let catalog =
+            ToolCatalog::new(tools).expect("a filtered subset of a valid catalog remains valid");
+        Self {
+            inner,
+            catalog,
+            prefix: qualified_prefix,
+        }
+    }
+}
+
+#[async_trait::async_trait]
+impl AsyncToolDispatcher for ScopedToolDispatcher {
+    fn catalog(&self) -> &ToolCatalog {
+        &self.catalog
+    }
+
+    async fn invoke(
+        &self,
+        name: &str,
+        arguments: &serde_json::Value,
+    ) -> Result<ToolCallOutput, DispatchError> {
+        if !name.starts_with(&self.prefix) || self.catalog.find(name).is_none() {
+            return Err(DispatchError::UnknownTool(name.to_string()));
+        }
+        self.inner.invoke(name, arguments).await
+    }
+}
 
 /// HTTP header name carrying the MCP session id on a successful
 /// `initialize` response and on subsequent client requests.
@@ -207,13 +256,23 @@ async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: 
 
     let started = std::time::Instant::now();
     let (method, tool) = peek_request_method_and_tool(&body);
+    let scoped_tools = headers
+        .get(MCP_SERVER_SCOPE_HEADER)
+        .and_then(|value| value.to_str().ok())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(|server| ScopedToolDispatcher::new(Arc::clone(&state.tools), server));
+    let tools = scoped_tools
+        .as_ref()
+        .map(|dispatcher| dispatcher as &dyn AsyncToolDispatcher)
+        .unwrap_or(state.tools.as_ref());
 
     let outcome = process_request_async(
         &body,
         accept.as_deref(),
         state.config.as_ref(),
         state.minter.as_ref(),
-        Some(state.tools.as_ref()),
+        Some(tools),
     )
     .await;
 
@@ -589,6 +648,88 @@ mod tests {
         let v: Value = serde_json::from_str(&text).unwrap();
         let tools = v["result"]["tools"].as_array().unwrap();
         assert!(!tools.is_empty(), "EchoDispatcher exposes >=1 tool");
+    }
+
+    fn multi_server_state() -> McpRouteState {
+        let catalog = ToolCatalog::new(vec![
+            crate::mcp::tools::ToolDefinition {
+                name: "github.get_me".into(),
+                description: "GitHub identity".into(),
+                input_schema: json!({"type": "object"}),
+            },
+            crate::mcp::tools::ToolDefinition {
+                name: "playwright.browser_click".into(),
+                description: "Browser click".into(),
+                input_schema: json!({"type": "object"}),
+            },
+        ])
+        .unwrap();
+        McpRouteState {
+            config: Arc::new(InitializeConfig::default()),
+            minter: Arc::new(FixedMinter("test-session-002")),
+            tools: Arc::new(SyncToAsync::new(EchoDispatcher::with_catalog(catalog))),
+            task_telemetry: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn mcp_server_header_scopes_advertised_catalog() {
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 8,
+            "method": "tools/list",
+            "params": {}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header(MCP_SERVER_SCOPE_HEADER, "github")
+            .body(Body::from(req_body.to_string()))
+            .unwrap();
+        let (_, _, text) = body_text(
+            mcp_route()
+                .with_state(multi_server_state())
+                .oneshot(req)
+                .await
+                .unwrap(),
+        )
+        .await;
+        let value: Value = serde_json::from_str(&text).unwrap();
+        let names = value["result"]["tools"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter_map(|tool| tool["name"].as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(names, vec!["github.get_me"]);
+    }
+
+    #[tokio::test]
+    async fn unknown_mcp_server_header_fails_closed() {
+        let req_body = json!({
+            "jsonrpc": "2.0",
+            "id": 9,
+            "method": "tools/list",
+            "params": {}
+        });
+        let req = Request::builder()
+            .method("POST")
+            .uri("/mcp")
+            .header("accept", "application/json, text/event-stream")
+            .header(MCP_SERVER_SCOPE_HEADER, "missing")
+            .body(Body::from(req_body.to_string()))
+            .unwrap();
+        let (_, _, text) = body_text(
+            mcp_route()
+                .with_state(multi_server_state())
+                .oneshot(req)
+                .await
+                .unwrap(),
+        )
+        .await;
+        let value: Value = serde_json::from_str(&text).unwrap();
+        assert!(value["result"]["tools"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]

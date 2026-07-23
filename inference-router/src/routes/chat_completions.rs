@@ -292,10 +292,11 @@ pub(super) async fn chat_completions(
     // Defence-in-depth tool-schema filter: even when the upstream
     // runtime (e.g. a raw OpenAI SDK client outside OpenClaw) sends
     // `tools[]` schemas the AGT plugin would normally never have
-    // surfaced, the router strips entries whose
-    // `tool.invoke:<name>` action is denied by the active AGT
-    // profile. This is opt-in — AGT defaults to Allow for unknown
-    // actions, so operators must add explicit `deny tool.invoke:*`
+    // surfaced, the router strips entries whose `tool:<name>` action
+    // is denied by the active AGT profile. This intentionally matches
+    // the documented policy contract and the OpenClaw in-process gate.
+    // This is opt-in — AGT defaults to Allow for unknown actions, so
+    // operators must add explicit `deny tool:*`
     // rules to take effect. Pure passthrough cost is one parse +
     // one walk when `tools[]` is absent or empty.
     if let Some((new_body, dropped)) = filter_disallowed_tools(&state, sandbox_name, &body).await {
@@ -1371,9 +1372,13 @@ pub(super) fn rewrite_body_dropping_tools(
 
 /// Async wrapper that ties [`extract_advertised_tool_names`] to the
 /// four-seam `PolicyDecisionProvider` and emits the rewritten body
-/// when any tool was denied. Action format is
-/// `tool.invoke:<name>` — same as the OpenClaw plugin uses
-/// in-process, so a single AGT rule covers both layers.
+/// when any tool was denied. Action format is `tool:<name>` — the
+/// name-level form documented by the policy profile and used for
+/// advertisement decisions before invocation arguments exist.
+fn advertised_tool_action(name: &str) -> String {
+    format!("tool:{name}")
+}
+
 async fn filter_disallowed_tools(
     state: &AppState,
     sandbox: &str,
@@ -1386,7 +1391,7 @@ async fn filter_disallowed_tools(
     let mut allowed: std::collections::HashSet<String> =
         std::collections::HashSet::with_capacity(names.len());
     for name in &names {
-        let action = format!("tool.invoke:{name}");
+        let action = advertised_tool_action(name);
         if matches!(
             super::inference_policy::check(state, sandbox, &action).await,
             super::inference_policy::InferenceDecision::Allow
@@ -1569,6 +1574,11 @@ mod tests {
         // shape. The filter must still find the name.
         let body = br#"{"tools":[{"type":"function","name":"foo"}]}"#;
         assert_eq!(extract_advertised_tool_names(body), vec!["foo".to_string()]);
+    }
+
+    #[test]
+    fn advertised_tool_action_matches_policy_contract() {
+        assert_eq!(advertised_tool_action("kars_spawn"), "tool:kars_spawn");
     }
 
     #[test]
