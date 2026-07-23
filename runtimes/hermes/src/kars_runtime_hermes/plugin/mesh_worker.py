@@ -257,15 +257,19 @@ def _prepare_task_contract(content: str) -> str:
         return content
     if not isinstance(value, dict) or value.get("schema") != "kars.task/v1":
         return content
-    objective = value.get("objective") if isinstance(value.get("objective"), str) else ""
-    instructions = (
-        value.get("instructions") if isinstance(value.get("instructions"), str) else ""
-    )
-    checkpoint_json = (
-        value.get("checkpoint_json")
-        if isinstance(value.get("checkpoint_json"), str)
-        else ""
-    )
+    def decode(encoded_key: str, fallback_key: str) -> str:
+        encoded = value.get(encoded_key)
+        if value.get("encoding") == "base64-utf8" and isinstance(encoded, str):
+            try:
+                return base64.b64decode(encoded).decode("utf-8")
+            except (ValueError, UnicodeDecodeError):
+                return ""
+        fallback = value.get(fallback_key)
+        return fallback if isinstance(fallback, str) else ""
+
+    objective = decode("objective_b64", "objective")
+    instructions = decode("instructions_b64", "instructions")
+    checkpoint_json = decode("checkpoint_json_b64", "checkpoint_json")
     digest = value.get("digest") if isinstance(value.get("digest"), str) else ""
 
     def frame(field: str) -> str:

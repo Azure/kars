@@ -60,6 +60,10 @@ export interface VersionedTaskContract {
   objective: string;
   instructions: string;
   checkpoint_json?: string;
+  encoding?: "base64-utf8";
+  objective_b64?: string;
+  instructions_b64?: string;
+  checkpoint_json_b64?: string;
 }
 
 function frameContractField(value: string): string {
@@ -90,10 +94,15 @@ export function normalizeTaskContract(taskContent: unknown): {
   }
 
   const value = candidate as Partial<VersionedTaskContract>;
-  const objective = typeof value.objective === "string" ? value.objective : "";
-  const instructions = typeof value.instructions === "string" ? value.instructions : "";
-  const checkpointJson =
-    typeof value.checkpoint_json === "string" ? value.checkpoint_json : "";
+  const decode = (encoded: unknown, fallback: unknown): string => {
+    if (value.encoding === "base64-utf8" && typeof encoded === "string") {
+      return Buffer.from(encoded, "base64").toString("utf8");
+    }
+    return typeof fallback === "string" ? fallback : "";
+  };
+  const objective = decode(value.objective_b64, value.objective);
+  const instructions = decode(value.instructions_b64, value.instructions);
+  const checkpointJson = decode(value.checkpoint_json_b64, value.checkpoint_json);
   const digest = typeof value.digest === "string" ? value.digest : "";
   const canonical = [
     "kars.task/v1",

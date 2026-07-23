@@ -30,6 +30,7 @@ use super::{
     TaskReply, enqueue_outbound, is_lease_holder,
 };
 use anyhow::{Context, Result};
+use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64_STANDARD};
 use chrono::Utc;
 use kube::api::{Api, DynamicObject, ListParams, Patch, PatchParams};
 use serde_json::json;
@@ -93,6 +94,10 @@ fn task_contract_payload(
     let payload = json!({
         "schema": TASK_CONTRACT_SCHEMA,
         "digest": digest,
+        "encoding": "base64-utf8",
+        "objective_b64": BASE64_STANDARD.encode(objective.as_bytes()),
+        "instructions_b64": BASE64_STANDARD.encode(instructions.as_bytes()),
+        "checkpoint_json_b64": BASE64_STANDARD.encode(checkpoint_json.as_bytes()),
         "objective": objective,
         "instructions": instructions,
         "checkpoint_json": checkpoint_json,
@@ -1827,9 +1832,11 @@ async fn handle_transient_miss(
 #[cfg(test)]
 mod tests {
     use super::{
-        assignment_lease_active, child_assignment_state, is_substantive_deliverable,
-        reply_matches_current_worker, select_newest_agent_did, task_contract_payload,
+        BASE64_STANDARD, assignment_lease_active, child_assignment_state,
+        is_substantive_deliverable, reply_matches_current_worker, select_newest_agent_did,
+        task_contract_payload,
     };
+    use base64::Engine as _;
     use kube::api::DynamicObject;
     use serde_json::json;
 
@@ -1856,6 +1863,13 @@ mod tests {
 
         assert_eq!(parsed["schema"], "kars.task/v1");
         assert_eq!(parsed["digest"], digest);
+        assert_eq!(parsed["encoding"], "base64-utf8");
+        assert_eq!(
+            BASE64_STANDARD
+                .decode(parsed["objective_b64"].as_str().unwrap())
+                .unwrap(),
+            "Inspect the repository.".as_bytes()
+        );
         assert_eq!(parsed["objective"], "Inspect the repository.");
         assert_eq!(
             parsed["instructions"],

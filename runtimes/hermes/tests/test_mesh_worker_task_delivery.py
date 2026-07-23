@@ -19,6 +19,7 @@ agent deliver + delegate end-to-end like OpenClaw:
 from __future__ import annotations
 
 import asyncio
+import base64
 import hashlib
 import json
 from typing import Any
@@ -35,8 +36,8 @@ def test_versioned_task_contract_is_verified_and_persisted(
     tmp_path: Any,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    objective = "Build the acceptance artifact."
-    instructions = "Checkpoint each milestone."
+    objective = "Build the acceptance artifact · résumé."
+    instructions = "Checkpoint each milestone — preserve evidence."
     checkpoint_json = json.dumps({"milestone_id": "build", "status": "in_progress"})
 
     def frame(value: str) -> str:
@@ -55,6 +56,10 @@ def test_versioned_task_contract_is_verified_and_persisted(
             {
                 "schema": "kars.task/v1",
                 "digest": digest,
+                "encoding": "base64-utf8",
+                "objective_b64": base64.b64encode(objective.encode()).decode(),
+                "instructions_b64": base64.b64encode(instructions.encode()).decode(),
+                "checkpoint_json_b64": base64.b64encode(checkpoint_json.encode()).decode(),
                 "objective": objective,
                 "instructions": instructions,
                 "checkpoint_json": checkpoint_json,

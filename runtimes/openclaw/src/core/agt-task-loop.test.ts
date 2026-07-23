@@ -197,6 +197,30 @@ describe("task-loop context bounds", () => {
     }))).toThrow(/digest mismatch/);
   });
 
+  it("verifies Unicode contracts through base64 UTF-8 transport fields", () => {
+    const objective = "Prior evidence · résumé — approved";
+    const instructions = "Preserve the team’s handback.";
+    const checkpoint_json = "";
+    const frame = (value: string) => `${Buffer.byteLength(value, "utf8")}:${value}`;
+    const digest = createHash("sha256")
+      .update(["kars.task/v1", objective, instructions, checkpoint_json].map(frame).join(""))
+      .digest("hex");
+    const normalized = normalizeTaskContract(JSON.stringify({
+      schema: "kars.task/v1",
+      digest,
+      encoding: "base64-utf8",
+      objective_b64: Buffer.from(objective, "utf8").toString("base64"),
+      instructions_b64: Buffer.from(instructions, "utf8").toString("base64"),
+      checkpoint_json_b64: "",
+      objective: "corrupted transport fallback",
+      instructions: "",
+      checkpoint_json: "",
+    }));
+
+    expect(normalized.contract?.objective).toBe(objective);
+    expect(normalized.contract?.instructions).toBe(instructions);
+  });
+
   it("keeps the default execution contract compact and source-specific", () => {
     const contract = compactSubAgentExecutionContract();
 
