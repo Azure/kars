@@ -5,9 +5,12 @@ import { resolve } from "node:path";
 
 import {
   agtEvaluateFailOpenGrace,
+  compactSubAgentExecutionContract,
+  compactTaskLoopMessages,
   createAGTPolicyEvaluator,
   processTaskWithTools,
   type AGTEvaluateTransport,
+  type TaskLoopMessage,
 } from "./agt-task-loop.js";
 
 const log = { info: () => {}, warn: () => {} };
@@ -127,6 +130,59 @@ describe("createAGTPolicyEvaluator", () => {
     expect(agtEvaluateFailOpenGrace("99")).toBe(10);
     expect(agtEvaluateFailOpenGrace("invalid")).toBe(0);
     expect(agtEvaluateFailOpenGrace("2.5")).toBe(0);
+  });
+});
+
+describe("task-loop context bounds", () => {
+  it("keeps the default execution contract compact and source-specific", () => {
+    const contract = compactSubAgentExecutionContract();
+
+    expect(contract.length).toBeLessThan(3_000);
+    expect(contract).toContain("GitHub MCP");
+    expect(contract).toContain("work-packet ID");
+    expect(contract).toContain("Do not redo a completed work packet");
+  });
+
+  it("compacts old round history while preserving the task and recent tool pair", () => {
+    const pinnedSystem = `system contract:${"s".repeat(6_000)}`;
+    const pinnedTask = `original task:${"u".repeat(6_000)}`;
+    const messages: TaskLoopMessage[] = [
+      { role: "system", content: pinnedSystem },
+      { role: "user", content: pinnedTask },
+    ];
+    for (let index = 0; index < 12; index += 1) {
+      messages.push({
+        role: "assistant",
+        tool_calls: [{
+          id: `call-${index}`,
+          function: {
+            name: "http_fetch",
+            arguments: JSON.stringify({
+              url: `https://example.com/${index}`,
+              payload: "y".repeat(3_000),
+            }),
+          },
+        }],
+      });
+      messages.push({
+        role: "tool",
+        tool_call_id: `call-${index}`,
+        content: `result-${index}:${"x".repeat(10_000)}`,
+      });
+    }
+
+    const compacted = compactTaskLoopMessages(messages, 40_000, 4);
+
+    expect(compacted.length).toBeLessThan(messages.length);
+    expect(compacted[0].content).toBe(pinnedSystem);
+    expect(compacted[1].content).toBe(pinnedTask);
+    expect(compacted[2].content).toContain("earlier round messages were compacted");
+    expect(compacted.at(-1)?.tool_call_id).toBe("call-11");
+    const finalAssistant = compacted.slice().reverse().find((message) => message.role === "assistant");
+    expect(JSON.parse(finalAssistant?.tool_calls?.[0]?.function?.arguments)).toEqual({
+      _compacted: true,
+    });
+    expect(JSON.stringify(compacted).length).toBeLessThan(40_000);
   });
 });
 

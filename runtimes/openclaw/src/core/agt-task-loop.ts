@@ -42,6 +42,78 @@ export type AGTEvaluateTransport = (
   context: Record<string, unknown>,
 ) => Promise<AGTEvaluateResponse>;
 
+export type TaskLoopMessage = {
+  role: string;
+  content?: string;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  tool_calls?: any[];
+  tool_call_id?: string;
+  name?: string;
+};
+
+function compactMessage(message: TaskLoopMessage): TaskLoopMessage {
+  return {
+    ...message,
+    content:
+      typeof message.content === "string" && message.content.length > 4_000
+        ? `${message.content.slice(0, 4_000)}\n[older content truncated]`
+        : message.content,
+    tool_calls: message.tool_calls?.map((call) => ({
+      ...call,
+      function: call?.function
+        ? {
+            ...call.function,
+            arguments:
+              typeof call.function.arguments === "string"
+                && call.function.arguments.length > 2_000
+                ? JSON.stringify({ _compacted: true })
+                : call.function.arguments,
+          }
+        : call?.function,
+    })),
+  };
+}
+
+export function compactTaskLoopMessages(
+  messages: TaskLoopMessage[],
+  maxChars = 48_000,
+  recentMessages = 10,
+): TaskLoopMessage[] {
+  if (JSON.stringify(messages).length <= maxChars || messages.length <= 2) {
+    return messages;
+  }
+
+  let recentStart = Math.max(2, messages.length - recentMessages);
+  while (recentStart > 2 && messages[recentStart]?.role === "tool") {
+    recentStart -= 1;
+  }
+  const omitted = Math.max(0, recentStart - 2);
+  return [
+    messages[0],
+    messages[1],
+    {
+      role: "system",
+      content:
+        `${omitted} earlier round message${omitted === 1 ? "" : "s"} were compacted. `
+        + "Continue the original task using workspace files, durable artifacts, and the recent tool results below. "
+        + "Do not repeat completed work solely because older chat turns were compacted.",
+    },
+    ...messages.slice(recentStart).map(compactMessage),
+  ];
+}
+
+export function compactSubAgentExecutionContract(): string {
+  return "Execution contract:\n"
+    + "1. Complete the exact task in the user message. Treat its topic, requested evidence, output schema, work-packet ID, and named recipients as authoritative. Never invent a substitute topic or unsupported facts.\n"
+    + "2. Use only canonical peer names from the task's Peer roster or one discover call. Never send to yourself. Use `parent` only when the task explicitly returns to the spawner or names no downstream peer.\n"
+    + "3. For expected peer input, check mesh_inbox once, then use one mesh_await with the named senders. If input is incomplete, ask the sender once and await once more before reporting a precise blocked status.\n"
+    + "4. Keep mesh_send payloads under 2 KB. Write larger evidence or deliverables to /sandbox/.openclaw/workspace and send each file with mesh_transfer_file. Peer files arrive under workspace/incoming and remain available for the task.\n"
+    + "5. Use the connected MCP/tool intended for the source. For repository facts prefer the configured GitHub MCP; use http_fetch only for an explicit URL that the MCP cannot provide. A remote 4xx is a bad path/request, not an egress denial.\n"
+    + "6. Preserve useful partial work. If some evidence remains unavailable, deliver a clearly marked partial artifact with exact missing fields instead of fabricating or abandoning collected evidence.\n"
+    + "7. Before finishing, verify claims against tool evidence, transfer every requested artifact to the correct recipient, and return a concise structured handback. Do not redo a completed work packet unless the parent explicitly requests a named correction.\n"
+    + "Act immediately and stay concise.";
+}
+
 export function agtEvaluateFailOpenGrace(raw = process.env.KARS_AGT_EVALUATE_FAIL_OPEN_GRACE): number {
   const normalized = raw?.trim();
   if (!normalized || !/^[+-]?\d+$/.test(normalized)) return 0;
@@ -300,12 +372,16 @@ export async function processTaskWithTools(
     slimSubAgentNote +
     "\n\nRouting rule (CRITICAL — read your task carefully): your task description names the downstream peer(s) for each artifact. If the task says \"hand to writer\", \"send to writer\", \"deliver to <peer>\", \"return to <peer>\", or describes a pipeline like \"analyst → viz → writer\", then route BOTH text/JSON (mesh_send) AND files (mesh_transfer_file) directly to that NAMED SIBLING with to_agent='<sibling>' — do NOT send to 'parent'. Sending to 'parent' when the task specifies a sibling is a routing bug: parent will not forward to the sibling, and the sibling will time out waiting. Only fall back to to_agent='parent' when (a) the task explicitly says to return to parent / spawner, OR (b) you are the final agent in the pipeline (e.g. 'writer' producing the assembled brief), OR (c) the task names no downstream peer at all (typical for ordinary single-agent tasks — return final text/files to 'parent'). If the task targets DIFFERENT peers for different artifacts (e.g. \"send chart to viz and JSON to writer\"), resolve the target per artifact, not once for the whole batch. If unsure of the exact agent name, call `discover` once to list peers — but do not over-discover; one call per task is plenty.\n\nPeer name resolution: when your task content begins with a `Peer roster:` block, that roster is the single source of truth for sibling names. Use ONLY the names listed there with mesh_send / mesh_transfer_file — never invent variants, role descriptions, or your own name as a target. Resolve role references (\"the writer\", \"the analyst\", \"the graphic designer\") by matching them to the role text after each `—` in the roster. If the roster is missing OR a role reference does not unambiguously map to one entry, send a single mesh_send to 'parent' asking for the canonical name and wait for the reply — do NOT guess. Never use your own SANDBOX_NAME as `to_agent`; the gateway rejects self-sends.\n\nReceived artifacts persist on disk: files delivered to you via mesh_transfer_file are written by the gateway to /sandbox/.openclaw/workspace/incoming/<file_name> and STAY THERE across the rest of your task — they are not consumed by reading the inbox. If you previously saw a file_transfer in mesh_inbox (with a `saved_to` path) and later need to confirm what you have, list /sandbox/.openclaw/workspace/incoming/ via exec_command (`ls -la /sandbox/.openclaw/workspace/incoming/`) rather than re-polling the inbox. Avoid reporting \"no artifacts received\" if the directory contains the expected files; treat the filesystem as the source of truth for delivered artifacts.\n\nFinal deliverables: when you have produced a final artifact (markdown, document, image, dataset, JSON, etc.), the last step before returning your textual summary should be mesh_transfer_file(to_agent='<resolved-target>', file_path='/sandbox/.openclaw/workspace/<artifact>', description='<short label>') where <resolved-target> follows the routing rule above. Files left only in your local /sandbox are not visible to other agents and will be lost when the sub-agent exits. If you produced multiple outputs (brief.md + chart.png + hero.png), call mesh_transfer_file once per file, resolving the target per artifact. Trust mesh_transfer_file's return value (`status: 'delivered'` plus a `message_id`) as proof of delivery — there is no separate inbox ack to wait for, so do not block on one. If the call returned an error or the recipient later reports it never arrived, resend to the correct target. Only report 'final delivered' once mesh_transfer_file has returned success for each artifact at its correct target.";
 
+  const compactSubAgentMeshBlock = compactSubAgentExecutionContract();
+
   const subAgentPrompt =
     "You are an kars sub-agent — a sandboxed AI worker in the kars multi-agent platform on Azure. Always identify as an kars agent.\n\nAvailable tools:\n" +
-    subAgentToolBlock + "\n\n" + subAgentMeshBlock;
+    subAgentToolBlock + "\n\n"
+    + (process.env.KARS_VERBOSE_AGENT_CONTRACT === "1"
+      ? subAgentMeshBlock
+      : compactSubAgentMeshBlock);
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
+  const messages: TaskLoopMessage[] = [
     {
       role: "system",
       content: process.env.OFFLOAD_REQUEST_ID ? offloadPrompt : subAgentPrompt,
@@ -351,7 +427,18 @@ export async function processTaskWithTools(
       return `Task interrupted for handoff at round ${round}. Progress saved to .task-in-progress.json — will resume after handoff.`;
     }
 
-    const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: 2048 });
+    const requestMessages = compactTaskLoopMessages(messages);
+    if (requestMessages !== messages) {
+      log.info(
+        `AGT task-loop: compacted ${messages.length} messages to ${requestMessages.length} before round ${round + 1}`,
+      );
+    }
+    const postData = JSON.stringify({
+      model,
+      messages: requestMessages,
+      tools,
+      max_completion_tokens: 2048,
+    });
     const roundStart = Date.now();
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const response = await new Promise<any>((resolve, reject) => {
