@@ -26,7 +26,16 @@ pub struct TeamTask {
     pub title: String,
     #[serde(default)]
     pub description: String,
-    /// `pending` | `active` | `done`.
+    /// Stable task IDs that must be `done` before this milestone is eligible.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub depends_on: Vec<String>,
+    /// Human/model-verifiable conditions that define completion.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub acceptance_criteria: Vec<String>,
+    /// Require a human decision before this milestone unlocks dependents.
+    #[serde(default)]
+    pub review_required: bool,
+    /// `pending` | `active` | `awaiting_review` | `done`.
     pub status: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub run: Option<String>,
@@ -66,7 +75,14 @@ pub async fn read_tasks(client: &Client, team: &str) -> Vec<TeamTask> {
 
 /// The next task an idle team should pick up: the oldest `pending` task.
 pub fn next_pending(tasks: &[TeamTask]) -> Option<&TeamTask> {
-    tasks.iter().find(|t| t.status == "pending")
+    tasks.iter().find(|task| {
+        task.status == "pending"
+            && task.depends_on.iter().all(|dependency| {
+                tasks
+                    .iter()
+                    .any(|candidate| candidate.id == *dependency && candidate.status == "done")
+            })
+    })
 }
 
 /// Whether the team already has a task in flight (its run hasn't delivered yet),
@@ -280,11 +296,55 @@ pub async fn requeue_for_run(client: &Client, team: &str, run: &str) -> Result<b
     .await
 }
 
+pub async fn awaiting_review_for_run(client: &Client, team: &str, run: &str) -> Option<TeamTask> {
+    read_tasks(client, team)
+        .await
+        .into_iter()
+        .find(|task| task.status == "awaiting_review" && task.run.as_deref() == Some(run))
+}
+
+pub async fn resolve_review_for_run(
+    client: &Client,
+    team: &str,
+    run: &str,
+    approved: bool,
+    feedback: Option<&str>,
+) -> Result<bool, kube::Error> {
+    let feedback = feedback.map(str::trim).filter(|value| !value.is_empty());
+    mutate_tasks(client, team, |tasks| {
+        let Some(task) = tasks
+            .iter_mut()
+            .find(|task| task.status == "awaiting_review" && task.run.as_deref() == Some(run))
+        else {
+            return (false, false);
+        };
+        if approved {
+            task.status = "done".into();
+        } else {
+            if let Some(feedback) = feedback {
+                task.description.push_str(&format!(
+                    "\n\nREVIEW FEEDBACK (source run {run}):\n{feedback}"
+                ));
+            }
+            task.status = "pending".into();
+            task.run = None;
+            task.done_at = None;
+            task.stuck_since = None;
+        }
+        (true, true)
+    })
+    .await
+}
+
 fn mark_done(tasks: &mut [TeamTask], run: &str, now: &str) -> bool {
     let mut changed = false;
     for task in tasks {
         if task.status == "active" && task.run.as_deref() == Some(run) {
-            task.status = "done".into();
+            task.status = if task.review_required {
+                "awaiting_review".into()
+            } else {
+                "done".into()
+            };
             task.done_at = Some(now.to_string());
             task.stuck_since = None;
             changed = true;
@@ -316,6 +376,9 @@ mod tests {
             id: id.into(),
             title: id.into(),
             description: String::new(),
+            depends_on: Vec::new(),
+            acceptance_criteria: Vec::new(),
+            review_required: false,
             status: status.into(),
             run: run.map(String::from),
             created_at: None,
@@ -332,6 +395,19 @@ mod tests {
             t("c", "pending", None),
         ];
         assert_eq!(next_pending(&tasks).unwrap().id, "b");
+    }
+
+    #[test]
+    fn next_pending_waits_for_milestone_dependencies() {
+        let first = t("scaffold", "pending", None);
+        let mut second = t("acceptance", "pending", None);
+        second.depends_on = vec!["scaffold".into()];
+        let tasks = vec![first, second];
+        assert_eq!(next_pending(&tasks).unwrap().id, "scaffold");
+
+        let mut done_first = tasks;
+        done_first[0].status = "done".into();
+        assert_eq!(next_pending(&done_first).unwrap().id, "acceptance");
     }
 
     #[test]
@@ -384,6 +460,16 @@ mod tests {
         assert_eq!(tasks[0].status, "done");
         assert_eq!(tasks[0].done_at.as_deref(), Some("2026-07-20T12:00:00Z"));
         assert!(tasks[0].stuck_since.is_none());
+    }
+
+    #[test]
+    fn review_required_milestone_waits_for_human_decision() {
+        let mut milestone = t("release-review", "active", Some("run-1"));
+        milestone.review_required = true;
+        let mut tasks = vec![milestone];
+        assert!(mark_done(&mut tasks, "run-1", "2026-07-20T12:00:00Z"));
+        assert_eq!(tasks[0].status, "awaiting_review");
+        assert_eq!(tasks[0].done_at.as_deref(), Some("2026-07-20T12:00:00Z"));
     }
 
     #[test]

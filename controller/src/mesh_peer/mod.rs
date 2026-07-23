@@ -659,6 +659,8 @@ enum FederationMessage {
         #[serde(default)]
         reason: Option<String>,
         #[serde(default)]
+        checkpoint: Option<serde_json::Value>,
+        #[serde(default)]
         timestamp: Option<String>,
     },
 
@@ -1701,6 +1703,7 @@ async fn handle_peer_message(
             child_role,
             outcome,
             reason,
+            checkpoint,
             ..
         } => {
             // Keep-alive: bump the in-flight delivery's last-activity clock so
@@ -1717,6 +1720,7 @@ async fn handle_peer_message(
                     child_role,
                     outcome,
                     message: reason,
+                    checkpoint,
                 },
             )
             .await;
@@ -1969,7 +1973,7 @@ mod tests {
     /// wire shape the runtime sends.
     #[test]
     fn task_progress_deserializes_from_runtime_wire_shape() {
-        let wire = r#"{"type":"task_progress","message_id":"progress-run-1-3","in_reply_to_id":"run-1","task_id":"run-1","stage":"child_progress","tick":3,"elapsed_seconds":60,"from_agent":"landscape-watch-run-1","child_task_id":"child-7","child_role":"researcher","child_stage":"executing","timestamp":"2026-06-29T21:47:27.557Z"}"#;
+        let wire = r#"{"type":"task_progress","message_id":"progress-run-1-3","in_reply_to_id":"run-1","task_id":"run-1","stage":"checkpoint","tick":3,"elapsed_seconds":60,"from_agent":"landscape-watch-run-1","child_task_id":"child-7","child_role":"researcher","child_stage":"executing","checkpoint":{"schema":"kars.checkpoint/v1","milestone_id":"research","status":"completed"},"timestamp":"2026-06-29T21:47:27.557Z"}"#;
         let decoded: FederationMessage = serde_json::from_str(wire).unwrap();
         match decoded {
             FederationMessage::TaskProgress {
@@ -1980,15 +1984,22 @@ mod tests {
                 from_agent,
                 child_task_id,
                 child_role,
+                checkpoint,
                 ..
             } => {
                 assert_eq!(in_reply_to.as_deref(), Some("run-1"));
-                assert_eq!(stage.as_deref(), Some("child_progress"));
+                assert_eq!(stage.as_deref(), Some("checkpoint"));
                 assert_eq!(tick, Some(3));
                 assert_eq!(elapsed_seconds, Some(60));
                 assert_eq!(from_agent.as_deref(), Some("landscape-watch-run-1"));
                 assert_eq!(child_task_id.as_deref(), Some("child-7"));
                 assert_eq!(child_role.as_deref(), Some("researcher"));
+                assert_eq!(
+                    checkpoint
+                        .as_ref()
+                        .and_then(|value| value.get("milestone_id")),
+                    Some(&serde_json::json!("research"))
+                );
             }
             _ => panic!("Wrong variant — task_progress must parse"),
         }

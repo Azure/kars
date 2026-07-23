@@ -93,6 +93,25 @@ export const TASK_TOOLS: any[] = [
   {
     type: "function" as const,
     function: {
+      name: "checkpoint",
+      description: "Persist a durable milestone checkpoint for long-running work. Call when a milestone starts, completes, blocks, or hands off. The checkpoint is written to the workspace and reported to the Kars controller so a restarted run can resume from known progress instead of starting over.",
+      parameters: {
+        type: "object",
+        properties: {
+          milestone_id: { type: "string", description: "Stable milestone identifier, e.g. scaffold, backend-api, acceptance-tests" },
+          status: { type: "string", enum: ["pending", "in_progress", "completed", "blocked"] },
+          summary: { type: "string", description: "Concise evidence-based progress summary" },
+          acceptance_criteria: { type: "array", items: { type: "string" } },
+          artifacts: { type: "array", items: { type: "string" }, description: "Workspace-relative or absolute artifact paths owned by this milestone" },
+          next_steps: { type: "array", items: { type: "string" } },
+        },
+        required: ["milestone_id", "status", "summary"],
+      },
+    },
+  },
+  {
+    type: "function" as const,
+    function: {
       name: "http_fetch",
       description: "Make an HTTP request to an external URL through the security proxy. The request goes through blocklist checking and allowlist enforcement. Use this for any external API calls (Telegram, HackerNews, web APIs, etc.).",
       parameters: {

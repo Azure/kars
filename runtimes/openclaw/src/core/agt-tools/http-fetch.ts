@@ -5,6 +5,7 @@
 
 import { routerCall } from "../router-client.js";
 import { safeJson } from "../safe-json.js";
+import { githubMcpRoutingError } from "../capability-routing.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyApi = any;
@@ -28,6 +29,13 @@ export function registerHttpFetchTool(api: AnyApi): void {
     async execute(_id: string, params: Record<string, unknown>) {
       const url = String(params.url || "");
       const method = String(params.method || "GET").toUpperCase();
+      const routingError = githubMcpRoutingError(url, method);
+      if (routingError) {
+        return {
+          content: [{ type: "text", text: routingError }],
+          isError: true,
+        };
+      }
       try {
         const result = await routerCall("POST", "/egress/fetch", {
           url,

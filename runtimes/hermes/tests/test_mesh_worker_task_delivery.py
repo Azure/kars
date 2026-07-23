@@ -19,6 +19,7 @@ agent deliver + delegate end-to-end like OpenClaw:
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 from typing import Any
 
@@ -28,6 +29,42 @@ from kars_runtime_hermes.plugin import mesh_worker
 
 CONTROLLER_DID = "did:mesh:02b4286377b5d84d1791c2a932c2c3cd"
 AGENT_DID = "did:mesh:abc123abc123abc123abc123abc12345"
+
+
+def test_versioned_task_contract_is_verified_and_persisted(
+    tmp_path: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    objective = "Build the acceptance artifact."
+    instructions = "Checkpoint each milestone."
+    checkpoint_json = json.dumps({"milestone_id": "build", "status": "in_progress"})
+
+    def frame(value: str) -> str:
+        return f"{len(value.encode('utf-8'))}:{value}"
+
+    digest = hashlib.sha256(
+        "".join(
+            frame(value)
+            for value in ("kars.task/v1", objective, instructions, checkpoint_json)
+        ).encode("utf-8")
+    ).hexdigest()
+    monkeypatch.setenv("KARS_HERMES_ARTIFACT_DIR", str(tmp_path))
+
+    prompt = mesh_worker._prepare_task_contract(
+        json.dumps(
+            {
+                "schema": "kars.task/v1",
+                "digest": digest,
+                "objective": objective,
+                "instructions": instructions,
+                "checkpoint_json": checkpoint_json,
+            }
+        )
+    )
+
+    assert objective in prompt
+    assert "Resume checkpoint" in prompt
+    assert (tmp_path / "execution-contract.json").exists()
 
 
 class _FakeMsg:

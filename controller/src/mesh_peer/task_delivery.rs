@@ -53,6 +53,7 @@ const RUN_ACK_ANNOTATION: &str = "kars.azure.com/run-ack";
 /// a run whose agent wasn't ready yet is retried a bounded number of times
 /// rather than recorded as a permanent timeout on the first miss.
 const RUN_ATTEMPTS_ANNOTATION: &str = "kars.azure.com/run-attempts";
+const TASK_CONTRACT_SCHEMA: &str = "kars.task/v1";
 /// A fresh AKS sandbox can take several minutes to pull images and join the mesh.
 /// Keep the local/kind default robust while allowing operators to tune the
 /// bounded warm-up budget.
@@ -62,6 +63,61 @@ fn max_delivery_attempts() -> u32 {
         .and_then(|v| v.parse::<u32>().ok())
         .map(|v| v.clamp(1, 360))
         .unwrap_or(72)
+}
+
+fn task_contract_payload(
+    task: &DynamicObject,
+    objective: &str,
+    checkpoint_json: Option<&str>,
+) -> (String, String) {
+    let instructions = task
+        .data
+        .get("spec")
+        .and_then(|spec| spec.get("blueprint"))
+        .and_then(|blueprint| blueprint.get("instructions"))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or("")
+        .trim();
+    let checkpoint_json = checkpoint_json.unwrap_or("");
+    let frame = |value: &str| format!("{}:{value}", value.len());
+    let canonical = [
+        TASK_CONTRACT_SCHEMA,
+        objective,
+        instructions,
+        checkpoint_json,
+    ]
+    .into_iter()
+    .map(frame)
+    .collect::<String>();
+    let digest = format!("{:x}", sha2::Sha256::digest(canonical.as_bytes()));
+    let payload = json!({
+        "schema": TASK_CONTRACT_SCHEMA,
+        "digest": digest,
+        "objective": objective,
+        "instructions": instructions,
+        "checkpoint_json": checkpoint_json,
+    })
+    .to_string();
+    (payload, digest)
+}
+
+async fn read_mission_progress(
+    state: &Arc<MeshPeerState>,
+    task: &str,
+    task_id: &str,
+) -> Option<String> {
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
+    let cms: Api<k8s_openapi::api::core::v1::ConfigMap> =
+        Api::namespaced(state.client.clone(), &namespace);
+    let data = cms
+        .get_opt(&format!("kars-mission-progress-{task}"))
+        .await
+        .ok()
+        .flatten()
+        .and_then(|config_map| config_map.data)?;
+    (data.get("taskId").map(String::as_str) == Some(task_id))
+        .then(|| data.get("checkpoint.json").cloned())
+        .flatten()
 }
 /// Idle timeout: how long the controller waits with NO signal from the agent
 /// (neither a `task_progress` heartbeat nor the terminal `task_response`)
@@ -118,6 +174,7 @@ pub(super) struct ProgressUpdate {
     pub child_role: Option<String>,
     pub outcome: Option<String>,
     pub message: Option<String>,
+    pub checkpoint: Option<serde_json::Value>,
 }
 
 /// Bump the last-activity clock for the in-flight delivery to `agent_did`,
@@ -138,6 +195,15 @@ pub(super) async fn touch_progress(
             let Ok(Some(task)) = find_task_by_nonce(state, task_id).await else {
                 return false;
             };
+            let current_worker = task
+                .data
+                .get("status")
+                .and_then(|status| status.get("assignment"))
+                .and_then(|assignment| assignment.get("workerDid"))
+                .and_then(serde_json::Value::as_str);
+            if current_worker.is_some_and(|worker| worker != agent_did) {
+                return false;
+            }
             PendingAssignmentProgress {
                 clock: Arc::new(AtomicI64::new(Utc::now().timestamp_millis())),
                 namespace: task
@@ -153,12 +219,22 @@ pub(super) async fn touch_progress(
     pending
         .clock
         .store(Utc::now().timestamp_millis(), Ordering::Release);
+    let checkpoint = update.checkpoint.clone();
     if let Err(error) = persist_assignment_progress(state, &pending, agent_did, update).await {
         tracing::warn!(
             task = %pending.task_name,
             task_id = %pending.task_id,
             error = %format!("{error:#}"),
             "failed to persist assignment progress"
+        );
+    }
+    if let Some(checkpoint) = checkpoint
+        && let Err(error) = write_mission_progress(state, &pending, &checkpoint).await
+    {
+        tracing::warn!(
+            task = %pending.task_name,
+            error = %format!("{error:#}"),
+            "failed to persist mission checkpoint"
         );
     }
     true
@@ -298,6 +374,15 @@ async fn deliver_for_task(
         .and_then(|o| o.as_str())
         .map(str::to_string)
         .context("KarsTask has no spec.objective")?;
+    let checkpoint_json = read_mission_progress(state, &name, nonce).await;
+    let (delivery_content, contract_digest) =
+        task_contract_payload(task, &objective, checkpoint_json.as_deref());
+    tracing::info!(
+        task = %name,
+        contract_schema = TASK_CONTRACT_SCHEMA,
+        contract_digest = %contract_digest,
+        "delivering versioned task contract"
+    );
 
     // The model the run actually used, recorded on the deliverable so the
     // scorecard + efficiency frontier attribute the run's real token cost to a
@@ -459,7 +544,7 @@ async fn deliver_for_task(
         epoch,
         &agent_did,
         FederationMessage::TaskRequest {
-            content: objective.clone(),
+            content: delivery_content.clone(),
             message_id: Some(nonce.to_string()),
             request_id: Some(nonce.to_string()),
             timestamp: Some(Utc::now().to_rfc3339()),
@@ -507,6 +592,9 @@ async fn deliver_for_task(
                     && let Some(discovered_did) = discover_agent_did(&sandbox).await
                     && discovered_did != agent_did
                 {
+                    let reroute_checkpoint = read_mission_progress(state, &name, nonce).await;
+                    let (reroute_content, _) =
+                        task_contract_payload(task, &objective, reroute_checkpoint.as_deref());
                     let progress = pending_progress.clone();
                     state
                         .pending_progress
@@ -522,7 +610,7 @@ async fn deliver_for_task(
                                 epoch,
                                 &discovered_did,
                                 FederationMessage::TaskRequest {
-                                    content: objective.clone(),
+                                    content: reroute_content,
                                     message_id: Some(nonce.to_string()),
                                     request_id: Some(nonce.to_string()),
                                     timestamp: Some(Utc::now().to_rfc3339()),
@@ -1327,6 +1415,39 @@ async fn write_mission_trace(
     Ok(())
 }
 
+async fn write_mission_progress(
+    state: &Arc<MeshPeerState>,
+    pending: &PendingAssignmentProgress,
+    checkpoint: &serde_json::Value,
+) -> Result<()> {
+    let namespace = std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
+    let cms: Api<k8s_openapi::api::core::v1::ConfigMap> =
+        Api::namespaced(state.client.clone(), &namespace);
+    let name = format!("kars-mission-progress-{}", pending.task_name);
+    let serialized = serde_json::to_string(checkpoint).context("serialize mission checkpoint")?;
+    let patch = json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": name,
+            "labels": {"kars.azure.com/mission-progress": pending.task_name}
+        },
+        "data": {
+            "checkpoint.json": serialized,
+            "taskId": pending.task_id,
+            "capturedAt": Utc::now().to_rfc3339(),
+        }
+    });
+    cms.patch(
+        &name,
+        &PatchParams::apply(crate::field_managers::MESH_PEER).force(),
+        &Patch::Apply(patch),
+    )
+    .await
+    .context("write mission-progress ConfigMap")?;
+    Ok(())
+}
+
 fn assignment_api(state: &MeshPeerState, namespace: &str) -> Api<DynamicObject> {
     let api_resource = kube::api::ApiResource {
         group: "kars.azure.com".into(),
@@ -1683,10 +1804,63 @@ async fn handle_transient_miss(
 mod tests {
     use super::{
         assignment_lease_active, child_assignment_state, is_substantive_deliverable,
-        reply_matches_current_worker, select_newest_agent_did,
+        reply_matches_current_worker, select_newest_agent_did, task_contract_payload,
     };
     use kube::api::DynamicObject;
     use serde_json::json;
+
+    #[test]
+    fn task_contract_payload_is_versioned_and_hashes_instructions() {
+        let task: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "KarsTask",
+            "metadata": {"name": "run"},
+            "spec": {
+                "blueprint": {
+                    "instructions": "Spawn every selected role and retain each handback."
+                }
+            }
+        }))
+        .expect("dynamic task");
+
+        let (payload, digest) = task_contract_payload(
+            &task,
+            "Inspect the repository.",
+            Some(r#"{"milestone_id":"inventory","status":"in_progress"}"#),
+        );
+        let parsed: serde_json::Value = serde_json::from_str(&payload).expect("contract JSON");
+
+        assert_eq!(parsed["schema"], "kars.task/v1");
+        assert_eq!(parsed["digest"], digest);
+        assert_eq!(parsed["objective"], "Inspect the repository.");
+        assert_eq!(
+            parsed["instructions"],
+            "Spawn every selected role and retain each handback."
+        );
+        assert_eq!(
+            parsed["checkpoint_json"],
+            r#"{"milestone_id":"inventory","status":"in_progress"}"#
+        );
+        assert_eq!(digest.len(), 64);
+
+        let split_task: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "KarsTask",
+            "metadata": {"name": "split"},
+            "spec": {"blueprint": {"instructions": "b\u{0000}c"}}
+        }))
+        .expect("dynamic task");
+        let joined_task: DynamicObject = serde_json::from_value(json!({
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "kind": "KarsTask",
+            "metadata": {"name": "joined"},
+            "spec": {"blueprint": {"instructions": "c"}}
+        }))
+        .expect("dynamic task");
+        let (_, split_digest) = task_contract_payload(&split_task, "a", None);
+        let (_, joined_digest) = task_contract_payload(&joined_task, "a\u{0000}b", None);
+        assert_ne!(split_digest, joined_digest);
+    }
 
     #[test]
     fn aborted_outputs_are_not_successes() {

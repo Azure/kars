@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, it } from "vitest";
 import { createServer, type Server } from "node:http";
+import { createHash } from "node:crypto";
 import { existsSync, rmSync } from "node:fs";
 import { resolve } from "node:path";
 
@@ -8,6 +9,8 @@ import {
   compactSubAgentExecutionContract,
   compactTaskLoopMessages,
   createAGTPolicyEvaluator,
+  githubMcpRoutingError,
+  normalizeTaskContract,
   processTaskWithTools,
   type AGTEvaluateTransport,
   type TaskLoopMessage,
@@ -134,6 +137,66 @@ describe("createAGTPolicyEvaluator", () => {
 });
 
 describe("task-loop context bounds", () => {
+  it("requires GitHub MCP for GitHub API and page requests", () => {
+    expect(githubMcpRoutingError(
+      "https://api.github.com/repos/Azure/kars/pulls",
+      "GET",
+      "github",
+    )).toMatch(/GitHub MCP is configured/);
+    expect(githubMcpRoutingError(
+      "https://github.com/Azure/kars/pull/1",
+      "GET",
+      "github-mcp",
+    )).toMatch(/GitHub MCP is configured/);
+    expect(githubMcpRoutingError(
+      "https://raw.githubusercontent.com/Azure/kars/main/README.md",
+      "GET",
+      "github",
+    )).toBeNull();
+    expect(githubMcpRoutingError(
+      "https://api.github.com/repos/Azure/kars/pulls",
+      "GET",
+      "playwright",
+    )).toBeNull();
+  });
+
+  it("verifies and expands a versioned task contract", () => {
+    const objective = "Inspect the repository.";
+    const instructions = "Return evidence from every selected role.";
+    const checkpoint_json = JSON.stringify({
+      milestone_id: "inventory",
+      status: "in_progress",
+    });
+    const frame = (value: string) => `${Buffer.byteLength(value, "utf8")}:${value}`;
+    const digest = createHash("sha256")
+      .update(["kars.task/v1", objective, instructions, checkpoint_json].map(frame).join(""))
+      .digest("hex");
+
+    const normalized = normalizeTaskContract(JSON.stringify({
+      schema: "kars.task/v1",
+      digest,
+      objective,
+      instructions,
+      checkpoint_json,
+    }));
+
+    expect(normalized.contract?.digest).toBe(digest);
+    expect(normalized.userContent).toContain("execution-contract.json");
+    expect(normalized.userContent).toContain(objective);
+    expect(normalized.userContent).toContain(instructions);
+    expect(normalized.userContent).toContain("Resume checkpoint");
+    expect(normalized.userContent).toContain("inventory");
+  });
+
+  it("rejects a tampered versioned task contract", () => {
+    expect(() => normalizeTaskContract(JSON.stringify({
+      schema: "kars.task/v1",
+      digest: "0".repeat(64),
+      objective: "Do something else.",
+      instructions: "",
+    }))).toThrow(/digest mismatch/);
+  });
+
   it("keeps the default execution contract compact and source-specific", () => {
     const contract = compactSubAgentExecutionContract();
 

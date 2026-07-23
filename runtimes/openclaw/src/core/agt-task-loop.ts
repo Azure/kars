@@ -14,6 +14,7 @@
 // sanitizeLog) are pulled directly from sibling core modules.
 
 import type { AgtInboxEntry } from "./agt-handoff.js";
+import { createHash } from "node:crypto";
 import { getTaskTools } from "./agt-task-tools.js";
 import { resolveAmidByName, getStaleAmid, amidToName, parentTrustedNames } from "./amid-cache.js";
 import { sanitizeLog } from "./log-redact.js";
@@ -21,6 +22,8 @@ import { meshSendWithIdentity, type MeshIdentity } from "./mesh-transport.js";
 import { validateMeshPayload } from "./mesh-payload-guard.js";
 import { routerUrl } from "./router-client.js";
 import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js";
+import { githubMcpRoutingError } from "./capability-routing.js";
+export { githubMcpRoutingError } from "./capability-routing.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyMeshClient = any;
@@ -50,6 +53,99 @@ export type TaskLoopMessage = {
   tool_call_id?: string;
   name?: string;
 };
+
+export interface VersionedTaskContract {
+  schema: "kars.task/v1";
+  digest: string;
+  objective: string;
+  instructions: string;
+  checkpoint_json?: string;
+}
+
+function frameContractField(value: string): string {
+  return `${Buffer.byteLength(value, "utf8")}:${value}`;
+}
+
+export function normalizeTaskContract(taskContent: unknown): {
+  userContent: string;
+  contract: VersionedTaskContract | null;
+} {
+  let candidate: unknown = taskContent;
+  if (typeof taskContent === "string") {
+    try {
+      candidate = JSON.parse(taskContent);
+    } catch {
+      return { userContent: taskContent, contract: null };
+    }
+  }
+  if (
+    candidate == null
+    || typeof candidate !== "object"
+    || (candidate as { schema?: unknown }).schema !== "kars.task/v1"
+  ) {
+    return {
+      userContent: typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent),
+      contract: null,
+    };
+  }
+
+  const value = candidate as Partial<VersionedTaskContract>;
+  const objective = typeof value.objective === "string" ? value.objective : "";
+  const instructions = typeof value.instructions === "string" ? value.instructions : "";
+  const checkpointJson =
+    typeof value.checkpoint_json === "string" ? value.checkpoint_json : "";
+  const digest = typeof value.digest === "string" ? value.digest : "";
+  const canonical = [
+    "kars.task/v1",
+    objective,
+    instructions,
+    checkpointJson,
+  ].map(frameContractField).join("");
+  const expected = createHash("sha256").update(canonical).digest("hex");
+  if (!objective.trim() || digest !== expected) {
+    throw new Error("Invalid kars.task/v1 execution contract: objective missing or digest mismatch");
+  }
+
+  const contract: VersionedTaskContract = {
+    schema: "kars.task/v1",
+    digest,
+    objective,
+    instructions,
+    checkpoint_json: checkpointJson,
+  };
+  return {
+    contract,
+    userContent:
+      `Execution contract: ${contract.schema} (${contract.digest})\n`
+      + "The verified contract is persisted at /sandbox/.openclaw/workspace/execution-contract.json.\n\n"
+      + `Objective:\n${contract.objective}`
+      + (contract.instructions.trim()
+        ? `\n\nStanding instructions:\n${contract.instructions}`
+        : "")
+      + (contract.checkpoint_json?.trim()
+        ? `\n\nResume checkpoint (continue from this state; do not repeat completed milestones):\n${contract.checkpoint_json}`
+        : ""),
+  };
+}
+
+export async function prepareTaskContract(taskContent: unknown): Promise<{
+  userContent: string;
+  contract: VersionedTaskContract | null;
+}> {
+  const normalized = normalizeTaskContract(taskContent);
+  if (normalized.contract) {
+    const fs = await import("node:fs");
+    const workspaceRoot =
+      process.env.KARS_WORKSPACE_ROOT || "/sandbox/.openclaw/workspace";
+    fs.mkdirSync(workspaceRoot, { recursive: true });
+    fs.writeFileSync(
+      `${workspaceRoot}/execution-contract.json`,
+      JSON.stringify(normalized.contract, null, 2),
+      { mode: 0o600 },
+    );
+  }
+  return normalized;
+}
 
 function compactMessage(message: TaskLoopMessage): TaskLoopMessage {
   return {
@@ -107,10 +203,11 @@ export function compactSubAgentExecutionContract(): string {
     + "1. Complete the exact task in the user message. Treat its topic, requested evidence, output schema, work-packet ID, and named recipients as authoritative. Never invent a substitute topic or unsupported facts.\n"
     + "2. Use only canonical peer names from the task's Peer roster or one discover call. Never send to yourself. Use `parent` only when the task explicitly returns to the spawner or names no downstream peer.\n"
     + "3. For expected peer input, check mesh_inbox once, then use one mesh_await with the named senders. If input is incomplete, ask the sender once and await once more before reporting a precise blocked status.\n"
-    + "4. Keep mesh_send payloads under 2 KB. Write larger evidence or deliverables to /sandbox/.openclaw/workspace and send each file with mesh_transfer_file. Peer files arrive under workspace/incoming and remain available for the task.\n"
-    + "5. Use the connected MCP/tool intended for the source. For repository facts prefer the configured GitHub MCP; use http_fetch only for an explicit URL that the MCP cannot provide. A remote 4xx is a bad path/request, not an egress denial.\n"
-    + "6. Preserve useful partial work. If some evidence remains unavailable, deliver a clearly marked partial artifact with exact missing fields instead of fabricating or abandoning collected evidence.\n"
-    + "7. Before finishing, verify claims against tool evidence, transfer every requested artifact to the correct recipient, and return a concise structured handback. Do not redo a completed work packet unless the parent explicitly requests a named correction.\n"
+    + "4. For milestone or long-running work, call checkpoint when work starts, when acceptance criteria are met, and when blocked. Keep artifact paths and next steps in the checkpoint so restart/resume never begins from zero.\n"
+    + "5. Keep mesh_send payloads under 2 KB. Write larger evidence or deliverables to /sandbox/.openclaw/workspace and send each file with mesh_transfer_file. Peer files arrive under workspace/incoming and remain available for the task.\n"
+    + "6. Use the connected MCP/tool intended for the source. For repository facts prefer the configured GitHub MCP; use http_fetch only for an explicit URL that the MCP cannot provide. A remote 4xx is a bad path/request, not an egress denial.\n"
+    + "7. Preserve useful partial work. If some evidence remains unavailable, deliver a clearly marked partial artifact with exact missing fields instead of fabricating or abandoning collected evidence.\n"
+    + "8. Before finishing, verify claims against tool evidence, transfer every requested artifact to the correct recipient, and return a concise structured handback. Do not redo a completed work packet unless the parent explicitly requests a named correction.\n"
     + "Act immediately and stay concise.";
 }
 
@@ -285,6 +382,7 @@ export interface TaskLoopDeps {
    * sub-agent) pass nothing and the loop behaves exactly as before.
    */
   onTrace?: (event: TraceEvent) => void;
+  reportTaskProgress?: (stage: string, details?: Record<string, unknown>) => void;
 }
 
 /// Sanitized, length-bounded preview of a tool's arguments or result. Strips
@@ -338,6 +436,7 @@ export async function processTaskWithTools(
 ): Promise<string> {
   const http = await import("node:http");
   const { execSync } = await import("node:child_process");
+  const normalizedTask = await prepareTaskContract(taskContent);
   const evaluateAGTPolicy = createAGTPolicyEvaluator(log);
   const model = process.env.OPENCLAW_MODEL || process.env.MODEL || "gpt-4.1";
 
@@ -388,7 +487,7 @@ export async function processTaskWithTools(
     },
     {
       role: "user",
-      content: typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent),
+      content: normalizedTask.userContent,
     },
   ];
 
@@ -607,30 +706,79 @@ export async function processTaskWithTools(
             } catch (err: any) {
               result = `file_read error: ${err.message}`;
             }
+          } else if (fnName === "checkpoint") {
+            const milestoneId = String(args.milestone_id || "")
+              .trim()
+              .replace(/[^a-zA-Z0-9._-]/g, "-")
+              .slice(0, 96);
+            const status = String(args.status || "").trim();
+            const summary = String(args.summary || "").trim().slice(0, 2_000);
+            if (!milestoneId || !["pending", "in_progress", "completed", "blocked"].includes(status) || !summary) {
+              result = "checkpoint error: milestone_id, valid status, and summary are required";
+              toolOk = false;
+            } else {
+              const fs = await import("node:fs");
+              const checkpoint = {
+                schema: "kars.checkpoint/v1",
+                milestone_id: milestoneId,
+                status,
+                summary,
+                acceptance_criteria: Array.isArray(args.acceptance_criteria)
+                  ? args.acceptance_criteria.map(String).slice(0, 20)
+                  : [],
+                artifacts: Array.isArray(args.artifacts)
+                  ? args.artifacts.map(String).slice(0, 50)
+                  : [],
+                next_steps: Array.isArray(args.next_steps)
+                  ? args.next_steps.map(String).slice(0, 20)
+                  : [],
+                updated_at: new Date().toISOString(),
+                agent: process.env.SANDBOX_NAME || process.env.HOSTNAME || "unknown",
+              };
+              const workspaceRoot =
+                process.env.KARS_WORKSPACE_ROOT || "/sandbox/.openclaw/workspace";
+              const checkpointPath = `${workspaceRoot}/task-checkpoint.json`;
+              const stagingPath = `${checkpointPath}.tmp`;
+              fs.mkdirSync(workspaceRoot, { recursive: true });
+              fs.writeFileSync(stagingPath, JSON.stringify(checkpoint, null, 2), { mode: 0o600 });
+              fs.renameSync(stagingPath, checkpointPath);
+              deps.reportTaskProgress?.("checkpoint", { checkpoint });
+              result = JSON.stringify({
+                persisted: true,
+                path: checkpointPath,
+                checkpoint,
+              });
+            }
           } else if (fnName === "http_fetch") {
             log.info(`AGT sub-agent http_fetch: ${args.method || "GET"} ${args.url}`);
-            const fetchBody = JSON.stringify({
-              url: args.url,
-              method: args.method || "GET",
-              headers: args.headers || {},
-              body: args.body || "",
-            });
-            const httpMod = await import("node:http");
-            const fetchResult = await new Promise<string>((resolve) => {
-              const req = httpMod.request(routerUrl("/egress/fetch"), {
-                method: "POST", timeout: 35000,
-                headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(fetchBody) },
-              }, (res) => {
-                let data = "";
-                res.on("data", (c: Buffer) => { data += c.toString(); });
-                res.on("end", () => resolve(data.trim()));
+            const routingError = githubMcpRoutingError(args.url, args.method || "GET");
+            if (routingError) {
+              result = routingError;
+              toolOk = false;
+            } else {
+              const fetchBody = JSON.stringify({
+                url: args.url,
+                method: args.method || "GET",
+                headers: args.headers || {},
+                body: args.body || "",
               });
-              req.on("error", (e: Error) => resolve(`http_fetch error: ${e.message}`));
-              req.on("timeout", () => { req.destroy(); resolve("http_fetch timeout"); });
-              req.write(fetchBody);
-              req.end();
-            });
-            result = fetchResult;
+              const httpMod = await import("node:http");
+              const fetchResult = await new Promise<string>((resolve) => {
+                const req = httpMod.request(routerUrl("/egress/fetch"), {
+                  method: "POST", timeout: 35000,
+                  headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(fetchBody) },
+                }, (res) => {
+                  let data = "";
+                  res.on("data", (c: Buffer) => { data += c.toString(); });
+                  res.on("end", () => resolve(data.trim()));
+                });
+                req.on("error", (e: Error) => resolve(`http_fetch error: ${e.message}`));
+                req.on("timeout", () => { req.destroy(); resolve("http_fetch timeout"); });
+                req.write(fetchBody);
+                req.end();
+              });
+              result = fetchResult;
+            }
           } else if (fnName === "web_search") {
             const q = String(args.query || "").slice(0, 500);
             const max = Math.min(Math.max(Number(args.max_results) || 8, 1), 20);

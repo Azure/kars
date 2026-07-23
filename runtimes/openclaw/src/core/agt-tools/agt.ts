@@ -44,6 +44,7 @@ import { getMeshRegistry } from "../mesh-registry.js";
 import type { HandoffProgress, AgtInboxEntry } from "../agt-handoff.js";
 import {
   appendCollaborationEvent,
+  appendSubAgentTelemetry,
   evidenceDigest,
   evidencePreview,
 } from "../evidence-log.js";
@@ -1330,6 +1331,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           const pollIntervalMs = 500;
           let replyContent: string | null = null;
           let replyOk = true;
+          let replyTrace: Array<Record<string, unknown>> = [];
+          let replyTelemetry: Record<string, unknown> | undefined;
+          let replyArtifacts: Array<Record<string, unknown>> = [];
           let leaseFailureReason: string | null = null;
           let waitSliceExpired = false;
           const overallStart = waitStart;
@@ -1360,6 +1364,9 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
                   ? reply.content
                   : JSON.stringify(reply.content);
                 replyOk = reply.task_ok !== false;
+                replyTrace = Array.isArray(reply.trace) ? reply.trace : [];
+                replyTelemetry = reply.telemetry;
+                replyArtifacts = Array.isArray(reply.artifacts) ? reply.artifacts : [];
                 log.info(`AGT relay: got reply from '${agentName}' after ${((Date.now() - overallStart) / 1000).toFixed(1)}s`);
                 break;
               }
@@ -1464,6 +1471,27 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
             protocol: "AGT E2E encrypted (Signal Protocol)",
             message_id: messageId,
           };
+          if (replyContent !== null) {
+            appendSubAgentTelemetry({
+              event: "subagent_telemetry_summary",
+              member: originalAgentName,
+              mesh_name: agentName,
+              message_id: messageId,
+              outcome: replyOk ? "success" : "failed",
+              telemetry: replyTelemetry ?? null,
+              artifacts: replyArtifacts,
+              trace_event_count: replyTrace.length,
+            });
+            for (const traceEvent of replyTrace.slice(-500)) {
+              appendSubAgentTelemetry({
+                event: "subagent_trace",
+                member: originalAgentName,
+                mesh_name: agentName,
+                message_id: messageId,
+                trace: traceEvent,
+              });
+            }
+          }
           if (replyContent !== null && replyOk) {
             terminalMeshAssignments.set(originalAgentName.toLowerCase(), {
               outcome: "success",
@@ -2039,6 +2067,26 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
               at: new Date().toISOString(),
             });
             pendingMeshAssignments.delete(messageId);
+            const replyTrace = Array.isArray(reply.trace) ? reply.trace : [];
+            appendSubAgentTelemetry({
+              event: "subagent_telemetry_summary",
+              member: pending.logicalAgentName,
+              mesh_name: pending.agentName,
+              message_id: pending.messageId,
+              outcome,
+              telemetry: reply.telemetry ?? null,
+              artifacts: Array.isArray(reply.artifacts) ? reply.artifacts : [],
+              trace_event_count: replyTrace.length,
+            });
+            for (const traceEvent of replyTrace.slice(-500)) {
+              appendSubAgentTelemetry({
+                event: "subagent_trace",
+                member: pending.logicalAgentName,
+                mesh_name: pending.agentName,
+                message_id: pending.messageId,
+                trace: traceEvent,
+              });
+            }
             appendCollaborationEvent({
               event: "handback_received",
               member: pending.logicalAgentName,

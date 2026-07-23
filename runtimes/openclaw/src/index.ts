@@ -174,6 +174,9 @@ const agtInbox: Array<{
   message_type?: string;
   in_reply_to_id?: string;
   task_ok?: boolean;
+  trace?: Array<Record<string, unknown>>;
+  telemetry?: Record<string, unknown>;
+  artifacts?: Array<Record<string, unknown>>;
   read_at?: string;
 }> = [];
 let activeTaskProgressHeartbeat: ((() => void) & {
@@ -314,6 +317,9 @@ function pushInbox(entry: {
   message_type?: string;
   in_reply_to_id?: string;
   task_ok?: boolean;
+  trace?: Array<Record<string, unknown>>;
+  telemetry?: Record<string, unknown>;
+  artifacts?: Array<Record<string, unknown>>;
 }): void {
   agtInbox.push(entry);
   inboxStats.received_total += 1;
@@ -409,7 +415,11 @@ import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MES
 import { TASK_TOOLS } from "./core/agt-task-tools.js";
 import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
-import { createAGTPolicyEvaluator, processTaskWithTools as _processTaskWithTools } from "./core/agt-task-loop.js";
+import {
+  createAGTPolicyEvaluator,
+  prepareTaskContract,
+  processTaskWithTools as _processTaskWithTools,
+} from "./core/agt-task-loop.js";
 import { createHarvestMarker, collectAndShipArtifacts, latin1Safe } from "./core/artifact-collect.js";
 import {
   appendCollaborationEvent,
@@ -419,6 +429,7 @@ import {
 } from "./core/evidence-log.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
 import { registerHttpFetchTool } from "./core/agt-tools/http-fetch.js";
+import { registerCheckpointTool } from "./core/agt-tools/checkpoint.js";
 import { registerFoundryTools } from "./core/agt-tools/foundry.js";
 import { registerAgtTools } from "./core/agt-tools/agt.js";
 import { registerOpenClawCommands } from "./core/commands/openclaw.js";
@@ -488,6 +499,9 @@ async function processTaskWithTools(
     },
     waitForInbox,
     onTrace,
+    reportTaskProgress: (stage, details) => {
+      activeTaskProgressHeartbeat?.report?.(stage, details);
+    },
   }, log);
 }
 
@@ -988,6 +1002,12 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
             ? message.in_reply_to
             : undefined,
         task_ok: typeof message?.ok === "boolean" ? message.ok : undefined,
+        trace: Array.isArray(message?.trace) ? message.trace : undefined,
+        telemetry:
+          message?.telemetry && typeof message.telemetry === "object"
+            ? message.telemetry
+            : undefined,
+        artifacts: Array.isArray(message?.artifacts) ? message.artifacts : undefined,
         timestamp: new Date().toISOString(),
         id: `agt-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
       };
@@ -1164,8 +1184,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
           // native agent makes).
           const telemetryCursor = await fetchTelemetryCursor(log);
           let llmResponse: string;
-          const taskText =
-            typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent);
+          const taskText = (await prepareTaskContract(taskContent)).userContent;
           try {
             llmResponse = await delegateToNativeAgent(
               taskText,
@@ -3135,6 +3154,9 @@ const azureClawPlugin = definePluginEntry({
     // unchanged; the registration helpers receive a Deps bag for late-bound
     // foundryProject + log + config access.
     registerHttpFetchTool(api);
+    registerCheckpointTool(api, (stage, details) => {
+      activeTaskProgressHeartbeat?.report?.(stage, details);
+    });
     // Skip Foundry tool catalog when running against GH-token providers
     // (`github-models` or `github-copilot`). Foundry tools require an Azure
     // project the GH-token paths don't have, so registering them is pure dead

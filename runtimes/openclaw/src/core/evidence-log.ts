@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { createHash } from "node:crypto";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 
 const DEFAULT_WORKSPACE = "/sandbox/.openclaw/workspace";
@@ -49,11 +49,24 @@ function appendEvidence(file: string, event: EvidenceEvent): void {
   try {
     const path = join(workspaceRoot(), "artifacts", `.run-${activeScope}`, file);
     mkdirSync(dirname(path), { recursive: true });
-    appendFileSync(path, `${JSON.stringify({
+    const line = `${JSON.stringify({
       at: new Date().toISOString(),
       agent: process.env.SANDBOX_NAME || process.env.HOSTNAME || "unknown",
       ...event,
-    })}\n`, { encoding: "utf8", mode: 0o600 });
+    })}\n`;
+    if (file === "subagent-telemetry.jsonl") {
+      const currentSize = (() => {
+        try {
+          return statSync(path).size;
+        } catch {
+          return 0;
+        }
+      })();
+      if (currentSize + Buffer.byteLength(line, "utf8") > 700 * 1024) {
+        return;
+      }
+    }
+    appendFileSync(path, line, { encoding: "utf8", mode: 0o600 });
   } catch (error) {
     // Evidence capture must never break the governed task path, but failure must
     // remain observable because collaboration truth depends on this artifact.
@@ -63,4 +76,8 @@ function appendEvidence(file: string, event: EvidenceEvent): void {
 
 export function appendCollaborationEvent(event: EvidenceEvent): void {
   appendEvidence("collaboration.jsonl", event);
+}
+
+export function appendSubAgentTelemetry(event: EvidenceEvent): void {
+  appendEvidence("subagent-telemetry.jsonl", event);
 }

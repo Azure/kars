@@ -37,6 +37,7 @@ use kube::{
     runtime::controller::Action,
 };
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::time::Duration;
@@ -1079,6 +1080,107 @@ async fn process_promotion(client: &Client, ns: &str, team: &KarsTeam, principal
         .await;
 }
 
+async fn process_milestone_review(
+    client: &Client,
+    ns: &str,
+    team: &KarsTeam,
+    run: &str,
+    milestone: &crate::team_tasks::TeamTask,
+) {
+    use crate::kars_approval::{ApprovalAction, KarsApproval};
+
+    let hash = format!(
+        "{:x}",
+        Sha256::digest(format!("{run}:{}", milestone.id).as_bytes())
+    );
+    let approval_name = format!("checkpoint-{}", &hash[..20]);
+    let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
+    if let Ok(Some(approval)) = approvals.get_opt(&approval_name).await {
+        let phase = approval
+            .status
+            .as_ref()
+            .and_then(|status| status.phase.as_deref());
+        let feedback = approval
+            .spec
+            .decision
+            .as_ref()
+            .and_then(|decision| decision.reason.as_deref());
+        match phase {
+            Some("Approved") => {
+                let _ = crate::team_tasks::resolve_review_for_run(
+                    client,
+                    &team.name_any(),
+                    run,
+                    true,
+                    feedback,
+                )
+                .await;
+            }
+            Some("Denied" | "Expired" | "Stale") => {
+                let _ = crate::team_tasks::resolve_review_for_run(
+                    client,
+                    &team.name_any(),
+                    run,
+                    false,
+                    feedback.or(Some("Milestone review was not approved.")),
+                )
+                .await;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    let detail = format!(
+        "Milestone ID: {}\nSource run: {run}\nAcceptance criteria:\n- {}",
+        milestone.id,
+        if milestone.acceptance_criteria.is_empty() {
+            "(none declared)".to_string()
+        } else {
+            milestone.acceptance_criteria.join("\n- ")
+        }
+    );
+    let approval = json!({
+        "apiVersion": "kars.azure.com/v1alpha1",
+        "kind": "KarsApproval",
+        "metadata": {
+            "name": approval_name,
+            "ownerReferences": [owner_ref(team)],
+            "labels": {
+                "kars.azure.com/team": team.name_any(),
+                "kars.azure.com/milestone": milestone.id,
+            },
+            "annotations": team_owner_annotations(team),
+        },
+        "spec": {
+            "taskRef": {"name": run},
+            "action": ApprovalAction {
+                kind: "checkpoint".into(),
+                summary: format!("Approve milestone '{}' for team '{}'", milestone.title, team.name_any()),
+                detail: Some(detail),
+                requested_tier: None,
+            },
+            "ttl": "P7D",
+        }
+    });
+    if let Err(error) = approvals
+        .patch(
+            &approval_name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(approval),
+        )
+        .await
+    {
+        tracing::warn!(
+            team = %team.name_any(),
+            milestone = %milestone.id,
+            run,
+            %error,
+            "failed to create milestone checkpoint approval"
+        );
+    }
+}
+
 /// A short, stable id for a clarification question so the same unanswered
 /// question doesn't spawn a new approval on every reconcile (idempotency key).
 fn clarification_id(question: &str) -> String {
@@ -1365,6 +1467,21 @@ fn launched_run_blueprint(team: &KarsTeam) -> Option<TaskBlueprint> {
         bp.memory = Some(team_memory_name(&team.name_any()));
     }
     Some(bp)
+}
+
+const TEAM_EXECUTION_CONTRACT_VERSION: &str = "kars.team/v1";
+
+fn team_execution_contract(team: &KarsTeam, manifest: &str) -> String {
+    let manifest = truncate_middle(manifest, 800, "\n[operating capability detail truncated]\n");
+    format!(
+        "# Kars Team Execution Contract\nversion: {TEAM_EXECUTION_CONTRACT_VERSION}\n\
+         This contract is authoritative for this run and is persisted by the runtime as execution-contract.json. \
+         For milestone work, persist task-checkpoint.json using schema kars.checkpoint/v1 with milestone_id, \
+         status, summary, acceptance_criteria, artifacts, and next_steps whenever progress starts, completes, or blocks.\
+         {}{}",
+        orchestration_contract(team),
+        manifest
+    )
 }
 
 /// True when a Foundry project is connected on this cluster — the controller env
@@ -1737,6 +1854,23 @@ async fn mint_taskforce(
                 .unwrap_or_else(|| team.name_any())
         ),
     };
+    let mut run_blueprint = launched_run_blueprint(team).unwrap_or_default();
+    let execution_contract = team_execution_contract(team, &manifest);
+    run_blueprint.instructions = Some(
+        match run_blueprint
+            .instructions
+            .as_deref()
+            .map(str::trim)
+            .filter(|instructions| !instructions.is_empty())
+        {
+            Some(existing) => {
+                truncate_middle(existing, 800, "\n[user standing instructions truncated]\n")
+                    + "\n\n"
+                    + &execution_contract
+            }
+            None => execution_contract,
+        },
+    );
     let spec = KarsTaskSpec {
         objective: build_run_objective(team, &manifest, prior_knowledge, assigned),
         envelope,
@@ -1748,7 +1882,7 @@ async fn mint_taskforce(
             launch: true,
             runtime: None,
         }),
-        blueprint: launched_run_blueprint(team),
+        blueprint: Some(run_blueprint),
         display_name: Some(display),
         retention_ttl_seconds: team.spec.run_retention_ttl_seconds,
     };
@@ -1799,8 +1933,8 @@ fn orchestration_contract(team: &KarsTeam) -> String {
     if team.spec.roster.is_empty() {
         return String::new();
     }
-    const CONTRACT_MAX: usize = 1600;
-    const CHARGE_MAX: usize = 70;
+    const CONTRACT_MAX: usize = 6_000;
+    const CHARGE_MAX: usize = 500;
     let monitoring_roles = standing_monitoring_roles(team);
     let names = team
         .spec
@@ -1874,7 +2008,7 @@ fn orchestration_contract(team: &KarsTeam) -> String {
 /// orchestration, or shared-memory contracts out of the objective.
 fn build_run_objective(
     team: &KarsTeam,
-    manifest: &str,
+    _manifest: &str,
     prior_knowledge: &str,
     task: Option<&crate::team_tasks::TeamTask>,
 ) -> String {
@@ -1882,15 +2016,15 @@ fn build_run_objective(
     const TASK_TITLE_MAX: usize = 220;
     const TASK_DETAILS_MAX: usize = 600;
     const CHARTER_MAX: usize = 300;
-    const MANIFEST_MAX: usize = 760;
     let task_and_charter = match task {
         // A discrete assigned task: THIS is the run's objective. The charter is
         // demoted to standing context so the agent still respects the team's
         // mandate, but its job is to complete + deliver the specific task.
         Some(t) => format!(
-            "Assigned task for team '{}'.\nTASK: {}\n{}\n\
+            "Assigned milestone for team '{}'.\nMILESTONE ID: {}\nTASK: {}\n{}\n{}\n\
              Deliver a complete result for THIS task.\nTEAM CHARTER: {}",
             team.name_any(),
+            t.id,
             truncate_middle(&t.title, TASK_TITLE_MAX, " [title truncated] "),
             if t.description.trim().is_empty() {
                 String::new()
@@ -1898,6 +2032,18 @@ fn build_run_objective(
                 format!(
                     "DETAILS: {}",
                     truncate_middle(&t.description, TASK_DETAILS_MAX, " [details truncated] ")
+                )
+            },
+            if t.acceptance_criteria.is_empty() {
+                String::new()
+            } else {
+                format!(
+                    "ACCEPTANCE CRITERIA:\n- {}",
+                    truncate_middle(
+                        &t.acceptance_criteria.join("\n- "),
+                        800,
+                        "\n[acceptance criteria truncated]\n",
+                    )
                 )
             },
             truncate_middle(&team.spec.charter, CHARTER_MAX, " [charter truncated] "),
@@ -1908,9 +2054,11 @@ fn build_run_objective(
             truncate_middle(&team.spec.charter, CHARTER_MAX, " [charter truncated] "),
         ),
     };
-    let manifest = truncate_middle(manifest, MANIFEST_MAX, " [operating contract truncated] ");
-    let orchestration = orchestration_contract(team);
-    let head = format!("{task_and_charter}{orchestration}{manifest}");
+    let head = format!(
+        "{task_and_charter}\n\nExecution contract: {TEAM_EXECUTION_CONTRACT_VERSION}. \
+         The full verified roster, capability, handback, and operating contract is delivered separately \
+         and persisted at /sandbox/.openclaw/workspace/execution-contract.json."
+    );
     let head_len = head.chars().count();
     if head_len >= OBJ_MAX {
         return truncate_middle(&head, OBJ_MAX, "\n[objective truncated]\n");
@@ -2413,6 +2561,11 @@ async fn harvest_and_retire_runs(
                     &Utc::now().to_rfc3339(),
                 )
                 .await;
+                if let Some(milestone) =
+                    crate::team_tasks::awaiting_review_for_run(client, &team_name, &run).await
+                {
+                    process_milestone_review(client, &ns, team, &run, &milestone).await;
+                }
             } else {
                 let _ = crate::team_tasks::requeue_for_run(client, &team_name, &run).await;
             }
@@ -3224,33 +3377,32 @@ mod tests {
             "previous maintenance evidence ".repeat(120),
             crate::team_commons::PRIOR_KNOWLEDGE_FOOTER,
         );
-        let objective = build_run_objective(
-            &team,
-            &operating_contract(
-                "kars-default",
-                "github",
-                "api.github.com:443, raw.githubusercontent.com:443, pypi.org:443",
-            ),
-            &prior,
-            None,
+        let manifest = operating_contract(
+            "kars-default",
+            "github",
+            "api.github.com:443, raw.githubusercontent.com:443, pypi.org:443",
         );
+        let contract = team_execution_contract(&team, &manifest);
+        let objective = build_run_objective(&team, &manifest, &prior, None);
 
         assert!(objective.chars().count() <= 4096);
-        assert!(objective.contains("call `kars_spawn`"), "{objective}");
+        assert!(objective.contains(TEAM_EXECUTION_CONTRACT_VERSION));
+        assert!(objective.contains("execution-contract.json"));
+        assert!(contract.contains("call `kars_spawn`"), "{contract}");
         assert!(
-            objective.contains("Never substitute `agents_list`"),
-            "{objective}"
+            contract.contains("Never substitute `agents_list`"),
+            "{contract}"
         );
         assert!(
-            objective
+            contract
                 .contains("Mandatory standing roles every cadence tick: alert-monitor, pr-watcher"),
-            "{objective}"
+            "{contract}"
         );
         assert!(
-            objective.contains("Final delivery requires a successful structured handback"),
-            "{objective}"
+            contract.contains("Final delivery requires a successful structured handback"),
+            "{contract}"
         );
-        assert!(!objective.contains("[orchestration detail truncated]"));
+        assert!(!contract.contains("[orchestration detail truncated]"));
     }
 
     #[test]
@@ -3459,6 +3611,9 @@ mod tests {
                  Extend the prior decision with WOW-ARCH-20260712-EXTENDED.",
                 "detailed acceptance criterion ".repeat(80)
             ),
+            depends_on: Vec::new(),
+            acceptance_criteria: Vec::new(),
+            review_required: false,
             status: "pending".into(),
             run: None,
             created_at: None,
@@ -3471,34 +3626,33 @@ mod tests {
             "prior evidence ".repeat(80),
             crate::team_commons::PRIOR_KNOWLEDGE_FOOTER,
         );
-        let objective = build_run_objective(
-            &team,
-            &operating_contract("kars-default", "playwright", "example.com:443"),
-            &prior,
-            Some(&task),
-        );
+        let manifest = operating_contract("kars-default", "playwright", "example.com:443");
+        let contract = team_execution_contract(&team, &manifest);
+        let objective = build_run_objective(&team, &manifest, &prior, Some(&task));
 
         assert!(objective.chars().count() <= 4096);
-        assert!(objective.contains("security-reviewer"));
-        assert!(objective.contains("reliability-reviewer"));
-        assert!(objective.contains("browser-investigator"));
-        assert!(objective.contains("kars_spawn"), "{objective}");
+        assert!(objective.contains(TEAM_EXECUTION_CONTRACT_VERSION));
+        assert!(objective.contains("execution-contract.json"));
+        assert!(contract.contains("security-reviewer"));
+        assert!(contract.contains("reliability-reviewer"));
+        assert!(contract.contains("browser-investigator"));
+        assert!(contract.contains("kars_spawn"), "{contract}");
         assert!(
-            objective.contains("Only you may spawn roster members"),
-            "{objective}"
+            contract.contains("Only you may spawn roster members"),
+            "{contract}"
         );
         assert!(
-            objective.contains("Never substitute `agents_list`"),
-            "{objective}"
+            contract.contains("Never substitute `agents_list`"),
+            "{contract}"
         );
-        assert!(objective.contains("kars_mesh_send"));
-        assert!(objective.contains("Select roles that add real value"));
-        assert!(objective.contains("selected and skipped roles"));
-        assert!(objective.contains("approved egress=example.com:443"));
-        assert!(objective.contains("role-plan.json"));
-        assert!(objective.contains("OMIT `egress`"));
-        assert!(objective.contains("isolate a role"));
-        assert!(!objective.contains("for EVERY member"));
+        assert!(contract.contains("kars_mesh_send"));
+        assert!(contract.contains("Select roles that add real value"));
+        assert!(contract.contains("selected and skipped roles"));
+        assert!(contract.contains("approved egress=example.com:443"));
+        assert!(contract.contains("role-plan.json"));
+        assert!(contract.contains("OMIT `egress`"));
+        assert!(contract.contains("isolate a role"));
+        assert!(!contract.contains("for EVERY member"));
         assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_HEADER));
         assert!(objective.contains(crate::team_commons::PRIOR_KNOWLEDGE_FOOTER));
         assert!(objective.contains("PRIOR TOKEN WOW-ARCH-20260712"));

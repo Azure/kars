@@ -143,6 +143,7 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                     format!("kars-mission-output-{name}"),
                     format!("kars-mission-artifacts-{name}"),
                     format!("kars-mission-trace-{name}"),
+                    format!("kars-mission-progress-{name}"),
                     format!("kars-mission-review-{name}"),
                 ] {
                     let _ = cms.delete(&cm, &kube::api::DeleteParams::default()).await;

@@ -39,6 +39,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import hashlib
+import hmac
 import json
 import logging
 import os
@@ -53,6 +54,19 @@ logger = logging.getLogger("kars.hermes.mesh_worker")
 def _utc_now_iso() -> str:
     """RFC3339 UTC timestamp for task_response envelopes (matches OpenClaw)."""
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
+
+
+def _read_checkpoint() -> dict[str, Any] | None:
+    try:
+        checkpoint_path = _artifact_root() / "task-checkpoint.json"
+        if not checkpoint_path.exists():
+            return None
+        parsed = json.loads(checkpoint_path.read_text(encoding="utf-8"))
+        if isinstance(parsed, dict) and parsed.get("schema") == "kars.checkpoint/v1":
+            return parsed
+    except (OSError, json.JSONDecodeError, ValueError):
+        return None
+    return None
 
 
 # Interval between task_progress heartbeats sent to the controller while a
@@ -103,6 +117,7 @@ async def _heartbeat_loop(
     while True:
         await asyncio.sleep(_HEARTBEAT_INTERVAL_S)
         tick += 1
+        checkpoint = _read_checkpoint()
         frame = json.dumps(
             {
                 "type": "task_progress",
@@ -111,6 +126,7 @@ async def _heartbeat_loop(
                 "elapsed_seconds": int(tick * _HEARTBEAT_INTERVAL_S),
                 "from_agent": from_agent,
                 "timestamp": _utc_now_iso(),
+                **({"checkpoint": checkpoint, "stage": "checkpoint"} if checkpoint else {}),
             }
         ).encode("utf-8")
         try:
@@ -232,6 +248,57 @@ def _artifact_root() -> Path:
     if shared.exists():
         return shared
     return Path("/sandbox/.hermes/artifacts")
+
+
+def _prepare_task_contract(content: str) -> str:
+    try:
+        value = json.loads(content)
+    except (json.JSONDecodeError, ValueError):
+        return content
+    if not isinstance(value, dict) or value.get("schema") != "kars.task/v1":
+        return content
+    objective = value.get("objective") if isinstance(value.get("objective"), str) else ""
+    instructions = (
+        value.get("instructions") if isinstance(value.get("instructions"), str) else ""
+    )
+    checkpoint_json = (
+        value.get("checkpoint_json")
+        if isinstance(value.get("checkpoint_json"), str)
+        else ""
+    )
+    digest = value.get("digest") if isinstance(value.get("digest"), str) else ""
+
+    def frame(field: str) -> str:
+        return f"{len(field.encode('utf-8'))}:{field}"
+
+    canonical = "".join(
+        frame(field)
+        for field in ("kars.task/v1", objective, instructions, checkpoint_json)
+    )
+    expected = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+    if not objective.strip() or not hmac.compare_digest(digest, expected):
+        raise ValueError(
+            "Invalid kars.task/v1 execution contract: objective missing or digest mismatch"
+        )
+    root = _artifact_root()
+    root.mkdir(parents=True, exist_ok=True)
+    target = root / "execution-contract.json"
+    staging = root / "execution-contract.json.tmp"
+    staging.write_text(json.dumps(value, indent=2), encoding="utf-8")
+    os.chmod(staging, 0o600)
+    staging.replace(target)
+    prompt = (
+        f"Execution contract: kars.task/v1 ({digest})\n"
+        f"Verified contract persisted at {target}.\n\nObjective:\n{objective}"
+    )
+    if instructions.strip():
+        prompt += f"\n\nStanding instructions:\n{instructions}"
+    if checkpoint_json.strip():
+        prompt += (
+            "\n\nResume checkpoint (continue from this state; do not repeat completed "
+            f"milestones):\n{checkpoint_json}"
+        )
+    return prompt
 
 
 def _open_workspace_root() -> int:
@@ -644,6 +711,23 @@ async def _execute_task_request(
                 logger.warning("mesh_worker: artifact delivery failed (continuing): %s", exc)
                 artifacts = []
 
+        final_checkpoint = _read_checkpoint()
+        if final_checkpoint is not None:
+            checkpoint_frame = json.dumps(
+                {
+                    "type": "task_progress",
+                    "stage": "checkpoint",
+                    "task_id": task_request_id,
+                    "checkpoint": final_checkpoint,
+                    "from_agent": from_agent,
+                    "timestamp": _utc_now_iso(),
+                }
+            ).encode("utf-8")
+            try:
+                await _route_send(client, msg, sender_name, checkpoint_frame)
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("mesh_worker: final checkpoint send failed: %s", exc)
+
         reply_payload = json.dumps(
             {
                 "type": "task_response",
@@ -729,6 +813,26 @@ async def _handle_message(client: Any, msg: Any) -> None:
             task_request_id,
             prompt_text[:120],
         )
+        try:
+            prompt_text = _prepare_task_contract(prompt_text)
+        except ValueError as error:
+            sender_name = await _resolve_sender_name(client, msg.from_did)
+            await _route_send(
+                client,
+                msg,
+                sender_name,
+                json.dumps(
+                    {
+                        "type": "task_response",
+                        "in_reply_to_id": task_request_id,
+                        "content": str(error),
+                        "ok": False,
+                        "from_agent": os.environ.get("SANDBOX_NAME", "hermes"),
+                        "timestamp": _utc_now_iso(),
+                    }
+                ).encode("utf-8"),
+            )
+            return
 
     # ── Publish peer to router trust store (operator panel feed) ──
     # Without this, the operator's per-sandbox AGT view stays empty
