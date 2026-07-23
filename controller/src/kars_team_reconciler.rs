@@ -2639,16 +2639,19 @@ async fn harvest_and_retire_runs(
                     &Utc::now().to_rfc3339(),
                 )
                 .await;
-                if let Some(milestone) =
-                    crate::team_tasks::awaiting_review_for_run(client, &team_name, &run).await
-                {
-                    process_milestone_review(client, &ns, team, &run, &milestone).await;
-                }
             } else {
                 let _ = crate::team_tasks::requeue_for_run(client, &team_name, &run).await;
             }
         } else if launched {
             stats.active += 1;
+        }
+        // Review decisions commonly arrive after the run has already been
+        // retired. Consume the typed KarsApproval on every harvest pass, not
+        // only in the single reconcile that toggled launch=false.
+        if let Some(milestone) =
+            crate::team_tasks::awaiting_review_for_run(client, &team_name, &run).await
+        {
+            process_milestone_review(client, &ns, team, &run, &milestone).await;
         }
     }
 
