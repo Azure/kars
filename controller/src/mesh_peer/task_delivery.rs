@@ -106,6 +106,26 @@ fn task_contract_payload(
     (payload, digest)
 }
 
+fn initial_milestone_checkpoint(objective: &str) -> Option<serde_json::Value> {
+    let milestone_id = objective.lines().find_map(|line| {
+        line.trim()
+            .strip_prefix("MILESTONE ID:")
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+    })?;
+    Some(json!({
+        "schema": "kars.checkpoint/v1",
+        "milestone_id": milestone_id,
+        "status": "in_progress",
+        "summary": "Controller initialized the durable milestone checkpoint before task delivery.",
+        "acceptance_criteria": [],
+        "artifacts": [],
+        "next_steps": ["Continue the assigned milestone from this checkpoint."],
+        "updated_at": Utc::now().to_rfc3339(),
+        "agent": "kars-controller",
+    }))
+}
+
 async fn read_mission_progress(
     state: &Arc<MeshPeerState>,
     task: &str,
@@ -379,7 +399,19 @@ async fn deliver_for_task(
         .and_then(|o| o.as_str())
         .map(str::to_string)
         .context("KarsTask has no spec.objective")?;
-    let checkpoint_json = read_mission_progress(state, &name, nonce).await;
+    let mut checkpoint_json = read_mission_progress(state, &name, nonce).await;
+    if checkpoint_json.is_none()
+        && let Some(checkpoint) = initial_milestone_checkpoint(&objective)
+    {
+        let progress = PendingAssignmentProgress {
+            clock: Arc::new(AtomicI64::new(Utc::now().timestamp_millis())),
+            namespace: namespace.clone(),
+            task_name: name.clone(),
+            task_id: nonce.to_string(),
+        };
+        write_mission_progress(state, &progress, &checkpoint).await?;
+        checkpoint_json = Some(serde_json::to_string(&checkpoint)?);
+    }
     let (delivery_content, contract_digest) =
         task_contract_payload(task, &objective, checkpoint_json.as_deref());
     tracing::info!(
@@ -1833,8 +1865,8 @@ async fn handle_transient_miss(
 mod tests {
     use super::{
         BASE64_STANDARD, assignment_lease_active, child_assignment_state,
-        is_substantive_deliverable, reply_matches_current_worker, select_newest_agent_did,
-        task_contract_payload,
+        initial_milestone_checkpoint, is_substantive_deliverable, reply_matches_current_worker,
+        select_newest_agent_did, task_contract_payload,
     };
     use base64::Engine as _;
     use kube::api::DynamicObject;
@@ -1898,6 +1930,18 @@ mod tests {
         let (_, split_digest) = task_contract_payload(&split_task, "a", None);
         let (_, joined_digest) = task_contract_payload(&joined_task, "a\u{0000}b", None);
         assert_ne!(split_digest, joined_digest);
+    }
+
+    #[test]
+    fn milestone_objective_gets_controller_checkpoint() {
+        let checkpoint = initial_milestone_checkpoint(
+            "Assigned milestone.\nMILESTONE ID: architecture-and-contract\nTASK: Design",
+        )
+        .expect("checkpoint");
+        assert_eq!(checkpoint["milestone_id"], "architecture-and-contract");
+        assert_eq!(checkpoint["status"], "in_progress");
+        assert_eq!(checkpoint["agent"], "kars-controller");
+        assert!(initial_milestone_checkpoint("Standing charter tick").is_none());
     }
 
     #[test]
