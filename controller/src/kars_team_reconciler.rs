@@ -1592,6 +1592,23 @@ fn is_no_change(output: &str) -> bool {
         && is_banner_only(prefix)
 }
 
+fn is_failure_shaped_output(output: &str) -> bool {
+    let lower = output
+        .trim_start_matches(|character: char| {
+            character.is_whitespace()
+                || matches!(character, '*' | '_' | '#' | '>' | '`' | '-' | '?' | '🔒')
+        })
+        .to_ascii_lowercase();
+    let head: String = lower.chars().take(800).collect();
+    head.starts_with("unexpected tokens remaining in message header")
+        || head.starts_with("assignment progress lease expired")
+        || head.starts_with("native agent failed")
+        || head.starts_with("error processing task")
+        || (head.starts_with("kars sandbox - secure ai runtime") && head.contains("how can i help"))
+        || head.starts_with("now await pr-watcher")
+        || head.starts_with("awaiting handback from")
+}
+
 /// Appended to a team run's operating contract when the team has communication
 /// channels configured (Telegram/Slack/Discord/WhatsApp). Instructs the agent to
 /// proactively keep the operator in the loop over whatever channel is wired.
@@ -2226,7 +2243,7 @@ async fn harvest_and_retire_runs(
             continue;
         };
         let data = cm.data.unwrap_or_default();
-        let ok = data.get("status").map(String::as_str) == Some("ok");
+        let mut ok = data.get("status").map(String::as_str) == Some("ok");
         let tokens = data
             .get("totalTokens")
             .and_then(|t| t.parse::<i64>().ok())
@@ -2237,6 +2254,32 @@ async fn harvest_and_retire_runs(
             .unwrap_or(0);
         stats.tokens_total += tokens.max(0);
         let output = data.get("output").map(String::as_str).unwrap_or_default();
+        if ok && is_failure_shaped_output(output) {
+            ok = false;
+            tracing::warn!(
+                team = %team_name,
+                run = %run,
+                output_head = %output.chars().take(160).collect::<String>(),
+                "team run rejected — ok output matched a terminal failure shape"
+            );
+            let invalid = json!({
+                "data": {
+                    "status": "error",
+                    "failureShape": "output matched a known parser, lease, runtime-banner, or incomplete-handback failure"
+                }
+            });
+            if let Err(error) = cms
+                .patch(&output_cm, &PatchParams::default(), &Patch::Merge(invalid))
+                .await
+            {
+                tracing::warn!(
+                    team = %team_name,
+                    run = %run,
+                    %error,
+                    "could not persist failure-shaped output correction"
+                );
+            }
+        }
         let collaboration_error = if roster_roles.is_empty() {
             None
         } else {
@@ -2305,7 +2348,7 @@ async fn harvest_and_retire_runs(
         let no_change = is_no_change(output);
         let successful =
             collaboration_valid && ok && (no_change || (did_work && !output.trim().is_empty()));
-        if no_change && collaboration_valid {
+        if no_change && collaboration_valid && ok {
             stats.quiet += 1;
         } else if collaboration_valid && did_work && ok && !output.trim().is_empty() {
             stats.succeeded += 1;
@@ -2900,6 +2943,23 @@ mod tests {
              - **Capabilities:** Code execution.\n\n\
              Substantive finding: CI is red.\n\
              [[NO_MATERIAL_CHANGE]] mentioned incorrectly."
+        ));
+    }
+
+    #[test]
+    fn parser_and_incomplete_outputs_are_failure_shaped() {
+        assert!(is_failure_shaped_output(
+            "unexpected tokens remaining in message header: Some(...)"
+        ));
+        assert!(is_failure_shaped_output(
+            "assignment progress lease expired after 90s without renewal"
+        ));
+        assert!(is_failure_shaped_output("Now await pr-watcher."));
+        assert!(!is_failure_shaped_output(
+            "Validated the manifest and collected every required handback."
+        ));
+        assert!(!is_failure_shaped_output(
+            "Completed remediation successfully. A prior child reported assignment progress lease expired, but the replacement delivered."
         ));
     }
 
