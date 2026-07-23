@@ -2171,17 +2171,23 @@ fn validate_collaboration_evidence(
     let role_plan = role_plan.ok_or_else(|| "role-plan.json was not retained".to_string())?;
     let plan: serde_json::Value = serde_json::from_str(role_plan)
         .map_err(|error| format!("invalid role-plan.json: {error}"))?;
-    let selected = planned_roles(&plan, "selected_roles")?;
-    let skipped = planned_roles(&plan, "skipped_roles")?;
+    let dedupe_roles = |roles: Vec<String>| {
+        let mut seen = std::collections::HashSet::new();
+        roles
+            .into_iter()
+            .filter(|role| seen.insert(role.clone()))
+            .collect::<Vec<_>>()
+    };
+    // A failed worker may be replaced by a fresh generation with a different
+    // member name but the same logical role. The plan records both attempts;
+    // truthfulness is evaluated per logical role against the latest spawn.
+    let selected = dedupe_roles(planned_roles(&plan, "selected_roles")?);
+    let skipped = dedupe_roles(planned_roles(&plan, "skipped_roles")?);
     let selected_set: std::collections::HashSet<&str> =
         selected.iter().map(String::as_str).collect();
     let skipped_set: std::collections::HashSet<&str> = skipped.iter().map(String::as_str).collect();
     let roster_set: std::collections::HashSet<&str> =
         roster_roles.iter().map(String::as_str).collect();
-    if selected_set.len() != selected.len() || skipped_set.len() != skipped.len() {
-        return Err("role plan contains duplicate selected/skipped roles".to_string());
-    }
-
     for role in &selected {
         if !roster_set.contains(role.as_str()) {
             return Err(format!("selected role '{role}' is not in the team roster"));
@@ -2480,6 +2486,26 @@ async fn harvest_and_retire_runs(
                 .await;
         }
         let collaboration_valid = collaboration_error.is_none();
+        if collaboration_valid
+            && data.contains_key("collaborationError")
+            && !data.contains_key("failureShape")
+            && !is_failure_shaped_output(output)
+        {
+            ok = true;
+            let corrected = json!({
+                "data": {
+                    "status": "ok",
+                    "collaborationError": serde_json::Value::Null,
+                }
+            });
+            let _ = cms
+                .patch(
+                    &output_cm,
+                    &PatchParams::default(),
+                    &Patch::Merge(corrected),
+                )
+                .await;
+        }
         // A *substantive* deliverable did real work. Prefer the harness-reported
         // signal (tokens spent or artifacts produced), but some harnesses (e.g.
         // Hermes) don't populate token/artifact counts — so also accept a
@@ -3465,6 +3491,35 @@ mod tests {
         )
         .unwrap_err();
         assert!(error.contains("same member"), "{error}");
+    }
+
+    #[test]
+    fn collaboration_evidence_accepts_recovery_generation_for_same_role() {
+        let plan = r#"{
+            "selected_roles": [
+                {"role":"reviewer","name":"reviewer"},
+                {"role":"reviewer","name":"reviewer-recovery"}
+            ],
+            "skipped_roles": []
+        }"#;
+        let collaboration = r#"
+{"event":"assignment_received"}
+{"event":"member_spawn_requested","member":"reviewer","role":"reviewer"}
+{"event":"assignment_sent","member":"reviewer"}
+{"event":"handback_received","member":"reviewer","outcome":"failed"}
+{"event":"member_spawn_requested","member":"reviewer-recovery","role":"reviewer"}
+{"event":"assignment_sent","member":"reviewer-recovery"}
+{"event":"handback_received","member":"reviewer-recovery","outcome":"success"}
+"#;
+        assert!(
+            validate_collaboration_evidence(
+                Some(plan),
+                Some(collaboration),
+                &["reviewer".into()],
+                &["reviewer".into()],
+            )
+            .is_ok()
+        );
     }
 
     #[test]
