@@ -85,10 +85,12 @@ pub fn next_pending(tasks: &[TeamTask]) -> Option<&TeamTask> {
     })
 }
 
-/// Whether the team already has a task in flight (its run hasn't delivered yet),
-/// so we don't start a second task concurrently.
+/// Whether the team already has a task in flight or waiting for human review,
+/// so no independent later task can bypass the current approval boundary.
 pub fn has_active(tasks: &[TeamTask]) -> bool {
-    tasks.iter().any(|t| t.status == "active")
+    tasks
+        .iter()
+        .any(|task| matches!(task.status.as_str(), "active" | "awaiting_review"))
 }
 
 const MAX_TASK_UPDATE_RETRIES: usize = 8;
@@ -469,6 +471,7 @@ mod tests {
         let mut tasks = vec![milestone];
         assert!(mark_done(&mut tasks, "run-1", "2026-07-20T12:00:00Z"));
         assert_eq!(tasks[0].status, "awaiting_review");
+        assert!(has_active(&tasks));
         assert_eq!(tasks[0].done_at.as_deref(), Some("2026-07-20T12:00:00Z"));
     }
 
