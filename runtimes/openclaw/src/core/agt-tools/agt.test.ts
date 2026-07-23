@@ -7,6 +7,7 @@ import {
   isMeshAwaitContentMessage,
   isReplyForAssignment,
   isTaskProgressMessage,
+  registryCandidateBelongsToSpawn,
 } from "./agt.js";
 
 function message(
@@ -168,6 +169,24 @@ describe("assignment wait window", () => {
         90_000,
       ),
     ).toBe(false);
+  });
+
+  describe("respawn registry identity", () => {
+    it("rejects a stale identity from before the respawn request", () => {
+      expect(registryCandidateBelongsToSpawn(
+        { last_seen: "2026-07-23T18:00:00.000Z" },
+        Date.parse("2026-07-23T18:01:00.000Z"),
+      )).toBe(false);
+    });
+
+    it("accepts the new identity and legacy records without timestamps", () => {
+      const requestedAt = Date.parse("2026-07-23T18:01:00.000Z");
+      expect(registryCandidateBelongsToSpawn(
+        { last_seen: "2026-07-23T18:01:01.000Z" },
+        requestedAt,
+      )).toBe(true);
+      expect(registryCandidateBelongsToSpawn({}, requestedAt)).toBe(true);
+    });
   });
 
   describe("mesh await content filtering", () => {

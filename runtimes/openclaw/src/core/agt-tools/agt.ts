@@ -119,6 +119,17 @@ export function assignmentWaitWindowOpen(
   return now - idleLeaseStartedAt < idleLeaseMs && now - overallStartedAt < waitSliceMs;
 }
 
+export function registryCandidateBelongsToSpawn(
+  candidate: Record<string, unknown>,
+  spawnRequestedAt: number,
+  clockSkewMs = 5_000,
+): boolean {
+  const raw = candidate.last_seen ?? candidate.registered_at ?? candidate.created_at;
+  if (typeof raw !== "string") return true;
+  const seenAt = Date.parse(raw);
+  return !Number.isFinite(seenAt) || seenAt >= spawnRequestedAt - clockSkewMs;
+}
+
 // 2-arg wrapper around the canonical resolveAmidByName(name, routerUrl, opts?).
 // Kept local so existing tool bodies don't have to thread routerUrl.
 async function resolveAmidByName(
@@ -580,6 +591,7 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
         };
       }
       try {
+        const spawnRequestedAt = Date.now();
         appendCollaborationEvent({
           event: "member_spawn_requested",
           member: String(params.name || ""),
@@ -665,7 +677,11 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           // actual send path resolves through resolveAmidByName which will hit the
           // registry once status flips Running, picking the freshest live entry.
           if (!amid && deps.meshClient()) {
-            const resolved = await resolveAmidByName(meshName, { bypassCache: true });
+            const resolved = await resolveAmidByName(meshName, {
+              bypassCache: true,
+              scopeFilter: (candidate) =>
+                registryCandidateBelongsToSpawn(candidate, spawnRequestedAt),
+            });
             if (resolved) {
               amid = resolved;
               nameToAmid.set(agentName, resolved);
@@ -2492,15 +2508,19 @@ export function registerAgtTools(api: AnyApi, deps: AgtToolsDeps): void {
           await routerCall("DELETE", `/agt/trust/${encodeURIComponent(params.name as string)}`);
         } catch { /* trust cleanup is best-effort */ }
 
-        // Clean AMID caches
-        const amid = nameToAmid.get(params.name as string);
-        if (amid) {
-          amidToName.delete(amid);
-          nameToAmid.delete(params.name as string);
+        // Clean both the agent-facing alias and the parent-scoped registry name.
+        // Immediate same-name respawns must not reuse the destroyed identity
+        // while its registry heartbeat is still aging out.
+        const destroyedName = params.name as string;
+        const destroyedMeshName = spawnedMeshNames.get(destroyedName);
+        for (const cacheName of [destroyedName, destroyedMeshName]) {
+          if (!cacheName) continue;
+          const amid = nameToAmid.get(cacheName);
+          if (amid) amidToName.delete(amid);
+          nameToAmid.delete(cacheName);
         }
         // Drop the destroyed sibling from the roster so future mesh_send
         // calls don't advertise a peer that no longer exists.
-        const destroyedName = params.name as string;
         spawnedRoster.delete(destroyedName);
         spawnedMeshNames.delete(destroyedName);
         for (const [messageId, pending] of pendingMeshAssignments) {
