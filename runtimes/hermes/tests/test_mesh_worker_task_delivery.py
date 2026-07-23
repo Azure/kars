@@ -148,7 +148,10 @@ async def test_task_request_runs_inprocess_and_wraps_task_response(
     await mesh_worker._handle_message(client, _FakeMsg(CONTROLLER_DID, envelope))
 
     # 1) the in-process agent got the OBJECTIVE, not the raw JSON envelope.
-    assert prompts == ["Summarize the repo"]
+    assert len(prompts) == 1
+    assert prompts[0].startswith("Summarize the repo")
+    assert "automatically returns your final response" in prompts[0]
+    assert "Do not call kars_mesh_send to 'parent'" in prompts[0]
 
     # 2) reply is a task_response FederationMessage sent by DID to the controller.
     assert len(client.sent) == 1

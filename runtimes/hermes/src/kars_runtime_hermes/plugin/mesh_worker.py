@@ -675,7 +675,15 @@ async def _execute_task_request(
     loop = asyncio.get_running_loop()
     tel_cursor = await loop.run_in_executor(None, _telemetry_cursor)
     artifact_snapshot = await loop.run_in_executor(None, _snapshot_workspace)
-    agent_future = loop.run_in_executor(None, _run_hermes_agent_inprocess, prompt_text)
+    delivery_prompt = (
+        f"{prompt_text}\n\n"
+        "Kars handback protocol: complete the assignment in this response. "
+        "Do not call kars_mesh_send to 'parent' or to the assigning agent for the "
+        "final handback; the mesh worker automatically returns your final response "
+        "as the correlated task_response. Use mesh tools only for deliberate peer "
+        "collaboration required by the assignment."
+    )
+    agent_future = loop.run_in_executor(None, _run_hermes_agent_inprocess, delivery_prompt)
     timed_out = False
 
     try:
