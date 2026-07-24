@@ -21,6 +21,7 @@
 - [Architecture overview](architecture.md)
 - [Architecture diagrams](architecture-diagrams.md)
 - [Kars and Kars Bridge](concepts/kars-and-bridge.md)
+- [Durable team workflows](concepts/durable-team-workflows.md)
 - [Runtimes](runtimes.md)
   - [Runtime contract (BYO)](runtimes/CONTRACT.md)
 - [A2A gateway (architecture)](architecture/a2a-gateway.md)

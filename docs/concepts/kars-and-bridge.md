@@ -42,6 +42,10 @@ Use Bridge when you want:
 - human approval workflows and inboxes;
 - visual evidence, receipts, budgets, MCP, skills, and fleet operations.
 
+For the complete relationship between teams, milestones, runs, activity,
+artifacts, deliverables, approvals, and memory, see
+[Durable team workflows](durable-team-workflows.md).
+
 ## Compatibility
 
 Bridge evolves alongside Kars APIs. A Bridge release must publish:

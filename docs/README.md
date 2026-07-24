@@ -17,6 +17,7 @@ docs distinguish:
 | Install with Helm on an existing cluster | [Helm installation](how-to/helm-installation.md) |
 | Add Playwright or another MCP | [Managed MCP tutorial](tutorials/managed-mcp.md) |
 | Understand Kars versus Kars Bridge | [Product boundary](concepts/kars-and-bridge.md) |
+| Understand durable team runs, checkpoints, review, and memory | [Durable team workflows](concepts/durable-team-workflows.md) |
 | Assess platform support | [Compatibility matrix](reference/compatibility.md) |
 | Debug a failure | [Troubleshooting](operations/troubleshooting.md) |
 | Review the security model | [Security](security.md) |
@@ -53,6 +54,7 @@ readiness.
 - [Architecture](architecture.md)
 - [Architecture diagrams](architecture-diagrams.md)
 - [Kars and Kars Bridge](concepts/kars-and-bridge.md)
+- [Durable team workflows](concepts/durable-team-workflows.md)
 - [Runtimes](runtimes.md)
 - [MCP](mcp.md)
 - [AgentMesh and AGT boundary](architecture/agt-boundary.md)
