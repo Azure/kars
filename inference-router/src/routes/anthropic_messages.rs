@@ -30,6 +30,25 @@ use crate::provider::{ProviderError, ProviderKind};
 use crate::proxy;
 use std::sync::Arc;
 
+/// Framing / hop-by-hop headers that must not be copied from an
+/// upstream response onto a rebuilt one — hyper re-frames the body
+/// itself, and a stale `transfer-encoding: chunked` (Anthropic over
+/// HTTP/1.1) makes it abort the connection without a response.
+fn is_hop_by_hop(name: &str) -> bool {
+    matches!(
+        name,
+        "connection"
+            | "content-length"
+            | "keep-alive"
+            | "proxy-authenticate"
+            | "proxy-authorization"
+            | "te"
+            | "trailer"
+            | "transfer-encoding"
+            | "upgrade"
+    )
+}
+
 fn deny_response(status: StatusCode, message: &str, code: &str) -> axum::response::Response {
     (
         status,
@@ -544,6 +563,9 @@ async fn forward_anthropic_passthrough(
                 let mut resp = axum::response::Response::builder().status(status);
                 if let Some(h) = resp.headers_mut() {
                     for (n, v) in resp_headers.iter() {
+                        if is_hop_by_hop(n.as_str()) {
+                            continue;
+                        }
                         h.insert(n.clone(), v.clone());
                     }
                     h.insert(
@@ -651,6 +673,9 @@ async fn forward_anthropic_passthrough(
                 let mut resp = axum::response::Response::builder().status(status);
                 if let Some(h) = resp.headers_mut() {
                     for (n, v) in resp_headers.iter() {
+                        if is_hop_by_hop(n.as_str()) {
+                            continue;
+                        }
                         h.insert(n.clone(), v.clone());
                     }
                     if !h.contains_key(axum::http::header::CONTENT_TYPE) {
