@@ -25,7 +25,10 @@ use futures::stream::StreamExt;
 use serde_json::{Value, json};
 
 use super::AppState;
+use crate::guardrails::{self, Direction, GuardrailPipeline};
+use crate::provider::{ProviderError, ProviderKind};
 use crate::proxy;
+use std::sync::Arc;
 
 fn deny_response(status: StatusCode, message: &str, code: &str) -> axum::response::Response {
     (
@@ -264,11 +267,98 @@ pub(super) async fn anthropic_messages(
     // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
     crate::routes::apply_model_preference_override(&mut upstream, &policy);
 
-    // Copilot exposes a native Anthropic Messages endpoint at /v1/messages.
-    // Skip translation entirely and forward the body as-is, preserving the
-    // streaming + tool_use + multi-modal contracts of the Anthropic SDK.
-    if proxy::is_copilot_endpoint(&upstream.endpoint) {
-        return forward_anthropic_passthrough(state, sandbox_name, headers, body, upstream).await;
+    // Multi-provider slice: retarget at the policy-selected provider.
+    // Fails closed — see `routes::apply_provider_resolution`.
+    if let Err(e) = crate::routes::apply_provider_resolution(&state, &mut upstream, &policy) {
+        tracing::warn!(
+            target: "inference.audit",
+            sandbox = %sandbox_name,
+            inference_policy_digest = %policy.digest,
+            decision = "deny",
+            gate = "provider_resolution",
+            error = %e,
+            "InferencePolicy provider could not be resolved (anthropic route)"
+        );
+        let status = match e {
+            ProviderError::Unimplemented { .. } => StatusCode::NOT_IMPLEMENTED,
+            _ => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        return deny_response(status, &e.to_string(), "api_error");
+    }
+
+    // Guardrail pipeline — build fails closed on declared-but-
+    // unbuildable stages, input scan runs before any upstream forward.
+    let guardrail_pipeline =
+        match super::chat_completions::build_guardrail_pipeline(&state, &policy) {
+            Ok(p) => p,
+            Err(e) => {
+                tracing::warn!(
+                    target: "inference.audit",
+                    sandbox = %sandbox_name,
+                    inference_policy_digest = %policy.digest,
+                    decision = "deny",
+                    gate = "guardrail_config",
+                    error = %e,
+                    "guardrail pipeline could not be built (anthropic route) — failing closed"
+                );
+                return deny_response(StatusCode::SERVICE_UNAVAILABLE, &e.to_string(), "api_error");
+            }
+        };
+    if let Some(ref p) = guardrail_pipeline
+        && p.covers(Direction::Input)
+    {
+        let input_text = guardrails::extract_anthropic_input_text(&req_json);
+        match p.scan(&input_text, Direction::Input).await {
+            Ok(None) => {}
+            Ok(Some(v)) => {
+                tracing::warn!(
+                    target: "inference.audit",
+                    sandbox = %sandbox_name,
+                    inference_policy_digest = %policy.digest,
+                    decision = "deny",
+                    gate = "guardrail_input",
+                    categories = ?v.categories,
+                    "guardrail pipeline blocked request (anthropic route)"
+                );
+                return deny_response(
+                    StatusCode::FORBIDDEN,
+                    &v.message(),
+                    "content_policy_violation",
+                );
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "inference.audit",
+                    sandbox = %sandbox_name,
+                    inference_policy_digest = %policy.digest,
+                    decision = "deny",
+                    gate = "guardrail_input",
+                    error = %e,
+                    "guardrail pipeline unavailable (anthropic route) — failing closed"
+                );
+                return deny_response(StatusCode::BAD_GATEWAY, &e.to_string(), "api_error");
+            }
+        }
+    }
+
+    // Native Anthropic Messages pass-through — either the policy
+    // selected `provider: anthropic` (upstream is api.anthropic.com
+    // with the router-held API key) or the endpoint is GitHub Copilot
+    // (native /v1/messages). No translation: streaming, tool_use and
+    // multi-modal content flow through unchanged.
+    if upstream.provider == ProviderKind::Anthropic
+        || proxy::is_copilot_endpoint(&upstream.endpoint)
+    {
+        return forward_anthropic_passthrough(
+            state,
+            sandbox_name,
+            headers,
+            body,
+            upstream,
+            guardrail_pipeline,
+            policy.digest.clone(),
+        )
+        .await;
     }
 
     // Translate Anthropic -> OpenAI chat completions request shape.
@@ -337,6 +427,46 @@ pub(super) async fn anthropic_messages(
                 }
             };
             let anthropic_resp = openai_to_anthropic(&openai_resp, &requested_model);
+
+            // Guardrail output scan (buffered, translated path).
+            if let Some(p) = guardrail_pipeline
+                .as_ref()
+                .filter(|p| p.covers(Direction::Output))
+            {
+                let text = guardrails::extract_anthropic_output_text(&anthropic_resp);
+                match p.scan(&text, Direction::Output).await {
+                    Ok(None) => {}
+                    Ok(Some(v)) => {
+                        tracing::warn!(
+                            target: "inference.audit",
+                            sandbox = %sandbox_name,
+                            inference_policy_digest = %policy.digest,
+                            decision = "deny",
+                            gate = "guardrail_output",
+                            categories = ?v.categories,
+                            "guardrail pipeline blocked translated response (anthropic route)"
+                        );
+                        return deny_response(
+                            StatusCode::FORBIDDEN,
+                            &v.message(),
+                            "content_policy_violation",
+                        );
+                    }
+                    Err(e) => {
+                        tracing::warn!(
+                            target: "inference.audit",
+                            sandbox = %sandbox_name,
+                            inference_policy_digest = %policy.digest,
+                            decision = "deny",
+                            gate = "guardrail_output",
+                            error = %e,
+                            "guardrail pipeline unavailable (anthropic route) — failing closed"
+                        );
+                        return deny_response(StatusCode::BAD_GATEWAY, &e.to_string(), "api_error");
+                    }
+                }
+            }
+
             (StatusCode::OK, Json(anthropic_resp)).into_response()
         }
         Err(e) => {
@@ -362,6 +492,8 @@ async fn forward_anthropic_passthrough(
     headers: HeaderMap,
     body: Bytes,
     upstream: crate::proxy::UpstreamConfig,
+    guardrail_pipeline: Option<Arc<GuardrailPipeline>>,
+    policy_digest: String,
 ) -> axum::response::Response {
     let is_stream = serde_json::from_slice::<Value>(&body)
         .ok()
@@ -393,7 +525,22 @@ async fn forward_anthropic_passthrough(
         .await
         {
             Ok((status, resp_headers, stream)) => {
-                let body = Body::from_stream(stream.map(|c| c.map_err(std::io::Error::other)));
+                // Guardrail output scan (streaming, Anthropic event
+                // dialect): hold-and-release — see guardrails.rs.
+                let guarded = match guardrail_pipeline
+                    .as_ref()
+                    .filter(|p| p.covers(Direction::Output))
+                {
+                    Some(p) => guardrails::guard_sse_stream(
+                        stream,
+                        p.clone(),
+                        guardrails::StreamDialect::AnthropicMessages,
+                        sandbox_name.to_string(),
+                        policy_digest.clone(),
+                    ),
+                    None => stream,
+                };
+                let body = Body::from_stream(guarded.map(|c| c.map_err(std::io::Error::other)));
                 let mut resp = axum::response::Response::builder().status(status);
                 if let Some(h) = resp.headers_mut() {
                     for (n, v) in resp_headers.iter() {
@@ -451,6 +598,51 @@ async fn forward_anthropic_passthrough(
                     let total = input + output;
                     if total > 0 {
                         state.budget.record_usage(sandbox_name, total).await;
+                    }
+                }
+
+                // Guardrail output scan (buffered, Anthropic shape).
+                if status.is_success()
+                    && let Some(p) = guardrail_pipeline
+                        .as_ref()
+                        .filter(|p| p.covers(Direction::Output))
+                    && let Ok(body_json) = serde_json::from_slice::<Value>(&resp_body)
+                {
+                    let text = guardrails::extract_anthropic_output_text(&body_json);
+                    match p.scan(&text, Direction::Output).await {
+                        Ok(None) => {}
+                        Ok(Some(v)) => {
+                            tracing::warn!(
+                                target: "inference.audit",
+                                sandbox = %sandbox_name,
+                                inference_policy_digest = %policy_digest,
+                                decision = "deny",
+                                gate = "guardrail_output",
+                                categories = ?v.categories,
+                                "guardrail pipeline blocked buffered response (anthropic route)"
+                            );
+                            return deny_response(
+                                StatusCode::FORBIDDEN,
+                                &v.message(),
+                                "content_policy_violation",
+                            );
+                        }
+                        Err(e) => {
+                            tracing::warn!(
+                                target: "inference.audit",
+                                sandbox = %sandbox_name,
+                                inference_policy_digest = %policy_digest,
+                                decision = "deny",
+                                gate = "guardrail_output",
+                                error = %e,
+                                "guardrail pipeline unavailable (anthropic route) — failing closed"
+                            );
+                            return deny_response(
+                                StatusCode::BAD_GATEWAY,
+                                &e.to_string(),
+                                "api_error",
+                            );
+                        }
                     }
                 }
 

@@ -18,6 +18,7 @@ use crate::copilot_auth::{
     self, COPILOT_INTEGRATION_ID, CopilotTokenCache, EDITOR_PLUGIN_VERSION, EDITOR_VERSION,
 };
 use crate::metrics;
+use crate::provider::ProviderKind;
 use std::sync::Arc;
 
 /// Upstream configuration for a single request.
@@ -26,6 +27,39 @@ pub struct UpstreamConfig {
     pub endpoint: String,
     pub deployment: String,
     pub sandbox_name: String,
+    /// Which provider family `endpoint` belongs to — drives URL shape
+    /// and auth scheme. `AzureOpenAI` preserves the historic
+    /// behaviour (incl. GitHub Models / Copilot endpoint detection).
+    pub provider: ProviderKind,
+    /// Static API key for providers that use one (`Anthropic`).
+    /// Filled by `provider::resolve` from router-side config only —
+    /// never from the inbound request.
+    pub api_key: Option<String>,
+}
+
+impl UpstreamConfig {
+    /// The historic constructor shape: an Azure OpenAI / Foundry
+    /// upstream authenticated via Workload Identity / API-key mode.
+    #[must_use]
+    pub fn azure(endpoint: String, deployment: String, sandbox_name: String) -> Self {
+        Self {
+            endpoint,
+            deployment,
+            sandbox_name,
+            provider: ProviderKind::AzureOpenAI,
+            api_key: None,
+        }
+    }
+}
+
+/// Credential material resolved for one upstream request. Which
+/// header it lands in is provider-specific (`Authorization: Bearer`
+/// vs `x-api-key` vs nothing at all for unauthenticated in-cluster
+/// Ollama).
+pub enum UpstreamCredential {
+    Bearer(String),
+    AnthropicApiKey(String),
+    None,
 }
 
 /// Determine the correct token audience for the upstream endpoint.
@@ -51,7 +85,7 @@ fn token_audience(endpoint: &str) -> &'static str {
 fn build_upstream_headers(
     request_headers: &HeaderMap,
     _auth: &WorkloadIdentityAuth,
-    token: &str,
+    credential: &UpstreamCredential,
     endpoint: &str,
 ) -> Result<HeaderMap> {
     let mut headers = HeaderMap::new();
@@ -68,13 +102,32 @@ fn build_upstream_headers(
         }
     }
 
-    // Both API-key and Entra modes use Authorization: Bearer for the unified
-    // /openai/v1/ endpoint format. Azure OpenAI accepts API keys as Bearer tokens.
-    // Copilot also uses Bearer (with the exchanged Copilot JWT).
-    headers.insert(
-        "authorization",
-        HeaderValue::from_str(&format!("Bearer {token}")).context("Invalid token")?,
-    );
+    match credential {
+        // Both API-key and Entra modes use Authorization: Bearer for the unified
+        // /openai/v1/ endpoint format. Azure OpenAI accepts API keys as Bearer tokens.
+        // Copilot also uses Bearer (with the exchanged Copilot JWT).
+        UpstreamCredential::Bearer(token) => {
+            headers.insert(
+                "authorization",
+                HeaderValue::from_str(&format!("Bearer {token}")).context("Invalid token")?,
+            );
+        }
+        // Anthropic's Messages API authenticates with `x-api-key` and
+        // requires an `anthropic-version` header. The inbound SDK
+        // value (when present) was already copied through above —
+        // only the default is filled in here.
+        UpstreamCredential::AnthropicApiKey(key) => {
+            headers.insert(
+                "x-api-key",
+                HeaderValue::from_str(key).context("Invalid Anthropic API key")?,
+            );
+            headers
+                .entry("anthropic-version")
+                .or_insert(HeaderValue::from_static("2023-06-01"));
+        }
+        // Unauthenticated upstream (in-cluster Ollama).
+        UpstreamCredential::None => {}
+    }
     headers
         .entry("content-type")
         .or_insert(HeaderValue::from_static("application/json"));
@@ -129,6 +182,38 @@ pub async fn token_for_endpoint(
         }
     } else {
         auth.get_token(token_audience(endpoint)).await
+    }
+}
+
+/// Provider-aware credential resolution for a single upstream request.
+///
+/// - `AzureOpenAI` → the historic [`token_for_endpoint`] path (Azure
+///   WI/IMDS, API key, or Copilot JWT depending on endpoint).
+/// - `Anthropic` → the static API key `provider::resolve` copied from
+///   router-side config onto `UpstreamConfig.api_key`. Its absence
+///   here is a programmer error (resolution fails closed earlier),
+///   surfaced as a clean 502 rather than a panic.
+/// - `Ollama` → no credential.
+pub async fn credential_for_upstream(
+    auth: &WorkloadIdentityAuth,
+    copilot: Option<&CopilotTokenCache>,
+    upstream: &UpstreamConfig,
+) -> Result<UpstreamCredential> {
+    match upstream.provider {
+        ProviderKind::AzureOpenAI => token_for_endpoint(auth, copilot, &upstream.endpoint)
+            .await
+            .map(UpstreamCredential::Bearer),
+        ProviderKind::Anthropic => upstream
+            .api_key
+            .clone()
+            .map(UpstreamCredential::AnthropicApiKey)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "Anthropic upstream selected but no API key on UpstreamConfig — \
+                     provider resolution must run before forward()"
+                )
+            }),
+        ProviderKind::Ollama => Ok(UpstreamCredential::None),
     }
 }
 
@@ -194,20 +279,26 @@ pub async fn forward(
 
     let (upstream_url, body) = build_upstream_url(auth, upstream, path, request_body)?;
 
-    let mode = if is_copilot_endpoint(&upstream.endpoint) {
-        "copilot"
-    } else if auth.is_api_key_mode() {
-        "dev"
-    } else {
-        "foundry"
+    let mode = match upstream.provider {
+        ProviderKind::Anthropic => "anthropic",
+        ProviderKind::Ollama => "ollama",
+        ProviderKind::AzureOpenAI => {
+            if is_copilot_endpoint(&upstream.endpoint) {
+                "copilot"
+            } else if auth.is_api_key_mode() {
+                "dev"
+            } else {
+                "foundry"
+            }
+        }
     };
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = %mode, "Forwarding inference");
 
-    let token = token_for_endpoint(auth, copilot, &upstream.endpoint)
+    let credential = credential_for_upstream(auth, copilot, upstream)
         .await
         .context("Failed to acquire auth token")?;
 
-    let headers = build_upstream_headers(request_headers, auth, &token, &upstream.endpoint)?;
+    let headers = build_upstream_headers(request_headers, auth, &credential, &upstream.endpoint)?;
 
     tracing::info!(sandbox = %upstream.sandbox_name, url = %upstream_url, body_len = body.len(), "Sending upstream request");
 
@@ -430,10 +521,10 @@ pub async fn forward_stream(
 
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = "stream", "Forwarding SSE stream");
 
-    let token = token_for_endpoint(&auth, copilot.as_deref(), &upstream.endpoint)
+    let credential = credential_for_upstream(&auth, copilot.as_deref(), &upstream)
         .await
         .context("Failed to acquire auth token")?;
-    let headers = build_upstream_headers(&request_headers, &auth, &token, &upstream.endpoint)?;
+    let headers = build_upstream_headers(&request_headers, &auth, &credential, &upstream.endpoint)?;
 
     let start = Instant::now();
 
@@ -591,6 +682,10 @@ fn is_github_models_endpoint(endpoint: &str) -> bool {
 /// Uses the unified /openai/v1/ format — works with both API-key and Entra auth.
 ///
 /// Routing rules:
+///  - Anthropic: no path rewrite — callers pass Messages-API paths
+///    (`v1/messages`) verbatim.
+///  - Ollama: OpenAI-compat lives under `/v1/` — `chat/completions`
+///    becomes `{endpoint}/v1/chat/completions`.
 ///  - GitHub Copilot (`api.githubcopilot.com`): no path rewrite; OpenClaw
 ///    sends OpenAI-shape to `/chat/completions` and Anthropic-shape to
 ///    `/v1/messages`. We forward those paths unchanged.
@@ -602,20 +697,34 @@ fn build_upstream_url(
     path: &str,
     request_body: Bytes,
 ) -> Result<(String, Bytes)> {
-    let url = if is_github_models_endpoint(&upstream.endpoint)
-        || is_copilot_endpoint(&upstream.endpoint)
-    {
-        format!(
+    let url = match upstream.provider {
+        ProviderKind::Anthropic => format!(
             "{}/{}",
             upstream.endpoint.trim_end_matches('/'),
             path.trim_start_matches('/'),
-        )
-    } else {
-        format!(
-            "{}/openai/v1/{}",
+        ),
+        ProviderKind::Ollama => format!(
+            "{}/v1/{}",
             upstream.endpoint.trim_end_matches('/'),
-            path.trim_start_matches('/'),
-        )
+            path.trim_start_matches('/').trim_start_matches("v1/"),
+        ),
+        ProviderKind::AzureOpenAI => {
+            if is_github_models_endpoint(&upstream.endpoint)
+                || is_copilot_endpoint(&upstream.endpoint)
+            {
+                format!(
+                    "{}/{}",
+                    upstream.endpoint.trim_end_matches('/'),
+                    path.trim_start_matches('/'),
+                )
+            } else {
+                format!(
+                    "{}/openai/v1/{}",
+                    upstream.endpoint.trim_end_matches('/'),
+                    path.trim_start_matches('/'),
+                )
+            }
+        }
     };
     let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body)
     {
@@ -642,6 +751,7 @@ fn build_upstream_url(
         // requesting reasoning encryption on a stripped input is a no-op
         // for output and Azure rejects it on the input side anyway.
         if path.trim_start_matches('/').starts_with("responses")
+            && upstream.provider == ProviderKind::AzureOpenAI
             && !is_github_models_endpoint(&upstream.endpoint)
             && !is_copilot_endpoint(&upstream.endpoint)
             && let Some(obj) = body_json.as_object_mut()

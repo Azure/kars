@@ -165,6 +165,22 @@ pub struct LoadedInferencePolicy {
     /// back to the env-driven default deployment (back-compat).
     pub model_preference: Option<ModelPreference>,
 
+    /// `spec.provider` — multi-provider slice. Raw kebab-case tag
+    /// (`azure-openai` / `anthropic` / `ollama` / `bedrock`);
+    /// interpretation (including the unimplemented-provider
+    /// fail-closed path) happens per request in
+    /// [`crate::provider::resolve`] so a policy naming a provider
+    /// this build can't serve degrades that *request*, not the whole
+    /// policy load. `None` ⇒ env-driven Azure upstream (back-compat).
+    pub provider: Option<String>,
+
+    /// `spec.guardrails[]` — pluggable guardrail pipeline stages.
+    /// Empty when the CR omits the block. Stage validity (known
+    /// backend, credential present) is checked at pipeline build
+    /// time in [`crate::guardrails::GuardrailPipeline::from_stages`],
+    /// where a request exists to fail closed.
+    pub guardrails: Vec<crate::guardrails::GuardrailStageCfg>,
+
     /// Whole profile JSON, kept so subsequent sub-slices can pick up
     /// other axes without a new loader.
     pub raw: serde_json::Value,
@@ -327,6 +343,19 @@ pub fn load_inference_policy_from_dir(
             .unwrap_or(&serde_json::Value::Null),
     );
 
+    // Multi-provider slice: raw provider tag + guardrail stages.
+    // Both parse liberally here (defence-in-depth: never crash the
+    // data plane on schema drift); enforcement-relevant strictness
+    // lives at the per-request consumption sites.
+    let provider = parsed
+        .get("provider")
+        .and_then(|p| p.as_str())
+        .filter(|p| !p.trim().is_empty())
+        .map(str::to_string);
+    let guardrails = crate::guardrails::GuardrailStageCfg::from_compiled_json(
+        parsed.get("guardrails").unwrap_or(&serde_json::Value::Null),
+    );
+
     // Digest layout matches controller `inference_policy_digest`:
     // length-prefixed (name, body) hashed with sha256.
     let canonical = canonical_bytes_for_digest(INFERENCE_POLICY_FILENAME, &body);
@@ -342,6 +371,8 @@ pub fn load_inference_policy_from_dir(
         daily_tokens = ?daily_tokens,
         monthly_tokens = ?monthly_tokens,
         content_safety_active = content_safety.is_active(),
+        provider = ?provider,
+        guardrail_stages = guardrails.len(),
         primary_deployment = ?model_preference.as_ref().map(|m| m.primary.deployment.as_str()),
         fallback_count = model_preference.as_ref().map(|m| m.fallback.len()).unwrap_or(0),
         // Surface the actual fallback chain (not just the count) so ops
@@ -383,6 +414,8 @@ pub fn load_inference_policy_from_dir(
         monthly_tokens,
         content_safety,
         model_preference,
+        provider,
+        guardrails,
         raw: parsed,
     })
 }
@@ -507,6 +540,13 @@ pub struct InferencePolicySnapshot {
     /// `primary.deployment`; the `fallback` chain is captured for
     /// Slice 2d.2's health-aware failover.
     pub model_preference: Option<ModelPreference>,
+    /// `spec.provider` — raw tag consumed by
+    /// [`crate::routes::apply_provider_resolution`] per request.
+    pub provider: Option<String>,
+    /// `spec.guardrails[]` — consumed by
+    /// [`crate::guardrails::GuardrailPipeline::from_stages`] per
+    /// request. Empty ⇒ no pipeline.
+    pub guardrails: Vec<crate::guardrails::GuardrailStageCfg>,
 }
 
 /// Take a single read-lock snapshot of the currently-loaded policy.
@@ -529,6 +569,8 @@ pub async fn current_snapshot(handle: &LoadedInferencePolicyHandle) -> Inference
             monthly_tokens: p.monthly_tokens,
             content_safety: p.content_safety.clone(),
             model_preference: p.model_preference.clone(),
+            provider: p.provider.clone(),
+            guardrails: p.guardrails.clone(),
         })
         .unwrap_or_default()
 }
@@ -743,6 +785,11 @@ mod tests {
                     deployment: "gpt-5.4-us".into(),
                 }],
             }),
+            provider: Some("anthropic".into()),
+            guardrails: vec![crate::guardrails::GuardrailStageCfg {
+                provider: "openai-moderation".into(),
+                apply_to: crate::guardrails::ApplyTo::Both,
+            }],
             raw: serde_json::Value::Null,
         };
         let handle: LoadedInferencePolicyHandle =
@@ -761,6 +808,73 @@ mod tests {
         assert_eq!(mp.primary.deployment, "gpt-5.4-eu");
         assert_eq!(mp.fallback.len(), 1);
         assert_eq!(mp.fallback[0].deployment, "gpt-5.4-us");
+        assert_eq!(snap.provider.as_deref(), Some("anthropic"));
+        assert_eq!(snap.guardrails.len(), 1);
+        assert_eq!(snap.guardrails[0].provider, "openai-moderation");
+    }
+
+    #[test]
+    fn loads_provider_and_guardrails_when_present() {
+        // Multi-provider slice: compiled JSON carries `provider` +
+        // `guardrails`; the loader lifts both onto
+        // `LoadedInferencePolicy` verbatim (interpretation is
+        // per-request).
+        let tmp = TempDir::new().unwrap();
+        let profile = serde_json::json!({
+            "appliesTo": { "sandboxName": "agent-x", "sandboxMatchLabels": {}, "action": null },
+            "tokenBudget": null,
+            "contentSafety": null,
+            "modelPreference": null,
+            "provider": "ollama",
+            "guardrails": [
+                { "provider": "openai-moderation", "applyTo": "input" },
+                { "provider": "openai-moderation", "applyTo": null }
+            ],
+            "displayName": null
+        });
+        write_profile(tmp.path(), INFERENCE_POLICY_FILENAME, &profile);
+
+        let reg = registry();
+        let outcome = load_inference_policy_from_dir(tmp.path().to_str().unwrap(), &reg);
+        let loaded = match outcome {
+            LoadOutcome::Loaded(p) => p,
+            other => panic!("expected Loaded, got {other:?}"),
+        };
+        assert_eq!(loaded.provider.as_deref(), Some("ollama"));
+        assert_eq!(loaded.guardrails.len(), 2);
+        assert_eq!(loaded.guardrails[0].provider, "openai-moderation");
+        assert_eq!(
+            loaded.guardrails[0].apply_to,
+            crate::guardrails::ApplyTo::Input
+        );
+        assert_eq!(
+            loaded.guardrails[1].apply_to,
+            crate::guardrails::ApplyTo::Both
+        );
+    }
+
+    #[test]
+    fn absent_provider_and_guardrails_keep_backcompat_defaults() {
+        // Pre-slice compiled profiles (no `provider` / `guardrails`
+        // keys at all) must load exactly as before.
+        let tmp = TempDir::new().unwrap();
+        let profile = serde_json::json!({
+            "appliesTo": { "sandboxName": null, "sandboxMatchLabels": {}, "action": null },
+            "tokenBudget": { "perRequestTokens": 1024 },
+            "contentSafety": null,
+            "modelPreference": null,
+            "displayName": null
+        });
+        write_profile(tmp.path(), INFERENCE_POLICY_FILENAME, &profile);
+
+        let reg = registry();
+        let outcome = load_inference_policy_from_dir(tmp.path().to_str().unwrap(), &reg);
+        let loaded = match outcome {
+            LoadOutcome::Loaded(p) => p,
+            other => panic!("expected Loaded, got {other:?}"),
+        };
+        assert!(loaded.provider.is_none());
+        assert!(loaded.guardrails.is_empty());
     }
 
     #[test]

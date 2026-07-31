@@ -366,12 +366,57 @@ impl AppState {
             .and_then(|g| g.clone())
             .unwrap_or_else(|| self.config.default_model.clone());
 
-        UpstreamConfig {
-            endpoint,
-            deployment,
-            sandbox_name: sandbox_name.to_string(),
+        UpstreamConfig::azure(endpoint, deployment, sandbox_name.to_string())
+    }
+}
+
+/// Multi-provider slice — retarget `upstream` at the provider the
+/// loaded `InferencePolicy` selects. No-op (Azure) when the policy
+/// carries no provider opinion, keeping the historic behaviour for
+/// every sandbox without a policy.
+///
+/// Fails closed: a policy that names a provider the router cannot
+/// serve (unimplemented `bedrock`, or missing endpoint/credential
+/// config) yields an error the handler must surface — silently
+/// falling back to Azure would ship prompts to a provider the
+/// operator didn't select.
+pub(crate) fn apply_provider_resolution(
+    state: &AppState,
+    upstream: &mut UpstreamConfig,
+    policy: &crate::inference_policy_loader::InferencePolicySnapshot,
+) -> Result<(), crate::provider::ProviderError> {
+    let model_pref_tag = policy
+        .model_preference
+        .as_ref()
+        .map(|m| m.primary.provider.as_str());
+    let target =
+        crate::provider::resolve(policy.provider.as_deref(), model_pref_tag, &state.config)?;
+    match target {
+        crate::provider::ProviderTarget::AzureOpenAI => {}
+        crate::provider::ProviderTarget::Anthropic { endpoint, api_key } => {
+            tracing::info!(
+                sandbox = %upstream.sandbox_name,
+                endpoint = %endpoint,
+                digest = %policy.digest,
+                "InferencePolicy provider: routing to Anthropic"
+            );
+            upstream.endpoint = endpoint;
+            upstream.provider = crate::provider::ProviderKind::Anthropic;
+            upstream.api_key = Some(api_key);
+        }
+        crate::provider::ProviderTarget::Ollama { endpoint } => {
+            tracing::info!(
+                sandbox = %upstream.sandbox_name,
+                endpoint = %endpoint,
+                digest = %policy.digest,
+                "InferencePolicy provider: routing to Ollama"
+            );
+            upstream.endpoint = endpoint;
+            upstream.provider = crate::provider::ProviderKind::Ollama;
+            upstream.api_key = None;
         }
     }
+    Ok(())
 }
 
 /// Slice 2d.1 — apply `modelPreference.primary.deployment` from a

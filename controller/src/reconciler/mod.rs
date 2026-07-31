@@ -311,6 +311,24 @@ struct Context {
     dev_openai_api_key: String,
     dev_provider: String,
     dev_copilot_github_token: String,
+    /// Multi-provider inference credentials/endpoints (roadmap:
+    /// multi-cloud LLM providers + native guardrails). Forwarded to
+    /// every router sidecar when present so `InferencePolicy`
+    /// `spec.provider` / `spec.guardrails` can resolve. All sourced
+    /// from the controller's own env at startup (Helm
+    /// `controller.extraEnv`, typically referencing a Secret) — the
+    /// agent container NEVER receives these.
+    /// - `anthropic_api_key` / `anthropic_endpoint`: Anthropic
+    ///   Messages API (`provider: anthropic`).
+    /// - `ollama_endpoint`: OpenAI-compatible Ollama server
+    ///   (`provider: ollama`); no credential.
+    /// - `openai_moderation_api_key` / `openai_moderation_endpoint`:
+    ///   OpenAI Moderation guardrail stage backend.
+    anthropic_api_key: String,
+    anthropic_endpoint: String,
+    ollama_endpoint: String,
+    openai_moderation_api_key: String,
+    openai_moderation_endpoint: String,
     /// `KARS_DEV_PROFILE=true` (set only in `kars dev`) — triggers
     /// relaxed sub-agent CRD defaults in the router spawn helper.
     dev_profile: bool,
@@ -1930,6 +1948,24 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "value": &ctx.dev_copilot_github_token,
             }));
         }
+        // Multi-provider inference + guardrail backends. Router-only —
+        // never on the agent container. Empty values are skipped so
+        // Azure-only clusters keep an identical env surface (and
+        // config-hash) to previous releases.
+        for (name, value) in [
+            ("ANTHROPIC_API_KEY", &ctx.anthropic_api_key),
+            ("ANTHROPIC_ENDPOINT", &ctx.anthropic_endpoint),
+            ("OLLAMA_ENDPOINT", &ctx.ollama_endpoint),
+            ("OPENAI_MODERATION_API_KEY", &ctx.openai_moderation_api_key),
+            (
+                "OPENAI_MODERATION_ENDPOINT",
+                &ctx.openai_moderation_endpoint,
+            ),
+        ] {
+            if !value.is_empty() {
+                router_env.push(json!({"name": name, "value": value}));
+            }
+        }
         dev_env::apply(
             &ctx.dev_provider,
             ctx.dev_profile,
@@ -3546,6 +3582,13 @@ pub async fn run(client: Client) -> Result<()> {
         dev_openai_api_key,
         dev_provider,
         dev_copilot_github_token,
+        anthropic_api_key: std::env::var("ANTHROPIC_API_KEY").unwrap_or_default(),
+        anthropic_endpoint: std::env::var("ANTHROPIC_ENDPOINT").unwrap_or_default(),
+        ollama_endpoint: std::env::var("OLLAMA_ENDPOINT").unwrap_or_default(),
+        openai_moderation_api_key: std::env::var("OPENAI_MODERATION_API_KEY")
+            .or_else(|_| std::env::var("OPENAI_API_KEY"))
+            .unwrap_or_default(),
+        openai_moderation_endpoint: std::env::var("OPENAI_MODERATION_ENDPOINT").unwrap_or_default(),
         dev_profile,
         cluster_name: std::env::var("CLUSTER_NAME")
             .ok()

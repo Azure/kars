@@ -72,6 +72,8 @@ use crate::inference_policy::InferencePolicySpec;
 ///   "tokenBudget":     { "perRequestTokens": ..., "dailyTokens": ..., "monthlyTokens": ... } | null,
 ///   "contentSafety":   { "hate": ..., "selfHarm": ..., "sexual": ..., "violence": ..., "requirePromptShields": ... } | null,
 ///   "modelPreference": { "primary": {provider, deployment}, "fallback": [...] } | null,
+///   "provider":        "azure-openai" | "anthropic" | "ollama" | "bedrock" | null,
+///   "guardrails":      [ { "provider": "openai-moderation", "applyTo": "input"|"output"|"both"|null }, ... ] | null,
 ///   "displayName":     "..." | null
 /// }
 /// ```
@@ -118,11 +120,32 @@ pub fn compile_to_profile(spec: &InferencePolicySpec) -> Value {
         })
     });
 
+    // Provider + guardrails travel as the same kebab-case wire tags
+    // the CRD serde emits (`InferenceProvider::as_tag` /
+    // `GuardrailProvider` renames) so the router-side loader parses
+    // one vocabulary for both the typed field and the free-form
+    // `modelPreference.*.provider` strings.
+    let provider = spec.provider.as_ref().map(|p| json!(p.as_tag()));
+
+    let guardrails = spec.guardrails.as_ref().map(|stages| {
+        json!(
+            stages
+                .iter()
+                .map(|g| json!({
+                    "provider": g.provider,
+                    "applyTo": g.apply_to,
+                }))
+                .collect::<Vec<_>>()
+        )
+    });
+
     json!({
         "appliesTo": applies_to,
         "tokenBudget": token_budget,
         "contentSafety": content_safety,
         "modelPreference": model_preference,
+        "provider": provider,
+        "guardrails": guardrails,
         "displayName": spec.display_name,
     })
 }
@@ -195,7 +218,8 @@ pub fn inference_policy_digest(body: &[u8]) -> String {
 mod tests {
     use super::*;
     use crate::inference_policy::{
-        ContentSafetyFloor, InferenceAppliesTo, InferencePolicySpec, ModelPreference, ModelRef,
+        ContentSafetyFloor, GuardrailApplyTo, GuardrailProvider, GuardrailStage,
+        InferenceAppliesTo, InferencePolicySpec, InferenceProvider, ModelPreference, ModelRef,
         TokenBudget,
     };
 
@@ -230,6 +254,17 @@ mod tests {
                     deployment: "claude-3-5-sonnet".into(),
                 }],
             }),
+            provider: Some(InferenceProvider::Anthropic),
+            guardrails: Some(vec![
+                GuardrailStage {
+                    provider: GuardrailProvider::OpenAIModeration,
+                    apply_to: Some(GuardrailApplyTo::Output),
+                },
+                GuardrailStage {
+                    provider: GuardrailProvider::OpenAIModeration,
+                    apply_to: None,
+                },
+            ]),
             display_name: Some("Prod chat policy".into()),
             bundle_ref: None,
         }
@@ -243,6 +278,8 @@ mod tests {
         assert!(profile.get("tokenBudget").unwrap().is_null());
         assert!(profile.get("contentSafety").unwrap().is_null());
         assert!(profile.get("modelPreference").unwrap().is_null());
+        assert!(profile.get("provider").unwrap().is_null());
+        assert!(profile.get("guardrails").unwrap().is_null());
         assert!(profile.get("appliesTo").unwrap().is_object());
     }
 
@@ -271,7 +308,58 @@ mod tests {
             profile["modelPreference"]["fallback"][0]["provider"],
             "anthropic"
         );
+        assert_eq!(profile["provider"], "anthropic");
+        let stages = profile["guardrails"].as_array().unwrap();
+        assert_eq!(stages.len(), 2);
+        assert_eq!(stages[0]["provider"], "openai-moderation");
+        assert_eq!(stages[0]["applyTo"], "output");
+        assert_eq!(stages[1]["provider"], "openai-moderation");
+        assert!(stages[1]["applyTo"].is_null());
         assert_eq!(profile["displayName"], "Prod chat policy");
+    }
+
+    #[test]
+    fn provider_enum_serializes_to_kebab_case_wire_tags() {
+        // Wire-contract pin: the typed `spec.provider` must emit the
+        // same kebab-case tags the free-form `ModelRef.provider`
+        // strings have always documented, so existing YAML values
+        // stay valid when operators migrate to the typed field.
+        for (variant, tag) in [
+            (InferenceProvider::AzureOpenAI, "azure-openai"),
+            (InferenceProvider::Anthropic, "anthropic"),
+            (InferenceProvider::Ollama, "ollama"),
+            (InferenceProvider::AWSBedrock, "bedrock"),
+        ] {
+            assert_eq!(serde_json::to_value(variant).unwrap(), tag);
+            assert_eq!(variant.as_tag(), tag);
+            let parsed: InferenceProvider = serde_json::from_value(serde_json::json!(tag)).unwrap();
+            assert_eq!(parsed, variant);
+        }
+    }
+
+    #[test]
+    fn version_hash_changes_when_provider_changes() {
+        let mut a = full_spec();
+        let b = full_spec();
+        a.provider = Some(InferenceProvider::Ollama);
+        assert_ne!(
+            version_hash(&compile_to_profile(&a)),
+            version_hash(&compile_to_profile(&b))
+        );
+    }
+
+    #[test]
+    fn version_hash_changes_when_guardrails_change() {
+        let mut a = full_spec();
+        let b = full_spec();
+        a.guardrails = Some(vec![GuardrailStage {
+            provider: GuardrailProvider::OpenAIModeration,
+            apply_to: Some(GuardrailApplyTo::Input),
+        }]);
+        assert_ne!(
+            version_hash(&compile_to_profile(&a)),
+            version_hash(&compile_to_profile(&b))
+        );
     }
 
     #[test]
