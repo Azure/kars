@@ -578,6 +578,21 @@ pub fn extract_anthropic_output_text(body: &serde_json::Value) -> String {
     out.join("\n")
 }
 
+/// Extract scan text from a body via `extract`, falling back to the
+/// raw (lossy-UTF-8) bytes when the body is not JSON. A declared
+/// guardrail must never be skipped because a body failed to parse —
+/// the raw fallback keeps unknown/malformed shapes covered instead of
+/// letting them through unscanned. (A body that parses but yields no
+/// extractable text — e.g. tool-call-only responses — is a deliberate
+/// pass: the extractors define the scannable surface.)
+#[must_use]
+pub fn scan_text_or_raw(body: &[u8], extract: impl FnOnce(&serde_json::Value) -> String) -> String {
+    match serde_json::from_slice::<serde_json::Value>(body) {
+        Ok(v) => extract(&v),
+        Err(_) => String::from_utf8_lossy(body).into_owned(),
+    }
+}
+
 // ─── Streaming (SSE) guard ───────────────────────────────────────────────────
 
 /// SSE wire dialect of the guarded stream — decides how delta text is
@@ -717,9 +732,11 @@ impl SseGuardState {
         };
         self.line_carry = rest;
         for line in complete.lines() {
-            let Some(payload) = line.trim().strip_prefix("data: ") else {
+            // SSE permits `data:` with or without a following space.
+            let Some(payload) = line.trim().strip_prefix("data:") else {
                 continue;
             };
+            let payload = payload.trim_start();
             if payload == "[DONE]" {
                 continue;
             }
@@ -985,6 +1002,17 @@ mod tests {
     }
 
     // ---- text extraction ----
+
+    #[test]
+    fn scan_text_or_raw_extracts_json_and_falls_back_to_raw() {
+        let json = br#"{"choices":[{"message":{"content":"answer"}}]}"#;
+        assert_eq!(scan_text_or_raw(json, extract_openai_output_text), "answer");
+        let not_json = b"plain text that failed to parse";
+        assert_eq!(
+            scan_text_or_raw(not_json, extract_openai_output_text),
+            "plain text that failed to parse"
+        );
+    }
 
     #[test]
     fn openai_input_text_handles_string_and_parts() {
@@ -1305,6 +1333,29 @@ mod tests {
             0,
             "no text ⇒ no scan round-trips"
         );
+    }
+
+    #[tokio::test]
+    async fn sse_guard_catches_data_prefix_without_space() {
+        let scans = Arc::new(AtomicUsize::new(0));
+        let p = Arc::new(pipeline_with("FORBIDDEN", ApplyTo::Output, scans, false));
+        let event =
+            serde_json::json!({ "choices": [ { "delta": { "content": "FORBIDDEN text" } } ] });
+        let chunks: Vec<Result<Bytes, std::io::Error>> =
+            vec![Ok(Bytes::from(format!("data:{event}\n\n")))];
+        let guarded = guard_sse_stream(
+            futures::stream::iter(chunks).boxed(),
+            p,
+            StreamDialect::OpenAiChat,
+            "sbx".into(),
+            "sha256:t".into(),
+        );
+        let out = collect_stream(guarded).await;
+        assert!(
+            !out.contains("FORBIDDEN"),
+            "spaceless data: events must still be scanned: {out}"
+        );
+        assert!(out.contains("guardrail_blocked"));
     }
 
     #[tokio::test]

@@ -606,9 +606,11 @@ async fn forward_anthropic_passthrough(
                     && let Some(p) = guardrail_pipeline
                         .as_ref()
                         .filter(|p| p.covers(Direction::Output))
-                    && let Ok(body_json) = serde_json::from_slice::<Value>(&resp_body)
                 {
-                    let text = guardrails::extract_anthropic_output_text(&body_json);
+                    let text = guardrails::scan_text_or_raw(
+                        &resp_body,
+                        guardrails::extract_anthropic_output_text,
+                    );
                     match p.scan(&text, Direction::Output).await {
                         Ok(None) => {}
                         Ok(Some(v)) => {

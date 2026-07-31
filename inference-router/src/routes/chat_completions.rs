@@ -155,8 +155,7 @@ pub(super) async fn scan_openai_output_guardrails(
     if !p.covers(Direction::Output) {
         return None;
     }
-    let body_json = serde_json::from_slice::<serde_json::Value>(resp_body).ok()?;
-    let text = guardrails::extract_openai_output_text(&body_json);
+    let text = guardrails::scan_text_or_raw(resp_body, guardrails::extract_openai_output_text);
     match p.scan(&text, Direction::Output).await {
         Ok(None) => None,
         Ok(Some(v)) => {
@@ -410,9 +409,7 @@ pub(super) async fn chat_completions(
     if let Some(ref p) = guardrail_pipeline
         && p.covers(Direction::Input)
     {
-        let input_text = serde_json::from_slice::<serde_json::Value>(&body)
-            .map(|v| guardrails::extract_openai_input_text(&v))
-            .unwrap_or_default();
+        let input_text = guardrails::scan_text_or_raw(&body, guardrails::extract_openai_input_text);
         match p.scan(&input_text, Direction::Input).await {
             Ok(None) => {}
             Ok(Some(v)) => {
