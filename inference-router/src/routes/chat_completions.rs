@@ -119,28 +119,46 @@ pub(super) fn build_guardrail_pipeline(
         .map(|p| Some(Arc::new(p)))
 }
 
+/// A blocked output scan: either a confirmed content violation or a
+/// fail-closed guardrail failure. Kept as data (not a ready-made
+/// `Response`) so each transport picks the accurate wire shape —
+/// buffered paths map to 403/502/503 HTTP responses, SSE paths to
+/// the matching `guardrails::{violation,error}_sse_frame`.
+pub(super) enum OutputGuardrailBlock {
+    Violation(GuardrailViolation),
+    Error(GuardrailError),
+}
+
+impl OutputGuardrailBlock {
+    /// SSE frame carrying this block's own type/code — a backend
+    /// outage must surface as `guardrail_unavailable`, never be
+    /// mislabelled `content_policy_violation`.
+    pub(super) fn sse_frame(&self) -> bytes::Bytes {
+        match self {
+            Self::Violation(v) => guardrails::violation_sse_frame(v),
+            Self::Error(e) => guardrails::error_sse_frame(e),
+        }
+    }
+}
+
 /// Run the output-direction guardrail stages over a buffered
-/// OpenAI-shaped response body. `Ok(())` when there is nothing to do
-/// or the scan passes; `Err(response)` carries the ready-made block
-/// response.
-pub(super) async fn enforce_openai_output_guardrails(
+/// OpenAI-shaped response body. `None` when there is nothing to do or
+/// the scan passes; `Some(block)` when the response must not reach
+/// the client. Emits the audit log line on every block.
+pub(super) async fn scan_openai_output_guardrails(
     pipeline: Option<&Arc<GuardrailPipeline>>,
     resp_body: &[u8],
     sandbox_name: &str,
     policy_digest: &str,
-) -> Result<(), axum::response::Response> {
-    let Some(p) = pipeline else {
-        return Ok(());
-    };
+) -> Option<OutputGuardrailBlock> {
+    let p = pipeline?;
     if !p.covers(Direction::Output) {
-        return Ok(());
+        return None;
     }
-    let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(resp_body) else {
-        return Ok(());
-    };
+    let body_json = serde_json::from_slice::<serde_json::Value>(resp_body).ok()?;
     let text = guardrails::extract_openai_output_text(&body_json);
     match p.scan(&text, Direction::Output).await {
-        Ok(None) => Ok(()),
+        Ok(None) => None,
         Ok(Some(v)) => {
             tracing::warn!(
                 target: "inference.audit",
@@ -151,7 +169,7 @@ pub(super) async fn enforce_openai_output_guardrails(
                 categories = ?v.categories,
                 "guardrail pipeline blocked buffered response"
             );
-            Err(guardrail_violation_response(&v))
+            Some(OutputGuardrailBlock::Violation(v))
         }
         Err(e) => {
             tracing::warn!(
@@ -163,8 +181,24 @@ pub(super) async fn enforce_openai_output_guardrails(
                 error = %e,
                 "guardrail pipeline unavailable — failing closed"
             );
-            Err(guardrail_error_response(&e))
+            Some(OutputGuardrailBlock::Error(e))
         }
+    }
+}
+
+/// HTTP-response wrapper over [`scan_openai_output_guardrails`] for
+/// the buffered branches: `Err(response)` carries the ready-made
+/// block response (403 violation / 502 unavailable / 503 config).
+pub(super) async fn enforce_openai_output_guardrails(
+    pipeline: Option<&Arc<GuardrailPipeline>>,
+    resp_body: &[u8],
+    sandbox_name: &str,
+    policy_digest: &str,
+) -> Result<(), axum::response::Response> {
+    match scan_openai_output_guardrails(pipeline, resp_body, sandbox_name, policy_digest).await {
+        None => Ok(()),
+        Some(OutputGuardrailBlock::Violation(v)) => Err(guardrail_violation_response(&v)),
+        Some(OutputGuardrailBlock::Error(e)) => Err(guardrail_error_response(&e)),
     }
 }
 
@@ -508,10 +542,12 @@ pub(super) async fn chat_completions(
                         }
                         // Guardrail output scan — the Responses-API
                         // recovery path must not bypass a declared
-                        // pipeline. Violations surface as an SSE
-                        // error frame (this branch already committed
-                        // to text/event-stream).
-                        if let Err(resp) = enforce_openai_output_guardrails(
+                        // pipeline. This branch already committed to
+                        // text/event-stream, so the block surfaces as
+                        // the outcome-accurate SSE frame (violation
+                        // vs guardrail_unavailable/misconfigured —
+                        // never a mislabelled content violation).
+                        if let Some(block) = scan_openai_output_guardrails(
                             guardrail_for_task.as_ref(),
                             &chat_body,
                             &sandbox_owned,
@@ -519,12 +555,7 @@ pub(super) async fn chat_completions(
                         )
                         .await
                         {
-                            let _ = resp; // structured 4xx/5xx body not sendable mid-SSE
-                            let err_sse = format!(
-                                "data: {}\n\ndata: [DONE]\n\n",
-                                serde_json::json!({"error":{"message":"Blocked by guardrail pipeline","type":"content_policy_violation","code":"guardrail_blocked"}})
-                            );
-                            let _ = tx.send(Ok(bytes::Bytes::from(err_sse))).await;
+                            let _ = tx.send(Ok(block.sse_frame())).await;
                             return;
                         }
                         let sse_data = format!(

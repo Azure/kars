@@ -622,8 +622,10 @@ fn delta_text_from_event(dialect: StreamDialect, event: &serde_json::Value) -> O
 /// The client-facing SSE error frame emitted when a stream is cut by
 /// a guardrail. OpenAI-style error object works for both dialects'
 /// SDK error paths and is what the existing content-safety stream cut
-/// emits too.
-fn violation_sse_frame(violation: &GuardrailViolation) -> Bytes {
+/// emits too. Public so buffered-to-SSE conversion paths (e.g. the
+/// Responses-API recovery branch) can emit the same frame shape.
+#[must_use]
+pub fn violation_sse_frame(violation: &GuardrailViolation) -> Bytes {
     Bytes::from(format!(
         "data: {}\n\ndata: [DONE]\n\n",
         serde_json::json!({
@@ -636,7 +638,11 @@ fn violation_sse_frame(violation: &GuardrailViolation) -> Bytes {
     ))
 }
 
-fn unavailable_sse_frame(err: &GuardrailError) -> Bytes {
+/// SSE frame for a guardrail that could not run (config gap or
+/// backend outage) — carries the error's own `type`/`code` so a
+/// fail-closed cut is never mislabelled as a content violation.
+#[must_use]
+pub fn error_sse_frame(err: &GuardrailError) -> Bytes {
     Bytes::from(format!(
         "data: {}\n\ndata: [DONE]\n\n",
         serde_json::json!({
@@ -757,11 +763,31 @@ impl SseGuardState {
         {
             Ok(None) => {
                 self.unscanned = 0;
+                self.trim_scan_context();
                 SseGuardStep::Release(std::mem::take(&mut self.held))
             }
             Ok(Some(violation)) => SseGuardStep::Cut(violation_sse_frame(&violation)),
-            Err(e) => SseGuardStep::Cut(unavailable_sse_frame(&e)),
+            Err(e) => SseGuardStep::Cut(error_sse_frame(&e)),
         }
+    }
+
+    /// Bound the retained scan context after a clean scan. Output
+    /// scans only ever submit the trailing [`MAX_SCAN_CHARS`] chars
+    /// (see [`cap_for_scan`]), so anything older cannot influence a
+    /// future scan's input — dropping it keeps per-connection memory
+    /// bounded on long-lived streams without weakening the
+    /// scanned-before-delivery contract.
+    fn trim_scan_context(&mut self) {
+        if self.accumulated.chars().count() <= MAX_SCAN_CHARS {
+            return;
+        }
+        let start = self
+            .accumulated
+            .char_indices()
+            .rev()
+            .nth(MAX_SCAN_CHARS - 1)
+            .map_or(0, |(i, _)| i);
+        self.accumulated = self.accumulated.split_off(start);
     }
 }
 
@@ -1278,6 +1304,30 @@ mod tests {
             scans.load(Ordering::SeqCst),
             0,
             "no text ⇒ no scan round-trips"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_guard_state_bounds_scan_context_on_long_streams() {
+        // Regression: `accumulated` must not grow without bound on
+        // long-lived streams — after every clean scan the retained
+        // context is trimmed to MAX_SCAN_CHARS (the most a future
+        // scan can consume anyway).
+        let scans = Arc::new(AtomicUsize::new(0));
+        let p = Arc::new(pipeline_with("BAD", ApplyTo::Output, scans.clone(), false));
+        let mut state = SseGuardState::new(p, StreamDialect::OpenAiChat, 10);
+        for _ in 0..40 {
+            let step = state.on_chunk(sse_chunk(&"y".repeat(1000))).await;
+            assert!(matches!(step, SseGuardStep::Release(_)));
+        }
+        assert!(
+            scans.load(Ordering::SeqCst) >= 40,
+            "every chunk over threshold scans"
+        );
+        assert!(
+            state.accumulated.chars().count() <= MAX_SCAN_CHARS,
+            "scan context must stay bounded, got {}",
+            state.accumulated.chars().count()
         );
     }
 
