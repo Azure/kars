@@ -1948,10 +1948,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "value": &ctx.dev_copilot_github_token,
             }));
         }
-        // Multi-provider inference + guardrail backends. Router-only —
-        // never on the agent container. Empty values are skipped so
-        // Azure-only clusters keep an identical env surface (and
-        // config-hash) to previous releases.
+        // Router-only provider/guardrail backends. Empty values are
+        // skipped so Azure-only clusters keep an identical env surface.
         for (name, value) in [
             ("ANTHROPIC_API_KEY", &ctx.anthropic_api_key),
             ("ANTHROPIC_ENDPOINT", &ctx.anthropic_endpoint),

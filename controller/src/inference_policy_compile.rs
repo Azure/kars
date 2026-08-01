@@ -120,11 +120,8 @@ pub fn compile_to_profile(spec: &InferencePolicySpec) -> Value {
         })
     });
 
-    // Provider + guardrails travel as the same kebab-case wire tags
-    // the CRD serde emits (`InferenceProvider::as_tag` /
-    // `GuardrailProvider` renames) so the router-side loader parses
-    // one vocabulary for both the typed field and the free-form
-    // `modelPreference.*.provider` strings.
+    // Provider + guardrails emit the same kebab-case wire tags the
+    // CRD serde uses, so the router parses one vocabulary.
     let provider = spec.provider.as_ref().map(|p| json!(p.as_tag()));
 
     let guardrails = spec.guardrails.as_ref().map(|stages| {

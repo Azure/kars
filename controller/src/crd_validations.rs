@@ -282,9 +282,8 @@ pub fn inference_policy_validations() -> Vec<ValidationRule> {
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
-        // Guardrail pipeline shape: an explicitly-empty list is an
-        // authoring mistake (delete the field to mean "no pipeline"),
-        // and a small cap keeps per-request scan fan-out bounded.
+        // An empty list is an authoring mistake (omit the field for
+        // no pipeline); the cap bounds per-request scan fan-out.
         ValidationRule {
             rule: "!has(self.guardrails) || (size(self.guardrails) >= 1 && size(self.guardrails) <= 8)".into(),
             message: Some("spec.guardrails, when set, must contain 1-8 stages (omit the field for no pipeline)".into()),

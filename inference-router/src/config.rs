@@ -87,12 +87,9 @@ pub struct Config {
     /// override with `ANTHROPIC_ENDPOINT` for gateways.
     pub anthropic_endpoint: String,
 
-    /// Anthropic API key — `ANTHROPIC_API_KEY` env var or the secret
-    /// mounts `/etc/kars/secrets/anthropic-api-key` /
-    /// `/run/secrets/anthropic-api-key`. Lives ONLY in the router
-    /// sidecar; the agent process talks to the localhost proxy and
-    /// never sees it. `None` ⇒ policies selecting Anthropic fail
-    /// closed with an operator-actionable error.
+    /// Anthropic API key — `ANTHROPIC_API_KEY` env or the
+    /// `anthropic-api-key` secret mount. Router-side only. `None` ⇒
+    /// Anthropic policies fail closed.
     pub anthropic_api_key: Option<String>,
 
     /// OpenAI-compatible Ollama endpoint (e.g.
@@ -106,12 +103,9 @@ pub struct Config {
     /// `OPENAI_MODERATION_ENDPOINT`.
     pub openai_moderation_endpoint: String,
 
-    /// API key for the OpenAI Moderation guardrail —
-    /// `OPENAI_MODERATION_API_KEY` env var (falls back to
-    /// `OPENAI_API_KEY`, then the secret mounts
-    /// `/etc/kars/secrets/openai-moderation-api-key` /
-    /// `/run/secrets/openai-moderation-api-key`). `None` ⇒ policies
-    /// declaring an `openai-moderation` guardrail stage fail closed.
+    /// OpenAI Moderation key — `OPENAI_MODERATION_API_KEY` env (falls
+    /// back to `OPENAI_API_KEY`, then the `openai-moderation-api-key`
+    /// secret mount). `None` ⇒ `openai-moderation` stages fail closed.
     pub openai_moderation_api_key: Option<String>,
 
     /// Moderation model (`OPENAI_MODERATION_MODEL`, default

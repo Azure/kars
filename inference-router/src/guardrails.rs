@@ -1,45 +1,22 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Pluggable guardrail pipeline (multi-cloud guardrails slice).
+//! Pluggable guardrail pipeline for `InferencePolicy.spec.guardrails[]`.
 //!
-//! An `InferencePolicy` can declare an ordered list of guardrail
-//! stages (`spec.guardrails[]`) that the router runs around every
-//! inference call it governs — on the request text before the
-//! upstream forward, and on the response text both buffered and
-//! streaming. The first backend today is the OpenAI Moderation API;
-//! Bedrock Guardrails and Model Armor extend the same [`Guardrail`]
-//! trait in follow-up slices.
+//! Stages run around each governed call — request text pre-flight and
+//! response text (buffered + streaming). First backend is OpenAI
+//! Moderation; the [`Guardrail`] trait is the extension point.
 //!
-//! ## Fail-closed contract
+//! Fail-closed: a declared stage that can't be built (unknown backend
+//! / missing credential) or errors at runtime blocks the request
+//! rather than passing unscanned content.
 //!
-//! A *declared* guardrail that cannot run must never become an open
-//! gate:
-//!
-//! - A stage whose backend the router does not recognise, or whose
-//!   credential/endpoint is missing, fails pipeline construction —
-//!   the handler rejects the request with an operator-actionable
-//!   error before any prompt bytes leave the pod.
-//! - A scan that errors at runtime (transport failure, non-2xx,
-//!   unparseable verdict) blocks the request with
-//!   `guardrail_unavailable` rather than passing unscanned content.
-//!
-//! ## Streaming semantics (hold-and-release)
-//!
-//! SSE responses are guarded with a hold-and-release window: chunks
-//! are buffered until the accumulated new text reaches
-//! [`STREAM_SCAN_THRESHOLD_CHARS`] (or the stream ends), the
-//! accumulated text is scanned, and only then is the held window
-//! released to the client. No model output is ever delivered before
-//! some scan has covered it. On a flagged scan, the client receives a
-//! structured SSE error frame + `data: [DONE]` and the upstream
-//! stream is dropped. The cost is scan-sized delivery granularity
-//! (one moderation round-trip per window), which is the standard
-//! trade-off for streaming guardrails.
-//!
-//! Text longer than [`MAX_SCAN_CHARS`] is scanned in successive
-//! windows (see [`scan_windows`]), never truncated, so content can't
-//! be hidden past the per-call cap.
+//! Streaming uses hold-and-release: SSE chunks are withheld until the
+//! accumulated text reaches [`STREAM_SCAN_THRESHOLD_CHARS`] (or the
+//! stream ends) and a scan clears it, so no model text reaches the
+//! client unscanned; a flagged scan cuts the stream with an error
+//! frame. Text over [`MAX_SCAN_CHARS`] is scanned in successive
+//! windows ([`scan_windows`]), never truncated.
 
 use std::sync::Arc;
 
@@ -119,11 +96,9 @@ impl Direction {
     }
 }
 
-/// One stage as it travels through the compiled policy JSON
-/// (`{"provider": "...", "applyTo": "..." | null}`). Parsed liberally
-/// by the loader; strictness (unknown backend ⇒ fail closed) applies
-/// at pipeline *construction*, where a request is available to
-/// reject.
+/// One compiled `guardrails[]` stage (`{provider, applyTo}`). Parsed
+/// liberally; unknown-backend rejection happens at pipeline
+/// construction, where a request exists to fail closed.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct GuardrailStageCfg {
     pub provider: String,
@@ -568,13 +543,10 @@ pub fn extract_anthropic_output_text(body: &serde_json::Value) -> String {
     out.join("\n")
 }
 
-/// Extract scan text from a body via `extract`, falling back to the
-/// raw (lossy-UTF-8) bytes when the body is not JSON. A declared
-/// guardrail must never be skipped because a body failed to parse —
-/// the raw fallback keeps unknown/malformed shapes covered instead of
-/// letting them through unscanned. (A body that parses but yields no
-/// extractable text — e.g. tool-call-only responses — is a deliberate
-/// pass: the extractors define the scannable surface.)
+/// Extract scan text via `extract`, falling back to raw lossy-UTF-8
+/// bytes when the body isn't JSON, so a declared guardrail is never
+/// skipped on a parse failure. (Parsed-but-empty extraction — e.g. a
+/// tool-call-only response — is a deliberate pass.)
 #[must_use]
 pub fn scan_text_or_raw(body: &[u8], extract: impl FnOnce(&serde_json::Value) -> String) -> String {
     match serde_json::from_slice::<serde_json::Value>(body) {
@@ -624,11 +596,8 @@ fn delta_text_from_event(dialect: StreamDialect, event: &serde_json::Value) -> O
     }
 }
 
-/// The client-facing SSE error frame emitted when a stream is cut by
-/// a guardrail. OpenAI-style error object works for both dialects'
-/// SDK error paths and is what the existing content-safety stream cut
-/// emits too. Public so buffered-to-SSE conversion paths (e.g. the
-/// Responses-API recovery branch) can emit the same frame shape.
+/// Client-facing SSE error frame for a guardrail cut. The OpenAI-shape
+/// error object works for both dialects' SDK error paths.
 #[must_use]
 pub fn violation_sse_frame(violation: &GuardrailViolation) -> Bytes {
     Bytes::from(format!(
@@ -736,21 +705,16 @@ impl SseGuardState {
             return;
         }
         match serde_json::from_str::<serde_json::Value>(payload) {
-            // Known text-bearing delta: scan the extracted text.
             Ok(event) => {
                 if let Some(text) = delta_text_from_event(self.dialect, &event) {
                     self.unscanned += text.chars().count();
                     self.accumulated.push_str(&text);
                 }
                 // Valid JSON with no delta text is a structural frame
-                // (ping / message_start / role-only / stop); no model
-                // text to scan. Non-`content` fields (tool-call args,
-                // "thinking" deltas) are the documented extraction-
-                // surface gap, not handled here.
+                // (ping / role-only / stop) — nothing to scan.
             }
-            // Non-JSON `data:` payload (upstream drift / malformed
-            // frame): scan the raw payload rather than fast-releasing
-            // it — an unrecognised frame must not bypass the scan.
+            // Unrecognised (non-JSON) frame: scan the raw payload so
+            // it can't bypass the scan.
             Err(_) => {
                 self.unscanned += payload.chars().count();
                 self.accumulated.push_str(payload);
@@ -761,9 +725,8 @@ impl SseGuardState {
     async fn on_chunk(&mut self, chunk: Bytes) -> SseGuardStep {
         self.ingest_text(&chunk);
         self.held.push(chunk);
-        // A buffered partial line's bytes are already in `held` but
-        // its delta text has not been counted or scanned — never
-        // release while one is pending, or that text ships unscanned.
+        // A pending partial line's bytes are in `held` but its text is
+        // uncounted — never release until the line completes.
         if !self.line_carry.is_empty() {
             return SseGuardStep::Release(Vec::new());
         }
@@ -777,8 +740,7 @@ impl SseGuardState {
     }
 
     async fn on_end(&mut self) -> SseGuardStep {
-        // Flush a trailing unterminated line (truncated upstream) so
-        // its text is scanned before the held bytes are released.
+        // Flush a trailing unterminated line so it's scanned too.
         if !self.line_carry.is_empty() {
             let line = std::mem::take(&mut self.line_carry);
             self.ingest_line(&line);
@@ -805,10 +767,9 @@ impl SseGuardState {
         }
     }
 
-    /// Retain `MAX_SCAN_CHARS - threshold` chars of scanned context
-    /// after a clean scan: bounds per-connection memory and keeps the
-    /// next scan (context + up to `threshold` new chars) within one
-    /// window, with overlap for cross-boundary detection.
+    /// After a clean scan, retain `MAX_SCAN_CHARS - threshold` chars
+    /// of context: bounds memory and keeps the next scan in one window
+    /// while overlapping for cross-boundary detection.
     fn trim_scan_context(&mut self) {
         let keep = MAX_SCAN_CHARS.saturating_sub(self.threshold).max(1);
         if self.accumulated.chars().count() <= keep {

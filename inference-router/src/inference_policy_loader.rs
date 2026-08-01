@@ -165,20 +165,12 @@ pub struct LoadedInferencePolicy {
     /// back to the env-driven default deployment (back-compat).
     pub model_preference: Option<ModelPreference>,
 
-    /// `spec.provider` — multi-provider slice. Raw kebab-case tag
-    /// (`azure-openai` / `anthropic` / `ollama` / `bedrock`);
-    /// interpretation (including the unimplemented-provider
-    /// fail-closed path) happens per request in
-    /// [`crate::provider::resolve`] so a policy naming a provider
-    /// this build can't serve degrades that *request*, not the whole
-    /// policy load. `None` ⇒ env-driven Azure upstream (back-compat).
+    /// `spec.provider` — raw kebab-case tag, resolved per request by
+    /// [`crate::provider::resolve`]. `None` ⇒ Azure (back-compat).
     pub provider: Option<String>,
 
-    /// `spec.guardrails[]` — pluggable guardrail pipeline stages.
-    /// Empty when the CR omits the block. Stage validity (known
-    /// backend, credential present) is checked at pipeline build
-    /// time in [`crate::guardrails::GuardrailPipeline::from_stages`],
-    /// where a request exists to fail closed.
+    /// `spec.guardrails[]` — pipeline stages; validity is checked at
+    /// build time in [`crate::guardrails::GuardrailPipeline::from_stages`].
     pub guardrails: Vec<crate::guardrails::GuardrailStageCfg>,
 
     /// Whole profile JSON, kept so subsequent sub-slices can pick up

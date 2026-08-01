@@ -370,16 +370,9 @@ impl AppState {
     }
 }
 
-/// Multi-provider slice — retarget `upstream` at the provider the
-/// loaded `InferencePolicy` selects. No-op (Azure) when the policy
-/// carries no provider opinion, keeping the historic behaviour for
-/// every sandbox without a policy.
-///
-/// Fails closed: a policy that names a provider the router cannot
-/// serve (unimplemented `bedrock`, or missing endpoint/credential
-/// config) yields an error the handler must surface — silently
-/// falling back to Azure would ship prompts to a provider the
-/// operator didn't select.
+/// Retarget `upstream` at the policy-selected provider (no-op for
+/// Azure / no policy). Fails closed on `bedrock` or missing config —
+/// the handler must surface the error, not fall back to Azure.
 pub(crate) fn apply_provider_resolution(
     state: &AppState,
     upstream: &mut UpstreamConfig,

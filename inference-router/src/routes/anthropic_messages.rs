@@ -286,8 +286,7 @@ pub(super) async fn anthropic_messages(
     // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
     crate::routes::apply_model_preference_override(&mut upstream, &policy);
 
-    // Multi-provider slice: retarget at the policy-selected provider.
-    // Fails closed — see `routes::apply_provider_resolution`.
+    // Retarget at the policy-selected provider (fails closed).
     if let Err(e) = crate::routes::apply_provider_resolution(&state, &mut upstream, &policy) {
         tracing::warn!(
             target: "inference.audit",
@@ -305,8 +304,7 @@ pub(super) async fn anthropic_messages(
         return deny_response(status, &e.to_string(), "api_error");
     }
 
-    // Guardrail pipeline — build fails closed on declared-but-
-    // unbuildable stages, input scan runs before any upstream forward.
+    // Guardrail pipeline; a declared-but-unbuildable stage blocks.
     let guardrail_pipeline =
         match super::chat_completions::build_guardrail_pipeline(&state, &policy) {
             Ok(p) => p,
@@ -360,11 +358,8 @@ pub(super) async fn anthropic_messages(
         }
     }
 
-    // Native Anthropic Messages pass-through — either the policy
-    // selected `provider: anthropic` (upstream is api.anthropic.com
-    // with the router-held API key) or the endpoint is GitHub Copilot
-    // (native /v1/messages). No translation: streaming, tool_use and
-    // multi-modal content flow through unchanged.
+    // Native Messages pass-through (provider: anthropic, or Copilot's
+    // native /v1/messages) — no translation.
     if upstream.provider == ProviderKind::Anthropic
         || proxy::is_copilot_endpoint(&upstream.endpoint)
     {
@@ -544,8 +539,7 @@ async fn forward_anthropic_passthrough(
         .await
         {
             Ok((status, resp_headers, stream)) => {
-                // Guardrail output scan (streaming, Anthropic event
-                // dialect): hold-and-release — see guardrails.rs.
+                // Streaming output scan (Anthropic event dialect).
                 let guarded = match guardrail_pipeline
                     .as_ref()
                     .filter(|p| p.covers(Direction::Output))

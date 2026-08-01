@@ -3,26 +3,16 @@
 
 //! Multi-provider upstream resolution.
 //!
-//! Maps `InferencePolicy.spec.provider` (`azure-openai` / `anthropic`
-//! / `ollama` / `bedrock`) onto a concrete upstream target: base URL
-//! shape + auth scheme. Credentials and endpoints come exclusively
-//! from the router's own environment / secret mounts — the agent
-//! process never sees a provider API key, exactly as with the Azure
-//! Workload Identity path.
+//! Maps `InferencePolicy.spec.provider` onto a concrete upstream
+//! target (base URL + auth scheme). Credentials/endpoints come only
+//! from the router's env / secret mounts — never from the agent.
 //!
-//! `spec.provider` is the only routing selector. The pre-existing
-//! `modelPreference.primary.provider` tag stays informational (it
-//! drove no routing before this slice), so adding provider routing
-//! doesn't retroactively reroute CRs that only set a model
-//! preference. Absent/empty `spec.provider` ⇒ Azure; an unrecognised
-//! tag warns and falls back to Azure.
-//!
-//! `bedrock` is recognised but not yet implemented: a policy that
-//! declares it gets an explicit 501-style error instead of a silent
-//! reroute to Azure — declared intent must never be silently ignored.
-//! Likewise a resolvable provider with missing router-side config
-//! (no `ANTHROPIC_API_KEY`, no `OLLAMA_ENDPOINT`) fails the request
-//! closed rather than falling back to Azure.
+//! `spec.provider` is the sole routing selector; the pre-existing
+//! `modelPreference.primary.provider` tag stays informational, so
+//! adding routing doesn't reroute CRs that only set a model
+//! preference. Absent/empty or unrecognised ⇒ Azure. `bedrock`
+//! (unimplemented) and a provider with missing config both fail the
+//! request closed rather than silently falling back to Azure.
 
 use crate::config::Config;
 
@@ -121,14 +111,8 @@ impl ProviderTarget {
     }
 }
 
-/// Resolve the effective provider for a request from `spec.provider`.
-///
-/// `spec.provider` is the sole routing selector. The pre-existing
-/// `modelPreference.primary.provider` tag stays informational (it
-/// drove nothing before this slice) so an unchanged CR that only set
-/// a model preference keeps its Azure upstream — routing is opt-in
-/// via the new field. Absent/empty ⇒ Azure; an unrecognised tag
-/// warns and falls back to Azure; `bedrock` is a hard error.
+/// Resolve the upstream target from `spec.provider` (the sole routing
+/// selector; see module docs).
 pub fn resolve(policy_tag: Option<&str>, config: &Config) -> Result<ProviderTarget, ProviderError> {
     let kind = effective_kind(policy_tag)?;
     target_for(kind, config)

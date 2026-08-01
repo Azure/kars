@@ -523,12 +523,9 @@ fn merge_bundle_with_selector(
         token_budget,
         content_safety,
         model_preference,
-        // The signed-bundle canonical format
-        // (`policy_canonical::inference`) does not carry
-        // `provider`/`guardrails` yet — extending that wire contract
-        // is a coordinated change with the bundle tooling. Until
-        // then, bundle-sourced policies keep the router defaults on
-        // these axes.
+        // The signed-bundle canonical format doesn't carry
+        // provider/guardrails yet; bundle-sourced policies keep the
+        // router defaults on these axes.
         provider: None,
         guardrails: None,
         display_name: verified.display_name.clone(),

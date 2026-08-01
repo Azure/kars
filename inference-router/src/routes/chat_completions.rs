@@ -119,20 +119,16 @@ pub(super) fn build_guardrail_pipeline(
         .map(|p| Some(Arc::new(p)))
 }
 
-/// A blocked output scan: either a confirmed content violation or a
-/// fail-closed guardrail failure. Kept as data (not a ready-made
-/// `Response`) so each transport picks the accurate wire shape —
-/// buffered paths map to 403/502/503 HTTP responses, SSE paths to
-/// the matching `guardrails::{violation,error}_sse_frame`.
+/// A blocked output scan, kept as data so each transport picks its
+/// wire shape (buffered → HTTP 403/502/503, SSE → error frame).
 pub(super) enum OutputGuardrailBlock {
     Violation(GuardrailViolation),
     Error(GuardrailError),
 }
 
 impl OutputGuardrailBlock {
-    /// SSE frame carrying this block's own type/code — a backend
-    /// outage must surface as `guardrail_unavailable`, never be
-    /// mislabelled `content_policy_violation`.
+    /// SSE frame carrying this block's own type/code, so a backend
+    /// outage isn't mislabelled a content violation.
     pub(super) fn sse_frame(&self) -> bytes::Bytes {
         match self {
             Self::Violation(v) => guardrails::violation_sse_frame(v),
@@ -425,9 +421,7 @@ pub(super) async fn chat_completions(
     // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
     crate::routes::apply_model_preference_override(&mut upstream, &policy);
 
-    // Multi-provider slice: retarget the upstream when the policy
-    // selects a non-Azure provider. Fails closed on unimplemented /
-    // unconfigured providers — never a silent Azure fallback.
+    // Retarget at the policy-selected provider; fails closed.
     if let Err(e) = crate::routes::apply_provider_resolution(&state, &mut upstream, &policy) {
         tracing::warn!(
             target: "inference.audit",
@@ -441,13 +435,8 @@ pub(super) async fn chat_completions(
         return provider_error_response(&e);
     }
 
-    // The Anthropic upstream speaks the Messages API, not
-    // chat-completions. Anthropic-native runtimes (Claude Agent SDK)
-    // already target the router's `/anthropic/v1/messages` surface,
-    // which forwards natively; an OpenAI-shaped client under an
-    // Anthropic-provider policy gets an explicit 501 (mirrors the
-    // GitHub-Models 501s for Foundry-only routes) instead of a
-    // confusing upstream 404.
+    // Anthropic serves the Messages API — an OpenAI-shaped request
+    // here gets an explicit 501 pointing at /anthropic/v1/messages.
     if upstream.provider == ProviderKind::Anthropic {
         return errors::openai(
             StatusCode::NOT_IMPLEMENTED,
@@ -459,9 +448,7 @@ pub(super) async fn chat_completions(
         .into_response();
     }
 
-    // Guardrail pipeline (multi-cloud guardrails slice). Built per
-    // request from the policy snapshot; a declared stage that cannot
-    // be materialised blocks the request.
+    // Guardrail pipeline; a declared-but-unbuildable stage blocks.
     let guardrail_pipeline = match build_guardrail_pipeline(&state, &policy) {
         Ok(p) => p,
         Err(e) => {
@@ -610,13 +597,9 @@ pub(super) async fn chat_completions(
                         {
                             budget.record_usage(&sandbox_owned, total).await;
                         }
-                        // Guardrail output scan — the Responses-API
-                        // recovery path must not bypass a declared
-                        // pipeline. This branch already committed to
-                        // text/event-stream, so the block surfaces as
-                        // the outcome-accurate SSE frame (violation
-                        // vs guardrail_unavailable/misconfigured —
-                        // never a mislabelled content violation).
+                        // Output scan on the Responses-API recovery
+                        // path; block as an SSE frame (already committed
+                        // to text/event-stream).
                         if let Some(block) = scan_openai_output_guardrails(
                             guardrail_for_task.as_ref(),
                             &chat_body,
@@ -937,10 +920,7 @@ pub(super) async fn chat_completions(
                     }
                     chunk
                 });
-                // Guardrail output scan (streaming): hold-and-release
-                // windows — no model text reaches the client before a
-                // scan has covered it. Skipped entirely (zero cost)
-                // when the policy declares no output stages.
+                // Streaming output scan; skipped when no output stages.
                 let guarded: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>> =
                     match guardrail_pipeline
                         .as_ref()
@@ -1178,11 +1158,7 @@ pub(super) async fn chat_completions(
                             return resp;
                         }
 
-                        // Guardrail output scan (buffered) — runs
-                        // beside the contentSafety floor: the floor
-                        // polices upstream-native annotations, the
-                        // pipeline runs the policy's external
-                        // backends (e.g. OpenAI Moderation).
+                        // Buffered output scan (beside the contentSafety floor).
                         if let Err(block) = enforce_openai_output_guardrails(
                             guardrail_pipeline.as_ref(),
                             &resp_body,

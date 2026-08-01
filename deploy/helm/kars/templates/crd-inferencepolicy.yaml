@@ -184,20 +184,15 @@ spec:
               guardrails:
                 description: |-
                   Ordered guardrail pipeline stages the router runs around each
-                  inference call (request pre-flight and response — buffered and
-                  streaming). Optional — absent ⇒ only the Phase 1 substrate
-                  (Foundry guardrail annotations + `contentSafety` floors)
-                  applies. Stages run in declaration order; the first stage that
-                  flags content blocks the call. Mutually exclusive with
-                  [`Self::bundle_ref`].
+                  call (input pre-flight + response, buffered and streaming), in
+                  declaration order — first flag blocks. Absent ⇒ only the
+                  Phase 1 substrate (Foundry annotations + `contentSafety`).
+                  Mutually exclusive with [`Self::bundle_ref`].
                 items:
                   description: |-
-                    A single stage of the router-side guardrail pipeline. The router
-                    materialises each stage into a scanner (network client + policy)
-                    at policy load time; a stage whose backend is not configured on
-                    the router (e.g. missing moderation API key) fails the *request*
-                    closed with an explicit error rather than silently skipping — a
-                    declared guardrail that cannot run must never be an open gate.
+                    A single router-side guardrail stage. A stage whose backend isn't
+                    configured (e.g. missing moderation key) fails the request closed,
+                    never skips.
                   properties:
                     applyTo:
                       description: Scan direction for a [`GuardrailStage`].
@@ -264,25 +259,12 @@ spec:
                 type: object
               provider:
                 description: |-
-                  Inference provider selector — the typed form of the kebab-case
-                  provider tags this CRD has always documented on [`ModelRef`]
-                  (`azure-openai` / `anthropic` / `bedrock` / `ollama`).
-
-                  Serialized with explicit kebab-case renames (NOT `rename_all`) so
-                  the wire tags match the existing free-form `ModelRef.provider`
-                  strings byte-for-byte — a CR that says `provider: anthropic` under
-                  `modelPreference` today can move to the typed field without a
-                  migration.
-
-                  Router-side consumption (Slice: multi-provider): `azure-openai`
-                  keeps the env-configured Foundry/AOAI upstream (back-compat
-                  default); `anthropic` targets the Anthropic Messages API
-                  (`ANTHROPIC_ENDPOINT`, key from the router-side secret mount —
-                  never visible to the agent process); `ollama` targets an
-                  OpenAI-compatible Ollama server (`OLLAMA_ENDPOINT`, no auth).
-                  `bedrock` is accepted by the schema for forward-compat but the
-                  router rejects it with a clear 501 until the Bedrock client lands
-                  — declaring it here keeps the CRD stable across that slice.
+                  Inference provider selector. Explicit kebab-case renames (not
+                  `rename_all`) keep the wire tags byte-identical to the free-form
+                  `ModelRef.provider` strings this CRD has always documented, so a
+                  CR can move to the typed field without a migration. `bedrock` is
+                  schema-accepted for forward-compat; the router returns 501 until
+                  its client lands.
                 enum:
                 - azure-openai
                 - anthropic

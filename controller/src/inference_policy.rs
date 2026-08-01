@@ -54,25 +54,12 @@ use serde::{Deserialize, Serialize};
 
 use crate::mcp_server::LocalObjectRef;
 
-/// Inference provider selector — the typed form of the kebab-case
-/// provider tags this CRD has always documented on [`ModelRef`]
-/// (`azure-openai` / `anthropic` / `bedrock` / `ollama`).
-///
-/// Serialized with explicit kebab-case renames (NOT `rename_all`) so
-/// the wire tags match the existing free-form `ModelRef.provider`
-/// strings byte-for-byte — a CR that says `provider: anthropic` under
-/// `modelPreference` today can move to the typed field without a
-/// migration.
-///
-/// Router-side consumption (Slice: multi-provider): `azure-openai`
-/// keeps the env-configured Foundry/AOAI upstream (back-compat
-/// default); `anthropic` targets the Anthropic Messages API
-/// (`ANTHROPIC_ENDPOINT`, key from the router-side secret mount —
-/// never visible to the agent process); `ollama` targets an
-/// OpenAI-compatible Ollama server (`OLLAMA_ENDPOINT`, no auth).
-/// `bedrock` is accepted by the schema for forward-compat but the
-/// router rejects it with a clear 501 until the Bedrock client lands
-/// — declaring it here keeps the CRD stable across that slice.
+/// Inference provider selector. Explicit kebab-case renames (not
+/// `rename_all`) keep the wire tags byte-identical to the free-form
+/// `ModelRef.provider` strings this CRD has always documented, so a
+/// CR can move to the typed field without a migration. `bedrock` is
+/// schema-accepted for forward-compat; the router returns 501 until
+/// its client lands.
 #[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
 pub enum InferenceProvider {
     /// Azure OpenAI / Azure AI Foundry (default — Phase 1 substrate).
@@ -93,9 +80,7 @@ pub enum InferenceProvider {
 }
 
 impl InferenceProvider {
-    /// The kebab-case wire tag — same string serde emits. Exposed for
-    /// log lines and compile-step JSON so call sites never hand-roll
-    /// the mapping.
+    /// The kebab-case wire tag serde emits.
     #[must_use]
     pub fn as_tag(&self) -> &'static str {
         match self {
@@ -155,25 +140,18 @@ pub struct InferencePolicySpec {
     /// [`Self::bundle_ref`].
     pub model_preference: Option<ModelPreference>,
 
-    /// Default inference provider for call sites this policy governs.
-    /// Optional — absent ⇒ the router keeps its env-configured Azure
-    /// OpenAI / Foundry upstream (back-compat). When set to a
-    /// non-Azure provider the router swaps the upstream base URL and
-    /// auth scheme accordingly; provider credentials stay inside the
-    /// router sidecar (secret mount / env), never in the agent
-    /// process. `modelPreference.primary.provider`, when it names a
-    /// recognised tag, takes precedence over this field so a fallback
-    /// chain can pin its own route. Mutually exclusive with
-    /// [`Self::bundle_ref`].
+    /// Inference provider for the call sites this policy governs, and
+    /// the sole routing selector. Absent ⇒ the env-configured Azure
+    /// OpenAI / Foundry upstream. A non-Azure provider swaps the base
+    /// URL and auth scheme; credentials stay in the router sidecar,
+    /// never in the agent. Mutually exclusive with [`Self::bundle_ref`].
     pub provider: Option<InferenceProvider>,
 
     /// Ordered guardrail pipeline stages the router runs around each
-    /// inference call (request pre-flight and response — buffered and
-    /// streaming). Optional — absent ⇒ only the Phase 1 substrate
-    /// (Foundry guardrail annotations + `contentSafety` floors)
-    /// applies. Stages run in declaration order; the first stage that
-    /// flags content blocks the call. Mutually exclusive with
-    /// [`Self::bundle_ref`].
+    /// call (input pre-flight + response, buffered and streaming), in
+    /// declaration order — first flag blocks. Absent ⇒ only the
+    /// Phase 1 substrate (Foundry annotations + `contentSafety`).
+    /// Mutually exclusive with [`Self::bundle_ref`].
     pub guardrails: Option<Vec<GuardrailStage>>,
 
     /// Optional human-readable label. Mutually exclusive with
@@ -302,12 +280,9 @@ pub struct ModelRef {
     pub deployment: String,
 }
 
-/// A single stage of the router-side guardrail pipeline. The router
-/// materialises each stage into a scanner (network client + policy)
-/// at policy load time; a stage whose backend is not configured on
-/// the router (e.g. missing moderation API key) fails the *request*
-/// closed with an explicit error rather than silently skipping — a
-/// declared guardrail that cannot run must never be an open gate.
+/// A single router-side guardrail stage. A stage whose backend isn't
+/// configured (e.g. missing moderation key) fails the request closed,
+/// never skips.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct GuardrailStage {
@@ -318,15 +293,12 @@ pub struct GuardrailStage {
     pub apply_to: Option<GuardrailApplyTo>,
 }
 
-/// Guardrail backend. One variant today; Bedrock Guardrails and
-/// Model Armor are declared roadmap follow-ups and will extend this
-/// enum (adding a variant is a non-breaking CRD change).
+/// Guardrail backend. Bedrock Guardrails / Model Armor are roadmap
+/// follow-ups that extend this enum.
 #[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, JsonSchema)]
 pub enum GuardrailProvider {
-    /// OpenAI Moderation API (`omni-moderation-latest`). Router-side
-    /// key via `OPENAI_MODERATION_API_KEY` (falls back to
-    /// `OPENAI_API_KEY`); endpoint override via
-    /// `OPENAI_MODERATION_ENDPOINT` for Azure-hosted equivalents.
+    /// OpenAI Moderation API; router-side key via
+    /// `OPENAI_MODERATION_API_KEY` (falls back to `OPENAI_API_KEY`).
     #[serde(rename = "openai-moderation")]
     OpenAIModeration,
 }
