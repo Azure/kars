@@ -732,14 +732,29 @@ impl SseGuardState {
             return;
         };
         let payload = payload.trim_start();
-        if payload == "[DONE]" {
+        if payload.is_empty() || payload == "[DONE]" {
             return;
         }
-        if let Ok(event) = serde_json::from_str::<serde_json::Value>(payload)
-            && let Some(text) = delta_text_from_event(self.dialect, &event)
-        {
-            self.unscanned += text.chars().count();
-            self.accumulated.push_str(&text);
+        match serde_json::from_str::<serde_json::Value>(payload) {
+            // Known text-bearing delta: scan the extracted text.
+            Ok(event) => {
+                if let Some(text) = delta_text_from_event(self.dialect, &event) {
+                    self.unscanned += text.chars().count();
+                    self.accumulated.push_str(&text);
+                }
+                // Valid JSON with no delta text is a structural frame
+                // (ping / message_start / role-only / stop); no model
+                // text to scan. Non-`content` fields (tool-call args,
+                // "thinking" deltas) are the documented extraction-
+                // surface gap, not handled here.
+            }
+            // Non-JSON `data:` payload (upstream drift / malformed
+            // frame): scan the raw payload rather than fast-releasing
+            // it — an unrecognised frame must not bypass the scan.
+            Err(_) => {
+                self.unscanned += payload.chars().count();
+                self.accumulated.push_str(payload);
+            }
         }
     }
 
@@ -1385,6 +1400,73 @@ mod tests {
             "split-event text must still be caught: {out}"
         );
         assert!(out.contains("guardrail_blocked"));
+    }
+
+    #[tokio::test]
+    async fn sse_guard_scans_non_json_data_frames() {
+        // Upstream drift: a `data:` line whose payload isn't valid
+        // JSON must still be scanned, not fast-released unscanned.
+        let scans = Arc::new(AtomicUsize::new(0));
+        let p = Arc::new(pipeline_with(
+            "FORBIDDEN",
+            ApplyTo::Output,
+            scans.clone(),
+            false,
+        ));
+        let chunks: Vec<Result<Bytes, std::io::Error>> =
+            vec![Ok(Bytes::from("data: this is FORBIDDEN not-json\n\n"))];
+        let guarded = guard_sse_stream(
+            futures::stream::iter(chunks).boxed(),
+            p,
+            StreamDialect::OpenAiChat,
+            "sbx".into(),
+            "sha256:t".into(),
+        );
+        let out = collect_stream(guarded).await;
+        assert!(
+            !out.contains("FORBIDDEN not-json"),
+            "non-JSON data frame must be scanned, not leaked: {out}"
+        );
+        assert!(out.contains("guardrail_blocked"));
+        assert!(
+            scans.load(Ordering::SeqCst) >= 1,
+            "raw frame must be scanned"
+        );
+    }
+
+    #[tokio::test]
+    async fn sse_guard_passes_json_structural_frames_without_scanning() {
+        // Valid-JSON frames with no delta text (ping / role-only /
+        // stop) carry no model text and are released without a scan
+        // round-trip.
+        let scans = Arc::new(AtomicUsize::new(0));
+        let p = Arc::new(pipeline_with(
+            "FORBIDDEN",
+            ApplyTo::Output,
+            scans.clone(),
+            false,
+        ));
+        let chunks: Vec<Result<Bytes, std::io::Error>> = vec![
+            Ok(Bytes::from(
+                "data: {\"choices\":[{\"delta\":{\"role\":\"assistant\"}}]}\n\n",
+            )),
+            Ok(Bytes::from("data: [DONE]\n\n")),
+        ];
+        let guarded = guard_sse_stream(
+            futures::stream::iter(chunks).boxed(),
+            p,
+            StreamDialect::OpenAiChat,
+            "sbx".into(),
+            "sha256:t".into(),
+        );
+        let out = collect_stream(guarded).await;
+        assert!(out.contains("\"role\":\"assistant\""));
+        assert!(out.contains("[DONE]"));
+        assert_eq!(
+            scans.load(Ordering::SeqCst),
+            0,
+            "structural frames don't scan"
+        );
     }
 
     #[tokio::test]
