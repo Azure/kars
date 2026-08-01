@@ -37,9 +37,9 @@
 //! (one moderation round-trip per window), which is the standard
 //! trade-off for streaming guardrails.
 //!
-//! Scanned text is capped at [`MAX_SCAN_CHARS`] (most recent chars
-//! for output, leading chars for input) to stay under moderation
-//! input limits; truncation is logged at WARN — never silent.
+//! Text longer than [`MAX_SCAN_CHARS`] is scanned in successive
+//! windows (see [`scan_windows`]), never truncated, so content can't
+//! be hidden past the per-call cap.
 
 use std::sync::Arc;
 
@@ -387,8 +387,10 @@ impl GuardrailPipeline {
         self.stages.iter().any(|s| s.apply_to.covers(direction))
     }
 
-    /// Run every stage covering `direction` over `text`, in order.
-    /// First flagged verdict wins. Empty text short-circuits to pass.
+    /// Run every stage covering `direction` over `text`, first flag
+    /// wins. Text over [`MAX_SCAN_CHARS`] is scanned in successive
+    /// windows, not truncated, so content can't be hidden past the
+    /// cap.
     pub async fn scan(
         &self,
         text: &str,
@@ -397,30 +399,31 @@ impl GuardrailPipeline {
         if text.is_empty() {
             return Ok(None);
         }
-        let capped = cap_for_scan(text, direction);
+        let windows = scan_windows(text);
         for stage in self.stages.iter().filter(|s| s.apply_to.covers(direction)) {
-            let outcome = stage.guard.scan(capped).await;
-            match outcome {
-                Ok(verdict) if verdict.flagged => {
-                    metrics::GUARDRAIL_SCANS
-                        .with_label_values(&[stage.guard.name(), direction.as_str(), "flagged"])
-                        .inc();
-                    return Ok(Some(GuardrailViolation {
-                        provider: stage.guard.name(),
-                        direction,
-                        categories: verdict.categories,
-                    }));
-                }
-                Ok(_) => {
-                    metrics::GUARDRAIL_SCANS
-                        .with_label_values(&[stage.guard.name(), direction.as_str(), "pass"])
-                        .inc();
-                }
-                Err(e) => {
-                    metrics::GUARDRAIL_SCANS
-                        .with_label_values(&[stage.guard.name(), direction.as_str(), "error"])
-                        .inc();
-                    return Err(e);
+            for window in &windows {
+                match stage.guard.scan(window).await {
+                    Ok(verdict) if verdict.flagged => {
+                        metrics::GUARDRAIL_SCANS
+                            .with_label_values(&[stage.guard.name(), direction.as_str(), "flagged"])
+                            .inc();
+                        return Ok(Some(GuardrailViolation {
+                            provider: stage.guard.name(),
+                            direction,
+                            categories: verdict.categories,
+                        }));
+                    }
+                    Ok(_) => {
+                        metrics::GUARDRAIL_SCANS
+                            .with_label_values(&[stage.guard.name(), direction.as_str(), "pass"])
+                            .inc();
+                    }
+                    Err(e) => {
+                        metrics::GUARDRAIL_SCANS
+                            .with_label_values(&[stage.guard.name(), direction.as_str(), "error"])
+                            .inc();
+                        return Err(e);
+                    }
                 }
             }
         }
@@ -428,38 +431,25 @@ impl GuardrailPipeline {
     }
 }
 
-/// Cap text to [`MAX_SCAN_CHARS`]: leading chars for input (the
-/// system prompt + earliest instructions), trailing chars for output
-/// (the newest generated text — earlier output was already scanned by
-/// previous windows in the streaming path). Logs at WARN on
-/// truncation.
-fn cap_for_scan(text: &str, direction: Direction) -> &str {
-    if text.chars().count() <= MAX_SCAN_CHARS {
-        return text;
+/// Split `text` into consecutive windows of at most [`MAX_SCAN_CHARS`]
+/// chars (never mid-char) so scanning all windows covers everything.
+fn scan_windows(text: &str) -> Vec<&str> {
+    if text.len() <= MAX_SCAN_CHARS {
+        return vec![text];
     }
-    tracing::warn!(
-        direction = direction.as_str(),
-        total_chars = text.chars().count(),
-        scanned_chars = MAX_SCAN_CHARS,
-        "guardrail scan text exceeds cap — scanning a truncated window"
-    );
-    match direction {
-        Direction::Input => {
-            let end = text
-                .char_indices()
-                .nth(MAX_SCAN_CHARS)
-                .map_or(text.len(), |(i, _)| i);
-            &text[..end]
+    let mut windows = Vec::new();
+    let mut start = 0;
+    let mut count = 0;
+    for (i, _) in text.char_indices() {
+        if count == MAX_SCAN_CHARS {
+            windows.push(&text[start..i]);
+            start = i;
+            count = 0;
         }
-        Direction::Output => {
-            let start = text
-                .char_indices()
-                .rev()
-                .nth(MAX_SCAN_CHARS - 1)
-                .map_or(0, |(i, _)| i);
-            &text[start..]
-        }
+        count += 1;
     }
+    windows.push(&text[start..]);
+    windows
 }
 
 // ─── Request / response text extraction ──────────────────────────────────────
@@ -670,13 +660,16 @@ pub fn error_sse_frame(err: &GuardrailError) -> Bytes {
     ))
 }
 
-/// Effective hold-and-release window size.
+/// Effective hold-and-release window size, clamped to
+/// [`MAX_SCAN_CHARS`] so a window can never accumulate more text than
+/// one scan covers.
 fn stream_scan_threshold() -> usize {
     std::env::var(STREAM_SCAN_THRESHOLD_ENV)
         .ok()
         .and_then(|v| v.parse().ok())
         .filter(|v: &usize| *v > 0)
         .unwrap_or(STREAM_SCAN_THRESHOLD_CHARS)
+        .min(MAX_SCAN_CHARS)
 }
 
 /// Hold-and-release state machine for one guarded SSE stream. Kept
@@ -718,11 +711,8 @@ impl SseGuardState {
         }
     }
 
-    /// Pull complete lines out of `chunk` (+ carry), extract delta
-    /// text, and account it as unscanned.
     fn ingest_text(&mut self, chunk: &[u8]) {
         self.line_carry.push_str(&String::from_utf8_lossy(chunk));
-        // Keep the trailing partial line (no '\n' yet) in the carry.
         let (complete, rest) = match self.line_carry.rfind('\n') {
             Some(idx) => {
                 let (c, r) = self.line_carry.split_at(idx + 1);
@@ -732,31 +722,37 @@ impl SseGuardState {
         };
         self.line_carry = rest;
         for line in complete.lines() {
-            // SSE permits `data:` with or without a following space.
-            let Some(payload) = line.trim().strip_prefix("data:") else {
-                continue;
-            };
-            let payload = payload.trim_start();
-            if payload == "[DONE]" {
-                continue;
-            }
-            if let Ok(event) = serde_json::from_str::<serde_json::Value>(payload)
-                && let Some(text) = delta_text_from_event(self.dialect, &event)
-            {
-                self.unscanned += text.chars().count();
-                self.accumulated.push_str(&text);
-            }
+            self.ingest_line(line);
+        }
+    }
+
+    fn ingest_line(&mut self, line: &str) {
+        // SSE permits `data:` with or without a following space.
+        let Some(payload) = line.trim().strip_prefix("data:") else {
+            return;
+        };
+        let payload = payload.trim_start();
+        if payload == "[DONE]" {
+            return;
+        }
+        if let Ok(event) = serde_json::from_str::<serde_json::Value>(payload)
+            && let Some(text) = delta_text_from_event(self.dialect, &event)
+        {
+            self.unscanned += text.chars().count();
+            self.accumulated.push_str(&text);
         }
     }
 
     async fn on_chunk(&mut self, chunk: Bytes) -> SseGuardStep {
         self.ingest_text(&chunk);
         self.held.push(chunk);
+        // A buffered partial line's bytes are already in `held` but
+        // its delta text has not been counted or scanned — never
+        // release while one is pending, or that text ships unscanned.
+        if !self.line_carry.is_empty() {
+            return SseGuardStep::Release(Vec::new());
+        }
         if self.unscanned < self.threshold {
-            // Fast path: window not full. Chunks carrying no delta
-            // text at all (keepalives, role/annotation frames) are
-            // safe to release immediately when nothing text-bearing
-            // is being held alongside them.
             if self.unscanned == 0 {
                 return SseGuardStep::Release(std::mem::take(&mut self.held));
             }
@@ -766,6 +762,12 @@ impl SseGuardState {
     }
 
     async fn on_end(&mut self) -> SseGuardStep {
+        // Flush a trailing unterminated line (truncated upstream) so
+        // its text is scanned before the held bytes are released.
+        if !self.line_carry.is_empty() {
+            let line = std::mem::take(&mut self.line_carry);
+            self.ingest_line(&line);
+        }
         if self.unscanned == 0 {
             return SseGuardStep::Release(std::mem::take(&mut self.held));
         }
@@ -788,21 +790,20 @@ impl SseGuardState {
         }
     }
 
-    /// Bound the retained scan context after a clean scan. Output
-    /// scans only ever submit the trailing [`MAX_SCAN_CHARS`] chars
-    /// (see [`cap_for_scan`]), so anything older cannot influence a
-    /// future scan's input — dropping it keeps per-connection memory
-    /// bounded on long-lived streams without weakening the
-    /// scanned-before-delivery contract.
+    /// Retain `MAX_SCAN_CHARS - threshold` chars of scanned context
+    /// after a clean scan: bounds per-connection memory and keeps the
+    /// next scan (context + up to `threshold` new chars) within one
+    /// window, with overlap for cross-boundary detection.
     fn trim_scan_context(&mut self) {
-        if self.accumulated.chars().count() <= MAX_SCAN_CHARS {
+        let keep = MAX_SCAN_CHARS.saturating_sub(self.threshold).max(1);
+        if self.accumulated.chars().count() <= keep {
             return;
         }
         let start = self
             .accumulated
             .char_indices()
             .rev()
-            .nth(MAX_SCAN_CHARS - 1)
+            .nth(keep - 1)
             .map_or(0, |(i, _)| i);
         self.accumulated = self.accumulated.split_off(start);
     }
@@ -1078,25 +1079,6 @@ mod tests {
             delta_text_from_event(StreamDialect::AnthropicMessages, &other),
             None
         );
-    }
-
-    // ---- cap ----
-
-    #[test]
-    fn cap_keeps_short_text_intact() {
-        assert_eq!(cap_for_scan("short", Direction::Input), "short");
-    }
-
-    #[test]
-    fn cap_truncates_head_for_input_and_tail_for_output() {
-        let long: String = "a".repeat(MAX_SCAN_CHARS) + "TAIL";
-        let capped_in = cap_for_scan(&long, Direction::Input);
-        assert_eq!(capped_in.len(), MAX_SCAN_CHARS);
-        assert!(capped_in.starts_with('a') && !capped_in.contains("TAIL"));
-        let long2 = "HEAD".to_string() + &"b".repeat(MAX_SCAN_CHARS);
-        let capped_out = cap_for_scan(&long2, Direction::Output);
-        assert_eq!(capped_out.len(), MAX_SCAN_CHARS);
-        assert!(!capped_out.contains("HEAD"));
     }
 
     // ---- pipeline + streaming with a fake backend ----
@@ -1403,5 +1385,63 @@ mod tests {
             "split-event text must still be caught: {out}"
         );
         assert!(out.contains("guardrail_blocked"));
+    }
+
+    #[tokio::test]
+    async fn sse_guard_withholds_bytes_when_split_inside_content_string() {
+        // Regression (B1): a chunk boundary *inside* the JSON content
+        // string leaves the delta text uncounted in line_carry while
+        // its bytes sit in `held`. The guard must not fast-release
+        // those bytes, or flagged model text ships unscanned.
+        let scans = Arc::new(AtomicUsize::new(0));
+        let p = Arc::new(pipeline_with("FORBIDDEN", ApplyTo::Output, scans, false));
+        let full = sse_chunk("this is FORBIDDEN text");
+        let s = String::from_utf8(full.to_vec()).unwrap();
+        let cut = s.find("FORB").unwrap() + 2; // split mid-word, mid-string
+        let (a, b) = s.split_at(cut);
+        let chunks: Vec<Result<Bytes, std::io::Error>> =
+            vec![Ok(Bytes::from(a.to_owned())), Ok(Bytes::from(b.to_owned()))];
+        let guarded = guard_sse_stream(
+            futures::stream::iter(chunks).boxed(),
+            p,
+            StreamDialect::OpenAiChat,
+            "sbx".into(),
+            "sha256:t".into(),
+        );
+        let out = collect_stream(guarded).await;
+        assert!(
+            !out.contains("FORB"),
+            "no partial content bytes may reach the client unscanned: {out}"
+        );
+        assert!(out.contains("guardrail_blocked"));
+    }
+
+    #[test]
+    fn scan_windows_covers_every_char_without_truncation() {
+        let short = "hello";
+        assert_eq!(scan_windows(short), vec!["hello"]);
+
+        let long: String = "a".repeat(MAX_SCAN_CHARS) + &"b".repeat(500);
+        let windows = scan_windows(&long);
+        assert_eq!(windows.len(), 2);
+        assert_eq!(windows[0].chars().count(), MAX_SCAN_CHARS);
+        assert_eq!(windows[1].chars().count(), 500);
+        assert_eq!(windows.concat(), long, "no char dropped across windows");
+    }
+
+    #[tokio::test]
+    async fn pipeline_scans_past_the_cap_via_windows() {
+        // Content hidden past MAX_SCAN_CHARS must still be caught —
+        // padding can't push it out of a truncated window anymore.
+        let scans = Arc::new(AtomicUsize::new(0));
+        let p = pipeline_with("NEEDLE", ApplyTo::Input, scans.clone(), false);
+        let text = "x".repeat(MAX_SCAN_CHARS + 100) + " NEEDLE";
+        let v = p
+            .scan(&text, Direction::Input)
+            .await
+            .unwrap()
+            .expect("needle past the cap is still flagged");
+        assert_eq!(v.provider, "marker-test");
+        assert!(scans.load(Ordering::SeqCst) >= 2, "must scan >1 window");
     }
 }

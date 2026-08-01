@@ -201,6 +201,79 @@ pub(super) async fn enforce_openai_output_guardrails(
     }
 }
 
+/// Why a route without provider/guardrail enforcement must refuse the
+/// active policy. `Ok` ⇒ the route may proceed (Azure upstream, no
+/// guardrails — the historic behaviour).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RouteGap {
+    NonAzureProvider,
+    Guardrails,
+}
+
+/// Pure classifier for [`guard_unenforced_route`]: does this policy
+/// need enforcement a non-chat route can't provide? Kept `AppState`-
+/// free so the truth table is unit-testable.
+pub(super) fn classify_route_gap(
+    policy: &crate::inference_policy_loader::InferencePolicySnapshot,
+    config: &crate::config::Config,
+) -> Result<(), RouteGap> {
+    if !matches!(
+        crate::provider::resolve(policy.provider.as_deref(), config),
+        Ok(crate::provider::ProviderTarget::AzureOpenAI)
+    ) {
+        return Err(RouteGap::NonAzureProvider);
+    }
+    if !policy.guardrails.is_empty() {
+        return Err(RouteGap::Guardrails);
+    }
+    Ok(())
+}
+
+/// Fail-closed guard for inference/generation routes that do NOT
+/// implement provider routing or the guardrail pipeline
+/// (`completions`, `responses`, `embeddings`, image generation).
+/// Such a route would silently bypass a policy that selects a
+/// non-Azure provider or declares guardrail stages, so it refuses
+/// instead. `None` ⇒ proceed.
+pub(super) async fn guard_unenforced_route(
+    state: &AppState,
+    sandbox: &str,
+    route: &'static str,
+) -> Option<axum::response::Response> {
+    let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+    let gap = classify_route_gap(&policy, &state.config).err()?;
+    let (status, code, msg) = match gap {
+        RouteGap::NonAzureProvider => (
+            StatusCode::NOT_IMPLEMENTED,
+            "provider_unimplemented",
+            format!(
+                "InferencePolicy selects a non-Azure provider, unsupported on {route} in this \
+                 release — use /v1/chat/completions or /anthropic/v1/messages"
+            ),
+        ),
+        RouteGap::Guardrails => (
+            StatusCode::FORBIDDEN,
+            "guardrail_route_unsupported",
+            format!(
+                "InferencePolicy declares a guardrail pipeline, not enforced on {route} in this \
+                 release — use /v1/chat/completions or /anthropic/v1/messages"
+            ),
+        ),
+    };
+    tracing::warn!(
+        target: "inference.audit",
+        sandbox = %sandbox,
+        inference_policy_digest = %policy.digest,
+        decision = "deny",
+        gate = "route_enforcement_gap",
+        route,
+        "{msg}"
+    );
+    let mut resp = errors::openai(status, &msg, code).into_response();
+    insert_decision_headers(&mut resp, "blocked", "InferencePolicy", &msg);
+    Some(resp)
+}
+
 /// POST /v1/chat/completions — the primary inference endpoint.
 pub(super) async fn chat_completions(
     State(state): State<AppState>,
@@ -966,6 +1039,16 @@ pub(super) async fn chat_completions(
                         {
                             state.budget.record_usage(sandbox_name, total).await;
                         }
+                        if let Err(block) = enforce_openai_output_guardrails(
+                            guardrail_pipeline.as_ref(),
+                            &chat_body,
+                            sandbox_name,
+                            &policy.digest,
+                        )
+                        .await
+                        {
+                            return block;
+                        }
                         let mut response = (resp_status, Body::from(chat_body)).into_response();
                         if let Some(ct) = resp_hdrs.get("content-type") {
                             response.headers_mut().insert("content-type", ct.clone());
@@ -1416,6 +1499,64 @@ async fn filter_disallowed_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference_policy_loader::InferencePolicySnapshot;
+
+    fn azure_cfg() -> crate::config::Config {
+        // No provider endpoints/keys configured — a bare Azure box.
+        let mut c = crate::config::Config::from_env().expect("config");
+        c.anthropic_api_key = None;
+        c.ollama_endpoint = None;
+        c
+    }
+
+    fn snapshot(provider: Option<&str>, guardrails: bool) -> InferencePolicySnapshot {
+        InferencePolicySnapshot {
+            provider: provider.map(String::from),
+            guardrails: if guardrails {
+                vec![crate::guardrails::GuardrailStageCfg {
+                    provider: "openai-moderation".into(),
+                    apply_to: crate::guardrails::ApplyTo::Both,
+                }]
+            } else {
+                vec![]
+            },
+            ..InferencePolicySnapshot::default()
+        }
+    }
+
+    #[test]
+    fn route_gap_allows_plain_azure_policy() {
+        assert!(classify_route_gap(&snapshot(None, false), &azure_cfg()).is_ok());
+        assert!(classify_route_gap(&snapshot(Some("azure-openai"), false), &azure_cfg()).is_ok());
+        // An unknown/informational tag routes to Azure ⇒ still allowed.
+        assert!(classify_route_gap(&snapshot(Some("gemini"), false), &azure_cfg()).is_ok());
+    }
+
+    #[test]
+    fn route_gap_refuses_non_azure_provider() {
+        // ollama/anthropic/bedrock all fail closed on these routes,
+        // whether or not their config is present.
+        assert_eq!(
+            classify_route_gap(&snapshot(Some("ollama"), false), &azure_cfg()),
+            Err(RouteGap::NonAzureProvider)
+        );
+        assert_eq!(
+            classify_route_gap(&snapshot(Some("anthropic"), false), &azure_cfg()),
+            Err(RouteGap::NonAzureProvider)
+        );
+        assert_eq!(
+            classify_route_gap(&snapshot(Some("bedrock"), false), &azure_cfg()),
+            Err(RouteGap::NonAzureProvider)
+        );
+    }
+
+    #[test]
+    fn route_gap_refuses_declared_guardrails() {
+        assert_eq!(
+            classify_route_gap(&snapshot(None, true), &azure_cfg()),
+            Err(RouteGap::Guardrails)
+        );
+    }
 
     #[test]
     fn gate_allow_when_no_policy_cap() {

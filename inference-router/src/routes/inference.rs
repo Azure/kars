@@ -250,6 +250,12 @@ async fn completions(
 ) -> impl IntoResponse {
     let sandbox_name = resolve_sandbox_name(&headers);
 
+    if let Some(resp) =
+        super::chat_completions::guard_unenforced_route(&state, sandbox_name, "completions").await
+    {
+        return resp;
+    }
+
     let upstream = state.upstream_config(sandbox_name);
     match proxy::forward(
         &state.auth,
@@ -280,6 +286,12 @@ async fn responses(
 ) -> impl IntoResponse {
     let sandbox_name_owned = resolve_sandbox_name(&headers).to_string();
     let sandbox_name = sandbox_name_owned.as_str();
+
+    if let Some(resp) =
+        super::chat_completions::guard_unenforced_route(&state, sandbox_name, "responses").await
+    {
+        return resp;
+    }
 
     // Slice 2 DoD #7 — snapshot policy early so every audit log
     // emitted from this handler can carry `inference_policy_digest`.
@@ -416,6 +428,12 @@ async fn embeddings(
 ) -> impl IntoResponse {
     let sandbox_name = resolve_sandbox_name(&headers);
 
+    if let Some(resp) =
+        super::chat_completions::guard_unenforced_route(&state, sandbox_name, "embeddings").await
+    {
+        return resp;
+    }
+
     // Embeddings need a different deployment than chat — extract model from request body
     let mut upstream = state.upstream_config(sandbox_name);
     if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body) {
@@ -458,6 +476,13 @@ async fn images_generations(
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name = resolve_sandbox_name(&headers);
+
+    if let Some(resp) =
+        super::chat_completions::guard_unenforced_route(&state, sandbox_name, "images/generations")
+            .await
+    {
+        return resp;
+    }
 
     // AGT policy check — image generation is a tool invocation
     {

@@ -385,12 +385,7 @@ pub(crate) fn apply_provider_resolution(
     upstream: &mut UpstreamConfig,
     policy: &crate::inference_policy_loader::InferencePolicySnapshot,
 ) -> Result<(), crate::provider::ProviderError> {
-    let model_pref_tag = policy
-        .model_preference
-        .as_ref()
-        .map(|m| m.primary.provider.as_str());
-    let target =
-        crate::provider::resolve(policy.provider.as_deref(), model_pref_tag, &state.config)?;
+    let target = crate::provider::resolve(policy.provider.as_deref(), &state.config)?;
     match target {
         crate::provider::ProviderTarget::AzureOpenAI => {}
         crate::provider::ProviderTarget::Anthropic { endpoint, api_key } => {

@@ -37,10 +37,14 @@ never sees a provider key.
 
 **Inference router — multi-provider upstreams**
 
-- New `provider` module: tag parsing + fail-closed resolution
-  (`modelPreference.primary.provider` wins over `spec.provider`;
-  unknown tags warn and fall through; missing endpoint/credential →
-  503, unimplemented `bedrock` → 501 — never a silent Azure fallback).
+- New `provider` module: tag parsing + fail-closed resolution.
+  `spec.provider` is the sole routing selector; the pre-existing
+  `modelPreference.primary.provider` tag stays informational (it drove
+  no routing before this slice), so an unchanged CR that only set a
+  model preference keeps its Azure upstream. Unknown tags warn and fall
+  back to Azure; missing endpoint/credential → 503; unimplemented
+  `bedrock` → 501. Never a silent Azure fallback for a selected
+  non-Azure provider.
 - `UpstreamConfig` carries `provider` + router-held `api_key`;
   `proxy.rs` gains per-provider URL shapes (Anthropic: path verbatim;
   Ollama: OpenAI-compat under `/v1/`) and auth schemes (Anthropic:
@@ -48,28 +52,37 @@ never sees a provider key.
   Agent-supplied `x-api-key` headers are stripped as before.
 - `provider: anthropic` serves the Anthropic Messages surface natively
   (`/anthropic/v1/messages`, `/v1/messages`): streaming, tool use and
-  multi-modal content pass through; usage metered from Anthropic
-  `usage` fields. OpenAI-shaped `/v1/chat/completions` under an
-  Anthropic policy returns an explicit 501 pointing at the Messages
-  surface (mirrors the GitHub-Models 501 precedent).
+  multi-modal content pass through. OpenAI-shaped `/v1/chat/completions`
+  under an Anthropic policy returns an explicit 501 pointing at the
+  Messages surface (mirrors the GitHub-Models 501 precedent).
 - `provider: ollama` serves `/v1/chat/completions` (buffered + SSE)
   against `OLLAMA_ENDPOINT` with token metering and budget tracking.
+- Routing + guardrails are wired on `/v1/chat/completions` and the
+  Anthropic Messages routes only. The sibling inference routes
+  (`/v1/completions`, `/v1/responses`, `/v1/embeddings`, image
+  generation) don't implement either and **fail closed** (501 on a
+  non-Azure provider, 403 when guardrails are declared) rather than
+  silently bypass the policy; a plain Azure policy uses them unchanged.
 
 **Inference router — pluggable guardrail pipeline**
 
 - New `guardrails` module: `Guardrail` trait + OpenAI Moderation
   backend (`POST {endpoint}/v1/moderations`, model
   `omni-moderation-latest`, override via `OPENAI_MODERATION_MODEL`).
-- Enforcement at every governed exchange: request pre-flight (input
-  stages), buffered responses (including the Responses-API recovery
+- Enforcement on the governed routes: request pre-flight (input
+  stages), buffered responses (including all Responses-API recovery
   paths), and SSE streams via **hold-and-release** windows
-  (`GUARDRAIL_STREAM_SCAN_CHARS`, default 1000 chars) — no model text
-  is delivered before a scan has covered it; flagged streams are cut
-  with a structured SSE error frame + `data: [DONE]`.
+  (`GUARDRAIL_STREAM_SCAN_CHARS`, default 1000, clamped to the 16k scan
+  cap) — no assistant message text is delivered before a scan covers
+  it, including across partial-line chunk boundaries; flagged streams
+  are cut with a structured SSE error frame + `data: [DONE]`. Text over
+  16k chars is scanned in successive windows, not truncated, so nothing
+  can be hidden past the cap. Tool-call arguments and provider
+  extended-"thinking" deltas are not yet scanned (roadmap).
 - Fail-closed contract: declared-but-unbuildable stages reject the
   request (503 `guardrail_misconfigured`); backend outages block (502
-  `guardrail_unavailable`); scan-text truncation (16k-char cap) is
-  logged, never silent. New `kars_guardrail_scans_total` metric
+  `guardrail_unavailable`); unparseable bodies are scanned as raw text
+  rather than skipped. New `kars_guardrail_scans_total` metric
   (provider / direction / outcome) and `x-kars-decision*` headers on
   every block.
 

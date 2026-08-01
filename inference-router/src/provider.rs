@@ -3,35 +3,26 @@
 
 //! Multi-provider upstream resolution.
 //!
-//! Maps the `InferencePolicy` provider tags (`azure-openai` /
-//! `anthropic` / `ollama` / `bedrock`) onto a concrete upstream
-//! target: base URL shape + auth scheme. The provider tag travels in
-//! the compiled policy JSON (`spec.provider`, and
-//! `spec.modelPreference.*.provider`); the *credentials and endpoints*
-//! come exclusively from the router's own environment / secret mounts
-//! — the agent process never sees a provider API key, exactly as with
-//! the Azure Workload Identity path.
+//! Maps `InferencePolicy.spec.provider` (`azure-openai` / `anthropic`
+//! / `ollama` / `bedrock`) onto a concrete upstream target: base URL
+//! shape + auth scheme. Credentials and endpoints come exclusively
+//! from the router's own environment / secret mounts — the agent
+//! process never sees a provider API key, exactly as with the Azure
+//! Workload Identity path.
 //!
-//! ## Resolution precedence
-//!
-//! 1. `modelPreference.primary.provider`, when it parses to a known
-//!    tag — an explicit route preference wins over the policy-level
-//!    default.
-//! 2. `spec.provider` (policy-level default).
-//! 3. `azure-openai` (absent / unknown tags — matches the pre-slice
-//!    behaviour where provider tags were informational-only).
+//! `spec.provider` is the only routing selector. The pre-existing
+//! `modelPreference.primary.provider` tag stays informational (it
+//! drove no routing before this slice), so adding provider routing
+//! doesn't retroactively reroute CRs that only set a model
+//! preference. Absent/empty `spec.provider` ⇒ Azure; an unrecognised
+//! tag warns and falls back to Azure.
 //!
 //! `bedrock` is recognised but not yet implemented: a policy that
 //! declares it gets an explicit 501-style error instead of a silent
 //! reroute to Azure — declared intent must never be silently ignored.
-//!
-//! ## Failure semantics
-//!
-//! A resolvable provider with missing router-side configuration
+//! Likewise a resolvable provider with missing router-side config
 //! (no `ANTHROPIC_API_KEY`, no `OLLAMA_ENDPOINT`) fails the request
-//! closed with a specific, operator-actionable error. Falling back to
-//! the Azure upstream would send prompts to a provider the operator
-//! didn't select.
+//! closed rather than falling back to Azure.
 
 use crate::config::Config;
 
@@ -130,37 +121,20 @@ impl ProviderTarget {
     }
 }
 
-/// Resolve the effective provider for a request.
+/// Resolve the effective provider for a request from `spec.provider`.
 ///
-/// `model_pref_tag` is `modelPreference.primary.provider` (when a
-/// policy carries a model preference), `policy_tag` is the top-level
-/// `spec.provider`. See module docs for precedence. Unknown tags log
-/// at WARN and fall through to the next precedence level.
-pub fn resolve(
-    policy_tag: Option<&str>,
-    model_pref_tag: Option<&str>,
-    config: &Config,
-) -> Result<ProviderTarget, ProviderError> {
-    let kind = effective_kind(policy_tag, model_pref_tag)?;
+/// `spec.provider` is the sole routing selector. The pre-existing
+/// `modelPreference.primary.provider` tag stays informational (it
+/// drove nothing before this slice) so an unchanged CR that only set
+/// a model preference keeps its Azure upstream — routing is opt-in
+/// via the new field. Absent/empty ⇒ Azure; an unrecognised tag
+/// warns and falls back to Azure; `bedrock` is a hard error.
+pub fn resolve(policy_tag: Option<&str>, config: &Config) -> Result<ProviderTarget, ProviderError> {
+    let kind = effective_kind(policy_tag)?;
     target_for(kind, config)
 }
 
-fn effective_kind(
-    policy_tag: Option<&str>,
-    model_pref_tag: Option<&str>,
-) -> Result<ProviderKind, ProviderError> {
-    if let Some(tag) = model_pref_tag.filter(|t| !t.trim().is_empty()) {
-        match parse_tag(tag)? {
-            Some(kind) => return Ok(kind),
-            None => {
-                tracing::warn!(
-                    tag,
-                    "InferencePolicy modelPreference.primary.provider tag not recognised — \
-                     falling back to spec.provider / default"
-                );
-            }
-        }
-    }
+fn effective_kind(policy_tag: Option<&str>) -> Result<ProviderKind, ProviderError> {
     if let Some(tag) = policy_tag.filter(|t| !t.trim().is_empty()) {
         match parse_tag(tag)? {
             Some(kind) => return Ok(kind),
@@ -264,27 +238,31 @@ mod tests {
     }
 
     #[test]
-    fn no_tags_resolves_to_azure() {
-        let t = resolve(None, None, &cfg(None, None)).unwrap();
-        assert_eq!(t, ProviderTarget::AzureOpenAI);
-    }
-
-    #[test]
-    fn model_pref_tag_wins_over_policy_tag() {
-        let t = resolve(
-            Some("anthropic"),
-            Some("azure-openai"),
-            &cfg(Some("sk-x"), None),
-        )
-        .unwrap();
-        assert_eq!(t, ProviderTarget::AzureOpenAI);
-    }
-
-    #[test]
-    fn unknown_model_pref_tag_falls_back_to_policy_tag() {
-        let t = resolve(Some("anthropic"), Some("gemini"), &cfg(Some("sk-x"), None)).unwrap();
+    fn absent_provider_resolves_to_azure() {
         assert_eq!(
-            t,
+            resolve(None, &cfg(None, None)).unwrap(),
+            ProviderTarget::AzureOpenAI
+        );
+        assert_eq!(
+            resolve(Some(""), &cfg(None, None)).unwrap(),
+            ProviderTarget::AzureOpenAI
+        );
+    }
+
+    #[test]
+    fn unknown_provider_tag_falls_back_to_azure() {
+        // A documented-but-unrouted tag like gemini must not error —
+        // it stays informational, request goes to Azure.
+        assert_eq!(
+            resolve(Some("gemini"), &cfg(Some("sk-x"), None)).unwrap(),
+            ProviderTarget::AzureOpenAI
+        );
+    }
+
+    #[test]
+    fn anthropic_provider_resolves_with_key() {
+        assert_eq!(
+            resolve(Some("anthropic"), &cfg(Some("sk-x"), None)).unwrap(),
             ProviderTarget::Anthropic {
                 endpoint: "https://api.anthropic.com".into(),
                 api_key: "sk-x".into(),
@@ -295,7 +273,7 @@ mod tests {
     #[test]
     fn anthropic_without_key_fails_closed() {
         assert!(matches!(
-            resolve(Some("anthropic"), None, &cfg(None, None)),
+            resolve(Some("anthropic"), &cfg(None, None)),
             Err(ProviderError::MissingCredential {
                 provider: "anthropic",
                 ..
@@ -306,7 +284,7 @@ mod tests {
     #[test]
     fn ollama_without_endpoint_fails_closed() {
         assert!(matches!(
-            resolve(Some("ollama"), None, &cfg(None, None)),
+            resolve(Some("ollama"), &cfg(None, None)),
             Err(ProviderError::MissingEndpoint {
                 provider: "ollama",
                 ..
@@ -316,14 +294,12 @@ mod tests {
 
     #[test]
     fn ollama_with_endpoint_resolves() {
-        let t = resolve(
-            Some("ollama"),
-            None,
-            &cfg(None, Some("http://ollama.ollama.svc:11434")),
-        )
-        .unwrap();
         assert_eq!(
-            t,
+            resolve(
+                Some("ollama"),
+                &cfg(None, Some("http://ollama.ollama.svc:11434"))
+            )
+            .unwrap(),
             ProviderTarget::Ollama {
                 endpoint: "http://ollama.ollama.svc:11434".into()
             }
@@ -331,13 +307,9 @@ mod tests {
     }
 
     #[test]
-    fn bedrock_anywhere_is_unimplemented_not_silent() {
+    fn bedrock_is_unimplemented_not_silent() {
         assert!(matches!(
-            resolve(Some("bedrock"), None, &cfg(None, None)),
-            Err(ProviderError::Unimplemented { .. })
-        ));
-        assert!(matches!(
-            resolve(None, Some("bedrock"), &cfg(None, None)),
+            resolve(Some("bedrock"), &cfg(None, None)),
             Err(ProviderError::Unimplemented { .. })
         ));
     }
