@@ -130,7 +130,8 @@ The controller mounts these paths into the runtime container.
 | `/etc/kars/a2a-card/agent.json` (optional) | ConfigMap (A2AAgent compiled) | Router (mounts `/.well-known/agent.json` + `/a2a` routes when present) | ✅ router |
 | `/etc/kars/trustgraph/projection.json` (optional) | ConfigMap (TrustGraph projection per sandbox) | Runtime + router | ⚠️ TrustGraph reconciler exists; runtime-side consumption is planned |
 | `/sandbox/agent/` | OCI artifact or git via `spec.openclaw.config.agentCode` (and per-runtime equivalent) | Runtime entrypoint — user-supplied agent code lands here | ✅ all runtimes that support `agentCode` |
-| `/sandbox/.openclaw/`, `/sandbox/.hermes/`, etc. | emptyDir | Runtime writable state (sessions, memory cache, prekeys) | ✅ all runtimes; per-runtime subdir |
+| `/sandbox/.openclaw/`, `/sandbox/.hermes/`, etc. | `emptyDir` by default; optional per-sandbox PVC via `spec.storage.workspace` | Runtime writable state (sessions, memory cache, prekeys) | ✅ all runtimes; PVC preserves state across Pod recreation and suspension |
+| `/etc/kars/workspace-bootstrap` | Same-namespace ConfigMap mirrored by the controller | OpenClaw bootstrap init container | ✅ OpenClaw; allowed files are `AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`, `TOOLS.md`, `USER.md` |
 | `/tmp` (4 GiB tmpfs by default) | pod spec | Runtime scratch space | ✅ all runtimes |
 
 **Read-only root filesystem**: all of `/`, `/usr`, `/opt`, `/etc` (except mounted ConfigMaps/Secrets) is RO on AKS + local-k8s. Runtimes that need writable state under those paths must mirror to `/tmp` at entrypoint time (see `sandbox-images/openclaw/entrypoint.sh:42-52` for the OpenClaw mirror pattern).

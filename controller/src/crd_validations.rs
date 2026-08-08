@@ -752,18 +752,52 @@ pub fn kars_sre_action_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on KarsSREAction")
 }
 
-/// `KarsSandbox` CRD as produced by the kube-rs derive.
-///
-/// Currently no `kars_sandbox_validations()` helper exists — `KarsSandbox`
-/// has historically relied on its hand-written
-/// `deploy/helm/kars/templates/crd.yaml` (with rich CEL rules baked
-/// in there) rather than rule-injection in code. This helper is exposed
-/// so future drift tests / dumpers can compare the kube-rs-derived
-/// schema to the hand-written one without each call site reimplementing
-/// the `KarsSandbox::crd()` invocation.
+fn inject_kars_sandbox_workspace_validations(
+    mut crd: CustomResourceDefinition,
+) -> Option<CustomResourceDefinition> {
+    let root = crd
+        .spec
+        .versions
+        .first_mut()?
+        .schema
+        .as_mut()?
+        .open_api_v3_schema
+        .as_mut()?;
+    let workspace = root
+        .properties
+        .as_mut()?
+        .get_mut("spec")?
+        .properties
+        .as_mut()?
+        .get_mut("storage")?
+        .properties
+        .as_mut()?
+        .get_mut("workspace")?;
+    workspace.x_kubernetes_validations = Some(vec![
+        ValidationRule {
+            rule: "!has(self.existingClaim) || (!has(self.size) && !has(self.storageClassName) && !has(self.accessModes) && !has(self.retainPolicy))".into(),
+            message: Some(
+                "existingClaim is mutually exclusive with dynamic provisioning fields".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.size) || quantity(self.size).isGreaterThan(quantity('0'))".into(),
+            message: Some("workspace size must be a positive Kubernetes quantity".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]);
+    Some(crd)
+}
+
+/// `KarsSandbox` CRD with workspace storage CEL injected into the generated
+/// schema. The hand-written Helm CRD carries the same rule.
 #[must_use]
 pub fn kars_sandbox_crd() -> CustomResourceDefinition {
-    crate::crd::KarsSandbox::crd()
+    inject_kars_sandbox_workspace_validations(crate::crd::KarsSandbox::crd())
+        .expect("kube-rs derive must produce spec.storage.workspace")
 }
 
 #[cfg(test)]

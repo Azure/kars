@@ -59,10 +59,10 @@ rules:
   - apiGroups: [""]
     resources: ["namespaces"]
     verbs: ["get", "list", "create", "update", "patch", "delete"]
-  # Manage pods, services, configmaps in sandbox namespaces
+  # Manage pods, services, configmaps, and workspace PVCs in sandbox namespaces
   - apiGroups: [""]
-    resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts", "persistentvolumeclaims"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
   # Read pod logs (for offload result relay)
   - apiGroups: [""]
     resources: ["pods/log"]
@@ -70,7 +70,7 @@ rules:
   # Manage deployments
   - apiGroups: ["apps"]
     resources: ["deployments"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
   # Slice 3 of kars-sre — typed actions RolloutRestart targets
   # StatefulSet / DaemonSet as well. Read+patch is sufficient (we
   # only ever rollout-restart, never create/delete those kinds).
@@ -84,11 +84,11 @@ rules:
   # KarsEval runs jobs and cronjobs to invoke the conformance runner
   - apiGroups: ["batch"]
     resources: ["jobs", "cronjobs"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
   # Manage network policies
   - apiGroups: ["networking.k8s.io"]
     resources: ["networkpolicies"]
-    verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+    verbs: ["get", "list", "watch", "create", "update", "patch", "delete", "deletecollection"]
   # Events — Kubernetes ships two Event APIs: the legacy core v1
   # Events ("" apiGroup) and the modern events.k8s.io/v1 Events.
   # The controller writes to events.k8s.io (the kube-rs Recorder

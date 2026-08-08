@@ -36,6 +36,12 @@ interface AddOptions {
   openaiApiKey?: string;
   learnEgress: boolean;
   skills?: string;
+  workspaceStorage?: string;
+  workspaceStorageClass?: string;
+  workspaceExistingClaim?: string;
+  workspaceRetainPolicy?: "Retain" | "Delete";
+  workspaceBootstrap?: string;
+  workspaceOverwrite?: "IfMissing" | "Always";
 }
 
 function defaultOptions(overrides: Partial<AddOptions> = {}): AddOptions {
@@ -113,6 +119,28 @@ function buildSandboxManifest(name: string, options: AddOptions) {
     np.egressMode = "Learn";
   }
 
+  if (options.workspaceStorage || options.workspaceExistingClaim) {
+    const workspace = options.workspaceExistingClaim
+      ? { existingClaim: options.workspaceExistingClaim }
+      : {
+          size: options.workspaceStorage,
+          ...(options.workspaceStorageClass
+            ? { storageClassName: options.workspaceStorageClass }
+            : {}),
+          accessModes: ["ReadWriteOnce"],
+          retainPolicy: options.workspaceRetainPolicy ?? "Retain",
+        };
+    (sandbox.spec as Record<string, unknown>).storage = { workspace };
+  }
+
+  if (options.workspaceBootstrap) {
+    const runtime = (sandbox.spec as any).runtime;
+    runtime.openclaw.workspace = {
+      bootstrapConfigMapRef: { name: options.workspaceBootstrap },
+      overwritePolicy: options.workspaceOverwrite ?? "IfMissing",
+    };
+  }
+
   return sandbox;
 }
 
@@ -177,6 +205,47 @@ describe("KarsSandbox manifest generation", () => {
     expect(manifest.metadata).toEqual({
       name: "my-agent",
       namespace: "kars-system",
+    });
+  });
+
+  it("configures a dynamically provisioned workspace PVC", () => {
+    const manifest = buildSandboxManifest(
+      "my-agent",
+      defaultOptions({
+        workspaceStorage: "20Gi",
+        workspaceStorageClass: "managed-csi",
+        workspaceRetainPolicy: "Retain",
+      }),
+    );
+    expect((manifest.spec as any).storage.workspace).toEqual({
+      size: "20Gi",
+      storageClassName: "managed-csi",
+      accessModes: ["ReadWriteOnce"],
+      retainPolicy: "Retain",
+    });
+  });
+
+  it("references an existing workspace claim without dynamic fields", () => {
+    const manifest = buildSandboxManifest(
+      "my-agent",
+      defaultOptions({ workspaceExistingClaim: "restored-workspace" }),
+    );
+    expect((manifest.spec as any).storage.workspace).toEqual({
+      existingClaim: "restored-workspace",
+    });
+  });
+
+  it("configures OpenClaw workspace bootstrap", () => {
+    const manifest = buildSandboxManifest(
+      "my-agent",
+      defaultOptions({
+        workspaceBootstrap: "my-agent-workspace",
+        workspaceOverwrite: "Always",
+      }),
+    );
+    expect((manifest.spec as any).runtime.openclaw.workspace).toEqual({
+      bootstrapConfigMapRef: { name: "my-agent-workspace" },
+      overwritePolicy: "Always",
     });
   });
 

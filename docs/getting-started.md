@@ -315,6 +315,19 @@ kars add another-agent --runtime LangGraph --model gpt-4.1
 
 `kars add` reuses the existing AKS cluster and Foundry project — only the pod is new. See **[CLI reference](cli-reference.md)** for the full surface.
 
+By default `/sandbox` is ephemeral. Enable a retained workspace when sessions
+and files must survive Pod recreation or `spec.suspended` scale-to-zero:
+
+```bash
+kars add teaching-agent --runtime openclaw --model gpt-4.1 \
+  --workspace-storage 20Gi \
+  --workspace-storage-class managed-csi
+```
+
+This creates one PVC in `kars-teaching-agent`, which incurs storage charges
+while retained. A PVC is not a backup; configure snapshots and regional
+placement through the selected StorageClass and your platform policy.
+
 ### 2.5a Try a Hermes-runtime sandbox instead
 
 The same `kars add` works for [Hermes](https://github.com/NousResearch/hermes-agent), a channels-first agent harness with native MCP support — useful when you want a Telegram or Slack-driven agent without writing the integration:

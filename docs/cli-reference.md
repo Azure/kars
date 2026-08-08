@@ -413,6 +413,12 @@ kars add <name> [options]
 | `--agent-instructions <instructions>` | — | System prompt for the Foundry agent |
 | `--agent-tools <tools>` | — | Foundry tools: `file_search,web_search,code_interpreter` (comma-separated) |
 | `--image <image>` | — | Custom sandbox image (default: from Helm values) |
+| `--workspace-storage <size>` | — | Create a persistent workspace PVC, for example `10Gi` |
+| `--workspace-storage-class <name>` | cluster default | StorageClass for the generated workspace PVC |
+| `--workspace-existing-claim <name>` | — | Attach an existing PVC in `kars-<name>`; mutually exclusive with generated storage |
+| `--workspace-retain-policy <policy>` | `Retain` | Generated PVC deletion policy: `Retain` or `Delete` |
+| `--workspace-bootstrap <configmap>` | — | OpenClaw-only same-namespace ConfigMap for declarative workspace files |
+| `--workspace-overwrite <policy>` | `IfMissing` | Bootstrap policy: `IfMissing` or `Always` |
 | `--governance` | `true` | Enable AGT governance (tool policy, trust, audit) |
 | `--no-governance` | — | Disable AGT governance |
 | `--trust-threshold <score>` | `500` | AGT trust threshold (0–1000) |
@@ -443,6 +449,14 @@ kars add researcher --model gpt-4.1 --token-budget-daily 100000
 
 # Add a Telegram-connected agent with enhanced isolation
 kars add support-bot --channels telegram --telegram-token $TOKEN --isolation enhanced
+
+# Add an OpenClaw agent with a retained 20Gi workspace and bootstrap files
+kars add teaching-agent --workspace-storage 20Gi \
+  --workspace-storage-class managed-csi \
+  --workspace-bootstrap teaching-agent-workspace
+
+# Explicitly recover a retained workspace
+kars add teaching-agent --workspace-existing-claim teaching-agent-workspace
 
 # Add a BYO-runtime agent
 kars add my-agent --runtime byo --byo-image myacr.azurecr.io/my-agent:latest

@@ -175,7 +175,8 @@ RUN mkdir -p /etc/kars/policies /etc/kars/blocklist && \
 
 # Copy entrypoint that auto-configures OpenClaw from mounted secrets
 COPY sandbox-images/openclaw/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY sandbox-images/openclaw/workspace-bootstrap.sh /usr/local/bin/workspace-bootstrap.sh
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/workspace-bootstrap.sh
 
 # Labels
 LABEL org.opencontainers.image.title="kars OpenClaw Sandbox" \

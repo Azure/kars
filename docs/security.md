@@ -59,7 +59,15 @@ Applied to every sandbox pod:
 | User | Non-root (`runAsNonRoot: true`) — agent UID 1000, router UID 1001 |
 | Privilege escalation | Blocked (`allowPrivilegeEscalation: false`) |
 | Capabilities | All dropped (`drop: [ALL]`) |
-| Writable paths | `/sandbox` and `/tmp` only (emptyDir) |
+| Writable paths | `/sandbox` and `/tmp` only. `/sandbox` is `emptyDir` by default or an optional per-sandbox PVC; `/tmp` remains memory-backed `emptyDir`. |
+
+PVC persistence does not weaken UID, seccomp, read-only-rootfs, or egress
+boundaries, but it extends the lifetime of data written by the runtime. The
+operator remains responsible for StorageClass encryption, snapshots, backup,
+regional placement, and customer-managed keys. `retainPolicy: Retain` protects
+against deletion of the `KarsSandbox`; manually deleting the retained namespace
+still deletes namespaced claims unless the backing PV policy independently
+retains them.
 
 ### Layer 4 — Kernel confinement (seccomp)
 
