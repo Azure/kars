@@ -12,6 +12,56 @@ import {
   inferenceRefName,
   toolPolicyRefName,
 } from "../refs.js";
+import type { RuntimeKind } from "../runtime.js";
+import { buildWorkspaceStorageSpec } from "../lib/workspace-storage.js";
+
+export function validateRuntimeSpecificAddFlags(
+  runtimeKind: RuntimeKind,
+  options: Record<string, unknown>,
+): string[] {
+  const errors: string[] = [];
+  const channelFlags: Array<[string, unknown]> = [
+    ["--channels", options.channels],
+    ["--telegram-token", options.telegramToken],
+    ["--telegram-allow-from", options.telegramAllowFrom],
+    ["--slack-token", options.slackToken],
+    ["--discord-token", options.discordToken],
+  ];
+  if (runtimeKind !== "OpenClaw" && runtimeKind !== "Hermes") {
+    const used = channelFlags
+      .filter(([, value]) => value !== undefined && value !== "" && value !== false)
+      .map(([flag]) => flag);
+    if (used.length > 0) {
+      errors.push(
+        `${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with ` +
+          `--runtime openclaw or --runtime hermes.`,
+      );
+    }
+  }
+
+  const openClawOnlyFlags: Array<[string, unknown]> = [
+    ["--skills", options.skills],
+    ["--brave-api-key", options.braveApiKey],
+    ["--tavily-api-key", options.tavilyApiKey],
+    ["--exa-api-key", options.exaApiKey],
+    ["--firecrawl-api-key", options.firecrawlApiKey],
+    ["--perplexity-api-key", options.perplexityApiKey],
+    ["--openai-api-key", options.openaiApiKey],
+    ["--image", options.image],
+  ];
+  if (runtimeKind !== "OpenClaw") {
+    const used = openClawOnlyFlags
+      .filter(([, value]) => value !== undefined && value !== "" && value !== false)
+      .map(([flag]) => flag);
+    if (used.length > 0) {
+      errors.push(
+        `${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with ` +
+          `--runtime openclaw.`,
+      );
+    }
+  }
+  return errors;
+}
 
 export function addCommand(): Command {
   const cmd = new Command("add");
@@ -102,29 +152,10 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
       // Validate runtime-specific flag combinations before doing any work.
       // Reject incompatible flags up-front with a clear, actionable error
       // — better than silently ignoring a user's intent.
-      const openClawOnlyFlags: Array<[string, unknown]> = [
-        ["--channels", options.channels],
-        ["--telegram-token", options.telegramToken],
-        ["--telegram-allow-from", options.telegramAllowFrom],
-        ["--slack-token", options.slackToken],
-        ["--discord-token", options.discordToken],
-        ["--skills", options.skills],
-        ["--brave-api-key", options.braveApiKey],
-        ["--tavily-api-key", options.tavilyApiKey],
-        ["--exa-api-key", options.exaApiKey],
-        ["--firecrawl-api-key", options.firecrawlApiKey],
-        ["--perplexity-api-key", options.perplexityApiKey],
-        ["--openai-api-key", options.openaiApiKey],
-        ["--image", options.image],
-      ];
-      if (runtimeKind !== "OpenClaw") {
-        const used = openClawOnlyFlags.filter(([, v]) => v !== undefined && v !== "" && v !== false).map(([f]) => f);
-        if (used.length > 0) {
-          console.error(chalk.red(`\n  Error: ${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with --runtime openclaw.`));
-          console.error(chalk.dim(`  Channels, skills, and plugin API keys are OpenClaw-specific entrypoint features.`));
-          console.error(chalk.dim(`  For ${options.runtime}, configure equivalents inside the agent's own code.\n`));
-          process.exit(1);
-        }
+      const runtimeFlagErrors = validateRuntimeSpecificAddFlags(runtimeKind, options);
+      if (runtimeFlagErrors.length > 0) {
+        console.error(chalk.red(`\n  Error: ${runtimeFlagErrors.join(" ")}\n`));
+        process.exit(1);
       }
       if (runtimeKind !== "BYO" && (options.byoImage || (options.byoContractVersion && options.byoContractVersion !== "v1"))) {
         console.error(chalk.red(`\n  Error: --byo-image / --byo-contract-version are only valid with --runtime byo.\n`));
@@ -224,18 +255,9 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         },
       };
 
-      if (options.workspaceStorage || options.workspaceExistingClaim) {
-        const workspace = options.workspaceExistingClaim
-          ? { existingClaim: options.workspaceExistingClaim }
-          : {
-              size: options.workspaceStorage,
-              ...(options.workspaceStorageClass
-                ? { storageClassName: options.workspaceStorageClass }
-                : {}),
-              accessModes: ["ReadWriteOnce"],
-              retainPolicy: options.workspaceRetainPolicy,
-            };
-        (sandbox.spec as Record<string, unknown>).storage = { workspace };
+      const storage = buildWorkspaceStorageSpec(options);
+      if (storage) {
+        (sandbox.spec as Record<string, unknown>).storage = storage;
       }
 
       // Add Foundry agent config if provided

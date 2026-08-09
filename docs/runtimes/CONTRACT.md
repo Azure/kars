@@ -69,6 +69,8 @@ The controller (AKS/local-k8s) or `inference-router/src/spawn/docker.rs` (dev) i
 | `AGT_TRUST_THRESHOLD` | `KarsSandbox.spec.governance.trustThreshold` | Numeric trust floor (default 500) | ⚠️ same |
 | `KARS_MESH_PROVIDER=agt` | controller hard-set | Mesh protocol family | ✅ all runtimes |
 | `KARS_AUTH_MODE` | controller: `workload-identity` (k8s) or `api-key` (dev) | Tells entrypoint how creds are sourced | ✅ all runtimes |
+| `KARS_WORKSPACE_DIR=/sandbox` | controller | Root of the writable workspace volume (`emptyDir` or PVC). Runtime/user code should place recoverable files below this path. | ✅ all Kubernetes runtimes |
+| `KARS_STATE_DIR=/sandbox/.<runtime>` | controller runtime-kind mapping | Recommended private state directory for sessions, checkpoints, identities, and runtime metadata. Adapters may expose a native alias such as `HERMES_HOME`. | ✅ all Kubernetes runtimes |
 
 ### Conditionally present
 
@@ -135,6 +137,29 @@ The controller mounts these paths into the runtime container.
 | `/tmp` (4 GiB tmpfs by default) | pod spec | Runtime scratch space | ✅ all runtimes |
 
 **Read-only root filesystem**: all of `/`, `/usr`, `/opt`, `/etc` (except mounted ConfigMaps/Secrets) is RO on AKS + local-k8s. Runtimes that need writable state under those paths must mirror to `/tmp` at entrypoint time (see `sandbox-images/openclaw/entrypoint.sh:42-52` for the OpenClaw mirror pattern).
+
+### Persistent workspace contract
+
+`spec.storage.workspace` is a platform-level contract shared by every wired
+runtime. The controller guarantees only that the same filesystem is mounted at
+`/sandbox` after Pod recreation or suspension. Each runtime adapter or user
+application remains responsible for placing recoverable state there.
+
+| Runtime | Known state below `/sandbox` | Persistence boundary |
+|---|---|---|
+| OpenClaw | `/sandbox/.openclaw` | Sessions, workspace, memory cache, pairing/bindings, and mesh identity use the PVC. OpenClaw-only ConfigMap bootstrap is supported. |
+| Hermes | `/sandbox/.hermes` and `HOME=/sandbox` | Hermes config, sessions, memory, channel-local state, plugins, and AGT identity use the PVC. No declarative Hermes bootstrap yet. |
+| OpenAI Agents | `/sandbox/agent` | User code and files persist. Conversation/session state persists only if the application configures its store/checkpoint under `/sandbox`. |
+| Microsoft Agent Framework Python | `/sandbox/agent` | User code and files persist. Thread/conversation persistence remains application-defined. |
+| LangGraph Python/TypeScript | `/sandbox/agent` | User code and files persist. Agents must configure a durable checkpointer (for example SQLite under `/sandbox` or an external database); in-memory checkpointers do not become durable merely because a PVC is mounted. |
+| Anthropic | `/sandbox/agent` | User code and files persist. SDK session state remains application-defined. |
+| PydanticAI | `/sandbox/agent` | User code and files persist. Application message history/state must be written under `/sandbox` or to an external store. |
+| BYO | `/sandbox` by contract | The image must write every state item it expects to recover below `/sandbox`; writes elsewhere are not covered. |
+
+The PVC capability is implemented on Kubernetes targets (AKS and local-k8s).
+The Docker `kars dev` target has no `KarsSandbox` CRD or PVC and continues to
+use its Docker bind/volume behavior. Do not interpret `--workspace-storage` as
+a portable Docker-dev flag.
 
 ---
 

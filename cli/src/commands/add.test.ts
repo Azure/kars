@@ -2,6 +2,9 @@
 // Licensed under the MIT License.
 
 import { describe, it, expect } from "vitest";
+import { validateRuntimeSpecificAddFlags } from "./add.js";
+import { buildRuntimeBlock, type RuntimeKind } from "../runtime.js";
+import { buildWorkspaceStorageSpec } from "../lib/workspace-storage.js";
 
 /**
  * Tests for the `add` command's sandbox manifest generation logic.
@@ -42,6 +45,7 @@ interface AddOptions {
   workspaceRetainPolicy?: "Retain" | "Delete";
   workspaceBootstrap?: string;
   workspaceOverwrite?: "IfMissing" | "Always";
+  runtimeKind?: RuntimeKind;
 }
 
 function defaultOptions(overrides: Partial<AddOptions> = {}): AddOptions {
@@ -60,19 +64,21 @@ function defaultOptions(overrides: Partial<AddOptions> = {}): AddOptions {
 
 /** Build the KarsSandbox manifest object (mirrors add.ts action logic). */
 function buildSandboxManifest(name: string, options: AddOptions) {
+  const runtimeKind = options.runtimeKind ?? "OpenClaw";
   const sandbox: Record<string, unknown> = {
     apiVersion: "kars.azure.com/v1alpha1",
     kind: "KarsSandbox",
     metadata: { name, namespace: "kars-system" },
     spec: {
-      runtime: {
-        kind: "OpenClaw",
-        openclaw: {
-          version: "2026.3.13",
-          ...(options.image ? { image: options.image } : {}),
-          config: { agent: { model: `azure/${options.model}` } },
-        },
-      },
+      runtime: buildRuntimeBlock({
+        kind: runtimeKind,
+        openclawVersion: "2026.3.13",
+        model: options.model,
+        image: options.image,
+        byoImage: runtimeKind === "BYO" ? "example.invalid/byo:latest" : undefined,
+        byoContractVersion: "v1",
+        mafLanguage: "python",
+      }),
       sandbox: {
         isolation: options.isolation,
         seccompProfile: options.isolation === "standard" ? "RuntimeDefault" : "kars-strict",
@@ -119,18 +125,9 @@ function buildSandboxManifest(name: string, options: AddOptions) {
     np.egressMode = "Learn";
   }
 
-  if (options.workspaceStorage || options.workspaceExistingClaim) {
-    const workspace = options.workspaceExistingClaim
-      ? { existingClaim: options.workspaceExistingClaim }
-      : {
-          size: options.workspaceStorage,
-          ...(options.workspaceStorageClass
-            ? { storageClassName: options.workspaceStorageClass }
-            : {}),
-          accessModes: ["ReadWriteOnce"],
-          retainPolicy: options.workspaceRetainPolicy ?? "Retain",
-        };
-    (sandbox.spec as Record<string, unknown>).storage = { workspace };
+  const storage = buildWorkspaceStorageSpec(options);
+  if (storage) {
+    (sandbox.spec as Record<string, unknown>).storage = storage;
   }
 
   if (options.workspaceBootstrap) {
@@ -376,6 +373,59 @@ describe("KarsSandbox manifest generation", () => {
     expect(spec.sandbox.runAsNonRoot).toBe(true);
     expect(spec.sandbox.allowPrivilegeEscalation).toBe(false);
     expect(spec.sandbox.writablePaths).toEqual(["/sandbox", "/tmp"]);
+  });
+
+  it.each([
+    "OpenClaw",
+    "Hermes",
+    "OpenAIAgents",
+    "MicrosoftAgentFramework",
+    "LangGraph",
+    "Anthropic",
+    "PydanticAi",
+    "BYO",
+  ] satisfies RuntimeKind[])("configures workspace storage for %s", (runtimeKind) => {
+    const manifest = buildSandboxManifest(
+      "persistent-agent",
+      defaultOptions({ runtimeKind, workspaceStorage: "10Gi" }),
+    );
+    const spec = manifest.spec as any;
+    expect(spec.runtime.kind).toBe(runtimeKind);
+    expect(spec.storage.workspace).toEqual({
+      size: "10Gi",
+      accessModes: ["ReadWriteOnce"],
+      retainPolicy: "Retain",
+    });
+  });
+});
+
+describe("runtime-specific add flag validation", () => {
+  it("allows channels for Hermes", () => {
+    expect(
+      validateRuntimeSpecificAddFlags("Hermes", {
+        channels: "telegram",
+        telegramToken: "test-token",
+      }),
+    ).toEqual([]);
+  });
+
+  it("rejects channels for runtimes without channel adapters", () => {
+    expect(
+      validateRuntimeSpecificAddFlags("LangGraph", { channels: "telegram" }),
+    ).toEqual([
+      "--channels is only valid with --runtime openclaw or --runtime hermes.",
+    ]);
+  });
+
+  it("keeps skills, plugins, and image overrides OpenClaw-only", () => {
+    expect(
+      validateRuntimeSpecificAddFlags("Hermes", {
+        skills: "browser",
+        image: "example.invalid/custom:latest",
+      }),
+    ).toEqual([
+      "--skills, --image are only valid with --runtime openclaw.",
+    ]);
   });
 });
 

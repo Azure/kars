@@ -255,6 +255,11 @@ For **per-sandbox Entra Agent IDs**, you also need the **Agent ID Developer** En
 # --release pulls the public, signed images (no local build / Rust toolchain).
 kars up --name prod-agent --region swedencentral --release
 
+# Keep the initial agent's /sandbox state across Pod recreation and suspension.
+kars up --name prod-agent --region swedencentral --release \
+  --workspace-storage 20Gi \
+  --workspace-storage-class managed-csi
+
 # Entra tier — full per-sandbox Entra Agent IDs + verified mesh trust
 kars up --name prod-agent --region swedencentral --release --mesh-trust=entra
 

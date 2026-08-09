@@ -450,6 +450,11 @@ kars add researcher --model gpt-4.1 --token-budget-daily 100000
 # Add a Telegram-connected agent with enhanced isolation
 kars add support-bot --channels telegram --telegram-token $TOKEN --isolation enhanced
 
+# Add a Telegram-connected Hermes agent with persistent Hermes state
+kars add hermes-support --runtime hermes \
+  --channels telegram --telegram-token "$TOKEN" \
+  --workspace-storage 20Gi
+
 # Add an OpenClaw agent with a retained 20Gi workspace and bootstrap files
 kars add teaching-agent --workspace-storage 20Gi \
   --workspace-storage-class managed-csi \
@@ -466,6 +471,23 @@ kars add reviewer --dry-run
 ```
 
 **See also:** [docs/api/crd-reference.md](api/crd-reference.md), [docs/runtimes.md](runtimes.md), [docs/channels-plugins.md](channels-plugins.md)
+
+Workspace PVC flags apply to every wired Kubernetes runtime. The controller
+mounts the claim at `/sandbox`; each runtime/application must store recoverable
+state there. `--workspace-bootstrap` remains OpenClaw-only. Channel flags are
+supported by the OpenClaw and Hermes adapters; other runtimes must configure
+their own channel integration.
+
+The initial OpenClaw sandbox created by `kars up` supports the same generated
+or existing workspace claim options:
+
+```bash
+kars up --name prod-agent --workspace-storage 20Gi \
+  --workspace-storage-class managed-csi
+```
+
+`kars dev --target docker` does not use Kubernetes PVCs. Local Kubernetes and
+AKS persistence are controlled through the `KarsSandbox.spec.storage` contract.
 
 ---
 

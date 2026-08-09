@@ -13,6 +13,15 @@ Before this change, every `KarsSandbox` runtime mounted `/sandbox` from an `empt
 
 The persistent volume is a platform-level capability shared by OpenClaw, Hermes, OpenAI Agents, Microsoft Agent Framework, LangGraph, Anthropic, PydanticAI, and BYO runtimes. It preserves only state the runtime writes below `/sandbox`; the controller cannot make framework state persistent when an adapter stores that state elsewhere or only in memory.
 
+The support statement therefore has two levels:
+
+- **Platform support:** all wired Kubernetes runtimes receive the same PVC at
+  `/sandbox`, with the same readiness, Retain/Delete, recovery, and suspension
+  semantics.
+- **Framework-state support:** OpenClaw and Hermes have known runtime homes
+  below `/sandbox`; other frameworks require their application/checkpointer to
+  place recoverable state below `/sandbox` or in an external store.
+
 Before this change, the Controller had no supported way to initialize runtime-owned files such as `SOUL.md` and `HEARTBEAT.md` from a declarative source, and OpenClaw's entrypoint rewrote Kars-provided `AGENTS.md`, `SOUL.md`, and `TOOLS.md` on every startup. The implementation now uses a typed workspace block and create-if-missing defaults; the unrelated unstructured `runtime.openclaw.config` field remains outside this feature.
 
 ## 2. Goals
@@ -658,4 +667,6 @@ Potential follow-up specs may add:
   than reusing OpenClaw Markdown semantics);
 - a CSI-backed persistence matrix for Hermes, LangGraph, BYO, and the remaining
   shipping adapters;
+- workspace controls in the operator TUI spawn dialog (the primary `kars up`
+  and `kars add` CLI paths are implemented);
 - workspace lifecycle Events and Prometheus metrics listed in Section 14.

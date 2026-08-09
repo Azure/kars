@@ -648,6 +648,20 @@ fn workspace_desired_replicas(
     }
 }
 
+fn runtime_state_dir(kind: &crate::crd::RuntimeKind) -> &'static str {
+    match kind {
+        crate::crd::RuntimeKind::OpenClaw => "/sandbox/.openclaw",
+        crate::crd::RuntimeKind::Hermes => "/sandbox/.hermes",
+        crate::crd::RuntimeKind::OpenAIAgents => "/sandbox/.openai-agents",
+        crate::crd::RuntimeKind::MicrosoftAgentFramework => "/sandbox/.maf",
+        crate::crd::RuntimeKind::LangGraph => "/sandbox/.langgraph",
+        crate::crd::RuntimeKind::Anthropic => "/sandbox/.anthropic",
+        crate::crd::RuntimeKind::PydanticAi => "/sandbox/.pydantic-ai",
+        crate::crd::RuntimeKind::BYO => "/sandbox/.byo",
+        crate::crd::RuntimeKind::SemanticKernel => "/sandbox/.semantic-kernel",
+    }
+}
+
 fn kube_api_access_mount() -> serde_json::Value {
     json!({
         "name": "kube-api-access",
@@ -2676,6 +2690,11 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         openclaw_env.push(
             json!({"name": "KARS_RUNTIME_KIND", "value": format!("{:?}", runtime_spec.kind)}),
         );
+        openclaw_env.push(json!({"name": "KARS_WORKSPACE_DIR", "value": "/sandbox"}));
+        openclaw_env.push(json!({
+            "name": "KARS_STATE_DIR",
+            "value": runtime_state_dir(&runtime_spec.kind)
+        }));
         openclaw_env.push(json!({"name": "SANDBOX_NAME", "value": &name}));
         if let Some(ref cluster) = ctx.cluster_name {
             openclaw_env.push(json!({"name": "CLUSTER_NAME", "value": cluster}));

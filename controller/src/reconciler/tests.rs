@@ -624,6 +624,26 @@ fn existing_claim_waits_for_bound_but_dynamic_claim_can_trigger_wffc() {
 }
 
 #[test]
+fn every_wired_runtime_has_a_persistent_state_directory() {
+    use crate::crd::RuntimeKind;
+
+    let expected = [
+        (RuntimeKind::OpenClaw, "/sandbox/.openclaw"),
+        (RuntimeKind::Hermes, "/sandbox/.hermes"),
+        (RuntimeKind::OpenAIAgents, "/sandbox/.openai-agents"),
+        (RuntimeKind::MicrosoftAgentFramework, "/sandbox/.maf"),
+        (RuntimeKind::LangGraph, "/sandbox/.langgraph"),
+        (RuntimeKind::Anthropic, "/sandbox/.anthropic"),
+        (RuntimeKind::PydanticAi, "/sandbox/.pydantic-ai"),
+        (RuntimeKind::BYO, "/sandbox/.byo"),
+    ];
+    for (kind, path) in expected {
+        assert_eq!(runtime_state_dir(&kind), path);
+        assert!(path.starts_with("/sandbox/"));
+    }
+}
+
+#[test]
 fn workspace_volume_transition_requires_suspension() {
     assert!(validate_workspace_volume_transition(None, Some("generated"), false).is_err());
     assert!(
