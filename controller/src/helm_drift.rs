@@ -235,6 +235,78 @@ mod tests {
     }
 
     #[test]
+    fn helm_and_rust_expose_feishu_channel_contract() {
+        let rust = serde_json::to_value(kars_sandbox_crd()).expect("rust CRD serializes");
+        let helm_text = std::fs::read_to_string(KARSSANDBOX_HELM_CRD_PATH)
+            .expect("KarsSandbox Helm CRD exists");
+        let helm: serde_json::Value = serde_yaml::Deserializer::from_str(&helm_text)
+            .next()
+            .map(serde_json::Value::deserialize)
+            .expect("KarsSandbox document exists")
+            .expect("KarsSandbox Helm CRD parses");
+        const SPEC: &str = "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties";
+
+        for (label, crd) in [("Rust", &rust), ("Helm", &helm)] {
+            let channels = crd
+                .pointer(&format!("{SPEC}/channels"))
+                .unwrap_or_else(|| panic!("{label} schema must expose spec.channels"));
+            assert_eq!(
+                channels.pointer("/items/properties/type/enum/0"),
+                Some(&serde_json::json!("Feishu"))
+            );
+            assert_eq!(
+                channels.pointer("/items/properties/feishu/properties/connectionMode/enum/0"),
+                Some(&serde_json::json!("WebSocket"))
+            );
+            assert_eq!(channels.get("maxItems"), Some(&serde_json::json!(8)));
+            assert_eq!(
+                channels.pointer("/items/properties/credentialSecretRef/properties/name/maxLength"),
+                Some(&serde_json::json!(253))
+            );
+            assert_eq!(
+                channels.pointer("/items/properties/credentialSecretRef/properties/name/pattern"),
+                Some(&serde_json::json!(
+                    r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                ))
+            );
+            assert_eq!(
+                channels.pointer("/items/properties/feishu/properties/directMessages/properties/allowFrom/maxItems"),
+                Some(&serde_json::json!(256))
+            );
+            assert_eq!(
+                channels.pointer("/items/properties/feishu/properties/directMessages/properties/allowFrom/items/pattern"),
+                Some(&serde_json::json!("^ou_[A-Za-z0-9_-]+$"))
+            );
+            assert_eq!(
+                channels.pointer(
+                    "/items/properties/feishu/properties/groups/properties/allowFrom/items/pattern"
+                ),
+                Some(&serde_json::json!("^oc_[A-Za-z0-9_-]+$"))
+            );
+            let dm_validations = channels
+                .pointer(
+                    "/items/properties/feishu/properties/directMessages/x-kubernetes-validations",
+                )
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| panic!("{label} Feishu DM CEL validations"));
+            assert!(dm_validations.iter().any(|validation| {
+                validation["rule"]
+                    .as_str()
+                    .is_some_and(|rule| rule.contains("Allowlist") && rule.contains("allowFrom"))
+            }));
+            let validations = channels
+                .get("x-kubernetes-validations")
+                .and_then(serde_json::Value::as_array)
+                .unwrap_or_else(|| panic!("{label} channel CEL validations"));
+            assert!(validations.iter().any(|validation| {
+                validation["rule"]
+                    .as_str()
+                    .is_some_and(|rule| rule.contains("Feishu") && rule.contains("size"))
+            }));
+        }
+    }
+
+    #[test]
     fn helm_toolpolicy_crd_matches_rust_schema() {
         let rust_crd_value =
             serde_json::to_value(tool_policy_crd()).expect("rust crd serializes to JSON");

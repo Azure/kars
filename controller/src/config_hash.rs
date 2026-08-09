@@ -32,6 +32,11 @@ use prometheus::{IntGaugeVec, opts, register_int_gauge_vec};
 use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
 
+pub fn sha256_hex_prefix(bytes: &[u8], prefix_bytes: usize) -> String {
+    let digest = Sha256::digest(bytes);
+    hex::encode(&digest[..prefix_bytes.min(digest.len())])
+}
+
 /// Env var names that contribute to the controller config hash.
 ///
 /// Adding/removing entries from this list is itself a config-hash
@@ -128,6 +133,14 @@ pub fn record_config_hash(config_hash: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sha256_hex_prefix_matches_known_vector() {
+        assert_eq!(
+            sha256_hex_prefix(b"abc", 16),
+            "ba7816bf8f01cfea414140de5dae2223"
+        );
+    }
     use std::collections::HashMap;
 
     fn lookup_fn(map: HashMap<&'static str, &'static str>) -> impl Fn(&str) -> Option<String> {

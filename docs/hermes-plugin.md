@@ -95,7 +95,7 @@ Each is replaced by its kars equivalent (`foundry_*` via MCP or `http_fetch`) th
 
 ---
 
-## Channels (4 first-class adapters today)
+## Channels (5 first-class adapters today)
 
 Hermes ships 20+ channel adapters; kars wires the four production-grade ones via CLI flag → env var → `entrypoint.sh` → `hermes config set channels.*` flow:
 
@@ -105,8 +105,9 @@ Hermes ships 20+ channel adapters; kars wires the four production-grade ones via
 | **Slack** | `SLACK_BOT_TOKEN` | `channels.slack.{token,enabled}` |
 | **Discord** | `DISCORD_BOT_TOKEN` | `channels.discord.{token,enabled}` |
 | **WhatsApp** | `WHATSAPP_TOKEN` | `channels.whatsapp.{token,enabled}` |
+| **Feishu/Lark** | `FEISHU_APP_ID`, `FEISHU_APP_SECRET` | `platforms.feishu.extra` policy + native WebSocket adapter |
 
-Credentials live in a Kubernetes secret named `<sandbox-name>-credentials` in namespace `kars-<sandbox-name>`, mounted via `envFrom: { secretRef: { optional: true } }` so a Hermes pod starts even before the secret is created. Add or rotate tokens with:
+Telegram, Slack, Discord, and plugin credentials use `<sandbox-name>-credentials` in namespace `kars-<sandbox-name>`. Feishu App credentials use a dedicated immutable, versioned Secret selected by `spec.channels[].credentialSecretRef` and are injected through explicit key refs. Add or rotate credentials with:
 
 ```bash
 kars credentials update my-hermes-agent --telegram-token <bot-token>
@@ -114,6 +115,10 @@ kubectl rollout restart deployment/my-hermes-agent -n kars-my-hermes-agent
 ```
 
 When no channels are configured the entrypoint logs `No channels — starting hermes gateway in idle daemon mode` and serves only mesh / spawn / hook traffic — perfect for sub-agents that talk only to other agents.
+
+Feishu is WebSocket-only in the Kars v1 contract. The image pins `hermes-agent[feishu]==0.16.0`, translates DM pairing/allowlist/disabled policy, generates per-chat `group_rules` for allowed `oc_...` IDs, disables all unlisted groups, and enforces `require_mention` before model dispatch. A pod-local readiness marker is created only after the pinned `lark-oapi==1.5.3` SDK completes `websockets.connect()` and is removed by the SDK disconnect path; the controller maps that probe to `ChannelReady`.
+
+Use one Feishu App per sandbox. The controller atomically claims a SHA-256 fingerprint of the App ID and rejects a second owner without exposing the App ID or App Secret in status. Pairing approvals are runtime state under `/sandbox`; use a workspace PVC when approvals must survive Pod replacement.
 
 ---
 

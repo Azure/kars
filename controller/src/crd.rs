@@ -77,6 +77,11 @@ pub struct KarsSandboxSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub storage: Option<SandboxStorageSpec>,
 
+    /// Runtime-facing messaging channels. Policy is non-sensitive; channel
+    /// credentials remain in the per-sandbox Kubernetes Secret.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ChannelSpec>,
+
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
 
@@ -246,6 +251,93 @@ pub enum WorkspaceRetainPolicy {
     #[default]
     Retain,
     Delete,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSpec {
+    #[serde(rename = "type")]
+    pub type_: ChannelType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_secret_ref: Option<LocalObjectRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feishu: Option<FeishuChannelSpec>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum ChannelType {
+    Feishu,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuChannelSpec {
+    #[serde(default)]
+    pub domain: FeishuDomain,
+    #[serde(default)]
+    pub connection_mode: FeishuConnectionMode,
+    #[serde(default)]
+    pub direct_messages: DirectMessagePolicy,
+    #[serde(default)]
+    pub groups: GroupPolicy,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum FeishuDomain {
+    #[default]
+    Feishu,
+    Lark,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum FeishuConnectionMode {
+    #[default]
+    WebSocket,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectMessagePolicy {
+    #[serde(default)]
+    pub policy: DirectMessageAccess,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_from: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum DirectMessageAccess {
+    #[default]
+    Pairing,
+    Allowlist,
+    Disabled,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupPolicy {
+    #[serde(default)]
+    pub policy: GroupAccess,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_from: Vec<String>,
+    #[serde(default = "default_true")]
+    pub require_mention: bool,
+}
+
+impl Default for GroupPolicy {
+    fn default() -> Self {
+        Self {
+            policy: GroupAccess::Allowlist,
+            allow_from: Vec::new(),
+            require_mention: true,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum GroupAccess {
+    #[default]
+    Allowlist,
+    Disabled,
 }
 
 /// Per-sandbox mesh authentication mode.
@@ -1403,6 +1495,54 @@ mod tests {
         assert!(cfg.allowed_endpoints.is_none());
         assert_eq!(cfg.egress_mode, EgressMode::Learn);
         assert!(cfg.allowlist_ref.is_none());
+    }
+
+    #[test]
+    fn feishu_channel_defaults_are_fail_closed() {
+        let channel: ChannelSpec = serde_json::from_value(serde_json::json!({
+            "type": "Feishu",
+            "feishu": {}
+        }))
+        .expect("Feishu channel uses safe defaults");
+        assert_eq!(channel.type_, ChannelType::Feishu);
+        let feishu = channel.feishu.expect("Feishu config");
+        assert_eq!(feishu.domain, FeishuDomain::Feishu);
+        assert_eq!(feishu.connection_mode, FeishuConnectionMode::WebSocket);
+        assert_eq!(feishu.direct_messages.policy, DirectMessageAccess::Pairing);
+        assert!(feishu.direct_messages.allow_from.is_empty());
+        assert_eq!(feishu.groups.policy, GroupAccess::Allowlist);
+        assert!(feishu.groups.allow_from.is_empty());
+        assert!(feishu.groups.require_mention);
+    }
+
+    #[test]
+    fn feishu_channel_round_trips_camel_case_policy() {
+        let channel: ChannelSpec = serde_json::from_value(serde_json::json!({
+            "type": "Feishu",
+            "credentialSecretRef": {"name": "agent-credentials"},
+            "feishu": {
+                "domain": "Lark",
+                "connectionMode": "WebSocket",
+                "directMessages": {
+                    "policy": "Allowlist",
+                    "allowFrom": ["ou_teacher"]
+                },
+                "groups": {
+                    "policy": "Allowlist",
+                    "allowFrom": ["oc_teaching"],
+                    "requireMention": false
+                }
+            }
+        }))
+        .unwrap();
+        let value = serde_json::to_value(channel).unwrap();
+        assert_eq!(value["credentialSecretRef"]["name"], "agent-credentials");
+        assert_eq!(value["feishu"]["connectionMode"], "WebSocket");
+        assert_eq!(
+            value["feishu"]["directMessages"]["allowFrom"][0],
+            "ou_teacher"
+        );
+        assert_eq!(value["feishu"]["groups"]["allowFrom"][0], "oc_teaching");
     }
 
     #[test]

@@ -65,7 +65,7 @@ If your runtime SDK reads its model endpoint from one of the well-known env vars
 
 ### `OpenClaw`
 
-Default. Uses the [OpenClaw](https://openclaw.ai) public plugin API + `tools.deny` config. **No OpenClaw source is modified, patched, or vendored.** Any upstream OpenClaw release is drop-in compatible. See **[Upstream alignment](upstream-alignment.md)** for the contract details.
+Default. Uses the [OpenClaw](https://openclaw.ai) public plugin API + `tools.deny` config. The image pins `openclaw@2026.5.27` and the matching `@openclaw/feishu@2026.5.27`; image builds fail if the Feishu plugin is not discoverable. OpenClaw core source is not modified. See **[Upstream alignment](upstream-alignment.md)** for the contract details.
 
 The OpenClaw adapter ships two multi-agent helpers on top of the platform mesh:
 
@@ -74,13 +74,15 @@ The OpenClaw adapter ships two multi-agent helpers on top of the platform mesh:
 
 ### `Hermes`
 
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT). Python 3.11+ agent harness pinned to v0.15.2 by default. Ships **20+ messaging channels** (Telegram, Slack, Discord, WhatsApp, …), **18+ inference providers**, **70+ built-in tools**, and a native MCP client out-of-the-box. The kars Hermes plugin wires Hermes into AGT governance, the kars mesh (Python AGT MeshClient via `runtimes/agt-mesh-python/`), Foundry data-plane tools, and the same CRD-driven `agentCode` mounting story as OpenClaw.
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT). Python 3.11+ agent harness pinned to v0.16.0 by default. The image installs the exact `hermes-agent[feishu]==0.16.0` extra and applies a source-anchored compatibility patch for the Kars DM/group admission contract; a changed upstream source shape fails the image build. Hermes ships **20+ messaging channels**, **18+ inference providers**, **70+ built-in tools**, and a native MCP client out-of-the-box. The kars Hermes plugin wires Hermes into AGT governance, the kars mesh (Python AGT MeshClient via `runtimes/agt-mesh-python/`), Foundry data-plane tools, and the same CRD-driven `agentCode` mounting story as OpenClaw.
 
 What makes Hermes a useful counterpart to OpenClaw:
 
 - **Channels-first.** Drop a Telegram bot token into a secret and Hermes is a Telegram-driven agent — no glue code. OpenClaw is more code-first; Hermes is more chat-first.
 - **MCP client built-in.** Hermes' native `mcp_servers` config lets the agent reach the kars platform MCP server (Foundry tools) without writing the bridge yourself.
 - **Bidi mesh peer.** Hermes participates in the AGT mesh identically to OpenClaw — `OpenClaw → Hermes`, `Hermes → OpenClaw`, and `Hermes → Hermes` are all proven end-to-end on AKS (see [`tests/e2e/interop/hermes_openclaw_bidi.sh`](../tests/e2e/interop/hermes_openclaw_bidi.sh) and [`tests/e2e/interop/aks_full_suite.sh`](../tests/e2e/interop/aks_full_suite.sh)).
+
+OpenClaw and Hermes are the only v1 runtimes that accept `spec.channels[].type=Feishu`. Both use outbound WebSocket transport, DM pairing by default, group chat-ID allowlisting, and mention gating. Other runtime kinds fail capability validation before a runtime Pod is made ready.
 
 Full operator-facing reference: **[Hermes plugin](hermes-plugin.md)**.
 

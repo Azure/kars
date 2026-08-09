@@ -2,7 +2,12 @@
 // Licensed under the MIT License.
 
 import { describe, it, expect } from "vitest";
-import { validateRuntimeSpecificAddFlags } from "./add.js";
+import {
+  buildFeishuChannelSpec,
+  buildFeishuSecrets,
+  buildCredentialSecretManifest,
+  validateRuntimeSpecificAddFlags,
+} from "./add.js";
 import { buildRuntimeBlock, type RuntimeKind } from "../runtime.js";
 import { buildWorkspaceStorageSpec } from "../lib/workspace-storage.js";
 
@@ -31,6 +36,14 @@ interface AddOptions {
   telegramToken?: string;
   slackToken?: string;
   discordToken?: string;
+  feishuAppId?: string;
+  feishuAppSecret?: string;
+  feishuDomain?: "feishu" | "lark";
+  feishuDmPolicy?: "pairing" | "allowlist" | "disabled";
+  feishuAllowFrom?: string;
+  feishuGroupPolicy?: "allowlist" | "disabled";
+  feishuGroupAllowFrom?: string;
+  feishuRequireMention?: boolean;
   braveApiKey?: string;
   tavilyApiKey?: string;
   exaApiKey?: string;
@@ -191,6 +204,32 @@ function buildSecrets(options: AddOptions) {
 // --- Tests ---
 
 describe("KarsSandbox manifest generation", () => {
+  it("does not treat Feishu policy defaults as explicitly selected flags", () => {
+    expect(validateRuntimeSpecificAddFlags("OpenClaw", {
+      feishuDomain: "feishu",
+      feishuDmPolicy: "pairing",
+      feishuGroupPolicy: "allowlist",
+      feishuRequireMention: true,
+    })).toEqual([]);
+  });
+
+  it("builds an immutable managed Feishu Secret manifest", () => {
+    expect(buildCredentialSecretManifest(
+      "agent-feishu-credentials",
+      "kars-agent",
+      { FEISHU_APP_ID: "cli_test", FEISHU_APP_SECRET: "secret" },
+      {
+        immutable: true,
+        labels: { "channels.kars.azure.com/managed-rotation": "true" },
+      },
+    )).toMatchObject({
+      immutable: true,
+      metadata: {
+        labels: { "channels.kars.azure.com/managed-rotation": "true" },
+      },
+    });
+  });
+
   it("generates correct apiVersion and kind", () => {
     const manifest = buildSandboxManifest("agent1", defaultOptions());
     expect(manifest.apiVersion).toBe("kars.azure.com/v1alpha1");
@@ -426,6 +465,92 @@ describe("runtime-specific add flag validation", () => {
     ).toEqual([
       "--skills, --image are only valid with --runtime openclaw.",
     ]);
+  });
+});
+
+describe("Feishu channel contract", () => {
+  it.each(["OpenClaw", "Hermes"] satisfies RuntimeKind[])(
+    "builds typed policy for %s without credentials",
+    (runtimeKind) => {
+      const channel = buildFeishuChannelSpec(runtimeKind, {
+        channels: "feishu",
+        feishuDomain: "lark",
+        feishuDmPolicy: "allowlist",
+        feishuAllowFrom: "ou_teacher,ou_admin",
+        feishuGroupPolicy: "allowlist",
+        feishuGroupAllowFrom: "oc_teaching",
+        feishuRequireMention: false,
+      });
+      expect(channel).toEqual({
+        type: "Feishu",
+        feishu: {
+          domain: "Lark",
+          connectionMode: "WebSocket",
+          directMessages: {
+            policy: "Allowlist",
+            allowFrom: ["ou_teacher", "ou_admin"],
+          },
+          groups: {
+            policy: "Allowlist",
+            allowFrom: ["oc_teaching"],
+            requireMention: false,
+          },
+        },
+      });
+      expect(JSON.stringify(channel)).not.toContain("secret");
+    },
+  );
+
+  it("maps App credentials only into Secret env keys", () => {
+    expect(
+      buildFeishuSecrets({
+        channels: "feishu",
+        feishuAppId: "cli_test",
+        feishuAppSecret: "top-secret",
+      }),
+    ).toEqual({
+      FEISHU_APP_ID: "cli_test",
+      FEISHU_APP_SECRET: "top-secret",
+    });
+  });
+
+  it("rejects partial credentials and unsupported runtimes", () => {
+    expect(() =>
+      buildFeishuSecrets({ channels: "feishu", feishuAppId: "cli_test" }),
+    ).toThrow("both --feishu-app-id and --feishu-app-secret");
+    expect(() => buildFeishuChannelSpec("LangGraph", { channels: "feishu" })).toThrow(
+      "Feishu is only supported by OpenClaw and Hermes",
+    );
+    expect(() => buildFeishuSecrets({ channels: "feishu" })).toThrow(
+      "both --feishu-app-id and --feishu-app-secret",
+    );
+  });
+
+  it("rejects invalid Feishu policy values and IDs", () => {
+    expect(() => buildFeishuChannelSpec("OpenClaw", {
+      channels: "feishu",
+      feishuDomain: "example",
+    })).toThrow("--feishu-domain");
+    expect(() => buildFeishuChannelSpec("OpenClaw", {
+      channels: "feishu",
+      feishuDmPolicy: "allowlist",
+    })).toThrow("requires --feishu-allow-from");
+    expect(() => buildFeishuChannelSpec("OpenClaw", {
+      channels: "feishu",
+      feishuGroupAllowFrom: "group-1",
+    })).toThrow("oc_ group chat IDs");
+  });
+
+  it("builds an apply manifest without putting values in kubectl arguments", () => {
+    const manifest = buildCredentialSecretManifest("agent-credentials", "kars-agent", {
+      FEISHU_APP_ID: "cli_test",
+      FEISHU_APP_SECRET: "top-secret",
+    });
+    expect(manifest).toMatchObject({
+      kind: "Secret",
+      metadata: { name: "agent-credentials", namespace: "kars-agent" },
+      stringData: { FEISHU_APP_SECRET: "top-secret" },
+    });
   });
 });
 

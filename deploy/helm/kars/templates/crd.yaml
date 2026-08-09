@@ -506,6 +506,75 @@ spec:
                         retainPolicy:
                           type: string
                           enum: ["Retain", "Delete"]
+                channels:
+                  type: array
+                  description: "Runtime-facing messaging channel policy. Credentials remain in a per-sandbox Secret."
+                  maxItems: 8
+                  x-kubernetes-validations:
+                    - rule: "self.filter(channel, channel.type == 'Feishu').size() <= 1"
+                      message: "spec.channels may contain at most one Feishu channel"
+                      reason: "FieldValueInvalid"
+                    - rule: "self.all(channel, (channel.type == 'Feishu') == has(channel.feishu))"
+                      message: "channels[].feishu must be set iff type is Feishu"
+                      reason: "FieldValueInvalid"
+                  items:
+                    type: object
+                    required: ["type"]
+                    properties:
+                      type:
+                        type: string
+                        enum: ["Feishu"]
+                      credentialSecretRef:
+                        type: object
+                        required: ["name"]
+                        properties:
+                          name:
+                            type: string
+                            maxLength: 253
+                            pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                      feishu:
+                        type: object
+                        properties:
+                          domain:
+                            type: string
+                            enum: ["Feishu", "Lark"]
+                            default: "Feishu"
+                          connectionMode:
+                            type: string
+                            enum: ["WebSocket"]
+                            default: "WebSocket"
+                          directMessages:
+                            type: object
+                            properties:
+                              policy:
+                                type: string
+                                enum: ["Pairing", "Allowlist", "Disabled"]
+                                default: "Pairing"
+                              allowFrom:
+                                type: array
+                                maxItems: 256
+                                items:
+                                  type: string
+                                  pattern: "^ou_[A-Za-z0-9_-]+$"
+                            x-kubernetes-validations:
+                              - rule: "!has(self.policy) || self.policy != 'Allowlist' || (has(self.allowFrom) && self.allowFrom.size() > 0)"
+                                message: "directMessages.allowFrom must be non-empty when policy is Allowlist"
+                          groups:
+                            type: object
+                            properties:
+                              policy:
+                                type: string
+                                enum: ["Allowlist", "Disabled"]
+                                default: "Allowlist"
+                              allowFrom:
+                                type: array
+                                maxItems: 256
+                                items:
+                                  type: string
+                                  pattern: "^oc_[A-Za-z0-9_-]+$"
+                              requireMention:
+                                type: boolean
+                                default: true
                 agent:
                   type: object
                   description: "Foundry Agent Service configuration — controller creates a prompt agent on reconcile"

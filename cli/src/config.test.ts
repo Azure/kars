@@ -359,6 +359,8 @@ describe("secrets store", () => {
   it("KNOWN_SECRETS has correct env mappings", () => {
     expect(KNOWN_SECRETS["telegram-token"].env).toBe("TELEGRAM_BOT_TOKEN");
     expect(KNOWN_SECRETS["slack-token"].env).toBe("SLACK_BOT_TOKEN");
+    expect(KNOWN_SECRETS["feishu-app-id"].env).toBe("FEISHU_APP_ID");
+    expect(KNOWN_SECRETS["feishu-app-secret"].env).toBe("FEISHU_APP_SECRET");
     expect(KNOWN_SECRETS["azure-openai-key"].env).toBe("AZURE_OPENAI_API_KEY");
   });
 

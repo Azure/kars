@@ -10,6 +10,75 @@
 #   UID 1001 (router)  — inference router, can reach internet
 #   UID 1000 (sandbox) — agent processes, restricted to localhost + DNS
 
+append_feishu_channel_config() {
+  if [ -z "${FEISHU_CONNECTION_MODE:-}" ]; then
+    return 0
+  fi
+  if [ -z "${FEISHU_APP_ID:-}" ] && [ -z "${FEISHU_APP_SECRET:-}" ]; then
+    echo "[kars] FATAL: Feishu requires both FEISHU_APP_ID and FEISHU_APP_SECRET" >&2
+    return 1
+  fi
+  if [ -z "${FEISHU_APP_ID:-}" ] || [ -z "${FEISHU_APP_SECRET:-}" ]; then
+    echo "[kars] FATAL: Feishu requires both FEISHU_APP_ID and FEISHU_APP_SECRET" >&2
+    return 1
+  fi
+  if [ "$FEISHU_CONNECTION_MODE" != "websocket" ]; then
+    echo "[kars] FATAL: Feishu only supports websocket connection mode" >&2
+    return 1
+  fi
+  local plugin_stage="${KARS_FEISHU_PLUGIN_STAGE:-/opt/openclaw-feishu-stage}"
+  local openclaw_state="${OPENCLAW_DIR:-/sandbox/.openclaw}"
+  if [ ! -f "$plugin_stage/plugins/installs.json" ] || \
+     [ ! -d "$plugin_stage/npm/node_modules/@openclaw/feishu" ]; then
+    echo "[kars] FATAL: pinned OpenClaw Feishu plugin is missing" >&2
+    return 1
+  fi
+  mkdir -p "$openclaw_state/plugins"
+  rm -rf "$openclaw_state/npm"
+  cp -r "$plugin_stage/npm" "$openclaw_state/npm"
+  cp "$plugin_stage/plugins/installs.json" "$openclaw_state/plugins/installs.json"
+
+  local allow_from group_allow_from require_mention feishu_config separator
+  allow_from=$(jq -cn --arg value "${FEISHU_ALLOW_FROM:-}" \
+    '$value | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+  group_allow_from=$(jq -cn --arg value "${FEISHU_GROUP_ALLOW_FROM:-}" \
+    '$value | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+  case "${FEISHU_REQUIRE_MENTION:-true}" in
+    true) require_mention=true ;;
+    false) require_mention=false ;;
+    *)
+      echo "[kars] FATAL: FEISHU_REQUIRE_MENTION must be true or false" >&2
+      return 1
+      ;;
+  esac
+
+  feishu_config=$(jq -cn \
+    --arg app_id "$FEISHU_APP_ID" \
+    --arg app_secret "$FEISHU_APP_SECRET" \
+    --arg domain "${FEISHU_DOMAIN:-feishu}" \
+    --arg connection_mode "${FEISHU_CONNECTION_MODE:-websocket}" \
+    --arg dm_policy "${FEISHU_DM_POLICY:-pairing}" \
+    --argjson allow_from "$allow_from" \
+    --arg group_policy "${FEISHU_GROUP_POLICY:-allowlist}" \
+    --argjson group_allow_from "$group_allow_from" \
+    --argjson require_mention "$require_mention" \
+    '{appId: $app_id, appSecret: $app_secret, domain: $domain,
+      connectionMode: $connection_mode, dmPolicy: $dm_policy,
+      allowFrom: $allow_from, groupPolicy: $group_policy,
+      groupAllowFrom: $group_allow_from, requireMention: $require_mention}')
+
+  separator=""
+  [ -n "${CHANNELS_CONFIG:-}" ] && separator=", "
+  CHANNELS_CONFIG="${CHANNELS_CONFIG:-}${separator}\"feishu\": ${feishu_config}"
+  PLUGINS_LIST="${PLUGINS_LIST}, \"feishu\""
+  [ -n "${PLUGINS_ENTRIES:-}" ] && PLUGINS_ENTRIES="${PLUGINS_ENTRIES}, "
+  PLUGINS_ENTRIES="${PLUGINS_ENTRIES}\"feishu\": { \"enabled\": true }"
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 set -e
 
 # Make pre-staged OpenClaw bundled-runtime-deps discoverable at runtime.
@@ -965,6 +1034,8 @@ AUTHPROFEOF
     [ -n "${PLUGINS_ENTRIES}" ] && PLUGINS_ENTRIES="${PLUGINS_ENTRIES}, "
     PLUGINS_ENTRIES="${PLUGINS_ENTRIES}\"discord\": { \"enabled\": true }"
   fi
+
+  append_feishu_channel_config
 
   # Default: no channels configured
   if [ -z "${CHANNELS_CONFIG}" ]; then

@@ -15,6 +15,10 @@ For threat-model walkthroughs, see **[STRIDE](security/stride.md)** and the **[R
 3. **Inter-agent messages are E2E encrypted with forward secrecy.** Compromise of the AgentMesh relay does not expose any past or future message content.
 4. **Every external call is audited in a tamper-evident chain.** Each audit record carries a SHA-256 hash of the previous record, so any deletion or modification — including by the cluster operator — breaks the chain and is detectable on replay. (We do not yet sign the chain head with a separate key; that is on the roadmap. The integrity property today is *detection*, not *non-repudiation*.)
 
+Channel credentials are a separate boundary from Azure credentials. A messaging runtime must receive its bot token or App Secret to authenticate to that platform. Ordinary channel/plugin values use the per-sandbox `<name>-credentials` Secret. Feishu App credentials use a dedicated immutable, versioned Secret referenced by `spec.channels[].credentialSecretRef`. Only the UID 1000 runtime container receives these values; the inference-router and init containers do not. Feishu policy is non-sensitive and lives in `KarsSandbox.spec.channels[]`.
+
+Feishu defaults fail closed: DM pairing, group chat-ID allowlist, direct mention required, WebSocket-only transport, and one App ID per sandbox. The controller indexes only a SHA-256 App ID fingerprint in an internal ownership ConfigMap and never writes the App ID, App Secret, fingerprint, or message content to CR status. `ChannelReady=True` requires a runtime-specific connection signal, not Secret presence or generic Pod readiness.
+
 Everything below explains how those four guarantees are enforced and where the seams are.
 
 > **What is not yet enforced in this release.** Trying to be explicit so reviewers do not have to hunt:

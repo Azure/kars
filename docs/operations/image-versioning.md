@@ -20,6 +20,24 @@ override env var on the controller (e.g. `OPENAI_AGENTS_RUNTIME_IMAGE`,
 `PYDANTIC_AI_RUNTIME_IMAGE`, `INFERENCE_ROUTER_IMAGE`,
 `SANDBOX_IMAGE`).
 
+## Runtime dependency coupling
+
+The OpenClaw sandbox base pins `openclaw@2026.5.27` and
+`@openclaw/feishu@2026.5.27` to the same exact version. Its build verifies that
+the `feishu` plugin is discoverable in an immutable external-plugin stage; the
+entrypoint copies that registered stage into the writable OpenClaw state before
+generating channel config. Upgrade the host and plugin together.
+
+The Hermes runtime pins `hermes-agent[feishu]==0.16.0`, including
+`lark-oapi==1.5.3`. Kars applies a source-anchored compatibility patch for typed
+DM/group admission and SDK-handshake channel readiness; the image build fails if
+either dependency changes those source anchors. Upgrade Hermes only after updating the patch and rerunning
+`sandbox-images/hermes/testM_feishu_channel.sh` against the new wheel.
+
+These package pins are independent of the container tag channel. A floating
+`:latest` image still contains exact runtime package versions from its source
+revision.
+
 ## Recommended channels per environment
 
 | Environment | Controller / router | Sandbox / runtimes | Why |

@@ -1,6 +1,6 @@
 # Channels & external plugins
 
-Messaging channels (Telegram, Slack, Discord, WhatsApp) and **third-party** search/scrape API integrations (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI) extend your kars agent with external communication and search capabilities. Configuration is via CLI flags — the sandbox entrypoint auto-configures everything from environment variables at startup.
+Messaging channels (Telegram, Slack, Discord, WhatsApp, Feishu/Lark) and **third-party** search/scrape API integrations (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI) extend your kars agent with external communication and search capabilities. Configuration is via CLI flags — the sandbox entrypoint auto-configures everything from environment variables at startup.
 
 > **Looking for the kars-owned plugins?** This page is about **external** integrations. For the kars-owned components:
 > - **[kars OpenClaw plugin](openclaw-plugin.md)** — the in-sandbox plugin (24 governance-aware tools, 10 skills) shipped with every OpenClaw-runtime sandbox.
@@ -8,7 +8,7 @@ Messaging channels (Telegram, Slack, Discord, WhatsApp) and **third-party** sear
 > - **[`@kars/mesh` plugin](mesh-plugin.md)** — the companion local plugin (built from source, not yet published on npm) for pairing a **local** OpenClaw with a remote kars cluster (8 federation tools, 1 skill).
 > - **Cross-Framework Secure Mesh** — Hermes, OpenClaw, and LangGraph agents communicate over one AgentMesh fabric, every hop end-to-end encrypted with the Signal Protocol. See [mesh-plugin.md](mesh-plugin.md) and the [`kars mesh` reference](cli-reference.md#kars-mesh).
 
-The channels and plugins documented below work identically with both runtimes — same CLI flag, same secret name (`<sandbox>-credentials`), same auto-config flow inside the entrypoint. The only difference is the config-file shape inside the agent container: OpenClaw writes to `~/.openclaw-data/config.yaml`, Hermes writes to `$HERMES_HOME/config.yaml`. The CLI hides that detail.
+The channels and plugins documented below use the same secret name (`<sandbox>-credentials`) and auto-config flow in OpenClaw and Hermes. Feishu is supported only by these two runtimes; the CLI and controller reject every other runtime rather than silently dropping the channel.
 
 ---
 
@@ -24,6 +24,7 @@ Channels connect your agent to messaging platforms. Pass channel flags to `kars 
 | Slack | `--channels slack` | `--slack-token` | Bot User OAuth Token (`xoxb-...`) |
 | Discord | `--channels discord` | `--discord-token` | Bot token from Discord Developer Portal |
 | WhatsApp | `--channels whatsapp` | — | QR code pairing at runtime (no token needed) |
+| Feishu/Lark | `--channels feishu` | `--feishu-app-id`, `--feishu-app-secret` | Outbound WebSocket; OpenClaw and Hermes only |
 
 Multiple channels can be enabled at once:
 
@@ -73,6 +74,31 @@ kars dev --channels whatsapp
 ```
 
 Scan the QR code with WhatsApp on your phone to link the session.
+
+### Feishu / Lark Setup
+
+1. Create one custom app in the [Feishu Open Platform](https://open.feishu.cn/) or [Lark Developer Console](https://open.larksuite.com/).
+2. Enable the bot capability and the message receive/send permissions required by your app.
+3. In Event Subscriptions, select **WebSocket / long connection**. Kars does not expose a webhook endpoint in v1.
+4. Publish or install the app to the tenant, then add the bot to each allowed group.
+5. Deploy with a dedicated App ID and App Secret:
+
+```bash
+kars add teaching-agent \
+    --runtime openclaw \
+    --channels feishu \
+    --feishu-app-id "$FEISHU_APP_ID" \
+    --feishu-app-secret "$FEISHU_APP_SECRET" \
+    --feishu-group-allow-from oc_teaching_a,oc_teaching_b \
+    --workspace-storage 10Gi \
+    --learn-egress
+```
+
+Use `--runtime hermes` for the Hermes adapter. `--feishu-domain lark` selects Lark; the default is `feishu`.
+
+Security defaults are DM pairing, group allowlist, and direct bot mention required. User IDs use Feishu open IDs (`ou_...`); group entries use chat IDs (`oc_...`). An empty group allowlist admits no groups. The same App ID cannot be active in two sandboxes: the controller stores a non-secret SHA-256 ownership claim and reports `ChannelReady=False/AppAlreadyClaimed` for a conflict.
+
+Pairing approvals and runtime dedup/session state live under `/sandbox`. Add `--workspace-storage` when those approvals must survive Pod replacement. Incoming Feishu messages do not wake a suspended sandbox.
 
 ---
 
@@ -164,7 +190,7 @@ When deploying to AKS with `kars add`, channel tokens and plugin API keys are st
 CLI (kars add --telegram-token "...")
     │
     ▼
-K8s Secret (kars-<name>/<name>-credentials)
+K8s Secret (conventional: <name>-credentials; Feishu: immutable versioned Secret)
     │
     ▼
 Controller mounts via envFrom in pod spec
@@ -176,7 +202,7 @@ entrypoint.sh reads env vars → configures channels/plugins
 Agent process (pre-configured, never sees raw tokens)
 ```
 
-Secret naming convention: All credentials are stored in a **single secret** named `<name>-credentials` in the `kars-<name>` namespace. The secret contains keys mapped to environment variables:
+Secret naming convention: ordinary channel/plugin credentials are stored in `<name>-credentials` in the `kars-<name>` namespace. Feishu App credentials are stored separately in a dedicated immutable, versioned Secret referenced by `spec.channels[].credentialSecretRef`. Secret keys map to these environment variables:
 
 | Credential Type | Secret Key | Environment Variable |
 |----------------|------------|---------------------|
@@ -184,6 +210,8 @@ Secret naming convention: All credentials are stored in a **single secret** name
 | Telegram allowlist | `TELEGRAM_ALLOW_FROM` | `TELEGRAM_ALLOW_FROM` |
 | Slack token | `SLACK_BOT_TOKEN` | `SLACK_BOT_TOKEN` |
 | Discord token | `DISCORD_BOT_TOKEN` | `DISCORD_BOT_TOKEN` |
+| Feishu App ID | `FEISHU_APP_ID` | `FEISHU_APP_ID` |
+| Feishu App Secret | `FEISHU_APP_SECRET` | `FEISHU_APP_SECRET` |
 | WhatsApp | `WHATSAPP_ENABLED` | `WHATSAPP_ENABLED` |
 | Brave API key | `BRAVE_API_KEY` | `BRAVE_API_KEY` |
 | Tavily API key | `TAVILY_API_KEY` | `TAVILY_API_KEY` |
@@ -211,9 +239,14 @@ kars credentials update my-agent --telegram-token "NEW" --brave-api-key "NEW"
 
 # Update without restarting the pod (apply on next restart)
 kars credentials update my-agent --telegram-token "NEW" --no-restart
+
+# Rotate Feishu credentials and restart the target sandbox
+kars credentials update teaching-agent \
+    --feishu-app-id "$NEW_APP_ID" \
+    --feishu-app-secret "$NEW_APP_SECRET"
 ```
 
-The command updates the K8s secret and triggers a rolling restart of the sandbox pod (unless `--no-restart` is passed).
+Feishu credentials are separated from Telegram/plugin credentials from initial creation onward and stored in a dedicated immutable Secret referenced by `credentialSecretRef`. For ordinary credentials, the command updates the conventional Secret and triggers a rolling restart unless `--no-restart` is passed. Feishu rotation is stricter: the CLI requires App ID and App Secret together, rejects mixing Feishu and ordinary updates in one command, creates an immutable versioned Secret containing only those two keys, and updates `credentialSecretRef`. The controller claims the new App ID before rolling the Pod and deletes obsolete managed revisions afterward. `--no-restart` is rejected for Feishu.
 
 ---
 
@@ -243,6 +276,11 @@ No manual configuration files needed — everything is driven by environment var
 | Slack `invalid_auth` | Token revoked or wrong workspace | Reinstall the Slack app and use the new `xoxb-` token |
 | Discord bot offline | Missing `MESSAGE_CONTENT` intent | Enable it in Discord Developer Portal → Bot → Privileged Gateway Intents |
 | WhatsApp QR not appearing | Console output buffered | Check gateway logs: `kubectl logs <pod> -c openclaw` |
+| Feishu `ChannelReady=False/Connecting` | Runtime is starting or the WebSocket is reconnecting | Wait for the retry loop; if it persists, inspect runtime logs and learned egress |
+| Feishu `ChannelReady=False/ConnectionFailed` | Adapter startup, authentication, dependency, or egress failed | Check runtime logs, then review `kars egress <name> --learned` and approve only the exact Feishu/Lark hosts |
+| Feishu `AppAlreadyClaimed` | The App ID is already active in another sandbox | Give each sandbox a dedicated app, or remove or rotate the existing channel first |
+| Feishu DMs return a pairing code | Safe DM default is active | Approve with the runtime pairing command; use persistent workspace storage to retain approval |
+| Feishu group messages are ignored | Chat ID is absent from the group allowlist or the bot was not directly mentioned | Add the `oc_...` ID and mention the bot; `@all` does not count |
 | Channel traffic blocked | Domain not on egress allowlist | Run `kars egress <name> --learned` and approve channel API domains |
 
 ### Plugin Issues

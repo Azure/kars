@@ -13,10 +13,507 @@
 
 use super::*;
 use crate::crd::{
-    OpenClawConfig, OpenClawWorkspaceSpec, PersistentVolumeAccessMode, SandboxConfig,
-    SandboxStorageSpec, WorkspaceOverwritePolicy, WorkspaceRetainPolicy, WorkspaceStorageSpec,
+    ChannelSpec, ChannelType, DirectMessageAccess, DirectMessagePolicy, FeishuChannelSpec,
+    FeishuConnectionMode, FeishuDomain, GroupAccess, GroupPolicy, OpenClawConfig,
+    OpenClawWorkspaceSpec, PersistentVolumeAccessMode, SandboxConfig, SandboxStorageSpec,
+    WorkspaceOverwritePolicy, WorkspaceRetainPolicy, WorkspaceStorageSpec,
 };
 use crate::mcp_server::LocalObjectRef;
+
+#[test]
+fn feishu_policy_env_uses_common_runtime_contract() {
+    let channels = vec![ChannelSpec {
+        type_: ChannelType::Feishu,
+        credential_secret_ref: None,
+        feishu: Some(FeishuChannelSpec {
+            domain: FeishuDomain::Lark,
+            connection_mode: FeishuConnectionMode::WebSocket,
+            direct_messages: DirectMessagePolicy {
+                policy: DirectMessageAccess::Allowlist,
+                allow_from: vec!["ou_teacher".into()],
+            },
+            groups: GroupPolicy {
+                policy: GroupAccess::Allowlist,
+                allow_from: vec!["oc_teaching".into(), "oc_admin".into()],
+                require_mention: false,
+            },
+        }),
+    }];
+
+    let env = build_channel_policy_env(&channels).expect("valid policy");
+    let values = env
+        .iter()
+        .map(|entry| {
+            (
+                entry["name"].as_str().unwrap(),
+                entry["value"].as_str().unwrap(),
+            )
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    assert_eq!(values["FEISHU_DOMAIN"], "lark");
+    assert_eq!(values["FEISHU_CONNECTION_MODE"], "websocket");
+    assert_eq!(values["FEISHU_DM_POLICY"], "allowlist");
+    assert_eq!(values["FEISHU_ALLOW_FROM"], "ou_teacher");
+    assert_eq!(values["FEISHU_GROUP_POLICY"], "allowlist");
+    assert_eq!(values["FEISHU_GROUP_ALLOW_FROM"], "oc_teaching,oc_admin");
+    assert_eq!(values["FEISHU_REQUIRE_MENTION"], "false");
+}
+
+#[test]
+fn feishu_policy_rejects_invalid_user_and_group_ids() {
+    let mut channel = ChannelSpec {
+        type_: ChannelType::Feishu,
+        credential_secret_ref: None,
+        feishu: Some(FeishuChannelSpec::default()),
+    };
+    channel.feishu.as_mut().unwrap().direct_messages = DirectMessagePolicy {
+        policy: DirectMessageAccess::Allowlist,
+        allow_from: vec!["user-1".into()],
+    };
+    assert!(build_channel_policy_env(&[channel.clone()]).is_err());
+    channel.feishu.as_mut().unwrap().direct_messages = DirectMessagePolicy::default();
+    channel.feishu.as_mut().unwrap().groups.allow_from = vec!["group-1".into()];
+    assert!(build_channel_policy_env(&[channel]).is_err());
+}
+
+#[test]
+fn feishu_credential_state_never_exposes_values() {
+    let complete: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "agent-credentials"},
+        "data": {
+            "FEISHU_APP_ID": "Y2xpX3Rlc3Q=",
+            "FEISHU_APP_SECRET": "c3VwZXItc2VjcmV0"
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        feishu_credential_state(Some(&complete)),
+        FeishuCredentialState::Complete
+    );
+
+    let partial: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "agent-credentials"},
+        "data": {"FEISHU_APP_ID": "Y2xpX3Rlc3Q="}
+    }))
+    .unwrap();
+    assert_eq!(
+        feishu_credential_state(Some(&partial)),
+        FeishuCredentialState::Partial
+    );
+    assert_eq!(
+        feishu_credential_state(None),
+        FeishuCredentialState::Missing
+    );
+    assert!(!format!("{:?}", feishu_credential_state(Some(&complete))).contains("secret"));
+
+    let invalid_utf8: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {"name": "agent-credentials"},
+        "data": {
+            "FEISHU_APP_ID": "/w==",
+            "FEISHU_APP_SECRET": "c2VjcmV0"
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        feishu_credential_state(Some(&invalid_utf8)),
+        FeishuCredentialState::Invalid
+    );
+}
+
+#[test]
+fn feishu_secret_name_uses_explicit_ref_or_sandbox_default() {
+    let default = ChannelSpec {
+        type_: ChannelType::Feishu,
+        credential_secret_ref: None,
+        feishu: Some(FeishuChannelSpec::default()),
+    };
+    assert_eq!(
+        channel_credential_secret_name("agent", &default),
+        "agent-credentials"
+    );
+    let explicit = ChannelSpec {
+        credential_secret_ref: Some(LocalObjectRef {
+            name: "custom-feishu".into(),
+        }),
+        ..default
+    };
+    assert_eq!(
+        channel_credential_secret_name("agent", &explicit),
+        "custom-feishu"
+    );
+}
+
+#[test]
+fn channel_env_from_uses_declared_feishu_secret() {
+    let channels = vec![ChannelSpec {
+        type_: ChannelType::Feishu,
+        credential_secret_ref: Some(LocalObjectRef {
+            name: "custom-feishu".into(),
+        }),
+        feishu: Some(FeishuChannelSpec::default()),
+    }];
+    assert_eq!(
+        channel_credential_secret_name("agent", &channels[0]),
+        "custom-feishu"
+    );
+    assert_eq!(
+        runtime_credentials_secret_name("agent"),
+        "agent-credentials"
+    );
+}
+
+#[test]
+fn feishu_credentials_use_explicit_secret_key_refs() {
+    let channel = ChannelSpec {
+        type_: ChannelType::Feishu,
+        credential_secret_ref: Some(LocalObjectRef {
+            name: "custom-feishu".into(),
+        }),
+        feishu: Some(FeishuChannelSpec::default()),
+    };
+    let env = feishu_credential_env("agent", &[channel]);
+    assert_eq!(env.len(), 2);
+    assert!(
+        env.iter()
+            .all(|entry| { entry["valueFrom"]["secretKeyRef"]["name"] == "custom-feishu" })
+    );
+    assert_eq!(
+        runtime_credentials_secret_name("agent"),
+        "agent-credentials"
+    );
+}
+
+#[test]
+fn channel_policy_env_names_are_feishu_only_and_non_secret() {
+    let channels = vec![ChannelSpec {
+        type_: ChannelType::Feishu,
+        credential_secret_ref: None,
+        feishu: Some(FeishuChannelSpec::default()),
+    }];
+    let env = build_channel_policy_env(&channels).unwrap();
+    let names = env
+        .iter()
+        .filter_map(|entry| entry["name"].as_str())
+        .collect::<Vec<_>>();
+    assert!(names.iter().all(|name| name.starts_with("FEISHU_")));
+    assert!(!names.contains(&"FEISHU_APP_ID"));
+    assert!(!names.contains(&"FEISHU_APP_SECRET"));
+}
+
+#[test]
+fn feishu_channel_status_tracks_runtime_probe_and_suspension() {
+    let ready_pod: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "agent-abc", "annotations": {
+            FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION: "42"
+        }},
+        "spec": {"containers": [{
+            "name": "openclaw",
+            "image": "openclaw:test",
+            "readinessProbe": {"exec": {"command": ["sh", "-c", "kars-channel-feishu-ready"]}}
+        }]},
+        "status": {"containerStatuses": [{"name": "openclaw", "ready": true}]}
+    }))
+    .unwrap();
+    let connecting_pod: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "agent-def"},
+        "status": {"containerStatuses": [{"name": "openclaw", "ready": false}]}
+    }))
+    .unwrap();
+
+    assert_eq!(
+        feishu_channel_runtime_state(&[ready_pod], "openclaw", Some("42"), false),
+        FeishuChannelRuntimeState::Configured
+    );
+    assert_eq!(
+        feishu_channel_runtime_state(&[connecting_pod], "openclaw", Some("42"), false),
+        FeishuChannelRuntimeState::Connecting
+    );
+    assert_eq!(
+        feishu_channel_runtime_state(&[], "openclaw", Some("42"), true),
+        FeishuChannelRuntimeState::Suspended
+    );
+
+    let generic_ready_pod: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "agent-old"},
+        "spec": {"containers": [{
+            "name": "openclaw",
+            "image": "openclaw:old",
+            "readinessProbe": {"exec": {"command": ["sh", "-c", "test -f /proc/1/status"]}}
+        }]},
+        "status": {"containerStatuses": [{"name": "openclaw", "ready": true}]}
+    }))
+    .unwrap();
+    assert_eq!(
+        feishu_channel_runtime_state(&[generic_ready_pod], "openclaw", Some("42"), false),
+        FeishuChannelRuntimeState::Connecting
+    );
+
+    let stale_ready_pod: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "agent-stale", "annotations": {
+            FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION: "41"
+        }},
+        "spec": {"containers": [{
+            "name": "openclaw",
+            "image": "openclaw:test",
+            "readinessProbe": {"exec": {"command": ["sh", "-c", "kars-channel-feishu-ready"]}}
+        }]},
+        "status": {"containerStatuses": [{"name": "openclaw", "ready": true}]}
+    }))
+    .unwrap();
+    assert_eq!(
+        feishu_channel_runtime_state(&[stale_ready_pod], "openclaw", Some("42"), false),
+        FeishuChannelRuntimeState::Connecting
+    );
+
+    let crash_looping_pod: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "agent-crash", "annotations": {
+            FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION: "42"
+        }},
+        "spec": {"containers": [{
+            "name": "openclaw",
+            "image": "openclaw:test",
+            "readinessProbe": {"exec": {"command": ["sh", "-c", "kars-channel-feishu-ready"]}}
+        }]},
+        "status": {"containerStatuses": [{
+            "name": "openclaw",
+            "ready": false,
+            "state": {"waiting": {"reason": "CrashLoopBackOff"}}
+        }]}
+    }))
+    .unwrap();
+    assert_eq!(
+        feishu_channel_runtime_state(&[crash_looping_pod], "openclaw", Some("42"), false),
+        FeishuChannelRuntimeState::Failed
+    );
+}
+
+#[test]
+fn channel_readiness_condition_gates_overall_ready() {
+    let sandbox = KarsSandbox {
+        metadata: kube::api::ObjectMeta {
+            name: Some("agent".into()),
+            namespace: Some("default".into()),
+            generation: Some(2),
+            ..Default::default()
+        },
+        spec: crate::crd::KarsSandboxSpec::default(),
+        status: None,
+    };
+    let extras = feishu_channel_status_conditions(&sandbox, FeishuChannelRuntimeState::Connecting);
+    let patch = crate::status::build_running_status_patch_with_extras(
+        &sandbox,
+        "kars-agent",
+        "OpenClaw",
+        &extras,
+    );
+    let conditions = patch["status"]["conditions"].as_array().unwrap();
+    assert!(conditions.iter().any(|condition| {
+        condition["type"] == "ChannelReady"
+            && condition["status"] == "False"
+            && condition["reason"] == "Connecting"
+    }));
+    assert!(
+        conditions
+            .iter()
+            .any(|condition| { condition["type"] == "Ready" && condition["status"] == "False" })
+    );
+}
+
+#[test]
+fn feishu_app_claim_is_deterministic_and_uid_owned() {
+    let first = build_feishu_app_claim("cli_test", "default", "agent-a", "uid-a");
+    let same = build_feishu_app_claim("cli_test", "default", "agent-a", "uid-a");
+    let other_app = build_feishu_app_claim("cli_other", "default", "agent-a", "uid-a");
+
+    assert_eq!(first.metadata.name, same.metadata.name);
+    assert_ne!(first.metadata.name, other_app.metadata.name);
+    assert!(!format!("{first:?}").contains("cli_test"));
+    assert_eq!(feishu_app_claim_owner(&first).as_deref(), Some("uid-a"));
+    assert!(feishu_app_claim_matches(&first, "uid-a"));
+    assert!(!feishu_app_claim_matches(&first, "uid-b"));
+}
+
+#[test]
+fn feishu_app_claim_cleanup_preserves_only_current_app() {
+    let current = build_feishu_app_claim("cli_current", "default", "agent", "uid-a");
+    let stale = build_feishu_app_claim("cli_stale", "default", "agent", "uid-a");
+    let other_owner = build_feishu_app_claim("cli_other", "default", "other", "uid-b");
+    let release = feishu_app_claims_to_release(
+        &[current.clone(), stale.clone(), other_owner],
+        "uid-a",
+        current.metadata.name.as_deref(),
+    );
+
+    assert_eq!(release, vec![stale.name_any()]);
+}
+
+#[test]
+fn feishu_secret_cleanup_ignores_unadopted_staged_revisions() {
+    let staged: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "agent-feishu-staged",
+            "labels": {FEISHU_SECRET_REVISION_STATE_LABEL: "staged"}
+        }
+    }))
+    .unwrap();
+    let adopted: Secret = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Secret",
+        "metadata": {
+            "name": "agent-feishu-adopted",
+            "labels": {FEISHU_SECRET_REVISION_STATE_LABEL: "adopted"}
+        }
+    }))
+    .unwrap();
+    assert!(!managed_feishu_secret_cleanup_candidate(
+        &staged,
+        Some("agent-feishu-current")
+    ));
+    assert!(managed_feishu_secret_cleanup_candidate(
+        &adopted,
+        Some("agent-feishu-current")
+    ));
+    assert!(!managed_feishu_secret_cleanup_candidate(
+        &adopted,
+        Some("agent-feishu-adopted")
+    ));
+}
+
+#[test]
+fn feishu_app_claim_cleanup_waits_for_pod_rollout() {
+    let old_pod: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "agent-old", "annotations": {
+            FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION: "41"
+        }},
+        "spec": {"containers": [{"name": "openclaw", "image": "runtime:latest"}]}
+    }))
+    .unwrap();
+    let unready_new_pod: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "agent-new", "annotations": {
+            FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION: "42"
+        }},
+        "spec": {"containers": [{
+            "name": "openclaw",
+            "image": "runtime:latest",
+            "readinessProbe": {"exec": {"command": ["kars-channel-feishu-ready"]}}
+        }]},
+        "status": {"containerStatuses": [{"name": "openclaw", "ready": false}]}
+    }))
+    .unwrap();
+
+    let ready_new_pod: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "agent-new", "annotations": {
+            FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION: "42"
+        }},
+        "spec": {"containers": [{
+            "name": "openclaw",
+            "image": "runtime:latest",
+            "readinessProbe": {"exec": {"command": ["kars-channel-feishu-ready"]}}
+        }]},
+        "status": {"containerStatuses": [{"name": "openclaw", "ready": true}]}
+    }))
+    .unwrap();
+
+    assert!(!feishu_claim_rollout_complete(
+        &[old_pod, ready_new_pod.clone()],
+        "openclaw",
+        Some("42"),
+    ));
+    assert!(!feishu_claim_rollout_complete(
+        &[unready_new_pod],
+        "openclaw",
+        Some("42"),
+    ));
+    assert!(feishu_claim_rollout_complete(
+        &[ready_new_pod],
+        "openclaw",
+        Some("42"),
+    ));
+    assert!(!feishu_claim_rollout_complete(&[], "openclaw", Some("42"),));
+    assert!(feishu_claim_rollout_complete(&[], "openclaw", None));
+}
+
+#[test]
+fn feishu_app_claim_delete_waits_for_all_pods_to_terminate() {
+    let pod: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "agent-terminating"},
+        "spec": {"containers": [{"name": "openclaw", "image": "runtime:latest"}]}
+    }))
+    .unwrap();
+    assert!(!feishu_claim_release_ready_on_delete(&[pod]));
+    assert!(feishu_claim_release_ready_on_delete(&[]));
+}
+
+#[test]
+fn feishu_credential_revision_requires_explicit_rotation_after_initial_deploy() {
+    assert_eq!(
+        plan_feishu_credential_revision("agent-credentials", None, None, Some("41")),
+        FeishuCredentialRevisionPlan::UseCurrent("41".into())
+    );
+    assert_eq!(
+        plan_feishu_credential_revision(
+            "agent-credentials-rotation-new",
+            Some("agent-credentials"),
+            Some("41"),
+            Some("42"),
+        ),
+        FeishuCredentialRevisionPlan::UseCurrent("42".into())
+    );
+    assert_eq!(
+        plan_feishu_credential_revision(
+            "agent-credentials",
+            Some("agent-credentials"),
+            Some("41"),
+            Some("42"),
+        ),
+        FeishuCredentialRevisionPlan::KeepDeployed("41".into())
+    );
+    assert_eq!(
+        plan_feishu_credential_revision("agent-credentials", None, Some("41"), Some("42")),
+        FeishuCredentialRevisionPlan::Unavailable
+    );
+}
+
+#[test]
+fn unsupported_feishu_runtime_uses_channel_condition_reason() {
+    let (condition_type, reason) = channel_capability_failure_condition();
+    assert_eq!(condition_type, "ChannelReady");
+    assert_eq!(reason, "UnsupportedByRuntime");
+}
+
+#[test]
+fn channel_fail_closed_patch_stops_existing_runtime() {
+    assert_eq!(
+        channel_fail_closed_deployment_patch(),
+        json!({"spec": {"replicas": 0}})
+    );
+}
 
 #[test]
 fn workspace_bootstrap_config_map_accepts_declarative_files() {
