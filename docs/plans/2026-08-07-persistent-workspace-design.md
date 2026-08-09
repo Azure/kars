@@ -1,22 +1,24 @@
 # Kars Persistent Workspace Design
 
-**Status:** Approved design
+**Status:** Implemented in [PR #494](https://github.com/Azure/kars/pull/494); follow-up validation and observability are listed in Sections 13, 14, and 17.
 
 **Date:** 2026-08-07
 
-**Scope:** Per-sandbox persistent workspace storage and declarative OpenClaw workspace bootstrap files.
+**Scope:** Runtime-agnostic per-sandbox persistent `/sandbox` storage, plus declarative OpenClaw workspace bootstrap files.
 **Out of scope:** Feishu channel integration, message-triggered wake-up, cross-cluster volume migration, multi-replica RWX, online volume expansion.
 
 ## 1. Problem
 
-Every `KarsSandbox` runtime currently mounts `/sandbox` from an `emptyDir` volume. OpenClaw stores its workspace, sessions, runtime configuration, pairing state, dynamic bindings, local memory and AgentMesh identity below this directory. The data survives a container restart inside the same Pod but is lost when the Pod is recreated, the Deployment is rolled out, or a suspended sandbox scales from zero back to one.
+Before this change, every `KarsSandbox` runtime mounted `/sandbox` from an `emptyDir` volume. Runtime state survived a container restart inside the same Pod but was lost when the Pod was recreated, the Deployment rolled out, or a suspended sandbox scaled from zero back to one.
 
-The Controller also has no supported way to initialize runtime-owned files such as `SOUL.md` and `HEARTBEAT.md` from a declarative source. OpenClaw's entrypoint currently rewrites Kars-provided `AGENTS.md`, `SOUL.md`, and `TOOLS.md` on every startup. Although `runtime.openclaw.config` exists in the CRD schema, the OpenClaw deployment planner does not consume it.
+The persistent volume is a platform-level capability shared by OpenClaw, Hermes, OpenAI Agents, Microsoft Agent Framework, LangGraph, Anthropic, PydanticAI, and BYO runtimes. It preserves only state the runtime writes below `/sandbox`; the controller cannot make framework state persistent when an adapter stores that state elsewhere or only in memory.
+
+Before this change, the Controller had no supported way to initialize runtime-owned files such as `SOUL.md` and `HEARTBEAT.md` from a declarative source, and OpenClaw's entrypoint rewrote Kars-provided `AGENTS.md`, `SOUL.md`, and `TOOLS.md` on every startup. The implementation now uses a typed workspace block and create-if-missing defaults; the unrelated unstructured `runtime.openclaw.config` field remains outside this feature.
 
 ## 2. Goals
 
-1. Give each `KarsSandbox` an optional, dedicated persistent volume mounted at `/sandbox`.
-2. Preserve sessions, workspace files, pairing state, dynamic bindings and runtime identity across Pod recreation and scale-to-zero.
+1. Give every supported `KarsSandbox` runtime an optional, dedicated persistent volume mounted at `/sandbox`.
+2. Preserve runtime state written below `/sandbox` across Pod recreation and scale-to-zero.
 3. Let an operator initialize selected OpenClaw workspace Markdown files from a same-namespace ConfigMap.
 4. Preserve user changes by default after the initial bootstrap.
 5. Retain dynamically provisioned storage by default when a `KarsSandbox` is deleted.
@@ -60,11 +62,13 @@ Dynamically created claims default to `Retain`. Deleting the `KarsSandbox` remov
 
 The default `IfMissing` policy copies each managed file only when the destination does not exist. A ConfigMap update does not overwrite files already modified on the PVC.
 
-## 5. Proposed API
+## 5. API
+
+The storage block is runtime-agnostic. The nested OpenClaw workspace block is intentionally runtime-specific because `SOUL.md`, `HEARTBEAT.md`, and related files are OpenClaw contracts, not portable Kars runtime contracts.
 
 ### 5.1 KarsSandbox storage
 
-Add the following optional block to `KarsSandboxSpec`:
+`KarsSandboxSpec` exposes the following optional block:
 
 ```yaml
 apiVersion: kars.azure.com/v1alpha1
@@ -116,7 +120,7 @@ pub struct WorkspaceStorageSpec {
     pub storage_class_name: Option<String>,
 
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub access_modes: Option<Vec<PersistentVolumeAccessMode>>,
+    pub access_modes: Vec<PersistentVolumeAccessMode>,
 
     #[serde(default)]
     pub retain_policy: WorkspaceRetainPolicy,
@@ -222,7 +226,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: teaching-agent-workspace
-  namespace: kars-teaching-agent
+  namespace: kars-system          # same namespace as the KarsSandbox CR
 data:
   SOUL.md: |
     # Soul
@@ -245,7 +249,7 @@ data:
 
 ## 6. Admission and validation
 
-The generated CRD and Helm CRD must enforce these constraints with schema and CEL where possible:
+The generated CRD and Helm CRD enforce these constraints with schema and CEL where possible:
 
 1. `existingClaim` must not appear with dynamic provisioning fields.
 2. `size` must parse as a positive Kubernetes quantity.
@@ -269,18 +273,24 @@ Required metadata:
 ```yaml
 metadata:
   labels:
-    kars.azure.com/managed: "true"
+    app.kubernetes.io/managed-by: kars-controller
     kars.azure.com/sandbox: teaching-agent
     kars.azure.com/storage-role: workspace
   annotations:
     kars.azure.com/retain-policy: Retain
+    kars.azure.com/sandbox-uid: <KarsSandbox metadata.uid>
 ```
 
 The source `KarsSandbox` and generated PVC live in different namespaces, so a
-namespaced owner reference would be invalid. Both policies use labels plus a
-`kars.azure.com/sandbox-uid` provenance annotation. `Delete` relies on deletion
-of the generated sandbox namespace; `Retain` preserves that namespace and its
-PVC while removing labelled workload resources.
+namespaced owner reference would be invalid. Both policies use strict management
+labels plus a `kars.azure.com/sandbox-uid` provenance annotation.
+
+Any PVC in the generated namespace prevents direct namespace cascading. On
+deletion, the controller only deletes a PVC when the current CR still declares
+a dynamically generated `retainPolicy: Delete` workspace and the claim name,
+management labels, storage-role label, and sandbox UID all match. It then
+requeues until the claim is gone. `Retain`, `existingClaim`, and omitted storage
+never authorize PVC deletion, even if a claim carries stale annotations.
 
 ### 7.2 Immutable fields and drift
 
@@ -290,7 +300,7 @@ The Controller reconciles desired PVC shape without attempting invalid in-place 
 - Decreasing `size` is rejected.
 - Changing `storageClassName` is rejected after creation.
 - Changing `accessModes` is rejected after creation.
-- Changing from a generated claim to `existingClaim`, or the reverse, is rejected while either claim contains active state.
+- Changing from a generated claim to `existingClaim`, the reverse, or changing existing claim names requires `spec.suspended: true`; active transitions fail closed with `StorageReady=False/ImmutableFieldChanged`.
 
 These errors set `StorageReady=False` and leave the last-known-good Deployment and claim untouched.
 
@@ -315,6 +325,10 @@ volumeMounts:
 
 `/tmp` remains a memory-backed `emptyDir`.
 
+PVC-backed or bootstrap-enabled Deployments use the `Recreate` strategy. This
+prevents two runtime Pods from concurrently writing a ReadWriteOnce workspace
+and avoids rolling-update multi-attach deadlocks.
+
 The inference-router does not receive access to the workspace PVC unless a separately reviewed feature requires it. The least-privilege boundary remains unchanged.
 
 ### 7.4 Bootstrap ConfigMap mount
@@ -329,10 +343,10 @@ Do not mount the ConfigMap directly over the writable OpenClaw workspace.
 
 ### 7.5 Bootstrap init container
 
-Add an init container before the runtime starts. It mounts:
+The controller adds an init container before the runtime starts. It mounts:
 
 - `sandbox-data` at `/sandbox`;
-- the bootstrap ConfigMap at `/bootstrap`, read-only.
+- the bootstrap ConfigMap at `/etc/kars/workspace-bootstrap`, read-only.
 
 Its responsibilities are:
 
@@ -347,6 +361,11 @@ Its responsibilities are:
 9. Write a non-sensitive manifest to `/sandbox/.kars/bootstrap-state.json` containing ConfigMap UID, resourceVersion, policy, filenames and SHA-256 digests.
 
 The init container must not log file contents.
+
+The Pod disables automatic service-account-token mounting. A projected
+Kubernetes token is mounted explicitly into the runtime and router containers,
+while `egress-guard` and `workspace-bootstrap` receive neither that token nor an
+Azure Workload Identity token.
 
 ### 7.6 Default Kars templates
 
@@ -376,18 +395,21 @@ For `retainPolicy: Retain`:
 
 1. Delete the Deployment and normal sandbox-owned resources.
 2. Leave the PVC and backing PV intact.
-3. Add an event and final status message naming the retained claim before the CR disappears.
-4. Do not remove the PVC protection finalizer.
-5. Do not automatically expose the retained claim to another sandbox.
+3. Preserve the generated namespace because PVCs are namespaced resources.
+4. Do not automatically expose the retained claim to another sandbox instance.
 
-A future sandbox may use the retained data only by explicitly setting `existingClaim`.
+A future sandbox may use the retained data only by explicitly setting
+`existingClaim`. Because the claim remains in `kars-<sandbox-name>`, recovery
+normally recreates the same sandbox name.
 
 ### 8.2 Delete
 
 For `retainPolicy: Delete`:
 
-- the finalizer deletes the generated sandbox namespace;
-- namespace cascading deletion removes the claim;
+- the current CR spec must still explicitly request a dynamic Delete workspace;
+- the controller verifies the generated claim's name, management labels,
+  storage-role label, and sandbox UID before deleting it;
+- the finalizer waits for the claim to disappear, then deletes the namespace;
 - backing-volume deletion follows the StorageClass/PV reclaim policy.
 
 The CLI must show a destructive warning before creating or updating a sandbox to `Delete`.
@@ -396,9 +418,9 @@ The CLI must show a destructive warning before creating or updating a sandbox to
 
 Kubernetes namespace deletion can delete both Retain and Delete claims. `retainPolicy: Retain` protects against deletion of the `KarsSandbox`, not deletion of its namespace. Documentation and CLI output must state this explicitly.
 
-## 9. Status and events
+## 9. Status conditions
 
-Add a `StorageReady` condition to `KarsSandbox.status.conditions`.
+The controller adds a `StorageReady` condition to `KarsSandbox.status.conditions`.
 
 | Status | Reason | Meaning |
 |---|---|---|
@@ -408,21 +430,28 @@ Add a `StorageReady` condition to `KarsSandbox.status.conditions`.
 | `False` | `ClaimNotFound` | Referenced existing claim does not exist. |
 | `False` | `ClaimIncompatible` | Access mode or claim shape is unsupported. |
 | `False` | `ImmutableFieldChanged` | Requested storage mutation cannot be applied safely. |
+
+`BootstrapReady` is a separate condition:
+
+| Status | Reason | Meaning |
+|---|---|---|
+| `True` | `Reconciled` | The bootstrap init container completed successfully. |
+| `False` | `Creating` | The bootstrap Pod/init container is pending. |
 | `False` | `BootstrapConfigNotFound` | Referenced ConfigMap does not exist. |
 | `False` | `BootstrapInvalid` | ConfigMap contains unsupported or unsafe entries. |
-| `False` | `BootstrapFailed` | Init container failed to initialize the workspace. |
+| `False` | `BootstrapFailed` | The init container terminated or crash-looped. |
 
-`Ready=True` requires `StorageReady=True` when persistent storage or bootstrap is configured.
+`Ready=True` requires both storage and configured bootstrap initialization to be ready. The controller aggregates all active Pods with `Failed > Pending > Ready` precedence so an old successful Pod cannot hide a new failing rollout.
 
-The Controller emits Kubernetes Events for claim creation, retention, incompatible mutation, missing bootstrap ConfigMap and bootstrap failure.
+Kubernetes Events for storage/bootstrap transitions are not part of PR #494 and remain follow-up work.
 
 ## 10. Security
 
 1. ConfigMap data is non-sensitive. Admission documentation prohibits secrets in workspace bootstrap files.
 2. Credentials remain in `<sandbox-name>-credentials` and are injected through `envFrom` or mounted Secret files.
-3. The init container runs with only the permissions needed to write the workspace volume; it receives no cloud credentials, service account token or network access.
+3. The init container runs with only the permissions needed to write the workspace volume; it receives no cloud credentials or service-account token. Existing Pod-level NetworkPolicy still governs the Pod network; the bootstrap script itself performs no network operations.
 4. Bootstrap source and destination paths are fixed; user-controlled path fields are not supported.
-5. Symlinks are rejected at both source and destination.
+5. ConfigMap projection symlinks are accepted as read-only sources; destination files and every writable destination/state directory component reject symlinks.
 6. Atomic writes prevent partially initialized files.
 7. The runtime remains UID 1000 with a read-only root filesystem.
 8. PVCs are per sandbox and same namespace. Cross-namespace claim references are impossible.
@@ -431,7 +460,7 @@ The Controller emits Kubernetes Events for claim creation, retention, incompatib
 
 ## 11. CLI behavior
 
-Add storage flags to `kars add`:
+`kars add` exposes these storage flags:
 
 ```text
 --workspace-storage <size>          Enable a generated workspace PVC, e.g. 10Gi
@@ -515,10 +544,15 @@ Verify generated resources for:
 - omitted storage produces `emptyDir`;
 - dynamic storage produces the expected PVC and claim mount;
 - both policies omit cross-namespace owner references and record sandbox UID provenance;
-- Delete removes the namespace; Retain preserves namespace + PVC;
+- Delete removes only a strictly matched generated claim, then its namespace;
+- Retain, existingClaim, and omitted storage preserve any namespace containing PVCs;
 - existing claims do not produce a PVC object;
 - bootstrap produces ConfigMap volume, mount and init container;
 - Router does not mount the workspace claim;
+- bootstrap init containers do not receive Kubernetes or Azure identity tokens;
+- PVC/bootstrap Deployments use `Recreate`;
+- valid pending existing claims remain `ClaimPending` with zero replicas;
+- valid pending dynamic claims retain one consumer Pod for `WaitForFirstConsumer`;
 - suspended sandboxes retain PVC reconciliation with replicas zero;
 - immutable changes set the expected condition.
 
@@ -538,6 +572,10 @@ Verify:
 
 ### 13.4 End-to-end tests
 
+**Follow-up, not delivered by PR #494.** The PR includes controller/CLI unit
+tests, Rust/Helm schema parity, API-server CRD dry-run, and executable bootstrap
+filesystem tests. A CSI-backed lifecycle suite should additionally prove:
+
 A local Kind test with a CSI-capable test provisioner, or a pre-created hostPath-backed PVC, must prove:
 
 1. Create a sandbox with persistent workspace and bootstrap ConfigMap.
@@ -551,12 +589,14 @@ A local Kind test with a CSI-capable test provisioner, or a pre-created hostPath
 9. Delete a Retain sandbox and verify the PVC remains.
 10. Create a new sandbox with `existingClaim` and verify explicit recovery.
 11. Delete a Delete-policy sandbox and verify its claim is removed.
+12. Repeat the write/recreate/suspend sentinel flow for Hermes, LangGraph, and
+  BYO to verify each adapter places recoverable state below `/sandbox`.
 
 Do not use `kubectl exec` into the agent container in AKS E2E because the validating admission policy correctly blocks that path. Use an approved test runtime, init-container evidence, `kars connect`, or a purpose-built test probe.
 
 ## 14. Observability
 
-Add metrics:
+**Follow-up, not delivered by PR #494.** Proposed metrics:
 
 ```text
 kars_workspace_storage_reconcile_total{result,mode}
@@ -572,7 +612,7 @@ Log claim names, mode, condition reason and bootstrap resourceVersion. Never log
 
 ## 15. Documentation updates
 
-Implementation must update:
+The implementation updates:
 
 - `docs/api/crd-reference.md` with storage and OpenClaw workspace fields;
 - `docs/api/lifecycle.md` with PVC creation, suspension and deletion behavior;
@@ -584,21 +624,21 @@ Implementation must update:
 
 ## 16. Acceptance criteria
 
-The feature is complete when all of the following are true:
+The implemented acceptance criteria are:
 
 1. An old `KarsSandbox` without storage still runs with `emptyDir`.
 2. A sandbox with dynamic storage gets a unique Bound PVC mounted at `/sandbox`.
-3. Pod recreation and scale-to-zero preserve OpenClaw workspace and runtime state.
+3. Pod recreation and scale-to-zero preserve state that any runtime writes below `/sandbox`.
 4. A same-namespace existing claim can be explicitly attached without Controller adoption or deletion.
 5. Retain is the default and deleting the CR leaves the claim intact.
-6. Delete is explicit and removes the generated claim through namespace cascading deletion.
+6. Delete is explicit, requires strict current-spec and PVC provenance checks, and removes the generated claim before namespace deletion.
 7. A bootstrap ConfigMap initializes only the allowed files.
 8. `IfMissing` preserves runtime/user edits across restart.
 9. `Always` deterministically reapplies operator content.
 10. `MEMORY.md`, credentials and runtime databases cannot be supplied through bootstrap.
 11. Missing/incompatible claims and invalid bootstrap data prevent false `Ready=True` and expose actionable conditions.
 12. No Secret or workspace content is emitted to logs or status.
-13. Controller, CRD, CLI and E2E tests cover the behaviors above.
+13. Controller, CRD, CLI, and executable bootstrap tests cover the implemented behaviors; CSI-backed multi-runtime E2E remains tracked follow-up work.
 14. Documentation no longer claims state survives suspension when `/sandbox` is ephemeral.
 
 ## 17. Future extensions
@@ -614,3 +654,8 @@ Potential follow-up specs may add:
 - per-file bootstrap policy;
 - OCI-based signed workspace bundles;
 - explicit migration jobs between claims or storage classes.
+- runtime-specific bootstrap contracts for Hermes or other harnesses (rather
+  than reusing OpenClaw Markdown semantics);
+- a CSI-backed persistence matrix for Hermes, LangGraph, BYO, and the remaining
+  shipping adapters;
+- workspace lifecycle Events and Prometheus metrics listed in Section 14.
