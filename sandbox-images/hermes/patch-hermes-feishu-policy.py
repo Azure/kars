@@ -6,13 +6,73 @@
 from __future__ import annotations
 
 import importlib.util
+import inspect
+import os
+import socket
 from pathlib import Path
+from urllib.parse import urlparse
 
 
 def replace_once(source: str, old: str, new: str) -> str:
     if source.count(old) != 1:
         raise RuntimeError(f"expected one Hermes Feishu source anchor, found {source.count(old)}")
     return source.replace(old, new)
+
+
+def _open_kars_proxy_tunnel(target_url: str):
+    target = urlparse(target_url)
+    if target.scheme.lower() != "wss":
+        raise RuntimeError("Feishu WebSocket target must use wss")
+    if target.username or target.password:
+        raise RuntimeError("Feishu WebSocket target userinfo is unsupported")
+    if not target.hostname:
+        raise RuntimeError("Feishu WebSocket target has no hostname")
+
+    target_host = target.hostname.encode("idna").decode("ascii")
+    target_port = target.port or 443
+    authority = f"{target_host}:{target_port}"
+    request = (
+        f"CONNECT {authority} HTTP/1.1\r\n"
+        f"Host: {authority}\r\n"
+        "Proxy-Connection: Keep-Alive\r\n\r\n"
+    ).encode("ascii")
+
+    proxy_url = os.getenv("HTTPS_PROXY") or os.getenv("https_proxy")
+    if not proxy_url:
+        return None
+    proxy = urlparse(proxy_url)
+    if proxy.scheme.lower() != "http" or not proxy.hostname:
+        raise RuntimeError("Feishu WebSocket requires an HTTP CONNECT proxy")
+    if proxy.username or proxy.password:
+        raise RuntimeError("authenticated Feishu proxy URLs are unsupported")
+    proxy_host = proxy.hostname.encode("idna").decode("ascii")
+
+    proxy_socket = socket.create_connection((proxy_host, proxy.port or 80), timeout=10)
+    try:
+        proxy_socket.sendall(request)
+        response = bytearray()
+        while b"\r\n\r\n" not in response:
+            chunk = proxy_socket.recv(4096)
+            if not chunk:
+                raise RuntimeError("Feishu proxy closed during CONNECT")
+            response.extend(chunk)
+            if len(response) > 65536:
+                raise RuntimeError("Feishu proxy CONNECT response is too large")
+        status_line = bytes(response).split(b"\r\n", 1)[0]
+        status_parts = status_line.split(b" ", 2)
+        if (
+            len(status_parts) < 2
+            or status_parts[0] not in {b"HTTP/1.0", b"HTTP/1.1"}
+            or status_parts[1] != b"200"
+        ):
+            raise RuntimeError(
+                f"Feishu proxy CONNECT failed: {status_line.decode('ascii', 'replace')}"
+            )
+        proxy_socket.settimeout(None)
+        return proxy_socket
+    except Exception:
+        proxy_socket.close()
+        raise
 
 
 def main() -> None:
@@ -117,8 +177,35 @@ def main() -> None:
     sdk_source = replace_once(
         sdk_source,
         "import time\nfrom urllib.parse import urlparse, parse_qs\n",
-        "import time\nfrom pathlib import Path\nfrom urllib.parse import urlparse, parse_qs\n\n"
-        '_KARS_READY_PATH = Path("/tmp/kars-channel-feishu-ready")\n',
+        "import time\n"
+        "import os\n"
+        "import socket\n"
+        "from pathlib import Path\n"
+        "from urllib.parse import urlparse, parse_qs\n\n"
+        '_KARS_READY_PATH = Path("/tmp/kars-channel-feishu-ready")\n\n'
+        + inspect.getsource(_open_kars_proxy_tunnel)
+        + "\n",
+    )
+    sdk_source = replace_once(
+        sdk_source,
+        "            conn = await websockets.connect(conn_url)\n",
+        "            proxy_socket = await asyncio.to_thread(_open_kars_proxy_tunnel, conn_url)\n"
+        "            try:\n"
+        "                conn = await websockets.connect(conn_url, sock=proxy_socket) if proxy_socket else await websockets.connect(conn_url)\n"
+        "            except Exception:\n"
+        "                if proxy_socket is not None:\n"
+        "                    proxy_socket.close()\n"
+        "                raise\n",
+    )
+    sdk_source = replace_once(
+        sdk_source,
+        '            logger.info(self._fmt_log("connected to {}", conn_url))\n',
+        '            logger.info(self._fmt_log("connected to Feishu WebSocket host {}", u.hostname or "unknown"))\n',
+    )
+    sdk_source = replace_once(
+        sdk_source,
+        '            logger.info(self._fmt_log("disconnected to {}", self._conn_url))\n',
+        '            logger.info(self._fmt_log("disconnected from Feishu WebSocket host {}", urlparse(self._conn_url).hostname or "unknown"))\n',
     )
     sdk_source = replace_once(
         sdk_source,
