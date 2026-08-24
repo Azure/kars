@@ -30,7 +30,7 @@ rust-version = "1.88"
 [workspace.dependencies]
 # Kubernetes
 kube = { version = "3.1", features = ["runtime", "derive"] }
-k8s-openapi = { version = "0.27", features = ["latest", "schemars"] }
+k8s-openapi = { version = "0.28", features = ["latest", "schemars"] }
 schemars = "1"
 
 # Async runtime
