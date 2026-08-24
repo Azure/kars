@@ -824,6 +824,7 @@ mod tests {
     }
 
     fn route_issue_token(sk: &SigningKey, kid: &str) -> String {
+        crate::install_jsonwebtoken_crypto_provider();
         let now = jsonwebtoken::get_current_timestamp() as i64;
         let claims = json!({
             "iss": ROUTE_TEST_ISS,

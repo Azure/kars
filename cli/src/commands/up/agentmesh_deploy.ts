@@ -13,7 +13,7 @@
 // creation step (d.4) and the saveContext() call at end-of-deploy.
 import path from "node:path";
 import * as os from "node:os";
-import { readFileSync, writeFileSync, unlinkSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { resolveBundledAsset } from "../../lib/repo-assets.js";
 import type { Stepper } from "../../stepper.js";
 import { kvLine } from "../../stepper.js";
@@ -107,9 +107,10 @@ export async function deployAgentMesh(
         "karsacr.azurecr.io",
         acrLoginServer,
       );
-      const tmpManifest = path.join(os.tmpdir(), `kars-${manifestName}-${Date.now()}`);
+      const tmpDir = mkdtempSync(path.join(os.tmpdir(), "kars-agentmesh-"));
+      const tmpManifest = path.join(tmpDir, manifestName);
       try {
-        writeFileSync(tmpManifest, patchedManifest);
+        writeFileSync(tmpManifest, patchedManifest, { encoding: "utf8", mode: 0o600 });
         await execa("kubectl", ["apply", "-f", tmpManifest], { stdio: "pipe" });
 
         // Wait for AgentMesh pods to be ready
@@ -173,7 +174,7 @@ export async function deployAgentMesh(
           kvLine("Entra verify", `enabled (aud=${entraVerify.audience})`);
         }
       } finally {
-        try { unlinkSync(tmpManifest); } catch { /* noop */ }
+        rmSync(tmpDir, { recursive: true, force: true });
       }
     } else {
       stepper.warn(`AgentMesh manifest not found (${manifestName}) — skipping`);
@@ -194,9 +195,10 @@ export async function deployAgentMesh(
           .replace(/SUBSCRIPTION_ID/g, currentSubId.trim())
           .replace(/RESOURCE_GROUP/g, rg)
           .replace(/karsacr\.azurecr\.io/g, acrLoginServer);
-        const tmpIngress = path.join(os.tmpdir(), `kars-agentmesh-ingress-${Date.now()}.yaml`);
+        const tmpDir = mkdtempSync(path.join(os.tmpdir(), "kars-agentmesh-ingress-"));
+        const tmpIngress = path.join(tmpDir, "agentmesh-ingress.yaml");
         try {
-          writeFileSync(tmpIngress, patchedIngress);
+          writeFileSync(tmpIngress, patchedIngress, { encoding: "utf8", mode: 0o600 });
           await execa("kubectl", ["apply", "-f", tmpIngress], { stdio: "pipe" });
           stepper.done(`AgentMesh Ingress deployed (registry.${domain}, relay.${domain})`);
 
@@ -204,7 +206,7 @@ export async function deployAgentMesh(
           globalRegistryUrl = `https://registry.${domain}`;
           globalRelayUrl = `wss://relay.${domain}`;
         } finally {
-          try { unlinkSync(tmpIngress); } catch { /* noop */ }
+          rmSync(tmpDir, { recursive: true, force: true });
         }
       } else {
         stepper.warn("Ingress manifest not found — skipping");

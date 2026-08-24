@@ -46,9 +46,9 @@ fn sign_err_response(e: SigningError) -> Response {
 pub(crate) async fn sign_default_b64_or_response(
     state: &AppState,
     payload: &[u8],
-) -> Result<String, Response> {
+) -> Result<String, Box<Response>> {
     let bytes = sign_default(state, payload)
         .await
-        .map_err(sign_err_response)?;
+        .map_err(|error| Box::new(sign_err_response(error)))?;
     Ok(base64::engine::general_purpose::STANDARD.encode(&bytes))
 }

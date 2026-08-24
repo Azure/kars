@@ -493,6 +493,7 @@ fn base64_url_decode(s: &str) -> Option<Vec<u8>> {
 }
 
 fn build_decoding_key(jwk: &Jwk) -> Result<DecodingKey, jsonwebtoken::errors::Error> {
+    crate::install_jsonwebtoken_crypto_provider();
     DecodingKey::from_jwk(jwk)
 }
 
@@ -610,6 +611,7 @@ mod tests {
         exp_offset_secs: i64,
         scope: Option<&str>,
     ) -> String {
+        crate::install_jsonwebtoken_crypto_provider();
         let now = jsonwebtoken::get_current_timestamp() as i64;
         let claims = json!({
             "iss": iss,
@@ -721,6 +723,7 @@ mod tests {
 
     #[test]
     fn hs256_token_rejected_even_if_in_allow_list() {
+        crate::install_jsonwebtoken_crypto_provider();
         // Algorithm-confusion defence: HS256 must never be accepted
         // by a resource server using public-key trust anchors, even
         // if a misconfigured allow-list contains it.
@@ -765,6 +768,7 @@ mod tests {
 
     #[test]
     fn missing_kid_header_rejected() {
+        crate::install_jsonwebtoken_crypto_provider();
         let (sk, _vk) = ed_keypair();
         let signing = signing_key_pem(&sk);
         let now = jsonwebtoken::get_current_timestamp() as i64;

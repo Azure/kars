@@ -42,7 +42,7 @@ async fn sandbox_spawn(
     if let Err(resp) =
         crate::routes::spawn_policy::check_sandbox_spawn(&state, &parent_name, &req.agent_id).await
     {
-        return resp;
+        return *resp;
     }
     match spawn::create_sandbox(&parent_name, &req).await {
         Ok(resp) => (
