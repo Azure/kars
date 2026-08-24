@@ -264,11 +264,7 @@ pub(super) fn responses_to_chat_body(resp_body: &Bytes) -> Bytes {
     };
 
     // If it's an error response, pass through
-    if resp
-        .get("error")
-        .and_then(|e| if e.is_null() { None } else { Some(e) })
-        .is_some()
-    {
+    if resp.get("error").filter(|e| !e.is_null()).is_some() {
         return resp_body.clone();
     }
 
@@ -325,18 +321,17 @@ pub(super) fn responses_to_chat_body(resp_body: &Bytes) -> Bytes {
     let mut message = serde_json::json!({
         "role": "assistant",
     });
-    let finish_reason;
-    if !tool_calls.is_empty() {
+    let finish_reason = if !tool_calls.is_empty() {
         message["tool_calls"] = serde_json::json!(tool_calls);
         message["content"] = serde_json::Value::Null;
         if !content.is_empty() {
             message["content"] = serde_json::json!(content);
         }
-        finish_reason = "tool_calls";
+        "tool_calls"
     } else {
         message["content"] = serde_json::json!(content);
-        finish_reason = "stop";
-    }
+        "stop"
+    };
 
     let chat_resp = serde_json::json!({
         "id": resp.get("id").cloned().unwrap_or(serde_json::json!("")),

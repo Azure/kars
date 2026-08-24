@@ -548,19 +548,13 @@ async fn verify_via_sigstore<K: PolicyKind>(
         artifact_ref.digest.clone(),
     );
 
-    // Step A: discover the cosign signature reference for this digest.
-    let (cosign_image, source_digest) = client
-        .triangulate(&image, &auth)
-        .await
-        .map_err(map_oci_error)?;
-
-    // Step B: pull + locally-verify each signature layer (sig over
+    // Pull + locally verify each signature layer (sig over
     // payload, optional cert chain, optional Rekor bundle). The returned
     // layers may have `certificate_signature: None` if the trust roots
     // weren't injected — that's fine, the constraint check below will
     // fail closed in that case.
     let layers = client
-        .trusted_signature_layers(&auth, &source_digest, &cosign_image)
+        .trusted_signature_layers(&auth, &image)
         .await
         .map_err(map_oci_error)?;
 

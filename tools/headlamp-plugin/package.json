@@ -15,7 +15,8 @@
     "displayName": "kars"
   },
   "devDependencies": {
-    "@kinvolk/headlamp-plugin": "^0.13.0"
+    "@kinvolk/headlamp-plugin": "^0.13.0",
+    "vite": "6.4.3"
   },
   "overrides": {
     "vitest": "^4.1.8",

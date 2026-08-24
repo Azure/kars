@@ -76,6 +76,13 @@ use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    if jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER
+        .install_default()
+        .is_err()
+    {
+        tracing::debug!("jsonwebtoken CryptoProvider already installed");
+    }
+
     // Multiple transitive deps enable both `ring` and `aws-lc-rs`
     // rustls providers. rustls 0.23.40+ refuses to auto-detect when
     // both are available, so pick one explicitly before any TLS
