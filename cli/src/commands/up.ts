@@ -727,16 +727,20 @@ Auto-resume:
                 "}",
               ].join("\n");
               const fs = await import("fs");
-              const tmpBicep = path.join(os.tmpdir(), `kars-role-${Date.now()}.bicep`);
-              fs.writeFileSync(tmpBicep, bicepRole);
-              await execa("az", [
-                "deployment", "sub", "create",
-                "--location", options.region,
-                "--template-file", tmpBicep,
-                "--parameters", `pid=${principalId}`,
-                "--output", "none",
-              ], { stdio: "pipe" }).catch(() => {});
-              fs.unlinkSync(tmpBicep);
+              const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "kars-role-"));
+              const tmpBicep = path.join(tmpDir, "role-assignments.bicep");
+              try {
+                fs.writeFileSync(tmpBicep, bicepRole, { encoding: "utf8", mode: 0o600 });
+                await execa("az", [
+                  "deployment", "sub", "create",
+                  "--location", options.region,
+                  "--template-file", tmpBicep,
+                  "--parameters", `pid=${principalId}`,
+                  "--output", "none",
+                ], { stdio: "pipe" }).catch(() => {});
+              } finally {
+                fs.rmSync(tmpDir, { recursive: true, force: true });
+              }
             }
           } catch {
             // Non-fatal — IMDS will still try without explicit client ID

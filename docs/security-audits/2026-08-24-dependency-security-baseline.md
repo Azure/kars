@@ -2,7 +2,8 @@
 
 Date: 2026-08-24
 Scope: Rust and npm dependency manifests/locks, Sigstore verification, JWT
-crypto-provider selection, and Clippy-driven internal refactors.
+crypto-provider selection, secure temporary manifests, and Clippy-driven
+internal refactors.
 Gated paths: `inference-router/src/mcp/oauth.rs`,
 `inference-router/src/mcp/oauth_layer.rs`,
 `inference-router/src/routes/handoff/mod.rs`,
@@ -11,7 +12,8 @@ Gated paths: `inference-router/src/mcp/oauth.rs`,
 `inference-router/src/routes/internal.rs`,
 `inference-router/src/routes/mcp.rs`,
 `inference-router/src/routes/signing_ops.rs`,
-`inference-router/src/routes/spawn_policy.rs`.
+`inference-router/src/routes/spawn_policy.rs`,
+`cli/src/commands/up/agentmesh_deploy.ts`, `cli/src/commands/up.ts`.
 
 ## Summary
 
@@ -21,10 +23,11 @@ run. This change restores the security baseline without changing supported
 customer-facing CLI commands, CRDs, Helm values, router APIs, or AGT mesh wire
 formats.
 
-- Rust dependencies move off current RustSec findings: `h2` 0.4.16,
-  `webbrowser` 1.2.2, `event-listener` 5.4.2, non-yanked `spin` releases, and
-  Sigstore 0.14.0. The Sigstore call site passes the original OCI image to the
-  new API, which performs signature-reference triangulation internally.
+- Rust dependencies move off current security findings: `h2` 0.4.16,
+  `webbrowser` 1.2.2, `event-listener` 5.4.2, `serde_with` 3.21.0,
+  non-yanked `spin` releases, and Sigstore 0.14.0. The Sigstore call site passes
+  the original OCI image to the new API, which performs signature-reference
+  triangulation internally.
 - npm locks are refreshed across all seven workspaces. AGT remains on
   `js-yaml` 4.x semantics while moving to patched 4.3.1. Every changed lock
   entry resolves through `registry.npmjs.org`, has SHA-512 integrity, and was
@@ -38,6 +41,9 @@ formats.
   at every existing route boundary.
 - The mesh plugin now declares its existing `oxlint` build dependency so a
   clean install no longer depends on stale or global tooling.
+- Temporary Kubernetes/Bicep manifests now live in unpredictable private
+  directories with mode `0600`, preventing shared-`/tmp` symlink races before
+  privileged `kubectl` or `az` operations consume them.
 
 ## T1: New capability / attack surface? (NO)
 
@@ -62,6 +68,8 @@ formats.
   introduced.
 - npm lock provenance is not accepted from the workstation's SHA-1-only proxy:
   all changed entries use SHA-512 integrity and public registry URLs.
+- Predictable shared temporary files are replaced with private directories and
+  restrictive file modes, matching established secure CLI patterns.
 
 ## T3: Availability / fail-open risk? (REDUCED)
 
@@ -70,6 +78,8 @@ formats.
 - Sigstore errors still fail closed; there is no unsigned fallback.
 - Explicit JWT providers remove a nondeterministic workspace-test panic and
   select the same crypto families already intended by each binary.
+- Temporary file cleanup is unconditional through `finally`; deployment command
+  behavior and manifest contents are unchanged.
 - The change is isolated in a draft PR. It is not a release or deployment and
   must pass clean GitHub CI plus non-breaking contract review before merge.
 
@@ -83,6 +93,8 @@ formats.
 - Mesh plugin: typecheck, lint, build, and 68 tests passed (3 skipped).
 - OpenClaw runtime: typecheck, lint, build, and 250 tests passed.
 - npm audit: zero high or critical findings in all seven workspaces.
+- CodeQL serious-alert triage verified 41 false positives and identified two
+  instances of the shared temporary-manifest race fixed in this change.
 - Lockfiles: zero SHA-1 integrity entries; changed tarballs verified by matching
   their existing SHA-1 before replacing it with locally computed SHA-512.
 - Two independent diff reviews found and drove fixes for incorrect Sigstore
