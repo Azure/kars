@@ -782,7 +782,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // In overlay mode the Pod is upstream-owned, but the governance
     // overlay still relies on these.
     let governance_config = spec.governance.clone().unwrap_or_default();
-    let blocklist_cm_name = format!("{}-blocklist", &name);
+    let blocklist_cm_name = format!("{}-blocklist", name);
 
     // ── S13: resolve the sandbox's ToolPolicy ref (if governance enabled) ─
     // Governance == off ⇒ no ref required. Governance == on ⇒ the ref
@@ -2338,7 +2338,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         //   - Failure: source missing → mount omitted (router falls back
         //     to empty policy engine, fail-closed at the AGT layer).
         if governance_config.enabled && !tool_policy_profile.is_empty() {
-            let cm_name = format!("toolpolicy-{}-profile", &tool_policy_profile);
+            let cm_name = format!("toolpolicy-{}-profile", tool_policy_profile);
             match governance_mounts::mirror_configmap(
                 client,
                 &cm_name,
@@ -2430,7 +2430,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // existing env-driven `TOKEN_BUDGET_PER_REQUEST` warn-only
         // path stays in place as a safety net.
         if !inference_ref_name.is_empty() {
-            let ip_cm = format!("inferencepolicy-{}-profile", &inference_ref_name);
+            let ip_cm = format!("inferencepolicy-{}-profile", inference_ref_name);
             match governance_mounts::mirror_configmap(
                 client,
                 &ip_cm,
@@ -3062,7 +3062,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Today the ToolPolicy CR is the sole source; sandboxes whose
         // ToolPolicy has no inline profile are degraded with
         // `SpecInvalid` before they reach this point.
-        let cm_name = format!("toolpolicy-{}-profile", &tool_policy_profile);
+        let cm_name = format!("toolpolicy-{}-profile", tool_policy_profile);
 
         // The mesh/gateway/operator ingress rules used to be patched here
         // as a separate `Patch::Apply` against `sandbox-policy`. That
@@ -3138,7 +3138,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // CronJob: fetch OISD + URLhaus → patch ConfigMap every 6h
         // Uses kubectl to patch the ConfigMap in-place. The router's background
         // task also fetches feeds directly, so this is defense-in-depth.
-        let cronjob_name = format!("{}-blocklist-refresh", &name);
+        let cronjob_name = format!("{}-blocklist-refresh", name);
         let cronjob: serde_json::Value = json!({
             "apiVersion": "batch/v1",
             "kind": "CronJob",

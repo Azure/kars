@@ -173,7 +173,7 @@ pub(super) async fn handoff_succession(
     .await
     {
         Ok(s) => s,
-        Err(r) => return r,
+        Err(r) => return *r,
     };
 
     // Submit to registry

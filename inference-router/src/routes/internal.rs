@@ -331,10 +331,9 @@ fn parse_duration_secs(raw: &str) -> Option<u64> {
         (rest, 60)
     } else if let Some(rest) = s.strip_suffix('h') {
         (rest, 3_600)
-    } else if let Some(rest) = s.strip_suffix('d') {
-        (rest, 86_400)
     } else {
-        return None;
+        let rest = s.strip_suffix('d')?;
+        (rest, 86_400)
     };
     let n: u64 = num.trim().parse().ok()?;
     Some(n.saturating_mul(mul).max(if mul == 0 { 0 } else { 1 }))
