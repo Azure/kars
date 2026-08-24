@@ -691,6 +691,30 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Foundry proxy path families that serve model-generated inference
+/// output: agent runs (`/agents*`), the Responses API
+/// (`/openai/responses*`), and conversations, which store and return
+/// Responses output (`/openai/conversations*`). [`foundry_proxy`]
+/// implements neither provider routing nor the guardrail pipeline, so
+/// requests to these families must fail closed when the active
+/// `InferencePolicy` needs either — otherwise an agent blocked on
+/// `/v1/chat/completions` could rerun the same inference here and
+/// receive an unscanned response. The remaining Foundry surfaces
+/// (memory stores, knowledge bases, evaluations, files, vector
+/// stores, …) are management/storage APIs, not general-purpose
+/// inference channels; they stay unguarded — enforcement scope is
+/// documented in docs/api/crd-reference.md.
+fn inference_bearing_foundry_route(path: &str) -> Option<&'static str> {
+    let p = path.strip_prefix('/').unwrap_or(path);
+    ["agents", "openai/responses", "openai/conversations"]
+        .into_iter()
+        .find(|family| {
+            p == *family
+                || p.strip_prefix(family)
+                    .is_some_and(|rest| rest.starts_with('/'))
+        })
+}
+
 /// Generic Foundry project-level API proxy.
 /// Forwards requests to the Foundry project endpoint with IMDS auth (ai.azure.com audience).
 /// Handles: /agents/*, /memory-stores/*, /knowledgebases/*, /evaluations/*
@@ -702,6 +726,17 @@ async fn foundry_proxy(
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name = resolve_sandbox_name(&headers);
+
+    // Fail-closed guard for the inference-bearing families this proxy
+    // serves — must run before anything else so a policy that selects
+    // a non-Azure provider or declares guardrails cannot be bypassed
+    // through these routes (see `guard_unenforced_route`).
+    if let Some(route) = inference_bearing_foundry_route(uri.path())
+        && let Some(resp) =
+            super::chat_completions::guard_unenforced_route(&state, sandbox_name, route).await
+    {
+        return resp;
+    }
 
     // Use project endpoint for agent/standalone APIs, fall back to foundry/openai endpoint
     let endpoint = state
@@ -939,7 +974,50 @@ async fn foundry_proxy(
 
 #[cfg(test)]
 mod tests {
-    use super::strip_project_prefix;
+    use super::{inference_bearing_foundry_route, strip_project_prefix};
+
+    #[test]
+    fn classifies_inference_bearing_foundry_paths() {
+        assert_eq!(inference_bearing_foundry_route("/agents"), Some("agents"));
+        assert_eq!(
+            inference_bearing_foundry_route("/agents/a1/runs"),
+            Some("agents")
+        );
+        assert_eq!(
+            inference_bearing_foundry_route("/openai/responses"),
+            Some("openai/responses")
+        );
+        assert_eq!(
+            inference_bearing_foundry_route("/openai/responses/resp_123"),
+            Some("openai/responses")
+        );
+        assert_eq!(
+            inference_bearing_foundry_route("/openai/conversations"),
+            Some("openai/conversations")
+        );
+        assert_eq!(
+            inference_bearing_foundry_route("/openai/conversations/c1/items"),
+            Some("openai/conversations")
+        );
+    }
+
+    #[test]
+    fn leaves_non_inference_foundry_paths_unclassified() {
+        for path in [
+            "/memory_stores",
+            "/knowledgebases/kb1/queries",
+            "/openai/files",
+            "/openai/vector_stores/vs1",
+            "/openai/containers/c1/files/f1/content",
+            "/evaluations",
+            // Prefix must match a whole path segment — no false
+            // positives on lookalike names.
+            "/agentsmith",
+            "/openai/responsesx",
+        ] {
+            assert_eq!(inference_bearing_foundry_route(path), None, "path: {path}");
+        }
+    }
 
     #[test]
     fn strips_foundry_project_prefix() {

@@ -58,11 +58,15 @@ never sees a provider key.
 - `provider: ollama` serves `/v1/chat/completions` (buffered + SSE)
   against `OLLAMA_ENDPOINT` with token metering and budget tracking.
 - Routing + guardrails are wired on `/v1/chat/completions` and the
-  Anthropic Messages routes only. The sibling inference routes
+  Anthropic Messages routes only. Every other inference-bearing route
   (`/v1/completions`, `/v1/responses`, `/v1/embeddings`, image
-  generation) don't implement either and **fail closed** (501 on a
-  non-Azure provider, 403 when guardrails are declared) rather than
-  silently bypass the policy; a plain Azure policy uses them unchanged.
+  generation, and the Foundry proxy families that serve model output —
+  `/agents*`, `/openai/responses*`, `/openai/conversations*`) doesn't
+  implement either and **fails closed** (501 on a non-Azure provider,
+  403 when guardrails are declared) rather than silently bypass the
+  policy; a plain Azure policy uses them unchanged. Non-inference
+  Foundry surfaces (memory stores, files, vector stores, …) are
+  management/storage APIs and stay unguarded.
 
 **Inference router — pluggable guardrail pipeline**
 
