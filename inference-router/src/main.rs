@@ -50,6 +50,8 @@ const MAX_TRACE_ID_LEN: usize = 128;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    kars_inference_router::install_jsonwebtoken_crypto_provider();
+
     // Install the rustls process-level crypto provider FIRST, before any
     // TLS-using code (kube-client, reqwest, kube::Client::try_default,
     // etc.) runs. Without this, kube-client's first TLS handshake from
