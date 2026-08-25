@@ -64,9 +64,12 @@ never sees a provider key.
   `/agents*`, `/openai/responses*`, `/openai/conversations*`) doesn't
   implement either and **fails closed** (501 on a non-Azure provider,
   403 when guardrails are declared) rather than silently bypass the
-  policy; a plain Azure policy uses them unchanged. Non-inference
-  Foundry surfaces (memory stores, files, vector stores, …) are
-  management/storage APIs and stay unguarded.
+  policy; a plain Azure policy uses them unchanged. The Foundry proxy
+  guard is default-deny: only an explicit exempt set of canonical
+  management/storage APIs (memory stores, files, vector stores, …)
+  bypasses it, and paths with dot/empty/percent-encoded-dot segments
+  are rejected (400) so a request cannot normalize into a different
+  upstream route than the one classified.
 
 **Inference router — pluggable guardrail pipeline**
 
