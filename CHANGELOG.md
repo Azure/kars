@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Fixed — `--runtime langgraph` accepted (canonical spelling)
+
+`kars add <name> --runtime langgraph` previously failed with
+`Unknown --runtime value: langgraph` because the CLI flag parser only
+accepted the hyphenated `lang-graph`, even though the `--runtime` help
+text, the docs (`cli-reference.md`, `runtimes.md`, `README.md`), the
+controller (`plan_langgraph`), the runtime images
+(`kars-runtime-langgraph`) and the Helm values all use the unhyphenated
+`langgraph`. `langgraph` is now the canonical CLI flag; `lang-graph`
+continues to work as a back-compat alias (accepted by `flagToKind`,
+but not surfaced in pickers or the "Valid values" error text). Fixes
+the `--runtime langgraph` example shown in the getting-started guide and
+launch materials. (`cli/src/runtime.ts`, `cli/src/commands/operator/dialogs/spawn.ts`)
+
 ### Upstream alignment — AGT mesh-identity hardening merged
 
 [microsoft/agent-governance-toolkit#2719](https://github.com/microsoft/agent-governance-toolkit/pull/2719)

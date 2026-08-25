@@ -27,9 +27,29 @@ describe("flagToKind", () => {
     expect(flagToKind("OPENAI-AGENTS")).toBe("OpenAIAgents");
   });
 
+  it("resolves LangGraph via the canonical `langgraph` flag", () => {
+    expect(flagToKind("langgraph")).toBe("LangGraph");
+    expect(flagToKind("LangGraph")).toBe("LangGraph");
+  });
+
+  it("accepts the legacy hyphenated `lang-graph` as a back-compat alias", () => {
+    // `lang-graph` was the original flag spelling; `langgraph` is now
+    // canonical (matches images/controller/docs/help text). The alias
+    // must keep resolving so existing scripts don't break.
+    expect(flagToKind("lang-graph")).toBe("LangGraph");
+    expect(flagToKind("LANG-GRAPH")).toBe("LangGraph");
+  });
+
   it("throws with a helpful error on unknown flags", () => {
     expect(() => flagToKind("autogen")).toThrow(/Unknown --runtime value: autogen/);
     expect(() => flagToKind("")).toThrow(/Unknown --runtime value/);
+  });
+
+  it("does not advertise the `lang-graph` alias in the canonical valid-values list", () => {
+    // The alias is accepted but must stay out of the error text and
+    // pickers — only the canonical `langgraph` should surface.
+    expect(() => flagToKind("autogen")).toThrow(/langgraph/);
+    expect(() => flagToKind("autogen")).not.toThrow(/lang-graph/);
   });
 });
 
@@ -213,7 +233,7 @@ describe("wiredRuntimeFlags", () => {
       "openclaw",
       "openai-agents",
       "microsoft-agent-framework",
-      "lang-graph",
+      "langgraph",
       "anthropic",
       "pydantic-ai",
       "hermes",

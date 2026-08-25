@@ -33,7 +33,7 @@ export type RuntimeFlag =
   | "openai-agents"
   | "microsoft-agent-framework"
   | "semantic-kernel"
-  | "lang-graph"
+  | "langgraph"
   | "anthropic"
   | "pydantic-ai"
   | "hermes"
@@ -44,7 +44,7 @@ const FLAG_TO_KIND: Record<RuntimeFlag, RuntimeKind> = {
   "openai-agents": "OpenAIAgents",
   "microsoft-agent-framework": "MicrosoftAgentFramework",
   "semantic-kernel": "SemanticKernel",
-  "lang-graph": "LangGraph",
+  "langgraph": "LangGraph",
   "anthropic": "Anthropic",
   "pydantic-ai": "PydanticAi",
   "hermes": "Hermes",
@@ -96,8 +96,24 @@ export function wiredRuntimeFlags(): RuntimeFlag[] {
   });
 }
 
+/**
+ * Back-compat aliases accepted by `flagToKind` but intentionally NOT
+ * listed in `FLAG_TO_KIND`, so they never leak into pickers
+ * (`wiredRuntimeFlags`), the reverse `KIND_TO_FLAG` map, or the
+ * canonical "Valid values" error text. `lang-graph` was the original
+ * hyphenated flag; `langgraph` is now canonical and matches the
+ * runtime images, controller (`plan_langgraph`), Helm values, docs,
+ * and the `--runtime` help text. Old scripts using `lang-graph` keep
+ * working.
+ */
+const FLAG_ALIASES: Record<string, RuntimeFlag> = {
+  "lang-graph": "langgraph",
+};
+
 export function flagToKind(flag: string): RuntimeKind {
-  const k = FLAG_TO_KIND[flag.toLowerCase() as RuntimeFlag];
+  const normalized = flag.toLowerCase();
+  const canonical = (FLAG_ALIASES[normalized] ?? normalized) as RuntimeFlag;
+  const k = FLAG_TO_KIND[canonical];
   if (!k) {
     throw new Error(
       `Unknown --runtime value: ${flag}. ` +
