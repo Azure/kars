@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+## [0.1.26] — 2026-08-25
+
+### Security and dependency maintenance
+
+- Restored the current CI/security baseline after advisory and toolchain drift:
+  patched Rust and npm dependencies, retained fail-hard audit gates, and
+  preserved customer-facing CLI, CRD, router API, and mesh contracts.
+- Fixed predictable shared-temporary-file races before generated manifests are
+  consumed by `kubectl` or `az`.
+- Upgraded and corrected Sigstore verification, explicitly selected JWT crypto
+  providers under workspace feature unification, and refreshed verified
+  build/release action pins.
+- Cleared the actionable Dependabot and serious CodeQL backlog; remaining
+  findings were either fixed or dispositioned with documented rationale.
+
+### Fixed
+
+- `kars add <name> --runtime langgraph` now accepts the canonical spelling.
+  The historical `lang-graph` spelling remains supported as a compatibility
+  alias for existing scripts.
+
 ### Fixed — `--runtime langgraph` accepted (canonical spelling)
 
 `kars add <name> --runtime langgraph` previously failed with
