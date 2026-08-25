@@ -73,7 +73,7 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
       "openclaw":                   "OpenClaw",
       "openai-agents":              "OpenAI Agents",
       "microsoft-agent-framework":  "Microsoft Agent Framework",
-      "lang-graph":                 "LangGraph",
+      "langgraph":                  "LangGraph",
       "anthropic":                  "Anthropic Claude SDK",
       "pydantic-ai":                "Pydantic AI",
       "hermes":                     "Hermes",
