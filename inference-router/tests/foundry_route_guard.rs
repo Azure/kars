@@ -237,11 +237,130 @@ async fn guardrail_policy_leaves_non_inference_foundry_routes_unguarded() {
     install_policy(&state, None, true).await;
     let app = app(state);
 
-    let (status, body) = send(&app, "POST", "/openai/files").await;
-    assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "{body}");
+    for uri in ["/openai/files", "/memory_stores", "/evaluations"] {
+        let (status, body) = send(&app, "POST", uri).await;
+        assert_eq!(status, StatusCode::NOT_IMPLEMENTED, "POST {uri}: {body}");
+        assert_eq!(
+            body["error"]["type"].as_str(),
+            Some("unsupported_for_provider"),
+            "expected the proxy's own github-models 501 (proof the guard let it through): {body}"
+        );
+    }
+}
+
+/// Pins the premise of the dot-segment guard: URL parsing (as done by
+/// reqwest when the raw path is concatenated into the upstream URL)
+/// resolves `.`/`..` segments including percent-encoded `%2e` forms.
+/// If this ever stops holding, the traversal rejection below is
+/// defense-in-depth rather than load-bearing, but it must hold today.
+#[test]
+fn url_parsing_normalizes_dot_segments() {
+    for (raw, normalized) in [
+        ("/openai/files/../responses", "/openai/responses"),
+        ("/openai/files/%2e%2e/responses", "/openai/responses"),
+        ("/memory_stores/../openai/responses", "/openai/responses"),
+        ("/evaluations/../openai/responses", "/openai/responses"),
+    ] {
+        let url = reqwest::Url::parse(&format!("https://upstream.example{raw}")).unwrap();
+        assert_eq!(url.path(), normalized, "raw: {raw}");
+    }
+}
+
+/// A dot-segment / encoded-dot / empty-segment path routed through an
+/// UNGUARDED wildcard must not pivot into a guarded inference path
+/// after normalization. These are rejected outright (400) before
+/// classification or forwarding, through real router wiring.
+#[tokio::test]
+async fn traversal_paths_are_rejected_not_forwarded() {
+    let state = test_state();
+    install_policy(&state, None, true).await;
+    let app = app(state);
+
+    for uri in [
+        // Literal dot segments through unguarded wildcards.
+        "/openai/files/../responses",
+        "/openai/vector_stores/../responses",
+        "/openai/evals/../responses",
+        "/memory_stores/../openai/responses",
+        "/evaluations/../openai/responses",
+        "/connections/../openai/responses",
+        "/openai/files/../conversations",
+        // Percent-encoded dot segments (lower + upper case).
+        "/openai/files/%2e%2e/responses",
+        "/openai/files/%2E%2E/responses",
+        "/memory_stores/%2e%2e/openai/responses",
+        // Single-dot segment.
+        "/openai/files/./responses",
+        // Encoded slash smuggled inside one segment.
+        "/openai/files/..%2fresponses",
+        // Empty segment (double slash) through a wildcard.
+        "/openai/files//../responses",
+        // Malformed percent escape.
+        "/openai/files/%zz/responses",
+    ] {
+        let (status, body) = send(&app, "POST", uri).await;
+        assert_eq!(
+            status,
+            StatusCode::BAD_REQUEST,
+            "POST {uri} must be rejected before forwarding, got {status}: {body}"
+        );
+        assert_eq!(
+            body["error"]["type"].as_str(),
+            Some("invalid_path"),
+            "POST {uri}: {body}"
+        );
+    }
+}
+
+/// Double-slash and trailing-slash variants of guarded families must
+/// never reach the proxy body, they either 404 at routing or are
+/// rejected/blocked at the top of `foundry_proxy`. The one outcome
+/// that would be a bug is the github-models 501 marker (proof of
+/// reaching the proxy body) or any 2xx.
+#[tokio::test]
+async fn slash_variants_of_guarded_families_never_reach_proxy_body() {
+    let state = test_state();
+    install_policy(&state, None, true).await;
+    let app = app(state);
+
+    for uri in [
+        "/openai/responses/",
+        "/openai//responses",
+        "/agents/",
+        "/agents//runs",
+        "/openai/conversations/",
+    ] {
+        let (status, body) = send(&app, "POST", uri).await;
+        assert!(
+            matches!(
+                status,
+                StatusCode::BAD_REQUEST | StatusCode::FORBIDDEN | StatusCode::NOT_FOUND
+            ),
+            "POST {uri} must not reach the proxy body, got {status}: {body}"
+        );
+        assert_ne!(
+            body["error"]["type"].as_str(),
+            Some("unsupported_for_provider"),
+            "POST {uri} reached the proxy body (github-models 501 marker): {body}"
+        );
+    }
+}
+
+/// Default-deny: with the guard inverted to an exempt list, an
+/// unknown-but-routed path family fails closed rather than slipping
+/// through. `/agents*` wildcards cover arbitrary suffixes, so use a
+/// suffix no explicit rule names.
+#[tokio::test]
+async fn unknown_wildcard_suffixes_fail_closed() {
+    let state = test_state();
+    install_policy(&state, None, true).await;
+    let app = app(state);
+
+    let (status, body) = send(&app, "POST", "/agents/a1/some/new/api").await;
+    assert_eq!(status, StatusCode::FORBIDDEN, "{body}");
     assert_eq!(
         body["error"]["type"].as_str(),
-        Some("unsupported_for_provider"),
-        "expected the proxy's own github-models 501 (proof the guard let it through): {body}"
+        Some("guardrail_route_unsupported"),
+        "{body}"
     );
 }

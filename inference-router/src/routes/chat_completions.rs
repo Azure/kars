@@ -184,16 +184,20 @@ pub(super) async fn scan_openai_output_guardrails(
 /// HTTP-response wrapper over [`scan_openai_output_guardrails`] for
 /// the buffered branches: `Err(response)` carries the ready-made
 /// block response (403 violation / 502 unavailable / 503 config).
+///
+/// The error is boxed: an `axum::Response` is large, and an unboxed
+/// `Result<(), Response>` trips `clippy::result_large_err` under
+/// `-D warnings`.
 pub(super) async fn enforce_openai_output_guardrails(
     pipeline: Option<&Arc<GuardrailPipeline>>,
     resp_body: &[u8],
     sandbox_name: &str,
     policy_digest: &str,
-) -> Result<(), axum::response::Response> {
+) -> Result<(), Box<axum::response::Response>> {
     match scan_openai_output_guardrails(pipeline, resp_body, sandbox_name, policy_digest).await {
         None => Ok(()),
-        Some(OutputGuardrailBlock::Violation(v)) => Err(guardrail_violation_response(&v)),
-        Some(OutputGuardrailBlock::Error(e)) => Err(guardrail_error_response(&e)),
+        Some(OutputGuardrailBlock::Violation(v)) => Err(Box::new(guardrail_violation_response(&v))),
+        Some(OutputGuardrailBlock::Error(e)) => Err(Box::new(guardrail_error_response(&e))),
     }
 }
 
@@ -265,7 +269,9 @@ pub(super) async fn guard_unenforced_route(
         route,
         "{msg}"
     );
-    let mut resp = errors::openai(status, &msg, code).into_response();
+    // Code-carrying shape: `type` == `code` here (historic value), plus
+    // an explicit `error.code` so clients switch on one field everywhere.
+    let mut resp = errors::openai_coded(status, &msg, code, code).into_response();
     insert_decision_headers(&mut resp, "blocked", "InferencePolicy", &msg);
     Some(resp)
 }
@@ -673,7 +679,7 @@ pub(super) async fn chat_completions(
                 )
                 .await
                 {
-                    return block;
+                    return *block;
                 }
                 let mut response = (resp_status, Body::from(chat_body)).into_response();
                 if let Some(ct) = resp_hdrs.get("content-type") {
@@ -784,7 +790,7 @@ pub(super) async fn chat_completions(
                             )
                             .await
                             {
-                                return block;
+                                return *block;
                             }
                             // Wrap as SSE so the streaming client can parse it
                             let sse = format!(
@@ -1027,7 +1033,7 @@ pub(super) async fn chat_completions(
                         )
                         .await
                         {
-                            return block;
+                            return *block;
                         }
                         let mut response = (resp_status, Body::from(chat_body)).into_response();
                         if let Some(ct) = resp_hdrs.get("content-type") {
@@ -1066,6 +1072,23 @@ pub(super) async fn chat_completions(
                             "Per-request limit: {msg}"
                         );
                     }
+                }
+
+                // Buffered output guardrail scan. Runs on EVERY buffered
+                // response, hoisted OUT of the JSON-parse block below so a
+                // non-JSON / truncated upstream body can't skip a declared
+                // output guardrail (`scan_text_or_raw` falls back to raw
+                // bytes). Fails closed: 403 violation / 502 unavailable /
+                // 503 misconfigured.
+                if let Err(block) = enforce_openai_output_guardrails(
+                    guardrail_pipeline.as_ref(),
+                    &resp_body,
+                    sandbox_name,
+                    &policy.digest,
+                )
+                .await
+                {
+                    return *block;
                 }
 
                 // Parse Foundry guardrail annotations and report to AGT governance.
@@ -1156,18 +1179,6 @@ pub(super) async fn chat_completions(
                                 &normalized_reason,
                             );
                             return resp;
-                        }
-
-                        // Buffered output scan (beside the contentSafety floor).
-                        if let Err(block) = enforce_openai_output_guardrails(
-                            guardrail_pipeline.as_ref(),
-                            &resp_body,
-                            sandbox_name,
-                            &policy.digest,
-                        )
-                        .await
-                        {
-                            return block;
                         }
 
                         // AGT output pipeline: redact → scan → policy check (blocking)

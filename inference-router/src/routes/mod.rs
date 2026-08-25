@@ -181,23 +181,21 @@ impl AppState {
             .unwrap_or_else(|_| "/var/lib/kars/token-budgets.json".into());
         let budget = if persist_path.is_empty() {
             TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
+        } else if let Some(parent) = std::path::Path::new(&persist_path).parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %e,
+                "Could not create token-budget persistence dir — falling back to in-memory"
+            );
+            TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
         } else {
-            if let Some(parent) = std::path::Path::new(&persist_path).parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                tracing::warn!(
-                    path = %parent.display(),
-                    error = %e,
-                    "Could not create token-budget persistence dir — falling back to in-memory"
-                );
-                TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
-            } else {
-                TokenBudgetTracker::with_persistence(
-                    config.token_budget_daily,
-                    config.token_budget_per_request,
-                    &persist_path,
-                )
-            }
+            TokenBudgetTracker::with_persistence(
+                config.token_budget_daily,
+                config.token_budget_per_request,
+                &persist_path,
+            )
         };
 
         let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());

@@ -50,12 +50,16 @@ fn is_hop_by_hop(name: &str) -> bool {
 }
 
 fn deny_response(status: StatusCode, message: &str, code: &str) -> axum::response::Response {
+    // Anthropic wire shape (`error.type`) plus an explicit `error.code`
+    // mirroring the OpenAI routes, so a client can switch on one stable
+    // `error.code` across every inference route.
     (
         status,
         Json(json!({
             "type": "error",
             "error": {
                 "type": code,
+                "code": code,
                 "message": message,
             }
         })),
@@ -494,6 +498,136 @@ pub(super) async fn anthropic_messages(
     }
 }
 
+/// Update running token counts from one Anthropic SSE event.
+/// `message_start` carries `message.usage.input_tokens` (and an initial
+/// `output_tokens`); each `message_delta` carries the cumulative
+/// `usage.output_tokens`.
+fn update_anthropic_usage(ev: &Value, input: &mut u64, output: &mut u64) {
+    match ev.get("type").and_then(|t| t.as_str()) {
+        Some("message_start") => {
+            if let Some(usage) = ev.get("message").and_then(|m| m.get("usage")) {
+                if let Some(i) = usage.get("input_tokens").and_then(|v| v.as_u64()) {
+                    *input = i;
+                }
+                if let Some(o) = usage.get("output_tokens").and_then(|v| v.as_u64()) {
+                    *output = o;
+                }
+            }
+        }
+        Some("message_delta") => {
+            if let Some(o) = ev
+                .get("usage")
+                .and_then(|u| u.get("output_tokens"))
+                .and_then(|v| v.as_u64())
+            {
+                *output = o;
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Best-effort token accounting for a streamed Anthropic passthrough.
+/// Taps the SSE stream for `input_tokens`/`output_tokens` and records
+/// the total with the budget tracker at end-of-stream, so streamed
+/// Anthropic inference feeds the same daily/monthly accumulation as the
+/// buffered path. Every byte passes through unchanged; usage is
+/// recorded once (also on an upstream error, with whatever was seen).
+fn tap_anthropic_stream_usage<E>(
+    stream: futures::stream::BoxStream<'static, Result<Bytes, E>>,
+    budget: crate::budget::TokenBudgetTracker,
+    sandbox: String,
+) -> futures::stream::BoxStream<'static, Result<Bytes, E>>
+where
+    E: Send + 'static,
+{
+    struct Ctx<E> {
+        inner: futures::stream::BoxStream<'static, Result<Bytes, E>>,
+        budget: crate::budget::TokenBudgetTracker,
+        sandbox: String,
+        // Trailing incomplete UTF-8 bytes carried across a chunk
+        // boundary, mirroring the guardrail SSE state so a split
+        // multi-byte code point is not corrupted before parsing.
+        byte_carry: Vec<u8>,
+        line_carry: String,
+        input: u64,
+        output: u64,
+        recorded: bool,
+    }
+    async fn record<E>(ctx: &mut Ctx<E>) {
+        if ctx.recorded {
+            return;
+        }
+        ctx.recorded = true;
+        let total = ctx.input + ctx.output;
+        if total > 0 {
+            ctx.budget.record_usage(&ctx.sandbox, total).await;
+        }
+    }
+    fn scan_lines<E>(ctx: &mut Ctx<E>, text: &str) {
+        for line in text.lines() {
+            let Some(payload) = line.trim().strip_prefix("data:") else {
+                continue;
+            };
+            let payload = payload.trim();
+            if payload.is_empty() || payload == "[DONE]" {
+                continue;
+            }
+            if let Ok(ev) = serde_json::from_str::<Value>(payload) {
+                update_anthropic_usage(&ev, &mut ctx.input, &mut ctx.output);
+            }
+        }
+    }
+    let ctx = Ctx {
+        inner: stream,
+        budget,
+        sandbox,
+        byte_carry: Vec::new(),
+        line_carry: String::new(),
+        input: 0,
+        output: 0,
+        recorded: false,
+    };
+    futures::stream::unfold(ctx, |mut ctx| async move {
+        match ctx.inner.next().await {
+            Some(Ok(chunk)) => {
+                // Decode only complete code points; carry a trailing
+                // incomplete UTF-8 sequence to the next chunk.
+                let mut bytes = std::mem::take(&mut ctx.byte_carry);
+                bytes.extend_from_slice(&chunk);
+                let decodable = match std::str::from_utf8(&bytes) {
+                    Ok(_) => bytes.len(),
+                    Err(e) if e.error_len().is_none() => e.valid_up_to(),
+                    Err(_) => bytes.len(),
+                };
+                ctx.byte_carry = bytes.split_off(decodable);
+                ctx.line_carry.push_str(&String::from_utf8_lossy(&bytes));
+                if let Some(idx) = ctx.line_carry.rfind('\n') {
+                    let complete = ctx.line_carry[..=idx].to_string();
+                    ctx.line_carry = ctx.line_carry[idx + 1..].to_string();
+                    scan_lines(&mut ctx, &complete);
+                }
+                Some((Ok(chunk), ctx))
+            }
+            Some(Err(e)) => {
+                record(&mut ctx).await;
+                Some((Err(e), ctx))
+            }
+            None => {
+                if !ctx.byte_carry.is_empty() {
+                    let tail = std::mem::take(&mut ctx.byte_carry);
+                    ctx.line_carry.push_str(&String::from_utf8_lossy(&tail));
+                }
+                let tail = std::mem::take(&mut ctx.line_carry);
+                scan_lines(&mut ctx, &tail);
+                record(&mut ctx).await;
+                None
+            }
+        }
+    })
+    .boxed()
+}
+
 /// Native passthrough for Copilot's Anthropic Messages API.
 ///
 /// No translation: forwards body verbatim to `{copilot_endpoint}/v1/messages`,
@@ -539,6 +673,13 @@ async fn forward_anthropic_passthrough(
         .await
         {
             Ok((status, resp_headers, stream)) => {
+                // Tap usage BEFORE guarding so input tokens are still
+                // recorded if the guard later cuts the stream.
+                let stream = tap_anthropic_stream_usage(
+                    stream,
+                    state.budget.clone(),
+                    sandbox_name.to_string(),
+                );
                 // Streaming output scan (Anthropic event dialect).
                 let guarded = match guardrail_pipeline
                     .as_ref()
@@ -780,5 +921,53 @@ mod tests {
         });
         let openai = anthropic_to_openai(&req);
         assert_eq!(openai["stop"], json!(["END", "STOP"]));
+    }
+
+    #[test]
+    fn usage_tap_reads_message_start_and_latest_delta() {
+        let mut input = 0;
+        let mut output = 0;
+        update_anthropic_usage(
+            &json!({"type": "message_start", "message": {"usage": {"input_tokens": 42, "output_tokens": 1}}}),
+            &mut input,
+            &mut output,
+        );
+        update_anthropic_usage(
+            &json!({"type": "message_delta", "usage": {"output_tokens": 5}}),
+            &mut input,
+            &mut output,
+        );
+        update_anthropic_usage(
+            &json!({"type": "message_delta", "usage": {"output_tokens": 17}}),
+            &mut input,
+            &mut output,
+        );
+        assert_eq!(input, 42, "input from message_start");
+        assert_eq!(output, 17, "output is the latest cumulative delta");
+    }
+
+    #[tokio::test]
+    async fn streaming_usage_is_recorded_to_budget() {
+        use bytes::Bytes;
+        use futures::stream::StreamExt as _;
+        let budget = crate::budget::TokenBudgetTracker::new(1_000_000, 0);
+        // Anthropic SSE split so a delta lands across a chunk boundary.
+        let frames = [
+            "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":30,\"output_tokens\":1}}}\n\n",
+            "event: message_delta\ndata: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":",
+            "12}}\n\n",
+            "data: [DONE]\n\n",
+        ];
+        let chunks: Vec<Result<Bytes, std::io::Error>> =
+            frames.iter().map(|f| Ok(Bytes::from(*f))).collect();
+        let tapped = tap_anthropic_stream_usage(
+            futures::stream::iter(chunks).boxed(),
+            budget.clone(),
+            "sbx".into(),
+        );
+        // Drain the stream (client role).
+        let _drained: Vec<_> = tapped.collect().await;
+        let (used, _) = budget.get_usage("sbx").await;
+        assert_eq!(used, 42, "30 input + 12 output recorded once at stream end");
     }
 }
