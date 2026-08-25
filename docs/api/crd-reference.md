@@ -183,6 +183,16 @@ spec:
                                     #    LangGraph | Anthropic | PydanticAi | BYO
     openclaw:                       # block name matches `kind` (CEL-validated)
       image: karsacr.azurecr.io/kars-runtime-openclaw:latest
+      workspace:
+        bootstrapConfigMapRef:
+          name: my-agent-workspace  # AGENTS/SOUL/HEARTBEAT/TOOLS/USER.md only
+        overwritePolicy: IfMissing # IfMissing (default) | Always
+  storage:
+    workspace:
+      size: 10Gi
+      storageClassName: managed-csi
+      accessModes: [ReadWriteOnce]
+      retainPolicy: Retain          # Retain (default) | Delete
   inferenceRef:
     name: shared-inference          # required: sibling InferencePolicy
   memoryRef:                        # optional: sibling KarsMemory
@@ -225,6 +235,9 @@ status:
 | Field | Type | Purpose |
 |---|---|---|
 | `spec.memoryRef.name` | LocalObjectRef | Bind to a sibling `KarsMemory` (same namespace). |
+| `spec.storage.workspace` | object | Optional PVC-backed `/sandbox`. Omit for legacy `emptyDir`; set `existingClaim` to attach an explicitly selected PVC, or set dynamic fields (`size`, `storageClassName`, `accessModes`, `retainPolicy`). |
+| `spec.runtime.openclaw.workspace.bootstrapConfigMapRef.name` | LocalObjectRef | Same-namespace ConfigMap containing only `AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`, `TOOLS.md`, or `USER.md`. The controller mirrors it into the runtime namespace. |
+| `spec.runtime.openclaw.workspace.overwritePolicy` | enum | `IfMissing` (default) preserves files already on the PVC; `Always` reapplies declared bootstrap files on every Pod start. |
 | `spec.sandbox` | object | Isolation primitives — `isolation` (`standard` \| `enhanced`, default `enhanced`), `seccompProfile` (default `kars-strict`), `writablePaths` (default `[/sandbox, /tmp]`). |
 | `spec.networkPolicy` | object | Baseline egress allowlist. Defaults `defaultDeny: true`, `egressMode: Learn`. |
 | `spec.governance.enabled` | bool | **Defaults to `true`.** Turn on AGT governance — router guardrails are always on regardless; this gates AGT trust/audit + creates the per-sandbox Service on `:8443` (required for InferencePolicy enforcement + cross-agent mesh DNS). Set to `false` to opt out. |
@@ -234,7 +247,7 @@ status:
 | `spec.governance.registryMode` | string | `local` (default) or `global`. Global enables cross-cluster mesh + handoff tools. |
 | `spec.governance.trustedPeers` | string | Pre-seeded `"name:AMID,..."` peers — used by sub-agents to auto-trust the spawning parent. |
 | `spec.a2a` | object | Inbound A2A 1.0.0 ingress configuration. Default off; see [A2A gateway](../architecture/a2a-gateway.md). |
-| `spec.suspended` | bool | Operator-driven graceful pause. When `true`, the controller scales the Deployment to `replicas: 0` and stamps `Suspended=True / SuspendedBySpec` without tearing down namespace, NetworkPolicy, or federated credentials. |
+| `spec.suspended` | bool | Operator-driven graceful pause. When `true`, the controller scales the Deployment to `replicas: 0`. Runtime files survive only when `spec.storage.workspace` uses a PVC; the legacy `emptyDir` is deleted with the Pod. |
 
 **Status**
 
@@ -247,6 +260,15 @@ status:
 | `status.runtimeKind` | Runtime kind observed for the current `observedGeneration`. |
 | `status.observedGeneration` | `metadata.generation` that produced this status. Compare against `metadata.generation` to detect stale observations. |
 | `status.conditions[]` | The full condition chain — every reason emitted by the controller is enumerated in [`docs/api/conditions.md`](conditions.md). |
+
+`StorageReady=True/ClaimBound` means a persistent workspace is bound. While a
+claim is pending, the Deployment exists so `WaitForFirstConsumer` storage can
+bind, but the sandbox remains `phase=Creating`, `Ready=False`, and
+`StorageReady=False/ClaimPending`.
+
+For a retained workspace, deleting the `KarsSandbox` removes Kars-managed
+workloads but leaves the generated namespace and PVC. Reattach it explicitly
+with `existingClaim`; a new same-name CR cannot silently adopt a retained claim.
 
 ### `spec.runtime.hermes` (`HermesConfig`) {#hermesconfig}
 

@@ -255,6 +255,11 @@ For **per-sandbox Entra Agent IDs**, you also need the **Agent ID Developer** En
 # --release pulls the public, signed images (no local build / Rust toolchain).
 kars up --name prod-agent --region swedencentral --release
 
+# Keep the initial agent's /sandbox state across Pod recreation and suspension.
+kars up --name prod-agent --region swedencentral --release \
+  --workspace-storage 20Gi \
+  --workspace-storage-class managed-csi
+
 # Entra tier — full per-sandbox Entra Agent IDs + verified mesh trust
 kars up --name prod-agent --region swedencentral --release --mesh-trust=entra
 
@@ -314,6 +319,19 @@ kars add another-agent --runtime LangGraph --model gpt-4.1
 ```
 
 `kars add` reuses the existing AKS cluster and Foundry project — only the pod is new. See **[CLI reference](cli-reference.md)** for the full surface.
+
+By default `/sandbox` is ephemeral. Enable a retained workspace when sessions
+and files must survive Pod recreation or `spec.suspended` scale-to-zero:
+
+```bash
+kars add teaching-agent --runtime openclaw --model gpt-4.1 \
+  --workspace-storage 20Gi \
+  --workspace-storage-class managed-csi
+```
+
+This creates one PVC in `kars-teaching-agent`, which incurs storage charges
+while retained. A PVC is not a backup; configure snapshots and regional
+placement through the selected StorageClass and your platform policy.
 
 ### 2.5a Try a Hermes-runtime sandbox instead
 

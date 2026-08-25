@@ -21,6 +21,8 @@ These types are reused across CRDs.
 | `Progressing` | Reconciler is making forward progress toward the spec.          |
 | `Degraded`    | Object is partially functional but a sub-resource is failing.   |
 | `Suspended`   | Operator has paused the object via `spec.suspended: true`.      |
+| `StorageReady` | Sandbox workspace storage is available to the runtime.         |
+| `BootstrapReady` | OpenClaw workspace bootstrap init container completed.       |
 
 `status: True` means the type predicate holds. For `Degraded`, that
 means the object **is** degraded; for `Ready`, that it **is** ready.
@@ -37,6 +39,15 @@ means the object **is** degraded; for `Ready`, that it **is** ready.
 | `TimedOut` | most kinds | A wait loop hit its budget. |
 | `SuspendedBySpec` | `KarsSandbox` | `spec.suspended: true`; Deployment scaled to 0. |
 | `Active` | `KarsSandbox` | Pairs with `Suspended=False` to clear a prior `SuspendedBySpec`. |
+| `EmptyDir` | `KarsSandbox` | Workspace uses the backward-compatible ephemeral volume. |
+| `ClaimBound` | `KarsSandbox` | Workspace PVC is bound and available. |
+| `ClaimPending` | `KarsSandbox` | Workspace PVC has not bound yet; sandbox remains Creating. |
+| `ClaimNotFound` | `KarsSandbox` | Referenced `existingClaim` does not exist. |
+| `ClaimIncompatible` | `KarsSandbox` | PVC mode, phase, or provenance is incompatible with the sandbox. |
+| `ImmutableFieldChanged` | `KarsSandbox` | Kubernetes rejected an unsafe PVC mutation such as changing StorageClass or access mode. |
+| `BootstrapConfigNotFound` | `KarsSandbox` | Referenced workspace bootstrap ConfigMap does not exist. |
+| `BootstrapInvalid` | `KarsSandbox` | Bootstrap ConfigMap contains unsupported files or binary data. |
+| `BootstrapFailed` | `KarsSandbox` | Bootstrap init container exited unsuccessfully. |
 
 ## KarsSandbox
 
@@ -50,6 +61,8 @@ end-to-end runtime.
 | `Degraded` | True/False | `AuthMisconfigured`, `MemoryStoreMissing`, `FailedClosed` |
 | `Suspended` | True/False | `SuspendedBySpec`, `Active` |
 | `RuntimeReady` | True/False | `AdapterMissing` (Falsey when the runtime adapter isn't wired) |
+| `StorageReady` | True/False | `EmptyDir`, `ClaimBound`, `ClaimPending` |
+| `BootstrapReady` | True/False | `Reconciled`, `Creating`, `BootstrapFailed` |
 | `AllowlistVerified` | True/False | `Verified`, `Unsigned`, `FailedClosed` |
 | `AllowlistAuthoritative` | True/False | `Inline`, `Verified`, `StaleLKG`, `FailedClosed`, `InlineDiffersFromArtifact` |
 | `AllowlistDrift` | True/False | `InlineDiffersFromArtifact`, `InlineCleared` |

@@ -12,6 +12,56 @@ import {
   inferenceRefName,
   toolPolicyRefName,
 } from "../refs.js";
+import type { RuntimeKind } from "../runtime.js";
+import { buildWorkspaceStorageSpec } from "../lib/workspace-storage.js";
+
+export function validateRuntimeSpecificAddFlags(
+  runtimeKind: RuntimeKind,
+  options: Record<string, unknown>,
+): string[] {
+  const errors: string[] = [];
+  const channelFlags: Array<[string, unknown]> = [
+    ["--channels", options.channels],
+    ["--telegram-token", options.telegramToken],
+    ["--telegram-allow-from", options.telegramAllowFrom],
+    ["--slack-token", options.slackToken],
+    ["--discord-token", options.discordToken],
+  ];
+  if (runtimeKind !== "OpenClaw" && runtimeKind !== "Hermes") {
+    const used = channelFlags
+      .filter(([, value]) => value !== undefined && value !== "" && value !== false)
+      .map(([flag]) => flag);
+    if (used.length > 0) {
+      errors.push(
+        `${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with ` +
+          `--runtime openclaw or --runtime hermes.`,
+      );
+    }
+  }
+
+  const openClawOnlyFlags: Array<[string, unknown]> = [
+    ["--skills", options.skills],
+    ["--brave-api-key", options.braveApiKey],
+    ["--tavily-api-key", options.tavilyApiKey],
+    ["--exa-api-key", options.exaApiKey],
+    ["--firecrawl-api-key", options.firecrawlApiKey],
+    ["--perplexity-api-key", options.perplexityApiKey],
+    ["--openai-api-key", options.openaiApiKey],
+    ["--image", options.image],
+  ];
+  if (runtimeKind !== "OpenClaw") {
+    const used = openClawOnlyFlags
+      .filter(([, value]) => value !== undefined && value !== "" && value !== false)
+      .map(([flag]) => flag);
+    if (used.length > 0) {
+      errors.push(
+        `${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with ` +
+          `--runtime openclaw.`,
+      );
+    }
+  }
+  return errors;
+}
 
 export function addCommand(): Command {
   const cmd = new Command("add");
@@ -25,6 +75,14 @@ export function addCommand(): Command {
     .option("--model <model>", "AI model deployment name in Foundry", "gpt-4.1")
     .option("--isolation <level>", "Isolation level: standard | enhanced | confidential", "enhanced")
     .option("--image <image>", "Custom sandbox image (default: from Helm values; OpenClaw runtime only)")
+
+    // ── Workspace storage (all runtimes; bootstrap is OpenClaw-only) ───
+    .option("--workspace-storage <size>", "Create a persistent workspace PVC, e.g. 10Gi")
+    .option("--workspace-storage-class <name>", "StorageClass for a generated workspace PVC")
+    .option("--workspace-existing-claim <name>", "Use an existing PVC in the generated sandbox namespace")
+    .option("--workspace-retain-policy <policy>", "Generated PVC deletion policy: Retain | Delete", "Retain")
+    .option("--workspace-bootstrap <configmap>", "[OpenClaw only] ConfigMap containing workspace bootstrap files")
+    .option("--workspace-overwrite <policy>", "[OpenClaw only] Bootstrap policy: IfMissing | Always", "IfMissing")
 
     // ── Inference budget (all runtimes) ────────────────────────────────
     .option("--token-budget-daily <tokens>", "Daily token budget (0 = unlimited)", "0")
@@ -72,6 +130,7 @@ export function addCommand(): Command {
     .addHelpText("after", `
 Flag groups (see --help for details):
   Core:                --runtime, --model, --isolation, --image
+  Workspace:           --workspace-storage, --workspace-existing-claim, --workspace-bootstrap
   Inference budget:    --token-budget-*
   Governance / net:    --governance, --trust-threshold, --policy-profile, --learn-egress
   Foundry agent:       --agent-instructions, --agent-tools
@@ -93,29 +152,10 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
       // Validate runtime-specific flag combinations before doing any work.
       // Reject incompatible flags up-front with a clear, actionable error
       // — better than silently ignoring a user's intent.
-      const openClawOnlyFlags: Array<[string, unknown]> = [
-        ["--channels", options.channels],
-        ["--telegram-token", options.telegramToken],
-        ["--telegram-allow-from", options.telegramAllowFrom],
-        ["--slack-token", options.slackToken],
-        ["--discord-token", options.discordToken],
-        ["--skills", options.skills],
-        ["--brave-api-key", options.braveApiKey],
-        ["--tavily-api-key", options.tavilyApiKey],
-        ["--exa-api-key", options.exaApiKey],
-        ["--firecrawl-api-key", options.firecrawlApiKey],
-        ["--perplexity-api-key", options.perplexityApiKey],
-        ["--openai-api-key", options.openaiApiKey],
-        ["--image", options.image],
-      ];
-      if (runtimeKind !== "OpenClaw") {
-        const used = openClawOnlyFlags.filter(([, v]) => v !== undefined && v !== "" && v !== false).map(([f]) => f);
-        if (used.length > 0) {
-          console.error(chalk.red(`\n  Error: ${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with --runtime openclaw.`));
-          console.error(chalk.dim(`  Channels, skills, and plugin API keys are OpenClaw-specific entrypoint features.`));
-          console.error(chalk.dim(`  For ${options.runtime}, configure equivalents inside the agent's own code.\n`));
-          process.exit(1);
-        }
+      const runtimeFlagErrors = validateRuntimeSpecificAddFlags(runtimeKind, options);
+      if (runtimeFlagErrors.length > 0) {
+        console.error(chalk.red(`\n  Error: ${runtimeFlagErrors.join(" ")}\n`));
+        process.exit(1);
       }
       if (runtimeKind !== "BYO" && (options.byoImage || (options.byoContractVersion && options.byoContractVersion !== "v1"))) {
         console.error(chalk.red(`\n  Error: --byo-image / --byo-contract-version are only valid with --runtime byo.\n`));
@@ -129,6 +169,40 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         console.error(chalk.red(`\n  Error: --maf-language is only valid with --runtime microsoft-agent-framework.\n`));
         process.exit(1);
       }
+      if (options.workspaceStorage && options.workspaceExistingClaim) {
+        console.error(chalk.red(`\n  Error: --workspace-storage and --workspace-existing-claim are mutually exclusive.\n`));
+        process.exit(1);
+      }
+      if (options.workspaceStorageClass && !options.workspaceStorage) {
+        console.error(chalk.red(`\n  Error: --workspace-storage-class requires --workspace-storage <size>.\n`));
+        process.exit(1);
+      }
+      if (options.workspaceExistingClaim && options.workspaceRetainPolicy !== "Retain") {
+        console.error(chalk.red(`\n  Error: --workspace-retain-policy applies only to generated PVCs; existing claims are always externally managed.\n`));
+        process.exit(1);
+      }
+      if (!(["Retain", "Delete"] as const).includes(options.workspaceRetainPolicy)) {
+        console.error(chalk.red(`\n  Error: --workspace-retain-policy must be Retain or Delete.\n`));
+        process.exit(1);
+      }
+      if (runtimeKind !== "OpenClaw" && options.workspaceBootstrap) {
+        console.error(chalk.red(`\n  Error: --workspace-bootstrap is only valid with --runtime openclaw.\n`));
+        process.exit(1);
+      }
+      if (!(["IfMissing", "Always"] as const).includes(options.workspaceOverwrite)) {
+        console.error(chalk.red(`\n  Error: --workspace-overwrite must be IfMissing or Always.\n`));
+        process.exit(1);
+      }
+      if (!options.workspaceBootstrap && options.workspaceOverwrite !== "IfMissing") {
+        console.error(chalk.red(`\n  Error: --workspace-overwrite requires --workspace-bootstrap <configmap>.\n`));
+        process.exit(1);
+      }
+      if (options.workspaceStorage && options.workspaceRetainPolicy === "Delete") {
+        console.log(chalk.yellow("  ⚠ Workspace retain policy is Delete: deleting the KarsSandbox will delete its PVC and data."));
+      }
+      if (!options.workspaceStorage && !options.workspaceExistingClaim) {
+        console.log(chalk.yellow("  ⚠ Workspace is ephemeral (emptyDir): Pod recreation or suspension deletes sessions and files."));
+      }
 
       const runtimeBlock = buildRuntimeBlock({
         kind: runtimeKind,
@@ -139,6 +213,13 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         byoContractVersion: options.byoContractVersion,
         mafLanguage: options.mafLanguage as "python" | "dotnet",
       });
+      if (options.workspaceBootstrap) {
+        const openclaw = runtimeBlock.openclaw as Record<string, unknown>;
+        openclaw.workspace = {
+          bootstrapConfigMapRef: { name: options.workspaceBootstrap },
+          overwritePolicy: options.workspaceOverwrite,
+        };
+      }
 
       const sandbox: Record<string, unknown> = {
         apiVersion: "kars.azure.com/v1alpha1",
@@ -173,6 +254,11 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           },
         },
       };
+
+      const storage = buildWorkspaceStorageSpec(options);
+      if (storage) {
+        (sandbox.spec as Record<string, unknown>).storage = storage;
+      }
 
       // Add Foundry agent config if provided
       if (options.agentInstructions || options.agentTools) {
@@ -591,6 +677,18 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         console.log(chalk.dim(`  Namespace:  ${namespace}`));
         console.log(chalk.dim(`  Model:      ${options.model}`));
         console.log(chalk.dim(`  Isolation:  ${options.isolation}`));
+        if (options.workspaceExistingClaim) {
+          console.log(chalk.dim(`  Workspace:  existing PVC ${options.workspaceExistingClaim} (externally managed)`));
+        } else if (options.workspaceStorage) {
+          console.log(chalk.dim(
+            `  Workspace:  ${name}-workspace (${options.workspaceStorage}, ${options.workspaceStorageClass || "default StorageClass"}, ${options.workspaceRetainPolicy})`,
+          ));
+        } else {
+          console.log(chalk.yellow("  Workspace:  ephemeral emptyDir"));
+        }
+        if (options.workspaceBootstrap) {
+          console.log(chalk.dim(`  Bootstrap:  ${options.workspaceBootstrap} (${options.workspaceOverwrite})`));
+        }
         if (options.channels) {
           console.log(chalk.dim(`  Channels:   ${options.channels}`));
         }

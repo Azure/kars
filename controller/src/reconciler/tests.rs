@@ -12,7 +12,804 @@
 // reviewer benefit.
 
 use super::*;
-use crate::crd::SandboxConfig;
+use crate::crd::{
+    OpenClawConfig, OpenClawWorkspaceSpec, PersistentVolumeAccessMode, SandboxConfig,
+    SandboxStorageSpec, WorkspaceOverwritePolicy, WorkspaceRetainPolicy, WorkspaceStorageSpec,
+};
+use crate::mcp_server::LocalObjectRef;
+
+#[test]
+fn workspace_bootstrap_config_map_accepts_declarative_files() {
+    let config_map: ConfigMap = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "workspace"},
+        "data": {
+            "AGENTS.md": "instructions",
+            "SOUL.md": "persona",
+            "HEARTBEAT.md": "checks",
+            "TOOLS.md": "tools",
+            "USER.md": "profile"
+        }
+    }))
+    .unwrap();
+
+    assert!(validate_workspace_bootstrap_config_map(&config_map).is_ok());
+}
+
+#[test]
+fn workspace_bootstrap_config_map_rejects_runtime_state_and_binary_data() {
+    let runtime_state: ConfigMap = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "workspace"},
+        "data": {"MEMORY.md": "mutable state"}
+    }))
+    .unwrap();
+    assert!(
+        validate_workspace_bootstrap_config_map(&runtime_state)
+            .unwrap_err()
+            .contains("MEMORY.md")
+    );
+
+    let binary_data: ConfigMap = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {"name": "workspace"},
+        "binaryData": {"SOUL.md": "c2VjcmV0"}
+    }))
+    .unwrap();
+    assert!(
+        validate_workspace_bootstrap_config_map(&binary_data)
+            .unwrap_err()
+            .contains("binaryData")
+    );
+}
+
+#[test]
+fn workspace_bootstrap_plan_is_absent_without_config_map() {
+    assert!(
+        build_workspace_bootstrap_plan(
+            &OpenClawConfig::default(),
+            "openclaw:latest",
+            "Always",
+            "",
+            "",
+        )
+        .is_none()
+    );
+}
+
+#[test]
+fn workspace_bootstrap_plan_mounts_config_map_and_workspace() {
+    let config = OpenClawConfig {
+        workspace: Some(OpenClawWorkspaceSpec {
+            bootstrap_config_map_ref: Some(LocalObjectRef {
+                name: "teaching-agent-workspace".into(),
+            }),
+            overwrite_policy: WorkspaceOverwritePolicy::Always,
+        }),
+        ..Default::default()
+    };
+    let plan =
+        build_workspace_bootstrap_plan(&config, "openclaw:latest", "IfNotPresent", "cm-uid", "42")
+            .expect("bootstrap plan");
+
+    assert_eq!(plan.volume["configMap"]["name"], "teaching-agent-workspace");
+    assert_eq!(plan.init_container["image"], "openclaw:latest");
+    assert_eq!(plan.init_container["imagePullPolicy"], "IfNotPresent");
+    assert_eq!(plan.init_container["env"][0]["value"], "Always");
+    assert_eq!(plan.init_container["env"][1]["value"], "cm-uid");
+    assert_eq!(plan.init_container["env"][2]["value"], "42");
+    assert_eq!(
+        plan.init_container["command"],
+        json!(["/usr/local/bin/workspace-bootstrap.sh"])
+    );
+    assert_eq!(plan.init_container["securityContext"]["runAsUser"], 1000);
+    assert_eq!(
+        plan.init_container["volumeMounts"],
+        json!([
+            {"name": "sandbox-data", "mountPath": "/sandbox"},
+            {"name": "workspace-bootstrap", "mountPath": "/etc/kars/workspace-bootstrap", "readOnly": true}
+        ])
+    );
+    assert!(
+        plan.init_container["volumeMounts"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|mount| mount["name"] != "kube-api-access")
+    );
+}
+
+#[test]
+fn service_account_projection_is_explicit_and_skips_init_containers() {
+    let mount = kube_api_access_mount();
+    let volume = kube_api_access_volume();
+    assert_eq!(
+        mount["mountPath"],
+        "/var/run/secrets/kubernetes.io/serviceaccount"
+    );
+    assert_eq!(
+        volume["projected"]["sources"][0]["serviceAccountToken"]["path"],
+        "token"
+    );
+    assert_eq!(
+        WORKLOAD_IDENTITY_SKIP_CONTAINERS,
+        "egress-guard;workspace-bootstrap"
+    );
+}
+
+#[test]
+fn workspace_bootstrap_conditions_gate_ready_and_surface_failure() {
+    let sandbox = KarsSandbox {
+        metadata: kube::api::ObjectMeta {
+            name: Some("demo".into()),
+            generation: Some(3),
+            ..Default::default()
+        },
+        spec: Default::default(),
+        status: None,
+    };
+
+    let pending =
+        workspace_bootstrap_status_conditions(&sandbox, &WorkspaceBootstrapState::Pending);
+    assert_eq!(pending[0].type_, "BootstrapReady");
+    assert_eq!(pending[0].status, "False");
+    assert_eq!(pending[1].type_, "Ready");
+    assert_eq!(pending[1].status, "False");
+
+    let ready = workspace_bootstrap_status_conditions(&sandbox, &WorkspaceBootstrapState::Ready);
+    assert_eq!(ready.len(), 1);
+    assert_eq!(ready[0].status, "True");
+
+    let failed = workspace_bootstrap_status_conditions(
+        &sandbox,
+        &WorkspaceBootstrapState::Failed("symlink destination".into()),
+    );
+    assert!(failed.iter().any(|condition| {
+        condition.type_ == "Degraded"
+            && condition.status == "True"
+            && condition.reason == "BootstrapFailed"
+    }));
+}
+
+#[test]
+fn workspace_bootstrap_state_reads_init_container_termination() {
+    let succeeded: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "demo"},
+        "spec": {"containers": [{"name": "openclaw", "image": "test"}]},
+        "status": {
+            "initContainerStatuses": [{
+                "name": "workspace-bootstrap",
+                "image": "test",
+                "imageID": "test",
+                "ready": true,
+                "restartCount": 0,
+                "state": {"terminated": {"exitCode": 0}}
+            }]
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        workspace_bootstrap_state(&[succeeded]),
+        WorkspaceBootstrapState::Ready
+    );
+
+    let failed: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "demo"},
+        "spec": {"containers": [{"name": "openclaw", "image": "test"}]},
+        "status": {
+            "initContainerStatuses": [{
+                "name": "workspace-bootstrap",
+                "image": "test",
+                "imageID": "test",
+                "ready": false,
+                "restartCount": 0,
+                "state": {"terminated": {"exitCode": 1, "message": "unsafe destination"}}
+            }]
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        workspace_bootstrap_state(&[failed]),
+        WorkspaceBootstrapState::Failed("unsafe destination".into())
+    );
+
+    let crash_loop: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "demo"},
+        "spec": {"containers": [{"name": "openclaw", "image": "test"}]},
+        "status": {
+            "initContainerStatuses": [{
+                "name": "workspace-bootstrap",
+                "image": "test",
+                "imageID": "test",
+                "ready": false,
+                "restartCount": 2,
+                "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                "lastState": {"terminated": {"exitCode": 1, "message": "unsafe destination"}}
+            }]
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        workspace_bootstrap_state(&[crash_loop]),
+        WorkspaceBootstrapState::Failed("unsafe destination".into())
+    );
+
+    let ready: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "old"},
+        "spec": {"containers": [{"name": "openclaw", "image": "test"}]},
+        "status": {
+            "initContainerStatuses": [{
+                "name": "workspace-bootstrap", "image": "test", "imageID": "test",
+                "ready": true, "restartCount": 0,
+                "state": {"terminated": {"exitCode": 0}}
+            }]
+        }
+    }))
+    .unwrap();
+    let failed: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "new"},
+        "spec": {"containers": [{"name": "openclaw", "image": "test"}]},
+        "status": {
+            "initContainerStatuses": [{
+                "name": "workspace-bootstrap", "image": "test", "imageID": "test",
+                "ready": false, "restartCount": 1,
+                "state": {"waiting": {"reason": "CrashLoopBackOff"}},
+                "lastState": {"terminated": {"exitCode": 1, "message": "new failed"}}
+            }]
+        }
+    }))
+    .unwrap();
+    assert_eq!(
+        workspace_bootstrap_state(&[ready.clone(), failed]),
+        WorkspaceBootstrapState::Failed("new failed".into())
+    );
+
+    let pending: Pod = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "Pod",
+        "metadata": {"name": "new"},
+        "spec": {"containers": [{"name": "openclaw", "image": "test"}]}
+    }))
+    .unwrap();
+    assert_eq!(
+        workspace_bootstrap_state(&[ready, pending]),
+        WorkspaceBootstrapState::Pending
+    );
+}
+
+#[test]
+fn workspace_plan_defaults_to_ephemeral_empty_dir() {
+    let plan = build_workspace_storage_plan("demo", "kars-demo", None, None);
+    assert!(plan.claim.is_none());
+    assert_eq!(plan.volume, json!({"name": "sandbox-data", "emptyDir": {}}));
+}
+
+#[test]
+fn workspace_plan_builds_retained_dynamic_claim() {
+    let storage = SandboxStorageSpec {
+        workspace: Some(WorkspaceStorageSpec::default()),
+    };
+    let plan = build_workspace_storage_plan("demo", "kars-demo", Some(&storage), Some("uid-1"));
+    let claim = plan.claim.expect("dynamic claim");
+
+    assert_eq!(claim["metadata"]["name"], "demo-workspace");
+    assert_eq!(claim["metadata"]["namespace"], "kars-demo");
+    assert_eq!(
+        claim["metadata"]["annotations"]["kars.azure.com/retain-policy"],
+        "Retain"
+    );
+    assert_eq!(
+        claim["metadata"]["annotations"]["kars.azure.com/sandbox-uid"],
+        "uid-1"
+    );
+    assert!(claim["metadata"].get("ownerReferences").is_none());
+    assert_eq!(claim["spec"]["accessModes"], json!(["ReadWriteOnce"]));
+    assert_eq!(claim["spec"]["resources"]["requests"]["storage"], "10Gi");
+    assert_eq!(
+        plan.volume,
+        json!({
+            "name": "sandbox-data",
+            "persistentVolumeClaim": {"claimName": "demo-workspace"}
+        })
+    );
+}
+
+#[test]
+fn workspace_plan_references_existing_claim_without_creating_one() {
+    let storage = SandboxStorageSpec {
+        workspace: Some(WorkspaceStorageSpec {
+            existing_claim: Some("restored-workspace".into()),
+            size: None,
+            storage_class_name: None,
+            access_modes: Vec::new(),
+            retain_policy: WorkspaceRetainPolicy::Retain,
+        }),
+    };
+    let plan = build_workspace_storage_plan("demo", "kars-demo", Some(&storage), Some("uid-1"));
+
+    assert!(plan.claim.is_none());
+    assert_eq!(
+        plan.volume["persistentVolumeClaim"]["claimName"],
+        "restored-workspace"
+    );
+}
+
+#[test]
+fn workspace_plan_delete_policy_owns_dynamic_claim() {
+    let storage = SandboxStorageSpec {
+        workspace: Some(WorkspaceStorageSpec {
+            existing_claim: None,
+            size: Some("20Gi".into()),
+            storage_class_name: Some("managed-csi".into()),
+            access_modes: vec![PersistentVolumeAccessMode::ReadWriteOncePod],
+            retain_policy: WorkspaceRetainPolicy::Delete,
+        }),
+    };
+    let plan = build_workspace_storage_plan("demo", "kars-demo", Some(&storage), Some("uid-1"));
+    let claim = plan.claim.expect("dynamic claim");
+
+    assert_eq!(claim["spec"]["storageClassName"], "managed-csi");
+    assert_eq!(claim["spec"]["accessModes"], json!(["ReadWriteOncePod"]));
+    assert_eq!(claim["spec"]["resources"]["requests"]["storage"], "20Gi");
+    assert_eq!(
+        claim["metadata"]["annotations"]["kars.azure.com/retain-policy"],
+        "Delete"
+    );
+    assert_eq!(
+        claim["metadata"]["annotations"]["kars.azure.com/sandbox-uid"],
+        "uid-1"
+    );
+    assert!(claim["metadata"].get("ownerReferences").is_none());
+}
+
+#[test]
+fn workspace_claim_provenance_rejects_implicit_adoption() {
+    let claim: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": "demo-workspace",
+            "annotations": {"kars.azure.com/sandbox-uid": "old-uid"}
+        },
+        "spec": {"accessModes": ["ReadWriteOnce"]},
+        "status": {"phase": "Bound"}
+    }))
+    .unwrap();
+    assert!(
+        validate_dynamic_claim_provenance(&claim, Some("new-uid"))
+            .unwrap_err()
+            .contains("existingClaim")
+    );
+    assert!(validate_dynamic_claim_provenance(&claim, Some("old-uid")).is_ok());
+}
+
+#[test]
+fn retained_claim_forces_namespace_preservation_for_later_same_name_cr() {
+    let retained: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": "demo-workspace",
+            "annotations": {
+                "kars.azure.com/retain-policy": "Retain",
+                "kars.azure.com/sandbox-uid": "old-uid"
+            }
+        }
+    }))
+    .unwrap();
+
+    assert!(should_preserve_namespace_on_delete(
+        None,
+        &[retained],
+        Some("new-uid")
+    ));
+}
+
+#[test]
+fn retained_namespace_still_deletes_current_delete_policy_claims() {
+    let current_delete: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": "demo-workspace",
+            "labels": {
+                "app.kubernetes.io/managed-by": "kars-controller",
+                "kars.azure.com/storage-role": "workspace"
+            },
+            "annotations": {
+                "kars.azure.com/retain-policy": "Delete",
+                "kars.azure.com/sandbox-uid": "current-uid"
+            }
+        }
+    }))
+    .unwrap();
+    let foreign: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "foreign"}
+    }))
+    .unwrap();
+    let delete_storage = SandboxStorageSpec {
+        workspace: Some(WorkspaceStorageSpec {
+            existing_claim: None,
+            size: Some("10Gi".into()),
+            storage_class_name: None,
+            access_modes: vec![PersistentVolumeAccessMode::ReadWriteOnce],
+            retain_policy: WorkspaceRetainPolicy::Delete,
+        }),
+    };
+
+    assert_eq!(
+        deletable_workspace_claims(
+            Some(&delete_storage),
+            "demo",
+            &[current_delete.clone(), foreign],
+            Some("current-uid")
+        ),
+        vec!["demo-workspace"]
+    );
+    let retain_storage = SandboxStorageSpec {
+        workspace: Some(WorkspaceStorageSpec::default()),
+    };
+    assert!(
+        deletable_workspace_claims(
+            Some(&retain_storage),
+            "demo",
+            &[current_delete.clone()],
+            Some("current-uid")
+        )
+        .is_empty()
+    );
+    let existing_storage = SandboxStorageSpec {
+        workspace: Some(WorkspaceStorageSpec {
+            existing_claim: Some("demo-workspace".into()),
+            size: None,
+            storage_class_name: None,
+            access_modes: Vec::new(),
+            retain_policy: WorkspaceRetainPolicy::Retain,
+        }),
+    };
+    assert!(
+        deletable_workspace_claims(
+            Some(&existing_storage),
+            "demo",
+            &[current_delete.clone()],
+            Some("current-uid")
+        )
+        .is_empty()
+    );
+    assert!(should_preserve_namespace_on_delete(
+        None,
+        &[current_delete.clone()],
+        Some("current-uid")
+    ));
+    assert!(
+        deletable_workspace_claims(None, "demo", &[current_delete.clone()], Some("current-uid"))
+            .is_empty()
+    );
+    let missing_labels: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": "demo-workspace",
+            "annotations": {
+                "kars.azure.com/retain-policy": "Delete",
+                "kars.azure.com/sandbox-uid": "current-uid"
+            }
+        }
+    }))
+    .unwrap();
+    assert!(
+        deletable_workspace_claims(
+            Some(&delete_storage),
+            "demo",
+            &[missing_labels],
+            Some("current-uid")
+        )
+        .is_empty()
+    );
+}
+
+#[test]
+fn retained_claim_requires_explicit_existing_claim_recovery() {
+    let retained: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {
+            "name": "demo-workspace",
+            "annotations": {
+                "kars.azure.com/retain-policy": "Retain",
+                "kars.azure.com/sandbox-uid": "old-uid"
+            }
+        }
+    }))
+    .unwrap();
+
+    assert!(
+        validate_namespace_claim_reuse(&[retained.clone()], None, None, Some("new-uid")).is_err()
+    );
+    assert!(
+        validate_namespace_claim_reuse(&[retained], Some("demo-workspace"), None, Some("new-uid"))
+            .is_ok()
+    );
+}
+
+#[test]
+fn suspended_transition_allows_current_and_target_claims() {
+    let current: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "current-external"}
+    }))
+    .unwrap();
+    let target: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "target-external"}
+    }))
+    .unwrap();
+
+    assert!(
+        validate_namespace_claim_reuse(
+            &[current.clone(), target.clone()],
+            Some("target-external"),
+            Some("current-external"),
+            Some("new-uid")
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_namespace_claim_reuse(
+            &[current, target],
+            Some("target-external"),
+            None,
+            Some("new-uid")
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn persistent_workspace_uses_recreate_rollout_strategy() {
+    assert_eq!(
+        workspace_deployment_strategy(true),
+        Some(json!({"type": "Recreate"}))
+    );
+    assert_eq!(workspace_deployment_strategy(false), None);
+}
+
+#[test]
+fn recreate_transition_clears_existing_rolling_update() {
+    let deployment: Deployment = serde_json::from_value(json!({
+        "apiVersion": "apps/v1",
+        "kind": "Deployment",
+        "metadata": {"name": "demo"},
+        "spec": {
+            "selector": {"matchLabels": {"app": "demo"}},
+            "strategy": {
+                "type": "RollingUpdate",
+                "rollingUpdate": {"maxSurge": "25%", "maxUnavailable": "25%"}
+            },
+            "template": {
+                "metadata": {"labels": {"app": "demo"}},
+                "spec": {"containers": [{"name": "agent", "image": "test"}]}
+            }
+        }
+    }))
+    .unwrap();
+    assert!(deployment_needs_recreate_cleanup(Some(&deployment), true));
+    assert!(!deployment_needs_recreate_cleanup(Some(&deployment), false));
+    assert!(!deployment_needs_recreate_cleanup(None, true));
+}
+
+#[test]
+fn existing_claim_waits_for_bound_but_dynamic_claim_can_trigger_wffc() {
+    assert_eq!(workspace_desired_replicas(false, true, Some("Pending")), 0);
+    assert_eq!(workspace_desired_replicas(false, true, Some("Bound")), 1);
+    assert_eq!(workspace_desired_replicas(false, false, Some("Pending")), 1);
+    assert_eq!(workspace_desired_replicas(true, false, Some("Bound")), 0);
+}
+
+#[test]
+fn every_wired_runtime_has_a_persistent_state_directory() {
+    use crate::crd::RuntimeKind;
+
+    let expected = [
+        (RuntimeKind::OpenClaw, "/sandbox/.openclaw"),
+        (RuntimeKind::Hermes, "/sandbox/.hermes"),
+        (RuntimeKind::OpenAIAgents, "/sandbox/.openai-agents"),
+        (RuntimeKind::MicrosoftAgentFramework, "/sandbox/.maf"),
+        (RuntimeKind::LangGraph, "/sandbox/.langgraph"),
+        (RuntimeKind::Anthropic, "/sandbox/.anthropic"),
+        (RuntimeKind::PydanticAi, "/sandbox/.pydantic-ai"),
+        (RuntimeKind::BYO, "/sandbox/.byo"),
+    ];
+    for (kind, path) in expected {
+        assert_eq!(runtime_state_dir(&kind), path);
+        assert!(path.starts_with("/sandbox/"));
+    }
+}
+
+#[test]
+fn workspace_volume_transition_requires_suspension() {
+    assert!(validate_workspace_volume_transition(None, Some("generated"), false).is_err());
+    assert!(
+        validate_workspace_volume_transition(Some("generated"), Some("restored"), false).is_err()
+    );
+    assert!(
+        validate_workspace_volume_transition(Some("generated"), Some("restored"), true).is_ok()
+    );
+    assert!(
+        validate_workspace_volume_transition(Some("generated"), Some("generated"), false).is_ok()
+    );
+}
+
+#[test]
+fn workspace_deletion_preserves_namespace_for_retained_claims() {
+    let retained = SandboxStorageSpec {
+        workspace: Some(WorkspaceStorageSpec::default()),
+    };
+    assert!(preserve_namespace_on_delete(Some(&retained)));
+
+    let existing = SandboxStorageSpec {
+        workspace: Some(WorkspaceStorageSpec {
+            existing_claim: Some("imported".into()),
+            size: None,
+            storage_class_name: None,
+            access_modes: Vec::new(),
+            retain_policy: WorkspaceRetainPolicy::Retain,
+        }),
+    };
+    assert!(preserve_namespace_on_delete(Some(&existing)));
+}
+
+#[test]
+fn workspace_deletion_cascades_for_ephemeral_or_delete_policy() {
+    assert!(!preserve_namespace_on_delete(None));
+
+    let delete = SandboxStorageSpec {
+        workspace: Some(WorkspaceStorageSpec {
+            existing_claim: None,
+            size: Some("10Gi".into()),
+            storage_class_name: None,
+            access_modes: vec![PersistentVolumeAccessMode::ReadWriteOnce],
+            retain_policy: WorkspaceRetainPolicy::Delete,
+        }),
+    };
+    assert!(!preserve_namespace_on_delete(Some(&delete)));
+}
+
+#[test]
+fn workspace_storage_validation_rejects_mixed_existing_claim_fields() {
+    let workspace = WorkspaceStorageSpec {
+        existing_claim: Some("imported".into()),
+        size: Some("10Gi".into()),
+        storage_class_name: None,
+        access_modes: Vec::new(),
+        retain_policy: WorkspaceRetainPolicy::Retain,
+    };
+    assert!(
+        validate_workspace_storage_spec(&workspace)
+            .unwrap_err()
+            .contains("mutually exclusive")
+    );
+}
+
+#[test]
+fn workspace_storage_validation_rejects_incomplete_dynamic_claim() {
+    let workspace = WorkspaceStorageSpec {
+        existing_claim: None,
+        size: Some(String::new()),
+        storage_class_name: None,
+        access_modes: Vec::new(),
+        retain_policy: WorkspaceRetainPolicy::Retain,
+    };
+    let error = validate_workspace_storage_spec(&workspace).unwrap_err();
+    assert!(error.contains("size"));
+    assert!(error.contains("accessModes"));
+}
+
+#[test]
+fn workspace_claim_validation_accepts_supported_modes_and_rejects_lost_claims() {
+    let bound: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "workspace"},
+        "spec": {"accessModes": ["ReadWriteOnce"]},
+        "status": {"phase": "Bound"}
+    }))
+    .unwrap();
+    assert!(validate_workspace_claim(&bound).is_ok());
+
+    let unsupported: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "workspace"},
+        "spec": {"accessModes": ["ReadWriteMany"]},
+        "status": {"phase": "Bound"}
+    }))
+    .unwrap();
+    assert!(validate_workspace_claim(&unsupported).is_err());
+
+    let lost: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "workspace"},
+        "spec": {"accessModes": ["ReadWriteOnce"]},
+        "status": {"phase": "Lost"}
+    }))
+    .unwrap();
+    assert!(
+        validate_workspace_claim(&lost)
+            .unwrap_err()
+            .contains("Lost")
+    );
+
+    let block: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "workspace"},
+        "spec": {"accessModes": ["ReadWriteOnce"], "volumeMode": "Block"},
+        "status": {"phase": "Bound"}
+    }))
+    .unwrap();
+    assert!(
+        validate_workspace_claim(&block)
+            .unwrap_err()
+            .contains("Filesystem")
+    );
+
+    let pending: PersistentVolumeClaim = serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "PersistentVolumeClaim",
+        "metadata": {"name": "workspace"},
+        "spec": {"accessModes": ["ReadWriteOnce"]},
+        "status": {"phase": "Pending"}
+    }))
+    .unwrap();
+    assert!(validate_workspace_claim(&pending).is_ok());
+}
+
+#[test]
+fn workspace_storage_conditions_gate_ready_until_claim_is_bound() {
+    let sandbox = KarsSandbox {
+        metadata: kube::api::ObjectMeta {
+            name: Some("demo".into()),
+            generation: Some(3),
+            ..Default::default()
+        },
+        spec: Default::default(),
+        status: None,
+    };
+    let pending = workspace_storage_status_conditions(&sandbox, Some("Pending"));
+    assert_eq!(pending.len(), 3);
+    assert_eq!(pending[0].type_, "StorageReady");
+    assert_eq!(pending[0].status, "False");
+    assert_eq!(pending[0].reason, "ClaimPending");
+    assert_eq!(pending[1].type_, "Ready");
+    assert_eq!(pending[1].status, "False");
+
+    let bound = workspace_storage_status_conditions(&sandbox, Some("Bound"));
+    assert_eq!(bound.len(), 1);
+    assert_eq!(bound[0].status, "True");
+    assert_eq!(bound[0].reason, "ClaimBound");
+
+    let ephemeral = workspace_storage_status_conditions(&sandbox, None);
+    assert_eq!(ephemeral[0].reason, "EmptyDir");
+}
 
 #[test]
 fn standard_isolation_uses_runtime_default_seccomp() {

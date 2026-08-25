@@ -383,7 +383,9 @@ else
   export OPENCLAW_DISABLE_BUNDLED_PLUGINS=1
 fi
 
-# Always (re)generate config + workspace seed files on every container start.
+# Always regenerate env-driven config on every container start. Workspace seed
+# files are created only when missing so PVC-backed user/bootstrap content
+# survives restarts.
 #
 # Previously this block was guarded by `[ ! -f "$OPENCLAW_CONFIG" ]` for "idempotency",
 # but on AKS `/sandbox` is a persistent volume and OpenClaw's runtime workspace
@@ -1029,8 +1031,10 @@ RCEOF
     printf '\n# kars env (managed by entrypoint)\n[ -f /sandbox/.kars-env.sh ] && . /sandbox/.kars-env.sh\n' >> /sandbox/.bashrc
   fi
 
-  # Write minimal workspace files so OpenClaw doesn't need onboarding
-  cat > "$WORKSPACE_DIR/AGENTS.md" << AGENTSEOF
+  # Write defaults only when a bootstrap init container or prior runtime has
+  # not already supplied the file.
+  if [ ! -e "$WORKSPACE_DIR/AGENTS.md" ]; then
+    cat > "$WORKSPACE_DIR/AGENTS.md" << AGENTSEOF
 # kars Agent
 
 You are a helpful AI assistant running inside an **kars** sandbox — a secure,
@@ -1143,9 +1147,11 @@ Network egress starts in **learn mode** — all domains are allowed and recorded
 The operator can graduate to enforcement with \`kars egress <name> --enforce\`,
 which promotes learned domains to the allowlist. After that, new domains require approval.
 AGENTSEOF
+  fi
 
   # Write TOOLS.md describing available Foundry endpoints
-  cat > "$WORKSPACE_DIR/TOOLS.md" << 'TOOLSEOF'
+  if [ ! -e "$WORKSPACE_DIR/TOOLS.md" ]; then
+    cat > "$WORKSPACE_DIR/TOOLS.md" << 'TOOLSEOF'
 # kars Tools
 
 All tools are accessed via the inference router at http://localhost:8443.
@@ -1210,8 +1216,10 @@ curl -s -X POST http://localhost:8443/egress/fetch \
 **IMPORTANT:** Do NOT use `curl https://...` directly — it will time out.
 Always use `curl http://localhost:8443/egress/fetch` with the target URL in the body.
 TOOLSEOF
+  fi
 
-  cat > "$WORKSPACE_DIR/SOUL.md" << SOULEOF
+  if [ ! -e "$WORKSPACE_DIR/SOUL.md" ]; then
+    cat > "$WORKSPACE_DIR/SOUL.md" << SOULEOF
 # Soul
 
 You are **kars Agent** — a secure, sandboxed AI assistant powered by Azure AI Foundry.
@@ -1239,6 +1247,7 @@ for clarification; interpret the task as given and deliver your best work.
 For memory: write important facts, preferences, and decisions to memory files so they
 persist across sessions. Use \`foundry_memory\` for cross-agent/cross-session recall.
 SOULEOF
+  fi
 
   echo "[kars] OpenClaw configured — model: ${MODEL}, endpoint: ${ENDPOINT}"
 else

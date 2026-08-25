@@ -99,6 +99,22 @@ spec:
                           type: object
                           x-kubernetes-preserve-unknown-fields: true
                           description: "OpenClaw configuration (openclaw.json equivalent)"
+                        workspace:
+                          type: object
+                          description: "Declarative initialization for selected OpenClaw workspace files."
+                          properties:
+                            bootstrapConfigMapRef:
+                              type: object
+                              required: ["name"]
+                              properties:
+                                name:
+                                  type: string
+                                  maxLength: 253
+                                  pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                            overwritePolicy:
+                              type: string
+                              enum: ["IfMissing", "Always"]
+                              default: "IfMissing"
                         extraEnv:
                           type: object
                           x-kubernetes-preserve-unknown-fields: true
@@ -458,6 +474,38 @@ spec:
                   x-kubernetes-validations:
                     - rule: "self.name.size() > 0"
                       message: "spec.memoryRef.name must not be empty"
+                storage:
+                  type: object
+                  description: "Optional per-sandbox persistent storage. Omission preserves the legacy emptyDir workspace."
+                  properties:
+                    workspace:
+                      type: object
+                      description: "Workspace storage mounted at /sandbox."
+                      x-kubernetes-validations:
+                        - rule: "!has(self.existingClaim) || (!has(self.size) && !has(self.storageClassName) && !has(self.accessModes) && !has(self.retainPolicy))"
+                          message: "existingClaim is mutually exclusive with dynamic provisioning fields"
+                        - rule: "!has(self.size) || quantity(self.size).isGreaterThan(quantity('0'))"
+                          message: "workspace size must be a positive Kubernetes quantity"
+                      properties:
+                        existingClaim:
+                          type: string
+                          maxLength: 253
+                          pattern: "^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"
+                          description: "Existing same-namespace PVC managed outside Kars."
+                        size:
+                          type: string
+                        storageClassName:
+                          type: string
+                        accessModes:
+                          type: array
+                          minItems: 1
+                          maxItems: 1
+                          items:
+                            type: string
+                            enum: ["ReadWriteOnce", "ReadWriteOncePod"]
+                        retainPolicy:
+                          type: string
+                          enum: ["Retain", "Delete"]
                 agent:
                   type: object
                   description: "Foundry Agent Service configuration — controller creates a prompt agent on reconcile"
@@ -691,8 +739,10 @@ spec:
                     namespace, NetworkPolicy, ServiceAccount, and all
                     governance overlay objects are preserved
                     byte-identical, so flipping this field back to
-                    `false` (or removing it) restores the agent
-                    in-place. Default `false`.
+                    `false` (or removing it) restores the agent. Runtime
+                    files survive only when `spec.storage.workspace`
+                    uses a PVC; the legacy `emptyDir` is deleted with
+                    the Pod. Default `false`.
 
                     Distinct from the `Suspended=True / Reason=OverlayMode`
                     transition, which is induced by

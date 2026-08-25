@@ -23,6 +23,7 @@ import {
   inferenceRefName,
   toolPolicyRefName,
 } from "../../refs.js";
+import { buildWorkspaceStorageSpec } from "../../lib/workspace-storage.js";
 
 export interface SandboxBringUpContext {
   options: {
@@ -30,6 +31,10 @@ export interface SandboxBringUpContext {
     model: string;
     region: string;
     isolation: string;
+    workspaceStorage?: string;
+    workspaceStorageClass?: string;
+    workspaceExistingClaim?: string;
+    workspaceRetainPolicy?: "Retain" | "Delete";
     [key: string]: unknown;
   };
   baseName: string;
@@ -516,6 +521,10 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       },
     },
   };
+  const storage = buildWorkspaceStorageSpec(options);
+  if (storage) {
+    (sandboxManifest.spec as Record<string, unknown>).storage = storage;
+  }
   // KarsMemory binding — only meaningful with a Foundry project endpoint
   // (Memory Store is a Foundry feature). Gives the sandbox the same
   // controller-managed binding `kars dev` creates, instead of relying purely
@@ -638,6 +647,16 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   kvLine("Sandbox", options.name);
   kvLine("Model", `${options.model} (Azure OpenAI, Entra ID auth)`);
   kvLine("Isolation", isolationDesc[options.isolation] || options.isolation);
+  if (options.workspaceExistingClaim) {
+    kvLine("Workspace", `existing PVC ${String(options.workspaceExistingClaim)}`);
+  } else if (options.workspaceStorage) {
+    kvLine(
+      "Workspace",
+      `${String(options.workspaceStorage)} (${String(options.workspaceStorageClass || "default StorageClass")}, ${String(options.workspaceRetainPolicy || "Retain")})`,
+    );
+  } else {
+    kvLine("Workspace", "ephemeral emptyDir");
+  }
   kvLine("Region", options.region);
   kvLine("Cluster", `${baseName}-aks`);
   kvLine("ACR", acrLoginServer);
