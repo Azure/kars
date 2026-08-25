@@ -344,9 +344,29 @@ pub fn load_inference_policy_from_dir(
         .and_then(|p| p.as_str())
         .filter(|p| !p.trim().is_empty())
         .map(str::to_string);
-    let guardrails = crate::guardrails::GuardrailStageCfg::from_compiled_json(
+    // `null`/absent ⇒ no pipeline. A present-but-malformed block does
+    // NOT degrade to "no guardrails" (that would silently disable both
+    // the scan and the sibling route-gap guard). Instead poison the
+    // policy with a sentinel stage: it is non-empty (so the route-gap
+    // guard fails closed) and names an unbuildable backend (so
+    // `GuardrailPipeline::from_stages` returns a config error and every
+    // request fails closed with 503 guardrail_misconfigured).
+    let guardrails = match crate::guardrails::GuardrailStageCfg::from_compiled_json(
         parsed.get("guardrails").unwrap_or(&serde_json::Value::Null),
-    );
+    ) {
+        Ok(stages) => stages,
+        Err(reason) => {
+            tracing::error!(
+                file = %file.display(),
+                %reason,
+                "InferencePolicy guardrails malformed, failing closed for every request"
+            );
+            vec![crate::guardrails::GuardrailStageCfg {
+                provider: format!("malformed-guardrail-config ({reason})"),
+                apply_to: crate::guardrails::ApplyTo::Both,
+            }]
+        }
+    };
 
     // Digest layout matches controller `inference_policy_digest`:
     // length-prefixed (name, body) hashed with sha256.
