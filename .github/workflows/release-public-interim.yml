@@ -94,7 +94,7 @@ jobs:
           ( cd ./bin && find . -type f -name 'kars-*' -exec sha256sum {} \; | tee SHA256SUMS )
           file ./bin/*/kars-*
       - name: Attest build provenance (binaries, GitHub-signed)
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: 'bin/*/kars-*'
 
@@ -183,7 +183,7 @@ jobs:
           provenance: true
 
       - name: Attest build provenance (GitHub-signed, pushed to registry)
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}
           subject-digest: ${{ steps.push.outputs.digest }}
@@ -411,7 +411,7 @@ jobs:
           done
 
       - name: Attest build provenance (both manifests)
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/openclaw-sandbox
           subject-digest: ${{ steps.digests.outputs.openclaw }}
@@ -554,7 +554,7 @@ jobs:
           provenance: true
 
       - name: Attest build provenance (GitHub-signed, pushed to registry)
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}
           subject-digest: ${{ steps.push.outputs.digest }}
@@ -705,7 +705,7 @@ jobs:
           || echo "::warning::Could not set kars-agentmesh-${{ matrix.component }} public via API; set it once manually."
 
       - name: Attest build provenance (GitHub-signed, pushed to registry)
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-name: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}
           subject-digest: ${{ steps.manifest.outputs.digest }}
@@ -759,7 +759,7 @@ jobs:
           npm pack
           ls -la ./*.tgz
       - name: Attest build provenance (CLI tarball, GitHub-signed)
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: 'cli/*.tgz'
 
@@ -913,7 +913,7 @@ jobs:
           echo "::notice::Wrote SHA256SUMS.cosign.bundle (verify: cosign verify-blob --bundle SHA256SUMS.cosign.bundle --certificate-identity-regexp '^https://github.com/${{ github.repository }}/' --certificate-oidc-issuer https://token.actions.githubusercontent.com SHA256SUMS)"
 
       - name: Attest build provenance for the checksums manifest
-        uses: actions/attest-build-provenance@a2bbfa25375fe432b6a289bc6b6cd05ecd0c4c32 # v4.1.0
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: ./release-artefacts/SHA256SUMS
 
