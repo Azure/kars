@@ -90,7 +90,7 @@ jobs:
 
       - name: Download binaries from prior ci.yml run
         if: steps.find-ci.outputs.reuse == 'true'
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: kars-binaries-${{ github.sha }}
           run-id: ${{ steps.find-ci.outputs.ci_run_id }}
@@ -204,7 +204,7 @@ jobs:
 
       - name: Download pre-built binaries (per-arch)
         if: matrix.image.no_binaries != true
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: kars-binaries-${{ env.VERSION }}
           path: ./bin/
@@ -421,26 +421,26 @@ jobs:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
 
       - name: Download Rust binaries
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: kars-binaries-${{ env.VERSION }}
           path: ./release-artefacts
 
       - name: Download npm tarballs
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: npm-*-${{ env.VERSION }}
           path: ./release-artefacts
           merge-multiple: true
 
       - name: Download Rust crates
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: rust-crates-${{ env.VERSION }}
           path: ./release-artefacts
 
       - name: Download SBOMs
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: sbom-*-${{ env.VERSION }}
           path: ./release-artefacts
@@ -449,7 +449,7 @@ jobs:
       - name: Download Trivy reports
         continue-on-error: true   # Trivy is best-effort; SBOM is the
                                    # primary audit artifact.
-        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           pattern: trivy-*-${{ env.VERSION }}
           path: ./release-artefacts
