@@ -25,7 +25,7 @@ use futures::stream::StreamExt;
 use serde_json::{Value, json};
 
 use super::AppState;
-use crate::guardrails::{self, Direction, GuardrailPipeline};
+use crate::guardrails::{self, Direction, GuardrailError, GuardrailPipeline};
 use crate::provider::{ProviderError, ProviderKind};
 use crate::proxy;
 use std::sync::Arc;
@@ -52,19 +52,73 @@ fn is_hop_by_hop(name: &str) -> bool {
 fn deny_response(status: StatusCode, message: &str, code: &str) -> axum::response::Response {
     // Anthropic wire shape (`error.type`) plus an explicit `error.code`
     // mirroring the OpenAI routes, so a client can switch on one stable
-    // `error.code` across every inference route.
-    (
+    // `error.code` across every inference route. For non-policy errors
+    // (bad request, rate limit) `type` and `code` coincide.
+    deny_coded(status, message, code, code, false)
+}
+
+/// Policy denial (provider/guardrail): keeps the Anthropic-native
+/// `error.type` but carries the stable machine code in `error.code`
+/// and attaches the `x-kars-decision*` headers, matching the
+/// chat-completions contract. Distinct `error_type` and `code` are the
+/// point: a client switches on `error.code` (e.g. `guardrail_blocked`
+/// vs `guardrail_misconfigured` vs `guardrail_unavailable`) while
+/// `error.type` stays the Anthropic-shaped value clients already read.
+fn deny_policy(
+    status: StatusCode,
+    message: &str,
+    error_type: &str,
+    code: &str,
+) -> axum::response::Response {
+    deny_coded(status, message, error_type, code, true)
+}
+
+fn deny_coded(
+    status: StatusCode,
+    message: &str,
+    error_type: &str,
+    code: &str,
+    decision_headers: bool,
+) -> axum::response::Response {
+    let mut resp = (
         status,
         Json(json!({
             "type": "error",
             "error": {
-                "type": code,
+                "type": error_type,
                 "code": code,
                 "message": message,
             }
         })),
     )
-        .into_response()
+        .into_response();
+    if decision_headers {
+        super::chat_completions::insert_decision_headers(
+            &mut resp,
+            "blocked",
+            "InferencePolicy",
+            message,
+        );
+    }
+    resp
+}
+
+/// HTTP status for a guardrail pipeline error: 503 misconfigured
+/// (declared stage cannot be built), 502 backend outage.
+fn guardrail_error_status(e: &GuardrailError) -> StatusCode {
+    match e {
+        GuardrailError::Config { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        GuardrailError::Unavailable { .. } => StatusCode::BAD_GATEWAY,
+    }
+}
+
+/// Stable machine code for a provider-resolution failure, matching
+/// `chat_completions::provider_error_response`.
+fn provider_error_code(e: &ProviderError) -> &'static str {
+    match e {
+        ProviderError::Unimplemented { .. } => "provider_unimplemented",
+        _ => "provider_unconfigured",
+    }
 }
 
 /// Convert Anthropic Messages-shaped JSON to OpenAI chat-completions-shaped JSON.
@@ -305,7 +359,7 @@ pub(super) async fn anthropic_messages(
             ProviderError::Unimplemented { .. } => StatusCode::NOT_IMPLEMENTED,
             _ => StatusCode::SERVICE_UNAVAILABLE,
         };
-        return deny_response(status, &e.to_string(), "api_error");
+        return deny_policy(status, &e.to_string(), "api_error", provider_error_code(&e));
     }
 
     // Guardrail pipeline; a declared-but-unbuildable stage blocks.
@@ -322,7 +376,12 @@ pub(super) async fn anthropic_messages(
                     error = %e,
                     "guardrail pipeline could not be built (anthropic route) — failing closed"
                 );
-                return deny_response(StatusCode::SERVICE_UNAVAILABLE, &e.to_string(), "api_error");
+                return deny_policy(
+                    guardrail_error_status(&e),
+                    &e.to_string(),
+                    "api_error",
+                    e.code(),
+                );
             }
         };
     if let Some(ref p) = guardrail_pipeline
@@ -341,10 +400,11 @@ pub(super) async fn anthropic_messages(
                     categories = ?v.categories,
                     "guardrail pipeline blocked request (anthropic route)"
                 );
-                return deny_response(
+                return deny_policy(
                     StatusCode::FORBIDDEN,
                     &v.message(),
                     "content_policy_violation",
+                    v.code(),
                 );
             }
             Err(e) => {
@@ -357,7 +417,12 @@ pub(super) async fn anthropic_messages(
                     error = %e,
                     "guardrail pipeline unavailable (anthropic route) — failing closed"
                 );
-                return deny_response(StatusCode::BAD_GATEWAY, &e.to_string(), "api_error");
+                return deny_policy(
+                    guardrail_error_status(&e),
+                    &e.to_string(),
+                    "api_error",
+                    e.code(),
+                );
             }
         }
     }
@@ -464,10 +529,11 @@ pub(super) async fn anthropic_messages(
                             categories = ?v.categories,
                             "guardrail pipeline blocked translated response (anthropic route)"
                         );
-                        return deny_response(
+                        return deny_policy(
                             StatusCode::FORBIDDEN,
                             &v.message(),
                             "content_policy_violation",
+                            v.code(),
                         );
                     }
                     Err(e) => {
@@ -480,7 +546,12 @@ pub(super) async fn anthropic_messages(
                             error = %e,
                             "guardrail pipeline unavailable (anthropic route) — failing closed"
                         );
-                        return deny_response(StatusCode::BAD_GATEWAY, &e.to_string(), "api_error");
+                        return deny_policy(
+                            guardrail_error_status(&e),
+                            &e.to_string(),
+                            "api_error",
+                            e.code(),
+                        );
                     }
                 }
             }
@@ -527,42 +598,41 @@ fn update_anthropic_usage(ev: &Value, input: &mut u64, output: &mut u64) {
     }
 }
 
-/// Best-effort token accounting for a streamed Anthropic passthrough.
-/// Taps the SSE stream for `input_tokens`/`output_tokens` and records
-/// the total with the budget tracker at end-of-stream, so streamed
-/// Anthropic inference feeds the same daily/monthly accumulation as the
-/// buffered path. Every byte passes through unchanged; usage is
-/// recorded once (also on an upstream error, with whatever was seen).
-fn tap_anthropic_stream_usage<E>(
+/// Shared streaming-usage accumulator. The observer (inside the guard)
+/// writes it as `usage` events arrive; the finalizer (outside the
+/// guard) reads it once at the terminal.
+#[derive(Default)]
+struct StreamUsage {
+    input: u64,
+    output: u64,
+}
+
+/// Observe token usage on a streamed Anthropic passthrough. Wraps the
+/// RAW upstream stream (INSIDE the guard) and updates the shared
+/// [`StreamUsage`] as it sees `message_start` / `message_delta` events.
+/// Every byte passes through unchanged; nothing is recorded here.
+///
+/// Recording is deliberately split out to [`finalize_stream_usage`]
+/// (which wraps OUTSIDE the guard) because on a mid-stream guardrail
+/// cut the guard stops polling its inner stream — so an inner tap's
+/// terminal branch would never run and usage would be lost. The outer
+/// finalizer still sees the guard's terminal and records what the
+/// observer accumulated up to the cut.
+fn observe_stream_usage<E>(
     stream: futures::stream::BoxStream<'static, Result<Bytes, E>>,
-    budget: crate::budget::TokenBudgetTracker,
-    sandbox: String,
+    usage: Arc<std::sync::Mutex<StreamUsage>>,
 ) -> futures::stream::BoxStream<'static, Result<Bytes, E>>
 where
     E: Send + 'static,
 {
     struct Ctx<E> {
         inner: futures::stream::BoxStream<'static, Result<Bytes, E>>,
-        budget: crate::budget::TokenBudgetTracker,
-        sandbox: String,
+        usage: Arc<std::sync::Mutex<StreamUsage>>,
         // Trailing incomplete UTF-8 bytes carried across a chunk
         // boundary, mirroring the guardrail SSE state so a split
         // multi-byte code point is not corrupted before parsing.
         byte_carry: Vec<u8>,
         line_carry: String,
-        input: u64,
-        output: u64,
-        recorded: bool,
-    }
-    async fn record<E>(ctx: &mut Ctx<E>) {
-        if ctx.recorded {
-            return;
-        }
-        ctx.recorded = true;
-        let total = ctx.input + ctx.output;
-        if total > 0 {
-            ctx.budget.record_usage(&ctx.sandbox, total).await;
-        }
     }
     fn scan_lines<E>(ctx: &mut Ctx<E>, text: &str) {
         for line in text.lines() {
@@ -574,25 +644,21 @@ where
                 continue;
             }
             if let Ok(ev) = serde_json::from_str::<Value>(payload) {
-                update_anthropic_usage(&ev, &mut ctx.input, &mut ctx.output);
+                let mut u = ctx.usage.lock().unwrap();
+                let StreamUsage { input, output } = &mut *u;
+                update_anthropic_usage(&ev, input, output);
             }
         }
     }
     let ctx = Ctx {
         inner: stream,
-        budget,
-        sandbox,
+        usage,
         byte_carry: Vec::new(),
         line_carry: String::new(),
-        input: 0,
-        output: 0,
-        recorded: false,
     };
     futures::stream::unfold(ctx, |mut ctx| async move {
         match ctx.inner.next().await {
             Some(Ok(chunk)) => {
-                // Decode only complete code points; carry a trailing
-                // incomplete UTF-8 sequence to the next chunk.
                 let mut bytes = std::mem::take(&mut ctx.byte_carry);
                 bytes.extend_from_slice(&chunk);
                 let decodable = match std::str::from_utf8(&bytes) {
@@ -609,10 +675,7 @@ where
                 }
                 Some((Ok(chunk), ctx))
             }
-            Some(Err(e)) => {
-                record(&mut ctx).await;
-                Some((Err(e), ctx))
-            }
+            Some(Err(e)) => Some((Err(e), ctx)),
             None => {
                 if !ctx.byte_carry.is_empty() {
                     let tail = std::mem::take(&mut ctx.byte_carry);
@@ -620,6 +683,61 @@ where
                 }
                 let tail = std::mem::take(&mut ctx.line_carry);
                 scan_lines(&mut ctx, &tail);
+                None
+            }
+        }
+    })
+    .boxed()
+}
+
+/// Record the observed streaming usage to the budget exactly once, at
+/// the terminal of the (possibly guard-cut) stream. Wraps OUTSIDE the
+/// guard so a mid-stream cut, an upstream error, or a clean end all
+/// funnel through here. Every byte passes through unchanged.
+fn finalize_stream_usage<E>(
+    stream: futures::stream::BoxStream<'static, Result<Bytes, E>>,
+    usage: Arc<std::sync::Mutex<StreamUsage>>,
+    budget: crate::budget::TokenBudgetTracker,
+    sandbox: String,
+) -> futures::stream::BoxStream<'static, Result<Bytes, E>>
+where
+    E: Send + 'static,
+{
+    struct Ctx<E> {
+        inner: futures::stream::BoxStream<'static, Result<Bytes, E>>,
+        usage: Arc<std::sync::Mutex<StreamUsage>>,
+        budget: crate::budget::TokenBudgetTracker,
+        sandbox: String,
+        recorded: bool,
+    }
+    async fn record<E>(ctx: &mut Ctx<E>) {
+        if ctx.recorded {
+            return;
+        }
+        ctx.recorded = true;
+        let total = {
+            let u = ctx.usage.lock().unwrap();
+            u.input + u.output
+        };
+        if total > 0 {
+            ctx.budget.record_usage(&ctx.sandbox, total).await;
+        }
+    }
+    let ctx = Ctx {
+        inner: stream,
+        usage,
+        budget,
+        sandbox,
+        recorded: false,
+    };
+    futures::stream::unfold(ctx, |mut ctx| async move {
+        match ctx.inner.next().await {
+            Some(Ok(chunk)) => Some((Ok(chunk), ctx)),
+            Some(Err(e)) => {
+                record(&mut ctx).await;
+                Some((Err(e), ctx))
+            }
+            None => {
                 record(&mut ctx).await;
                 None
             }
@@ -673,28 +791,32 @@ async fn forward_anthropic_passthrough(
         .await
         {
             Ok((status, resp_headers, stream)) => {
-                // Tap usage BEFORE guarding so input tokens are still
-                // recorded if the guard later cuts the stream.
-                let stream = tap_anthropic_stream_usage(
-                    stream,
-                    state.budget.clone(),
-                    sandbox_name.to_string(),
-                );
+                // Observe usage INSIDE the guard (sees raw upstream
+                // events), then record OUTSIDE the guard so a mid-stream
+                // cut still bills the tokens consumed up to the cut.
+                let usage = Arc::new(std::sync::Mutex::new(StreamUsage::default()));
+                let observed = observe_stream_usage(stream, usage.clone());
                 // Streaming output scan (Anthropic event dialect).
                 let guarded = match guardrail_pipeline
                     .as_ref()
                     .filter(|p| p.covers(Direction::Output))
                 {
                     Some(p) => guardrails::guard_sse_stream(
-                        stream,
+                        observed,
                         p.clone(),
                         guardrails::StreamDialect::AnthropicMessages,
                         sandbox_name.to_string(),
                         policy_digest.clone(),
                     ),
-                    None => stream,
+                    None => observed,
                 };
-                let body = Body::from_stream(guarded.map(|c| c.map_err(std::io::Error::other)));
+                let finalized = finalize_stream_usage(
+                    guarded,
+                    usage,
+                    state.budget.clone(),
+                    sandbox_name.to_string(),
+                );
+                let body = Body::from_stream(finalized.map(|c| c.map_err(std::io::Error::other)));
                 let mut resp = axum::response::Response::builder().status(status);
                 if let Some(h) = resp.headers_mut() {
                     for (n, v) in resp_headers.iter() {
@@ -960,14 +1082,135 @@ mod tests {
         ];
         let chunks: Vec<Result<Bytes, std::io::Error>> =
             frames.iter().map(|f| Ok(Bytes::from(*f))).collect();
-        let tapped = tap_anthropic_stream_usage(
-            futures::stream::iter(chunks).boxed(),
-            budget.clone(),
-            "sbx".into(),
-        );
-        // Drain the stream (client role).
-        let _drained: Vec<_> = tapped.collect().await;
+        // observer (no guard here) -> finalizer, mirroring the no-output-
+        // guardrail passthrough path.
+        let usage = Arc::new(std::sync::Mutex::new(StreamUsage::default()));
+        let observed = observe_stream_usage(futures::stream::iter(chunks).boxed(), usage.clone());
+        let finalized = finalize_stream_usage(observed, usage, budget.clone(), "sbx".into());
+        let _drained: Vec<_> = finalized.collect().await;
         let (used, _) = budget.get_usage("sbx").await;
         assert_eq!(used, 42, "30 input + 12 output recorded once at stream end");
+    }
+
+    #[tokio::test]
+    async fn buffered_policy_denial_carries_code_and_decision_headers() {
+        // Anthropic-native `error.type` is preserved, the stable machine
+        // code lands in `error.code`, and the decision headers are set.
+        let resp = deny_policy(
+            StatusCode::FORBIDDEN,
+            "blocked by guardrail",
+            "content_policy_violation",
+            "guardrail_blocked",
+        );
+        assert_eq!(resp.status(), StatusCode::FORBIDDEN);
+        assert_eq!(
+            resp.headers()
+                .get("x-kars-decision")
+                .and_then(|v| v.to_str().ok()),
+            Some("blocked")
+        );
+        assert!(resp.headers().get("x-kars-decision-by").is_some());
+        let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "content_policy_violation");
+        assert_eq!(v["error"]["code"], "guardrail_blocked");
+    }
+
+    #[tokio::test]
+    async fn non_policy_denial_has_no_decision_headers() {
+        // A plain client error is not a policy decision: type == code and
+        // no decision headers.
+        let resp = deny_response(
+            StatusCode::TOO_MANY_REQUESTS,
+            "slow down",
+            "rate_limit_error",
+        );
+        assert!(resp.headers().get("x-kars-decision").is_none());
+        let bytes = axum::body::to_bytes(resp.into_body(), 65536).await.unwrap();
+        let v: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(v["error"]["type"], "rate_limit_error");
+        assert_eq!(v["error"]["code"], "rate_limit_error");
+    }
+
+    /// Regression: a mid-stream guardrail cut must still bill the tokens
+    /// consumed up to the cut. The observer sits inside the guard; the
+    /// finalizer outside records on the guard's terminal even though the
+    /// guard stopped polling its inner stream at the cut.
+    #[tokio::test]
+    async fn streaming_usage_recorded_when_guard_cuts_midstream() {
+        use bytes::Bytes;
+        use futures::stream::StreamExt as _;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        // Moderation that flags any text containing "BLOCKED".
+        let moderation = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/moderations"))
+            .respond_with(move |req: &wiremock::Request| {
+                let flagged = String::from_utf8_lossy(&req.body).contains("BLOCKED");
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "results": [{ "flagged": flagged, "categories": { "illicit": flagged } }]
+                }))
+            })
+            .mount(&moderation)
+            .await;
+
+        let mut config = crate::config::Config::from_env().expect("config");
+        config.openai_moderation_endpoint = moderation.uri();
+        config.openai_moderation_api_key = Some("sk-mod-test".into());
+        let pipeline = Arc::new(
+            GuardrailPipeline::from_stages(
+                &[crate::guardrails::GuardrailStageCfg {
+                    provider: "openai-moderation".into(),
+                    apply_to: crate::guardrails::ApplyTo::Output,
+                }],
+                &config,
+                &reqwest::Client::new(),
+            )
+            .expect("pipeline builds"),
+        );
+
+        let budget = crate::budget::TokenBudgetTracker::new(1_000_000, 0);
+
+        // message_start carries input=30; a single content_block_delta
+        // over the scan threshold forces a mid-stream scan that flags and
+        // cuts BEFORE any [DONE]. The trailing message_delta never arrives.
+        let big = "BLOCKED ".repeat(200); // > STREAM_SCAN_THRESHOLD_CHARS
+        let frames = vec![
+            Ok(Bytes::from(
+                "event: message_start\ndata: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":30,\"output_tokens\":1}}}\n\n".to_string(),
+            )),
+            Ok(Bytes::from(format!(
+                "event: content_block_delta\ndata: {{\"type\":\"content_block_delta\",\"delta\":{{\"type\":\"text_delta\",\"text\":\"{big}\"}}}}\n\n"
+            ))),
+        ];
+        let stream: futures::stream::BoxStream<'static, Result<Bytes, std::io::Error>> =
+            futures::stream::iter(frames).boxed();
+
+        let usage = Arc::new(std::sync::Mutex::new(StreamUsage::default()));
+        let observed = observe_stream_usage(stream, usage.clone());
+        let guarded = guardrails::guard_sse_stream(
+            observed,
+            pipeline,
+            guardrails::StreamDialect::AnthropicMessages,
+            "sbx".into(),
+            "sha256:t".into(),
+        );
+        let finalized = finalize_stream_usage(guarded, usage, budget.clone(), "sbx".into());
+        let out: String = finalized
+            .collect::<Vec<_>>()
+            .await
+            .into_iter()
+            .filter_map(|c| c.ok())
+            .map(|b| String::from_utf8_lossy(&b).into_owned())
+            .collect();
+
+        assert!(out.contains("guardrail_blocked"), "guard must cut: {out}");
+        let (used, _) = budget.get_usage("sbx").await;
+        assert_eq!(
+            used, 31,
+            "input(30)+message_start output(1) billed once despite the mid-stream cut, got {used}"
+        );
     }
 }

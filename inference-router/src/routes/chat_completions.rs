@@ -31,7 +31,7 @@ use std::sync::Arc;
 /// HTTP clients) can read the policy decision without parsing the
 /// upstream-specific body wording. CR/LF are sanitized from the reason
 /// per HTTP/1.1 header rules.
-fn insert_decision_headers(
+pub(super) fn insert_decision_headers(
     response: &mut axum::response::Response,
     decision: &'static str,
     by_kind: &'static str,
@@ -443,15 +443,21 @@ pub(super) async fn chat_completions(
 
     // Anthropic serves the Messages API — an OpenAI-shaped request
     // here gets an explicit 501 pointing at /anthropic/v1/messages.
+    // Carries the coded error + decision headers like every other
+    // provider/guardrail denial on this route.
     if upstream.provider == ProviderKind::Anthropic {
-        return errors::openai(
-            StatusCode::NOT_IMPLEMENTED,
-            "InferencePolicy selects provider 'anthropic', which serves the Anthropic \
+        let msg = "InferencePolicy selects provider 'anthropic', which serves the Anthropic \
              Messages API — send Anthropic-shaped requests to /anthropic/v1/messages \
-             (chat-completions translation for Anthropic is not implemented)",
+             (chat-completions translation for Anthropic is not implemented)";
+        let mut resp = errors::openai_coded(
+            StatusCode::NOT_IMPLEMENTED,
+            msg,
+            "provider_error",
             "provider_unimplemented",
         )
         .into_response();
+        insert_decision_headers(&mut resp, "blocked", "InferencePolicy", msg);
+        return resp;
     }
 
     // Guardrail pipeline; a declared-but-unbuildable stage blocks.
