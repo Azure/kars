@@ -55,8 +55,10 @@ fail-closed/accounting fixes.
   The Foundry proxy guard is **default-deny**: everything is guarded except an
   explicit exempt list of canonical management/storage APIs.
 - **Path-canonicalization guard (bypass fix).** `foundry_proxy` percent-decodes
-  each path segment and rejects (400 `invalid_path`) any dot / empty /
-  encoded-slash segment before classification or forwarding, closing a traversal
+  each path segment, canonicalizes benign empty segments (`//`, trailing
+  `/`), and rejects (400 `invalid_path`) any dot segment (`.`/`..`, literal
+  or percent-encoded), encoded slash/backslash, or malformed escape before
+  classification or forwarding, closing a traversal
   bypass where `/openai/files/../responses` normalized upstream into a guarded
   inference route. Proven live (mock upstream received `/openai/responses`
   pre-fix; 400 post-fix) and pinned by `foundry_route_guard` tests including a

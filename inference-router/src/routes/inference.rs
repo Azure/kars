@@ -804,8 +804,8 @@ async fn foundry_proxy(
     // URL parsing resolves `.`/`..` segments (including
     // percent-encoded `%2e` forms), a crafted path could therefore
     // reach a different upstream route than the one classified here.
-    // Reject every form that could normalize away before anything
-    // else runs.
+    // Benign empty segments are canonicalized; only forms that could
+    // normalize away into a different route are rejected.
     let Some(segments) = decoded_path_segments(uri.path()) else {
         tracing::warn!(
             target: "inference.audit",
@@ -813,11 +813,11 @@ async fn foundry_proxy(
             path = %uri.path(),
             decision = "deny",
             gate = "path_canonicalization",
-            "Foundry proxy path contains dot, empty, or encoded-slash segments"
+            "Foundry proxy path contains a dot segment, encoded slash/backslash, or malformed escape"
         );
         return errors::openai_coded(
             StatusCode::BAD_REQUEST,
-            "path contains dot, empty, or encoded-slash segments",
+            "path contains a dot segment, encoded slash/backslash, or malformed escape",
             "invalid_path",
             "invalid_path",
         )

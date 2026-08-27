@@ -67,8 +67,10 @@ never sees a provider key.
   policy; a plain Azure policy uses them unchanged. The Foundry proxy
   guard is default-deny: only an explicit exempt set of canonical
   management/storage APIs (memory stores, files, vector stores, …)
-  bypasses it, and paths with dot/empty/percent-encoded-dot segments
-  are rejected (400) so a request cannot normalize into a different
+  bypasses it, and paths are canonicalized before routing — benign
+  empty segments (`//`, trailing `/`) are collapsed, while dot,
+  percent-encoded-dot, and encoded-slash/backslash segments are
+  rejected (400) so a request cannot normalize into a different
   upstream route than the one classified.
 
 **Inference router — pluggable guardrail pipeline**

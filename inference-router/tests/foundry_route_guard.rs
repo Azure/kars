@@ -295,7 +295,8 @@ async fn traversal_paths_are_rejected_not_forwarded() {
         "/openai/files/./responses",
         // Encoded slash smuggled inside one segment.
         "/openai/files/..%2fresponses",
-        // Empty segment (double slash) through a wildcard.
+        // Double slash + dot segment: rejected on the `..` (the `//`
+        // itself is collapsed, not rejected).
         "/openai/files//../responses",
         // Malformed percent escape.
         "/openai/files/%zz/responses",
