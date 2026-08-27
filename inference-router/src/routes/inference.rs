@@ -715,17 +715,24 @@ fn percent_decode_segment(seg: &str) -> Option<String> {
 /// Split a raw request path into percent-decoded segments, rejecting
 /// (`None`) any form that could reach a different upstream route than
 /// the one classified: dot segments (`.` / `..`, literal or
-/// percent-encoded), empty segments (`//`, trailing `/`), and decoded
-/// slashes smuggled inside a segment (`..%2f`). [`foundry_proxy`]
-/// concatenates the raw path into the upstream URL, where URL parsing
-/// resolves dot segments, so classification and forwarding would
-/// otherwise disagree. Foundry API paths never legitimately contain
-/// any of these forms.
+/// percent-encoded) and decoded slashes/backslashes smuggled inside a
+/// segment (`..%2f`, `..%5c`). [`foundry_proxy`] concatenates the raw
+/// path into the upstream URL, where URL parsing resolves dot segments,
+/// so classification and forwarding would otherwise disagree.
+///
+/// Benign empty segments (`//`, trailing `/`) are COLLAPSED, not
+/// rejected: they normalize away without creating a traversal, and
+/// management paths like `/openai/files/` have always been proxied.
+/// Rejecting them would 400 live customer traffic even with no policy
+/// configured, so we canonicalize instead.
 fn decoded_path_segments(path: &str) -> Option<Vec<String>> {
     let mut segments = Vec::new();
     for raw in path.trim_start_matches('/').split('/') {
         let seg = percent_decode_segment(raw)?;
-        if seg.is_empty() || seg == "." || seg == ".." || seg.contains('/') || seg.contains('\\') {
+        if seg.is_empty() {
+            continue; // collapse `//` and trailing `/`
+        }
+        if seg == "." || seg == ".." || seg.contains('/') || seg.contains('\\') {
             return None;
         }
         segments.push(seg);
@@ -1126,13 +1133,35 @@ mod tests {
             "/memory_stores/../openai/responses",
             "/openai/files/..%2fresponses", // decoded slash inside a segment
             "/openai/files/..%5cresponses", // decoded backslash
-            "/openai//responses",           // empty segment
-            "/openai/responses/",           // trailing empty segment
             "/openai/files/%zz",            // malformed escape
             "/openai/files/%2",             // truncated escape
         ] {
             assert_eq!(decoded_path_segments(path), None, "path: {path}");
         }
+    }
+
+    #[test]
+    fn collapses_benign_empty_segments_instead_of_rejecting() {
+        // Trailing and double slashes are canonicalized, not rejected,
+        // so historically proxied management paths keep working with no
+        // policy configured. Classification is unchanged by the collapse.
+        assert_eq!(
+            decoded_path_segments("/openai/files/"),
+            Some(vec!["openai".to_string(), "files".to_string()])
+        );
+        assert_eq!(
+            decoded_path_segments("/memory_stores/"),
+            Some(vec!["memory_stores".to_string()])
+        );
+        assert_eq!(
+            decoded_path_segments("/openai//files"),
+            Some(vec!["openai".to_string(), "files".to_string()])
+        );
+        // Exempt families stay exempt; guarded families stay guarded.
+        assert_eq!(classify("/openai/files/"), None);
+        assert_eq!(classify("/memory_stores/"), None);
+        assert_eq!(classify("/openai//responses"), Some("openai/responses"));
+        assert_eq!(classify("/agents/"), Some("agents"));
     }
 
     #[test]

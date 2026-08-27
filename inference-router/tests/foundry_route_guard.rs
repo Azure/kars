@@ -266,10 +266,12 @@ fn url_parsing_normalizes_dot_segments() {
     }
 }
 
-/// A dot-segment / encoded-dot / empty-segment path routed through an
-/// UNGUARDED wildcard must not pivot into a guarded inference path
-/// after normalization. These are rejected outright (400) before
-/// classification or forwarding, through real router wiring.
+/// A dot-segment / encoded-dot / encoded-slash / malformed-escape path
+/// routed through an UNGUARDED wildcard must not pivot into a guarded
+/// inference path after normalization. These are rejected outright
+/// (400) before classification or forwarding, through real router
+/// wiring. (Benign empty segments are collapsed, not rejected, so the
+/// `//../` case here is rejected on its `..`, not the `//`.)
 #[tokio::test]
 async fn traversal_paths_are_rejected_not_forwarded() {
     let state = test_state();
@@ -343,6 +345,41 @@ async fn slash_variants_of_guarded_families_never_reach_proxy_body() {
             Some("unsupported_for_provider"),
             "POST {uri} reached the proxy body (github-models 501 marker): {body}"
         );
+    }
+}
+
+/// Compatibility: trailing/double-slash management paths that live
+/// customers have always used must NOT be rejected by the path guard,
+/// even under an active guardrail policy (they are exempt) and even
+/// with no policy at all. They collapse to canonical form and reach the
+/// proxy body (here the network-free github-models 501). Paths carry a
+/// real segment before the slash so they match the `{*path}` wildcard
+/// route (a bare `/openai/files/` 404s at axum routing, which is
+/// pre-existing and orthogonal to the guard).
+#[tokio::test]
+async fn benign_trailing_slash_paths_are_not_rejected() {
+    for guardrails in [false, true] {
+        let state = test_state();
+        install_policy(&state, None, guardrails).await;
+        let app = app(state);
+        for uri in [
+            "/openai/files/f1/",  // trailing slash
+            "/memory_stores/s1/", // trailing slash
+            "/openai/files//f1",  // double slash
+            "/evaluations/e1/",   // trailing slash
+        ] {
+            let (status, body) = send(&app, "POST", uri).await;
+            assert_ne!(
+                body["error"]["type"].as_str(),
+                Some("invalid_path"),
+                "POST {uri} (guardrails={guardrails}) must not be rejected by the path guard: {status} {body}"
+            );
+            assert_eq!(
+                body["error"]["type"].as_str(),
+                Some("unsupported_for_provider"),
+                "POST {uri} (guardrails={guardrails}) should reach the proxy body: {status} {body}"
+            );
+        }
     }
 }
 
