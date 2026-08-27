@@ -23,9 +23,11 @@ fail-closed/accounting fixes.
 
 - **New egress targets.** The router can now originate requests to Anthropic and
   Ollama endpoints. Targets are derived from router-side config
-  (`ANTHROPIC_ENDPOINT`, `OLLAMA_ENDPOINT`), not from request or CR content; the
-  existing blocklist/egress guard still applies. `provider::resolve` fails closed
-  (501 unimplemented / 503 unconfigured) rather than defaulting to an
+  (`ANTHROPIC_ENDPOINT`, `OLLAMA_ENDPOINT`), not from request or CR content, so
+  the destinations are operator-controlled. Note the provider forward paths do
+  NOT currently invoke the blocklist (`is_blocked`); the blocklist/egress guard
+  applies to the Foundry proxy path, not these provider calls. `provider::resolve`
+  fails closed (501 unimplemented / 503 unconfigured) rather than defaulting to an
   attacker-influenced target.
 - **New outbound credential use.** Anthropic uses a router-held `x-api-key`
   (`ANTHROPIC_API_KEY`); Ollama is unauthenticated. Inbound agent-supplied
@@ -109,4 +111,3 @@ credential surface is router-side-only, bounded, and default-deny; the identifie
 bypass and functional gaps are fixed and regression-tested.
 
 Signed-off-by: John Seong <sandole97@gmail.com>
-Signed-off-by: Pal Lakatos-Toth <pallakatos@microsoft.com>
