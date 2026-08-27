@@ -902,10 +902,11 @@ async fn forward_anthropic_passthrough(
                                 categories = ?v.categories,
                                 "guardrail pipeline blocked buffered response (anthropic route)"
                             );
-                            return deny_response(
+                            return deny_policy(
                                 StatusCode::FORBIDDEN,
                                 &v.message(),
                                 "content_policy_violation",
+                                v.code(),
                             );
                         }
                         Err(e) => {
@@ -918,10 +919,11 @@ async fn forward_anthropic_passthrough(
                                 error = %e,
                                 "guardrail pipeline unavailable (anthropic route) — failing closed"
                             );
-                            return deny_response(
-                                StatusCode::BAD_GATEWAY,
+                            return deny_policy(
+                                guardrail_error_status(&e),
                                 &e.to_string(),
                                 "api_error",
+                                e.code(),
                             );
                         }
                     }
