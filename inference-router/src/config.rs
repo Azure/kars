@@ -81,6 +81,49 @@ pub struct Config {
     /// Captured at config-load time so provider detection is a pure
     /// function on the `Config` struct (testable without env hacks).
     pub provider_override: Option<String>,
+
+    /// Anthropic Messages API endpoint used when an `InferencePolicy`
+    /// selects `provider: anthropic`. Default `https://api.anthropic.com`;
+    /// override with `ANTHROPIC_ENDPOINT` for gateways.
+    pub anthropic_endpoint: String,
+
+    /// Anthropic API key — `ANTHROPIC_API_KEY` env or the
+    /// `anthropic-api-key` secret mount. Router-side only. `None` ⇒
+    /// Anthropic policies fail closed.
+    pub anthropic_api_key: Option<String>,
+
+    /// OpenAI-compatible Ollama endpoint (e.g.
+    /// `http://ollama.ollama.svc:11434`) used when an
+    /// `InferencePolicy` selects `provider: ollama`. No default — the
+    /// operator must opt in via `OLLAMA_ENDPOINT`.
+    pub ollama_endpoint: Option<String>,
+
+    /// Base endpoint for the OpenAI Moderation guardrail stage.
+    /// Default `https://api.openai.com`; override with
+    /// `OPENAI_MODERATION_ENDPOINT`.
+    pub openai_moderation_endpoint: String,
+
+    /// OpenAI Moderation key — `OPENAI_MODERATION_API_KEY` env (falls
+    /// back to `OPENAI_API_KEY`, then the `openai-moderation-api-key`
+    /// secret mount). `None` ⇒ `openai-moderation` stages fail closed.
+    pub openai_moderation_api_key: Option<String>,
+
+    /// Moderation model (`OPENAI_MODERATION_MODEL`, default
+    /// `omni-moderation-latest`).
+    pub openai_moderation_model: String,
+}
+
+/// Read a credential from an env var, falling back to the standard
+/// kars secret mounts (`/etc/kars/secrets/<file>` then
+/// `/run/secrets/<file>`). Mirrors the admin-token lookup in
+/// `routes::AppState::new`. Empty values are treated as unset.
+fn secret_from_env_or_mount(env: &str, file: &str) -> Option<String> {
+    std::env::var(env)
+        .ok()
+        .or_else(|| std::fs::read_to_string(format!("/etc/kars/secrets/{file}")).ok())
+        .or_else(|| std::fs::read_to_string(format!("/run/secrets/{file}")).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
 }
 
 impl Config {
@@ -145,6 +188,38 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .map(|s| s.to_ascii_lowercase()),
+
+            anthropic_endpoint: std::env::var("ANTHROPIC_ENDPOINT")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "https://api.anthropic.com".into()),
+
+            anthropic_api_key: secret_from_env_or_mount("ANTHROPIC_API_KEY", "anthropic-api-key"),
+
+            ollama_endpoint: std::env::var("OLLAMA_ENDPOINT")
+                .ok()
+                .filter(|s| !s.is_empty()),
+
+            openai_moderation_endpoint: std::env::var("OPENAI_MODERATION_ENDPOINT")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "https://api.openai.com".into()),
+
+            openai_moderation_api_key: secret_from_env_or_mount(
+                "OPENAI_MODERATION_API_KEY",
+                "openai-moderation-api-key",
+            )
+            .or_else(|| {
+                std::env::var("OPENAI_API_KEY")
+                    .ok()
+                    .map(|s| s.trim().to_string())
+                    .filter(|s| !s.is_empty())
+            }),
+
+            openai_moderation_model: std::env::var("OPENAI_MODERATION_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+                .unwrap_or_else(|| "omni-moderation-latest".into()),
         })
     }
 
@@ -212,6 +287,12 @@ mod tests {
             registry_mode: RegistryMode::Local,
             registry_url: None,
             provider_override: None,
+            anthropic_endpoint: "https://api.anthropic.com".into(),
+            anthropic_api_key: None,
+            ollama_endpoint: None,
+            openai_moderation_endpoint: "https://api.openai.com".into(),
+            openai_moderation_api_key: None,
+            openai_moderation_model: "omni-moderation-latest".into(),
         }
     }
 

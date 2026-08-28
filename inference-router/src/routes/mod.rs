@@ -181,23 +181,21 @@ impl AppState {
             .unwrap_or_else(|_| "/var/lib/kars/token-budgets.json".into());
         let budget = if persist_path.is_empty() {
             TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
+        } else if let Some(parent) = std::path::Path::new(&persist_path).parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            tracing::warn!(
+                path = %parent.display(),
+                error = %e,
+                "Could not create token-budget persistence dir — falling back to in-memory"
+            );
+            TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
         } else {
-            if let Some(parent) = std::path::Path::new(&persist_path).parent()
-                && let Err(e) = std::fs::create_dir_all(parent)
-            {
-                tracing::warn!(
-                    path = %parent.display(),
-                    error = %e,
-                    "Could not create token-budget persistence dir — falling back to in-memory"
-                );
-                TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
-            } else {
-                TokenBudgetTracker::with_persistence(
-                    config.token_budget_daily,
-                    config.token_budget_per_request,
-                    &persist_path,
-                )
-            }
+            TokenBudgetTracker::with_persistence(
+                config.token_budget_daily,
+                config.token_budget_per_request,
+                &persist_path,
+            )
         };
 
         let sandbox_name = std::env::var("SANDBOX_NAME").unwrap_or_else(|_| "unknown".into());
@@ -366,12 +364,45 @@ impl AppState {
             .and_then(|g| g.clone())
             .unwrap_or_else(|| self.config.default_model.clone());
 
-        UpstreamConfig {
-            endpoint,
-            deployment,
-            sandbox_name: sandbox_name.to_string(),
+        UpstreamConfig::azure(endpoint, deployment, sandbox_name.to_string())
+    }
+}
+
+/// Retarget `upstream` at the policy-selected provider (no-op for
+/// Azure / no policy). Fails closed on `bedrock` or missing config —
+/// the handler must surface the error, not fall back to Azure.
+pub(crate) fn apply_provider_resolution(
+    state: &AppState,
+    upstream: &mut UpstreamConfig,
+    policy: &crate::inference_policy_loader::InferencePolicySnapshot,
+) -> Result<(), crate::provider::ProviderError> {
+    let target = crate::provider::resolve(policy.provider.as_deref(), &state.config)?;
+    match target {
+        crate::provider::ProviderTarget::AzureOpenAI => {}
+        crate::provider::ProviderTarget::Anthropic { endpoint, api_key } => {
+            tracing::info!(
+                sandbox = %upstream.sandbox_name,
+                endpoint = %endpoint,
+                digest = %policy.digest,
+                "InferencePolicy provider: routing to Anthropic"
+            );
+            upstream.endpoint = endpoint;
+            upstream.provider = crate::provider::ProviderKind::Anthropic;
+            upstream.api_key = Some(api_key);
+        }
+        crate::provider::ProviderTarget::Ollama { endpoint } => {
+            tracing::info!(
+                sandbox = %upstream.sandbox_name,
+                endpoint = %endpoint,
+                digest = %policy.digest,
+                "InferencePolicy provider: routing to Ollama"
+            );
+            upstream.endpoint = endpoint;
+            upstream.provider = crate::provider::ProviderKind::Ollama;
+            upstream.api_key = None;
         }
     }
+    Ok(())
 }
 
 /// Slice 2d.1 — apply `modelPreference.primary.deployment` from a

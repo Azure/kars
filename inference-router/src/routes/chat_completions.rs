@@ -20,15 +20,18 @@ use futures::stream::StreamExt;
 use super::AppState;
 use super::inference_translate::{chat_to_responses_body, responses_to_chat_body};
 use crate::errors;
+use crate::guardrails::{self, Direction, GuardrailError, GuardrailPipeline, GuardrailViolation};
+use crate::provider::{ProviderError, ProviderKind};
 use crate::proxy;
 use crate::safety;
+use std::sync::Arc;
 
 /// Inject the canonical `x-kars-decision*` triplet onto a response
 /// so downstream tooling (conformance-runner, observability pipelines,
 /// HTTP clients) can read the policy decision without parsing the
 /// upstream-specific body wording. CR/LF are sanitized from the reason
 /// per HTTP/1.1 header rules.
-fn insert_decision_headers(
+pub(super) fn insert_decision_headers(
     response: &mut axum::response::Response,
     decision: &'static str,
     by_kind: &'static str,
@@ -44,6 +47,233 @@ fn insert_decision_headers(
     if let Ok(bh) = axum::http::HeaderValue::from_str(by_kind) {
         response.headers_mut().insert("x-kars-decision-by", bh);
     }
+}
+
+/// Map a provider-resolution failure onto an OpenAI-shaped error
+/// response: 501 for schema-valid-but-unimplemented providers
+/// (`bedrock`), 503 for router-side config gaps. Never falls back to
+/// Azure — see `routes::apply_provider_resolution`.
+pub(super) fn provider_error_response(e: &ProviderError) -> axum::response::Response {
+    let (status, code) = match e {
+        ProviderError::Unimplemented { .. } => {
+            (StatusCode::NOT_IMPLEMENTED, "provider_unimplemented")
+        }
+        ProviderError::MissingEndpoint { .. } | ProviderError::MissingCredential { .. } => {
+            (StatusCode::SERVICE_UNAVAILABLE, "provider_unconfigured")
+        }
+    };
+    let mut resp = (
+        status,
+        Json(serde_json::json!({
+            "error": { "message": e.to_string(), "type": "provider_error", "code": code }
+        })),
+    )
+        .into_response();
+    insert_decision_headers(&mut resp, "blocked", "InferencePolicy", &e.to_string());
+    resp
+}
+
+/// 403 response for a confirmed guardrail violation, with the
+/// canonical `x-kars-decision*` triplet attached.
+pub(super) fn guardrail_violation_response(v: &GuardrailViolation) -> axum::response::Response {
+    let mut resp = (
+        StatusCode::FORBIDDEN,
+        Json(serde_json::json!({
+            "error": { "message": v.message(), "type": "content_policy_violation", "code": v.code() }
+        })),
+    )
+        .into_response();
+    insert_decision_headers(&mut resp, "blocked", "InferencePolicy", &v.message());
+    resp
+}
+
+/// Fail-closed response for a guardrail that could not run: 503 for a
+/// misconfigured stage, 502 for a backend outage.
+pub(super) fn guardrail_error_response(e: &GuardrailError) -> axum::response::Response {
+    let status = match e {
+        GuardrailError::Config { .. } => StatusCode::SERVICE_UNAVAILABLE,
+        GuardrailError::Unavailable { .. } => StatusCode::BAD_GATEWAY,
+    };
+    let mut resp = (
+        status,
+        Json(serde_json::json!({
+            "error": { "message": e.to_string(), "type": "guardrail_error", "code": e.code() }
+        })),
+    )
+        .into_response();
+    insert_decision_headers(&mut resp, "blocked", "InferencePolicy", &e.to_string());
+    resp
+}
+
+/// Build the policy's guardrail pipeline, or `None` when the policy
+/// declares no stages. A declared-but-unbuildable pipeline is a
+/// request-blocking error (fail closed).
+pub(super) fn build_guardrail_pipeline(
+    state: &AppState,
+    policy: &crate::inference_policy_loader::InferencePolicySnapshot,
+) -> Result<Option<Arc<GuardrailPipeline>>, GuardrailError> {
+    if policy.guardrails.is_empty() {
+        return Ok(None);
+    }
+    GuardrailPipeline::from_stages(&policy.guardrails, &state.config, &state.client)
+        .map(|p| Some(Arc::new(p)))
+}
+
+/// A blocked output scan, kept as data so each transport picks its
+/// wire shape (buffered → HTTP 403/502/503, SSE → error frame).
+pub(super) enum OutputGuardrailBlock {
+    Violation(GuardrailViolation),
+    Error(GuardrailError),
+}
+
+impl OutputGuardrailBlock {
+    /// SSE frame carrying this block's own type/code, so a backend
+    /// outage isn't mislabelled a content violation.
+    pub(super) fn sse_frame(&self) -> bytes::Bytes {
+        match self {
+            Self::Violation(v) => guardrails::violation_sse_frame(v),
+            Self::Error(e) => guardrails::error_sse_frame(e),
+        }
+    }
+}
+
+/// Run the output-direction guardrail stages over a buffered
+/// OpenAI-shaped response body. `None` when there is nothing to do or
+/// the scan passes; `Some(block)` when the response must not reach
+/// the client. Emits the audit log line on every block.
+pub(super) async fn scan_openai_output_guardrails(
+    pipeline: Option<&Arc<GuardrailPipeline>>,
+    resp_body: &[u8],
+    sandbox_name: &str,
+    policy_digest: &str,
+) -> Option<OutputGuardrailBlock> {
+    let p = pipeline?;
+    if !p.covers(Direction::Output) {
+        return None;
+    }
+    let text = guardrails::scan_text_or_raw(resp_body, guardrails::extract_openai_output_text);
+    match p.scan(&text, Direction::Output).await {
+        Ok(None) => None,
+        Ok(Some(v)) => {
+            tracing::warn!(
+                target: "inference.audit",
+                sandbox = %sandbox_name,
+                inference_policy_digest = %policy_digest,
+                decision = "deny",
+                gate = "guardrail_output",
+                categories = ?v.categories,
+                "guardrail pipeline blocked buffered response"
+            );
+            Some(OutputGuardrailBlock::Violation(v))
+        }
+        Err(e) => {
+            tracing::warn!(
+                target: "inference.audit",
+                sandbox = %sandbox_name,
+                inference_policy_digest = %policy_digest,
+                decision = "deny",
+                gate = "guardrail_output",
+                error = %e,
+                "guardrail pipeline unavailable — failing closed"
+            );
+            Some(OutputGuardrailBlock::Error(e))
+        }
+    }
+}
+
+/// HTTP-response wrapper over [`scan_openai_output_guardrails`] for
+/// the buffered branches: `Err(response)` carries the ready-made
+/// block response (403 violation / 502 unavailable / 503 config).
+///
+/// The error is boxed: an `axum::Response` is large, and an unboxed
+/// `Result<(), Response>` trips `clippy::result_large_err` under
+/// `-D warnings`.
+pub(super) async fn enforce_openai_output_guardrails(
+    pipeline: Option<&Arc<GuardrailPipeline>>,
+    resp_body: &[u8],
+    sandbox_name: &str,
+    policy_digest: &str,
+) -> Result<(), Box<axum::response::Response>> {
+    match scan_openai_output_guardrails(pipeline, resp_body, sandbox_name, policy_digest).await {
+        None => Ok(()),
+        Some(OutputGuardrailBlock::Violation(v)) => Err(Box::new(guardrail_violation_response(&v))),
+        Some(OutputGuardrailBlock::Error(e)) => Err(Box::new(guardrail_error_response(&e))),
+    }
+}
+
+/// Why a route without provider/guardrail enforcement must refuse the
+/// active policy. `Ok` ⇒ the route may proceed (Azure upstream, no
+/// guardrails — the historic behaviour).
+#[derive(Debug, PartialEq, Eq)]
+pub(super) enum RouteGap {
+    NonAzureProvider,
+    Guardrails,
+}
+
+/// Pure classifier for [`guard_unenforced_route`]: does this policy
+/// need enforcement a non-chat route can't provide? Kept `AppState`-
+/// free so the truth table is unit-testable.
+pub(super) fn classify_route_gap(
+    policy: &crate::inference_policy_loader::InferencePolicySnapshot,
+    config: &crate::config::Config,
+) -> Result<(), RouteGap> {
+    if !matches!(
+        crate::provider::resolve(policy.provider.as_deref(), config),
+        Ok(crate::provider::ProviderTarget::AzureOpenAI)
+    ) {
+        return Err(RouteGap::NonAzureProvider);
+    }
+    if !policy.guardrails.is_empty() {
+        return Err(RouteGap::Guardrails);
+    }
+    Ok(())
+}
+
+/// Fail-closed guard for inference/generation routes that do NOT
+/// implement provider routing or the guardrail pipeline
+/// (`completions`, `responses`, `embeddings`, image generation).
+/// Such a route would silently bypass a policy that selects a
+/// non-Azure provider or declares guardrail stages, so it refuses
+/// instead. `None` ⇒ proceed.
+pub(super) async fn guard_unenforced_route(
+    state: &AppState,
+    sandbox: &str,
+    route: &'static str,
+) -> Option<axum::response::Response> {
+    let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+    let gap = classify_route_gap(&policy, &state.config).err()?;
+    let (status, code, msg) = match gap {
+        RouteGap::NonAzureProvider => (
+            StatusCode::NOT_IMPLEMENTED,
+            "provider_unimplemented",
+            format!(
+                "InferencePolicy selects a non-Azure provider, unsupported on {route} in this \
+                 release — use /v1/chat/completions or /anthropic/v1/messages"
+            ),
+        ),
+        RouteGap::Guardrails => (
+            StatusCode::FORBIDDEN,
+            "guardrail_route_unsupported",
+            format!(
+                "InferencePolicy declares a guardrail pipeline, not enforced on {route} in this \
+                 release — use /v1/chat/completions or /anthropic/v1/messages"
+            ),
+        ),
+    };
+    tracing::warn!(
+        target: "inference.audit",
+        sandbox = %sandbox,
+        inference_policy_digest = %policy.digest,
+        decision = "deny",
+        gate = "route_enforcement_gap",
+        route,
+        "{msg}"
+    );
+    // Code-carrying shape: `type` == `code` here (historic value), plus
+    // an explicit `error.code` so clients switch on one field everywhere.
+    let mut resp = errors::openai_coded(status, &msg, code, code).into_response();
+    insert_decision_headers(&mut resp, "blocked", "InferencePolicy", &msg);
+    Some(resp)
 }
 
 /// POST /v1/chat/completions — the primary inference endpoint.
@@ -197,6 +427,90 @@ pub(super) async fn chat_completions(
     // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
     crate::routes::apply_model_preference_override(&mut upstream, &policy);
 
+    // Retarget at the policy-selected provider; fails closed.
+    if let Err(e) = crate::routes::apply_provider_resolution(&state, &mut upstream, &policy) {
+        tracing::warn!(
+            target: "inference.audit",
+            sandbox = %sandbox_name,
+            inference_policy_digest = %policy.digest,
+            decision = "deny",
+            gate = "provider_resolution",
+            error = %e,
+            "InferencePolicy provider could not be resolved"
+        );
+        return provider_error_response(&e);
+    }
+
+    // Anthropic serves the Messages API — an OpenAI-shaped request
+    // here gets an explicit 501 pointing at /anthropic/v1/messages.
+    // Carries the coded error + decision headers like every other
+    // provider/guardrail denial on this route.
+    if upstream.provider == ProviderKind::Anthropic {
+        let msg = "InferencePolicy selects provider 'anthropic', which serves the Anthropic \
+             Messages API — send Anthropic-shaped requests to /anthropic/v1/messages \
+             (chat-completions translation for Anthropic is not implemented)";
+        let mut resp = errors::openai_coded(
+            StatusCode::NOT_IMPLEMENTED,
+            msg,
+            "provider_error",
+            "provider_unimplemented",
+        )
+        .into_response();
+        insert_decision_headers(&mut resp, "blocked", "InferencePolicy", msg);
+        return resp;
+    }
+
+    // Guardrail pipeline; a declared-but-unbuildable stage blocks.
+    let guardrail_pipeline = match build_guardrail_pipeline(&state, &policy) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!(
+                target: "inference.audit",
+                sandbox = %sandbox_name,
+                inference_policy_digest = %policy.digest,
+                decision = "deny",
+                gate = "guardrail_config",
+                error = %e,
+                "guardrail pipeline could not be built — failing closed"
+            );
+            return guardrail_error_response(&e);
+        }
+    };
+
+    // Input-direction scan, before any upstream forward.
+    if let Some(ref p) = guardrail_pipeline
+        && p.covers(Direction::Input)
+    {
+        let input_text = guardrails::scan_text_or_raw(&body, guardrails::extract_openai_input_text);
+        match p.scan(&input_text, Direction::Input).await {
+            Ok(None) => {}
+            Ok(Some(v)) => {
+                tracing::warn!(
+                    target: "inference.audit",
+                    sandbox = %sandbox_name,
+                    inference_policy_digest = %policy.digest,
+                    decision = "deny",
+                    gate = "guardrail_input",
+                    categories = ?v.categories,
+                    "guardrail pipeline blocked request"
+                );
+                return guardrail_violation_response(&v);
+            }
+            Err(e) => {
+                tracing::warn!(
+                    target: "inference.audit",
+                    sandbox = %sandbox_name,
+                    inference_policy_digest = %policy.digest,
+                    decision = "deny",
+                    gate = "guardrail_input",
+                    error = %e,
+                    "guardrail pipeline unavailable — failing closed"
+                );
+                return guardrail_error_response(&e);
+            }
+        }
+    }
+
     // Defence-in-depth tool-schema filter: even when the upstream
     // runtime (e.g. a raw OpenAI SDK client outside OpenClaw) sends
     // `tools[]` schemas the AGT plugin would normally never have
@@ -254,6 +568,8 @@ pub(super) async fn chat_completions(
             let headers = headers.clone();
             let budget = state.budget.clone();
             let sandbox_owned = sandbox_name.to_string();
+            let guardrail_for_task = guardrail_pipeline.clone();
+            let digest_for_task = policy.digest.clone();
 
             tokio::spawn(async move {
                 // Send keepalive comments every 5 seconds while waiting
@@ -292,6 +608,20 @@ pub(super) async fn chat_completions(
                                 .and_then(|v| v.as_u64())
                         {
                             budget.record_usage(&sandbox_owned, total).await;
+                        }
+                        // Output scan on the Responses-API recovery
+                        // path; block as an SSE frame (already committed
+                        // to text/event-stream).
+                        if let Some(block) = scan_openai_output_guardrails(
+                            guardrail_for_task.as_ref(),
+                            &chat_body,
+                            &sandbox_owned,
+                            &digest_for_task,
+                        )
+                        .await
+                        {
+                            let _ = tx.send(Ok(block.sse_frame())).await;
+                            return;
                         }
                         let sse_data = format!(
                             "data: {}\n\ndata: [DONE]\n\n",
@@ -346,6 +676,16 @@ pub(super) async fn chat_completions(
                         .and_then(|v| v.as_u64())
                 {
                     state.budget.record_usage(sandbox_name, total).await;
+                }
+                if let Err(block) = enforce_openai_output_guardrails(
+                    guardrail_pipeline.as_ref(),
+                    &chat_body,
+                    sandbox_name,
+                    &policy.digest,
+                )
+                .await
+                {
+                    return *block;
                 }
                 let mut response = (resp_status, Body::from(chat_body)).into_response();
                 if let Some(ct) = resp_hdrs.get("content-type") {
@@ -448,6 +788,16 @@ pub(super) async fn chat_completions(
                             {
                                 state.budget.record_usage(sandbox_name, total).await;
                             }
+                            if let Err(block) = enforce_openai_output_guardrails(
+                                guardrail_pipeline.as_ref(),
+                                &chat_body,
+                                sandbox_name,
+                                &policy.digest,
+                            )
+                            .await
+                            {
+                                return *block;
+                            }
                             // Wrap as SSE so the streaming client can parse it
                             let sse = format!(
                                 "data: {}\n\ndata: [DONE]\n\n",
@@ -493,6 +843,7 @@ pub(super) async fn chat_completions(
                 let stream_blocked = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
                 let floor_for_stream = stream_floor.clone();
                 let digest_for_stream = stream_policy_digest.clone();
+                let sandbox_for_guard = sandbox_owned.clone();
                 let wrapped = stream.map(move |chunk| {
                     use std::sync::atomic::Ordering;
                     if stream_blocked.load(Ordering::Relaxed) {
@@ -581,7 +932,22 @@ pub(super) async fn chat_completions(
                     }
                     chunk
                 });
-                let body = Body::from_stream(wrapped);
+                // Streaming output scan; skipped when no output stages.
+                let guarded: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>> =
+                    match guardrail_pipeline
+                        .as_ref()
+                        .filter(|p| p.covers(Direction::Output))
+                    {
+                        Some(p) => guardrails::guard_sse_stream(
+                            wrapped.boxed(),
+                            p.clone(),
+                            guardrails::StreamDialect::OpenAiChat,
+                            sandbox_for_guard,
+                            policy.digest.clone(),
+                        ),
+                        None => wrapped.boxed(),
+                    };
+                let body = Body::from_stream(guarded);
                 let mut response = (status, body).into_response();
                 if let Some(ct) = resp_headers.get("content-type") {
                     response.headers_mut().insert("content-type", ct.clone());
@@ -665,6 +1031,16 @@ pub(super) async fn chat_completions(
                         {
                             state.budget.record_usage(sandbox_name, total).await;
                         }
+                        if let Err(block) = enforce_openai_output_guardrails(
+                            guardrail_pipeline.as_ref(),
+                            &chat_body,
+                            sandbox_name,
+                            &policy.digest,
+                        )
+                        .await
+                        {
+                            return *block;
+                        }
                         let mut response = (resp_status, Body::from(chat_body)).into_response();
                         if let Some(ct) = resp_hdrs.get("content-type") {
                             response.headers_mut().insert("content-type", ct.clone());
@@ -702,6 +1078,23 @@ pub(super) async fn chat_completions(
                             "Per-request limit: {msg}"
                         );
                     }
+                }
+
+                // Buffered output guardrail scan. Runs on EVERY buffered
+                // response, hoisted OUT of the JSON-parse block below so a
+                // non-JSON / truncated upstream body can't skip a declared
+                // output guardrail (`scan_text_or_raw` falls back to raw
+                // bytes). Fails closed: 403 violation / 502 unavailable /
+                // 503 misconfigured.
+                if let Err(block) = enforce_openai_output_guardrails(
+                    guardrail_pipeline.as_ref(),
+                    &resp_body,
+                    sandbox_name,
+                    &policy.digest,
+                )
+                .await
+                {
+                    return *block;
                 }
 
                 // Parse Foundry guardrail annotations and report to AGT governance.
@@ -1099,6 +1492,64 @@ async fn filter_disallowed_tools(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::inference_policy_loader::InferencePolicySnapshot;
+
+    fn azure_cfg() -> crate::config::Config {
+        // No provider endpoints/keys configured — a bare Azure box.
+        let mut c = crate::config::Config::from_env().expect("config");
+        c.anthropic_api_key = None;
+        c.ollama_endpoint = None;
+        c
+    }
+
+    fn snapshot(provider: Option<&str>, guardrails: bool) -> InferencePolicySnapshot {
+        InferencePolicySnapshot {
+            provider: provider.map(String::from),
+            guardrails: if guardrails {
+                vec![crate::guardrails::GuardrailStageCfg {
+                    provider: "openai-moderation".into(),
+                    apply_to: crate::guardrails::ApplyTo::Both,
+                }]
+            } else {
+                vec![]
+            },
+            ..InferencePolicySnapshot::default()
+        }
+    }
+
+    #[test]
+    fn route_gap_allows_plain_azure_policy() {
+        assert!(classify_route_gap(&snapshot(None, false), &azure_cfg()).is_ok());
+        assert!(classify_route_gap(&snapshot(Some("azure-openai"), false), &azure_cfg()).is_ok());
+        // An unknown/informational tag routes to Azure ⇒ still allowed.
+        assert!(classify_route_gap(&snapshot(Some("gemini"), false), &azure_cfg()).is_ok());
+    }
+
+    #[test]
+    fn route_gap_refuses_non_azure_provider() {
+        // ollama/anthropic/bedrock all fail closed on these routes,
+        // whether or not their config is present.
+        assert_eq!(
+            classify_route_gap(&snapshot(Some("ollama"), false), &azure_cfg()),
+            Err(RouteGap::NonAzureProvider)
+        );
+        assert_eq!(
+            classify_route_gap(&snapshot(Some("anthropic"), false), &azure_cfg()),
+            Err(RouteGap::NonAzureProvider)
+        );
+        assert_eq!(
+            classify_route_gap(&snapshot(Some("bedrock"), false), &azure_cfg()),
+            Err(RouteGap::NonAzureProvider)
+        );
+    }
+
+    #[test]
+    fn route_gap_refuses_declared_guardrails() {
+        assert_eq!(
+            classify_route_gap(&snapshot(None, true), &azure_cfg()),
+            Err(RouteGap::Guardrails)
+        );
+    }
 
     #[test]
     fn gate_allow_when_no_policy_cap() {

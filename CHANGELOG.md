@@ -7,6 +7,100 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased] — `crd-well-oiled-machine`
 
+### Multi-cloud LLM providers + pluggable guardrails (slice 1: Anthropic, Ollama, OpenAI Moderation)
+
+First slice of the "multi-cloud LLM providers + native guardrails"
+roadmap theme. Credentials stay router-side (secret mount / env on the
+sidecar) — the agent process keeps talking to the localhost proxy and
+never sees a provider key.
+
+**`InferencePolicy` CRD (controller)**
+
+- `spec.provider` — new optional typed enum (`InferenceProvider`:
+  `azure-openai` | `anthropic` | `ollama` | `bedrock`), serialized with
+  the same kebab-case tags `ModelRef.provider` strings have always
+  documented, so existing YAML values stay valid. `bedrock` is
+  schema-accepted for forward-compat; the router answers 501 until the
+  Bedrock client lands (declared intent is never silently rerouted).
+- `spec.guardrails[]` — new optional ordered guardrail pipeline
+  (`{provider: openai-moderation, applyTo: input|output|both}`, 1–8
+  stages via CEL). Both new fields are mutually exclusive with
+  `spec.bundleRef` (CEL + reconciler defense-in-depth) and flow through
+  `compile_to_profile` into the compiled `inference-policy.json`
+  (`"provider"` / `"guardrails"` keys, null when absent).
+- Helm CRD template regenerated (`crd-inferencepolicy.yaml`).
+- Reconciler forwards router-only provider config to every sidecar when
+  present on the controller env: `ANTHROPIC_API_KEY`,
+  `ANTHROPIC_ENDPOINT`, `OLLAMA_ENDPOINT`, `OPENAI_MODERATION_API_KEY`
+  (falls back to `OPENAI_API_KEY`), `OPENAI_MODERATION_ENDPOINT`.
+  Endpoints (not secrets) join `CONFIG_HASH_INPUTS`.
+
+**Inference router — multi-provider upstreams**
+
+- New `provider` module: tag parsing + fail-closed resolution.
+  `spec.provider` is the sole routing selector; the pre-existing
+  `modelPreference.primary.provider` tag stays informational (it drove
+  no routing before this slice), so an unchanged CR that only set a
+  model preference keeps its Azure upstream. Unknown tags warn and fall
+  back to Azure; missing endpoint/credential → 503; unimplemented
+  `bedrock` → 501. Never a silent Azure fallback for a selected
+  non-Azure provider.
+- `UpstreamConfig` carries `provider` + router-held `api_key`;
+  `proxy.rs` gains per-provider URL shapes (Anthropic: path verbatim;
+  Ollama: OpenAI-compat under `/v1/`) and auth schemes (Anthropic:
+  `x-api-key` + default `anthropic-version`; Ollama: no credential).
+  Agent-supplied `x-api-key` headers are stripped as before.
+- `provider: anthropic` serves the Anthropic Messages surface natively
+  (`/anthropic/v1/messages`, `/v1/messages`): streaming, tool use and
+  multi-modal content pass through. OpenAI-shaped `/v1/chat/completions`
+  under an Anthropic policy returns an explicit 501 pointing at the
+  Messages surface (mirrors the GitHub-Models 501 precedent).
+- `provider: ollama` serves `/v1/chat/completions` (buffered + SSE)
+  against `OLLAMA_ENDPOINT` with token metering and budget tracking.
+- Routing + guardrails are wired on `/v1/chat/completions` and the
+  Anthropic Messages routes only. Every other inference-bearing route
+  (`/v1/completions`, `/v1/responses`, `/v1/embeddings`, image
+  generation, and the Foundry proxy families that serve model output —
+  `/agents*`, `/openai/responses*`, `/openai/conversations*`) doesn't
+  implement either and **fails closed** (501 on a non-Azure provider,
+  403 when guardrails are declared) rather than silently bypass the
+  policy; a plain Azure policy uses them unchanged. The Foundry proxy
+  guard is default-deny: only an explicit exempt set of canonical
+  management/storage APIs (memory stores, files, vector stores, …)
+  bypasses it, and paths are canonicalized before routing — benign
+  empty segments (`//`, trailing `/`) are collapsed, while dot,
+  percent-encoded-dot, and encoded-slash/backslash segments are
+  rejected (400) so a request cannot normalize into a different
+  upstream route than the one classified.
+
+**Inference router — pluggable guardrail pipeline**
+
+- New `guardrails` module: `Guardrail` trait + OpenAI Moderation
+  backend (`POST {endpoint}/v1/moderations`, model
+  `omni-moderation-latest`, override via `OPENAI_MODERATION_MODEL`).
+- Enforcement on the governed routes: request pre-flight (input
+  stages), buffered responses (including all Responses-API recovery
+  paths), and SSE streams via **hold-and-release** windows
+  (`GUARDRAIL_STREAM_SCAN_CHARS`, default 1000, clamped to the 16k scan
+  cap) — no assistant message text is delivered before a scan covers
+  it, including across partial-line chunk boundaries; flagged streams
+  are cut with a structured SSE error frame + `data: [DONE]`. Text over
+  16k chars is scanned in successive windows, not truncated, so nothing
+  can be hidden past the cap. Tool-call arguments and provider
+  extended-"thinking" deltas are not yet scanned (roadmap).
+- Fail-closed contract: declared-but-unbuildable stages reject the
+  request (503 `guardrail_misconfigured`); backend outages block (502
+  `guardrail_unavailable`); unparseable bodies are scanned as raw text
+  rather than skipped. New `kars_guardrail_scans_total` metric
+  (provider / direction / outcome) and `x-kars-decision*` headers on
+  every block.
+
+Tests: compile/round-trip + enum wire-tag pins (controller), provider
+resolution truth table, loader parsing, hold-and-release SSE guard
+(clean / violation / split-event / scan-error), and wiremock
+integration tests against fake Anthropic / Ollama / moderation
+upstreams (`inference-router/tests/multi_provider_guardrails.rs`).
+
 ## [0.1.26] — 2026-08-25
 
 ### Security and dependency maintenance

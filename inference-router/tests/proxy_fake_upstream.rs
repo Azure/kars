@@ -22,6 +22,7 @@ use axum::http::{HeaderMap, Method};
 use bytes::Bytes;
 use common::{FakeAd, FakeAzure, FakeImds, FixtureRoute};
 use kars_inference_router::auth::WorkloadIdentityAuth;
+use kars_inference_router::provider::ProviderKind;
 use kars_inference_router::proxy::{UpstreamConfig, forward};
 use std::sync::Mutex;
 
@@ -71,6 +72,8 @@ async fn api_key_mode_proxies_chat_completion_with_filter_results() {
         endpoint: azure.base_url(),
         deployment: "gpt-4o".to_string(),
         sandbox_name: "test-sandbox".to_string(),
+        provider: ProviderKind::AzureOpenAI,
+        api_key: None,
     };
     let client = reqwest::Client::new();
 
@@ -149,6 +152,8 @@ async fn wi_mode_falls_back_to_imds_and_proxies_embeddings() {
         endpoint: azure.base_url(),
         deployment: "text-embedding-3-small".to_string(),
         sandbox_name: "test-sandbox-wi".to_string(),
+        provider: ProviderKind::AzureOpenAI,
+        api_key: None,
     };
     let client = reqwest::Client::new();
     let body = Bytes::from(r#"{"input":"hello"}"#.as_bytes().to_vec());
@@ -218,6 +223,8 @@ async fn upstream_error_status_is_propagated() {
         endpoint: azure.base_url(),
         deployment: "gpt-4o".to_string(),
         sandbox_name: "test-sandbox-429".to_string(),
+        provider: ProviderKind::AzureOpenAI,
+        api_key: None,
     };
     let client = reqwest::Client::new();
 

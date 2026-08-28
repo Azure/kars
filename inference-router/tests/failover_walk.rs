@@ -27,6 +27,7 @@ use kars_inference_router::failover::forward_with_failover;
 use kars_inference_router::inference_policy_loader::{
     InferencePolicySnapshot, ModelPreference, ModelRef,
 };
+use kars_inference_router::provider::ProviderKind;
 use kars_inference_router::proxy::UpstreamConfig;
 use serde_json::Value;
 use std::net::SocketAddr;
@@ -133,6 +134,8 @@ async fn primary_503_falls_through_to_fallback_200() {
         endpoint: base,
         deployment: "fallback-up".into(),
         sandbox_name: "sbx".into(),
+        provider: ProviderKind::AzureOpenAI,
+        api_key: None,
     };
     let snap = snapshot("primary-down", &["fallback-up"]);
 
@@ -195,6 +198,8 @@ async fn unhealthy_primary_is_skipped_in_second_pass() {
         endpoint: base,
         deployment: "fallback-up".into(),
         sandbox_name: "sbx".into(),
+        provider: ProviderKind::AzureOpenAI,
+        api_key: None,
     };
     let snap = snapshot("primary-down", &["fallback-up"]);
 
@@ -248,6 +253,8 @@ async fn all_unhealthy_still_punches_primary_for_last_resort() {
         endpoint: base,
         deployment: "primary-down".into(),
         sandbox_name: "sbx".into(),
+        provider: ProviderKind::AzureOpenAI,
+        api_key: None,
     };
     let snap = snapshot("primary-down", &["fallback-up"]);
 

@@ -277,8 +277,16 @@ pub fn inference_policy_validations() -> Vec<ValidationRule> {
     let severities = "['Safe','Low','Medium','High']";
     vec![
         ValidationRule {
-            rule: "!has(self.bundleRef) || (!has(self.tokenBudget) && !has(self.contentSafety) && !has(self.modelPreference) && !has(self.displayName))".into(),
-            message: Some("spec.bundleRef is mutually exclusive with spec.tokenBudget, spec.contentSafety, spec.modelPreference, and spec.displayName; the bundle carries those content fields".into()),
+            rule: "!has(self.bundleRef) || (!has(self.tokenBudget) && !has(self.contentSafety) && !has(self.modelPreference) && !has(self.provider) && !has(self.guardrails) && !has(self.displayName))".into(),
+            message: Some("spec.bundleRef is mutually exclusive with spec.tokenBudget, spec.contentSafety, spec.modelPreference, spec.provider, spec.guardrails, and spec.displayName; the bundle carries those content fields".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        // An empty list is an authoring mistake (omit the field for
+        // no pipeline); the cap bounds per-request scan fan-out.
+        ValidationRule {
+            rule: "!has(self.guardrails) || (size(self.guardrails) >= 1 && size(self.guardrails) <= 8)".into(),
+            message: Some("spec.guardrails, when set, must contain 1-8 stages (omit the field for no pipeline)".into()),
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },

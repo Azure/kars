@@ -38,6 +38,11 @@ use std::sync::LazyLock;
 /// change and should be called out in the audit trail.
 pub const CONFIG_HASH_INPUTS: &[&str] = &[
     "KARS_DISABLE_ENTRA_AUTH",
+    // Multi-provider endpoints (never secrets — matches the
+    // AZURE_OPENAI_API_KEY precedent).
+    "ANTHROPIC_ENDPOINT",
+    "OLLAMA_ENDPOINT",
+    "OPENAI_MODERATION_ENDPOINT",
     "AZURE_AUTHORITY_HOST",
     "AZURE_OPENAI_ENDPOINT",
     "AZURE_SUBSCRIPTION_ID",

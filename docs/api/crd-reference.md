@@ -458,6 +458,10 @@ spec:
     sandboxName: my-agent                                 # exact match; empty = any in ns
     sandboxMatchLabels: {}                                # AND with sandboxName
     action: "*"                                           # chat | responses | image | embeddings | *
+  provider: azure-openai                                  # optional: azure-openai | anthropic | ollama | bedrock
+  guardrails:                                             # optional: ordered pipeline, first flag blocks
+    - provider: openai-moderation
+      applyTo: both                                       # input | output | both (default both)
   modelPreference:
     primary:
       provider: azure-openai                              # azure-openai | anthropic | gemini | bedrock | ollama
@@ -480,13 +484,17 @@ spec:
 | Field | Notes |
 |---|---|
 | `spec.appliesTo` | Required selector — AND of `sandboxName`, `sandboxMatchLabels`, `action`. |
-| `spec.modelPreference.primary` | `{provider, deployment}`. `provider` is one of `azure-openai`, `anthropic`, `gemini`, `bedrock`, `ollama`. |
-| `spec.modelPreference.fallback[]` | Ordered fallback routes — first healthy wins, deterministically. No load-balancing. |
+| `spec.provider` | Optional typed default provider (`azure-openai` \| `anthropic` \| `ollama` \| `bedrock`), and the **only** field that drives provider routing. Absent ⇒ the env-configured Azure OpenAI / Foundry upstream. `anthropic` serves the Anthropic Messages surface (`/anthropic/v1/messages`, streaming + tools pass-through) with the router-held `ANTHROPIC_API_KEY`; `ollama` serves OpenAI-compatible chat completions against `OLLAMA_ENDPOINT` (no credential). `bedrock` is schema-accepted but the router returns 501 until the Bedrock client lands. Routing applies to `/v1/chat/completions` and the Anthropic Messages routes only; the other inference routes (see note below) refuse a non-Azure provider with 501. Credentials/endpoints are router-sidecar config only — never visible to the agent. |
+| `spec.guardrails[]` | Optional ordered guardrail pipeline (1–8 stages) the router runs on `/v1/chat/completions` and the Anthropic Messages routes. Stage: `{provider, applyTo}` with `provider: openai-moderation` (Bedrock Guardrails / Model Armor are roadmap follow-ups) and `applyTo: input \| output \| both`. Fail-closed: a declared stage that cannot run (missing key, backend outage) blocks the request. Streaming responses use hold-and-release windows — no assistant message text reaches the client before a scan covers it (tool-call arguments and provider "thinking" deltas are not yet scanned — see note). Text over 16k chars is scanned in successive windows, not truncated. |
+| `spec.modelPreference.primary` | `{provider, deployment}`. `provider` is one of `azure-openai`, `anthropic`, `gemini`, `bedrock`, `ollama`. This tag stays **informational** — it does not select the upstream (use `spec.provider`); `modelPreference` drives deployment failover within the resolved provider. |
+| `spec.modelPreference.fallback[]` | Ordered fallback routes — first healthy wins, deterministically. No load-balancing. Failover walks deployments on the resolved provider (cross-provider failover is a follow-up). |
 | `spec.tokenBudget.perRequestTokens` | Per-call hard cap. Inference calls exceeding this are refused **before** the upstream forward. |
 | `spec.tokenBudget.dailyTokens` / `monthlyTokens` | Accepted and surfaced in status; **aggregate enforcement is not yet wired** — see roadmap below. CEL enforces `monthlyTokens ≥ dailyTokens`. |
 | `spec.contentSafety` | Per-category severity floors (`Safe` \| `Low` \| `Medium` \| `High`). The router parses Foundry `prompt_filter_results` inline; there is **no** separate Content Safety call. |
 | `spec.contentSafety.requirePromptShields` | Fail-closed if Prompt Shields are advertised by the deployment but the response lacks the corresponding annotations. |
-| `spec.bundleRef` | Signed OCI artifact alternative to inline `tokenBudget` / `contentSafety` / `modelPreference` / `displayName`. `appliesTo` always comes from the CR. |
+| `spec.bundleRef` | Signed OCI artifact alternative to inline `tokenBudget` / `contentSafety` / `modelPreference` / `provider` / `guardrails` / `displayName`. `appliesTo` always comes from the CR. |
+
+> **Provider + guardrail enforcement scope today.** `spec.provider` routing and `spec.guardrails[]` scanning are wired on `/v1/chat/completions` and the Anthropic Messages routes (`/anthropic/v1/messages`, `/v1/messages`). Every other inference-bearing route, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, image generation, and the Foundry proxy families that serve model output (`/agents*`, `/openai/responses*`, `/openai/conversations*`), does **not** implement either; rather than silently bypass the policy, they **fail closed** (501 for a non-Azure `spec.provider`, 403 when guardrails are declared). A plain Azure policy with no guardrails uses those routes exactly as before. The Foundry proxy guard is default-deny: only an explicit exempt set of canonical management/storage APIs (memory stores, knowledge bases, evaluations, files, vector stores, containers, and similar) bypasses it, because those surfaces are not general-purpose inference channels; every other or unknown Foundry path fails closed. Foundry proxy paths are canonicalized before routing: benign empty segments (`//`, trailing `/`) are collapsed, while dot segments (`.`/`..`, literal or percent-encoded), encoded slash/backslash forms, and malformed escapes are rejected outright (400 `invalid_path`) so a request cannot normalize into a different upstream route than the one classified. Guardrail output scanning covers assistant message text; tool-call arguments and provider extended-"thinking" deltas are not yet scanned. These gaps are on the roadmap.
 
 > **Budget enforcement scope today.** The router enforces `tokenBudget.perRequestTokens` on every model call. Aggregate counters across requests (`dailyTokens`, `monthlyTokens`) are **not yet persisted**; the fields are accepted and surfaced for forward compatibility but only the per-request limit fires denials today. Aggregate enforcement is on the roadmap — see [`docs/roadmap.md`](../roadmap.md#trust-topology-end-to-end).
 

@@ -253,6 +253,8 @@ mod tests {
             endpoint: "https://example.openai.azure.com".into(),
             deployment: dep.to_string(),
             sandbox_name: "sbx".into(),
+            provider: crate::provider::ProviderKind::AzureOpenAI,
+            api_key: None,
         }
     }
 

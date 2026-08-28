@@ -375,6 +375,8 @@ async fn resolve_inference_source(
     let inline_any = spec.token_budget.is_some()
         || spec.content_safety.is_some()
         || spec.model_preference.is_some()
+        || spec.provider.is_some()
+        || spec.guardrails.is_some()
         || spec.display_name.is_some();
     let bundle_set = spec.bundle_ref.is_some();
 
@@ -389,7 +391,8 @@ async fn resolve_inference_source(
             Some((
                 "InvalidSpec",
                 "spec.bundleRef is mutually exclusive with spec.tokenBudget, \
-                 spec.contentSafety, spec.modelPreference, and spec.displayName"
+                 spec.contentSafety, spec.modelPreference, spec.provider, \
+                 spec.guardrails, and spec.displayName"
                     .into(),
             )),
         );
@@ -520,6 +523,11 @@ fn merge_bundle_with_selector(
         token_budget,
         content_safety,
         model_preference,
+        // The signed-bundle canonical format doesn't carry
+        // provider/guardrails yet; bundle-sourced policies keep the
+        // router defaults on these axes.
+        provider: None,
+        guardrails: None,
         display_name: verified.display_name.clone(),
         bundle_ref: None,
     }

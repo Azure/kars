@@ -250,6 +250,12 @@ async fn completions(
 ) -> impl IntoResponse {
     let sandbox_name = resolve_sandbox_name(&headers);
 
+    if let Some(resp) =
+        super::chat_completions::guard_unenforced_route(&state, sandbox_name, "completions").await
+    {
+        return resp;
+    }
+
     let upstream = state.upstream_config(sandbox_name);
     match proxy::forward(
         &state.auth,
@@ -280,6 +286,12 @@ async fn responses(
 ) -> impl IntoResponse {
     let sandbox_name_owned = resolve_sandbox_name(&headers).to_string();
     let sandbox_name = sandbox_name_owned.as_str();
+
+    if let Some(resp) =
+        super::chat_completions::guard_unenforced_route(&state, sandbox_name, "responses").await
+    {
+        return resp;
+    }
 
     // Slice 2 DoD #7 — snapshot policy early so every audit log
     // emitted from this handler can carry `inference_policy_digest`.
@@ -416,6 +428,12 @@ async fn embeddings(
 ) -> impl IntoResponse {
     let sandbox_name = resolve_sandbox_name(&headers);
 
+    if let Some(resp) =
+        super::chat_completions::guard_unenforced_route(&state, sandbox_name, "embeddings").await
+    {
+        return resp;
+    }
+
     // Embeddings need a different deployment than chat — extract model from request body
     let mut upstream = state.upstream_config(sandbox_name);
     if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&body) {
@@ -458,6 +476,13 @@ async fn images_generations(
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name = resolve_sandbox_name(&headers);
+
+    if let Some(resp) =
+        super::chat_completions::guard_unenforced_route(&state, sandbox_name, "images/generations")
+            .await
+    {
+        return resp;
+    }
 
     // AGT policy check — image generation is a tool invocation
     {
@@ -666,6 +691,103 @@ async fn list_deployments(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Strictly percent-decode one path segment. `None` on a malformed
+/// escape (`%` not followed by two hex digits) or invalid UTF-8 ,
+/// callers reject the request rather than guess.
+fn percent_decode_segment(seg: &str) -> Option<String> {
+    let bytes = seg.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hi = (*bytes.get(i + 1)? as char).to_digit(16)?;
+            let lo = (*bytes.get(i + 2)? as char).to_digit(16)?;
+            out.push((hi * 16 + lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+/// Split a raw request path into percent-decoded segments, rejecting
+/// (`None`) any form that could reach a different upstream route than
+/// the one classified: dot segments (`.` / `..`, literal or
+/// percent-encoded) and decoded slashes/backslashes smuggled inside a
+/// segment (`..%2f`, `..%5c`). [`foundry_proxy`] concatenates the raw
+/// path into the upstream URL, where URL parsing resolves dot segments,
+/// so classification and forwarding would otherwise disagree.
+///
+/// Benign empty segments (`//`, trailing `/`) are COLLAPSED, not
+/// rejected: they normalize away without creating a traversal, and
+/// management paths like `/openai/files/` have always been proxied.
+/// Rejecting them would 400 live customer traffic even with no policy
+/// configured, so we canonicalize instead.
+fn decoded_path_segments(path: &str) -> Option<Vec<String>> {
+    let mut segments = Vec::new();
+    for raw in path.trim_start_matches('/').split('/') {
+        let seg = percent_decode_segment(raw)?;
+        if seg.is_empty() {
+            continue; // collapse `//` and trailing `/`
+        }
+        if seg == "." || seg == ".." || seg.contains('/') || seg.contains('\\') {
+            return None;
+        }
+        segments.push(seg);
+    }
+    Some(segments)
+}
+
+/// Default-deny guard classification for [`foundry_proxy`], over
+/// segments already canonicalized by [`decoded_path_segments`].
+///
+/// The proxy implements neither provider routing nor the guardrail
+/// pipeline, so any route that can serve model-generated inference
+/// output must fail closed when the active `InferencePolicy` needs
+/// either, otherwise an agent blocked on `/v1/chat/completions`
+/// could rerun the same inference here and receive an unscanned
+/// response. Rather than enumerating the inference-bearing families
+/// (a miss re-opens the bypass), everything is guarded EXCEPT an
+/// explicit exempt set of canonical management/storage APIs that do
+/// not proxy an inference channel. Returns the route label for
+/// `guard_unenforced_route`, or `None` when exempt, enforcement
+/// scope is documented in docs/api/crd-reference.md.
+fn guarded_foundry_route(segments: &[String]) -> Option<&'static str> {
+    const EXEMPT: &[&[&str]] = &[
+        &["memory_stores"],
+        &["knowledgebases"],
+        &["evaluations"],
+        &["evaluators"],
+        &["evaluationrules"],
+        &["evaluationtaxonomies"],
+        &["indexes"],
+        &["connections"],
+        &["deployments"],
+        &["datasets"],
+        &["insights"],
+        &["schedules"],
+        &["redTeams"],
+        &["openai", "evals"],
+        &["openai", "vector_stores"],
+        &["openai", "files"],
+        &["openai", "containers"],
+        &["openai", "fine-tuning"],
+    ];
+    if EXEMPT.iter().any(|family| {
+        segments.len() >= family.len() && family.iter().zip(segments).all(|(f, s)| s == f)
+    }) {
+        return None;
+    }
+    Some(match segments {
+        [first, ..] if first == "agents" => "agents",
+        [a, b, ..] if a == "openai" && b == "responses" => "openai/responses",
+        [a, b, ..] if a == "openai" && b == "conversations" => "openai/conversations",
+        _ => "foundry-proxy",
+    })
+}
+
 /// Generic Foundry project-level API proxy.
 /// Forwards requests to the Foundry project endpoint with IMDS auth (ai.azure.com audience).
 /// Handles: /agents/*, /memory-stores/*, /knowledgebases/*, /evaluations/*
@@ -677,6 +799,40 @@ async fn foundry_proxy(
     body: Bytes,
 ) -> impl IntoResponse {
     let sandbox_name = resolve_sandbox_name(&headers);
+
+    // The raw path is concatenated into the upstream URL below, and
+    // URL parsing resolves `.`/`..` segments (including
+    // percent-encoded `%2e` forms), a crafted path could therefore
+    // reach a different upstream route than the one classified here.
+    // Benign empty segments are canonicalized; only forms that could
+    // normalize away into a different route are rejected.
+    let Some(segments) = decoded_path_segments(uri.path()) else {
+        tracing::warn!(
+            target: "inference.audit",
+            sandbox = %sandbox_name,
+            path = %uri.path(),
+            decision = "deny",
+            gate = "path_canonicalization",
+            "Foundry proxy path contains a dot segment, encoded slash/backslash, or malformed escape"
+        );
+        return errors::openai_coded(
+            StatusCode::BAD_REQUEST,
+            "path contains a dot segment, encoded slash/backslash, or malformed escape",
+            "invalid_path",
+            "invalid_path",
+        )
+        .into_response();
+    };
+
+    // Default-deny fail-closed guard: every Foundry proxy route is
+    // guarded unless it is on the canonical management/storage exempt
+    // list (see `guarded_foundry_route` / `guard_unenforced_route`).
+    if let Some(route) = guarded_foundry_route(&segments)
+        && let Some(resp) =
+            super::chat_completions::guard_unenforced_route(&state, sandbox_name, route).await
+    {
+        return resp;
+    }
 
     // Use project endpoint for agent/standalone APIs, fall back to foundry/openai endpoint
     let endpoint = state
@@ -914,7 +1070,110 @@ async fn foundry_proxy(
 
 #[cfg(test)]
 mod tests {
-    use super::strip_project_prefix;
+    use super::{decoded_path_segments, guarded_foundry_route, strip_project_prefix};
+
+    fn classify(path: &str) -> Option<&'static str> {
+        guarded_foundry_route(&decoded_path_segments(path).expect("canonical path"))
+    }
+
+    #[test]
+    fn classifies_inference_bearing_foundry_paths() {
+        assert_eq!(classify("/agents"), Some("agents"));
+        assert_eq!(classify("/agents/a1/runs"), Some("agents"));
+        assert_eq!(classify("/openai/responses"), Some("openai/responses"));
+        assert_eq!(
+            classify("/openai/responses/resp_123"),
+            Some("openai/responses")
+        );
+        assert_eq!(
+            classify("/openai/conversations"),
+            Some("openai/conversations")
+        );
+        assert_eq!(
+            classify("/openai/conversations/c1/items"),
+            Some("openai/conversations")
+        );
+    }
+
+    #[test]
+    fn unknown_and_lookalike_families_fail_closed() {
+        // Default-deny: anything not on the exempt list is guarded,
+        // including lookalike names and families this router has
+        // never heard of.
+        for path in ["/agentsmith", "/openai/responsesx", "/openai/threads"] {
+            assert_eq!(classify(path), Some("foundry-proxy"), "path: {path}");
+        }
+    }
+
+    #[test]
+    fn exempts_management_and_storage_families() {
+        for path in [
+            "/memory_stores",
+            "/knowledgebases/kb1/queries",
+            "/openai/files",
+            "/openai/vector_stores/vs1",
+            "/openai/containers/c1/files/f1/content",
+            "/openai/fine-tuning/jobs",
+            "/evaluations",
+            "/redTeams/runs",
+            "/schedules/s1",
+        ] {
+            assert_eq!(classify(path), None, "path: {path}");
+        }
+    }
+
+    #[test]
+    fn rejects_paths_that_normalize_differently() {
+        for path in [
+            "/openai/files/../responses",
+            "/openai/files/%2e%2e/responses",
+            "/openai/files/%2E%2E/responses",
+            "/openai/files/./responses",
+            "/openai/files/%2e/responses",
+            "/memory_stores/../openai/responses",
+            "/openai/files/..%2fresponses", // decoded slash inside a segment
+            "/openai/files/..%5cresponses", // decoded backslash
+            "/openai/files/%zz",            // malformed escape
+            "/openai/files/%2",             // truncated escape
+        ] {
+            assert_eq!(decoded_path_segments(path), None, "path: {path}");
+        }
+    }
+
+    #[test]
+    fn collapses_benign_empty_segments_instead_of_rejecting() {
+        // Trailing and double slashes are canonicalized, not rejected,
+        // so historically proxied management paths keep working with no
+        // policy configured. Classification is unchanged by the collapse.
+        assert_eq!(
+            decoded_path_segments("/openai/files/"),
+            Some(vec!["openai".to_string(), "files".to_string()])
+        );
+        assert_eq!(
+            decoded_path_segments("/memory_stores/"),
+            Some(vec!["memory_stores".to_string()])
+        );
+        assert_eq!(
+            decoded_path_segments("/openai//files"),
+            Some(vec!["openai".to_string(), "files".to_string()])
+        );
+        // Exempt families stay exempt; guarded families stay guarded.
+        assert_eq!(classify("/openai/files/"), None);
+        assert_eq!(classify("/memory_stores/"), None);
+        assert_eq!(classify("/openai//responses"), Some("openai/responses"));
+        assert_eq!(classify("/agents/"), Some("agents"));
+    }
+
+    #[test]
+    fn decodes_benign_percent_encoding_for_classification() {
+        // Percent-encoding that hides a guarded family name must not
+        // dodge classification: the raw path is forwarded verbatim
+        // and most upstream servers decode it back.
+        assert_eq!(classify("/openai/%72esponses"), Some("openai/responses"));
+        assert_eq!(classify("/%61gents/a1"), Some("agents"));
+        // Encoded exempt families stay exempt.
+        assert_eq!(classify("/openai/%66iles/f1"), None);
+    }
 
     #[test]
     fn strips_foundry_project_prefix() {
