@@ -181,6 +181,37 @@ spec:
                   comes from the signed bundle.
                 nullable: true
                 type: string
+              guardrails:
+                description: |-
+                  Ordered guardrail pipeline stages the router runs around each
+                  call (input pre-flight + response, buffered and streaming), in
+                  declaration order — first flag blocks. Absent ⇒ only the
+                  Phase 1 substrate (Foundry annotations + `contentSafety`).
+                  Mutually exclusive with [`Self::bundle_ref`].
+                items:
+                  description: |-
+                    A single router-side guardrail stage. A stage whose backend isn't
+                    configured (e.g. missing moderation key) fails the request closed,
+                    never skips.
+                  properties:
+                    applyTo:
+                      description: Scan direction for a [`GuardrailStage`].
+                      enum:
+                      - input
+                      - output
+                      - both
+                      nullable: true
+                      type: string
+                    provider:
+                      description: Guardrail backend.
+                      enum:
+                      - openai-moderation
+                      type: string
+                  required:
+                  - provider
+                  type: object
+                nullable: true
+                type: array
               modelPreference:
                 description: |-
                   Model preference + fallback chain. Optional. **Not** a router:
@@ -226,6 +257,21 @@ spec:
                 required:
                 - primary
                 type: object
+              provider:
+                description: |-
+                  Inference provider selector. Explicit kebab-case renames (not
+                  `rename_all`) keep the wire tags byte-identical to the free-form
+                  `ModelRef.provider` strings this CRD has always documented, so a
+                  CR can move to the typed field without a migration. `bedrock` is
+                  schema-accepted for forward-compat; the router returns 501 until
+                  its client lands.
+                enum:
+                - azure-openai
+                - anthropic
+                - ollama
+                - bedrock
+                nullable: true
+                type: string
               tokenBudget:
                 description: |-
                   Token-budget caps. Optional — absent ⇒ no budget enforcement.
@@ -262,9 +308,12 @@ spec:
             - appliesTo
             type: object
             x-kubernetes-validations:
-            - message: spec.bundleRef is mutually exclusive with spec.tokenBudget, spec.contentSafety, spec.modelPreference, and spec.displayName; the bundle carries those content fields
+            - message: spec.bundleRef is mutually exclusive with spec.tokenBudget, spec.contentSafety, spec.modelPreference, spec.provider, spec.guardrails, and spec.displayName; the bundle carries those content fields
               reason: FieldValueInvalid
-              rule: '!has(self.bundleRef) || (!has(self.tokenBudget) && !has(self.contentSafety) && !has(self.modelPreference) && !has(self.displayName))'
+              rule: '!has(self.bundleRef) || (!has(self.tokenBudget) && !has(self.contentSafety) && !has(self.modelPreference) && !has(self.provider) && !has(self.guardrails) && !has(self.displayName))'
+            - message: spec.guardrails, when set, must contain 1-8 stages (omit the field for no pipeline)
+              reason: FieldValueInvalid
+              rule: '!has(self.guardrails) || (size(self.guardrails) >= 1 && size(self.guardrails) <= 8)'
             - message: spec.tokenBudget.monthlyTokens must be >= spec.tokenBudget.dailyTokens
               reason: FieldValueInvalid
               rule: '!has(self.tokenBudget) || !has(self.tokenBudget.monthlyTokens) || !has(self.tokenBudget.dailyTokens) || self.tokenBudget.monthlyTokens >= self.tokenBudget.dailyTokens'
@@ -403,4 +452,3 @@ spec:
     storage: true
     subresources:
       status: {}
-

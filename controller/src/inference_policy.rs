@@ -54,6 +54,44 @@ use serde::{Deserialize, Serialize};
 
 use crate::mcp_server::LocalObjectRef;
 
+/// Inference provider selector. Explicit kebab-case renames (not
+/// `rename_all`) keep the wire tags byte-identical to the free-form
+/// `ModelRef.provider` strings this CRD has always documented, so a
+/// CR can move to the typed field without a migration. `bedrock` is
+/// schema-accepted for forward-compat; the router returns 501 until
+/// its client lands.
+#[derive(Serialize, Deserialize, Clone, Copy, Debug, Default, PartialEq, Eq, JsonSchema)]
+pub enum InferenceProvider {
+    /// Azure OpenAI / Azure AI Foundry (default — Phase 1 substrate).
+    #[default]
+    #[serde(rename = "azure-openai")]
+    AzureOpenAI,
+    /// Anthropic Messages API (`api.anthropic.com` or a compatible
+    /// gateway).
+    #[serde(rename = "anthropic")]
+    Anthropic,
+    /// OpenAI-compatible Ollama server (in-cluster or local).
+    #[serde(rename = "ollama")]
+    Ollama,
+    /// AWS Bedrock — schema-level forward-compat; router support is a
+    /// follow-up slice.
+    #[serde(rename = "bedrock")]
+    AWSBedrock,
+}
+
+impl InferenceProvider {
+    /// The kebab-case wire tag serde emits.
+    #[must_use]
+    pub fn as_tag(&self) -> &'static str {
+        match self {
+            Self::AzureOpenAI => "azure-openai",
+            Self::Anthropic => "anthropic",
+            Self::Ollama => "ollama",
+            Self::AWSBedrock => "bedrock",
+        }
+    }
+}
+
 /// `InferencePolicy.spec` — declares per-sandbox inference-time
 /// guardrails: token budgets, Content Safety severity floors, model
 /// preference + fallback chain.
@@ -101,6 +139,20 @@ pub struct InferencePolicySpec {
     /// the underlying provider. Mutually exclusive with
     /// [`Self::bundle_ref`].
     pub model_preference: Option<ModelPreference>,
+
+    /// Inference provider for the call sites this policy governs, and
+    /// the sole routing selector. Absent ⇒ the env-configured Azure
+    /// OpenAI / Foundry upstream. A non-Azure provider swaps the base
+    /// URL and auth scheme; credentials stay in the router sidecar,
+    /// never in the agent. Mutually exclusive with [`Self::bundle_ref`].
+    pub provider: Option<InferenceProvider>,
+
+    /// Ordered guardrail pipeline stages the router runs around each
+    /// call (input pre-flight + response, buffered and streaming), in
+    /// declaration order — first flag blocks. Absent ⇒ only the
+    /// Phase 1 substrate (Foundry annotations + `contentSafety`).
+    /// Mutually exclusive with [`Self::bundle_ref`].
+    pub guardrails: Option<Vec<GuardrailStage>>,
 
     /// Optional human-readable label. Mutually exclusive with
     /// [`Self::bundle_ref`] — when `bundleRef` is set, the label
@@ -226,6 +278,45 @@ pub struct ModelRef {
 
     /// Deployment name as advertised by the provider.
     pub deployment: String,
+}
+
+/// A single router-side guardrail stage. A stage whose backend isn't
+/// configured (e.g. missing moderation key) fails the request closed,
+/// never skips.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct GuardrailStage {
+    /// Guardrail backend.
+    pub provider: GuardrailProvider,
+
+    /// Which direction(s) this stage scans. Absent ⇒ `both`.
+    pub apply_to: Option<GuardrailApplyTo>,
+}
+
+/// Guardrail backend. Bedrock Guardrails / Model Armor are roadmap
+/// follow-ups that extend this enum.
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, JsonSchema)]
+pub enum GuardrailProvider {
+    /// OpenAI Moderation API; router-side key via
+    /// `OPENAI_MODERATION_API_KEY` (falls back to `OPENAI_API_KEY`).
+    #[serde(rename = "openai-moderation")]
+    OpenAIModeration,
+}
+
+/// Scan direction for a [`GuardrailStage`].
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Eq, Default, JsonSchema)]
+pub enum GuardrailApplyTo {
+    /// Scan only the request (prompt) text.
+    #[serde(rename = "input")]
+    Input,
+    /// Scan only the response (completion) text — buffered and
+    /// streaming.
+    #[serde(rename = "output")]
+    Output,
+    /// Scan both directions (default).
+    #[default]
+    #[serde(rename = "both")]
+    Both,
 }
 
 /// Status of an `InferencePolicy` reconcile.

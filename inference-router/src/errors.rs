@@ -84,6 +84,32 @@ pub fn openai(
     )
 }
 
+/// OpenAI-shape error that additionally carries a machine-readable
+/// `code`: `{"error": {"message", "type", "code"}}`.
+///
+/// Use for provider/guardrail policy denials so a client can switch on
+/// a single stable `error.code` across every inference route
+/// (chat-completions, the sibling `/v1/*` routes, and the Anthropic
+/// Messages route, which mirrors `code` into its own error object).
+/// Additive to [`openai`], `type` keeps its per-route value.
+pub fn openai_coded(
+    status: StatusCode,
+    msg: impl Into<String>,
+    type_: &str,
+    code: &str,
+) -> (StatusCode, Json<Value>) {
+    (
+        status,
+        Json(json!({
+            "error": {
+                "message": msg.into(),
+                "type": type_,
+                "code": code,
+            }
+        })),
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

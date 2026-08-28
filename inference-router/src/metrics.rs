@@ -38,6 +38,19 @@ pub static TOKENS_USED: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Guardrail pipeline scans by backend, direction, and outcome
+/// (`pass` | `flagged` | `error`).
+pub static GUARDRAIL_SCANS: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "kars_guardrail_scans_total",
+            "Guardrail pipeline scans by backend, direction, and outcome"
+        ),
+        &["provider", "direction", "outcome"]
+    )
+    .unwrap()
+});
+
 // ── AGT Governance metrics ──────────────────────────────────────────────────
 
 /// Total AGT policy evaluations by decision (allow, deny, requires_approval, rate_limited).
