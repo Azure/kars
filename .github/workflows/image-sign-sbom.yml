@@ -106,7 +106,7 @@ jobs:
 
       # ─── SBOM Generation ─────────────────────────────────────────────
       - name: Generate SBOM with Syft
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ env.REGISTRY }}/${{ matrix.component.image }}:${{ env.VERSION }}
           format: spdx-json
@@ -120,12 +120,12 @@ jobs:
 
       # ─── Image Signing with Notation ──────────────────────────────────
       - name: Install Notation
-        uses: notaryproject/notation-action/setup@b6fee73110795d6793253c673bd723f12bcf9bbb # v1
+        uses: notaryproject/notation-action/setup@b6fee73110795d6793253c673bd723f12bcf9bbb # v1.2.2
         with:
           version: "1.2.0"
 
       - name: Sign image with Notation
-        uses: notaryproject/notation-action/sign@b6fee73110795d6793253c673bd723f12bcf9bbb # v1
+        uses: notaryproject/notation-action/sign@b6fee73110795d6793253c673bd723f12bcf9bbb # v1.2.2
         with:
           plugin_name: azure-kv
           plugin_url: https://github.com/Azure/notation-azure-kv/releases/download/v1.2.0/notation-azure-kv_1.2.0_linux_amd64.tar.gz
