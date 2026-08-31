@@ -78,7 +78,7 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.9"
 sha2 = "0.10"
 bs58 = "0.5"
-base64 = "0.22"
+base64 = "0.23"
 hex = "0.4"
 
 # WebSocket (relay connection)

@@ -67,7 +67,7 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.9"
-base64 = "0.22"
+base64 = "0.23"
 flate2 = "1"
 # Ed25519 sign/verify for A2A 1.0.0 AgentCard signatures (a2a::card_signing).
 # Public-key crypto only — private key material flows through `SigningProvider`
