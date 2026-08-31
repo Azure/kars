@@ -422,7 +422,7 @@ jobs:
           output: "trivy-results.sarif"
 
       - name: Upload Trivy scan results
-        uses: github/codeql-action/upload-sarif@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         if: always()
         with:
           sarif_file: "trivy-results.sarif"
@@ -464,7 +464,7 @@ jobs:
           skip-dirs: "vendor,node_modules,target,dist,build,.turbo"
 
       - name: Upload scan results
-        uses: github/codeql-action/upload-sarif@e46ed2cbd01164d986452f91f178727624ae40d7 # v4.35.3
+        uses: github/codeql-action/upload-sarif@db488ddef3bf6cb639b32c2e9a7c0a7ea8271d28 # v4.37.8
         if: always() && hashFiles('container-results.sarif') != ''
         with:
           sarif_file: "container-results.sarif"
