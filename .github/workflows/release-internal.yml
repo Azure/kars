@@ -260,7 +260,7 @@ jobs:
 
       # ─── Per-image SBOM + Trivy ────────────────────────────────
       - name: Generate SBOM (SPDX JSON)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ghcr.io/azure/${{ matrix.image.ghcr }}:${{ env.VERSION }}
           format: spdx-json
