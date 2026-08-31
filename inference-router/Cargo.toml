@@ -67,7 +67,8 @@ aes-gcm = "0.10"
 hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.9"
-base64 = "0.22"
+# Keep credential and handoff encoding paths off the default-on unsafe SIMD backend.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 flate2 = "1"
 # Ed25519 sign/verify for A2A 1.0.0 AgentCard signatures (a2a::card_signing).
 # Public-key crypto only — private key material flows through `SigningProvider`
