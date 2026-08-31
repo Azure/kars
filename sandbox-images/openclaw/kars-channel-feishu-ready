@@ -1,0 +1,16 @@
+#!/bin/bash
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+set -euo pipefail
+
+status=$(openclaw channels status --channel feishu --json 2>/dev/null)
+printf '%s' "$status" | jq -e '
+  .gatewayReachable == true and
+  (.configOnly // false) != true and
+  any(.channelAccounts.feishu[]?;
+    .enabled == true and
+    .configured == true and
+    .running == true and
+    (.lastError // null) == null)
+' >/dev/null

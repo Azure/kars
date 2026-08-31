@@ -10,6 +10,75 @@
 #   UID 1001 (router)  — inference router, can reach internet
 #   UID 1000 (sandbox) — agent processes, restricted to localhost + DNS
 
+append_feishu_channel_config() {
+  if [ -z "${FEISHU_CONNECTION_MODE:-}" ]; then
+    return 0
+  fi
+  if [ -z "${FEISHU_APP_ID:-}" ] && [ -z "${FEISHU_APP_SECRET:-}" ]; then
+    echo "[kars] FATAL: Feishu requires both FEISHU_APP_ID and FEISHU_APP_SECRET" >&2
+    return 1
+  fi
+  if [ -z "${FEISHU_APP_ID:-}" ] || [ -z "${FEISHU_APP_SECRET:-}" ]; then
+    echo "[kars] FATAL: Feishu requires both FEISHU_APP_ID and FEISHU_APP_SECRET" >&2
+    return 1
+  fi
+  if [ "$FEISHU_CONNECTION_MODE" != "websocket" ]; then
+    echo "[kars] FATAL: Feishu only supports websocket connection mode" >&2
+    return 1
+  fi
+  local plugin_stage="${KARS_FEISHU_PLUGIN_STAGE:-/opt/openclaw-feishu-stage}"
+  local openclaw_state="${OPENCLAW_DIR:-/sandbox/.openclaw}"
+  if [ ! -f "$plugin_stage/plugins/installs.json" ] || \
+     [ ! -d "$plugin_stage/npm/node_modules/@openclaw/feishu" ]; then
+    echo "[kars] FATAL: pinned OpenClaw Feishu plugin is missing" >&2
+    return 1
+  fi
+  mkdir -p "$openclaw_state/plugins"
+  rm -rf "$openclaw_state/npm"
+  cp -r "$plugin_stage/npm" "$openclaw_state/npm"
+  cp "$plugin_stage/plugins/installs.json" "$openclaw_state/plugins/installs.json"
+
+  local allow_from group_allow_from require_mention feishu_config separator
+  allow_from=$(jq -cn --arg value "${FEISHU_ALLOW_FROM:-}" \
+    '$value | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+  group_allow_from=$(jq -cn --arg value "${FEISHU_GROUP_ALLOW_FROM:-}" \
+    '$value | split(",") | map(gsub("^\\s+|\\s+$"; "")) | map(select(length > 0))')
+  case "${FEISHU_REQUIRE_MENTION:-true}" in
+    true) require_mention=true ;;
+    false) require_mention=false ;;
+    *)
+      echo "[kars] FATAL: FEISHU_REQUIRE_MENTION must be true or false" >&2
+      return 1
+      ;;
+  esac
+
+  feishu_config=$(jq -cn \
+    --arg app_id "$FEISHU_APP_ID" \
+    --arg app_secret "$FEISHU_APP_SECRET" \
+    --arg domain "${FEISHU_DOMAIN:-feishu}" \
+    --arg connection_mode "${FEISHU_CONNECTION_MODE:-websocket}" \
+    --arg dm_policy "${FEISHU_DM_POLICY:-pairing}" \
+    --argjson allow_from "$allow_from" \
+    --arg group_policy "${FEISHU_GROUP_POLICY:-allowlist}" \
+    --argjson group_allow_from "$group_allow_from" \
+    --argjson require_mention "$require_mention" \
+    '{appId: $app_id, appSecret: $app_secret, domain: $domain,
+      connectionMode: $connection_mode, dmPolicy: $dm_policy,
+      allowFrom: $allow_from, groupPolicy: $group_policy,
+      groupAllowFrom: $group_allow_from, requireMention: $require_mention}')
+
+  separator=""
+  [ -n "${CHANNELS_CONFIG:-}" ] && separator=", "
+  CHANNELS_CONFIG="${CHANNELS_CONFIG:-}${separator}\"feishu\": ${feishu_config}"
+  PLUGINS_LIST="${PLUGINS_LIST}, \"feishu\""
+  [ -n "${PLUGINS_ENTRIES:-}" ] && PLUGINS_ENTRIES="${PLUGINS_ENTRIES}, "
+  PLUGINS_ENTRIES="${PLUGINS_ENTRIES}\"feishu\": { \"enabled\": true }"
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 set -e
 
 # Make pre-staged OpenClaw bundled-runtime-deps discoverable at runtime.
@@ -383,7 +452,9 @@ else
   export OPENCLAW_DISABLE_BUNDLED_PLUGINS=1
 fi
 
-# Always (re)generate config + workspace seed files on every container start.
+# Always regenerate env-driven config on every container start. Workspace seed
+# files are created only when missing so PVC-backed user/bootstrap content
+# survives restarts.
 #
 # Previously this block was guarded by `[ ! -f "$OPENCLAW_CONFIG" ]` for "idempotency",
 # but on AKS `/sandbox` is a persistent volume and OpenClaw's runtime workspace
@@ -964,6 +1035,8 @@ AUTHPROFEOF
     PLUGINS_ENTRIES="${PLUGINS_ENTRIES}\"discord\": { \"enabled\": true }"
   fi
 
+  append_feishu_channel_config
+
   # Default: no channels configured
   if [ -z "${CHANNELS_CONFIG}" ]; then
     CHANNELS_CONFIG="\"_placeholder\": false"
@@ -1029,8 +1102,10 @@ RCEOF
     printf '\n# kars env (managed by entrypoint)\n[ -f /sandbox/.kars-env.sh ] && . /sandbox/.kars-env.sh\n' >> /sandbox/.bashrc
   fi
 
-  # Write minimal workspace files so OpenClaw doesn't need onboarding
-  cat > "$WORKSPACE_DIR/AGENTS.md" << AGENTSEOF
+  # Write defaults only when a bootstrap init container or prior runtime has
+  # not already supplied the file.
+  if [ ! -e "$WORKSPACE_DIR/AGENTS.md" ]; then
+    cat > "$WORKSPACE_DIR/AGENTS.md" << AGENTSEOF
 # kars Agent
 
 You are a helpful AI assistant running inside an **kars** sandbox — a secure,
@@ -1143,9 +1218,11 @@ Network egress starts in **learn mode** — all domains are allowed and recorded
 The operator can graduate to enforcement with \`kars egress <name> --enforce\`,
 which promotes learned domains to the allowlist. After that, new domains require approval.
 AGENTSEOF
+  fi
 
   # Write TOOLS.md describing available Foundry endpoints
-  cat > "$WORKSPACE_DIR/TOOLS.md" << 'TOOLSEOF'
+  if [ ! -e "$WORKSPACE_DIR/TOOLS.md" ]; then
+    cat > "$WORKSPACE_DIR/TOOLS.md" << 'TOOLSEOF'
 # kars Tools
 
 All tools are accessed via the inference router at http://localhost:8443.
@@ -1210,8 +1287,10 @@ curl -s -X POST http://localhost:8443/egress/fetch \
 **IMPORTANT:** Do NOT use `curl https://...` directly — it will time out.
 Always use `curl http://localhost:8443/egress/fetch` with the target URL in the body.
 TOOLSEOF
+  fi
 
-  cat > "$WORKSPACE_DIR/SOUL.md" << SOULEOF
+  if [ ! -e "$WORKSPACE_DIR/SOUL.md" ]; then
+    cat > "$WORKSPACE_DIR/SOUL.md" << SOULEOF
 # Soul
 
 You are **kars Agent** — a secure, sandboxed AI assistant powered by Azure AI Foundry.
@@ -1239,6 +1318,7 @@ for clarification; interpret the task as given and deliver your best work.
 For memory: write important facts, preferences, and decisions to memory files so they
 persist across sessions. Use \`foundry_memory\` for cross-agent/cross-session recall.
 SOULEOF
+  fi
 
   echo "[kars] OpenClaw configured — model: ${MODEL}, endpoint: ${ENDPOINT}"
 else

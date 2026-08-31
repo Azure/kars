@@ -15,7 +15,7 @@ FROM ${AZURELINUX_BASE} AS builder
 # Detect arch for Node.js download (x64 or arm64)
 ARG TARGETARCH
 RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    tdnf install -y tar gzip ca-certificates curl git && tdnf clean all && \
+    tdnf install -y tar gzip ca-certificates curl git jq && tdnf clean all && \
     curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
     tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/node.tar.gz
@@ -26,7 +26,22 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
 # or change the value below to force a fresh pull.
 ARG OPENCLAW_VERSION=2026.5.27
 ARG OPENCLAW_CACHE_BUST=0
-RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && npm install -g openclaw@${OPENCLAW_VERSION}
+COPY sandbox-images/openclaw/patch-feishu-proxy.cjs /usr/local/bin/patch-feishu-proxy.cjs
+RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && \
+    npm install -g openclaw@${OPENCLAW_VERSION} && \
+    mkdir -p /opt/openclaw-feishu-stage && \
+    OPENCLAW_STATE_DIR=/opt/openclaw-feishu-stage \
+      OPENCLAW_CONFIG_PATH=/opt/openclaw-feishu-stage/openclaw.json \
+      openclaw plugins install "@openclaw/feishu@${OPENCLAW_VERSION}" --pin && \
+    node /usr/local/bin/patch-feishu-proxy.cjs /opt/openclaw-feishu-stage && \
+    grep -Rqs 'httpsAgent: agent' /opt/openclaw-feishu-stage/npm/node_modules/@openclaw/feishu/dist/client-*.js && \
+    grep -Rqs 'r.httpsAgent = agent' /opt/openclaw-feishu-stage/npm/node_modules/@openclaw/feishu/dist/client-*.js && \
+    grep -Rqs 'error.config.data = "\[redacted\]"' /opt/openclaw-feishu-stage/npm/node_modules/@openclaw/feishu/dist/client-*.js && \
+    OPENCLAW_STATE_DIR=/opt/openclaw-feishu-stage \
+      OPENCLAW_CONFIG_PATH=/opt/openclaw-feishu-stage/openclaw.json \
+      openclaw plugins list --json | \
+      jq -e 'any(.plugins[]?; .id == "feishu" and .status == "loaded")' >/dev/null && \
+    chmod -R a-w /opt/openclaw-feishu-stage && chmod -R a+rX /opt/openclaw-feishu-stage
 
 # OpenClaw ≥2026.4 hoists channel bundle chunks to dist/ but npm installs don't
 # stage extension deps into the top-level node_modules/ (openclaw/openclaw#62749).
@@ -275,6 +290,7 @@ COPY --from=builder /root/.openclaw/workspace/skills/ /opt/clawhub-skills/
 # the deps without invoking npm. Read-only + world-readable; agent UID 1000 can read
 # but not modify, satisfying the agent self-modification prevention rule.
 COPY --from=builder /opt/openclaw-stage /opt/openclaw-stage
+COPY --from=builder /opt/openclaw-feishu-stage /opt/openclaw-feishu-stage
 RUN chmod -R a+rX /opt/openclaw-stage
 
 # Symlink Control UI assets (the gateway expects dist/control-ui/)

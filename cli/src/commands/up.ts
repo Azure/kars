@@ -51,6 +51,11 @@ export function upCommand(): Command {
     .option("--release [version]", "Import the PUBLIC, signed GHCR release images (ghcr.io/azure/*) into your ACR instead of building from source. Bare --release uses the latest release; pass a tag (e.g. v0.1.4) to pin. No Rust/Docker build needed.")
     .option("--build", "Build images locally and push to ACR (developer mode)", false)
     .option("--skip-runtime-images", "Skip building/importing the 7 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable)", false)
+    // ── Initial sandbox workspace ───────────────────────────────────────
+    .option("--workspace-storage <size>", "Create a persistent workspace PVC for the initial sandbox, e.g. 10Gi")
+    .option("--workspace-storage-class <name>", "StorageClass for the initial sandbox workspace PVC")
+    .option("--workspace-existing-claim <name>", "Use an existing PVC in the initial sandbox namespace")
+    .option("--workspace-retain-policy <policy>", "Initial workspace deletion policy: Retain | Delete", "Retain")
     // ── Foundry / Azure OpenAI ────────────────────────────────────────
     .option("--foundry-endpoint <url>", "Existing Azure AI Foundry project endpoint (services.ai.azure.com)")
     .option("--openai-endpoint <url>", "Existing Azure OpenAI endpoint (openai.azure.com, derived from Foundry if omitted)")
@@ -84,6 +89,7 @@ Flag groups:
   Cluster / region:   --region, --cluster-name, --isolation, --resource-group
   Infrastructure:     --skip-infra, --force-infra, --skip-preflight
   Images:             --source-acr, --build, --skip-runtime-images
+  Workspace:          --workspace-storage, --workspace-existing-claim, --workspace-retain-policy
   Foundry:            --foundry-endpoint, --openai-endpoint
   Mesh federation:    --mesh-peer / --no-mesh-peer, --global-registry, --expose-registry, --mesh-trust=anonymous|entra
   Output / lifecycle: --dry-run, --upgrade, --from-scratch
@@ -113,6 +119,22 @@ Auto-resume:
       const policyPresets = ["minimal", "developer", "web", "azure"];
       if (options.policy && !policyPresets.includes(options.policy)) {
         console.error(chalk.red(`\n  Error: --policy must be one of: ${policyPresets.join(" | ")} (got "${options.policy}").\n`));
+        process.exit(1);
+      }
+      if (options.workspaceStorage && options.workspaceExistingClaim) {
+        console.error(chalk.red("\n  Error: --workspace-storage and --workspace-existing-claim are mutually exclusive.\n"));
+        process.exit(1);
+      }
+      if (options.workspaceStorageClass && !options.workspaceStorage) {
+        console.error(chalk.red("\n  Error: --workspace-storage-class requires --workspace-storage <size>.\n"));
+        process.exit(1);
+      }
+      if (!["Retain", "Delete"].includes(options.workspaceRetainPolicy)) {
+        console.error(chalk.red("\n  Error: --workspace-retain-policy must be Retain or Delete.\n"));
+        process.exit(1);
+      }
+      if (options.workspaceExistingClaim && options.workspaceRetainPolicy !== "Retain") {
+        console.error(chalk.red("\n  Error: --workspace-retain-policy applies only to generated PVCs.\n"));
         process.exit(1);
       }
 

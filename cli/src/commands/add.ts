@@ -4,6 +4,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
+import { randomBytes } from "node:crypto";
 import { loadContext, resolveSecret } from "../config.js";
 import { assertRuntimeWired, buildRuntimeBlock, flagToKind } from "../runtime.js";
 import {
@@ -12,6 +13,182 @@ import {
   inferenceRefName,
   toolPolicyRefName,
 } from "../refs.js";
+import type { RuntimeKind } from "../runtime.js";
+import { buildWorkspaceStorageSpec } from "../lib/workspace-storage.js";
+import {
+  classifyFeishuSecretReference,
+  shouldCleanupStagedFeishuSecret,
+  type FeishuSecretReferenceState,
+} from "../lib/feishu-secret-reference.js";
+
+type FeishuAddOptions = {
+  channels?: string;
+  feishuAppId?: string;
+  feishuAppSecret?: string;
+  feishuDomain?: string;
+  feishuDmPolicy?: string;
+  feishuAllowFrom?: string;
+  feishuGroupPolicy?: string;
+  feishuGroupAllowFrom?: string;
+  feishuRequireMention?: boolean;
+};
+
+function includesChannel(channels: string | undefined, name: string): boolean {
+  return (channels ?? "")
+    .split(",")
+    .map((channel) => channel.trim().toLowerCase())
+    .includes(name);
+}
+
+function csv(value: string | undefined): string[] {
+  return (value ?? "")
+    .split(",")
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+export function buildCredentialSecretManifest(
+  name: string,
+  namespace: string,
+  values: Record<string, string>,
+  options: { immutable?: boolean; labels?: Record<string, string> } = {},
+): Record<string, unknown> {
+  return {
+    apiVersion: "v1",
+    kind: "Secret",
+    metadata: { name, namespace, ...(options.labels ? { labels: options.labels } : {}) },
+    type: "Opaque",
+    ...(options.immutable ? { immutable: true } : {}),
+    stringData: values,
+  };
+}
+
+export function buildFeishuChannelSpec(
+  runtimeKind: RuntimeKind,
+  options: FeishuAddOptions,
+): Record<string, unknown> | undefined {
+  if (!includesChannel(options.channels, "feishu")) return undefined;
+  if (runtimeKind !== "OpenClaw" && runtimeKind !== "Hermes") {
+    throw new Error("Feishu is only supported by OpenClaw and Hermes");
+  }
+  const domain = (options.feishuDomain ?? "feishu").toLowerCase();
+  const dmPolicy = (options.feishuDmPolicy ?? "pairing").toLowerCase();
+  const groupPolicy = (options.feishuGroupPolicy ?? "allowlist").toLowerCase();
+  if (!new Set(["feishu", "lark"]).has(domain)) {
+    throw new Error("--feishu-domain must be feishu or lark");
+  }
+  if (!new Set(["pairing", "allowlist", "disabled"]).has(dmPolicy)) {
+    throw new Error("--feishu-dm-policy must be pairing, allowlist, or disabled");
+  }
+  if (!new Set(["allowlist", "disabled"]).has(groupPolicy)) {
+    throw new Error("--feishu-group-policy must be allowlist or disabled");
+  }
+  const allowFrom = csv(options.feishuAllowFrom);
+  const groupAllowFrom = csv(options.feishuGroupAllowFrom);
+  if (dmPolicy === "allowlist" && allowFrom.length === 0) {
+    throw new Error("--feishu-dm-policy allowlist requires --feishu-allow-from");
+  }
+  if (allowFrom.some((id) => !/^ou_[A-Za-z0-9_-]+$/.test(id))) {
+    throw new Error("--feishu-allow-from values must be ou_ user open IDs");
+  }
+  if (groupAllowFrom.some((id) => !/^oc_[A-Za-z0-9_-]+$/.test(id))) {
+    throw new Error("--feishu-group-allow-from values must be oc_ group chat IDs");
+  }
+  return {
+    type: "Feishu",
+    feishu: {
+      domain: domain === "lark" ? "Lark" : "Feishu",
+      connectionMode: "WebSocket",
+      directMessages: {
+        policy: dmPolicy === "allowlist" ? "Allowlist" : dmPolicy === "disabled" ? "Disabled" : "Pairing",
+        allowFrom,
+      },
+      groups: {
+        policy: groupPolicy === "disabled" ? "Disabled" : "Allowlist",
+        allowFrom: groupAllowFrom,
+        requireMention: options.feishuRequireMention ?? true,
+      },
+    },
+  };
+}
+
+export function buildFeishuSecrets(options: FeishuAddOptions): Record<string, string> {
+  if (!includesChannel(options.channels, "feishu")) return {};
+  const appId = options.feishuAppId?.trim();
+  const appSecret = options.feishuAppSecret?.trim();
+  if (!appId || !appSecret) {
+    throw new Error("Feishu requires both --feishu-app-id and --feishu-app-secret");
+  }
+  return { FEISHU_APP_ID: appId, FEISHU_APP_SECRET: appSecret };
+}
+
+export function validateRuntimeSpecificAddFlags(
+  runtimeKind: RuntimeKind,
+  options: Record<string, unknown>,
+): string[] {
+  const errors: string[] = [];
+  const channelFlags: Array<[string, unknown]> = [
+    ["--channels", options.channels],
+    ["--telegram-token", options.telegramToken],
+    ["--telegram-allow-from", options.telegramAllowFrom],
+    ["--slack-token", options.slackToken],
+    ["--discord-token", options.discordToken],
+    ["--feishu-app-id", options.feishuAppId],
+    ["--feishu-app-secret", options.feishuAppSecret],
+    ["--feishu-allow-from", options.feishuAllowFrom],
+    ["--feishu-group-allow-from", options.feishuGroupAllowFrom],
+  ];
+  if (runtimeKind !== "OpenClaw" && runtimeKind !== "Hermes") {
+    const used = channelFlags
+      .filter(([, value]) => value !== undefined && value !== "" && value !== false)
+      .map(([flag]) => flag);
+    if (used.length > 0) {
+      errors.push(
+        `${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with ` +
+          `--runtime openclaw or --runtime hermes.`,
+      );
+    }
+  }
+  const feishuFlags: Array<[string, unknown]> = [
+    ["--feishu-app-id", options.feishuAppId],
+    ["--feishu-app-secret", options.feishuAppSecret],
+    ["--feishu-allow-from", options.feishuAllowFrom],
+    ["--feishu-group-allow-from", options.feishuGroupAllowFrom],
+    ["--feishu-domain", options.feishuDomain !== "feishu" ? options.feishuDomain : undefined],
+    ["--feishu-dm-policy", options.feishuDmPolicy !== "pairing" ? options.feishuDmPolicy : undefined],
+    ["--feishu-group-policy", options.feishuGroupPolicy !== "allowlist" ? options.feishuGroupPolicy : undefined],
+    ["--no-feishu-require-mention", options.feishuRequireMention === false],
+  ];
+  const usedFeishuFlags = feishuFlags
+    .filter(([, value]) => value !== undefined && value !== "" && value !== false)
+    .map(([flag]) => flag);
+  if (usedFeishuFlags.length > 0 && !includesChannel(options.channels as string | undefined, "feishu")) {
+    errors.push(`${usedFeishuFlags.join(", ")} require --channels feishu.`);
+  }
+
+  const openClawOnlyFlags: Array<[string, unknown]> = [
+    ["--skills", options.skills],
+    ["--brave-api-key", options.braveApiKey],
+    ["--tavily-api-key", options.tavilyApiKey],
+    ["--exa-api-key", options.exaApiKey],
+    ["--firecrawl-api-key", options.firecrawlApiKey],
+    ["--perplexity-api-key", options.perplexityApiKey],
+    ["--openai-api-key", options.openaiApiKey],
+    ["--image", options.image],
+  ];
+  if (runtimeKind !== "OpenClaw") {
+    const used = openClawOnlyFlags
+      .filter(([, value]) => value !== undefined && value !== "" && value !== false)
+      .map(([flag]) => flag);
+    if (used.length > 0) {
+      errors.push(
+        `${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with ` +
+          `--runtime openclaw.`,
+      );
+    }
+  }
+  return errors;
+}
 
 export function addCommand(): Command {
   const cmd = new Command("add");
@@ -25,6 +202,14 @@ export function addCommand(): Command {
     .option("--model <model>", "AI model deployment name in Foundry", "gpt-4.1")
     .option("--isolation <level>", "Isolation level: standard | enhanced | confidential", "enhanced")
     .option("--image <image>", "Custom sandbox image (default: from Helm values; OpenClaw runtime only)")
+
+    // ── Workspace storage (all runtimes; bootstrap is OpenClaw-only) ───
+    .option("--workspace-storage <size>", "Create a persistent workspace PVC, e.g. 10Gi")
+    .option("--workspace-storage-class <name>", "StorageClass for a generated workspace PVC")
+    .option("--workspace-existing-claim <name>", "Use an existing PVC in the generated sandbox namespace")
+    .option("--workspace-retain-policy <policy>", "Generated PVC deletion policy: Retain | Delete", "Retain")
+    .option("--workspace-bootstrap <configmap>", "[OpenClaw only] ConfigMap containing workspace bootstrap files")
+    .option("--workspace-overwrite <policy>", "[OpenClaw only] Bootstrap policy: IfMissing | Always", "IfMissing")
 
     // ── Inference budget (all runtimes) ────────────────────────────────
     .option("--token-budget-daily <tokens>", "Daily token budget (0 = unlimited)", "0")
@@ -46,11 +231,20 @@ export function addCommand(): Command {
     .option("--agent-tools <tools>", "Foundry tools: file_search,web_search,code_interpreter (comma-separated)")
 
     // ── Runtime-specific: OpenClaw + Hermes (channel-capable runtimes) ─
-    .option("--channels <channels>", "[OpenClaw + Hermes] Channels to enable: telegram,slack,discord,whatsapp (comma-separated)")
+    .option("--channels <channels>", "[OpenClaw + Hermes] Channels to enable: telegram,slack,discord,whatsapp,feishu (comma-separated)")
     .option("--telegram-token <token>", "[OpenClaw + Hermes] Telegram bot token (from BotFather)")
     .option("--telegram-allow-from <ids>", "[OpenClaw + Hermes] Telegram user IDs allowed to DM (comma-separated)")
     .option("--slack-token <token>", "[OpenClaw + Hermes] Slack bot OAuth token")
     .option("--discord-token <token>", "[OpenClaw + Hermes] Discord bot token")
+    .option("--feishu-app-id <id>", "[OpenClaw + Hermes] Feishu/Lark App ID")
+    .option("--feishu-app-secret <secret>", "[OpenClaw + Hermes] Feishu/Lark App Secret")
+    .option("--feishu-domain <domain>", "[OpenClaw + Hermes] Feishu domain: feishu | lark", "feishu")
+    .option("--feishu-dm-policy <policy>", "[OpenClaw + Hermes] Feishu DM policy: pairing | allowlist | disabled", "pairing")
+    .option("--feishu-allow-from <ids>", "[OpenClaw + Hermes] Feishu user open_ids (comma-separated)")
+    .option("--feishu-group-policy <policy>", "[OpenClaw + Hermes] Feishu group policy: allowlist | disabled", "allowlist")
+    .option("--feishu-group-allow-from <ids>", "[OpenClaw + Hermes] Feishu group chat_ids (comma-separated)")
+    .option("--feishu-require-mention", "[OpenClaw + Hermes] Require direct bot mention in groups", true)
+    .option("--no-feishu-require-mention", "[OpenClaw + Hermes] Respond in allowed groups without mention")
     // ── Runtime-specific: OpenClaw only (skills + plugin API keys) ─────
     .option("--skills <skills>", "[OpenClaw only] Skills to activate: browser,github,summarize,weather (comma-separated)")
     .option("--brave-api-key <key>", "[OpenClaw only] Brave Search API key")
@@ -72,6 +266,7 @@ export function addCommand(): Command {
     .addHelpText("after", `
 Flag groups (see --help for details):
   Core:                --runtime, --model, --isolation, --image
+  Workspace:           --workspace-storage, --workspace-existing-claim, --workspace-bootstrap
   Inference budget:    --token-budget-*
   Governance / net:    --governance, --trust-threshold, --policy-profile, --learn-egress
   Foundry agent:       --agent-instructions, --agent-tools
@@ -93,29 +288,10 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
       // Validate runtime-specific flag combinations before doing any work.
       // Reject incompatible flags up-front with a clear, actionable error
       // — better than silently ignoring a user's intent.
-      const openClawOnlyFlags: Array<[string, unknown]> = [
-        ["--channels", options.channels],
-        ["--telegram-token", options.telegramToken],
-        ["--telegram-allow-from", options.telegramAllowFrom],
-        ["--slack-token", options.slackToken],
-        ["--discord-token", options.discordToken],
-        ["--skills", options.skills],
-        ["--brave-api-key", options.braveApiKey],
-        ["--tavily-api-key", options.tavilyApiKey],
-        ["--exa-api-key", options.exaApiKey],
-        ["--firecrawl-api-key", options.firecrawlApiKey],
-        ["--perplexity-api-key", options.perplexityApiKey],
-        ["--openai-api-key", options.openaiApiKey],
-        ["--image", options.image],
-      ];
-      if (runtimeKind !== "OpenClaw") {
-        const used = openClawOnlyFlags.filter(([, v]) => v !== undefined && v !== "" && v !== false).map(([f]) => f);
-        if (used.length > 0) {
-          console.error(chalk.red(`\n  Error: ${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with --runtime openclaw.`));
-          console.error(chalk.dim(`  Channels, skills, and plugin API keys are OpenClaw-specific entrypoint features.`));
-          console.error(chalk.dim(`  For ${options.runtime}, configure equivalents inside the agent's own code.\n`));
-          process.exit(1);
-        }
+      const runtimeFlagErrors = validateRuntimeSpecificAddFlags(runtimeKind, options);
+      if (runtimeFlagErrors.length > 0) {
+        console.error(chalk.red(`\n  Error: ${runtimeFlagErrors.join(" ")}\n`));
+        process.exit(1);
       }
       if (runtimeKind !== "BYO" && (options.byoImage || (options.byoContractVersion && options.byoContractVersion !== "v1"))) {
         console.error(chalk.red(`\n  Error: --byo-image / --byo-contract-version are only valid with --runtime byo.\n`));
@@ -129,6 +305,40 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         console.error(chalk.red(`\n  Error: --maf-language is only valid with --runtime microsoft-agent-framework.\n`));
         process.exit(1);
       }
+      if (options.workspaceStorage && options.workspaceExistingClaim) {
+        console.error(chalk.red(`\n  Error: --workspace-storage and --workspace-existing-claim are mutually exclusive.\n`));
+        process.exit(1);
+      }
+      if (options.workspaceStorageClass && !options.workspaceStorage) {
+        console.error(chalk.red(`\n  Error: --workspace-storage-class requires --workspace-storage <size>.\n`));
+        process.exit(1);
+      }
+      if (options.workspaceExistingClaim && options.workspaceRetainPolicy !== "Retain") {
+        console.error(chalk.red(`\n  Error: --workspace-retain-policy applies only to generated PVCs; existing claims are always externally managed.\n`));
+        process.exit(1);
+      }
+      if (!(["Retain", "Delete"] as const).includes(options.workspaceRetainPolicy)) {
+        console.error(chalk.red(`\n  Error: --workspace-retain-policy must be Retain or Delete.\n`));
+        process.exit(1);
+      }
+      if (runtimeKind !== "OpenClaw" && options.workspaceBootstrap) {
+        console.error(chalk.red(`\n  Error: --workspace-bootstrap is only valid with --runtime openclaw.\n`));
+        process.exit(1);
+      }
+      if (!(["IfMissing", "Always"] as const).includes(options.workspaceOverwrite)) {
+        console.error(chalk.red(`\n  Error: --workspace-overwrite must be IfMissing or Always.\n`));
+        process.exit(1);
+      }
+      if (!options.workspaceBootstrap && options.workspaceOverwrite !== "IfMissing") {
+        console.error(chalk.red(`\n  Error: --workspace-overwrite requires --workspace-bootstrap <configmap>.\n`));
+        process.exit(1);
+      }
+      if (options.workspaceStorage && options.workspaceRetainPolicy === "Delete") {
+        console.log(chalk.yellow("  ⚠ Workspace retain policy is Delete: deleting the KarsSandbox will delete its PVC and data."));
+      }
+      if (!options.workspaceStorage && !options.workspaceExistingClaim) {
+        console.log(chalk.yellow("  ⚠ Workspace is ephemeral (emptyDir): Pod recreation or suspension deletes sessions and files."));
+      }
 
       const runtimeBlock = buildRuntimeBlock({
         kind: runtimeKind,
@@ -139,6 +349,29 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         byoContractVersion: options.byoContractVersion,
         mafLanguage: options.mafLanguage as "python" | "dotnet",
       });
+      let feishuChannel: Record<string, unknown> | undefined;
+      let feishuSecrets: Record<string, string> = {};
+      try {
+        feishuChannel = buildFeishuChannelSpec(runtimeKind, options);
+        feishuSecrets = buildFeishuSecrets({
+          ...options,
+          feishuAppId: resolveSecret(options.feishuAppId, "feishu-app-id"),
+          feishuAppSecret: resolveSecret(options.feishuAppSecret, "feishu-app-secret"),
+        });
+      } catch (error) {
+        console.error(chalk.red(`\n  Error: ${(error as Error).message}\n`));
+        process.exit(1);
+      }
+      const feishuSecretName = feishuChannel
+        ? `${name}-feishu-${randomBytes(6).toString("hex")}`
+        : undefined;
+      if (options.workspaceBootstrap) {
+        const openclaw = runtimeBlock.openclaw as Record<string, unknown>;
+        openclaw.workspace = {
+          bootstrapConfigMapRef: { name: options.workspaceBootstrap },
+          overwritePolicy: options.workspaceOverwrite,
+        };
+      }
 
       const sandbox: Record<string, unknown> = {
         apiVersion: "kars.azure.com/v1alpha1",
@@ -173,6 +406,15 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           },
         },
       };
+
+      const storage = buildWorkspaceStorageSpec(options);
+      if (storage) {
+        (sandbox.spec as Record<string, unknown>).storage = storage;
+      }
+      if (feishuChannel) {
+        feishuChannel.credentialSecretRef = { name: feishuSecretName };
+        (sandbox.spec as Record<string, unknown>).channels = [feishuChannel];
+      }
 
       // Add Foundry agent config if provided
       if (options.agentInstructions || options.agentTools) {
@@ -221,7 +463,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         discord: "DISCORD_BOT_TOKEN",
         whatsapp: "WHATSAPP_ENABLED",
       };
-      const knownChannels = new Set(["telegram", "slack", "discord", "whatsapp"]);
+      const knownChannels = new Set(["telegram", "slack", "discord", "whatsapp", "feishu"]);
 
       if (options.channels) {
         const channels = options.channels.split(",").map((c: string) => c.trim().toLowerCase());
@@ -381,6 +623,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
       }
 
       const spinner = ora(`Creating sandbox '${name}' (${options.isolation}, ${options.model})...`).start();
+      let stagedFeishuSecretCreated = false;
 
       try {
         // Verify cluster is reachable
@@ -449,21 +692,39 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         };
         if (Object.keys(allSecrets).length > 0) {
           spinner.text = "Creating credential secret...";
-          try {
-            // Ensure namespace exists
-            await execa("kubectl", ["create", "namespace", namespace], { stdio: "pipe" }).catch(() => {});
-            const secretArgs = ["create", "secret", "generic", `${name}-credentials`, "-n", namespace];
-            for (const [envVar, value] of Object.entries(allSecrets)) {
-              secretArgs.push(`--from-literal=${envVar}=${value}`);
-            }
-            await execa("kubectl", secretArgs, { stdio: "pipe" }).catch(async () => {
-              // Already exists — delete and recreate with updated values
-              await execa("kubectl", ["delete", "secret", `${name}-credentials`, "-n", namespace], { stdio: "pipe" }).catch(() => {});
-              return execa("kubectl", secretArgs, { stdio: "pipe" });
-            });
-          } catch {
-            // Non-fatal — controller can still create pod without credential secret
-          }
+          // Ensure namespace exists
+          await execa("kubectl", ["create", "namespace", namespace], { stdio: "pipe" }).catch(() => {});
+          const secretManifest = buildCredentialSecretManifest(
+            `${name}-credentials`,
+            namespace,
+            allSecrets,
+          );
+          await execa("kubectl", ["apply", "--server-side", "--field-manager=kars-cli", "-f", "-"], {
+            input: JSON.stringify(secretManifest),
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+        }
+        if (Object.keys(feishuSecrets).length > 0) {
+          spinner.text = "Creating immutable Feishu credential secret...";
+          await execa("kubectl", ["create", "namespace", namespace], { stdio: "pipe" }).catch(() => {});
+          const feishuSecretManifest = buildCredentialSecretManifest(
+            feishuSecretName!,
+            namespace,
+            feishuSecrets,
+            {
+              immutable: true,
+              labels: {
+                "channels.kars.azure.com/managed-rotation": "true",
+                "channels.kars.azure.com/revision-state": "staged",
+                "kars.azure.com/sandbox": name,
+              },
+            },
+          );
+          await execa("kubectl", ["create", "-f", "-"], {
+            input: JSON.stringify(feishuSecretManifest),
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+          stagedFeishuSecretCreated = true;
         }
         spinner.text = `Creating sandbox '${name}'...`;
         // Apply InferencePolicy + (optional) ToolPolicy + KarsSandbox as a
@@ -591,6 +852,18 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         console.log(chalk.dim(`  Namespace:  ${namespace}`));
         console.log(chalk.dim(`  Model:      ${options.model}`));
         console.log(chalk.dim(`  Isolation:  ${options.isolation}`));
+        if (options.workspaceExistingClaim) {
+          console.log(chalk.dim(`  Workspace:  existing PVC ${options.workspaceExistingClaim} (externally managed)`));
+        } else if (options.workspaceStorage) {
+          console.log(chalk.dim(
+            `  Workspace:  ${name}-workspace (${options.workspaceStorage}, ${options.workspaceStorageClass || "default StorageClass"}, ${options.workspaceRetainPolicy})`,
+          ));
+        } else {
+          console.log(chalk.yellow("  Workspace:  ephemeral emptyDir"));
+        }
+        if (options.workspaceBootstrap) {
+          console.log(chalk.dim(`  Bootstrap:  ${options.workspaceBootstrap} (${options.workspaceOverwrite})`));
+        }
         if (options.channels) {
           console.log(chalk.dim(`  Channels:   ${options.channels}`));
         }
@@ -602,6 +875,21 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         console.log(chalk.dim(`  Remove:     kars destroy ${name}\n`));
 
       } catch (error) {
+        if (stagedFeishuSecretCreated && feishuSecretName) {
+          let referenceState: FeishuSecretReferenceState = "unknown";
+          try {
+            const { stdout } = await execa("kubectl", [
+              "get", "karssandbox", name, "-n", "kars-system",
+              "--ignore-not-found=true", "-o", "json",
+            ], { stdio: "pipe" });
+            referenceState = classifyFeishuSecretReference(stdout, feishuSecretName);
+          } catch { /* preserve the Secret when the live reference is unknown */ }
+          if (shouldCleanupStagedFeishuSecret(feishuSecretName, referenceState)) {
+            await execa("kubectl", [
+              "delete", "secret", feishuSecretName, "-n", `kars-${name}`, "--ignore-not-found",
+            ], { stdio: "pipe" }).catch(() => {});
+          }
+        }
         spinner.fail("Failed to create sandbox");
         const message = error instanceof Error ? error.message : String(error);
         if (message.includes("karssandboxes.kars.azure.com")) { // lgtm[js/incomplete-url-substring-sanitization] — error message check, not URL validation

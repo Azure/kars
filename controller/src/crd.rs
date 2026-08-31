@@ -72,6 +72,16 @@ pub struct KarsSandboxSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_ref: Option<LocalObjectRef>,
 
+    /// Optional per-sandbox storage configuration. When omitted, the runtime
+    /// workspace remains an ephemeral `emptyDir` for backward compatibility.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage: Option<SandboxStorageSpec>,
+
+    /// Runtime-facing messaging channels. Policy is non-sensitive; channel
+    /// credentials remain in the per-sandbox Kubernetes Secret.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub channels: Vec<ChannelSpec>,
+
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
 
@@ -128,9 +138,9 @@ pub struct KarsSandboxSpec {
     /// to `replicas: 0` and stamps the K8s `Suspended=True` Condition
     /// with reason `SuspendedBySpec`. The namespace, NetworkPolicy,
     /// ServiceAccount, governance ConfigMaps, and any Azure
-    /// federated-identity binding are preserved byte-identical, so
-    /// flipping back to `Some(false)` (or unsetting) restores the
-    /// agent in-place without losing state.
+    /// federated-identity binding are preserved byte-identical. Runtime files
+    /// survive the transition only when `spec.storage.workspace` uses a PVC;
+    /// the backward-compatible `emptyDir` workspace is deleted with the Pod.
     ///
     /// Distinct from `Suspended=True / Reason=OverlayMode` (induced by
     /// `spec.upstreamCompatibility.sigsAgentSandbox=overlay`), which
@@ -153,6 +163,181 @@ pub struct KarsSandboxSpec {
     /// for the full design.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mesh_auth: Option<MeshAuthConfig>,
+}
+
+/// Per-sandbox storage resources.
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct SandboxStorageSpec {
+    /// Runtime workspace mounted at `/sandbox`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<WorkspaceStorageSpec>,
+}
+
+/// Persistent workspace configuration.
+///
+/// An existing claim is a pure reference. Otherwise omitted dynamic fields
+/// resolve to 10Gi, ReadWriteOnce, and Retain.
+#[derive(Debug, Serialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct WorkspaceStorageSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub existing_claim: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub size: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_class_name: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub access_modes: Vec<PersistentVolumeAccessMode>,
+    #[serde(default)]
+    pub retain_policy: WorkspaceRetainPolicy,
+}
+
+#[derive(Debug, Deserialize, Default)]
+#[serde(rename_all = "camelCase")]
+struct RawWorkspaceStorageSpec {
+    existing_claim: Option<String>,
+    size: Option<String>,
+    storage_class_name: Option<String>,
+    access_modes: Option<Vec<PersistentVolumeAccessMode>>,
+    retain_policy: Option<WorkspaceRetainPolicy>,
+}
+
+impl<'de> Deserialize<'de> for WorkspaceStorageSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let raw = RawWorkspaceStorageSpec::deserialize(deserializer)?;
+        let references_existing_claim = raw.existing_claim.is_some();
+        Ok(Self {
+            existing_claim: raw.existing_claim,
+            size: raw
+                .size
+                .or_else(|| (!references_existing_claim).then(|| "10Gi".to_string())),
+            storage_class_name: raw.storage_class_name,
+            access_modes: raw.access_modes.unwrap_or_else(|| {
+                if references_existing_claim {
+                    Vec::new()
+                } else {
+                    vec![PersistentVolumeAccessMode::ReadWriteOnce]
+                }
+            }),
+            retain_policy: raw.retain_policy.unwrap_or_default(),
+        })
+    }
+}
+
+impl Default for WorkspaceStorageSpec {
+    fn default() -> Self {
+        Self {
+            existing_claim: None,
+            size: Some("10Gi".to_string()),
+            storage_class_name: None,
+            access_modes: vec![PersistentVolumeAccessMode::ReadWriteOnce],
+            retain_policy: WorkspaceRetainPolicy::Retain,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum PersistentVolumeAccessMode {
+    ReadWriteOnce,
+    ReadWriteOncePod,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum WorkspaceRetainPolicy {
+    #[default]
+    Retain,
+    Delete,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ChannelSpec {
+    #[serde(rename = "type")]
+    pub type_: ChannelType,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_secret_ref: Option<LocalObjectRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feishu: Option<FeishuChannelSpec>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum ChannelType {
+    Feishu,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct FeishuChannelSpec {
+    #[serde(default)]
+    pub domain: FeishuDomain,
+    #[serde(default)]
+    pub connection_mode: FeishuConnectionMode,
+    #[serde(default)]
+    pub direct_messages: DirectMessagePolicy,
+    #[serde(default)]
+    pub groups: GroupPolicy,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum FeishuDomain {
+    #[default]
+    Feishu,
+    Lark,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum FeishuConnectionMode {
+    #[default]
+    WebSocket,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct DirectMessagePolicy {
+    #[serde(default)]
+    pub policy: DirectMessageAccess,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_from: Vec<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum DirectMessageAccess {
+    #[default]
+    Pairing,
+    Allowlist,
+    Disabled,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct GroupPolicy {
+    #[serde(default)]
+    pub policy: GroupAccess,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allow_from: Vec<String>,
+    #[serde(default = "default_true")]
+    pub require_mention: bool,
+}
+
+impl Default for GroupPolicy {
+    fn default() -> Self {
+        Self {
+            policy: GroupAccess::Allowlist,
+            allow_from: Vec::new(),
+            require_mention: true,
+        }
+    }
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum GroupAccess {
+    #[default]
+    Allowlist,
+    Disabled,
 }
 
 /// Per-sandbox mesh authentication mode.
@@ -849,12 +1034,31 @@ pub struct OpenClawConfig {
     pub version: Option<String>,
     pub image: Option<String>,
     pub config: Option<serde_json::Value>,
+    /// Declarative initialization for selected OpenClaw workspace files.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workspace: Option<OpenClawWorkspaceSpec>,
     /// Extra environment variables injected into the openclaw container as `key: value`
     /// pairs. Used by the controller to propagate offload parameters
     /// (`OFFLOAD_REQUEST_ID`, `OFFLOAD_PARENT_AMID`, `OFFLOAD_TASK`,
     /// `OFFLOAD_TIMEOUT_MINUTES`) into offload sandboxes.
     #[serde(default)]
     pub extra_env: Option<std::collections::BTreeMap<String, String>>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct OpenClawWorkspaceSpec {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bootstrap_config_map_ref: Option<LocalObjectRef>,
+    #[serde(default)]
+    pub overwrite_policy: WorkspaceOverwritePolicy,
+}
+
+#[derive(Debug, Serialize, Deserialize, Default, Clone, Copy, JsonSchema, PartialEq, Eq)]
+pub enum WorkspaceOverwritePolicy {
+    #[default]
+    IfMissing,
+    Always,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone, JsonSchema)]
@@ -1294,6 +1498,54 @@ mod tests {
     }
 
     #[test]
+    fn feishu_channel_defaults_are_fail_closed() {
+        let channel: ChannelSpec = serde_json::from_value(serde_json::json!({
+            "type": "Feishu",
+            "feishu": {}
+        }))
+        .expect("Feishu channel uses safe defaults");
+        assert_eq!(channel.type_, ChannelType::Feishu);
+        let feishu = channel.feishu.expect("Feishu config");
+        assert_eq!(feishu.domain, FeishuDomain::Feishu);
+        assert_eq!(feishu.connection_mode, FeishuConnectionMode::WebSocket);
+        assert_eq!(feishu.direct_messages.policy, DirectMessageAccess::Pairing);
+        assert!(feishu.direct_messages.allow_from.is_empty());
+        assert_eq!(feishu.groups.policy, GroupAccess::Allowlist);
+        assert!(feishu.groups.allow_from.is_empty());
+        assert!(feishu.groups.require_mention);
+    }
+
+    #[test]
+    fn feishu_channel_round_trips_camel_case_policy() {
+        let channel: ChannelSpec = serde_json::from_value(serde_json::json!({
+            "type": "Feishu",
+            "credentialSecretRef": {"name": "agent-credentials"},
+            "feishu": {
+                "domain": "Lark",
+                "connectionMode": "WebSocket",
+                "directMessages": {
+                    "policy": "Allowlist",
+                    "allowFrom": ["ou_teacher"]
+                },
+                "groups": {
+                    "policy": "Allowlist",
+                    "allowFrom": ["oc_teaching"],
+                    "requireMention": false
+                }
+            }
+        }))
+        .unwrap();
+        let value = serde_json::to_value(channel).unwrap();
+        assert_eq!(value["credentialSecretRef"]["name"], "agent-credentials");
+        assert_eq!(value["feishu"]["connectionMode"], "WebSocket");
+        assert_eq!(
+            value["feishu"]["directMessages"]["allowFrom"][0],
+            "ou_teacher"
+        );
+        assert_eq!(value["feishu"]["groups"]["allowFrom"][0], "oc_teaching");
+    }
+
+    #[test]
     fn egress_mode_default_is_learn() {
         // Slice 5b: default egress mode is `Learn` so manifests that omit
         // the field keep observing instead of denying.
@@ -1393,10 +1645,67 @@ mod tests {
         // empty-name on apply.
         assert!(spec.inference_ref.name.is_empty());
         assert!(spec.network_policy.is_none());
+        assert!(spec.storage.is_none());
         assert!(spec.agent.is_none());
         assert!(spec.governance.is_none());
         assert!(spec.azure_services.is_none());
         assert!(spec.resources.is_none());
+    }
+
+    #[test]
+    fn dynamic_workspace_storage_defaults_and_uses_camel_case() {
+        let workspace: WorkspaceStorageSpec = serde_json::from_value(serde_json::json!({}))
+            .expect("empty workspace storage uses safe defaults");
+        assert_eq!(workspace.size.as_deref(), Some("10Gi"));
+        assert_eq!(
+            workspace.access_modes,
+            vec![PersistentVolumeAccessMode::ReadWriteOnce]
+        );
+        assert_eq!(workspace.retain_policy, WorkspaceRetainPolicy::Retain);
+        assert!(workspace.existing_claim.is_none());
+
+        let value = serde_json::to_value(SandboxStorageSpec {
+            workspace: Some(workspace),
+        })
+        .unwrap();
+        let workspace = &value["workspace"];
+        assert_eq!(workspace["size"], "10Gi");
+        assert_eq!(
+            workspace["accessModes"],
+            serde_json::json!(["ReadWriteOnce"])
+        );
+        assert_eq!(workspace["retainPolicy"], "Retain");
+        assert!(workspace.get("existingClaim").is_none());
+    }
+
+    #[test]
+    fn existing_claim_and_openclaw_bootstrap_round_trip() {
+        let storage: SandboxStorageSpec = serde_json::from_value(serde_json::json!({
+            "workspace": { "existingClaim": "restored-workspace" }
+        }))
+        .unwrap();
+        let workspace = storage.workspace.expect("workspace storage");
+        assert_eq!(
+            workspace.existing_claim.as_deref(),
+            Some("restored-workspace")
+        );
+
+        let cfg: OpenClawConfig = serde_json::from_value(serde_json::json!({
+            "workspace": {
+                "bootstrapConfigMapRef": { "name": "teaching-agent-workspace" },
+                "overwritePolicy": "IfMissing"
+            }
+        }))
+        .unwrap();
+        let workspace = cfg.workspace.expect("OpenClaw workspace config");
+        assert_eq!(
+            workspace.bootstrap_config_map_ref.unwrap().name,
+            "teaching-agent-workspace"
+        );
+        assert_eq!(
+            workspace.overwrite_policy,
+            WorkspaceOverwritePolicy::IfMissing
+        );
     }
 
     #[test]

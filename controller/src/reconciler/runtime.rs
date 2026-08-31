@@ -34,9 +34,9 @@
 use std::collections::BTreeMap;
 
 use crate::crd::{
-    AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, HermesConfig, LangGraphConfig,
-    LangGraphLanguage, MafLanguage, MicrosoftAgentFrameworkConfig, OpenAIAgentsConfig,
-    OpenClawConfig, PydanticAiConfig, RuntimeKind, RuntimeSpec,
+    AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, ChannelSpec, ChannelType, HermesConfig,
+    LangGraphConfig, LangGraphLanguage, MafLanguage, MicrosoftAgentFrameworkConfig,
+    OpenAIAgentsConfig, OpenClawConfig, PydanticAiConfig, RuntimeKind, RuntimeSpec,
 };
 
 /// Default container image for the OpenAI Agents Python runtime
@@ -325,6 +325,45 @@ pub fn validate_runtime_shape(runtime: &RuntimeSpec) -> Result<(), RuntimePlanEr
             return Err(RuntimePlanError::ShapeInvalid(format!(
                 "spec.runtime.{field} must be absent when kind={kind_label}"
             )));
+        }
+    }
+    Ok(())
+}
+
+pub fn validate_channel_capabilities(
+    runtime_kind: &RuntimeKind,
+    channels: &[ChannelSpec],
+) -> Result<(), RuntimePlanError> {
+    if channels.len() > 8 {
+        return Err(RuntimePlanError::ShapeInvalid(
+            "spec.channels may contain at most 8 entries".into(),
+        ));
+    }
+    let feishu_count = channels
+        .iter()
+        .filter(|channel| channel.type_ == ChannelType::Feishu)
+        .count();
+    if feishu_count > 1 {
+        return Err(RuntimePlanError::ShapeInvalid(
+            "spec.channels may contain at most one Feishu channel".into(),
+        ));
+    }
+    for channel in channels {
+        match channel.type_ {
+            ChannelType::Feishu
+                if !matches!(runtime_kind, RuntimeKind::OpenClaw | RuntimeKind::Hermes) =>
+            {
+                return Err(RuntimePlanError::ShapeInvalid(format!(
+                    "Feishu channel is unsupported by runtime {}",
+                    kind_str(runtime_kind)
+                )));
+            }
+            ChannelType::Feishu if channel.feishu.is_none() => {
+                return Err(RuntimePlanError::ShapeInvalid(
+                    "Feishu channel requires spec.channels[].feishu".into(),
+                ));
+            }
+            ChannelType::Feishu => {}
         }
     }
     Ok(())
@@ -758,9 +797,9 @@ fn plan_hermes(cfg: &HermesConfig) -> RuntimeDeploymentPlan {
 mod tests {
     use super::*;
     use crate::crd::{
-        AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, HermesConfig, LangGraphConfig,
-        LangGraphLanguage, MafLanguage, MicrosoftAgentFrameworkConfig, OciAgentCode,
-        OpenAIAgentsConfig, OpenClawConfig, PydanticAiConfig, SemanticKernelConfig,
+        AgentCodeRef, AnthropicConfig, ByoRuntimeConfig, FeishuChannelSpec, HermesConfig,
+        LangGraphConfig, LangGraphLanguage, MafLanguage, MicrosoftAgentFrameworkConfig,
+        OciAgentCode, OpenAIAgentsConfig, OpenClawConfig, PydanticAiConfig, SemanticKernelConfig,
     };
     use std::sync::Mutex;
 
@@ -823,6 +862,58 @@ mod tests {
     fn validate_accepts_well_formed_openclaw() {
         let rt = rt_openclaw(None);
         assert!(validate_runtime_shape(&rt).is_ok());
+    }
+
+    #[test]
+    fn feishu_channel_capability_accepts_openclaw_and_hermes() {
+        let channels = vec![ChannelSpec {
+            type_: ChannelType::Feishu,
+            credential_secret_ref: None,
+            feishu: Some(FeishuChannelSpec::default()),
+        }];
+        assert!(validate_channel_capabilities(&RuntimeKind::OpenClaw, &channels).is_ok());
+        assert!(validate_channel_capabilities(&RuntimeKind::Hermes, &channels).is_ok());
+    }
+
+    #[test]
+    fn feishu_channel_capability_rejects_other_runtimes() {
+        let channels = vec![ChannelSpec {
+            type_: ChannelType::Feishu,
+            credential_secret_ref: None,
+            feishu: Some(FeishuChannelSpec::default()),
+        }];
+        for kind in [
+            RuntimeKind::OpenAIAgents,
+            RuntimeKind::MicrosoftAgentFramework,
+            RuntimeKind::LangGraph,
+            RuntimeKind::Anthropic,
+            RuntimeKind::PydanticAi,
+            RuntimeKind::BYO,
+        ] {
+            let error = validate_channel_capabilities(&kind, &channels).unwrap_err();
+            assert!(matches!(error, RuntimePlanError::ShapeInvalid(ref message)
+                    if message.contains("Feishu") && message.contains(kind_str(&kind))));
+        }
+    }
+
+    #[test]
+    fn feishu_channel_shape_rejects_duplicates_and_missing_config() {
+        let missing = vec![ChannelSpec {
+            type_: crate::crd::ChannelType::Feishu,
+            credential_secret_ref: None,
+            feishu: None,
+        }];
+        assert!(validate_channel_capabilities(&RuntimeKind::OpenClaw, &missing).is_err());
+
+        let channel = ChannelSpec {
+            type_: crate::crd::ChannelType::Feishu,
+            credential_secret_ref: None,
+            feishu: Some(FeishuChannelSpec::default()),
+        };
+        assert!(
+            validate_channel_capabilities(&RuntimeKind::OpenClaw, &[channel.clone(), channel])
+                .is_err()
+        );
     }
 
     #[test]

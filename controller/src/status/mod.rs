@@ -113,9 +113,23 @@ pub fn build_running_status_patch_with_extras(
         }
     }
 
+    let phase = if conditions_vec.iter().any(|condition| {
+        condition.type_ == conditions::TYPE_DEGRADED && condition.status == conditions::status::TRUE
+    }) {
+        "Degraded"
+    } else if conditions_vec
+        .iter()
+        .find(|condition| condition.type_ == conditions::TYPE_READY)
+        .is_some_and(|condition| condition.status == conditions::status::TRUE)
+    {
+        "Running"
+    } else {
+        "Creating"
+    };
+
     let mut status_obj = json!({
         "status": {
-            "phase": "Running",
+            "phase": phase,
             "namespace": sandbox_ns,
             "sandboxPod": format!("{name}-*"),
             "inferenceEndpoint": "https://kars-inference-router.kars-system.svc.cluster.local:8443",
@@ -178,7 +192,27 @@ pub fn running_status_matches_with_extras(
     let Some(status) = sandbox.status.as_ref() else {
         return false;
     };
-    if status.phase.as_deref() != Some("Running") {
+    let expected_ready = extra_conditions
+        .iter()
+        .find(|condition| condition.type_ == TYPE_READY)
+        .map(|condition| condition.status.as_str())
+        .unwrap_or(STATUS_TRUE);
+    let expected_progressing = extra_conditions
+        .iter()
+        .find(|condition| condition.type_ == TYPE_PROGRESSING)
+        .map(|condition| condition.status.as_str())
+        .unwrap_or(STATUS_FALSE);
+    let expected_degraded = extra_conditions.iter().any(|condition| {
+        condition.type_ == conditions::TYPE_DEGRADED && condition.status == conditions::status::TRUE
+    });
+    let expected_phase = if expected_degraded {
+        "Degraded"
+    } else if expected_ready == STATUS_TRUE {
+        "Running"
+    } else {
+        "Creating"
+    };
+    if status.phase.as_deref() != Some(expected_phase) {
         return false;
     }
     if status.namespace.as_deref() != Some(sandbox_ns) {
@@ -194,7 +228,7 @@ pub fn running_status_matches_with_extras(
         .conditions
         .iter()
         .find(|c| c.type_ == TYPE_READY)
-        .is_some_and(|c| c.status == STATUS_TRUE);
+        .is_some_and(|c| c.status == expected_ready);
     if !ready_ok {
         return false;
     }
@@ -207,7 +241,7 @@ pub fn running_status_matches_with_extras(
         .conditions
         .iter()
         .find(|c| c.type_ == TYPE_PROGRESSING)
-        .is_some_and(|c| c.status == STATUS_FALSE);
+        .is_some_and(|c| c.status == expected_progressing);
     if !progressing_ok {
         return false;
     }
@@ -644,6 +678,119 @@ mod tests {
                 .contains("OpenClaw"),
             "RuntimeReady message must reference the runtime kind"
         );
+    }
+
+    #[test]
+    fn running_patch_with_pending_storage_remains_creating() {
+        let sb = new_sandbox(Some(7), None);
+        let extras = vec![
+            conditions::new_condition(
+                conditions::TYPE_STORAGE_READY,
+                conditions::status::FALSE,
+                conditions::reason::CLAIM_PENDING,
+                "workspace PVC is pending",
+                Some(7),
+            ),
+            conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::FALSE,
+                conditions::reason::CREATING,
+                "waiting for workspace storage",
+                Some(7),
+            ),
+            conditions::new_condition(
+                conditions::TYPE_PROGRESSING,
+                conditions::status::TRUE,
+                conditions::reason::CREATING,
+                "waiting for workspace storage",
+                Some(7),
+            ),
+        ];
+
+        let patch = build_running_status_patch_with_extras(&sb, "kars-demo", "OpenClaw", &extras);
+        assert_eq!(patch["status"]["phase"], "Creating");
+        let conditions = patch["status"]["conditions"].as_array().unwrap();
+        let ready = conditions
+            .iter()
+            .find(|condition| condition["type"] == "Ready")
+            .unwrap();
+        assert_eq!(ready["status"], "False");
+        let storage = conditions
+            .iter()
+            .find(|condition| condition["type"] == "StorageReady")
+            .unwrap();
+        assert_eq!(storage["reason"], "ClaimPending");
+    }
+
+    #[test]
+    fn status_matcher_accepts_creating_storage_shape() {
+        let extras = vec![
+            conditions::new_condition(
+                conditions::TYPE_STORAGE_READY,
+                conditions::status::FALSE,
+                conditions::reason::CLAIM_PENDING,
+                "workspace PVC is pending",
+                Some(7),
+            ),
+            conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::FALSE,
+                conditions::reason::CREATING,
+                "waiting for workspace storage",
+                Some(7),
+            ),
+            conditions::new_condition(
+                conditions::TYPE_PROGRESSING,
+                conditions::status::TRUE,
+                conditions::reason::CREATING,
+                "waiting for workspace storage",
+                Some(7),
+            ),
+        ];
+        let initial = new_sandbox(Some(7), None);
+        let patch =
+            build_running_status_patch_with_extras(&initial, "kars-demo", "OpenClaw", &extras);
+        let status: KarsSandboxStatus = serde_json::from_value(patch["status"].clone()).unwrap();
+        let sandbox = new_sandbox(Some(7), Some(status));
+        assert!(running_status_matches_with_extras(
+            &sandbox,
+            "kars-demo",
+            "OpenClaw",
+            &extras
+        ));
+    }
+
+    #[test]
+    fn status_builder_and_matcher_accept_dependency_degraded_shape() {
+        let extras = vec![
+            conditions::new_condition(
+                conditions::TYPE_READY,
+                conditions::status::FALSE,
+                conditions::reason::BOOTSTRAP_FAILED,
+                "bootstrap failed",
+                Some(7),
+            ),
+            conditions::new_condition(
+                conditions::TYPE_DEGRADED,
+                conditions::status::TRUE,
+                conditions::reason::BOOTSTRAP_FAILED,
+                "bootstrap failed",
+                Some(7),
+            ),
+        ];
+        let initial = new_sandbox(Some(7), None);
+        let patch =
+            build_running_status_patch_with_extras(&initial, "kars-demo", "OpenClaw", &extras);
+        assert_eq!(patch["status"]["phase"], "Degraded");
+
+        let status: KarsSandboxStatus = serde_json::from_value(patch["status"].clone()).unwrap();
+        let sandbox = new_sandbox(Some(7), Some(status));
+        assert!(running_status_matches_with_extras(
+            &sandbox,
+            "kars-demo",
+            "OpenClaw",
+            &extras
+        ));
     }
 
     #[test]

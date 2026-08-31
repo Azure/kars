@@ -3,11 +3,139 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
+import { randomBytes } from "node:crypto";
 import { banner, section } from "../stepper.js";
 import {
   promptAndSaveCredentials, SECRETS_FILE,
   KNOWN_SECRETS, loadSecrets, setSecret, getSecret, deleteSecret, listSecretVariants,
 } from "../config.js";
+import { buildCredentialSecretManifest } from "./add.js";
+import {
+  classifyFeishuSecretReference,
+  shouldCleanupStagedFeishuSecret,
+  type FeishuSecretReferenceState,
+} from "../lib/feishu-secret-reference.js";
+
+export const CREDENTIAL_FLAG_TO_ENV: Record<string, string> = {
+  telegramToken: "TELEGRAM_BOT_TOKEN",
+  telegramAllowFrom: "TELEGRAM_ALLOW_FROM",
+  slackToken: "SLACK_BOT_TOKEN",
+  discordToken: "DISCORD_BOT_TOKEN",
+  feishuAppId: "FEISHU_APP_ID",
+  feishuAppSecret: "FEISHU_APP_SECRET",
+  braveApiKey: "BRAVE_API_KEY",
+  tavilyApiKey: "TAVILY_API_KEY",
+  exaApiKey: "EXA_API_KEY",
+  firecrawlApiKey: "FIRECRAWL_API_KEY",
+  perplexityApiKey: "PERPLEXITY_API_KEY",
+  openaiApiKey: "OPENAI_API_KEY",
+};
+
+const FEISHU_CREDENTIAL_KEYS = new Set(["FEISHU_APP_ID", "FEISHU_APP_SECRET"]);
+
+type SandboxCredentialView = {
+  metadata?: { name?: string; namespace?: string; resourceVersion?: string };
+  status?: { namespace?: string };
+  spec?: {
+    channels?: Array<{
+      type?: string;
+      credentialSecretRef?: { name?: string };
+      [key: string]: unknown;
+    }>;
+  };
+};
+
+export function selectSandboxForCredentialUpdate(
+  sandboxName: string,
+  list: { items?: SandboxCredentialView[] },
+): SandboxCredentialView {
+  const matches = (list.items ?? []).filter((item) => item.metadata?.name === sandboxName);
+  if (matches.length === 0) {
+    throw new Error(`KarsSandbox '${sandboxName}' was not found`);
+  }
+  if (matches.length > 1) {
+    throw new Error(
+      `multiple KarsSandboxes named '${sandboxName}' exist; update credentials with kubectl in the intended namespace`,
+    );
+  }
+  return matches[0];
+}
+
+export type CredentialSecretUpdatePlan = {
+  kind: "conventional" | "feishu";
+  secretName: string;
+  updates: Record<string, string>;
+};
+
+export function validateCredentialUpdates(updates: Record<string, string>): void {
+  const hasAppId = Boolean(updates.FEISHU_APP_ID);
+  const hasAppSecret = Boolean(updates.FEISHU_APP_SECRET);
+  if (hasAppId !== hasAppSecret) {
+    throw new Error("Feishu App ID and App Secret must be updated together");
+  }
+  if (hasAppId && Object.keys(updates).some((key) => !FEISHU_CREDENTIAL_KEYS.has(key))) {
+    throw new Error("Feishu credentials must be rotated separately from other credentials");
+  }
+}
+
+export function planCredentialSecretUpdates(
+  sandboxName: string,
+  sandbox: SandboxCredentialView,
+  updates: Record<string, string>,
+): CredentialSecretUpdatePlan[] {
+  validateCredentialUpdates(updates);
+  const conventionalSecret = `${sandboxName}-credentials`;
+  const feishuChannel = sandbox.spec?.channels?.find((channel) => channel.type === "Feishu");
+  if (updates.FEISHU_APP_ID && !feishuChannel) {
+    throw new Error(`KarsSandbox '${sandboxName}' does not declare a Feishu channel`);
+  }
+  const feishuSecret = feishuChannel?.credentialSecretRef?.name || conventionalSecret;
+  const conventionalUpdates: Record<string, string> = {};
+  const feishuUpdates: Record<string, string> = {};
+  for (const [key, value] of Object.entries(updates)) {
+    if (FEISHU_CREDENTIAL_KEYS.has(key)) {
+      feishuUpdates[key] = value;
+    } else {
+      conventionalUpdates[key] = value;
+    }
+  }
+  const plans: CredentialSecretUpdatePlan[] = [];
+  if (Object.keys(conventionalUpdates).length > 0) {
+    plans.push({ kind: "conventional", secretName: conventionalSecret, updates: conventionalUpdates });
+  }
+  if (Object.keys(feishuUpdates).length > 0) {
+    plans.push({ kind: "feishu", secretName: feishuSecret, updates: feishuUpdates });
+  }
+  return plans;
+}
+
+export function buildFeishuRotationSecretName(baseName: string, suffix: string): string {
+  const trailer = `-rotation-${suffix}`;
+  return `${baseName.slice(0, 253 - trailer.length).replace(/[.-]+$/, "")}${trailer}`;
+}
+
+export function buildFeishuChannelSecretPatch(
+  resourceVersion: string,
+  channels: NonNullable<SandboxCredentialView["spec"]>["channels"],
+  secretName: string,
+): Array<Record<string, unknown>> {
+  if (!resourceVersion) {
+    throw new Error("KarsSandbox resourceVersion is required for Feishu credential rotation");
+  }
+  const channelIndex = (channels ?? []).findIndex((channel) => channel.type === "Feishu");
+  if (channelIndex < 0) {
+    throw new Error("KarsSandbox does not declare a Feishu channel");
+  }
+  const channel = channels![channelIndex];
+  const refPath = `/spec/channels/${channelIndex}/credentialSecretRef`;
+  return [
+    { op: "test", path: "/metadata/resourceVersion", value: resourceVersion },
+    { op: "test", path: `/spec/channels/${channelIndex}/type`, value: "Feishu" },
+    channel.credentialSecretRef
+      ? { op: "replace", path: `${refPath}/name`, value: secretName }
+      : { op: "add", path: refPath, value: { name: secretName } },
+  ];
+}
 
 export function credentialsCommand(): Command {
   const cmd = new Command("credentials");
@@ -26,8 +154,7 @@ export function credentialsCommand(): Command {
       if (Object.keys(secrets).length > 0) {
         console.log(chalk.dim("  Currently stored:"));
         for (const key of Object.keys(secrets).sort()) {
-          const val = secrets[key];
-          const masked = val.length > 8 ? "••••" + val.slice(-4) : "••••";
+          const masked = "••••";
           const info = KNOWN_SECRETS[key.includes(".") ? key.slice(0, key.indexOf(".")) : key];
           const label = info ? chalk.dim(` (${info.label})`) : "";
           console.log(`    ${chalk.cyan(key)} = ${masked}${label}`);
@@ -41,6 +168,7 @@ export function credentialsCommand(): Command {
         { name: "Telegram      — bot token, allowed users", value: "telegram" },
         { name: "Slack         — bot OAuth token", value: "slack" },
         { name: "Discord       — bot token", value: "discord" },
+        { name: "Feishu        — App ID and App Secret", value: "feishu" },
         { name: "Search APIs   — Brave, Tavily, Exa, Perplexity", value: "search" },
         { name: "Other APIs    — Firecrawl, OpenAI", value: "other" },
         new inquirer.Separator(),
@@ -70,6 +198,10 @@ export function credentialsCommand(): Command {
             ],
             discord: [
               { key: "discord-token", label: "Discord bot token", allowSuffix: true },
+            ],
+            feishu: [
+              { key: "feishu-app-id", label: "Feishu App ID", allowSuffix: true },
+              { key: "feishu-app-secret", label: "Feishu App Secret", allowSuffix: true },
             ],
             search: [
               { key: "brave-api-key", label: "Brave Search API key" },
@@ -103,7 +235,7 @@ export function credentialsCommand(): Command {
             }
 
             const currentVal = getSecret(finalKey);
-            const currentHint = currentVal ? chalk.dim(` (current: ••••${currentVal.slice(-4)})`) : "";
+            const currentHint = currentVal ? chalk.dim(" (current: set)") : "";
 
             const { value } = await inquirer.prompt([{
               type: "password",
@@ -114,8 +246,7 @@ export function credentialsCommand(): Command {
 
             if (value && value.trim()) {
               setSecret(finalKey, value.trim());
-              const masked = value.length > 8 ? "••••" + value.slice(-4) : "••••";
-              console.log(chalk.green(`  ✔ ${finalKey} = ${masked}`));
+              console.log(chalk.green(`  ✔ ${finalKey} = ••••`));
             } else if (currentVal) {
               console.log(chalk.dim(`  Kept existing value for ${finalKey}`));
             } else {
@@ -171,9 +302,7 @@ export function credentialsCommand(): Command {
       // Note: `setSecret` runs `normalizeSecretValue` so Telegram `bot`
       // prefix stripping happens uniformly across all write paths.
       setSecret(key, value!);
-      const stored = (await import("../config.js")).getSecret(key) ?? value!;
-      const masked = stored.length > 8 ? "••••" + stored.slice(-4) : "••••";
-      console.log(chalk.green(`  ✔ ${key} = ${masked}`));
+      console.log(chalk.green(`  ✔ ${key} = ••••`));
       console.log(chalk.dim(`  Saved to ${SECRETS_FILE}`));
       if (info || baseInfo) {
         console.log(chalk.dim(`  → env var: ${(info || baseInfo)!.env}`));
@@ -194,8 +323,7 @@ export function credentialsCommand(): Command {
       }
       console.log(chalk.bold("\n  Stored secrets:\n"));
       for (const key of keys.sort()) {
-        const val = secrets[key];
-        const masked = val.length > 8 ? "••••" + val.slice(-4) : "••••";
+        const masked = "••••";
         const info = KNOWN_SECRETS[key];
         let label = "";
         if (info) {
@@ -233,12 +361,14 @@ export function credentialsCommand(): Command {
   // Subcommand: update credentials for a running AKS sandbox
   const update = new Command("update");
   update
-    .description("Update credentials for a running AKS sandbox (updates secret + restarts pod)")
+    .description("Update credentials for a running AKS sandbox (updates Secret + coordinates pod restart)")
     .argument("<name>", "Sandbox name")
     .option("--telegram-token <token>", "New Telegram bot token")
     .option("--telegram-allow-from <ids>", "Telegram allowed user IDs (comma-separated)")
     .option("--slack-token <token>", "New Slack bot token")
     .option("--discord-token <token>", "New Discord bot token")
+    .option("--feishu-app-id <id>", "New Feishu App ID")
+    .option("--feishu-app-secret <secret>", "New Feishu App Secret")
     .option("--brave-api-key <key>", "New Brave Search API key")
     .option("--tavily-api-key <key>", "New Tavily API key")
     .option("--exa-api-key <key>", "New Exa API key")
@@ -250,22 +380,9 @@ export function credentialsCommand(): Command {
       const { execa } = await import("execa");
       const ora = (await import("ora")).default;
 
-      const flagToEnv: Record<string, string> = {
-        telegramToken: "TELEGRAM_BOT_TOKEN",
-        telegramAllowFrom: "TELEGRAM_ALLOW_FROM",
-        slackToken: "SLACK_BOT_TOKEN",
-        discordToken: "DISCORD_BOT_TOKEN",
-        braveApiKey: "BRAVE_API_KEY",
-        tavilyApiKey: "TAVILY_API_KEY",
-        exaApiKey: "EXA_API_KEY",
-        firecrawlApiKey: "FIRECRAWL_API_KEY",
-        perplexityApiKey: "PERPLEXITY_API_KEY",
-        openaiApiKey: "OPENAI_API_KEY",
-      };
-
       // Collect new values
       const updates: Record<string, string> = {};
-      for (const [flag, env] of Object.entries(flagToEnv)) {
+      for (const [flag, env] of Object.entries(CREDENTIAL_FLAG_TO_ENV)) {
         if (options[flag]) updates[env] = options[flag];
       }
 
@@ -273,50 +390,108 @@ export function credentialsCommand(): Command {
         console.error(chalk.red("  No credentials specified. Use --telegram-token, --brave-api-key, etc."));
         process.exit(1);
       }
+      const rotatesFeishu = Boolean(updates.FEISHU_APP_ID);
+      if (rotatesFeishu && options.restart === false) {
+        console.error(chalk.red("  Feishu credential rotation does not support --no-restart; the controller must claim the new App before rollout."));
+        process.exit(1);
+      }
 
-      const namespace = `kars-${name}`;
-      const secretName = `${name}-credentials`;
       const spinner = ora(`Updating credentials for '${name}'...`).start();
+      let stagedFeishuSecret: string | undefined;
+      let stagedFeishuNamespace: string | undefined;
+      let feishuControlNamespace: string | undefined;
 
       try {
-        // Read existing secret (if any) and merge with new values
-        let existing: Record<string, string> = {};
-        try {
-          const { stdout } = await execa("kubectl", [
-            "get", "secret", secretName, "-n", namespace,
-            "-o", "jsonpath={.data}",
-          ], { stdio: "pipe" });
-          if (stdout && stdout !== "{}") {
-            const data = JSON.parse(stdout);
-            for (const [k, v] of Object.entries(data)) {
-              existing[k] = Buffer.from(v as string, "base64").toString();
+        const { stdout: sandboxJson } = await execa("kubectl", [
+          "get", "karssandboxes", "-A", "-o", "json",
+        ], { stdio: "pipe" });
+        const sandbox = selectSandboxForCredentialUpdate(
+          name,
+          JSON.parse(sandboxJson) as { items?: SandboxCredentialView[] },
+        );
+        const controlNamespace = sandbox.metadata?.namespace || "kars-system";
+        feishuControlNamespace = controlNamespace;
+        const namespace = sandbox.status?.namespace || `kars-${name}`;
+        const plans = planCredentialSecretUpdates(name, sandbox, updates);
+
+        for (const plan of plans) {
+          let existing: Record<string, string> = {};
+          try {
+            const { stdout } = await execa("kubectl", [
+              "get", "secret", plan.secretName, "-n", namespace,
+              "-o", "jsonpath={.data}",
+            ], { stdio: "pipe" });
+            if (stdout && stdout !== "{}") {
+              const data = JSON.parse(stdout);
+              for (const [key, value] of Object.entries(data)) {
+                existing[key] = Buffer.from(value as string, "base64").toString();
+              }
             }
+          } catch { /* secret doesn't exist yet */ }
+
+          const targetSecretName = plan.kind === "feishu"
+            ? buildFeishuRotationSecretName(plan.secretName, randomBytes(6).toString("hex"))
+            : plan.secretName;
+          const retained = plan.kind === "feishu"
+            ? Object.fromEntries(
+                Object.entries(existing).filter(([key]) => FEISHU_CREDENTIAL_KEYS.has(key)),
+              )
+            : existing;
+          const manifest = buildCredentialSecretManifest(
+            targetSecretName,
+            namespace,
+            { ...retained, ...plan.updates },
+            plan.kind === "feishu"
+              ? {
+                  immutable: true,
+                  labels: {
+                    "channels.kars.azure.com/managed-rotation": "true",
+                    "channels.kars.azure.com/revision-state": "staged",
+                    "kars.azure.com/sandbox": name,
+                  },
+                }
+              : {},
+          );
+          const secretCommand = plan.kind === "feishu"
+            ? ["create", "-f", "-"]
+            : ["apply", "--server-side", "--field-manager=kars-cli", "-f", "-"];
+          await execa("kubectl", secretCommand, {
+            input: JSON.stringify(manifest),
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+          if (plan.kind === "feishu") {
+            stagedFeishuSecret = targetSecretName;
+            stagedFeishuNamespace = namespace;
           }
-        } catch { /* secret doesn't exist yet */ }
-
-        const merged = { ...existing, ...updates };
-
-        // Create/replace the secret
-        const secretArgs = ["create", "secret", "generic", secretName, "-n", namespace, "--dry-run=client", "-o", "yaml"];
-        for (const [env, val] of Object.entries(merged)) {
-          secretArgs.push(`--from-literal=${env}=${val}`);
         }
-        const { stdout: yaml } = await execa("kubectl", secretArgs, { stdio: "pipe" });
-        await execa("kubectl", ["apply", "-f", "-"], { input: yaml, stdio: ["pipe", "pipe", "pipe"] });
+
+        if (stagedFeishuSecret) {
+          await execa("kubectl", [
+            "patch", "karssandbox", name, "-n", controlNamespace,
+            "--type=json", "-p", JSON.stringify(
+              buildFeishuChannelSecretPatch(
+                sandbox.metadata?.resourceVersion ?? "",
+                sandbox.spec?.channels,
+                stagedFeishuSecret,
+              ),
+            ),
+          ], { stdio: "pipe" });
+        }
 
         spinner.succeed("Secret updated");
 
         // Show what changed
-        for (const [env, val] of Object.entries(updates)) {
-          console.log(chalk.dim(`  ${env} = ••••${val.slice(-4)}`));
+        for (const env of Object.keys(updates)) {
+          console.log(chalk.dim(`  ${env} updated`));
         }
 
-        // Restart pod unless --no-restart
         if (options.restart !== false) {
           const restartSpinner = ora("Restarting pod...").start();
-          await execa("kubectl", [
-            "rollout", "restart", `deploy/${name}`, "-n", namespace,
-          ], { stdio: "pipe" });
+          if (!rotatesFeishu) {
+            await execa("kubectl", [
+              "rollout", "restart", `deploy/${name}`, "-n", namespace,
+            ], { stdio: "pipe" });
+          }
 
           // Wait for rollout
           try {
@@ -333,6 +508,31 @@ export function credentialsCommand(): Command {
           console.log(chalk.dim(`  Restart manually: kubectl rollout restart deploy/${name} -n ${namespace}`));
         }
       } catch (err: any) {
+        let referenceState: FeishuSecretReferenceState = "unknown";
+        if (stagedFeishuSecret && feishuControlNamespace) {
+          try {
+            const { stdout } = await execa("kubectl", [
+              "get", "karssandbox", name, "-n", feishuControlNamespace,
+              "--ignore-not-found=true", "-o", "json",
+            ], { stdio: "pipe" });
+            referenceState = classifyFeishuSecretReference(stdout, stagedFeishuSecret);
+          } catch { /* preserve the Secret when the live reference is unknown */ }
+        }
+        if (
+          shouldCleanupStagedFeishuSecret(stagedFeishuSecret, referenceState)
+          && stagedFeishuNamespace
+        ) {
+          try {
+            await execa("kubectl", [
+              "delete", "secret", stagedFeishuSecret!, "-n", stagedFeishuNamespace,
+              "--ignore-not-found=true",
+            ], { stdio: "pipe" });
+          } catch {
+            console.error(chalk.yellow(
+              `  Warning: failed to remove unreferenced Secret '${stagedFeishuSecret}'`,
+            ));
+          }
+        }
         spinner.fail(`Failed: ${err.message}`);
         process.exit(1);
       }

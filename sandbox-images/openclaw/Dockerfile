@@ -49,6 +49,15 @@ RUN node -e "const f='./mesh-plugin/package.json'; const p=require(f); delete p.
 
 FROM ${SANDBOX_BASE_IMAGE}
 
+# Keep the overlay compatible with base images built before Feishu CONNECT
+# support was added. The patch is source-anchored and idempotent.
+COPY sandbox-images/openclaw/patch-feishu-proxy.cjs /tmp/patch-feishu-proxy.cjs
+RUN chmod -R u+w /opt/openclaw-feishu-stage && \
+  node /tmp/patch-feishu-proxy.cjs /opt/openclaw-feishu-stage && \
+  chmod -R a-w /opt/openclaw-feishu-stage && \
+  chmod -R a+rX /opt/openclaw-feishu-stage && \
+  rm /tmp/patch-feishu-proxy.cjs
+
 # Proxy bootstrap — preloaded by NODE_OPTIONS to set undici global dispatcher
 COPY sandbox-images/openclaw/proxy-bootstrap.js /usr/local/lib/proxy-bootstrap.js
 
@@ -175,7 +184,10 @@ RUN mkdir -p /etc/kars/policies /etc/kars/blocklist && \
 
 # Copy entrypoint that auto-configures OpenClaw from mounted secrets
 COPY sandbox-images/openclaw/entrypoint.sh /usr/local/bin/entrypoint.sh
-RUN chmod +x /usr/local/bin/entrypoint.sh
+COPY sandbox-images/openclaw/workspace-bootstrap.sh /usr/local/bin/workspace-bootstrap.sh
+COPY sandbox-images/openclaw/kars-channel-feishu-ready /usr/local/bin/kars-channel-feishu-ready
+RUN chmod +x /usr/local/bin/entrypoint.sh /usr/local/bin/workspace-bootstrap.sh \
+  /usr/local/bin/kars-channel-feishu-ready
 
 # Labels
 LABEL org.opencontainers.image.title="kars OpenClaw Sandbox" \

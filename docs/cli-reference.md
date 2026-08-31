@@ -413,15 +413,29 @@ kars add <name> [options]
 | `--agent-instructions <instructions>` | — | System prompt for the Foundry agent |
 | `--agent-tools <tools>` | — | Foundry tools: `file_search,web_search,code_interpreter` (comma-separated) |
 | `--image <image>` | — | Custom sandbox image (default: from Helm values) |
+| `--workspace-storage <size>` | — | Create a persistent workspace PVC, for example `10Gi` |
+| `--workspace-storage-class <name>` | cluster default | StorageClass for the generated workspace PVC |
+| `--workspace-existing-claim <name>` | — | Attach an existing PVC in `kars-<name>`; mutually exclusive with generated storage |
+| `--workspace-retain-policy <policy>` | `Retain` | Generated PVC deletion policy: `Retain` or `Delete` |
+| `--workspace-bootstrap <configmap>` | — | OpenClaw-only same-namespace ConfigMap for declarative workspace files |
+| `--workspace-overwrite <policy>` | `IfMissing` | Bootstrap policy: `IfMissing` or `Always` |
 | `--governance` | `true` | Enable AGT governance (tool policy, trust, audit) |
 | `--no-governance` | — | Disable AGT governance |
 | `--trust-threshold <score>` | `500` | AGT trust threshold (0–1000) |
 | `--policy-profile <profile>` | `default` | AGT policy profile name |
-| `--channels <channels>` | — | Channels: `telegram,slack,discord,whatsapp` |
+| `--channels <channels>` | — | Channels: `telegram,slack,discord,whatsapp,feishu` |
 | `--telegram-token <token>` | — | Telegram bot token |
 | `--telegram-allow-from <ids>` | — | Allowed Telegram user IDs (comma-separated) |
 | `--slack-token <token>` | — | Slack bot OAuth token |
 | `--discord-token <token>` | — | Discord bot token |
+| `--feishu-app-id <id>` | — | Feishu/Lark App ID; required with `--channels feishu` |
+| `--feishu-app-secret <secret>` | — | Feishu/Lark App Secret; required with `--channels feishu` |
+| `--feishu-domain <domain>` | `feishu` | API domain: `feishu` or `lark` |
+| `--feishu-dm-policy <policy>` | `pairing` | Direct-message policy: `pairing`, `allowlist`, or `disabled` |
+| `--feishu-allow-from <ids>` | — | Allowed DM user open IDs (`ou_...`, comma-separated); required for `allowlist` |
+| `--feishu-group-policy <policy>` | `allowlist` | Group policy: `allowlist` or `disabled` |
+| `--feishu-group-allow-from <ids>` | — | Allowed group chat IDs (`oc_...`, comma-separated) |
+| `--feishu-require-mention <bool>` | `true` | Require a direct bot mention in admitted groups |
 | `--skills <skills>` | — | Skills: `browser,github,summarize,weather` |
 | `--brave-api-key <key>` | — | Brave Search API key |
 | `--tavily-api-key <key>` | — | Tavily search API key |
@@ -444,6 +458,28 @@ kars add researcher --model gpt-4.1 --token-budget-daily 100000
 # Add a Telegram-connected agent with enhanced isolation
 kars add support-bot --channels telegram --telegram-token $TOKEN --isolation enhanced
 
+# Add a Telegram-connected Hermes agent with persistent Hermes state
+kars add hermes-support --runtime hermes \
+  --channels telegram --telegram-token "$TOKEN" \
+  --workspace-storage 20Gi
+
+# Add a WebSocket-only Feishu agent with safe DM/group defaults
+kars add teaching-agent --runtime openclaw \
+  --channels feishu \
+  --feishu-app-id "$FEISHU_APP_ID" \
+  --feishu-app-secret "$FEISHU_APP_SECRET" \
+  --feishu-group-allow-from oc_teaching \
+  --workspace-storage 10Gi \
+  --learn-egress
+
+# Add an OpenClaw agent with a retained 20Gi workspace and bootstrap files
+kars add teaching-agent --workspace-storage 20Gi \
+  --workspace-storage-class managed-csi \
+  --workspace-bootstrap teaching-agent-workspace
+
+# Explicitly recover a retained workspace
+kars add teaching-agent --workspace-existing-claim teaching-agent-workspace
+
 # Add a BYO-runtime agent
 kars add my-agent --runtime byo --byo-image myacr.azurecr.io/my-agent:latest
 
@@ -452,6 +488,24 @@ kars add reviewer --dry-run
 ```
 
 **See also:** [docs/api/crd-reference.md](api/crd-reference.md), [docs/runtimes.md](runtimes.md), [docs/channels-plugins.md](channels-plugins.md)
+
+Workspace PVC flags apply to every wired Kubernetes runtime. The controller
+mounts the claim at `/sandbox`; each runtime/application must store recoverable
+state there. `--workspace-bootstrap` remains OpenClaw-only. Channel flags are
+supported by the OpenClaw and Hermes adapters. Feishu is rejected for every
+other runtime in v1. Feishu uses outbound WebSocket only and does not create a
+public ingress.
+
+The initial OpenClaw sandbox created by `kars up` supports the same generated
+or existing workspace claim options:
+
+```bash
+kars up --name prod-agent --workspace-storage 20Gi \
+  --workspace-storage-class managed-csi
+```
+
+`kars dev --target docker` does not use Kubernetes PVCs. Local Kubernetes and
+AKS persistence are controlled through the `KarsSandbox.spec.storage` contract.
 
 ---
 
@@ -1092,13 +1146,15 @@ kars credentials [subcommand] [arguments] [options]
 | `--telegram-allow-from <ids>` | — | Allowed Telegram user IDs (comma-separated) |
 | `--slack-token <token>` | — | New Slack bot token |
 | `--discord-token <token>` | — | New Discord bot token |
+| `--feishu-app-id <id>` | — | New Feishu/Lark App ID |
+| `--feishu-app-secret <secret>` | — | New Feishu/Lark App Secret |
 | `--brave-api-key <key>` | — | New Brave Search API key |
 | `--tavily-api-key <key>` | — | New Tavily API key |
 | `--exa-api-key <key>` | — | New Exa API key |
 | `--firecrawl-api-key <key>` | — | New Firecrawl API key |
 | `--perplexity-api-key <key>` | — | New Perplexity API key |
 | `--openai-api-key <key>` | — | New OpenAI API key |
-| `--no-restart` | — | Update secret without restarting the pod |
+| `--no-restart` | — | Update an ordinary credential without restarting the pod. Rejected for Feishu rotation. |
 
 **Examples:**
 ```bash
@@ -1113,6 +1169,15 @@ kars credentials list
 
 # Update a running sandbox's Telegram token and restart
 kars credentials update my-agent --telegram-token 999999:NEW-TOKEN
+
+# Rotate Feishu credentials and restart the target sandbox
+kars credentials update teaching-agent \
+  --feishu-app-id "$NEW_APP_ID" \
+  --feishu-app-secret "$NEW_APP_SECRET"
+
+# Feishu uses a versioned Secret and controller-owned rollout;
+# --no-restart is intentionally unsupported for this operation.
+# Rotate Telegram or plugin credentials in a separate command.
 
 # Update without restarting the pod
 kars credentials update my-agent --brave-api-key $KEY --no-restart

@@ -14,13 +14,14 @@ use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::{
     apps::v1::Deployment,
-    core::v1::{ConfigMap, Namespace, Secret, Service, ServiceAccount},
+    batch::v1::{CronJob, Job},
+    core::v1::{ConfigMap, Namespace, PersistentVolumeClaim, Pod, Secret, Service, ServiceAccount},
     networking::v1::NetworkPolicy,
     rbac::v1::ClusterRoleBinding,
 };
 use kube::{
     Client, ResourceExt,
-    api::{Api, DeleteParams, ListParams, Patch, PatchParams},
+    api::{Api, DeleteParams, ListParams, Patch, PatchParams, PostParams},
     runtime::{
         controller::{Action, Controller},
         reflector::ObjectRef,
@@ -40,6 +41,1400 @@ mod mcp_egress;
 pub(crate) mod trustgraph_mount;
 
 use mcp_egress::mcp_egress_rule;
+const FEISHU_CLAIM_OWNER_UID: &str = "channels.kars.azure.com/owner-uid";
+const FEISHU_CLAIM_OWNER_NAME: &str = "channels.kars.azure.com/owner-name";
+const FEISHU_CLAIM_OWNER_NAMESPACE: &str = "channels.kars.azure.com/owner-namespace";
+const FEISHU_CLAIM_FINGERPRINT: &str = "channels.kars.azure.com/app-fingerprint";
+const FEISHU_CLAIM_OWNER_UID_LABEL: &str = "channels.kars.azure.com/owner-uid";
+const FEISHU_SECRET_MANAGED_LABEL: &str = "channels.kars.azure.com/managed-rotation";
+const FEISHU_SECRET_REVISION_STATE_LABEL: &str = "channels.kars.azure.com/revision-state";
+const FEISHU_SECRET_SANDBOX_LABEL: &str = "kars.azure.com/sandbox";
+const FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION: &str =
+    "channels.kars.azure.com/credentials-secret-uid";
+const FEISHU_POD_CREDENTIALS_SECRET_ANNOTATION: &str = "channels.kars.azure.com/credentials-secret";
+
+fn build_feishu_app_claim(
+    app_id: &str,
+    owner_namespace: &str,
+    owner_name: &str,
+    owner_uid: &str,
+) -> ConfigMap {
+    let fingerprint = crate::config_hash::sha256_hex_prefix(app_id.as_bytes(), 16);
+    let claim_name = format!("feishu-app-{fingerprint}");
+    serde_json::from_value(json!({
+        "apiVersion": "v1",
+        "kind": "ConfigMap",
+        "metadata": {
+            "name": claim_name,
+            "labels": {
+                "app.kubernetes.io/name": "kars",
+                "app.kubernetes.io/component": "channel-app-claim",
+                FEISHU_CLAIM_OWNER_UID_LABEL: owner_uid
+            },
+            "annotations": {
+                FEISHU_CLAIM_OWNER_UID: owner_uid,
+                FEISHU_CLAIM_OWNER_NAME: owner_name,
+                FEISHU_CLAIM_OWNER_NAMESPACE: owner_namespace,
+                FEISHU_CLAIM_FINGERPRINT: fingerprint
+            }
+        }
+    }))
+    .expect("Feishu App claim shape is valid")
+}
+
+fn feishu_app_claim_owner(claim: &ConfigMap) -> Option<String> {
+    claim
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(FEISHU_CLAIM_OWNER_UID))
+        .cloned()
+}
+
+fn feishu_app_claim_matches(claim: &ConfigMap, owner_uid: &str) -> bool {
+    feishu_app_claim_owner(claim).as_deref() == Some(owner_uid)
+}
+
+fn feishu_app_claims_to_release(
+    claims: &[ConfigMap],
+    owner_uid: &str,
+    current_claim_name: Option<&str>,
+) -> Vec<String> {
+    claims
+        .iter()
+        .filter(|claim| {
+            feishu_app_claim_matches(claim, owner_uid)
+                && claim.metadata.name.as_deref() != current_claim_name
+        })
+        .filter_map(|claim| claim.metadata.name.clone())
+        .collect()
+}
+
+fn feishu_claim_rollout_complete(
+    pods: &[Pod],
+    runtime_container_name: &str,
+    credentials_version: Option<&str>,
+) -> bool {
+    if credentials_version.is_some() && pods.is_empty() {
+        return false;
+    }
+    pods.iter().all(|pod| match credentials_version {
+        Some(version) => feishu_pod_connected(pod, runtime_container_name, Some(version)),
+        None => pod
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get(FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION))
+            .is_none(),
+    })
+}
+
+fn feishu_claim_release_ready_on_delete(pods: &[Pod]) -> bool {
+    pods.is_empty()
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum FeishuCredentialRevisionPlan {
+    UseCurrent(String),
+    KeepDeployed(String),
+    Unavailable,
+}
+
+fn plan_feishu_credential_revision(
+    desired_secret: &str,
+    deployed_secret: Option<&str>,
+    deployed_version: Option<&str>,
+    secret_version: Option<&str>,
+) -> FeishuCredentialRevisionPlan {
+    let Some(secret_version) = secret_version else {
+        return FeishuCredentialRevisionPlan::Unavailable;
+    };
+    match (deployed_secret, deployed_version) {
+        (None, None) => FeishuCredentialRevisionPlan::UseCurrent(secret_version.to_string()),
+        (Some(deployed_secret), _) if deployed_secret != desired_secret => {
+            FeishuCredentialRevisionPlan::UseCurrent(secret_version.to_string())
+        }
+        (Some(_), Some(deployed)) if deployed == secret_version => {
+            FeishuCredentialRevisionPlan::UseCurrent(secret_version.to_string())
+        }
+        (Some(_), Some(deployed)) => {
+            FeishuCredentialRevisionPlan::KeepDeployed(deployed.to_string())
+        }
+        _ => FeishuCredentialRevisionPlan::Unavailable,
+    }
+}
+
+fn deployment_feishu_credentials_version(deployment: Option<&Deployment>) -> Option<&str> {
+    deployment
+        .and_then(|deployment| deployment.spec.as_ref())
+        .and_then(|spec| spec.template.metadata.as_ref())
+        .and_then(|metadata| metadata.annotations.as_ref())
+        .and_then(|annotations| annotations.get(FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION))
+        .map(String::as_str)
+}
+
+fn deployment_feishu_credentials_secret(deployment: Option<&Deployment>) -> Option<&str> {
+    deployment
+        .and_then(|deployment| deployment.spec.as_ref())
+        .and_then(|spec| spec.template.metadata.as_ref())
+        .and_then(|metadata| metadata.annotations.as_ref())
+        .and_then(|annotations| annotations.get(FEISHU_POD_CREDENTIALS_SECRET_ANNOTATION))
+        .map(String::as_str)
+}
+
+fn feishu_app_id(secret: &Secret) -> Option<String> {
+    secret
+        .data
+        .as_ref()
+        .and_then(|data| data.get("FEISHU_APP_ID"))
+        .and_then(|value| String::from_utf8(value.0.clone()).ok())
+        .filter(|value| !value.is_empty())
+}
+
+async fn acquire_feishu_app_claim(
+    client: &Client,
+    app_id: &str,
+    owner_namespace: &str,
+    owner_name: &str,
+    owner_uid: &str,
+) -> std::result::Result<(), kube::Error> {
+    let claim_namespace = std::env::var("POD_NAMESPACE")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "kars-system".to_string());
+    let api: Api<ConfigMap> = Api::namespaced(client.clone(), &claim_namespace);
+    let desired = build_feishu_app_claim(app_id, owner_namespace, owner_name, owner_uid);
+    match api.create(&PostParams::default(), &desired).await {
+        Ok(_) => Ok(()),
+        Err(kube::Error::Api(error)) if error.code == 409 => {
+            let existing = api.get(&desired.name_any()).await?;
+            let annotations_match = existing
+                .metadata
+                .annotations
+                .as_ref()
+                .is_some_and(|actual| {
+                    desired
+                        .metadata
+                        .annotations
+                        .as_ref()
+                        .is_some_and(|expected| {
+                            actual.get(FEISHU_CLAIM_OWNER_UID)
+                                == expected.get(FEISHU_CLAIM_OWNER_UID)
+                                && actual.get(FEISHU_CLAIM_FINGERPRINT)
+                                    == expected.get(FEISHU_CLAIM_FINGERPRINT)
+                        })
+                });
+            if annotations_match {
+                Ok(())
+            } else {
+                Err(kube::Error::Api(error))
+            }
+        }
+        Err(error) => Err(error),
+    }
+}
+
+async fn release_feishu_app_claims(
+    client: &Client,
+    owner_uid: &str,
+    current_claim_name: Option<&str>,
+) -> std::result::Result<(), kube::Error> {
+    let claim_namespace = std::env::var("POD_NAMESPACE")
+        .ok()
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| "kars-system".to_string());
+    let api: Api<ConfigMap> = Api::namespaced(client.clone(), &claim_namespace);
+    let selector = format!("{FEISHU_CLAIM_OWNER_UID_LABEL}={owner_uid}");
+    let claims = api
+        .list(&ListParams::default().labels(&selector))
+        .await?
+        .items;
+    for claim_name in feishu_app_claims_to_release(&claims, owner_uid, current_claim_name) {
+        api.delete(&claim_name, &DeleteParams::default()).await?;
+    }
+    Ok(())
+}
+
+async fn cleanup_managed_feishu_secrets(
+    client: &Client,
+    namespace: &str,
+    sandbox_name: &str,
+    current_secret_name: Option<&str>,
+) -> std::result::Result<(), kube::Error> {
+    let api = Api::<Secret>::namespaced(client.clone(), namespace);
+    let selector = format!(
+        "{FEISHU_SECRET_MANAGED_LABEL}=true,{FEISHU_SECRET_REVISION_STATE_LABEL}=adopted,{FEISHU_SECRET_SANDBOX_LABEL}={sandbox_name}"
+    );
+    for secret in api
+        .list(&ListParams::default().labels(&selector))
+        .await?
+        .items
+    {
+        if managed_feishu_secret_cleanup_candidate(&secret, current_secret_name) {
+            match api
+                .delete(&secret.name_any(), &DeleteParams::default())
+                .await
+            {
+                Ok(_) => {}
+                Err(kube::Error::Api(error)) if error.code == 404 => {}
+                Err(error) => return Err(error),
+            }
+        }
+    }
+    Ok(())
+}
+
+fn managed_feishu_secret_cleanup_candidate(
+    secret: &Secret,
+    current_secret_name: Option<&str>,
+) -> bool {
+    secret.metadata.name.as_deref() != current_secret_name
+        && secret
+            .metadata
+            .labels
+            .as_ref()
+            .and_then(|labels| labels.get(FEISHU_SECRET_REVISION_STATE_LABEL))
+            .is_some_and(|state| state == "adopted")
+}
+
+async fn adopt_managed_feishu_secret(
+    client: &Client,
+    namespace: &str,
+    sandbox_name: &str,
+    secret: &Secret,
+) -> std::result::Result<(), kube::Error> {
+    let labels = secret.metadata.labels.as_ref();
+    let managed = labels
+        .and_then(|labels| labels.get(FEISHU_SECRET_MANAGED_LABEL))
+        .is_some_and(|value| value == "true");
+    let owned = labels
+        .and_then(|labels| labels.get(FEISHU_SECRET_SANDBOX_LABEL))
+        .is_some_and(|value| value == sandbox_name);
+    let adopted = labels
+        .and_then(|labels| labels.get(FEISHU_SECRET_REVISION_STATE_LABEL))
+        .is_some_and(|value| value == "adopted");
+    if !managed || !owned || adopted {
+        return Ok(());
+    }
+    let Some(secret_name) = secret.metadata.name.as_deref() else {
+        return Ok(());
+    };
+    Api::<Secret>::namespaced(client.clone(), namespace)
+        .patch(
+            secret_name,
+            &PatchParams::default(),
+            &Patch::Merge(json!({
+                "metadata": {"labels": {FEISHU_SECRET_REVISION_STATE_LABEL: "adopted"}}
+            })),
+        )
+        .await?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeishuCredentialState {
+    Missing,
+    Partial,
+    Invalid,
+    Complete,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FeishuChannelRuntimeState {
+    Configured,
+    Connecting,
+    Failed,
+    Suspended,
+}
+
+fn feishu_pod_connected(
+    pod: &Pod,
+    runtime_container_name: &str,
+    credentials_version: Option<&str>,
+) -> bool {
+    let pod_credentials_version = pod
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION))
+        .map(String::as_str);
+    if pod_credentials_version != credentials_version {
+        return false;
+    }
+    let has_channel_probe = pod.spec.as_ref().is_some_and(|spec| {
+        spec.containers.iter().any(|container| {
+            container.name == runtime_container_name
+                && container
+                    .readiness_probe
+                    .as_ref()
+                    .and_then(|probe| probe.exec.as_ref())
+                    .and_then(|action| action.command.as_ref())
+                    .is_some_and(|command| {
+                        command
+                            .iter()
+                            .any(|part| part.contains("kars-channel-feishu-ready"))
+                    })
+        })
+    });
+    has_channel_probe
+        && pod
+            .status
+            .as_ref()
+            .and_then(|status| status.container_statuses.as_ref())
+            .is_some_and(|statuses| {
+                statuses
+                    .iter()
+                    .any(|status| status.name == runtime_container_name && status.ready)
+            })
+}
+
+fn feishu_pod_runtime_failed(
+    pod: &Pod,
+    runtime_container_name: &str,
+    credentials_version: Option<&str>,
+) -> bool {
+    let pod_credentials_version = pod
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION))
+        .map(String::as_str);
+    if pod_credentials_version != credentials_version {
+        return false;
+    }
+    pod.status
+        .as_ref()
+        .and_then(|status| status.container_statuses.as_ref())
+        .and_then(|statuses| {
+            statuses
+                .iter()
+                .find(|status| status.name == runtime_container_name)
+        })
+        .and_then(|status| status.state.as_ref())
+        .is_some_and(|state| {
+            state.terminated.is_some()
+                || state
+                    .waiting
+                    .as_ref()
+                    .and_then(|waiting| waiting.reason.as_deref())
+                    .is_some_and(|reason| {
+                        matches!(
+                            reason,
+                            "CrashLoopBackOff"
+                                | "CreateContainerConfigError"
+                                | "CreateContainerError"
+                                | "ErrImagePull"
+                                | "ImagePullBackOff"
+                                | "InvalidImageName"
+                                | "RunContainerError"
+                        )
+                    })
+        })
+}
+
+fn feishu_channel_runtime_state(
+    pods: &[Pod],
+    runtime_container_name: &str,
+    credentials_version: Option<&str>,
+    suspended: bool,
+) -> FeishuChannelRuntimeState {
+    if suspended {
+        return FeishuChannelRuntimeState::Suspended;
+    }
+    if pods
+        .iter()
+        .any(|pod| feishu_pod_connected(pod, runtime_container_name, credentials_version))
+    {
+        FeishuChannelRuntimeState::Configured
+    } else if pods
+        .iter()
+        .any(|pod| feishu_pod_runtime_failed(pod, runtime_container_name, credentials_version))
+    {
+        FeishuChannelRuntimeState::Failed
+    } else {
+        FeishuChannelRuntimeState::Connecting
+    }
+}
+
+fn feishu_channel_status_conditions(
+    sandbox: &KarsSandbox,
+    state: FeishuChannelRuntimeState,
+) -> Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
+    let prior = sandbox
+        .status
+        .as_ref()
+        .map(|status| status.conditions.as_slice())
+        .unwrap_or(&[]);
+    let generation = sandbox.metadata.generation;
+    let (channel_status, reason, message) = match state {
+        FeishuChannelRuntimeState::Configured => (
+            crate::status::conditions::status::TRUE,
+            crate::status::conditions::reason::CHANNEL_CONFIGURED,
+            "Feishu runtime adapter reports an active WebSocket connection",
+        ),
+        FeishuChannelRuntimeState::Connecting => (
+            crate::status::conditions::status::FALSE,
+            crate::status::conditions::reason::CHANNEL_CONNECTING,
+            "Feishu configuration is valid; waiting for the runtime WebSocket connection",
+        ),
+        FeishuChannelRuntimeState::Failed => (
+            crate::status::conditions::status::FALSE,
+            crate::status::conditions::reason::CHANNEL_CONNECTION_FAILED,
+            "Feishu runtime adapter failed to start or maintain its connection",
+        ),
+        FeishuChannelRuntimeState::Suspended => (
+            crate::status::conditions::status::FALSE,
+            crate::status::conditions::reason::CHANNEL_SUSPENDED,
+            "sandbox is suspended; no Feishu WebSocket consumer is running",
+        ),
+    };
+    let channel_ready = crate::status::conditions::preserve_transition_time(
+        crate::status::conditions::find(prior, crate::status::conditions::TYPE_CHANNEL_READY),
+        crate::status::conditions::TYPE_CHANNEL_READY,
+        channel_status,
+        reason,
+        message,
+        generation,
+    );
+    let mut conditions = vec![channel_ready];
+    if channel_status == crate::status::conditions::status::FALSE {
+        conditions.push(crate::status::conditions::preserve_transition_time(
+            crate::status::conditions::find(prior, crate::status::conditions::TYPE_READY),
+            crate::status::conditions::TYPE_READY,
+            crate::status::conditions::status::FALSE,
+            reason,
+            message,
+            generation,
+        ));
+    }
+    conditions
+}
+
+fn channel_capability_failure_condition() -> (&'static str, &'static str) {
+    (
+        crate::status::conditions::TYPE_CHANNEL_READY,
+        crate::status::conditions::reason::CHANNEL_UNSUPPORTED_RUNTIME,
+    )
+}
+
+fn is_feishu_id(value: &str, prefix: &str) -> bool {
+    value.strip_prefix(prefix).is_some_and(|suffix| {
+        !suffix.is_empty()
+            && suffix
+                .bytes()
+                .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_' || byte == b'-')
+    })
+}
+
+fn build_channel_policy_env(
+    channels: &[crate::crd::ChannelSpec],
+) -> Result<Vec<serde_json::Value>, String> {
+    let Some(channel) = channels
+        .iter()
+        .find(|channel| channel.type_ == crate::crd::ChannelType::Feishu)
+    else {
+        return Ok(Vec::new());
+    };
+    let feishu = channel
+        .feishu
+        .as_ref()
+        .ok_or_else(|| "Feishu channel requires spec.channels[].feishu".to_string())?;
+    if feishu.direct_messages.policy == crate::crd::DirectMessageAccess::Allowlist
+        && feishu.direct_messages.allow_from.is_empty()
+    {
+        return Err("Feishu DM allowlist policy requires at least one ou_ user ID".to_string());
+    }
+    if let Some(invalid) = feishu
+        .direct_messages
+        .allow_from
+        .iter()
+        .find(|value| !is_feishu_id(value, "ou_"))
+    {
+        return Err(format!("invalid Feishu user Open ID `{invalid}`"));
+    }
+    if let Some(invalid) = feishu
+        .groups
+        .allow_from
+        .iter()
+        .find(|value| !is_feishu_id(value, "oc_"))
+    {
+        return Err(format!("invalid Feishu group chat ID `{invalid}`"));
+    }
+
+    let domain = match feishu.domain {
+        crate::crd::FeishuDomain::Feishu => "feishu",
+        crate::crd::FeishuDomain::Lark => "lark",
+    };
+    let connection_mode = match feishu.connection_mode {
+        crate::crd::FeishuConnectionMode::WebSocket => "websocket",
+    };
+    let dm_policy = match feishu.direct_messages.policy {
+        crate::crd::DirectMessageAccess::Pairing => "pairing",
+        crate::crd::DirectMessageAccess::Allowlist => "allowlist",
+        crate::crd::DirectMessageAccess::Disabled => "disabled",
+    };
+    let group_policy = match feishu.groups.policy {
+        crate::crd::GroupAccess::Allowlist => "allowlist",
+        crate::crd::GroupAccess::Disabled => "disabled",
+    };
+
+    Ok(vec![
+        json!({"name": "FEISHU_DOMAIN", "value": domain}),
+        json!({"name": "FEISHU_CONNECTION_MODE", "value": connection_mode}),
+        json!({"name": "FEISHU_DM_POLICY", "value": dm_policy}),
+        json!({"name": "FEISHU_ALLOW_FROM", "value": feishu.direct_messages.allow_from.join(",")}),
+        json!({"name": "FEISHU_GROUP_POLICY", "value": group_policy}),
+        json!({"name": "FEISHU_GROUP_ALLOW_FROM", "value": feishu.groups.allow_from.join(",")}),
+        json!({"name": "FEISHU_REQUIRE_MENTION", "value": feishu.groups.require_mention.to_string()}),
+    ])
+}
+
+fn feishu_credential_state(secret: Option<&Secret>) -> FeishuCredentialState {
+    let value = |key: &str| -> Result<Option<&str>, std::str::Utf8Error> {
+        let Some(bytes) = secret
+            .and_then(|secret| secret.data.as_ref())
+            .and_then(|data| data.get(key))
+        else {
+            return Ok(None);
+        };
+        let decoded = std::str::from_utf8(&bytes.0)?;
+        Ok((!decoded.is_empty()).then_some(decoded))
+    };
+    match (value("FEISHU_APP_ID"), value("FEISHU_APP_SECRET")) {
+        (Err(_), _) | (_, Err(_)) => FeishuCredentialState::Invalid,
+        (Ok(None), Ok(None)) => FeishuCredentialState::Missing,
+        (Ok(Some(app_id)), Ok(Some(_))) if is_feishu_id(app_id, "cli_") => {
+            FeishuCredentialState::Complete
+        }
+        (Ok(Some(_)), Ok(Some(_))) => FeishuCredentialState::Invalid,
+        _ => FeishuCredentialState::Partial,
+    }
+}
+
+fn channel_credential_secret_name(sandbox_name: &str, channel: &crate::crd::ChannelSpec) -> String {
+    channel
+        .credential_secret_ref
+        .as_ref()
+        .map(|reference| reference.name.clone())
+        .unwrap_or_else(|| format!("{sandbox_name}-credentials"))
+}
+
+fn feishu_credential_env(
+    sandbox_name: &str,
+    channels: &[crate::crd::ChannelSpec],
+) -> Vec<serde_json::Value> {
+    let Some(channel) = channels
+        .iter()
+        .find(|channel| channel.type_ == crate::crd::ChannelType::Feishu)
+    else {
+        return Vec::new();
+    };
+    let secret_name = channel_credential_secret_name(sandbox_name, channel);
+    ["FEISHU_APP_ID", "FEISHU_APP_SECRET"]
+        .into_iter()
+        .map(|key| {
+            json!({
+                "name": key,
+                "valueFrom": {"secretKeyRef": {"name": secret_name, "key": key}}
+            })
+        })
+        .collect()
+}
+
+fn runtime_credentials_secret_name(sandbox_name: &str) -> String {
+    format!("{sandbox_name}-credentials")
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WorkspaceStoragePlan {
+    volume: serde_json::Value,
+    claim: Option<serde_json::Value>,
+}
+
+fn build_workspace_storage_plan(
+    sandbox_name: &str,
+    sandbox_namespace: &str,
+    storage: Option<&crate::crd::SandboxStorageSpec>,
+    sandbox_uid: Option<&str>,
+) -> WorkspaceStoragePlan {
+    let Some(workspace) = storage.and_then(|storage| storage.workspace.as_ref()) else {
+        return WorkspaceStoragePlan {
+            volume: json!({"name": "sandbox-data", "emptyDir": {}}),
+            claim: None,
+        };
+    };
+
+    if let Some(existing_claim) = workspace.existing_claim.as_deref() {
+        return WorkspaceStoragePlan {
+            volume: json!({
+                "name": "sandbox-data",
+                "persistentVolumeClaim": {"claimName": existing_claim}
+            }),
+            claim: None,
+        };
+    }
+
+    let claim_name = format!("{sandbox_name}-workspace");
+    let retain_policy = match workspace.retain_policy {
+        crate::crd::WorkspaceRetainPolicy::Retain => "Retain",
+        crate::crd::WorkspaceRetainPolicy::Delete => "Delete",
+    };
+    let mut metadata = json!({
+        "name": claim_name,
+        "namespace": sandbox_namespace,
+        "labels": {
+            "app.kubernetes.io/managed-by": "kars-controller",
+            "kars.azure.com/sandbox": sandbox_name,
+            "kars.azure.com/storage-role": "workspace"
+        },
+        "annotations": {
+            "kars.azure.com/retain-policy": retain_policy
+        }
+    });
+    if let Some(uid) = sandbox_uid {
+        metadata["annotations"]["kars.azure.com/sandbox-uid"] = json!(uid);
+    }
+
+    let access_modes = workspace
+        .access_modes
+        .iter()
+        .map(|mode| match mode {
+            crate::crd::PersistentVolumeAccessMode::ReadWriteOnce => "ReadWriteOnce",
+            crate::crd::PersistentVolumeAccessMode::ReadWriteOncePod => "ReadWriteOncePod",
+        })
+        .collect::<Vec<_>>();
+    let mut spec = json!({
+        "accessModes": access_modes,
+        "resources": {
+            "requests": {
+                "storage": workspace.size.as_deref().unwrap_or("10Gi")
+            }
+        }
+    });
+    if let Some(storage_class_name) = workspace.storage_class_name.as_deref() {
+        spec["storageClassName"] = json!(storage_class_name);
+    }
+
+    WorkspaceStoragePlan {
+        volume: json!({
+            "name": "sandbox-data",
+            "persistentVolumeClaim": {"claimName": claim_name}
+        }),
+        claim: Some(json!({
+            "apiVersion": "v1",
+            "kind": "PersistentVolumeClaim",
+            "metadata": metadata,
+            "spec": spec
+        })),
+    }
+}
+
+fn validate_workspace_storage_spec(
+    workspace: &crate::crd::WorkspaceStorageSpec,
+) -> Result<(), String> {
+    let mut errors = Vec::new();
+    if workspace.existing_claim.is_some() {
+        if workspace.size.is_some()
+            || workspace.storage_class_name.is_some()
+            || !workspace.access_modes.is_empty()
+            || workspace.retain_policy != crate::crd::WorkspaceRetainPolicy::Retain
+        {
+            errors.push(
+                "existingClaim is mutually exclusive with size, storageClassName, accessModes, and retainPolicy"
+                    .to_string(),
+            );
+        }
+    } else {
+        if workspace.size.as_deref().is_none_or(str::is_empty) {
+            errors.push("dynamic workspace size must not be empty".to_string());
+        }
+        if workspace.access_modes.len() != 1 {
+            errors.push("dynamic workspace accessModes must contain exactly one mode".to_string());
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(errors.join("; "))
+    }
+}
+
+fn validate_workspace_claim(claim: &PersistentVolumeClaim) -> Result<(), String> {
+    let access_modes = claim
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.access_modes.as_ref())
+        .cloned()
+        .unwrap_or_default();
+    if access_modes.len() != 1
+        || !matches!(
+            access_modes.first().map(String::as_str),
+            Some("ReadWriteOnce" | "ReadWriteOncePod")
+        )
+    {
+        return Err(format!(
+            "workspace PVC `{}` must use exactly one of ReadWriteOnce or ReadWriteOncePod",
+            claim.name_any()
+        ));
+    }
+    if claim
+        .status
+        .as_ref()
+        .and_then(|status| status.phase.as_deref())
+        == Some("Lost")
+    {
+        return Err(format!("workspace PVC `{}` is Lost", claim.name_any()));
+    }
+    if claim
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.volume_mode.as_deref())
+        .is_some_and(|mode| mode != "Filesystem")
+    {
+        return Err(format!(
+            "workspace PVC `{}` must use Filesystem volumeMode",
+            claim.name_any()
+        ));
+    }
+    Ok(())
+}
+
+fn validate_dynamic_claim_provenance(
+    claim: &PersistentVolumeClaim,
+    sandbox_uid: Option<&str>,
+) -> Result<(), String> {
+    let recorded_uid = claim
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get("kars.azure.com/sandbox-uid"))
+        .map(String::as_str);
+    if sandbox_uid.is_some() && recorded_uid == sandbox_uid {
+        return Ok(());
+    }
+    Err(format!(
+        "workspace PVC `{}` belongs to a different sandbox instance; use spec.storage.workspace.existingClaim for explicit recovery",
+        claim.name_any()
+    ))
+}
+
+fn workspace_storage_status_conditions(
+    sandbox: &KarsSandbox,
+    claim_phase: Option<&str>,
+) -> Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
+    let prior = sandbox
+        .status
+        .as_ref()
+        .map(|status| status.conditions.as_slice())
+        .unwrap_or(&[]);
+    let generation = sandbox.metadata.generation;
+    let storage = match claim_phase {
+        None => crate::status::conditions::preserve_transition_time(
+            crate::status::conditions::find(prior, crate::status::conditions::TYPE_STORAGE_READY),
+            crate::status::conditions::TYPE_STORAGE_READY,
+            crate::status::conditions::status::TRUE,
+            crate::status::conditions::reason::EMPTY_DIR,
+            "workspace uses ephemeral emptyDir storage",
+            generation,
+        ),
+        Some("Bound") => crate::status::conditions::preserve_transition_time(
+            crate::status::conditions::find(prior, crate::status::conditions::TYPE_STORAGE_READY),
+            crate::status::conditions::TYPE_STORAGE_READY,
+            crate::status::conditions::status::TRUE,
+            crate::status::conditions::reason::CLAIM_BOUND,
+            "workspace PVC is Bound",
+            generation,
+        ),
+        Some(_) => crate::status::conditions::preserve_transition_time(
+            crate::status::conditions::find(prior, crate::status::conditions::TYPE_STORAGE_READY),
+            crate::status::conditions::TYPE_STORAGE_READY,
+            crate::status::conditions::status::FALSE,
+            crate::status::conditions::reason::CLAIM_PENDING,
+            "workspace PVC is waiting to bind",
+            generation,
+        ),
+    };
+
+    if storage.status == crate::status::conditions::status::TRUE {
+        vec![storage]
+    } else {
+        vec![
+            storage,
+            crate::status::conditions::preserve_transition_time(
+                crate::status::conditions::find(prior, crate::status::conditions::TYPE_READY),
+                crate::status::conditions::TYPE_READY,
+                crate::status::conditions::status::FALSE,
+                crate::status::conditions::reason::CREATING,
+                "waiting for workspace storage",
+                generation,
+            ),
+            crate::status::conditions::preserve_transition_time(
+                crate::status::conditions::find(prior, crate::status::conditions::TYPE_PROGRESSING),
+                crate::status::conditions::TYPE_PROGRESSING,
+                crate::status::conditions::status::TRUE,
+                crate::status::conditions::reason::CREATING,
+                "waiting for workspace storage",
+                generation,
+            ),
+        ]
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum WorkspaceBootstrapState {
+    NotConfigured,
+    Pending,
+    Ready,
+    Failed(String),
+}
+
+fn workspace_bootstrap_state(pods: &[Pod]) -> WorkspaceBootstrapState {
+    let mut saw_ready = false;
+    let mut saw_pending = false;
+    for pod in pods {
+        if pod.metadata.deletion_timestamp.is_some() {
+            continue;
+        }
+        let Some(statuses) = pod
+            .status
+            .as_ref()
+            .and_then(|status| status.init_container_statuses.as_ref())
+        else {
+            saw_pending = true;
+            continue;
+        };
+        let Some(status) = statuses
+            .iter()
+            .find(|status| status.name == "workspace-bootstrap")
+        else {
+            saw_pending = true;
+            continue;
+        };
+        if let Some(terminated) = status
+            .state
+            .as_ref()
+            .and_then(|state| state.terminated.as_ref())
+        {
+            if terminated.exit_code == 0 {
+                saw_ready = true;
+                continue;
+            }
+            return WorkspaceBootstrapState::Failed(
+                terminated
+                    .message
+                    .clone()
+                    .or_else(|| terminated.reason.clone())
+                    .unwrap_or_else(|| format!("exit code {}", terminated.exit_code)),
+            );
+        }
+        if let Some(terminated) = status
+            .last_state
+            .as_ref()
+            .and_then(|state| state.terminated.as_ref())
+            && terminated.exit_code != 0
+            && status.restart_count > 0
+        {
+            return WorkspaceBootstrapState::Failed(
+                terminated
+                    .message
+                    .clone()
+                    .or_else(|| terminated.reason.clone())
+                    .unwrap_or_else(|| format!("exit code {}", terminated.exit_code)),
+            );
+        }
+        if let Some(waiting) = status
+            .state
+            .as_ref()
+            .and_then(|state| state.waiting.as_ref())
+            && matches!(
+                waiting.reason.as_deref(),
+                Some("CreateContainerError" | "RunContainerError")
+            )
+        {
+            return WorkspaceBootstrapState::Failed(
+                waiting
+                    .message
+                    .clone()
+                    .or_else(|| waiting.reason.clone())
+                    .unwrap_or_else(|| "bootstrap container could not start".to_string()),
+            );
+        }
+        saw_pending = true;
+    }
+    if saw_ready && !saw_pending {
+        WorkspaceBootstrapState::Ready
+    } else {
+        WorkspaceBootstrapState::Pending
+    }
+}
+
+fn workspace_bootstrap_status_conditions(
+    sandbox: &KarsSandbox,
+    state: &WorkspaceBootstrapState,
+) -> Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition> {
+    let prior = sandbox
+        .status
+        .as_ref()
+        .map(|status| status.conditions.as_slice())
+        .unwrap_or(&[]);
+    let generation = sandbox.metadata.generation;
+    let condition = |condition_type: &str, status: &str, reason: &str, message: &str| {
+        crate::status::conditions::preserve_transition_time(
+            crate::status::conditions::find(prior, condition_type),
+            condition_type,
+            status,
+            reason,
+            message,
+            generation,
+        )
+    };
+
+    match state {
+        WorkspaceBootstrapState::NotConfigured => Vec::new(),
+        WorkspaceBootstrapState::Ready => vec![condition(
+            crate::status::conditions::TYPE_BOOTSTRAP_READY,
+            crate::status::conditions::status::TRUE,
+            crate::status::conditions::reason::RECONCILED,
+            "workspace bootstrap completed",
+        )],
+        WorkspaceBootstrapState::Pending => vec![
+            condition(
+                crate::status::conditions::TYPE_BOOTSTRAP_READY,
+                crate::status::conditions::status::FALSE,
+                crate::status::conditions::reason::CREATING,
+                "waiting for workspace bootstrap init container",
+            ),
+            condition(
+                crate::status::conditions::TYPE_READY,
+                crate::status::conditions::status::FALSE,
+                crate::status::conditions::reason::CREATING,
+                "waiting for workspace bootstrap",
+            ),
+            condition(
+                crate::status::conditions::TYPE_PROGRESSING,
+                crate::status::conditions::status::TRUE,
+                crate::status::conditions::reason::CREATING,
+                "waiting for workspace bootstrap",
+            ),
+        ],
+        WorkspaceBootstrapState::Failed(message) => vec![
+            condition(
+                crate::status::conditions::TYPE_BOOTSTRAP_READY,
+                crate::status::conditions::status::FALSE,
+                crate::status::conditions::reason::BOOTSTRAP_FAILED,
+                message,
+            ),
+            condition(
+                crate::status::conditions::TYPE_READY,
+                crate::status::conditions::status::FALSE,
+                crate::status::conditions::reason::BOOTSTRAP_FAILED,
+                "workspace bootstrap failed",
+            ),
+            condition(
+                crate::status::conditions::TYPE_PROGRESSING,
+                crate::status::conditions::status::FALSE,
+                crate::status::conditions::reason::FAILED,
+                "workspace bootstrap cannot make progress",
+            ),
+            condition(
+                crate::status::conditions::TYPE_DEGRADED,
+                crate::status::conditions::status::TRUE,
+                crate::status::conditions::reason::BOOTSTRAP_FAILED,
+                message,
+            ),
+        ],
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
+struct WorkspaceBootstrapPlan {
+    volume: serde_json::Value,
+    init_container: serde_json::Value,
+}
+
+fn build_workspace_bootstrap_plan(
+    config: &crate::crd::OpenClawConfig,
+    image: &str,
+    image_pull_policy: &str,
+    config_map_uid: &str,
+    resource_version: &str,
+) -> Option<WorkspaceBootstrapPlan> {
+    let workspace = config.workspace.as_ref()?;
+    let config_map = workspace.bootstrap_config_map_ref.as_ref()?;
+    let overwrite_policy = match workspace.overwrite_policy {
+        crate::crd::WorkspaceOverwritePolicy::IfMissing => "IfMissing",
+        crate::crd::WorkspaceOverwritePolicy::Always => "Always",
+    };
+    Some(WorkspaceBootstrapPlan {
+        volume: json!({
+            "name": "workspace-bootstrap",
+            "configMap": {
+                "name": config_map.name,
+                "defaultMode": 288
+            }
+        }),
+        init_container: json!({
+            "name": "workspace-bootstrap",
+            "image": image,
+            "imagePullPolicy": image_pull_policy,
+            "command": ["/usr/local/bin/workspace-bootstrap.sh"],
+            "env": [
+                {
+                    "name": "KARS_WORKSPACE_OVERWRITE_POLICY",
+                    "value": overwrite_policy
+                },
+                {
+                    "name": "KARS_WORKSPACE_BOOTSTRAP_CONFIG_MAP_UID",
+                    "value": config_map_uid
+                },
+                {
+                    "name": "KARS_WORKSPACE_BOOTSTRAP_RESOURCE_VERSION",
+                    "value": resource_version
+                }
+            ],
+            "securityContext": {
+                "runAsUser": 1000,
+                "runAsGroup": 1000,
+                "runAsNonRoot": true,
+                "allowPrivilegeEscalation": false,
+                "readOnlyRootFilesystem": true,
+                "capabilities": {"drop": ["ALL"]}
+            },
+            "volumeMounts": [
+                {"name": "sandbox-data", "mountPath": "/sandbox"},
+                {"name": "workspace-bootstrap", "mountPath": "/etc/kars/workspace-bootstrap", "readOnly": true}
+            ],
+            "resources": {
+                "requests": {"cpu": "5m", "memory": "16Mi"},
+                "limits": {"cpu": "100m", "memory": "64Mi"}
+            }
+        }),
+    })
+}
+
+fn validate_workspace_bootstrap_config_map(config_map: &ConfigMap) -> Result<(), String> {
+    if config_map
+        .binary_data
+        .as_ref()
+        .is_some_and(|data| !data.is_empty())
+    {
+        return Err("workspace bootstrap ConfigMap must not contain binaryData".to_string());
+    }
+
+    const ALLOWED_FILES: &[&str] = &[
+        "AGENTS.md",
+        "SOUL.md",
+        "HEARTBEAT.md",
+        "TOOLS.md",
+        "USER.md",
+    ];
+    if let Some(data) = config_map.data.as_ref() {
+        let unsupported = data
+            .keys()
+            .filter(|key| !ALLOWED_FILES.contains(&key.as_str()))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !unsupported.is_empty() {
+            return Err(format!(
+                "workspace bootstrap ConfigMap contains unsupported files: {}",
+                unsupported.join(", ")
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn preserve_namespace_on_delete(storage: Option<&crate::crd::SandboxStorageSpec>) -> bool {
+    storage
+        .and_then(|storage| storage.workspace.as_ref())
+        .is_some_and(|workspace| {
+            workspace.existing_claim.is_some()
+                || workspace.retain_policy == crate::crd::WorkspaceRetainPolicy::Retain
+        })
+}
+
+fn should_preserve_namespace_on_delete(
+    storage: Option<&crate::crd::SandboxStorageSpec>,
+    claims: &[PersistentVolumeClaim],
+    _sandbox_uid: Option<&str>,
+) -> bool {
+    preserve_namespace_on_delete(storage) || !claims.is_empty()
+}
+
+fn deletable_workspace_claims(
+    storage: Option<&crate::crd::SandboxStorageSpec>,
+    sandbox_name: &str,
+    claims: &[PersistentVolumeClaim],
+    sandbox_uid: Option<&str>,
+) -> Vec<String> {
+    let delete_authorized = storage
+        .and_then(|storage| storage.workspace.as_ref())
+        .is_some_and(|workspace| {
+            workspace.existing_claim.is_none()
+                && workspace.retain_policy == crate::crd::WorkspaceRetainPolicy::Delete
+        });
+    if !delete_authorized {
+        return Vec::new();
+    }
+    let generated_claim_name = format!("{sandbox_name}-workspace");
+    claims
+        .iter()
+        .filter(|claim| {
+            let annotations = claim.metadata.annotations.as_ref();
+            let labels = claim.metadata.labels.as_ref();
+            claim.metadata.name.as_deref() == Some(generated_claim_name.as_str())
+                && labels
+                    .and_then(|values| values.get("app.kubernetes.io/managed-by"))
+                    .is_some_and(|value| value == "kars-controller")
+                && labels
+                    .and_then(|values| values.get("kars.azure.com/storage-role"))
+                    .is_some_and(|value| value == "workspace")
+                && annotations
+                    .and_then(|values| values.get("kars.azure.com/sandbox-uid"))
+                    .map(String::as_str)
+                    == sandbox_uid
+        })
+        .filter_map(|claim| claim.metadata.name.clone())
+        .collect()
+}
+
+fn validate_namespace_claim_reuse(
+    claims: &[PersistentVolumeClaim],
+    requested_existing_claim: Option<&str>,
+    current_claim: Option<&str>,
+    sandbox_uid: Option<&str>,
+) -> Result<(), String> {
+    for claim in claims {
+        let recorded_uid = claim
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|annotations| annotations.get("kars.azure.com/sandbox-uid"))
+            .map(String::as_str);
+        if recorded_uid == sandbox_uid
+            || requested_existing_claim == claim.metadata.name.as_deref()
+            || current_claim == claim.metadata.name.as_deref()
+        {
+            continue;
+        }
+        return Err(format!(
+            "namespace contains retained PVC `{}` from another sandbox instance; set spec.storage.workspace.existingClaim to recover it explicitly",
+            claim.name_any()
+        ));
+    }
+    Ok(())
+}
+
+fn workspace_deployment_strategy(persistent: bool) -> Option<serde_json::Value> {
+    persistent.then(|| json!({"type": "Recreate"}))
+}
+
+fn deployment_needs_recreate_cleanup(deployment: Option<&Deployment>, recreate: bool) -> bool {
+    recreate
+        && deployment
+            .and_then(|deployment| deployment.spec.as_ref())
+            .and_then(|spec| spec.strategy.as_ref())
+            .and_then(|strategy| strategy.rolling_update.as_ref())
+            .is_some()
+}
+
+fn workspace_desired_replicas(
+    suspended: bool,
+    existing_claim_requested: bool,
+    claim_phase: Option<&str>,
+) -> i64 {
+    if suspended || (existing_claim_requested && claim_phase != Some("Bound")) {
+        0
+    } else {
+        1
+    }
+}
+
+fn runtime_state_dir(kind: &crate::crd::RuntimeKind) -> &'static str {
+    match kind {
+        crate::crd::RuntimeKind::OpenClaw => "/sandbox/.openclaw",
+        crate::crd::RuntimeKind::Hermes => "/sandbox/.hermes",
+        crate::crd::RuntimeKind::OpenAIAgents => "/sandbox/.openai-agents",
+        crate::crd::RuntimeKind::MicrosoftAgentFramework => "/sandbox/.maf",
+        crate::crd::RuntimeKind::LangGraph => "/sandbox/.langgraph",
+        crate::crd::RuntimeKind::Anthropic => "/sandbox/.anthropic",
+        crate::crd::RuntimeKind::PydanticAi => "/sandbox/.pydantic-ai",
+        crate::crd::RuntimeKind::BYO => "/sandbox/.byo",
+        crate::crd::RuntimeKind::SemanticKernel => "/sandbox/.semantic-kernel",
+    }
+}
+
+fn kube_api_access_mount() -> serde_json::Value {
+    json!({
+        "name": "kube-api-access",
+        "mountPath": "/var/run/secrets/kubernetes.io/serviceaccount",
+        "readOnly": true
+    })
+}
+
+fn kube_api_access_volume() -> serde_json::Value {
+    json!({
+        "name": "kube-api-access",
+        "projected": {
+            "defaultMode": 420,
+            "sources": [
+                {"serviceAccountToken": {"expirationSeconds": 3607, "path": "token"}},
+                {"configMap": {"name": "kube-root-ca.crt", "items": [{"key": "ca.crt", "path": "ca.crt"}]}},
+                {"downwardAPI": {"items": [{"path": "namespace", "fieldRef": {"apiVersion": "v1", "fieldPath": "metadata.namespace"}}]}}
+            ]
+        }
+    })
+}
+
+const WORKLOAD_IDENTITY_SKIP_CONTAINERS: &str = "egress-guard;workspace-bootstrap";
+
+fn validate_workspace_volume_transition(
+    current_claim: Option<&str>,
+    desired_claim: Option<&str>,
+    suspended: bool,
+) -> Result<(), String> {
+    if current_claim == desired_claim || (current_claim.is_none() && desired_claim.is_none()) {
+        return Ok(());
+    }
+    if suspended {
+        return Ok(());
+    }
+    Err("changing workspace volume mode or claim requires spec.suspended=true".to_string())
+}
+
+fn deployment_workspace_claim(deployment: &Deployment) -> Option<&str> {
+    deployment
+        .spec
+        .as_ref()?
+        .template
+        .spec
+        .as_ref()?
+        .volumes
+        .as_ref()?
+        .iter()
+        .find(|volume| volume.name == "sandbox-data")?
+        .persistent_volume_claim
+        .as_ref()
+        .map(|source| source.claim_name.as_str())
+}
+
+async fn cleanup_namespaced_sandbox_resources(
+    client: &Client,
+    namespace: &str,
+    sandbox_name: &str,
+) -> Result<(), kube::Error> {
+    let delete = DeleteParams::default();
+    let list = ListParams::default().labels(&format!("kars.azure.com/sandbox={sandbox_name}"));
+
+    Api::<Deployment>::namespaced(client.clone(), namespace)
+        .delete_collection(&delete, &list)
+        .await?;
+    Api::<Service>::namespaced(client.clone(), namespace)
+        .delete_collection(&delete, &list)
+        .await?;
+    Api::<ConfigMap>::namespaced(client.clone(), namespace)
+        .delete_collection(&delete, &list)
+        .await?;
+    Api::<Secret>::namespaced(client.clone(), namespace)
+        .delete_collection(&delete, &list)
+        .await?;
+    let secret_api = Api::<Secret>::namespaced(client.clone(), namespace);
+    match secret_api
+        .delete(&format!("{sandbox_name}-credentials"), &delete)
+        .await
+    {
+        Ok(_) => {}
+        Err(kube::Error::Api(error)) if error.code == 404 => {}
+        Err(error) => return Err(error),
+    }
+    Api::<ServiceAccount>::namespaced(client.clone(), namespace)
+        .delete_collection(&delete, &list)
+        .await?;
+    Api::<NetworkPolicy>::namespaced(client.clone(), namespace)
+        .delete_collection(&delete, &list)
+        .await?;
+    Api::<CronJob>::namespaced(client.clone(), namespace)
+        .delete_collection(&delete, &list)
+        .await?;
+    Api::<Job>::namespaced(client.clone(), namespace)
+        .delete_collection(&delete, &list)
+        .await?;
+    Ok(())
+}
+
+async fn stamp_degraded_with_condition(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    name: &str,
+    condition_type: &'static str,
+    reason: &'static str,
+    message: &str,
+) {
+    let mut patch = crate::status::build_degraded_status_patch(sandbox, reason, message);
+    let prior = sandbox
+        .status
+        .as_ref()
+        .map(|status| status.conditions.as_slice())
+        .unwrap_or(&[]);
+    let condition = crate::status::conditions::preserve_transition_time(
+        crate::status::conditions::find(prior, condition_type),
+        condition_type,
+        crate::status::conditions::status::FALSE,
+        reason,
+        message,
+        sandbox.metadata.generation,
+    );
+    if let Some(conditions) = patch["status"]["conditions"].as_array_mut() {
+        conditions.retain(|value| value["type"] != condition_type);
+        conditions.push(serde_json::to_value(condition).unwrap_or_default());
+    }
+    let api =
+        Api::<KarsSandbox>::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
+    if let Err(error) = api
+        .patch_status(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await
+    {
+        tracing::warn!(sandbox = %name, error = %error, "failed to patch dependency-specific degraded status");
+    }
+}
+
+fn channel_fail_closed_deployment_patch() -> serde_json::Value {
+    json!({"spec": {"replicas": 0}})
+}
+
+async fn stamp_channel_failure_fail_closed(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    sandbox_namespace: &str,
+    name: &str,
+    reason: &'static str,
+    message: &str,
+) -> Result<(), kube::Error> {
+    let deployment_api = Api::<Deployment>::namespaced(client.clone(), sandbox_namespace);
+    match deployment_api
+        .patch(
+            name,
+            &PatchParams::default(),
+            &Patch::Merge(channel_fail_closed_deployment_patch()),
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(kube::Error::Api(error)) if error.code == 404 => {}
+        Err(error) => return Err(error),
+    }
+    stamp_degraded_with_condition(
+        client,
+        sandbox,
+        name,
+        crate::status::conditions::TYPE_CHANNEL_READY,
+        reason,
+        message,
+    )
+    .await;
+    Ok(())
+}
 
 mod pod_spec;
 pub(crate) use pod_spec::{
@@ -209,18 +1604,79 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     const FINALIZER: &str = "kars.azure.com/namespace-cleanup";
 
     if sandbox.metadata.deletion_timestamp.is_some() {
-        tracing::info!("KarsSandbox {name} is being deleted — cleaning up namespace {sandbox_ns}");
-
-        // Delete the namespace (cascades to all resources within it)
-        let ns_api: Api<Namespace> = Api::all(client.clone());
-        match ns_api.delete(&sandbox_ns, &DeleteParams::default()).await {
-            Ok(_) => tracing::info!("Namespace {sandbox_ns} deletion initiated"),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                tracing::info!("Namespace {sandbox_ns} already gone");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to delete namespace {sandbox_ns}");
+        let claim_api: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), &sandbox_ns);
+        let claims = match claim_api.list(&ListParams::default()).await {
+            Ok(claims) => claims.items,
+            Err(kube::Error::Api(error)) if error.code == 404 => Vec::new(),
+            Err(error) => {
+                tracing::error!(error = %error, "Failed to inspect PVCs in namespace {sandbox_ns}");
                 return Ok(Action::requeue(Duration::from_secs(10)));
+            }
+        };
+        let preserve_namespace = should_preserve_namespace_on_delete(
+            sandbox.spec.storage.as_ref(),
+            &claims,
+            sandbox.metadata.uid.as_deref(),
+        );
+        if preserve_namespace {
+            tracing::info!(
+                sandbox = %name,
+                namespace = %sandbox_ns,
+                "KarsSandbox is being deleted — retaining workspace PVC and namespace"
+            );
+            match cleanup_namespaced_sandbox_resources(client, &sandbox_ns, &name).await {
+                Ok(()) => tracing::info!(
+                    namespace = %sandbox_ns,
+                    "Kars-managed workload resources deleted; PVCs retained"
+                ),
+                Err(kube::Error::Api(error)) if error.code == 404 => {
+                    tracing::info!("Namespace {sandbox_ns} already gone");
+                }
+                Err(error) => {
+                    tracing::error!(error = %error, "Failed to clean namespace {sandbox_ns}");
+                    return Ok(Action::requeue(Duration::from_secs(10)));
+                }
+            }
+            let claim_api: Api<PersistentVolumeClaim> =
+                Api::namespaced(client.clone(), &sandbox_ns);
+            let deletable_claims = deletable_workspace_claims(
+                sandbox.spec.storage.as_ref(),
+                &name,
+                &claims,
+                sandbox.metadata.uid.as_deref(),
+            );
+            for claim_name in &deletable_claims {
+                match claim_api.delete(claim_name, &DeleteParams::default()).await {
+                    Ok(_) => {
+                        tracing::info!(claim = %claim_name, "Delete-policy workspace PVC deletion initiated")
+                    }
+                    Err(kube::Error::Api(error)) if error.code == 404 => {}
+                    Err(error) => {
+                        tracing::error!(claim = %claim_name, error = %error, "Failed to delete Delete-policy workspace PVC");
+                        return Ok(Action::requeue(Duration::from_secs(10)));
+                    }
+                }
+            }
+            if !deletable_claims.is_empty() {
+                return Ok(Action::requeue(Duration::from_secs(2)));
+            }
+        } else {
+            tracing::info!(
+                "KarsSandbox {name} is being deleted — cleaning up namespace {sandbox_ns}"
+            );
+
+            // Ephemeral and Delete-policy workspaces retain the historical
+            // namespace-level cascade.
+            let ns_api: Api<Namespace> = Api::all(client.clone());
+            match ns_api.delete(&sandbox_ns, &DeleteParams::default()).await {
+                Ok(_) => tracing::info!("Namespace {sandbox_ns} deletion initiated"),
+                Err(kube::Error::Api(ae)) if ae.code == 404 => {
+                    tracing::info!("Namespace {sandbox_ns} already gone");
+                }
+                Err(e) => {
+                    tracing::error!(error = %e, "Failed to delete namespace {sandbox_ns}");
+                    return Ok(Action::requeue(Duration::from_secs(10)));
+                }
             }
         }
 
@@ -291,6 +1747,25 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await;
 
+        if let Some(owner_uid) = sandbox.metadata.uid.as_deref() {
+            let pod_api = Api::<Pod>::namespaced(client.clone(), &sandbox_ns);
+            let pods = match pod_api
+                .list(&ListParams::default().labels(&format!("kars.azure.com/sandbox={name}")))
+                .await
+            {
+                Ok(pods) => pods.items,
+                Err(kube::Error::Api(error)) if error.code == 404 => Vec::new(),
+                Err(error) => return Err(error.into()),
+            };
+            if !feishu_claim_release_ready_on_delete(&pods) {
+                return Ok(Action::requeue(Duration::from_secs(2)));
+            }
+            if let Err(error) = release_feishu_app_claims(client, owner_uid, None).await {
+                tracing::warn!(sandbox = %name, error = %error, "Feishu App claim cleanup failed");
+                return Ok(Action::requeue(Duration::from_secs(10)));
+            }
+        }
+
         // Remove the finalizer so K8s can complete CRD deletion
         let sandbox_api: Api<KarsSandbox> =
             Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
@@ -301,9 +1776,13 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     .unwrap_or_default()
             }
         });
-        let _ = sandbox_api
+        if let Err(error) = sandbox_api
             .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
-            .await;
+            .await
+        {
+            tracing::error!(sandbox = %name, error = %error, "Failed to remove KarsSandbox cleanup finalizer");
+            return Ok(Action::requeue(Duration::from_secs(10)));
+        }
 
         tracing::info!("KarsSandbox {name} cleanup complete");
         return Ok(Action::await_change());
@@ -341,6 +1820,52 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // (refusing to silently run the OpenClaw image — see plan §S10.A1
     // rubber-duck #2 + audit doc 2026-04-28-phase2-multi-runtime-crd.md).
     let runtime_spec = spec.runtime.clone();
+    let is_openclaw = matches!(runtime_spec.kind, crate::crd::RuntimeKind::OpenClaw);
+    let has_feishu_channel = spec
+        .channels
+        .iter()
+        .any(|channel| channel.type_ == crate::crd::ChannelType::Feishu);
+    if let Err(error) = crate::reconciler::runtime::validate_channel_capabilities(
+        &runtime_spec.kind,
+        &spec.channels,
+    ) {
+        let message = error.to_string();
+        let (_, reason) = channel_capability_failure_condition();
+        stamp_channel_failure_fail_closed(client, &sandbox, &sandbox_ns, &name, reason, &message)
+            .await?;
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
+    let channel_policy_env = match build_channel_policy_env(&spec.channels) {
+        Ok(env) => env,
+        Err(message) => {
+            stamp_channel_failure_fail_closed(
+                client,
+                &sandbox,
+                &sandbox_ns,
+                &name,
+                crate::status::conditions::reason::CHANNEL_POLICY_INVALID,
+                &message,
+            )
+            .await?;
+            return Ok(Action::requeue(Duration::from_secs(300)));
+        }
+    };
+    if let Some(workspace) = spec
+        .storage
+        .as_ref()
+        .and_then(|storage| storage.workspace.as_ref())
+        && let Err(message) = validate_workspace_storage_spec(workspace)
+    {
+        crate::status::stamp_degraded(
+            client,
+            &sandbox,
+            &name,
+            crate::status::conditions::reason::SPEC_INVALID,
+            &message,
+        )
+        .await;
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
     let runtime_kind_str = crate::reconciler::runtime::kind_str(&runtime_spec.kind);
     let runtime_plan =
         match crate::reconciler::runtime::build_runtime_plan(&runtime_spec, &ctx.sandbox_image) {
@@ -370,7 +1895,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     client,
                     &sandbox,
                     &name,
-                    crate::status::conditions::reason::SPEC_INVALID,
+                    crate::status::conditions::reason::BOOTSTRAP_CONFIG_NOT_FOUND,
                     &msg,
                 )
                 .await;
@@ -702,6 +2227,363 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             &Patch::Apply(ns),
         )
         .await?;
+
+    let runtime_credentials_secret = runtime_credentials_secret_name(&name);
+    let feishu_credentials_secret = spec
+        .channels
+        .iter()
+        .find(|channel| channel.type_ == crate::crd::ChannelType::Feishu)
+        .map(|channel| channel_credential_secret_name(&name, channel));
+    let mut current_feishu_claim_name: Option<String> = None;
+    let mut feishu_credentials_version: Option<String> = None;
+    if has_feishu_channel {
+        let secret_api: Api<Secret> = Api::namespaced(client.clone(), &sandbox_ns);
+        let secret_name = feishu_credentials_secret
+            .as_deref()
+            .expect("Feishu channel has a credential Secret name");
+        let secret = secret_api.get_opt(secret_name).await?;
+        let (reason, message) = match feishu_credential_state(secret.as_ref()) {
+            FeishuCredentialState::Complete => (None, None),
+            FeishuCredentialState::Missing => (
+                Some(crate::status::conditions::reason::CHANNEL_CREDENTIALS_MISSING),
+                Some(format!(
+                    "Feishu credentials are missing from Secret `{secret_name}`"
+                )),
+            ),
+            FeishuCredentialState::Partial => (
+                Some(crate::status::conditions::reason::CHANNEL_CREDENTIALS_PARTIAL),
+                Some(format!(
+                    "Feishu credentials are incomplete in Secret `{secret_name}`"
+                )),
+            ),
+            FeishuCredentialState::Invalid => (
+                Some(crate::status::conditions::reason::CHANNEL_POLICY_INVALID),
+                Some(format!(
+                    "Feishu credentials in Secret `{secret_name}` are malformed"
+                )),
+            ),
+        };
+        if let (Some(reason), Some(message)) = (reason, message) {
+            stamp_channel_failure_fail_closed(
+                client,
+                &sandbox,
+                &sandbox_ns,
+                &name,
+                reason,
+                &message,
+            )
+            .await?;
+            return Ok(Action::requeue(Duration::from_secs(30)));
+        }
+        if secret.as_ref().and_then(|secret| secret.immutable) != Some(true) {
+            stamp_channel_failure_fail_closed(
+                client,
+                &sandbox,
+                &sandbox_ns,
+                &name,
+                crate::status::conditions::reason::CHANNEL_POLICY_INVALID,
+                "Feishu credential Secret must set immutable: true",
+            )
+            .await?;
+            return Ok(Action::requeue(Duration::from_secs(300)));
+        }
+        if let Some(secret) = secret.as_ref() {
+            adopt_managed_feishu_secret(client, &sandbox_ns, &name, secret).await?;
+        }
+        let secret_version = secret
+            .as_ref()
+            .and_then(|secret| secret.metadata.uid.clone());
+        let deployed = Api::<Deployment>::namespaced(client.clone(), &sandbox_ns)
+            .get_opt(&name)
+            .await?;
+        let revision_plan = plan_feishu_credential_revision(
+            secret_name,
+            deployment_feishu_credentials_secret(deployed.as_ref()),
+            deployment_feishu_credentials_version(deployed.as_ref()),
+            secret_version.as_deref(),
+        );
+        match revision_plan {
+            FeishuCredentialRevisionPlan::KeepDeployed(_version) => {
+                stamp_channel_failure_fail_closed(
+                    client,
+                    &sandbox,
+                    &sandbox_ns,
+                    &name,
+                    crate::status::conditions::reason::CHANNEL_CONNECTING,
+                    "Feishu credentials changed in place; use kars credentials update to stage an immutable Secret",
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            FeishuCredentialRevisionPlan::Unavailable => {
+                stamp_channel_failure_fail_closed(
+                    client,
+                    &sandbox,
+                    &sandbox_ns,
+                    &name,
+                    crate::status::conditions::reason::CHANNEL_CONNECTING,
+                    "requested Feishu credential revision is unavailable; runtime remains stopped",
+                )
+                .await?;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            FeishuCredentialRevisionPlan::UseCurrent(version) => {
+                feishu_credentials_version = Some(version);
+                let Some(app_id) = secret.as_ref().and_then(feishu_app_id) else {
+                    stamp_channel_failure_fail_closed(
+                        client,
+                        &sandbox,
+                        &sandbox_ns,
+                        &name,
+                        crate::status::conditions::reason::CHANNEL_POLICY_INVALID,
+                        "Feishu credential App ID is malformed",
+                    )
+                    .await?;
+                    return Ok(Action::requeue(Duration::from_secs(300)));
+                };
+                let Some(owner_uid) = sandbox.metadata.uid.as_deref() else {
+                    return Ok(Action::requeue(Duration::from_secs(5)));
+                };
+                if let Err(error) =
+                    acquire_feishu_app_claim(client, &app_id, &sandbox_self_ns, &name, owner_uid)
+                        .await
+                {
+                    if matches!(&error, kube::Error::Api(api_error) if api_error.code == 409) {
+                        stamp_channel_failure_fail_closed(
+                            client,
+                            &sandbox,
+                            &sandbox_ns,
+                            &name,
+                            crate::status::conditions::reason::CHANNEL_APP_ALREADY_CLAIMED,
+                            "Feishu App credentials are already owned by another sandbox",
+                        )
+                        .await?;
+                        return Ok(Action::requeue(Duration::from_secs(300)));
+                    }
+                    return Err(error.into());
+                }
+                let current_claim =
+                    build_feishu_app_claim(&app_id, &sandbox_self_ns, &name, owner_uid);
+                current_feishu_claim_name = current_claim.metadata.name;
+            }
+        }
+    }
+
+    let claim_api: Api<PersistentVolumeClaim> = Api::namespaced(client.clone(), &sandbox_ns);
+    let namespace_claims = claim_api.list(&ListParams::default()).await?.items;
+    let requested_existing_claim = spec
+        .storage
+        .as_ref()
+        .and_then(|storage| storage.workspace.as_ref())
+        .and_then(|workspace| workspace.existing_claim.as_deref());
+    let current_workspace_claim = if spec.suspended.unwrap_or(false) {
+        Api::<Deployment>::namespaced(client.clone(), &sandbox_ns)
+            .get_opt(&name)
+            .await?
+            .as_ref()
+            .and_then(deployment_workspace_claim)
+            .map(str::to_string)
+    } else {
+        None
+    };
+    if let Err(message) = validate_namespace_claim_reuse(
+        &namespace_claims,
+        requested_existing_claim,
+        current_workspace_claim.as_deref(),
+        sandbox.metadata.uid.as_deref(),
+    ) {
+        stamp_degraded_with_condition(
+            client,
+            &sandbox,
+            &name,
+            crate::status::conditions::TYPE_STORAGE_READY,
+            crate::status::conditions::reason::CLAIM_INCOMPATIBLE,
+            &message,
+        )
+        .await;
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
+
+    // ── Step 1b: Reconcile per-sandbox workspace storage ────────────────
+    // Backward-compatible sandboxes keep the historical emptyDir. A dynamic
+    // workspace produces a PVC, while existingClaim only changes the pod
+    // volume and remains entirely operator-owned.
+    let workspace_storage_plan = build_workspace_storage_plan(
+        &name,
+        &sandbox_ns,
+        spec.storage.as_ref(),
+        sandbox.metadata.uid.as_deref(),
+    );
+    let workspace_claim = if let Some(claim) = workspace_storage_plan.claim.as_ref() {
+        let claim: PersistentVolumeClaim = serde_json::from_value(claim.clone())?;
+        let claim_name = claim.name_any();
+        if let Some(existing) = claim_api.get_opt(&claim_name).await?
+            && let Err(message) =
+                validate_dynamic_claim_provenance(&existing, sandbox.metadata.uid.as_deref())
+        {
+            stamp_degraded_with_condition(
+                client,
+                &sandbox,
+                &name,
+                crate::status::conditions::TYPE_STORAGE_READY,
+                crate::status::conditions::reason::CLAIM_INCOMPATIBLE,
+                &message,
+            )
+            .await;
+            return Ok(Action::requeue(Duration::from_secs(300)));
+        }
+        let applied = match claim_api
+            .patch(
+                &claim_name,
+                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
+                &Patch::Apply(&claim),
+            )
+            .await
+        {
+            Ok(claim) => claim,
+            Err(kube::Error::Api(error)) if error.code == 422 => {
+                let message = format!(
+                    "workspace PVC `{claim_name}` update was rejected: {}",
+                    error.message
+                );
+                stamp_degraded_with_condition(
+                    client,
+                    &sandbox,
+                    &name,
+                    crate::status::conditions::TYPE_STORAGE_READY,
+                    crate::status::conditions::reason::IMMUTABLE_FIELD_CHANGED,
+                    &message,
+                )
+                .await;
+                return Ok(Action::requeue(Duration::from_secs(300)));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        Some(applied)
+    } else if let Some(existing_claim) = spec
+        .storage
+        .as_ref()
+        .and_then(|storage| storage.workspace.as_ref())
+        .and_then(|workspace| workspace.existing_claim.as_deref())
+    {
+        match claim_api.get(existing_claim).await {
+            Ok(claim) => Some(claim),
+            Err(kube::Error::Api(error)) if error.code == 404 => {
+                let message = format!(
+                    "workspace PVC `{existing_claim}` not found in namespace `{sandbox_ns}`"
+                );
+                stamp_degraded_with_condition(
+                    client,
+                    &sandbox,
+                    &name,
+                    crate::status::conditions::TYPE_STORAGE_READY,
+                    crate::status::conditions::reason::CLAIM_NOT_FOUND,
+                    &message,
+                )
+                .await;
+                return Ok(Action::requeue(Duration::from_secs(30)));
+            }
+            Err(error) => return Err(error.into()),
+        }
+    } else {
+        None
+    };
+    if let Some(claim) = workspace_claim.as_ref()
+        && let Err(message) = validate_workspace_claim(claim)
+    {
+        stamp_degraded_with_condition(
+            client,
+            &sandbox,
+            &name,
+            crate::status::conditions::TYPE_STORAGE_READY,
+            crate::status::conditions::reason::CLAIM_INCOMPATIBLE,
+            &message,
+        )
+        .await;
+        return Ok(Action::requeue(Duration::from_secs(300)));
+    }
+    let workspace_claim_phase = workspace_claim
+        .as_ref()
+        .and_then(|claim| claim.status.as_ref())
+        .and_then(|status| status.phase.clone());
+
+    // Validate the OpenClaw bootstrap ConfigMap in the KarsSandbox's own
+    // namespace, then mirror it into the generated runtime namespace. The
+    // runtime namespace cannot mount a ConfigMap across namespace boundaries.
+    let mut workspace_bootstrap_provenance: Option<(String, String)> = None;
+    if let Some(bootstrap_ref) = runtime_spec
+        .openclaw
+        .as_ref()
+        .and_then(|config| config.workspace.as_ref())
+        .and_then(|workspace| workspace.bootstrap_config_map_ref.as_ref())
+    {
+        let source_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_self_ns);
+        let source = match source_api.get(&bootstrap_ref.name).await {
+            Ok(config_map) => config_map,
+            Err(kube::Error::Api(error)) if error.code == 404 => {
+                let message = format!(
+                    "workspace bootstrap ConfigMap `{}` not found in namespace `{}`",
+                    bootstrap_ref.name, sandbox_self_ns
+                );
+                stamp_degraded_with_condition(
+                    client,
+                    &sandbox,
+                    &name,
+                    crate::status::conditions::TYPE_BOOTSTRAP_READY,
+                    crate::status::conditions::reason::BOOTSTRAP_CONFIG_NOT_FOUND,
+                    &message,
+                )
+                .await;
+                return Ok(Action::requeue(Duration::from_secs(300)));
+            }
+            Err(error) => return Err(error.into()),
+        };
+        if let Err(message) = validate_workspace_bootstrap_config_map(&source) {
+            stamp_degraded_with_condition(
+                client,
+                &sandbox,
+                &name,
+                crate::status::conditions::TYPE_BOOTSTRAP_READY,
+                crate::status::conditions::reason::BOOTSTRAP_INVALID,
+                &message,
+            )
+            .await;
+            return Ok(Action::requeue(Duration::from_secs(300)));
+        }
+        workspace_bootstrap_provenance = Some((
+            source.metadata.uid.clone().unwrap_or_default(),
+            source.metadata.resource_version.clone().unwrap_or_default(),
+        ));
+
+        if sandbox_self_ns != sandbox_ns {
+            let mirrored: ConfigMap = serde_json::from_value(json!({
+                "apiVersion": "v1",
+                "kind": "ConfigMap",
+                "metadata": {
+                    "name": bootstrap_ref.name,
+                    "namespace": sandbox_ns,
+                    "labels": {
+                        "app.kubernetes.io/managed-by": "kars-controller",
+                        "kars.azure.com/sandbox": name,
+                        "kars.azure.com/artifact": "workspace-bootstrap"
+                    },
+                    "annotations": {
+                        "kars.azure.com/source-namespace": sandbox_self_ns,
+                        "kars.azure.com/source-resource-version": source.metadata.resource_version
+                    }
+                },
+                "data": source.data
+            }))?;
+            let target_api: Api<ConfigMap> = Api::namespaced(client.clone(), &sandbox_ns);
+            target_api
+                .patch(
+                    &bootstrap_ref.name,
+                    &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
+                    &Patch::Apply(&mirrored),
+                )
+                .await?;
+        }
+    }
 
     // ── Step 2: Create ServiceAccount with Workload Identity ─────────────
     let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), &sandbox_ns);
@@ -1333,7 +3215,11 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // image / env / volume drift is reflected on the suspended
         // Deployment (so resume picks up the latest spec).
         let suspended_by_spec = spec.suspended.unwrap_or(false);
-        let desired_replicas: i64 = if suspended_by_spec { 0 } else { 1 };
+        let desired_replicas = workspace_desired_replicas(
+            suspended_by_spec,
+            requested_existing_claim.is_some(),
+            workspace_claim_phase.as_deref(),
+        );
 
         // S10.A2: image now comes from the runtime plan (already
         // resolved against the controller default fallback). The
@@ -1348,8 +3234,50 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         } else {
             "Always"
         };
+        let bootstrap_pull_policy = if ctx.dev_profile || !ctx.sandbox_image.ends_with(":latest") {
+            "IfNotPresent"
+        } else {
+            "Always"
+        };
+        let (bootstrap_uid, bootstrap_resource_version) = workspace_bootstrap_provenance
+            .as_ref()
+            .map(|(uid, resource_version)| (uid.as_str(), resource_version.as_str()))
+            .unwrap_or(("", ""));
+        let workspace_bootstrap_plan = runtime_spec.openclaw.as_ref().and_then(|config| {
+            build_workspace_bootstrap_plan(
+                config,
+                &ctx.sandbox_image,
+                bootstrap_pull_policy,
+                bootstrap_uid,
+                bootstrap_resource_version,
+            )
+        });
+        let workspace_bootstrap_enabled = workspace_bootstrap_plan.is_some();
 
         let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
+        let desired_workspace_claim = workspace_storage_plan
+            .volume
+            .pointer("/persistentVolumeClaim/claimName")
+            .and_then(serde_json::Value::as_str);
+        let current_deployment = deploy_api.get_opt(&name).await?;
+        if let Some(current_deployment) = current_deployment.as_ref()
+            && let Err(message) = validate_workspace_volume_transition(
+                deployment_workspace_claim(current_deployment),
+                desired_workspace_claim,
+                suspended_by_spec,
+            )
+        {
+            stamp_degraded_with_condition(
+                client,
+                &sandbox,
+                &name,
+                crate::status::conditions::TYPE_STORAGE_READY,
+                crate::status::conditions::reason::IMMUTABLE_FIELD_CHANGED,
+                &message,
+            )
+            .await;
+            return Ok(Action::requeue(Duration::from_secs(300)));
+        }
 
         // Token budget values resolved from the InferencePolicy ref above
         // (hoisted to the top of `reconcile` after S13). 0 = unlimited.
@@ -1361,8 +3289,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // BYO (S10.A2.b) and OpenAIAgents (S10.A3) both follow the
         // generic-runtime shape (different container name, no
         // OpenClaw-specific env, no admin-token mount).
-        let is_openclaw = matches!(runtime_spec.kind, crate::crd::RuntimeKind::OpenClaw);
-
         // Build OpenClaw container env vars.
         //
         // OPENCLAW_GATEWAY_TOKEN is plumbed via secretKeyRef rather than a static
@@ -1388,6 +3314,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // / MAF / BYO all read `KARS_MODEL` so they don't need to know
         // about runtime-specific env names.
         openclaw_env.push(json!({"name": "KARS_MODEL", "value": inference_model.clone()}));
+        openclaw_env.extend(channel_policy_env.clone());
+        openclaw_env.extend(feishu_credential_env(&name, &spec.channels));
         // Self-documenting marker: every container claiming to be a
         // kars v1 runtime contract participant gets this. Lets
         // operator tooling distinguish kars-managed pods from
@@ -1400,6 +3328,11 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         openclaw_env.push(
             json!({"name": "KARS_RUNTIME_KIND", "value": format!("{:?}", runtime_spec.kind)}),
         );
+        openclaw_env.push(json!({"name": "KARS_WORKSPACE_DIR", "value": "/sandbox"}));
+        openclaw_env.push(json!({
+            "name": "KARS_STATE_DIR",
+            "value": runtime_state_dir(&runtime_spec.kind)
+        }));
         openclaw_env.push(json!({"name": "SANDBOX_NAME", "value": &name}));
         if let Some(ref cluster) = ctx.cluster_name {
             openclaw_env.push(json!({"name": "CLUSTER_NAME", "value": cluster}));
@@ -1915,6 +3848,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         let mut agent_volume_mounts = vec![
             json!({"name": "sandbox-data", "mountPath": "/sandbox"}),
             json!({"name": "tmp", "mountPath": "/tmp"}),
+            kube_api_access_mount(),
         ];
         // Runtimes that ship the kars governance plugin (OpenClaw via TS
         // and Hermes via Python) push trust deltas to the router's
@@ -1944,7 +3878,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             "imagePullPolicy": pull_policy,
             "env": openclaw_env,
             "envFrom": [
-                {"secretRef": {"name": format!("{}-credentials", name), "optional": true}}
+                {"secretRef": {"name": runtime_credentials_secret.clone(), "optional": true}}
             ],
             "securityContext": {
                 "runAsUser": 1000,
@@ -1969,6 +3903,17 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "periodSeconds": 10
             }
         });
+        if has_feishu_channel {
+            agent_container["readinessProbe"] = json!({
+                "exec": {
+                    "command": ["sh", "-c", "kars-channel-feishu-ready"]
+                },
+                "initialDelaySeconds": 5,
+                "periodSeconds": 10,
+                "timeoutSeconds": 8,
+                "failureThreshold": 3
+            });
+        }
         if is_openclaw {
             // OpenClaw gateway port (used by `kars connect` port-forward).
             agent_container["ports"] = json!([{"containerPort": 18789, "name": "gateway"}]);
@@ -1997,6 +3942,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // Build the pod spec — runtimeClassName only set for Kata (confidential)
         let mut pod_spec = json!({
             "serviceAccountName": "sandbox",
+            "automountServiceAccountToken": false,
             "securityContext": build_pod_security_context(&sandbox_config),
             // ── Init container: iptables-based per-container egress control ──
             // Since K8s NetworkPolicy operates at pod level (not container level),
@@ -2104,14 +4050,16 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                                     "periodSeconds": 5
                                 },
                                 "volumeMounts": [
-                                    {"name": "admin-token", "mountPath": "/etc/kars/secrets", "readOnly": true}
+                                    {"name": "admin-token", "mountPath": "/etc/kars/secrets", "readOnly": true},
+                                    kube_api_access_mount()
                                 ]
                             }
                         ],
                         "volumes": [
-                            {"name": "sandbox-data", "emptyDir": {}},
+                            workspace_storage_plan.volume.clone(),
                             {"name": "tmp", "emptyDir": {"medium": "Memory", "sizeLimit": "4Gi"}},
-                            {"name": "admin-token", "secret": {"secretName": "router-admin-token", "items": [{"key": "token", "path": "admin-token"}]}}
+                            {"name": "admin-token", "secret": {"secretName": "router-admin-token", "items": [{"key": "token", "path": "admin-token"}]}},
+                            kube_api_access_volume()
                         ],
                         "tolerations": [{
                             "key": "kars.azure.com/sandbox",
@@ -2123,6 +4071,17 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "kars.azure.com/pool": pool_label
                         }
         });
+
+        if let Some(bootstrap) = workspace_bootstrap_plan {
+            pod_spec["initContainers"]
+                .as_array_mut()
+                .expect("initContainers is an array")
+                .push(bootstrap.init_container);
+            pod_spec["volumes"]
+                .as_array_mut()
+                .expect("volumes is an array")
+                .push(bootstrap.volume);
+        }
 
         // Set runtimeClassName for Kata (confidential) isolation
         if let Some(rc) = runtime_class {
@@ -2720,7 +4679,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
-        let deployment: Deployment = serde_json::from_value(json!({
+        let mut deployment_json = json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
             "metadata": {
@@ -2740,6 +4699,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 },
                 "template": {
                     "metadata": {
+                        "annotations": {
+                            "azure.workload.identity/skip-containers": WORKLOAD_IDENTITY_SKIP_CONTAINERS
+                        },
                         "labels": {
                             "kars.azure.com/sandbox": name,
                             "kars.azure.com/component": "sandbox",
@@ -2749,7 +4711,36 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     "spec": pod_spec
                 }
             }
-        }))?;
+        });
+        if let Some(credentials_version) = feishu_credentials_version.as_deref() {
+            deployment_json["spec"]["template"]["metadata"]["annotations"]
+                [FEISHU_POD_CREDENTIALS_VERSION_ANNOTATION] = json!(credentials_version);
+            if let Some(secret_name) = feishu_credentials_secret.as_deref() {
+                deployment_json["spec"]["template"]["metadata"]["annotations"]
+                    [FEISHU_POD_CREDENTIALS_SECRET_ANNOTATION] = json!(secret_name);
+            }
+        }
+        let recreate = workspace_claim.is_some() || workspace_bootstrap_enabled;
+        if let Some(strategy) = workspace_deployment_strategy(recreate) {
+            deployment_json["spec"]["strategy"] = strategy;
+        }
+        if deployment_needs_recreate_cleanup(current_deployment.as_ref(), recreate) {
+            deploy_api
+                .patch(
+                    &name,
+                    &PatchParams::default(),
+                    &Patch::Merge(json!({
+                        "spec": {
+                            "strategy": {
+                                "type": "Recreate",
+                                "rollingUpdate": null
+                            }
+                        }
+                    })),
+                )
+                .await?;
+        }
+        let deployment: Deployment = serde_json::from_value(deployment_json)?;
         deploy_api
             .patch(
                 &name,
@@ -3059,6 +5050,18 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         );
     }
 
+    let workspace_bootstrap_state = if workspace_bootstrap_provenance.is_some()
+        && overlay_target.is_none()
+        && !spec.suspended.unwrap_or(false)
+    {
+        let pods = Api::<Pod>::namespaced(client.clone(), &sandbox_ns)
+            .list(&ListParams::default().labels(&format!("kars.azure.com/sandbox={name}")))
+            .await?;
+        workspace_bootstrap_state(&pods.items)
+    } else {
+        WorkspaceBootstrapState::NotConfigured
+    };
+
     // ── Step 5: Update status ────────────────────────────────────────────
     // Idempotency guard: skip the patch when the desired status already
     // matches reality. Without this, every reconcile bumps
@@ -3097,6 +5100,59 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // empty list when `networkPolicy` itself is unset). The
         // fetcher itself short-circuits before any network IO.
         let mut extras: Vec<_> = allowlist_resolution.conditions.clone();
+        extras.extend(workspace_storage_status_conditions(
+            &sandbox,
+            if workspace_claim.is_some() {
+                Some(workspace_claim_phase.as_deref().unwrap_or("Pending"))
+            } else {
+                None
+            },
+        ));
+        extras.extend(workspace_bootstrap_status_conditions(
+            &sandbox,
+            &workspace_bootstrap_state,
+        ));
+
+        if has_feishu_channel {
+            let runtime_container_name = if is_openclaw { "openclaw" } else { "agent" };
+            let pods = Api::<Pod>::namespaced(client.clone(), &sandbox_ns)
+                .list(&ListParams::default().labels(&format!("kars.azure.com/sandbox={name}")))
+                .await?;
+            let channel_state = feishu_channel_runtime_state(
+                &pods.items,
+                runtime_container_name,
+                feishu_credentials_version.as_deref(),
+                spec.suspended.unwrap_or(false),
+            );
+            extras.extend(feishu_channel_status_conditions(&sandbox, channel_state));
+            if feishu_claim_rollout_complete(
+                &pods.items,
+                runtime_container_name,
+                feishu_credentials_version.as_deref(),
+            ) && current_feishu_claim_name.is_some()
+                && let Some(owner_uid) = sandbox.metadata.uid.as_deref()
+            {
+                release_feishu_app_claims(client, owner_uid, current_feishu_claim_name.as_deref())
+                    .await?;
+                if let Some(current_secret_name) = feishu_credentials_secret.as_deref() {
+                    cleanup_managed_feishu_secrets(
+                        client,
+                        &sandbox_ns,
+                        &name,
+                        Some(current_secret_name),
+                    )
+                    .await?;
+                }
+            }
+        } else if let Some(owner_uid) = sandbox.metadata.uid.as_deref() {
+            let pods = Api::<Pod>::namespaced(client.clone(), &sandbox_ns)
+                .list(&ListParams::default().labels(&format!("kars.azure.com/sandbox={name}")))
+                .await?;
+            if feishu_claim_rollout_complete(&pods.items, "", None) {
+                release_feishu_app_claims(client, owner_uid, None).await?;
+                cleanup_managed_feishu_secrets(client, &sandbox_ns, &name, None).await?;
+            }
+        }
 
         // Phase G P1 #4: stamp Suspended condition when spec.suspended
         // is true, or surface Suspended=False/Active when there is a
@@ -3185,7 +5241,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
-    Ok(Action::requeue(Duration::from_secs(300)))
+    let requeue_after = if (workspace_claim.is_some()
+        && workspace_claim_phase.as_deref() != Some("Bound"))
+        || workspace_bootstrap_state == WorkspaceBootstrapState::Pending
+    {
+        5
+    } else {
+        300
+    };
+    Ok(Action::requeue(Duration::from_secs(requeue_after)))
 }
 
 /// How long to wait before requeuing a failed reconcile, by error kind.

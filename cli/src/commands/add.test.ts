@@ -2,6 +2,14 @@
 // Licensed under the MIT License.
 
 import { describe, it, expect } from "vitest";
+import {
+  buildFeishuChannelSpec,
+  buildFeishuSecrets,
+  buildCredentialSecretManifest,
+  validateRuntimeSpecificAddFlags,
+} from "./add.js";
+import { buildRuntimeBlock, type RuntimeKind } from "../runtime.js";
+import { buildWorkspaceStorageSpec } from "../lib/workspace-storage.js";
 
 /**
  * Tests for the `add` command's sandbox manifest generation logic.
@@ -28,6 +36,14 @@ interface AddOptions {
   telegramToken?: string;
   slackToken?: string;
   discordToken?: string;
+  feishuAppId?: string;
+  feishuAppSecret?: string;
+  feishuDomain?: "feishu" | "lark";
+  feishuDmPolicy?: "pairing" | "allowlist" | "disabled";
+  feishuAllowFrom?: string;
+  feishuGroupPolicy?: "allowlist" | "disabled";
+  feishuGroupAllowFrom?: string;
+  feishuRequireMention?: boolean;
   braveApiKey?: string;
   tavilyApiKey?: string;
   exaApiKey?: string;
@@ -36,6 +52,13 @@ interface AddOptions {
   openaiApiKey?: string;
   learnEgress: boolean;
   skills?: string;
+  workspaceStorage?: string;
+  workspaceStorageClass?: string;
+  workspaceExistingClaim?: string;
+  workspaceRetainPolicy?: "Retain" | "Delete";
+  workspaceBootstrap?: string;
+  workspaceOverwrite?: "IfMissing" | "Always";
+  runtimeKind?: RuntimeKind;
 }
 
 function defaultOptions(overrides: Partial<AddOptions> = {}): AddOptions {
@@ -54,19 +77,21 @@ function defaultOptions(overrides: Partial<AddOptions> = {}): AddOptions {
 
 /** Build the KarsSandbox manifest object (mirrors add.ts action logic). */
 function buildSandboxManifest(name: string, options: AddOptions) {
+  const runtimeKind = options.runtimeKind ?? "OpenClaw";
   const sandbox: Record<string, unknown> = {
     apiVersion: "kars.azure.com/v1alpha1",
     kind: "KarsSandbox",
     metadata: { name, namespace: "kars-system" },
     spec: {
-      runtime: {
-        kind: "OpenClaw",
-        openclaw: {
-          version: "2026.3.13",
-          ...(options.image ? { image: options.image } : {}),
-          config: { agent: { model: `azure/${options.model}` } },
-        },
-      },
+      runtime: buildRuntimeBlock({
+        kind: runtimeKind,
+        openclawVersion: "2026.3.13",
+        model: options.model,
+        image: options.image,
+        byoImage: runtimeKind === "BYO" ? "example.invalid/byo:latest" : undefined,
+        byoContractVersion: "v1",
+        mafLanguage: "python",
+      }),
       sandbox: {
         isolation: options.isolation,
         seccompProfile: options.isolation === "standard" ? "RuntimeDefault" : "kars-strict",
@@ -111,6 +136,19 @@ function buildSandboxManifest(name: string, options: AddOptions) {
   if (options.learnEgress) {
     const np = (sandbox.spec as Record<string, unknown>).networkPolicy as Record<string, unknown>;
     np.egressMode = "Learn";
+  }
+
+  const storage = buildWorkspaceStorageSpec(options);
+  if (storage) {
+    (sandbox.spec as Record<string, unknown>).storage = storage;
+  }
+
+  if (options.workspaceBootstrap) {
+    const runtime = (sandbox.spec as any).runtime;
+    runtime.openclaw.workspace = {
+      bootstrapConfigMapRef: { name: options.workspaceBootstrap },
+      overwritePolicy: options.workspaceOverwrite ?? "IfMissing",
+    };
   }
 
   return sandbox;
@@ -166,6 +204,32 @@ function buildSecrets(options: AddOptions) {
 // --- Tests ---
 
 describe("KarsSandbox manifest generation", () => {
+  it("does not treat Feishu policy defaults as explicitly selected flags", () => {
+    expect(validateRuntimeSpecificAddFlags("OpenClaw", {
+      feishuDomain: "feishu",
+      feishuDmPolicy: "pairing",
+      feishuGroupPolicy: "allowlist",
+      feishuRequireMention: true,
+    })).toEqual([]);
+  });
+
+  it("builds an immutable managed Feishu Secret manifest", () => {
+    expect(buildCredentialSecretManifest(
+      "agent-feishu-credentials",
+      "kars-agent",
+      { FEISHU_APP_ID: "cli_test", FEISHU_APP_SECRET: "secret" },
+      {
+        immutable: true,
+        labels: { "channels.kars.azure.com/managed-rotation": "true" },
+      },
+    )).toMatchObject({
+      immutable: true,
+      metadata: {
+        labels: { "channels.kars.azure.com/managed-rotation": "true" },
+      },
+    });
+  });
+
   it("generates correct apiVersion and kind", () => {
     const manifest = buildSandboxManifest("agent1", defaultOptions());
     expect(manifest.apiVersion).toBe("kars.azure.com/v1alpha1");
@@ -177,6 +241,47 @@ describe("KarsSandbox manifest generation", () => {
     expect(manifest.metadata).toEqual({
       name: "my-agent",
       namespace: "kars-system",
+    });
+  });
+
+  it("configures a dynamically provisioned workspace PVC", () => {
+    const manifest = buildSandboxManifest(
+      "my-agent",
+      defaultOptions({
+        workspaceStorage: "20Gi",
+        workspaceStorageClass: "managed-csi",
+        workspaceRetainPolicy: "Retain",
+      }),
+    );
+    expect((manifest.spec as any).storage.workspace).toEqual({
+      size: "20Gi",
+      storageClassName: "managed-csi",
+      accessModes: ["ReadWriteOnce"],
+      retainPolicy: "Retain",
+    });
+  });
+
+  it("references an existing workspace claim without dynamic fields", () => {
+    const manifest = buildSandboxManifest(
+      "my-agent",
+      defaultOptions({ workspaceExistingClaim: "restored-workspace" }),
+    );
+    expect((manifest.spec as any).storage.workspace).toEqual({
+      existingClaim: "restored-workspace",
+    });
+  });
+
+  it("configures OpenClaw workspace bootstrap", () => {
+    const manifest = buildSandboxManifest(
+      "my-agent",
+      defaultOptions({
+        workspaceBootstrap: "my-agent-workspace",
+        workspaceOverwrite: "Always",
+      }),
+    );
+    expect((manifest.spec as any).runtime.openclaw.workspace).toEqual({
+      bootstrapConfigMapRef: { name: "my-agent-workspace" },
+      overwritePolicy: "Always",
     });
   });
 
@@ -307,6 +412,145 @@ describe("KarsSandbox manifest generation", () => {
     expect(spec.sandbox.runAsNonRoot).toBe(true);
     expect(spec.sandbox.allowPrivilegeEscalation).toBe(false);
     expect(spec.sandbox.writablePaths).toEqual(["/sandbox", "/tmp"]);
+  });
+
+  it.each([
+    "OpenClaw",
+    "Hermes",
+    "OpenAIAgents",
+    "MicrosoftAgentFramework",
+    "LangGraph",
+    "Anthropic",
+    "PydanticAi",
+    "BYO",
+  ] satisfies RuntimeKind[])("configures workspace storage for %s", (runtimeKind) => {
+    const manifest = buildSandboxManifest(
+      "persistent-agent",
+      defaultOptions({ runtimeKind, workspaceStorage: "10Gi" }),
+    );
+    const spec = manifest.spec as any;
+    expect(spec.runtime.kind).toBe(runtimeKind);
+    expect(spec.storage.workspace).toEqual({
+      size: "10Gi",
+      accessModes: ["ReadWriteOnce"],
+      retainPolicy: "Retain",
+    });
+  });
+});
+
+describe("runtime-specific add flag validation", () => {
+  it("allows channels for Hermes", () => {
+    expect(
+      validateRuntimeSpecificAddFlags("Hermes", {
+        channels: "telegram",
+        telegramToken: "test-token",
+      }),
+    ).toEqual([]);
+  });
+
+  it("rejects channels for runtimes without channel adapters", () => {
+    expect(
+      validateRuntimeSpecificAddFlags("LangGraph", { channels: "telegram" }),
+    ).toEqual([
+      "--channels is only valid with --runtime openclaw or --runtime hermes.",
+    ]);
+  });
+
+  it("keeps skills, plugins, and image overrides OpenClaw-only", () => {
+    expect(
+      validateRuntimeSpecificAddFlags("Hermes", {
+        skills: "browser",
+        image: "example.invalid/custom:latest",
+      }),
+    ).toEqual([
+      "--skills, --image are only valid with --runtime openclaw.",
+    ]);
+  });
+});
+
+describe("Feishu channel contract", () => {
+  it.each(["OpenClaw", "Hermes"] satisfies RuntimeKind[])(
+    "builds typed policy for %s without credentials",
+    (runtimeKind) => {
+      const channel = buildFeishuChannelSpec(runtimeKind, {
+        channels: "feishu",
+        feishuDomain: "lark",
+        feishuDmPolicy: "allowlist",
+        feishuAllowFrom: "ou_teacher,ou_admin",
+        feishuGroupPolicy: "allowlist",
+        feishuGroupAllowFrom: "oc_teaching",
+        feishuRequireMention: false,
+      });
+      expect(channel).toEqual({
+        type: "Feishu",
+        feishu: {
+          domain: "Lark",
+          connectionMode: "WebSocket",
+          directMessages: {
+            policy: "Allowlist",
+            allowFrom: ["ou_teacher", "ou_admin"],
+          },
+          groups: {
+            policy: "Allowlist",
+            allowFrom: ["oc_teaching"],
+            requireMention: false,
+          },
+        },
+      });
+      expect(JSON.stringify(channel)).not.toContain("secret");
+    },
+  );
+
+  it("maps App credentials only into Secret env keys", () => {
+    expect(
+      buildFeishuSecrets({
+        channels: "feishu",
+        feishuAppId: "cli_test",
+        feishuAppSecret: "top-secret",
+      }),
+    ).toEqual({
+      FEISHU_APP_ID: "cli_test",
+      FEISHU_APP_SECRET: "top-secret",
+    });
+  });
+
+  it("rejects partial credentials and unsupported runtimes", () => {
+    expect(() =>
+      buildFeishuSecrets({ channels: "feishu", feishuAppId: "cli_test" }),
+    ).toThrow("both --feishu-app-id and --feishu-app-secret");
+    expect(() => buildFeishuChannelSpec("LangGraph", { channels: "feishu" })).toThrow(
+      "Feishu is only supported by OpenClaw and Hermes",
+    );
+    expect(() => buildFeishuSecrets({ channels: "feishu" })).toThrow(
+      "both --feishu-app-id and --feishu-app-secret",
+    );
+  });
+
+  it("rejects invalid Feishu policy values and IDs", () => {
+    expect(() => buildFeishuChannelSpec("OpenClaw", {
+      channels: "feishu",
+      feishuDomain: "example",
+    })).toThrow("--feishu-domain");
+    expect(() => buildFeishuChannelSpec("OpenClaw", {
+      channels: "feishu",
+      feishuDmPolicy: "allowlist",
+    })).toThrow("requires --feishu-allow-from");
+    expect(() => buildFeishuChannelSpec("OpenClaw", {
+      channels: "feishu",
+      feishuGroupAllowFrom: "group-1",
+    })).toThrow("oc_ group chat IDs");
+  });
+
+  it("builds an apply manifest without putting values in kubectl arguments", () => {
+    const manifest = buildCredentialSecretManifest("agent-credentials", "kars-agent", {
+      FEISHU_APP_ID: "cli_test",
+      FEISHU_APP_SECRET: "top-secret",
+    });
+    expect(manifest).toMatchObject({
+      kind: "Secret",
+      metadata: { name: "agent-credentials", namespace: "kars-agent" },
+      stringData: { FEISHU_APP_SECRET: "top-secret" },
+    });
   });
 });
 

@@ -760,18 +760,113 @@ pub fn kars_sre_action_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on KarsSREAction")
 }
 
-/// `KarsSandbox` CRD as produced by the kube-rs derive.
-///
-/// Currently no `kars_sandbox_validations()` helper exists — `KarsSandbox`
-/// has historically relied on its hand-written
-/// `deploy/helm/kars/templates/crd.yaml` (with rich CEL rules baked
-/// in there) rather than rule-injection in code. This helper is exposed
-/// so future drift tests / dumpers can compare the kube-rs-derived
-/// schema to the hand-written one without each call site reimplementing
-/// the `KarsSandbox::crd()` invocation.
+fn inject_kars_sandbox_validations(
+    mut crd: CustomResourceDefinition,
+) -> Option<CustomResourceDefinition> {
+    let root = crd
+        .spec
+        .versions
+        .first_mut()?
+        .schema
+        .as_mut()?
+        .open_api_v3_schema
+        .as_mut()?;
+    let workspace = root
+        .properties
+        .as_mut()?
+        .get_mut("spec")?
+        .properties
+        .as_mut()?
+        .get_mut("storage")?
+        .properties
+        .as_mut()?
+        .get_mut("workspace")?;
+    workspace.x_kubernetes_validations = Some(vec![
+        ValidationRule {
+            rule: "!has(self.existingClaim) || (!has(self.size) && !has(self.storageClassName) && !has(self.accessModes) && !has(self.retainPolicy))".into(),
+            message: Some(
+                "existingClaim is mutually exclusive with dynamic provisioning fields".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.size) || quantity(self.size).isGreaterThan(quantity('0'))".into(),
+            message: Some("workspace size must be a positive Kubernetes quantity".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]);
+    let channels = root
+        .properties
+        .as_mut()?
+        .get_mut("spec")?
+        .properties
+        .as_mut()?
+        .get_mut("channels")?;
+    channels.x_kubernetes_validations = Some(vec![
+        ValidationRule {
+            rule: "self.filter(channel, channel.type == 'Feishu').size() <= 1".into(),
+            message: Some("spec.channels may contain at most one Feishu channel".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.all(channel, (channel.type == 'Feishu') == has(channel.feishu))".into(),
+            message: Some("channels[].feishu must be set iff type is Feishu".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]);
+
+    // kube-rs/schemars cannot express Kubernetes list bounds and nested
+    // string patterns consistently for this discriminated channel block.
+    // Apply the same structural facets as the hand-written Helm CRD.
+    let mut value = serde_json::to_value(&crd).ok()?;
+    const CHANNELS: &str =
+        "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/channels";
+    value
+        .pointer_mut(CHANNELS)?
+        .as_object_mut()?
+        .insert("maxItems".into(), serde_json::json!(8));
+    let credential_name =
+        format!("{CHANNELS}/items/properties/credentialSecretRef/properties/name");
+    let credential_schema = value.pointer_mut(&credential_name)?.as_object_mut()?;
+    credential_schema.insert("maxLength".into(), serde_json::json!(253));
+    credential_schema.insert(
+        "pattern".into(),
+        serde_json::json!(r"^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$"),
+    );
+    for (field, pattern) in [
+        ("directMessages", "^ou_[A-Za-z0-9_-]+$"),
+        ("groups", "^oc_[A-Za-z0-9_-]+$"),
+    ] {
+        let allow_from =
+            format!("{CHANNELS}/items/properties/feishu/properties/{field}/properties/allowFrom");
+        let allow_from_schema = value.pointer_mut(&allow_from)?.as_object_mut()?;
+        allow_from_schema.insert("maxItems".into(), serde_json::json!(256));
+        allow_from_schema
+            .get_mut("items")?
+            .as_object_mut()?
+            .insert("pattern".into(), serde_json::json!(pattern));
+    }
+    let direct_messages = format!("{CHANNELS}/items/properties/feishu/properties/directMessages");
+    value.pointer_mut(&direct_messages)?.as_object_mut()?.insert(
+        "x-kubernetes-validations".into(),
+        serde_json::json!([{
+            "rule": "!has(self.policy) || self.policy != 'Allowlist' || (has(self.allowFrom) && self.allowFrom.size() > 0)",
+            "message": "directMessages.allowFrom must be non-empty when policy is Allowlist"
+        }]),
+    );
+    serde_json::from_value(value).ok()
+}
+
+/// `KarsSandbox` CRD with workspace storage CEL injected into the generated
+/// schema. The hand-written Helm CRD carries the same rule.
 #[must_use]
 pub fn kars_sandbox_crd() -> CustomResourceDefinition {
-    crate::crd::KarsSandbox::crd()
+    inject_kars_sandbox_validations(crate::crd::KarsSandbox::crd())
+        .expect("kube-rs derive must produce workspace and channel schemas")
 }
 
 #[cfg(test)]

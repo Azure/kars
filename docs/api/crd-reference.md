@@ -183,10 +183,34 @@ spec:
                                     #    LangGraph | Anthropic | PydanticAi | BYO
     openclaw:                       # block name matches `kind` (CEL-validated)
       image: karsacr.azurecr.io/kars-runtime-openclaw:latest
+      workspace:
+        bootstrapConfigMapRef:
+          name: my-agent-workspace  # AGENTS/SOUL/HEARTBEAT/TOOLS/USER.md only
+        overwritePolicy: IfMissing # IfMissing (default) | Always
+  storage:
+    workspace:
+      size: 10Gi
+      storageClassName: managed-csi
+      accessModes: [ReadWriteOnce]
+      retainPolicy: Retain          # Retain (default) | Delete
   inferenceRef:
     name: shared-inference          # required: sibling InferencePolicy
   memoryRef:                        # optional: sibling KarsMemory
     name: my-agent-memory
+  channels:
+    - type: Feishu
+      credentialSecretRef:
+        name: my-agent-credentials  # optional; defaults to <sandbox>-credentials
+      feishu:
+        domain: Feishu              # Feishu (default) | Lark
+        connectionMode: WebSocket   # the only v1 transport
+        directMessages:
+          policy: Pairing           # Pairing (default) | Allowlist | Disabled
+          allowFrom: []             # ou_... IDs; required for Allowlist
+        groups:
+          policy: Allowlist         # Allowlist (default) | Disabled
+          allowFrom: [oc_teaching]  # group chat IDs
+          requireMention: true      # default true
   governance:
     # AGT governance defaults to enabled=true since v0.1.18 — AGT is
     # part of every kars deployment. To opt out, set enabled: false.
@@ -225,6 +249,10 @@ status:
 | Field | Type | Purpose |
 |---|---|---|
 | `spec.memoryRef.name` | LocalObjectRef | Bind to a sibling `KarsMemory` (same namespace). |
+| `spec.channels[]` | `[]ChannelSpec` | Typed messaging policy. V1 supports one `type: Feishu` entry on OpenClaw or Hermes only. Credentials remain in the referenced Secret, never in this CR. |
+| `spec.storage.workspace` | object | Optional PVC-backed `/sandbox`. Omit for legacy `emptyDir`; set `existingClaim` to attach an explicitly selected PVC, or set dynamic fields (`size`, `storageClassName`, `accessModes`, `retainPolicy`). |
+| `spec.runtime.openclaw.workspace.bootstrapConfigMapRef.name` | LocalObjectRef | Same-namespace ConfigMap containing only `AGENTS.md`, `SOUL.md`, `HEARTBEAT.md`, `TOOLS.md`, or `USER.md`. The controller mirrors it into the runtime namespace. |
+| `spec.runtime.openclaw.workspace.overwritePolicy` | enum | `IfMissing` (default) preserves files already on the PVC; `Always` reapplies declared bootstrap files on every Pod start. |
 | `spec.sandbox` | object | Isolation primitives — `isolation` (`standard` \| `enhanced`, default `enhanced`), `seccompProfile` (default `kars-strict`), `writablePaths` (default `[/sandbox, /tmp]`). |
 | `spec.networkPolicy` | object | Baseline egress allowlist. Defaults `defaultDeny: true`, `egressMode: Learn`. |
 | `spec.governance.enabled` | bool | **Defaults to `true`.** Turn on AGT governance — router guardrails are always on regardless; this gates AGT trust/audit + creates the per-sandbox Service on `:8443` (required for InferencePolicy enforcement + cross-agent mesh DNS). Set to `false` to opt out. |
@@ -234,7 +262,7 @@ status:
 | `spec.governance.registryMode` | string | `local` (default) or `global`. Global enables cross-cluster mesh + handoff tools. |
 | `spec.governance.trustedPeers` | string | Pre-seeded `"name:AMID,..."` peers — used by sub-agents to auto-trust the spawning parent. |
 | `spec.a2a` | object | Inbound A2A 1.0.0 ingress configuration. Default off; see [A2A gateway](../architecture/a2a-gateway.md). |
-| `spec.suspended` | bool | Operator-driven graceful pause. When `true`, the controller scales the Deployment to `replicas: 0` and stamps `Suspended=True / SuspendedBySpec` without tearing down namespace, NetworkPolicy, or federated credentials. |
+| `spec.suspended` | bool | Operator-driven graceful pause. When `true`, the controller scales the Deployment to `replicas: 0`. Runtime files survive only when `spec.storage.workspace` uses a PVC; the legacy `emptyDir` is deleted with the Pod. |
 
 **Status**
 
@@ -248,6 +276,21 @@ status:
 | `status.observedGeneration` | `metadata.generation` that produced this status. Compare against `metadata.generation` to detect stale observations. |
 | `status.conditions[]` | The full condition chain — every reason emitted by the controller is enumerated in [`docs/api/conditions.md`](conditions.md). |
 
+`StorageReady=True/ClaimBound` means a persistent workspace is bound. While a
+claim is pending, the Deployment exists so `WaitForFirstConsumer` storage can
+bind, but the sandbox remains `phase=Creating`, `Ready=False`, and
+`StorageReady=False/ClaimPending`.
+
+For a retained workspace, deleting the `KarsSandbox` removes Kars-managed
+workloads but leaves the generated namespace and PVC. Reattach it explicitly
+with `existingClaim`; a new same-name CR cannot silently adopt a retained claim.
+
+For Feishu, `ChannelReady=True/Configured` is emitted only after the runtime's
+channel-specific probe reports an active WebSocket adapter. Complete credentials
+or a generally-ready Pod are not enough. The controller atomically claims a
+SHA-256 fingerprint of the App ID so the same external app cannot run in two
+sandboxes; neither the App ID, App Secret, nor fingerprint appears in status.
+
 ### `spec.runtime.hermes` (`HermesConfig`) {#hermesconfig}
 
 Runtime-kind config block used when `spec.runtime.kind: Hermes`. All fields are optional — defaults give a working smoke-test agent on first boot.
@@ -257,7 +300,7 @@ spec:
   runtime:
     kind: Hermes
     hermes:
-      version: "0.15.2"               # optional — Hermes Agent version pin (entrypoint reads HERMES_VERSION)
+      version: "0.16.0"               # optional — Hermes Agent version pin (entrypoint reads HERMES_VERSION)
       agentCode:                      # optional — user-supplied agent code (mutually exclusive: oci | git)
         oci:
           image: myregistry.azurecr.io/my-hermes-agent:1.2.3
@@ -274,7 +317,7 @@ spec:
 
 | Field | Type | Notes |
 |---|---|---|
-| `version` | string | Hermes Agent version pin (e.g. `"0.15.2"`). Stays opt-in — adapter image defaults to its latest-supported tag. Surfaces as `HERMES_VERSION` in the container env. |
+| `version` | string | Hermes Agent version pin (e.g. `"0.16.0"`). Stays opt-in — adapter image defaults to its latest-supported tag. Surfaces as `HERMES_VERSION` in the container env. |
 | `agentCode.oci.image` | string | Pull agent code from an OCI image. Production path. |
 | `agentCode.git.url` | string | Clone agent code from a git URL. Development-iteration path. |
 | `agentCode.git.ref` | string | Branch / tag / commit SHA. Defaults to repo HEAD. |

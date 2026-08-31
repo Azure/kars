@@ -73,6 +73,18 @@ pub const TYPE_SUSPENDED: &str = "Suspended";
 /// running the wrong runtime image.
 pub const TYPE_RUNTIME_READY: &str = "RuntimeReady";
 
+/// Workspace storage is available to the sandbox runtime. Ephemeral
+/// sandboxes report `True/EmptyDir`; PVC-backed sandboxes report
+/// `True/ClaimBound` only after Kubernetes binds the claim.
+pub const TYPE_STORAGE_READY: &str = "StorageReady";
+
+/// OpenClaw workspace bootstrap completed successfully. Present only when a
+/// bootstrap ConfigMap is configured.
+pub const TYPE_BOOTSTRAP_READY: &str = "BootstrapReady";
+
+/// Declared runtime messaging channels are configured and connected.
+pub const TYPE_CHANNEL_READY: &str = "ChannelReady";
+
 /// Phase 2 S12.e — `AllowlistVerified`: the controller fetched the
 /// signed OCI artifact referenced by
 /// `spec.networkPolicy.allowlistRef`, verified its cosign signature
@@ -157,6 +169,24 @@ pub mod reason {
     /// operators see the un-suspend transition; never stamped on CRs
     /// that have not previously been suspended.
     pub const ACTIVE: &str = "Active";
+    pub const EMPTY_DIR: &str = "EmptyDir";
+    pub const CLAIM_BOUND: &str = "ClaimBound";
+    pub const CLAIM_PENDING: &str = "ClaimPending";
+    pub const CLAIM_NOT_FOUND: &str = "ClaimNotFound";
+    pub const CLAIM_INCOMPATIBLE: &str = "ClaimIncompatible";
+    pub const IMMUTABLE_FIELD_CHANGED: &str = "ImmutableFieldChanged";
+    pub const BOOTSTRAP_CONFIG_NOT_FOUND: &str = "BootstrapConfigNotFound";
+    pub const BOOTSTRAP_INVALID: &str = "BootstrapInvalid";
+    pub const BOOTSTRAP_FAILED: &str = "BootstrapFailed";
+    pub const CHANNEL_CONFIGURED: &str = "Configured";
+    pub const CHANNEL_CONNECTING: &str = "Connecting";
+    pub const CHANNEL_CONNECTION_FAILED: &str = "ConnectionFailed";
+    pub const CHANNEL_SUSPENDED: &str = "Suspended";
+    pub const CHANNEL_APP_ALREADY_CLAIMED: &str = "AppAlreadyClaimed";
+    pub const CHANNEL_CREDENTIALS_MISSING: &str = "CredentialsMissing";
+    pub const CHANNEL_CREDENTIALS_PARTIAL: &str = "CredentialsPartial";
+    pub const CHANNEL_UNSUPPORTED_RUNTIME: &str = "UnsupportedByRuntime";
+    pub const CHANNEL_POLICY_INVALID: &str = "PolicyInvalid";
     /// Phase 2 S12.b — `Verified`: signed allowlist artifact fetched,
     /// cosign signature passed, signer identity matched cluster
     /// SignerPolicy, canonical form re-validated.

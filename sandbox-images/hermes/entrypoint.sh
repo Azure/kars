@@ -24,7 +24,73 @@
 #   7. Set up iptables egress guard in docker dev (k8s has init container)
 #   8. Drop to UID 1000 if started as root (docker dev only) and exec hermes
 
+clear_feishu_readiness() {
+  rm -f "${KARS_FEISHU_READY_PATH:-/tmp/kars-channel-feishu-ready}"
+}
+
+validate_feishu_channel() {
+  if [ -z "${FEISHU_CONNECTION_MODE:-}" ]; then
+    return 0
+  fi
+  if [ -z "${FEISHU_APP_ID:-}" ] && [ -z "${FEISHU_APP_SECRET:-}" ]; then
+    echo "[kars-hermes] ERROR: Feishu requires both FEISHU_APP_ID and FEISHU_APP_SECRET" >&2
+    return 1
+  fi
+  if [ -z "${FEISHU_APP_ID:-}" ] || [ -z "${FEISHU_APP_SECRET:-}" ]; then
+    echo "[kars-hermes] ERROR: Feishu requires both FEISHU_APP_ID and FEISHU_APP_SECRET" >&2
+    return 1
+  fi
+  if [ "$FEISHU_CONNECTION_MODE" != "websocket" ]; then
+    echo "[kars-hermes] ERROR: Feishu only supports websocket connection mode" >&2
+    return 1
+  fi
+  case "${FEISHU_DM_POLICY:-pairing}" in pairing|allowlist|disabled) ;; *) return 1 ;; esac
+  case "${FEISHU_GROUP_POLICY:-allowlist}" in allowlist|disabled) ;; *) return 1 ;; esac
+  case "${FEISHU_REQUIRE_MENTION:-true}" in true|false) ;; *) return 1 ;; esac
+}
+
+render_feishu_platform_config() {
+  validate_feishu_channel
+  [ -z "${FEISHU_CONNECTION_MODE:-}" ] && return 0
+
+  local dm_allow_json group_id
+  dm_allow_json=$(python3 -c 'import json, os; print(json.dumps([v.strip() for v in os.getenv("FEISHU_ALLOW_FROM", "").split(",") if v.strip()], separators=(",", ":")))')
+  cat <<EOF
+platforms:
+  feishu:
+    enabled: true
+    extra:
+      dm_policy: "${FEISHU_DM_POLICY:-pairing}"
+      dm_allow_from: ${dm_allow_json}
+      default_group_policy: "disabled"
+      require_mention: ${FEISHU_REQUIRE_MENTION:-true}
+      group_rules:
+EOF
+  if [ "${FEISHU_GROUP_POLICY:-allowlist}" = "allowlist" ]; then
+    while IFS= read -r group_id || [ -n "$group_id" ]; do
+      [ -z "$group_id" ] && continue
+      case "$group_id" in
+        oc_[A-Za-z0-9_-]*) ;;
+        *)
+          echo "[kars-hermes] ERROR: invalid Feishu group chat ID" >&2
+          return 1
+          ;;
+      esac
+      cat <<EOF
+        "${group_id}":
+          policy: "open"
+          require_mention: ${FEISHU_REQUIRE_MENTION:-true}
+EOF
+    done < <(printf '%s' "${FEISHU_GROUP_ALLOW_FROM:-}" | tr ',' '\n' | tr -d ' ')
+  fi
+}
+
+if [[ "${BASH_SOURCE[0]}" != "$0" ]]; then
+  return 0
+fi
+
 set -e
+clear_feishu_readiness
 
 # ── UID detection (matches openclaw/entrypoint.sh pattern) ──────────────
 # Docker dev: started as root, runuser drops to sandbox UID
@@ -203,6 +269,7 @@ export HERMES_DEFAULT_PROVIDER
 # discovers them automatically.
 HERMES_CONFIG="$HERMES_HOME/config.yaml"
 MCP_FRAGMENT="$HERMES_CONFIG.mcp-fragment"
+FEISHU_PLATFORM_CONFIG=$(render_feishu_platform_config)
 
 echo "[kars-hermes] Building MCP server config in $HERMES_CONFIG"
 {
@@ -273,10 +340,13 @@ echo "[kars-hermes] Building MCP server config in $HERMES_CONFIG"
       echo "      x-kars-sandbox: \"$SANDBOX_NAME\""
     done
   fi
+  if [ -n "$FEISHU_PLATFORM_CONFIG" ]; then
+    printf '%s\n' "$FEISHU_PLATFORM_CONFIG"
+  fi
 } > "$MCP_FRAGMENT"
 
 # Merge into config.yaml. The two blocks the entrypoint owns
-# (`plugins:` and `mcp_servers:`) are stripped from any existing
+# (`plugins:`, `mcp_servers:`, `model:`, and `platforms:`) are stripped from any existing
 # config and replaced with freshly-generated versions. Everything
 # else the user may have written via `hermes config set <other.key>`
 # is preserved across pod restarts.
@@ -296,7 +366,7 @@ fragment = open(fragment_path).read()
 # blocks (the three sections the entrypoint owns) so re-runs are
 # idempotent. Everything else the user wrote via `hermes config set
 # <other.key>` is preserved across pod restarts.
-top_key = re.compile(r"^(plugins|mcp_servers|model):", re.M)
+top_key = re.compile(r"^(plugins|mcp_servers|model|platforms):", re.M)
 out, idx, prev = io.StringIO(), 0, 0
 while True:
     m = top_key.search(src, idx)
@@ -331,7 +401,7 @@ rm -f "$MCP_FRAGMENT"
 # Channels Hermes supports natively that map from kars envs:
 #   telegram, slack, discord, whatsapp, signal, matrix, email
 # Channels kars doesn't expose creds for yet:
-#   mattermost, dingtalk, feishu, wecom, weixin, bluebubbles,
+#   mattermost, dingtalk, wecom, weixin, bluebubbles,
 #   qqbot, homeassistant, webhook, api_server, yuanbao, sms
 # Operators wanting those can `hermes config set` manually post-boot
 # from their own creds.

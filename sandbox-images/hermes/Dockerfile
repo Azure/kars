@@ -110,7 +110,16 @@ RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
 # bumping to a newer Hermes should also re-verify the kars runtime
 # contract is still honored (entrypoint env shape + plugin context API).
 ARG HERMES_VERSION=0.16.0
-RUN pip install --no-cache-dir "hermes-agent==${HERMES_VERSION}"
+RUN pip install --no-cache-dir "hermes-agent[feishu]==${HERMES_VERSION}"
+
+# Hermes 0.16.0's Feishu adapter supports chat-ID group rules and the gateway
+# has a DM pairing store, but the adapter does not expose dm_policy or declare
+# that it owns admission. Apply a source-anchored compatibility patch; it fails
+# the build if the pinned upstream source shape changes.
+COPY sandbox-images/hermes/patch-hermes-feishu-policy.py /tmp/patch-hermes-feishu-policy.py
+RUN python3 /tmp/patch-hermes-feishu-policy.py && \
+    python3 -c "import lark_oapi, qrcode; from gateway.platforms.feishu import FeishuAdapter; assert FeishuAdapter.enforces_own_access_policy" && \
+    rm /tmp/patch-hermes-feishu-policy.py
 
 # ---- Channel adapter libraries -----------------------------------------
 # Hermes auto-detects channels (Telegram / Slack / Discord) from env
@@ -187,7 +196,8 @@ COPY --chown=1000:1000 sandbox-images/hermes/default-agent/ /opt/kars-default-ag
 
 # ---- Entrypoint ---------------------------------------------------------
 COPY sandbox-images/hermes/entrypoint.sh /usr/local/bin/kars-hermes-entrypoint.sh
-RUN chmod 0755 /usr/local/bin/kars-hermes-entrypoint.sh
+COPY sandbox-images/hermes/kars-channel-feishu-ready /usr/local/bin/kars-channel-feishu-ready
+RUN chmod 0755 /usr/local/bin/kars-hermes-entrypoint.sh /usr/local/bin/kars-channel-feishu-ready
 
 # ---- Security: drop to UID 1000 (matches AKS pod spec) ------------------
 # In docker dev mode, the entrypoint may run as root briefly to set up

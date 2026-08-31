@@ -28,7 +28,7 @@ flowchart LR
   CLI["kars CLI<br/>or GitOps / kubectl"]
   CRD[("CRD<br/>(12 kinds)")]
   Ctrl["kars-controller<br/>(kube-rs)"]
-  Art[("Cluster artifacts<br/>Namespace · ServiceAccount · NetworkPolicy<br/>Deployment · Service · ConfigMap · Secret<br/>FederatedIdentityCredential")]
+  Art[("Cluster artifacts<br/>Namespace · ServiceAccount · NetworkPolicy<br/>Deployment · Service · ConfigMap · Secret · optional PVC<br/>FederatedIdentityCredential")]
   Runtime["Runtime data plane<br/>inference-router · A2A gateway · sandbox pod"]
 
   CLI -->|writes| CRD
@@ -125,7 +125,7 @@ Every CLI command is a thin wrapper around `kubectl apply`. The CLI does no orch
 |---|---|---|---|
 | `kars up` | `KarsSandbox` (one or more) | Tenant namespace + everything inside it | The agent pod itself |
 | `kars add <name>` | `KarsSandbox` | Same as above | Same |
-| `kars destroy <name>` | Deletes `KarsSandbox` | Cascades via finalizer to delete the namespace + federated credential | — |
+| `kars destroy <name>` | Deletes `KarsSandbox` | Ephemeral/Delete storage: delete namespace. Retain/existing storage: delete labelled workloads but retain namespace + PVC. Always deletes federated credential. | — |
 | `kars inferencepolicy apply` | `InferencePolicy` | `ConfigMap` `inferencepolicy-<name>-profile` | Inference router (`/v1/chat`, `/v1/responses`) |
 | `kars toolpolicy apply` | `ToolPolicy` | `ConfigMap` `toolpolicy-<name>-profile` | Inference router (every tool dispatch) |
 | `kars mcp add` | `McpServer` | `Secret` `mcp-<name>-signing` (Ed25519 keypair) <br/> `ConfigMap` `mcp-<name>-jwks` (when `productionMode=true`) | Inference router (`/mcp` proxy — multi-issuer OAuth verifier + namespaced `{server}.{tool}` dispatch) |
@@ -368,7 +368,7 @@ Every reconciler installs a finalizer on first reconcile. This blocks Kubernetes
 
 | CRD | Finalizer | Cleanup work |
 |---|---|---|
-| `KarsSandbox` | `kars.azure.com/namespace-cleanup` | Delete the tenant namespace (cascades to all resources), delete spawner ClusterRoleBinding, **delete federated credential**, release pairing slot, then remove finalizer. |
+| `KarsSandbox` | `kars.azure.com/namespace-cleanup` | With ephemeral or `retainPolicy: Delete` storage, delete the tenant namespace. With `Retain` or `existingClaim`, delete labelled Kars workloads but preserve namespace and PVC (namespaced owner references cannot cross from the source CR namespace). Then delete spawner ClusterRoleBinding and federated credential, release pairing slot, and remove the finalizer. |
 | Compile-pattern CRDs | `kars.azure.com/<kind>-cleanup` | Delete the produced `ConfigMap` (and `Secret`, where present), then remove finalizer. |
 
 The federated-credential delete is the one cleanup that crosses the cluster boundary into Microsoft Graph. See `controller/src/fedcred_reaper.rs` for the orphan-collector that backstops force-delete and pre-finalizer CRs.

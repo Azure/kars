@@ -137,8 +137,8 @@ export function openSpawnDialog(ctx: SpawnDialogContext): void {
           const variants = storedTokens[state.channel] || [];
           const matchedVariant = variants.find(v => v.value === tokenVal);
           const display = matchedVariant
-            ? `{green-fg}${matchedVariant.label}{/} (●●●●${tokenVal.slice(-4)})`
-            : tokenVal ? "●●●●" + tokenVal.slice(-4) : "{gray-fg}(press Enter to type){/}";
+            ? `{green-fg}${matchedVariant.label}{/} (set)`
+            : tokenVal ? "●●●●" : "{gray-fg}(press Enter to type){/}";
           const hint = variants.length > 1 ? `  {gray-fg}←→ ${variants.length} stored{/}` : "";
           const label = state.channel.charAt(0).toUpperCase() + state.channel.slice(1);
           lines.push(`${sel} {bold}${label} Token:{/} ${display}${hint}`);
