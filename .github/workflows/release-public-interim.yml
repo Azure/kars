@@ -214,7 +214,7 @@ jobs:
           esac
 
       - name: Generate SBOM (SPDX JSON)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ env.REGISTRY }}/${{ matrix.image.ghcr }}:${{ env.VERSION }}
           format: spdx-json
@@ -418,7 +418,7 @@ jobs:
           push-to-registry: true
 
       - name: Generate SBOM (openclaw-sandbox)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}
           format: spdx-json
@@ -572,7 +572,7 @@ jobs:
           || echo "::warning::Could not set ${{ matrix.runtime.ghcr }} public via API; set it once manually."
 
       - name: Generate SBOM (SPDX JSON)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.VERSION }}
           format: spdx-json
@@ -712,7 +712,7 @@ jobs:
           push-to-registry: true
 
       - name: Generate SBOM (SPDX JSON)
-        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0
+        uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
           image: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}:${{ env.VERSION }}
           format: spdx-json
