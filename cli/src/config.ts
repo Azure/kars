@@ -9,7 +9,7 @@
 import chalk from "chalk";
 import ora from "ora";
 import inquirer from "inquirer";
-import { mkdirSync, writeFileSync, chmodSync, existsSync, readFileSync } from "fs";
+import { mkdirSync, writeFileSync, chmodSync, existsSync, readFileSync, rmSync } from "fs";
 import { execFileSync } from "child_process";
 import { join } from "path";
 import { homedir } from "os";
@@ -171,6 +171,11 @@ export function saveContext(ctx: DeploymentContext): void {
   ctx.savedAt = new Date().toISOString();
   writeFileSync(CONTEXT_FILE, JSON.stringify(ctx, null, 2), "utf-8");
   chmodSync(CONTEXT_FILE, 0o600);
+}
+
+/** Remove only the cached deployment context. Safe to call repeatedly. */
+export function clearDeploymentContext(): void {
+  rmSync(CONTEXT_FILE, { force: true });
 }
 
 /**

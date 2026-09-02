@@ -24,6 +24,9 @@ import { requireBundledAsset } from "../../lib/repo-assets.js";
 
 export interface BicepSetupOptions {
   clusterName?: string;
+  /// Subscription targeted by the ARM deployment. Defaults to the
+  /// currently selected Azure CLI subscription.
+  subscriptionId?: string;
   resourceGroup?: string;
   region: string;
   serviceTree?: string;
@@ -105,8 +108,14 @@ function resolveBicepTemplate(): string {
   }
 }
 
-async function getTenantInfo(): Promise<{ tenantId: string; subscriptionId: string; user: string }> {
-  const res = await execa("az", ["account", "show", "-o", "json"], {
+async function getAzureAccountContext(
+  requestedSubscriptionId?: string,
+): Promise<{ tenantId: string; subscriptionId: string; user: string }> {
+  const args = ["account", "show"];
+  if (requestedSubscriptionId) {
+    args.push("--subscription", requestedSubscriptionId);
+  }
+  const res = await execa("az", [...args, "-o", "json"], {
     stdio: ["ignore", "pipe", "pipe"],
   });
   const account = JSON.parse(res.stdout) as AzAccount;
@@ -128,7 +137,8 @@ async function getTenantInfo(): Promise<{ tenantId: string; subscriptionId: stri
 export async function ensureAgentIdTrustViaBicep(
   opts: BicepSetupOptions,
 ): Promise<BicepSetupResult> {
-  const auth = await getTenantInfo();
+  const auth = await getAzureAccountContext(opts.subscriptionId);
+  const subscriptionId = auth.subscriptionId;
   const clusterName = opts.clusterName ?? "kars";
   const rg = opts.resourceGroup ?? `${clusterName}-agentid-rg`;
   const region = opts.region;
@@ -142,7 +152,7 @@ export async function ensureAgentIdTrustViaBicep(
 
   section("Entra Agent ID — Bicep deployment");
   kvLine("Tenant", auth.tenantId);
-  kvLine("Subscription", auth.subscriptionId);
+  kvLine("Subscription", subscriptionId);
   kvLine("Signed in as", auth.user);
   kvLine("Cluster", clusterName);
   kvLine("Region", region);
@@ -202,6 +212,7 @@ export async function ensureAgentIdTrustViaBicep(
   if (credentialMode === "WorkloadIdentity" && opts.aksOidcIssuerUrl) {
     args.push("--parameters", `aksOidcIssuerUrl=${opts.aksOidcIssuerUrl}`);
   }
+  args.push("--subscription", subscriptionId);
 
   console.log();
   console.log(chalk.dim("  Running `az deployment sub create` — typical duration 30-90s..."));
@@ -340,7 +351,10 @@ export async function ensureAgentIdTrustViaBicep(
     });
     console.log();
     console.log(chalk.green("  ✓ KarsAuthConfig/default written"));
-    await printPortalVisibilityHint(result.blueprintObjectId);
+    await printPortalVisibilityHint(
+      result.blueprintObjectId,
+      subscriptionId,
+    );
   } catch (e) {
     // The kubectl apply is the LAST step and a soft failure here
     // should NOT mask the successful Bicep deployment that already
@@ -368,7 +382,10 @@ export async function ensureAgentIdTrustViaBicep(
       console.log(chalk.dim("    Bicep outputs (apply manually if you prefer):"));
       console.log(chalk.dim(`      blueprint:    ${result.blueprintClientId}`));
       console.log(chalk.dim(`      controller MI: ${result.controllerMiClientId}`));
-      await printPortalVisibilityHint(result.blueprintObjectId);
+      await printPortalVisibilityHint(
+        result.blueprintObjectId,
+        subscriptionId,
+      );
       // Return the result so callers know the Bicep half succeeded.
       return result;
     }
@@ -405,12 +422,15 @@ export async function ensureAgentIdTrustViaBicep(
 /// uses a different first-party app (`de8bc8b5-...`) and bypasses
 /// the CA token-binding policy.
 ///
-/// User OID discovery: try `az ad signed-in-user show` first (works
+/// User OID discovery: try a subscription-pinned Graph `/me` first (works
 /// in tenants where ARM-scope Graph is allowed but data-plane Graph
 /// is blocked — rare but exists). On failure leave a clear
 /// `<YOUR_USER_OID>` sentinel with a one-line hint on how to find it.
-async function printPortalVisibilityHint(blueprintObjectId: string): Promise<void> {
-  const userOid = await tryGetSignedInUserOid();
+async function printPortalVisibilityHint(
+  blueprintObjectId: string,
+  subscriptionId: string,
+): Promise<void> {
+  const userOid = await tryGetSignedInUserOid(subscriptionId);
   const oid = userOid ?? "<YOUR_USER_OID>";
   const body = JSON.stringify(
     {
@@ -601,14 +621,28 @@ async function printPortalVisibilityHint(blueprintObjectId: string): Promise<voi
 }
 
 /// Best-effort: try to read the signed-in user's Entra objectId via
-/// `az ad signed-in-user show`. This usually hits the same CA block
+/// a subscription-pinned `az rest` call. This usually hits the same CA block
 /// as direct Graph calls (returns AADSTS530084) — we return null
 /// silently in that case so the caller falls back to the literal sentinel.
-async function tryGetSignedInUserOid(): Promise<string | null> {
+async function tryGetSignedInUserOid(
+  subscriptionId: string,
+): Promise<string | null> {
   try {
     const res = await execa(
       "az",
-      ["ad", "signed-in-user", "show", "--query", "id", "-o", "tsv"],
+      [
+        "rest",
+        "--method",
+        "GET",
+        "--url",
+        "https://graph.microsoft.com/v1.0/me?$select=id",
+        "--query",
+        "id",
+        "--subscription",
+        subscriptionId,
+        "-o",
+        "tsv",
+      ],
       { stdio: ["ignore", "pipe", "pipe"], timeout: 15_000 },
     );
     const oid = res.stdout.trim();

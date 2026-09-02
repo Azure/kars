@@ -42,11 +42,17 @@ acceptable.
 | Role | Actions it grants | What `kars up` needs it for |
 |------|-------------------|----------------------------------|
 | **Contributor** | `*` except `Microsoft.Authorization/*/Write`, `*/Delete` | Create AKS, ACR, KV, Log Analytics, Foundry, VNet, Workload Identity, Bicep deployments |
-| **User Access Administrator** | `Microsoft.Authorization/*` | `az aks update --attach-acr` (kubelet↔ACR role assignment), federated-credential creation, Workload Identity → Foundry role grants |
+| **User Access Administrator** | `Microsoft.Authorization/*` | `az aks update --attach-acr` (kubelet↔ACR role assignment), federated-credential creation, Workload Identity → Foundry role grants; deployment lease locks only with `--rollback-on-failure` |
 
 `Contributor` alone is **not enough** — AKS↔ACR attachment creates a role
 assignment between the AKS kubelet identity and the ACR, and that requires
-`Microsoft.Authorization/roleAssignments/write`.
+`Microsoft.Authorization/roleAssignments/write`. When
+`--rollback-on-failure` is enabled, Kars also uses an Azure resource-group lock
+as a deployment lease, so the operator additionally needs lock read, write,
+and delete actions. Normal runs do not require lock permissions. Explicit
+`kars destroy --all --yes` removes only Kars deployment locks
+(`kars-up-lease-*` and `kars-up-adopted`) before deleting the group;
+customer-created locks are never removed.
 
 ---
 
@@ -59,6 +65,7 @@ here so you can build a **custom role** if you need tighter least-privilege.
 | Action | Purpose |
 |--------|---------|
 | `Microsoft.Resources/subscriptions/resourceGroups/write` | Create the target resource group |
+| `Microsoft.Resources/subscriptions/resourceGroups/delete` | Delete the generated resource group when `--rollback-on-failure` is enabled |
 | `Microsoft.Resources/deployments/write` | Run the Bicep deployment |
 | `Microsoft.ContainerService/managedClusters/write` | Provision AKS cluster |
 | `Microsoft.ContainerService/managedClusters/listClusterUserCredential/action` | `az aks get-credentials` |
@@ -69,6 +76,9 @@ here so you can build a **custom role** if you need tighter least-privilege.
 | `Microsoft.ManagedIdentity/userAssignedIdentities/federatedIdentityCredentials/write` | Federate each sandbox ServiceAccount |
 | `Microsoft.OperationalInsights/workspaces/write` | Provision Log Analytics |
 | `Microsoft.Authorization/roleAssignments/write` | Attach ACR to AKS, grant Workload Identity scoped RBAC |
+| `Microsoft.Authorization/locks/read` | Inspect the resource-group deployment lease when `--rollback-on-failure` is enabled |
+| `Microsoft.Authorization/locks/write` | Create and renew the resource-group deployment lease when `--rollback-on-failure` is enabled |
+| `Microsoft.Authorization/locks/delete` | Release the deployment lease when `--rollback-on-failure` is enabled |
 | `Microsoft.Network/virtualNetworks/write` | AKS VNet (if Bicep creates one) |
 | `Microsoft.CognitiveServices/accounts/write` | Provision Azure AI Foundry project (skip if you pass `--foundry-endpoint`) |
 | `Microsoft.Features/providers/features/register/action` | Register `EncryptionAtHost`, `KataVMIsolationPreview` |
@@ -84,6 +94,7 @@ here so you can build a **custom role** if you need tighter least-privilege.
   "Actions": [
     "Microsoft.Resources/subscriptions/resourceGroups/write",
     "Microsoft.Resources/subscriptions/resourceGroups/read",
+    "Microsoft.Resources/subscriptions/resourceGroups/delete",
     "Microsoft.Resources/deployments/*",
     "Microsoft.ContainerService/managedClusters/*",
     "Microsoft.ContainerRegistry/registries/*",
@@ -95,6 +106,9 @@ here so you can build a **custom role** if you need tighter least-privilege.
     "Microsoft.Authorization/roleAssignments/read",
     "Microsoft.Authorization/roleAssignments/delete",
     "Microsoft.Authorization/roleDefinitions/read",
+    "Microsoft.Authorization/locks/read",
+    "Microsoft.Authorization/locks/write",
+    "Microsoft.Authorization/locks/delete",
     "Microsoft.Network/virtualNetworks/*",
     "Microsoft.Network/networkSecurityGroups/*",
     "Microsoft.Network/privateEndpoints/*",
@@ -114,6 +128,9 @@ Assign with:
 az role definition create --role-definition ./kars-deployer.json
 az role assignment create --assignee "$USER" --role "kars Deployer" --scope "/subscriptions/$SUB"
 ```
+
+If the role will never run `kars up --rollback-on-failure`, omit the three
+`Microsoft.Authorization/locks/*` actions from the custom role.
 
 > **Note:** When `a2aGateway.enabled: true` in Helm values, cert-manager (≥ 1.14)
 > must be installed in the cluster before deploying — the chart creates a

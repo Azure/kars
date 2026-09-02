@@ -28,6 +28,8 @@ export interface AgentMeshDeployContext {
   baseName: string;
   /** Resolved resource group name. */
   rg: string;
+  /** Subscription selected and validated by deployment preflight. */
+  subscriptionId: string;
   stepper: Stepper;
   /**
    * Phase 6.c — when set, the relay + registry are configured at
@@ -69,7 +71,15 @@ export async function deployAgentMesh(
   options: AgentMeshDeployOptions,
 ): Promise<AgentMeshDeployResult> {
   const { execa } = await import("execa");
-  const { acr: _acr, acrLoginServer, baseName, rg, stepper, entraVerify } = ctx;
+  const {
+    acr: _acr,
+    acrLoginServer,
+    baseName,
+    rg,
+    subscriptionId,
+    stepper,
+    entraVerify,
+  } = ctx;
   void ctx.repoRoot;
 
   // Inspektor Gadget (eBPF observability) — non-fatal
@@ -187,12 +197,9 @@ export async function deployAgentMesh(
       if (ingressManifest) {
         const ingressYaml = readFileSync(ingressManifest, "utf-8");
         const domain = `${baseName}.kars.dev`;
-        const { stdout: currentSubId } = await execa("az", [
-          "account", "show", "--query", "id", "--output", "tsv",
-        ], { stdio: "pipe", timeout: 10000 }).catch(() => ({ stdout: "" }));
         const patchedIngress = ingressYaml
           .replace(/DOMAIN_PLACEHOLDER/g, domain)
-          .replace(/SUBSCRIPTION_ID/g, currentSubId.trim())
+          .replace(/SUBSCRIPTION_ID/g, subscriptionId)
           .replace(/RESOURCE_GROUP/g, rg)
           .replace(/karsacr\.azurecr\.io/g, acrLoginServer);
         const tmpDir = mkdtempSync(path.join(os.tmpdir(), "kars-agentmesh-ingress-"));

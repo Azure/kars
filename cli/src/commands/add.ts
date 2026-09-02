@@ -4,14 +4,100 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
-import { loadContext, resolveSecret } from "../config.js";
+import {
+  loadContext,
+  resolveSecret,
+  type DeploymentContext,
+} from "../config.js";
 import { assertRuntimeWired, buildRuntimeBlock, flagToKind } from "../runtime.js";
+import { createSubscriptionPinnedExeca } from "./up/orchestration.js";
 import {
   buildInferencePolicy,
   buildToolPolicy,
   inferenceRefName,
   toolPolicyRefName,
 } from "../refs.js";
+
+type Execa = typeof import("execa").execa;
+
+function parseAzureArray(value: string, operation: string): unknown[] {
+  try {
+    const parsed = JSON.parse(value || "[]") as unknown;
+    if (Array.isArray(parsed)) return parsed;
+  } catch {
+    // Use the actionable error below.
+  }
+  throw new Error(`${operation} returned invalid JSON`);
+}
+
+export async function resolveAddSubscription(
+  execute: Execa,
+  context: DeploymentContext | null,
+): Promise<string | undefined> {
+  const cached = context?.subscription?.trim();
+  if (cached) return cached;
+  if (!context?.resourceGroup || !context.aksCluster) return undefined;
+
+  const { stdout } = await execute("az", [
+    "account", "list",
+    "--query", "[?state=='Enabled'].{id:id}",
+    "--output", "json",
+  ], { stdio: "pipe", timeout: 15000 });
+  const subscriptions = parseAzureArray(
+    String(stdout),
+    "Listing enabled Azure subscriptions",
+  );
+  const matches = new Set<string>();
+  for (const value of subscriptions) {
+    if (
+      typeof value !== "object" ||
+      value === null ||
+      typeof (value as { id?: unknown }).id !== "string" ||
+      !(value as { id: string }).id.trim()
+    ) {
+      throw new Error("Azure returned an invalid enabled subscription list");
+    }
+    const subscriptionId = (value as { id: string }).id.trim();
+    const { stdout: clusterOutput } = await execute("az", [
+      "aks", "list",
+      "--query", "[].{name:name,resourceGroup:resourceGroup}",
+      "--output", "json",
+      "--subscription", subscriptionId,
+    ], { stdio: "pipe", timeout: 30000 });
+    for (const candidate of parseAzureArray(
+      String(clusterOutput),
+      `Listing AKS clusters in subscription '${subscriptionId}'`,
+    )) {
+      if (typeof candidate !== "object" || candidate === null) continue;
+      const cluster = candidate as {
+        name?: unknown;
+        resourceGroup?: unknown;
+      };
+      if (
+        typeof cluster.name === "string" &&
+        typeof cluster.resourceGroup === "string" &&
+        cluster.name.toLowerCase() === context.aksCluster.toLowerCase() &&
+        cluster.resourceGroup.toLowerCase() ===
+          context.resourceGroup.toLowerCase()
+      ) {
+        matches.add(subscriptionId);
+      }
+    }
+  }
+
+  if (matches.size === 1) return [...matches][0];
+  if (matches.size === 0) {
+    throw new Error(
+      `No enabled Azure subscription contains AKS cluster '${context.aksCluster}' ` +
+        `in resource group '${context.resourceGroup}'. Azure-side agent setup was not changed.`,
+    );
+  }
+  throw new Error(
+    `AKS cluster '${context.aksCluster}' in resource group '${context.resourceGroup}' ` +
+      `exists in multiple enabled Azure subscriptions (${[...matches].join(", ")}). ` +
+      "Azure-side agent setup was not changed.",
+  );
+}
 
 export function addCommand(): Command {
   const cmd = new Command("add");
@@ -86,6 +172,19 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
 `)
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
+      const deploymentContext = loadContext();
+      let pinnedAzurePromise: Promise<Execa | undefined> | undefined;
+      const pinnedAzure = () => {
+        pinnedAzurePromise ??= resolveAddSubscription(
+          execa,
+          deploymentContext,
+        ).then((subscriptionId) =>
+          subscriptionId
+            ? createSubscriptionPinnedExeca(execa, subscriptionId)
+            : undefined,
+        );
+        return pinnedAzurePromise;
+      };
 
       const runtimeKind = flagToKind(options.runtime);
       assertRuntimeWired(runtimeKind);
@@ -333,7 +432,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         } catch { /* no nodes */ }
 
         if (!kataReady) {
-          const ctx = loadContext();
+          const ctx = deploymentContext;
           if (ctx?.aksCluster && ctx?.resourceGroup) {
             console.log(chalk.yellow("\n⚠  No Kata nodepool found."));
             console.log(chalk.dim("  Confidential isolation requires a nodepool with Kata VM runtime.\n"));
@@ -354,7 +453,13 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
             // DC-series for confidential Kata — AMD SEV-SNP (matches up.ts --isolation confidential)
             const kataSpinner = ora("Provisioning Kata nodepool (Standard_DC4as_v5, AzureLinux)...").start();
             try {
-              await execa("az", [
+              const runAzure = await pinnedAzure();
+              if (!runAzure) {
+                throw new Error(
+                  "No deployment subscription is available for Kata nodepool provisioning.",
+                );
+              }
+              await runAzure("az", [
                 "aks", "nodepool", "add",
                 "--resource-group", ctx.resourceGroup,
                 "--cluster-name", ctx.aksCluster,
@@ -390,7 +495,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         const namespace = `kars-${name}`;
         try {
           spinner.text = "Creating federated credential...";
-          const ctx = loadContext();
+          const ctx = deploymentContext;
 
           let identityName = ctx?.identityName;
           let identityRg = ctx?.identityResourceGroup || ctx?.resourceGroup;
@@ -403,7 +508,13 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
             ], { stdio: "pipe" });
 
             if (wiClientId) {
-              const { stdout: identityJson } = await execa("az", [
+              const runAzure = await pinnedAzure();
+              if (!runAzure) {
+                throw new Error(
+                  "No deployment subscription is available for identity discovery.",
+                );
+              }
+              const { stdout: identityJson } = await runAzure("az", [
                 "identity", "list",
                 "--query", `[?clientId=='${wiClientId}'].{name:name, rg:resourceGroup}`,
                 "--output", "json",
@@ -415,7 +526,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
               }
 
               if (identityRg && !issuerUrl) {
-                const { stdout: aksJson } = await execa("az", [
+                const { stdout: aksJson } = await runAzure("az", [
                   "aks", "list", "--resource-group", identityRg,
                   "--query", "[0].oidcIssuerProfile.issuerUrl", "--output", "tsv",
                 ], { stdio: "pipe" });
@@ -425,7 +536,13 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           }
 
           if (identityName && identityRg && issuerUrl) {
-            await execa("az", [
+            const runAzure = await pinnedAzure();
+            if (!runAzure) {
+              throw new Error(
+                "No deployment subscription is available for federated credential creation.",
+              );
+            }
+            await runAzure("az", [
               "identity", "federated-credential", "create",
               "--name", `kars-${name}`,
               "--identity-name", identityName,

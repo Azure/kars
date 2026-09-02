@@ -20,6 +20,31 @@ param vmSize string = 'Standard_D4s_v5'
 @description('VM size for the system node pool')
 param systemVmSize string = 'Standard_D2as_v5'
 
+@description('AKS node count for the system pool')
+@minValue(1)
+@maxValue(100)
+param systemNodeCount int = 2
+
+@description('AKS Kubernetes version (empty = regional default)')
+param kubernetesVersion string = ''
+
+@description('AKS system node pool name')
+param systemPoolName string = 'system'
+
+@description('AKS sandbox node pool name')
+param sandboxPoolName string = 'clawpool'
+
+@description('AKS Kata node pool name')
+param kataPoolName string = 'katapool'
+
+@description('VM size for Kata nodes')
+param kataVmSize string = 'Standard_D4as_v6'
+
+@description('AKS Kata node count (0 follows nodeCount)')
+@minValue(0)
+@maxValue(100)
+param kataNodeCount int = 0
+
 @description('Enable Kata VM isolation for confidential sandbox level')
 param enableConfidential bool = false
 
@@ -40,6 +65,9 @@ param openAiModelVersion string = '2025-04-14'
 
 @description('Deploy Azure OpenAI resource (set false when using --foundry-endpoint)')
 param deployAoai bool = true
+
+@description('Recover the matching soft-deleted Key Vault instead of creating a new vault')
+param recoverKeyVault bool = false
 
 // ─── Azure Container Registry ───────────────────────────────────────────────
 
@@ -65,7 +93,7 @@ module keyVault 'modules/keyvault.bicep' = {
   params: {
     name: '${baseName}-kv-${kvSuffix}'
     location: location
-    recover: false
+    recover: recoverKeyVault
   }
 }
 
@@ -103,6 +131,13 @@ module aks 'modules/aks.bicep' = {
     nodeCount: nodeCount
     vmSize: enableConfidential ? 'Standard_DC4as_v5' : vmSize
     systemVmSize: systemVmSize
+    systemNodeCount: systemNodeCount
+    kubernetesVersion: kubernetesVersion
+    systemPoolName: systemPoolName
+    sandboxPoolName: sandboxPoolName
+    kataPoolName: kataPoolName
+    kataVmSize: kataVmSize
+    kataNodeCount: kataNodeCount == 0 ? nodeCount : kataNodeCount
     enableFips: enableFips
     logAnalyticsWorkspaceId: monitor.outputs.logAnalyticsWorkspaceId
     acrId: acr.outputs.acrId

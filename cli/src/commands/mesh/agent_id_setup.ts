@@ -118,9 +118,58 @@ interface AzAccount {
   user: { name: string };
 }
 
-async function azJson<T>(args: string[]): Promise<T | null> {
+interface AzAccountContext {
+  subscriptionId: string;
+  tenantId: string;
+  user: string;
+}
+
+interface AzArmContext {
+  subscriptionId: string;
+}
+
+interface AzGraphContext {
+  subscriptionId: string;
+  tenantId: string;
+}
+
+function armArgs(args: string[], context: AzArmContext): string[] {
+  if (
+    args.some(
+      (arg) => arg === "--subscription" || arg.startsWith("--subscription="),
+    )
+  ) {
+    throw new Error(
+      "Internal error: Azure ARM command is already subscription-scoped",
+    );
+  }
+  return [...args, "--subscription", context.subscriptionId];
+}
+
+function graphArgs(args: string[], context?: AzGraphContext): string[] {
+  if (!context) return args;
+  if (
+    args.some(
+      (arg) => arg === "--subscription" || arg.startsWith("--subscription="),
+    )
+  ) {
+    throw new Error(
+      "Internal error: Microsoft Graph command is already subscription-scoped",
+    );
+  }
+  // `az rest` has no --tenant argument. Its global --subscription
+  // argument selects the account entry (and therefore tenant) used
+  // to acquire the Graph token.
+  return [...args, "--subscription", context.subscriptionId];
+}
+
+async function azJson<T>(
+  args: string[],
+  context?: AzArmContext,
+): Promise<T | null> {
   try {
-    const res = await execa("az", [...args, "-o", "json"], {
+    const scopedArgs = context ? armArgs(args, context) : args;
+    const res = await execa("az", [...scopedArgs, "-o", "json"], {
       stdio: ["ignore", "pipe", "pipe"],
     });
     if (!res.stdout || res.stdout.trim() === "" || res.stdout.trim() === "null") return null;
@@ -137,8 +186,16 @@ async function azGraphRest<T>(
   graphPath: string,
   body?: unknown,
   interactive = true,
+  context?: AzGraphContext,
 ): Promise<T | null> {
-  return azGraphRestWithRetry<T>(method, graphPath, body, false, interactive);
+  return azGraphRestWithRetry<T>(
+    method,
+    graphPath,
+    body,
+    false,
+    interactive,
+    context,
+  );
 }
 
 /// Internal: shared implementation. `alreadyRetried` prevents an
@@ -154,6 +211,7 @@ async function azGraphRestWithRetry<T>(
   body: unknown,
   alreadyRetried: boolean,
   interactive = true,
+  context?: AzGraphContext,
 ): Promise<T | null> {
   // Microsoft Graph requires the OData-Version header for derived
   // types like agentIdentityBlueprint. `az rest` does not let us set
@@ -175,7 +233,7 @@ async function azGraphRestWithRetry<T>(
   }
 
   try {
-    const res = await execa("az", [...args], {
+    const res = await execa("az", graphArgs(args, context), {
       stdio: ["ignore", "pipe", "pipe"],
     });
     if (!res.stdout || res.stdout.trim() === "") return null;
@@ -209,18 +267,20 @@ async function azGraphRestWithRetry<T>(
   }
 }
 
-async function ensureAzAuth(): Promise<{
-  tenantId: string;
-  subscriptionId: string;
-  user: string;
-}> {
+async function ensureAzAuth(
+  requestedSubscriptionId?: string,
+): Promise<AzAccountContext> {
   let account: AzAccount | null;
   try {
-    account = await azJson<AzAccount>(["account", "show"]);
+    const args = ["account", "show"];
+    if (requestedSubscriptionId) {
+      args.push("--subscription", requestedSubscriptionId);
+    }
+    account = await azJson<AzAccount>(args);
   } catch {
     throw new Error("Azure CLI is not signed in — run `az login` first.");
   }
-  if (!account || !account.tenantId) {
+  if (!account || !account.id || !account.tenantId) {
     throw new Error("Azure CLI is not signed in — run `az login` first.");
   }
   return {
@@ -236,9 +296,15 @@ interface MeApiResponse {
   userPrincipalName: string;
 }
 
-async function getCurrentUserOid(): Promise<string> {
+async function getCurrentUserOid(context: AzGraphContext): Promise<string> {
   // /me requires User.Read; Agent ID Developer implies this.
-  const me = await azGraphRest<MeApiResponse>("GET", "/beta/me");
+  const me = await azGraphRest<MeApiResponse>(
+    "GET",
+    "/beta/me",
+    undefined,
+    true,
+    context,
+  );
   if (!me || !me.id) {
     throw new Error("Failed to look up current user via Graph /me — Agent ID Developer role required");
   }
@@ -259,6 +325,7 @@ interface BlueprintGraphResponse {
 async function findExistingBlueprint(
   displayName: string,
   interactive = true,
+  context?: AzGraphContext,
 ): Promise<BlueprintGraphResponse | null> {
   const filter = encodeURIComponent(`displayName eq '${displayName}'`);
   interface ListResp {
@@ -269,6 +336,7 @@ async function findExistingBlueprint(
     `/beta/applications?$filter=${filter}&$top=2`,
     undefined,
     interactive,
+    context,
   );
   if (!resp || !resp.value || resp.value.length === 0) return null;
   if (resp.value.length > 1) {
@@ -283,6 +351,7 @@ async function createBlueprint(
   displayName: string,
   userOid: string,
   serviceTree: string | undefined,
+  context: AzGraphContext,
 ): Promise<BlueprintGraphResponse> {
   // Body shape matches the user-verified working request in Graph
   // Explorer:
@@ -306,6 +375,8 @@ async function createBlueprint(
     "POST",
     "/beta/applications/",
     body,
+    true,
+    context,
   );
   if (!created || !created.appId) {
     throw new Error("Graph POST /applications returned an empty response");
@@ -319,7 +390,10 @@ interface SpGraphResponse {
   displayName: string;
 }
 
-async function ensureBlueprintSp(appId: string): Promise<SpGraphResponse> {
+async function ensureBlueprintSp(
+  appId: string,
+  context: AzGraphContext,
+): Promise<SpGraphResponse> {
   // Look up first.
   interface ListResp {
     value: SpGraphResponse[];
@@ -328,6 +402,9 @@ async function ensureBlueprintSp(appId: string): Promise<SpGraphResponse> {
   const existing = await azGraphRest<ListResp>(
     "GET",
     `/beta/servicePrincipals?$filter=${filter}&$top=1`,
+    undefined,
+    true,
+    context,
   );
   if (existing && existing.value && existing.value.length > 0) {
     return existing.value[0];
@@ -337,6 +414,8 @@ async function ensureBlueprintSp(appId: string): Promise<SpGraphResponse> {
     "POST",
     "/beta/servicePrincipals",
     { appId },
+    true,
+    context,
   );
   if (!created || !created.id) {
     throw new Error("Graph POST /servicePrincipals returned an empty response");
@@ -352,35 +431,51 @@ interface ManagedIdentityResponse {
   location: string;
 }
 
-async function ensureResourceGroup(rg: string, region: string): Promise<void> {
+async function ensureResourceGroup(
+  context: AzArmContext,
+  rg: string,
+  region: string,
+): Promise<void> {
   try {
-    await azJson(["group", "show", "--name", rg]);
+    await azJson(["group", "show", "--name", rg], context);
     return;
   } catch {
     // Doesn't exist yet — create.
   }
-  await azJson(["group", "create", "--name", rg, "--location", region]);
+  await azJson(
+    ["group", "create", "--name", rg, "--location", region],
+    context,
+  );
 }
 
 async function ensureControllerMi(
+  context: AzArmContext,
   rg: string,
   region: string,
   miName: string,
 ): Promise<ManagedIdentityResponse> {
   try {
-    const existing = await azJson<ManagedIdentityResponse>([
-      "identity", "show", "--resource-group", rg, "--name", miName,
-    ]);
+    const existing = await azJson<ManagedIdentityResponse>(
+      ["identity", "show", "--resource-group", rg, "--name", miName],
+      context,
+    );
     if (existing) return existing;
   } catch {
     // Falls through to create.
   }
-  const created = await azJson<ManagedIdentityResponse>([
-    "identity", "create",
-    "--resource-group", rg,
-    "--name", miName,
-    "--location", region,
-  ]);
+  const created = await azJson<ManagedIdentityResponse>(
+    [
+      "identity",
+      "create",
+      "--resource-group",
+      rg,
+      "--name",
+      miName,
+      "--location",
+      region,
+    ],
+    context,
+  );
   if (!created) throw new Error(`az identity create returned no output for ${miName}`);
   return created;
 }
@@ -393,11 +488,15 @@ async function ensureBlueprintMiAsFic(
   blueprintObjectId: string,
   tenantId: string,
   miPrincipalId: string,
+  context: AzGraphContext,
 ): Promise<void> {
   const issuer = `https://login.microsoftonline.com/${tenantId}/v2.0`;
   const existing = await azGraphRest<FicListResp>(
     "GET",
     `/beta/applications/${blueprintObjectId}/federatedIdentityCredentials`,
+    undefined,
+    true,
+    context,
   );
   if (
     existing &&
@@ -415,6 +514,8 @@ async function ensureBlueprintMiAsFic(
       subject: miPrincipalId,
       audiences: ["api://AzureADTokenExchange"],
     },
+    true,
+    context,
   );
 }
 
@@ -441,11 +542,15 @@ async function ensureBlueprintSaAsFic(
   aksOidcIssuerUrl: string,
   saNamespace: string,
   saName: string,
+  context: AzGraphContext,
 ): Promise<void> {
   const subject = `system:serviceaccount:${saNamespace}:${saName}`;
   const existing = await azGraphRest<FicListResp>(
     "GET",
     `/beta/applications/${blueprintObjectId}/federatedIdentityCredentials`,
+    undefined,
+    true,
+    context,
   );
   if (
     existing &&
@@ -466,6 +571,8 @@ async function ensureBlueprintSaAsFic(
         subject,
         audiences: ["api://AzureADTokenExchange"],
       },
+      true,
+      context,
     );
   } catch (e) {
     const msg = (e as Error).message ?? "";
@@ -495,24 +602,30 @@ interface AksClusterShowResponse {
 /// cluster name and walks `az aks list` to find an AKS cluster matching
 /// it. Returns `null` if no matching AKS cluster is discoverable — the
 /// caller then falls back to Pattern A.
-async function discoverAksOidcIssuerUrl(opts: {
-  aksClusterName?: string;
-  aksClusterResourceGroup?: string;
-}): Promise<{ name: string; rg: string; issuerUrl: string } | null> {
+async function discoverAksOidcIssuerUrl(
+  opts: {
+    aksClusterName?: string;
+    aksClusterResourceGroup?: string;
+  },
+  context: AzArmContext,
+): Promise<{ name: string; rg: string; issuerUrl: string } | null> {
   const fromArgs =
     opts.aksClusterName && opts.aksClusterResourceGroup
       ? { name: opts.aksClusterName, rg: opts.aksClusterResourceGroup }
-      : await guessAksFromKubeconfig();
+      : await guessAksFromKubeconfig(context);
   if (!fromArgs) return null;
 
-  const show = await azJson<AksClusterShowResponse>([
-    "aks",
-    "show",
-    "--name",
-    fromArgs.name,
-    "--resource-group",
-    fromArgs.rg,
-  ]);
+  const show = await azJson<AksClusterShowResponse>(
+    [
+      "aks",
+      "show",
+      "--name",
+      fromArgs.name,
+      "--resource-group",
+      fromArgs.rg,
+    ],
+    context,
+  );
   if (!show) return null;
   const url = show.oidcIssuerProfile?.issuerUrl;
   if (!url) {
@@ -529,7 +642,9 @@ interface KubeconfigDoc {
   contexts: { name: string; context: { cluster: string } }[];
 }
 
-async function guessAksFromKubeconfig(): Promise<{ name: string; rg: string } | null> {
+async function guessAksFromKubeconfig(
+  context: AzArmContext,
+): Promise<{ name: string; rg: string } | null> {
   let cluster: string | null = null;
   try {
     const res = await execa("kubectl", ["config", "view", "-o", "json"], {
@@ -545,12 +660,10 @@ async function guessAksFromKubeconfig(): Promise<{ name: string; rg: string } | 
   if (!cluster) return null;
   // kubectl + AKS conventionally name the cluster after the AKS
   // resource name. Match the first AKS resource with that name.
-  const list = await azJson<{ name: string; resourceGroup: string }[]>([
-    "aks",
-    "list",
-    "--query",
-    `[?name=='${cluster}']`,
-  ]);
+  const list = await azJson<{ name: string; resourceGroup: string }[]>(
+    ["aks", "list", "--query", `[?name=='${cluster}']`],
+    context,
+  );
   if (!list || list.length === 0) return null;
   return { name: list[0].name, rg: list[0].resourceGroup };
 }
@@ -648,11 +761,18 @@ async function writeKarsAuthConfig(result: {
 export async function ensureAgentIdTrust(
   opts: AgentIdSetupOptions,
 ): Promise<AgentIdSetupResult> {
-  const auth = await ensureAzAuth();
-  const tenantId = opts.subscriptionId ? opts.subscriptionId : auth.tenantId; // tenant from az, NOT sub
-  const realTenant = auth.tenantId;
-  const subscriptionId = opts.subscriptionId ?? auth.subscriptionId;
-  void tenantId; // ci:stub-ok: tsc-only no-op; multi-tenant CLI ships in Phase 1
+  const auth = await ensureAzAuth(opts.subscriptionId);
+  return ensureAgentIdTrustWithAuth(opts, auth);
+}
+
+async function ensureAgentIdTrustWithAuth(
+  opts: AgentIdSetupOptions,
+  auth: AzAccountContext,
+): Promise<AgentIdSetupResult> {
+  const tenantId = auth.tenantId;
+  const subscriptionId = auth.subscriptionId;
+  const armContext: AzArmContext = { subscriptionId };
+  const graphContext: AzGraphContext = { subscriptionId, tenantId };
 
   const clusterName = opts.clusterName ?? "kars";
   const rg = opts.resourceGroup ?? `${clusterName}-agentid-rg`;
@@ -668,7 +788,7 @@ export async function ensureAgentIdTrust(
   const miName = `${clusterName}-controller-mi`;
 
   section("Entra Agent ID — auto-provision");
-  kvLine("Tenant", realTenant);
+  kvLine("Tenant", tenantId);
   kvLine("Subscription", subscriptionId);
   kvLine("Signed in as", auth.user);
   kvLine("Blueprint display name", blueprintDisplayName);
@@ -677,7 +797,7 @@ export async function ensureAgentIdTrust(
   if (opts.dryRun) {
     console.log(chalk.yellow("  ⚠ --dry-run: no changes were made."));
     return {
-      tenantId: realTenant,
+      tenantId,
       blueprintClientId: "<dry-run>",
       blueprintObjectId: "<dry-run>",
       controllerMiClientId: "<dry-run>",
@@ -689,11 +809,20 @@ export async function ensureAgentIdTrust(
   }
 
   // Phase 1: blueprint.
-  let blueprint = await findExistingBlueprint(blueprintDisplayName);
+  let blueprint = await findExistingBlueprint(
+    blueprintDisplayName,
+    true,
+    graphContext,
+  );
   let freshlyCreated = false;
   if (!blueprint) {
-    const userOid = await getCurrentUserOid();
-    blueprint = await createBlueprint(blueprintDisplayName, userOid, serviceTree);
+    const userOid = await getCurrentUserOid(graphContext);
+    blueprint = await createBlueprint(
+      blueprintDisplayName,
+      userOid,
+      serviceTree,
+      graphContext,
+    );
     freshlyCreated = true;
     kvLine("Blueprint", chalk.green(`created (appId=${blueprint.appId})`));
   } else {
@@ -701,7 +830,7 @@ export async function ensureAgentIdTrust(
   }
 
   // Phase 2: SP for blueprint.
-  const sp = await ensureBlueprintSp(blueprint.appId);
+  const sp = await ensureBlueprintSp(blueprint.appId, graphContext);
   kvLine("Blueprint SP", chalk.dim(sp.id));
 
   // Phase 3-4: Credential-mode-dependent provisioning.
@@ -716,10 +845,13 @@ export async function ensureAgentIdTrust(
   let aksOidcIssuerUrl: string | undefined;
 
   const tryPatternB = async (): Promise<boolean> => {
-    const aks = await discoverAksOidcIssuerUrl({
-      aksClusterName: opts.aksClusterName,
-      aksClusterResourceGroup: opts.aksClusterResourceGroup,
-    });
+    const aks = await discoverAksOidcIssuerUrl(
+      {
+        aksClusterName: opts.aksClusterName,
+        aksClusterResourceGroup: opts.aksClusterResourceGroup,
+      },
+      armContext,
+    );
     if (!aks) {
       kvLine(
         "AKS OIDC issuer",
@@ -734,6 +866,7 @@ export async function ensureAgentIdTrust(
         aks.issuerUrl,
         "kars-system",
         "entra-auth-sidecar",
+        graphContext,
       );
       kvLine("SA-as-FIC", chalk.green("present"));
       aksOidcIssuerUrl = aks.issuerUrl;
@@ -764,19 +897,29 @@ export async function ensureAgentIdTrust(
     if (ok) {
       resolvedMode = "WorkloadIdentity";
     } else {
-      await ensureResourceGroup(rg, region);
-      mi = await ensureControllerMi(rg, region, miName);
+      await ensureResourceGroup(armContext, rg, region);
+      mi = await ensureControllerMi(armContext, rg, region, miName);
       kvLine("Controller MI", chalk.dim(`${mi.clientId} (rg=${rg})`));
-      await ensureBlueprintMiAsFic(blueprint.id, realTenant, mi.principalId);
+      await ensureBlueprintMiAsFic(
+        blueprint.id,
+        tenantId,
+        mi.principalId,
+        graphContext,
+      );
       kvLine("MI-as-FIC", chalk.green("present"));
       resolvedMode = "ManagedIdentityImds";
     }
   } else {
     // requestedMode === "ManagedIdentityImds"
-    await ensureResourceGroup(rg, region);
-    mi = await ensureControllerMi(rg, region, miName);
+    await ensureResourceGroup(armContext, rg, region);
+    mi = await ensureControllerMi(armContext, rg, region, miName);
     kvLine("Controller MI", chalk.dim(`${mi.clientId} (rg=${rg})`));
-    await ensureBlueprintMiAsFic(blueprint.id, realTenant, mi.principalId);
+    await ensureBlueprintMiAsFic(
+      blueprint.id,
+      tenantId,
+      mi.principalId,
+      graphContext,
+    );
     kvLine("MI-as-FIC", chalk.green("present"));
     resolvedMode = "ManagedIdentityImds";
   }
@@ -788,7 +931,7 @@ export async function ensureAgentIdTrust(
   // the error message so up.ts can decide whether to retry.
   try {
     await writeKarsAuthConfig({
-      tenantId: realTenant,
+      tenantId,
       blueprintClientId: blueprint.appId,
       blueprintObjectId: blueprint.id,
       controllerMiClientId: mi?.clientId,
@@ -811,7 +954,7 @@ export async function ensureAgentIdTrust(
   }
 
   return {
-    tenantId: realTenant,
+    tenantId,
     blueprintClientId: blueprint.appId,
     blueprintObjectId: blueprint.id,
     controllerMiClientId: mi?.clientId ?? "",
@@ -1022,8 +1165,9 @@ export async function detectExistingBlueprint(
 export async function ensureAgentIdTrustAutoFallback(
   opts: AgentIdSetupOptions,
 ): Promise<AgentIdSetupResult> {
+  const auth = await ensureAzAuth(opts.subscriptionId);
   try {
-    return await ensureAgentIdTrust(opts);
+    return await ensureAgentIdTrustWithAuth(opts, auth);
   } catch (e) {
     const msg = (e as Error).message;
     if (!msg.includes("AADSTS530084")) {
@@ -1056,10 +1200,13 @@ export async function ensureAgentIdTrustAutoFallback(
         : "ManagedIdentityImds";
     let aksOidcIssuerUrl: string | undefined;
     if (bicepMode === "WorkloadIdentity") {
-      const aks = await discoverAksOidcIssuerUrl({
-        aksClusterName: opts.aksClusterName,
-        aksClusterResourceGroup: opts.aksClusterResourceGroup,
-      });
+      const aks = await discoverAksOidcIssuerUrl(
+        {
+          aksClusterName: opts.aksClusterName,
+          aksClusterResourceGroup: opts.aksClusterResourceGroup,
+        },
+        { subscriptionId: auth.subscriptionId },
+      );
       aksOidcIssuerUrl = aks?.issuerUrl;
     }
 
@@ -1067,6 +1214,7 @@ export async function ensureAgentIdTrustAutoFallback(
     const bicepResult = await ensureAgentIdTrustViaBicep({
       clusterName: opts.clusterName,
       resourceGroup: opts.resourceGroup,
+      subscriptionId: auth.subscriptionId,
       region: opts.region ?? "eastus",
       serviceTree: opts.serviceTree,
       credentialMode: bicepMode,
