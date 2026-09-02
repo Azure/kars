@@ -12,22 +12,17 @@ import { requireBundledAsset } from "../lib/repo-assets.js";
 import { cliReleaseTag } from "../lib/version.js";
 import {
   buildProjectedBicepParameters,
-  cleanupCreatedResourceGroup,
   createAzureRunner,
   ensureResourceGroup,
   findRecoverableDeletedKeyVault,
-  formatCleanupCompletion,
-  formatRetainedResourceGuidance,
-  maybeRollbackResourceGroup,
   parsePositiveInteger,
   releaseResourceGroupOwnership,
-  ResourceGroupOwnershipError,
   validateInfrastructureMode,
   type AzureRunner,
   type CleanupContext,
-  type CleanupResult,
   type ResourceGroupOwnershipProof,
 } from "./up/orchestration.js";
+import { reportDeploymentFailure } from "./up/deployment_failure.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -1085,84 +1080,11 @@ Auto-resume:
         process.exit(0);
 
       } catch (error) {
-        stepper.stop();
-        console.error(chalk.red(`\n  Deployment failed`));
-        const message =
-          error instanceof Error ? error.message : String(error);
-        console.error(chalk.red(`  ${message}\n`));
-
-        // Helpful diagnostics
-        if (message.includes("EncryptionAtHost")) {
-          console.log(chalk.yellow("  Tip: EncryptionAtHost requires registering the feature:"));
-          console.log(chalk.cyan("  az feature register --namespace Microsoft.Compute --name EncryptionAtHost"));
-          console.log(chalk.cyan("  az provider register -n Microsoft.Compute\n"));
-        }
-        if (cleanupContext) {
-          const retainedContext = cleanupContext;
-          let cleanupResult: CleanupResult | undefined;
-          try {
-            const disposition = await maybeRollbackResourceGroup({
-              ownershipProof: resourceGroupOwnership,
-              cleanup: async () => {
-                console.log(
-                  chalk.yellow(
-                    `  Cleaning up resource group '${rg}' created by this run...`,
-                  ),
-                );
-                cleanupResult = await cleanupAndClearDeploymentContext(
-                  () => cleanupCreatedResourceGroup(
-                    retainedContext,
-                    runAzure,
-                  ),
-                );
-              },
-            });
-
-            if (disposition === "cleaned") {
-              for (const cleanupLine of formatCleanupCompletion(
-                rg,
-                cleanupResult ?? {
-                  keyVaultNames: [],
-                  azureAiNames: [],
-                  purgeFailures: [],
-                },
-              )) {
-                console.log(
-                  (cleanupResult?.purgeFailures.length
-                    ? chalk.yellow
-                    : chalk.green)(`  ${cleanupLine}`),
-                );
-              }
-            } else {
-              console.log(
-                chalk.dim(
-                  `  Resource group '${rg}' was preserved because it existed before this invocation. Fix the error and retry the same command.\n`,
-                ),
-              );
-            }
-          } catch (cleanupError) {
-            const cleanupMessage =
-              cleanupError instanceof Error
-                ? cleanupError.message
-                : String(cleanupError);
-            console.error(
-              chalk.red(`  Automatic cleanup failed: ${cleanupMessage}\n`),
-            );
-            if (cleanupError instanceof ResourceGroupOwnershipError) {
-              console.log(
-                chalk.yellow(
-                  `  Resource group '${rg}' was not deleted because the rollback safety protocol could not prove exclusive deletion was safe. It may have been adopted concurrently; inspect its locks and resources manually.\n`,
-                ),
-              );
-            } else if (resourceGroupOwnership) {
-              console.log(
-                chalk.yellow(
-                  `${formatRetainedResourceGuidance(retainedContext)}\n`,
-                ),
-              );
-            }
-          }
-        }
+        await reportDeploymentFailure({
+          error, stepper, resourceGroup: rg,
+          cleanupContext, resourceGroupOwnership, runAzure,
+          cleanupAndClearDeploymentContext,
+        });
         process.exit(1);
       }
     });
