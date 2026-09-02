@@ -235,6 +235,45 @@ describe("runPreflight retained-infrastructure completeness", () => {
     expect(resolveSafety).not.toHaveBeenCalled();
   });
 
+  it("does not validate a synthesized node resource-group name for an existing cluster", async () => {
+    const longResourceGroup = `existing-${"r".repeat(60)}`;
+    const input = {
+      ...options(false),
+      resourceGroup: longResourceGroup,
+    };
+    const existingCluster = {
+      ...healthyCluster,
+      id:
+        `/subscriptions/sub-1/resourceGroups/${longResourceGroup}` +
+        "/providers/Microsoft.ContainerService/managedClusters/kars-aks",
+    };
+    const detectInfrastructure = vi.fn().mockResolvedValue({
+      complete: true,
+      diagnostic: "complete",
+    });
+    const runChecks = vi.fn();
+    const resolveSafety = vi.fn();
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(
+      runPreflight(input, {
+        detectExistingAksCluster: vi.fn().mockResolvedValue(existingCluster),
+        detectInfrastructureCompleteness: detectInfrastructure,
+        runPreflightChecks: runChecks,
+        resolveAzureDeploymentSafety: resolveSafety,
+      }),
+    ).resolves.toEqual({
+      rg: longResourceGroup,
+      subscriptionId: "sub-1",
+    });
+
+    expect(input.skipInfra).toBe(true);
+    expect(detectInfrastructure).toHaveBeenCalled();
+    expect(runChecks).not.toHaveBeenCalled();
+    expect(resolveSafety).not.toHaveBeenCalled();
+  });
+
   it("rejects a healthy cluster with incomplete ancillary resources before safety or Bicep resolution", async () => {
     const input = options(false);
     const runChecks = vi.fn();
