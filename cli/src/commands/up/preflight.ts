@@ -527,6 +527,30 @@ export async function runPreflight(
   const derivedNames = validateDerivedAzureResourceNames(
     options.clusterName ?? "kars",
   );
+  const validateNewClusterNodeResourceGroupName = (): boolean => {
+    try {
+      validateAutomaticAksNodeResourceGroupName(
+        rg,
+        derivedNames.aks,
+        options.region,
+      );
+      return true;
+    } catch (error) {
+      console.error(chalk.red(`\n  Error: ${(error as Error).message}\n`));
+      process.exit(1);
+      return false;
+    }
+  };
+
+  // Dry-run does not query Azure for an existing cluster, so it models the
+  // generated node resource group only for a new infrastructure deployment.
+  if (
+    options.dryRun &&
+    !options.skipInfra &&
+    !validateNewClusterNodeResourceGroupName()
+  ) {
+    return null;
+  }
 
   // Detect after auth and final region/RG resolution. An existing AKS cluster
   // is either reused without Bicep or rejected with manual remediation.
@@ -546,18 +570,8 @@ export async function runPreflight(
       return null;
     }
 
-    if (!detection.exists) {
-      try {
-        validateAutomaticAksNodeResourceGroupName(
-          rg,
-          derivedNames.aks,
-          options.region,
-        );
-      } catch (error) {
-        console.error(chalk.red(`\n  Error: ${(error as Error).message}\n`));
-        process.exit(1);
-        return null;
-      }
+    if (!detection.exists && !validateNewClusterNodeResourceGroupName()) {
+      return null;
     }
 
     const disposition = classifyExistingAksCluster(

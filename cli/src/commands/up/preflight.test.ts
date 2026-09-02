@@ -247,20 +247,19 @@ describe("runPreflight rollback resource-group selection", () => {
   });
 
   it.each([
-    ["new infrastructure", false, false],
-    ["explicit --skip-infra", true, false],
-    ["dry run", false, true],
+    ["new infrastructure", false],
+    ["dry run", true],
   ])(
-    "rejects an overlong custom region on the %s path before deployment discovery",
-    async (_path, skipInfra, dryRun) => {
+    "rejects an overlong custom region on the %s path before deployment checks",
+    async (_path, dryRun) => {
       const region = "customregion".repeat(6);
       const input = {
-        ...options(skipInfra),
+        ...options(false),
         dryRun,
         region,
         resourceGroup: undefined,
       };
-      const detectAks = vi.fn();
+      const detectAks = vi.fn().mockResolvedValue({ exists: false });
       const runChecks = vi.fn();
       const resolveSafety = vi.fn();
       const consoleError = vi
@@ -283,7 +282,11 @@ describe("runPreflight rollback resource-group selection", () => {
             resolveAzureDeploymentSafety: resolveSafety,
           }),
         ).rejects.toThrow("process.exit(1)");
-        expect(detectAks).not.toHaveBeenCalled();
+        if (dryRun) {
+          expect(detectAks).not.toHaveBeenCalled();
+        } else {
+          expect(detectAks).toHaveBeenCalledOnce();
+        }
         expect(runChecks).not.toHaveBeenCalled();
         expect(resolveSafety).not.toHaveBeenCalled();
         expect(consoleError).toHaveBeenCalledWith(
