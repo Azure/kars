@@ -128,6 +128,17 @@ describe("detectExistingAksCluster", () => {
     ).resolves.toEqual({ exists: false });
   });
 
+  it("treats an unregistered AKS provider as proving no existing cluster", async () => {
+    await expect(
+      detectExistingAksCluster("new-rg", "kars-aks", async () => {
+        throw {
+          stderr:
+            "(MissingSubscriptionRegistration) The subscription is not registered to use namespace 'Microsoft.ContainerService'.",
+        };
+      }),
+    ).resolves.toEqual({ exists: false });
+  });
+
   it("rejects --skip-infra when the cluster is absent or unhealthy", () => {
     expect(() =>
       requireHealthySkipInfraCluster({ exists: false }, "standard"),

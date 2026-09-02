@@ -274,6 +274,60 @@ describe("runPreflight retained-infrastructure completeness", () => {
     expect(resolveSafety).not.toHaveBeenCalled();
   });
 
+  it("registers discovery providers before resolving a new cluster footprint", async () => {
+    const input = options(false);
+    input.foundryEndpoint =
+      "https://shared.services.ai.azure.com/api/projects/project";
+    const order: string[] = [];
+    const runChecks = vi.fn(async () => {
+      order.push("checks");
+      return { ok: true, blocking: [], warnings: [] };
+    });
+    const ensureProviders = vi.fn(async () => {
+      order.push("providers");
+    });
+    const resolveSafety = vi.fn(async () => {
+      order.push("safety");
+      return {
+        kubernetesVersion: "1.36.3",
+        vmSizes: {
+          node: "Standard_D4s_v5",
+          system: "Standard_D2as_v5",
+          checked: true,
+        },
+        systemNodeCount: 2,
+        kataVmSize: "Standard_D4as_v6",
+        kataNodeCount: 0,
+        poolNames: {
+          system: "system",
+          sandbox: "clawpool",
+          kata: "katapool",
+        },
+        additionalNodePools: [],
+        nodeCount: 1,
+        adaptedNodeCount: false,
+        quotaRequirements: [],
+      };
+    });
+    vi.spyOn(console, "log").mockImplementation(() => undefined);
+    vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    await expect(
+      runPreflight(input, {
+        detectExistingAksCluster: vi.fn().mockResolvedValue({ exists: false }),
+        ensureDiscoveryProvidersRegistered: ensureProviders,
+        runPreflightChecks: runChecks,
+        resolveAzureDeploymentSafety: resolveSafety,
+      }),
+    ).resolves.toEqual({
+      rg: "kars-westus3",
+      subscriptionId: "sub-1",
+    });
+
+    expect(order).toEqual(["checks", "providers", "safety"]);
+    expect(ensureProviders).toHaveBeenCalledWith("sub-1");
+  });
+
   it("rejects a healthy cluster with incomplete ancillary resources before safety or Bicep resolution", async () => {
     const input = options(false);
     const runChecks = vi.fn();

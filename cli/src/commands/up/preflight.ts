@@ -103,6 +103,9 @@ export interface PreflightResult {
 export interface PreflightDependencies {
   detectExistingAksCluster?: typeof detectExistingAksCluster;
   detectInfrastructureCompleteness?: typeof detectInfrastructureCompleteness;
+  ensureDiscoveryProvidersRegistered?: (
+    subscriptionId: string,
+  ) => Promise<void>;
   randomBytes?: RandomBytesSource;
   runPreflightChecks?: typeof runPreflightChecks;
   resolveAzureDeploymentSafety?: typeof resolveAzureDeploymentSafety;
@@ -121,6 +124,30 @@ export const AZURE_REGION_CHOICES = [
   { name: "Australia East", value: "australiaeast" },
   { name: "Germany West Central", value: "germanywestcentral" },
 ] as const;
+
+const DISCOVERY_PROVIDERS = [
+  "Microsoft.ContainerService",
+  "Microsoft.Compute",
+] as const;
+
+async function ensureDiscoveryProvidersRegistered(
+  subscriptionId: string,
+): Promise<void> {
+  const { execa } = await import("execa");
+  for (const provider of DISCOVERY_PROVIDERS) {
+    await execa("az", [
+      "provider",
+      "register",
+      "--namespace",
+      provider,
+      "--wait",
+      "--subscription",
+      subscriptionId,
+      "--output",
+      "none",
+    ], { stdio: "pipe", timeout: 600_000 });
+  }
+}
 
 export function validateRollbackResourceGroupSelection(
   options: Pick<
@@ -188,6 +215,9 @@ export async function runPreflight(
   const runChecks = dependencies.runPreflightChecks ?? runPreflightChecks;
   const resolveSafety =
     dependencies.resolveAzureDeploymentSafety ?? resolveAzureDeploymentSafety;
+  const ensureDiscoveryProviders =
+    dependencies.ensureDiscoveryProvidersRegistered ??
+    ensureDiscoveryProvidersRegistered;
   // The cached effective OpenAI endpoint can belong to a prior local
   // deployment; only explicit options or a cached project endpoint prove that
   // the AI backend is external to this deployment.
@@ -202,18 +232,6 @@ export async function runPreflight(
     console.error(chalk.red(`\n  Error: ${(error as Error).message}\n`));
     process.exit(1);
     return null;
-  }
-
-  // This is deliberately before the first Azure command. The Key Vault name
-  // has the tightest generated-name limit and must fail before any resource can
-  // be created.
-  if (!options.skipInfra) {
-    try {
-      validateDerivedAzureResourceNames(options.clusterName ?? "kars");
-    } catch (error) {
-      console.error(chalk.red(`\n  Error: ${(error as Error).message}\n`));
-      process.exit(1);
-    }
   }
 
   // Non-interactive when explicitly requested (--yes) or when there's no TTY to
@@ -524,11 +542,12 @@ export async function runPreflight(
     options,
     dependencies.randomBytes ?? randomBytes,
   );
-  const derivedNames = validateDerivedAzureResourceNames(
-    options.clusterName ?? "kars",
-  );
+  const clusterName = options.clusterName ?? "kars";
+  const baseName = clusterName.replace(/-aks$/, "");
+  const aksName = `${baseName}-aks`;
   const validateNewClusterNodeResourceGroupName = (): boolean => {
     try {
+      const derivedNames = validateDerivedAzureResourceNames(clusterName);
       validateAutomaticAksNodeResourceGroupName(
         rg,
         derivedNames.aks,
@@ -555,7 +574,6 @@ export async function runPreflight(
   // Detect after auth and final region/RG resolution. An existing AKS cluster
   // is either reused without Bicep or rejected with manual remediation.
   if (!options.dryRun) {
-    const aksName = derivedNames.aks;
     let detection;
     try {
       detection = await detectAks(rg, aksName, subscriptionId);
@@ -701,6 +719,22 @@ export async function runPreflight(
 
   // ── 4. SKU availability check ──────────────────────────────────
   if (!options.dryRun && !options.skipInfra) {
+    try {
+      await ensureDiscoveryProviders(subscriptionId);
+    } catch (error) {
+      checkLine(
+        false,
+        `Azure provider registration — ${(error as Error).message}`,
+      );
+      console.log(
+        chalk.red(
+          "\n  Microsoft.ContainerService and Microsoft.Compute must be registered before regional AKS and quota discovery.\n",
+        ),
+      );
+      process.exit(1);
+      return null;
+    }
+
     console.log();
     console.log(chalk.dim(`  Checking VM SKU availability in ${options.region}...\n`));
 

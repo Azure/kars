@@ -5,6 +5,7 @@ import {
   azureCliErrorText,
   defaultAzTextRunner,
   isAksNotFoundError,
+  isMissingSubscriptionRegistrationError,
   resourceGroupFromId,
   resourceNameFromId,
   asRecord,
@@ -372,7 +373,12 @@ export async function detectExistingAksCluster(
       clusterName,
     );
   } catch (error) {
-    if (isAksNotFoundError(error)) return { exists: false };
+    if (
+      isAksNotFoundError(error) ||
+      isMissingSubscriptionRegistrationError(error)
+    ) {
+      return { exists: false };
+    }
     const detail = azureCliErrorText(error).split("\n")[0] || String(error);
     throw new Error(
       `Could not determine whether AKS cluster '${clusterName}' exists: ${detail}`,
