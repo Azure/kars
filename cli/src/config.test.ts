@@ -12,21 +12,23 @@ vi.mock("fs", () => ({
   writeFileSync: vi.fn(),
   mkdirSync: vi.fn(),
   chmodSync: vi.fn(),
+  rmSync: vi.fn(),
 }));
 
 import {
-  loadConfig, loadContext, saveContext,
+  clearDeploymentContext, loadConfig, loadContext, saveContext,
   CONFIG_DIR, CONFIG_FILE, CREDENTIALS_FILE, SECRETS_FILE,
   loadSecrets, saveSecrets, setSecret, deleteSecret, resolveSecret,
   listSecretVariants, KNOWN_SECRETS,
 } from "./config.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync } from "fs";
 
 const mockExistsSync = vi.mocked(existsSync);
 const mockReadFileSync = vi.mocked(readFileSync);
 const mockWriteFileSync = vi.mocked(writeFileSync);
 const mockMkdirSync = vi.mocked(mkdirSync);
 const mockChmodSync = vi.mocked(chmodSync);
+const mockRmSync = vi.mocked(rmSync);
 
 beforeEach(() => {
   vi.clearAllMocks();
@@ -210,6 +212,19 @@ describe("loadContext", () => {
     expect(result).toEqual(ctx);
   });
 
+  it("loads legacy deployment context without a subscription", () => {
+    mockExistsSync.mockReturnValue(true);
+    const legacyCtx = {
+      region: "eastus2",
+      resourceGroup: "rg-test",
+      aksCluster: "aks-test",
+      acrLoginServer: "myacr.azurecr.io",
+    };
+    mockReadFileSync.mockReturnValue(JSON.stringify(legacyCtx));
+
+    expect(loadContext()).toEqual(legacyCtx);
+  });
+
   it("returns null on corrupted context file", () => {
     mockExistsSync.mockReturnValue(true);
     mockReadFileSync.mockImplementation(() => {
@@ -238,6 +253,25 @@ describe("saveContext", () => {
     expect(mockChmodSync).toHaveBeenCalledWith(
       expect.stringContaining("context.json"),
       0o600,
+    );
+  });
+});
+
+describe("clearDeploymentContext", () => {
+  it("idempotently removes only context.json", () => {
+    clearDeploymentContext();
+    clearDeploymentContext();
+
+    expect(mockRmSync).toHaveBeenCalledTimes(2);
+    expect(mockRmSync).toHaveBeenNthCalledWith(
+      1,
+      join(CONFIG_DIR, "context.json"),
+      { force: true },
+    );
+    expect(mockRmSync).toHaveBeenNthCalledWith(
+      2,
+      join(CONFIG_DIR, "context.json"),
+      { force: true },
     );
   });
 });
