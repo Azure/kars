@@ -129,6 +129,7 @@ export async function resolveVmSizes(
   region: string,
   requestedNode?: string,
   requestedSystem?: string,
+  subscriptionId?: string,
 ): Promise<ResolvedVmSizes> {
   let skus: VmSku[];
   try {
@@ -143,6 +144,7 @@ export async function resolveVmSizes(
         "virtualMachines",
         "--output",
         "json",
+        ...(subscriptionId ? ["--subscription", subscriptionId] : []),
       ],
       { stdio: "pipe" },
     );

@@ -13,6 +13,7 @@ import { loadContext } from "../../config.js";
 import { requireBundledAsset } from "../../lib/repo-assets.js";
 import { cliReleaseTag } from "../../lib/version.js";
 import { rolloutRestartAll } from "../upgrade.js";
+import { createSubscriptionPinnedExeca } from "./orchestration.js";
 
 export interface UpOptionsForUpgrade {
   upgrade?: boolean;
@@ -23,6 +24,85 @@ export interface UpOptionsForUpgrade {
 
 const blue = chalk.hex("#0078D4");
 
+function parseJsonArray(value: string, operation: string): unknown[] {
+  try {
+    const parsed = JSON.parse(value || "[]") as unknown;
+    if (Array.isArray(parsed)) return parsed;
+  } catch {
+    // Use the actionable error below.
+  }
+  throw new Error(`${operation} returned invalid JSON`);
+}
+
+async function discoverLegacyDeploymentSubscription(
+  resourceGroup: string,
+  aksCluster: string,
+): Promise<string> {
+  const { stdout } = await execa("az", [
+    "account", "list",
+    "--query", "[?state=='Enabled'].{id:id}",
+    "--output", "json",
+  ], { stdio: "pipe", timeout: 15000 });
+  const subscriptionIds = new Set(
+    parseJsonArray(
+      String(stdout),
+      "Listing enabled Azure subscriptions",
+    ).map((candidate) => {
+      if (
+        typeof candidate !== "object" ||
+        candidate === null ||
+        typeof (candidate as { id?: unknown }).id !== "string" ||
+        !(candidate as { id: string }).id.trim()
+      ) {
+        throw new Error("Azure returned an invalid enabled subscription list");
+      }
+      return (candidate as { id: string }).id.trim();
+    }),
+  );
+
+  const matches = new Set<string>();
+  for (const subscriptionId of subscriptionIds) {
+    const { stdout: clusterOutput } = await execa("az", [
+      "aks", "list",
+      "--query", "[].{name:name,resourceGroup:resourceGroup}",
+      "--output", "json",
+      "--subscription", subscriptionId,
+    ], { stdio: "pipe", timeout: 30000 });
+    const clusters = parseJsonArray(
+      String(clusterOutput),
+      `Listing AKS clusters in subscription '${subscriptionId}'`,
+    );
+    if (clusters.some((candidate) => {
+      if (typeof candidate !== "object" || candidate === null) return false;
+      const cluster = candidate as {
+        name?: unknown;
+        resourceGroup?: unknown;
+      };
+      return (
+        typeof cluster.name === "string" &&
+        typeof cluster.resourceGroup === "string" &&
+        cluster.name.toLowerCase() === aksCluster.toLowerCase() &&
+        cluster.resourceGroup.toLowerCase() === resourceGroup.toLowerCase()
+      );
+    })) {
+      matches.add(subscriptionId);
+    }
+  }
+
+  if (matches.size === 1) return [...matches][0];
+  if (matches.size === 0) {
+    throw new Error(
+      `No enabled Azure subscription contains cached AKS cluster '${aksCluster}' in resource group '${resourceGroup}'. ` +
+      "Fast upgrade stopped before making changes. Run 'kars up' without --upgrade to refresh the deployment context.",
+    );
+  }
+  throw new Error(
+    `Cached AKS cluster '${aksCluster}' in resource group '${resourceGroup}' exists in multiple enabled Azure subscriptions ` +
+    `(${[...matches].join(", ")}). Fast upgrade stopped before making changes. ` +
+    "Run 'kars up' without --upgrade and select the intended subscription to refresh the deployment context.",
+  );
+}
+
 export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void> {
         const ctx = loadContext();
         if (!ctx?.acrLoginServer || !ctx?.aksCluster || !ctx?.resourceGroup) {
@@ -30,11 +110,23 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
           process.exit(1);
         }
 
+        let subscriptionId = ctx.subscription?.trim();
+        if (!subscriptionId) {
+          subscriptionId = await discoverLegacyDeploymentSubscription(
+            ctx.resourceGroup,
+            ctx.aksCluster,
+          );
+        }
+        const subscriptionPinnedExeca = createSubscriptionPinnedExeca(
+          execa,
+          subscriptionId,
+        );
+
         console.log(blue("\n  kars · Fast Upgrade\n"));
 
         // Connect to AKS
         let spin = ora("Connecting to AKS...").start();
-        await execa("az", ["aks", "get-credentials", "--name", ctx.aksCluster, "--resource-group", ctx.resourceGroup, "--overwrite-existing"], { stdio: "pipe" });
+        await subscriptionPinnedExeca("az", ["aks", "get-credentials", "--name", ctx.aksCluster, "--resource-group", ctx.resourceGroup, "--overwrite-existing"], { stdio: "pipe" });
         spin.succeed("AKS connected");
 
         // Resolve the Helm chart from a repo checkout OR the bundled package
@@ -86,28 +178,25 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
         }
         // Fedcred config for controller auto-creation
         if (ctx.oidcIssuerUrl) {
-          try {
-            const { stdout: subId } = await execa("az", ["account", "show", "--query", "id", "--output", "tsv"], { stdio: "pipe", timeout: 10000 });
-            helmArgs.push(
-              "--set", `fedcred.subscriptionId=${subId.trim()}`,
-              "--set", `fedcred.identityName=${ctx.identityName || ""}`,
-              "--set", `fedcred.identityResourceGroup=${ctx.identityResourceGroup || ctx.resourceGroup}`,
-              "--set", `fedcred.oidcIssuerUrl=${ctx.oidcIssuerUrl}`,
-            );
-          } catch { /* non-critical */ }
+          helmArgs.push(
+            "--set", `fedcred.subscriptionId=${subscriptionId}`,
+            "--set", `fedcred.identityName=${ctx.identityName || ""}`,
+            "--set", `fedcred.identityResourceGroup=${ctx.identityResourceGroup || ctx.resourceGroup}`,
+            "--set", `fedcred.oidcIssuerUrl=${ctx.oidcIssuerUrl}`,
+          );
         }
         // Discover deployments
         try {
           const accountName = ctx.foundryEndpoint ? new URL(ctx.foundryEndpoint).hostname.split(".")[0] : "";
           if (accountName) {
-            const { stdout: rgOut } = await execa("az", [
+            const { stdout: rgOut } = await subscriptionPinnedExeca("az", [
               "cognitiveservices", "account", "list",
               "--query", `[?name=='${accountName}'].resourceGroup | [0]`,
               "--output", "tsv",
             ], { stdio: "pipe", timeout: 15000 });
             const foundryRg = rgOut.trim();
             if (foundryRg) {
-              const { stdout } = await execa("az", [
+              const { stdout } = await subscriptionPinnedExeca("az", [
                 "cognitiveservices", "account", "deployment", "list",
                 "--name", accountName, "--resource-group", foundryRg,
                 "--query", "[].name", "--output", "json",
@@ -140,7 +229,7 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
           const idRg = ctx.identityResourceGroup || ctx.resourceGroup;
 
           // Controller SA fedcred
-          await execa("az", [
+          await subscriptionPinnedExeca("az", [
             "identity", "federated-credential", "create",
             "--identity-name", ctx.identityName,
             "--resource-group", idRg,
@@ -153,18 +242,15 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
 
           // MI Contributor self-scoped (so controller can create/delete fedcreds)
           try {
-            const { stdout: subId } = await execa("az", [
-              "account", "show", "--query", "id", "--output", "tsv",
-            ], { stdio: "pipe", timeout: 10000 });
-            const miScope = `/subscriptions/${subId.trim()}/resourceGroups/${idRg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${ctx.identityName}`;
-            const { stdout: miPid } = await execa("az", [
+            const miScope = `/subscriptions/${subscriptionId}/resourceGroups/${idRg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${ctx.identityName}`;
+            const { stdout: miPid } = await subscriptionPinnedExeca("az", [
               "identity", "show",
               "--name", ctx.identityName,
               "--resource-group", idRg,
               "--query", "principalId",
               "--output", "tsv",
             ], { stdio: "pipe" });
-            await execa("az", [
+            await subscriptionPinnedExeca("az", [
               "role", "assignment", "create",
               "--assignee-object-id", miPid.trim(),
               "--assignee-principal-type", "ServicePrincipal",
@@ -190,7 +276,7 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
               const sbName = sb.metadata?.name;
               if (!sbName) continue;
               const sbNs = `kars-${sbName}`;
-              await execa("az", [
+              await subscriptionPinnedExeca("az", [
                 "identity", "federated-credential", "create",
                 "--identity-name", ctx.identityName,
                 "--resource-group", ctx.identityResourceGroup || ctx.resourceGroup,

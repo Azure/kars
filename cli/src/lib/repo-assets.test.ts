@@ -33,6 +33,7 @@ const REQUIRED_RELEASE_ASSETS = [
   "deploy/agentmesh-agt.yaml",
   // aks (kars up --release)
   "deploy/bicep/main.bicep",
+  "deploy/bicep/main.json",
   // shared / observability (best-effort)
   "deploy/agentmesh-ingress.yaml",
   "deploy/monitoring",
@@ -95,5 +96,22 @@ describe("bundle-deploy-assets manifest", () => {
       const covered = declared.some((d) => rel === d || rel.startsWith(d + "/"));
       expect(covered, `bundle script must cover '${rel}'`).toBe(true);
     }
+  });
+});
+
+describe("generated deployment assets", () => {
+  it("ships the current deployment-safety fixes in the generated ARM template", async () => {
+    const { readFileSync } = await import("node:fs");
+    const template = JSON.parse(
+      readFileSync(path.join(repoRoot, "deploy", "bicep", "main.json"), "utf8"),
+    ) as { parameters?: Record<string, unknown> };
+    const serialized = JSON.stringify(template);
+
+    expect(template.parameters).toHaveProperty("kubernetesVersion");
+    expect(template.parameters).toHaveProperty("systemNodeCount");
+    expect(template.parameters).toHaveProperty("kataVmSize");
+    expect(template.parameters).toHaveProperty("kataNodeCount");
+    expect(serialized).not.toContain('"trustPolicy"');
+    expect(serialized).not.toContain('"kubernetesVersion":"1.33"');
   });
 });

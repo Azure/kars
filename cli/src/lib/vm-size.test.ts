@@ -1,14 +1,34 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it, expect } from "vitest";
+import { afterEach, describe, it, expect, vi } from "vitest";
 import {
   usableSkuSet,
   pickUsableVmSize,
   SYSTEM_POOL_VM_PREFERENCES,
   USER_POOL_VM_PREFERENCES,
+  resolveVmSizes,
   type VmSku,
 } from "./vm-size.js";
+
+const azureCalls = vi.hoisted(() => [] as string[][]);
+
+vi.mock("execa", () => ({
+  execa: vi.fn(async (_command: string, args: string[]) => {
+    azureCalls.push(args);
+    return {
+      stdout: JSON.stringify([
+        { name: "Standard_D2as_v5" },
+        { name: "Standard_D4s_v5" },
+      ]),
+    };
+  }),
+}));
+
+afterEach(() => {
+  azureCalls.length = 0;
+  vi.restoreAllMocks();
+});
 
 describe("usableSkuSet", () => {
   it("includes SKUs with no restrictions", () => {
@@ -136,5 +156,36 @@ describe("pickUsableVmSize", () => {
       flagName: "--system-vm-size",
     });
     expect(sku).toBe("Standard_D2as_v5");
+  });
+});
+
+describe("resolveVmSizes", () => {
+  it("pins SKU discovery to the selected subscription", async () => {
+    await expect(
+      resolveVmSizes(
+        "westus3",
+        undefined,
+        undefined,
+        "selected-subscription",
+      ),
+    ).resolves.toMatchObject({
+      node: "Standard_D4s_v5",
+      system: "Standard_D2as_v5",
+      checked: true,
+    });
+    expect(azureCalls).toEqual([
+      [
+        "vm",
+        "list-skus",
+        "--location",
+        "westus3",
+        "--resource-type",
+        "virtualMachines",
+        "--output",
+        "json",
+        "--subscription",
+        "selected-subscription",
+      ],
+    ]);
   });
 });

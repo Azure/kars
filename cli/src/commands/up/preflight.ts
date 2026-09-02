@@ -13,7 +13,7 @@
 //   - Mutates `options` in place (cached context, interactive prompts).
 //   - Returns `null` when --dry-run was taken (caller must `return` and
 //     skip deploy).
-//   - Returns `{ rg }` when preflight passed and caller should proceed
+//   - Returns `{ rg, subscriptionId }` when preflight passed and caller should proceed
 //     to the production-deploy section.
 //
 // Symbol surface preserved verbatim:
@@ -23,10 +23,27 @@
 //   - chalk / execa / inquirer / existsSync ("fs")
 import chalk from "chalk";
 import { existsSync } from "fs";
+import { randomBytes } from "node:crypto";
 import { banner, checkLine } from "../../stepper.js";
 import { loadContext } from "../../config.js";
 import { runPreflightChecks } from "../../preflight.js";
-import { resolveVmSizes } from "../../lib/vm-size.js";
+import {
+  applyAzureDeploymentSafetyResult,
+  classifyExistingAksCluster,
+  classifyExistingNodeCountSelection,
+  detectExistingAksCluster,
+  detectInfrastructureCompleteness,
+  hasCliOption,
+  requireCompleteSkipInfraDeployment,
+  requireHealthyExistingAksPoolTopology,
+  requireSupportedExistingNodeCountWorkflow,
+  resolveAzureDeploymentSafety,
+  requireHealthySkipInfraCluster,
+  validateAutomaticAksNodeResourceGroupName,
+  validateDerivedAzureResourceNames,
+  validateExistingKubernetesVersionSelection,
+  validateExistingPoolVmSizeSelections,
+} from "./deployment-safety.js";
 
 export function isValidAzureHost(url: string, expectedSuffix: string): boolean {
   try {
@@ -53,7 +70,23 @@ export interface UpOptionsForPreflight {
   sourceAcr: string;
   dryRun: boolean;
   skipInfra: boolean;
+  forceInfra: boolean;
   skipPreflight: boolean;
+  clusterName?: string;
+  kubernetesVersion?: string;
+  nodeCount?: number;
+  nodeVmSize?: string;
+  systemVmSize?: string;
+  systemNodeCount?: number;
+  kataVmSize?: string;
+  kataNodeCount?: number;
+  /** Internal validated pool names consumed by deployment orchestration. */
+  systemPoolName?: string;
+  sandboxPoolName?: string;
+  kataPoolName?: string;
+  rollbackOnFailure?: boolean;
+  /** Internal proof that this invocation generated a unique rollback RG. */
+  resourceGroupGeneratedForRollback?: boolean;
   /** When `true`, ignore any cached deployment context so the user is
    * re-prompted for every choice. Same flag that disables resume-state. */
   fromScratch?: boolean;
@@ -63,17 +96,143 @@ export interface UpOptionsForPreflight {
 export interface PreflightResult {
   /** Resolved resource group name; reused throughout the production deploy. */
   rg: string;
+  /** Exact subscription selected for every subsequent Azure CLI command. */
+  subscriptionId: string;
+}
+
+export interface PreflightDependencies {
+  detectExistingAksCluster?: typeof detectExistingAksCluster;
+  detectInfrastructureCompleteness?: typeof detectInfrastructureCompleteness;
+  ensureDiscoveryProvidersRegistered?: (
+    subscriptionId: string,
+  ) => Promise<void>;
+  randomBytes?: RandomBytesSource;
+  runPreflightChecks?: typeof runPreflightChecks;
+  resolveAzureDeploymentSafety?: typeof resolveAzureDeploymentSafety;
+}
+
+export type RandomBytesSource = (size: number) => Buffer;
+
+export const AZURE_REGION_CHOICES = [
+  { name: "East US 2 (Recommended)", value: "eastus2" },
+  { name: "West US 3", value: "westus3" },
+  { name: "Central US", value: "centralus" },
+  { name: "West Europe", value: "westeurope" },
+  { name: "North Europe", value: "northeurope" },
+  { name: "UK South", value: "uksouth" },
+  { name: "Southeast Asia", value: "southeastasia" },
+  { name: "Australia East", value: "australiaeast" },
+  { name: "Germany West Central", value: "germanywestcentral" },
+] as const;
+
+const DISCOVERY_PROVIDERS = [
+  "Microsoft.ContainerService",
+  "Microsoft.Compute",
+] as const;
+
+async function ensureDiscoveryProvidersRegistered(
+  subscriptionId: string,
+): Promise<void> {
+  const { execa } = await import("execa");
+  for (const provider of DISCOVERY_PROVIDERS) {
+    await execa("az", [
+      "provider",
+      "register",
+      "--namespace",
+      provider,
+      "--wait",
+      "--subscription",
+      subscriptionId,
+      "--output",
+      "none",
+    ], { stdio: "pipe", timeout: 600_000 });
+  }
+}
+
+export function validateRollbackResourceGroupSelection(
+  options: Pick<
+    UpOptionsForPreflight,
+    "resourceGroup" | "rollbackOnFailure"
+  > &
+    Partial<Pick<UpOptionsForPreflight, "skipInfra">>,
+): void {
+  if (options.rollbackOnFailure && options.skipInfra) {
+    throw new Error(
+      "--skip-infra cannot be combined with --rollback-on-failure. " +
+        "Rollback requires a new, invocation-owned resource group; remove one of these flags.",
+    );
+  }
+  if (options.rollbackOnFailure && options.resourceGroup?.trim()) {
+    throw new Error(
+      "--rollback-on-failure cannot be used with an explicit or cached resource group. " +
+        "Omit --rollback-on-failure to deploy there, or clean up that group manually after a failure.",
+    );
+  }
+}
+
+export function resolveResourceGroupForInvocation(
+  options: Pick<
+    UpOptionsForPreflight,
+    | "region"
+    | "resourceGroup"
+    | "rollbackOnFailure"
+    | "resourceGroupGeneratedForRollback"
+  >,
+  randomBytesSource: RandomBytesSource = randomBytes,
+): string {
+  options.resourceGroupGeneratedForRollback = false;
+  validateRollbackResourceGroupSelection(options);
+
+  if (options.rollbackOnFailure) {
+    const resourceGroup =
+      `kars-${options.region}-${randomBytesSource(6).toString("hex")}`;
+    options.resourceGroup = resourceGroup;
+    options.resourceGroupGeneratedForRollback = true;
+    return resourceGroup;
+  }
+
+  return options.resourceGroup?.trim() || `kars-${options.region}`;
 }
 
 /**
  * Run all preflight checks. Returns null when --dry-run was taken (caller
- * must early-return), otherwise returns the derived `rg` for the production
- * deploy. May call `process.exit(1)` on hard failures.
+ * must early-return), otherwise returns the derived resource group and
+ * immutable selected subscription for production deploy. May call
+ * `process.exit(1)` on hard failures.
  */
-export async function runPreflight(options: UpOptionsForPreflight): Promise<PreflightResult | null> {
+export async function runPreflight(
+  options: UpOptionsForPreflight,
+  dependencies: PreflightDependencies = {},
+): Promise<PreflightResult | null> {
   const blue = chalk.hex("#0078D4");
   const { default: inquirer } = await import("inquirer");
   const { execa } = await import("execa");
+  const detectAks =
+    dependencies.detectExistingAksCluster ?? detectExistingAksCluster;
+  const detectInfrastructure =
+    dependencies.detectInfrastructureCompleteness ??
+    detectInfrastructureCompleteness;
+  const runChecks = dependencies.runPreflightChecks ?? runPreflightChecks;
+  const resolveSafety =
+    dependencies.resolveAzureDeploymentSafety ?? resolveAzureDeploymentSafety;
+  const ensureDiscoveryProviders =
+    dependencies.ensureDiscoveryProvidersRegistered ??
+    ensureDiscoveryProvidersRegistered;
+  // The cached effective OpenAI endpoint can belong to a prior local
+  // deployment; only explicit options or a cached project endpoint prove that
+  // the AI backend is external to this deployment.
+  let externalFoundryEndpoint =
+    options.foundryEndpoint?.trim() || undefined;
+  let externalOpenAiEndpoint =
+    options.openaiEndpoint?.trim() || undefined;
+
+  try {
+    validateRollbackResourceGroupSelection(options);
+  } catch (error) {
+    console.error(chalk.red(`\n  Error: ${(error as Error).message}\n`));
+    process.exit(1);
+    return null;
+  }
 
   // Non-interactive when explicitly requested (--yes) or when there's no TTY to
   // read prompts from (CI / piped stdin). In that mode we NEVER call inquirer;
@@ -104,20 +263,44 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   // values silently leak through and surprise the user when (e.g.)
   // their "fresh" deployment lands in the same region/RG as the old
   // one.
-  const cachedCtx = options.fromScratch ? null : loadContext();
+  const savedCtx = loadContext();
+  const cachedCtx = options.fromScratch ? null : savedCtx;
   if (cachedCtx && cachedCtx.region) {
     console.log(chalk.dim(`\n  Using cached deployment context (${cachedCtx.region}/${cachedCtx.resourceGroup || "default"}). Pass explicit flags to override.\n`));
-    const hasFlag = (f: string) => process.argv.includes(f);
+    const hasFlag = (f: string) => hasCliOption(f);
     if (cachedCtx.region && !hasFlag("--region"))
       options.region = cachedCtx.region;
     if (cachedCtx.resourceGroup && !hasFlag("-g") && !hasFlag("--resource-group"))
       options.resourceGroup = cachedCtx.resourceGroup;
     if (cachedCtx.foundryEndpoint && !hasFlag("--foundry-endpoint") && !hasFlag("--openai-endpoint"))
       options.openaiEndpoint = options.openaiEndpoint || cachedCtx.foundryEndpoint;
-    if (cachedCtx.foundryProjectEndpoint && !hasFlag("--foundry-endpoint"))
+    if (cachedCtx.foundryProjectEndpoint && !hasFlag("--foundry-endpoint")) {
       options.foundryEndpoint = options.foundryEndpoint || cachedCtx.foundryProjectEndpoint;
+      externalFoundryEndpoint =
+        options.foundryEndpoint?.trim() || undefined;
+    }
   } else if (options.fromScratch) {
     console.log(chalk.dim(`\n  --from-scratch: ignoring any cached deployment context — all choices will be re-prompted.\n`));
+    if (options.rollbackOnFailure) {
+      const retainedDeployment =
+        savedCtx?.phase === "complete" && savedCtx.resourceGroup
+          ? ` The complete cached deployment in '${savedCtx.resourceGroup}' will remain unchanged.`
+          : " Any existing deployment will remain unchanged.";
+      console.warn(
+        chalk.yellow(
+          "  Warning: --from-scratch with --rollback-on-failure creates a second " +
+            `deployment in a new resource group.${retainedDeployment} Remove it separately when no longer needed.\n`,
+        ),
+      );
+    }
+  }
+
+  try {
+    validateRollbackResourceGroupSelection(options);
+  } catch (error) {
+    console.error(chalk.red(`\n  Error: ${(error as Error).message}\n`));
+    process.exit(1);
+    return null;
   }
 
   // ══════════════════════════════════════════════════════════════
@@ -171,6 +354,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   }
 
   // ── 2. Azure auth + subscription ───────────────────────────────
+  let subscriptionId = "";
   {
     let isLoggedIn = false;
     try {
@@ -185,6 +369,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
       } else {
         console.log(chalk.yellow("\n  Not logged into Azure. Opening browser for login...\n"));
         await execa("az", ["login"], { stdio: "inherit" });
+        isLoggedIn = true;
       }
     }
 
@@ -193,7 +378,15 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
       const { stdout: subJson } = await execa("az", [
         "account", "show", "--output", "json",
       ], { stdio: "pipe" });
-      const currentSub = JSON.parse(subJson);
+      const currentSub = JSON.parse(subJson) as { id?: unknown; name?: unknown };
+      if (
+        typeof currentSub.id !== "string" ||
+        !currentSub.id.trim() ||
+        typeof currentSub.name !== "string"
+      ) {
+        throw new Error("Azure CLI returned an invalid current subscription.");
+      }
+      subscriptionId = currentSub.id;
 
       if (options.dryRun) {
         checkLine(true, `Subscription — ${currentSub.name}`);
@@ -218,14 +411,12 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
             choices: subChoices,
             default: currentSub.id,
           }]);
-
-          if (subId !== currentSub.id) {
-            await execa("az", ["account", "set", "--subscription", subId], { stdio: "pipe" });
-            const selected = subs.find((s) => s.id === subId);
-            checkLine(true, `Subscription — ${selected?.name || subId}`);
-          } else {
-            checkLine(true, `Subscription — ${currentSub.name}`);
+          const selected = subs.find((s) => s.id === subId);
+          if (!selected) {
+            throw new Error("The selected Azure subscription is no longer enabled.");
           }
+          subscriptionId = selected.id;
+          checkLine(true, `Subscription — ${selected.name}`);
         } else {
           checkLine(true, `Subscription — ${currentSub.name}`);
         }
@@ -249,14 +440,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
         name: "region",
         message: "Azure region:",
         choices: [
-          { name: "East US 2 (Recommended)", value: "eastus2" },
-          { name: "West US 3", value: "westus3" },
-          { name: "Central US", value: "centralus" },
-          { name: "West Europe", value: "westeurope" },
-          { name: "North Europe", value: "northeurope" },
-          { name: "UK South", value: "uksouth" },
-          { name: "Southeast Asia", value: "southeastasia" },
-          { name: "Australia East", value: "australiaeast" },
+          ...AZURE_REGION_CHOICES,
           new inquirer.Separator(),
           { name: "Other (type region name)", value: "__other__" },
         ],
@@ -326,10 +510,12 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
           },
         }]);
         options.foundryEndpoint = endpoint;
+        externalFoundryEndpoint = endpoint;
         // Derive OpenAI inference endpoint from Foundry resource name
         const match = endpoint.match(/https:\/\/([^.]+)\.services\.ai\.azure\.com/);
         if (match && !options.openaiEndpoint) {
           options.openaiEndpoint = `https://${match[1]}.openai.azure.com`;
+          externalOpenAiEndpoint = options.openaiEndpoint;
           console.log(chalk.dim(`  → Derived OpenAI inference endpoint: ${options.openaiEndpoint}`));
         }
       } else if (backendChoice === "openai") {
@@ -346,11 +532,169 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
         // Treat as the inference endpoint, not a Foundry project
         options.openaiEndpoint = endpoint.replace(/\/openai\/v1\/?$/, "");
         options.foundryEndpoint = endpoint.replace(/\/openai\/v1\/?$/, "");
+        externalOpenAiEndpoint = options.openaiEndpoint;
+        externalFoundryEndpoint = options.foundryEndpoint;
       }
     }
   }
 
-  const rg = options.resourceGroup || `kars-${options.region}`;
+  const rg = resolveResourceGroupForInvocation(
+    options,
+    dependencies.randomBytes ?? randomBytes,
+  );
+  const clusterName = options.clusterName ?? "kars";
+  const baseName = clusterName.replace(/-aks$/, "");
+  const aksName = `${baseName}-aks`;
+  const validateNewClusterNodeResourceGroupName = (): boolean => {
+    try {
+      const derivedNames = validateDerivedAzureResourceNames(clusterName);
+      validateAutomaticAksNodeResourceGroupName(
+        rg,
+        derivedNames.aks,
+        options.region,
+      );
+      return true;
+    } catch (error) {
+      console.error(chalk.red(`\n  Error: ${(error as Error).message}\n`));
+      process.exit(1);
+      return false;
+    }
+  };
+
+  // Dry-run does not query Azure for an existing cluster, so it models the
+  // generated node resource group only for a new infrastructure deployment.
+  if (
+    options.dryRun &&
+    !options.skipInfra &&
+    !validateNewClusterNodeResourceGroupName()
+  ) {
+    return null;
+  }
+
+  // Detect after auth and final region/RG resolution. An existing AKS cluster
+  // is either reused without Bicep or rejected with manual remediation.
+  if (!options.dryRun) {
+    let detection;
+    try {
+      detection = await detectAks(rg, aksName, subscriptionId);
+    } catch (error) {
+      checkLine(false, `AKS cluster detection — ${(error as Error).message}`);
+      console.log(
+        chalk.red(
+          "\n  Cannot safely decide whether this is a new deployment. Restore Azure access and try again.\n",
+        ),
+      );
+      process.exit(1);
+      return null;
+    }
+
+    if (!detection.exists && !validateNewClusterNodeResourceGroupName()) {
+      return null;
+    }
+
+    const disposition = classifyExistingAksCluster(
+      detection,
+      options.forceInfra,
+      options.isolation,
+    );
+    if (disposition.action === "stopped") {
+      checkLine(false, `AKS cluster (${aksName}) — stopped`);
+      console.log(chalk.red(`\n  ${disposition.diagnostic}\n`));
+      process.exit(1);
+      return null;
+    }
+
+    try {
+      if (disposition.action === "force-update") {
+        throw new Error(disposition.diagnostic);
+      }
+      const nodeCountSelection = detection.exists
+        ? classifyExistingNodeCountSelection({
+            cluster: detection,
+            isolation: options.isolation,
+            nodeCount: options.nodeCount,
+            nodeCountExplicit: hasCliOption("--node-count"),
+          })
+        : { action: "reuse" as const };
+      if (detection.exists) {
+        requireHealthyExistingAksPoolTopology(
+          detection,
+          options.isolation,
+          {
+            nodeCount: options.nodeCount,
+            nodeVmSize: options.nodeVmSize,
+            systemVmSize: options.systemVmSize,
+            kataVmSize: options.kataVmSize,
+          },
+        );
+        requireSupportedExistingNodeCountWorkflow(
+          nodeCountSelection,
+          detection,
+        );
+        validateExistingKubernetesVersionSelection({
+          cluster: detection,
+          kubernetesVersion: options.kubernetesVersion,
+          kubernetesVersionExplicit: hasCliOption("--kubernetes-version"),
+        });
+        validateExistingPoolVmSizeSelections({
+          cluster: detection,
+          isolation: options.isolation,
+          nodeVmSize: options.nodeVmSize,
+          nodeVmSizeExplicit: hasCliOption("--node-vm-size"),
+          systemVmSize: options.systemVmSize,
+          systemVmSizeExplicit: hasCliOption("--system-vm-size"),
+          kataVmSize: options.kataVmSize,
+          kataVmSizeExplicit: hasCliOption("--kata-vm-size"),
+        });
+      }
+      if (options.skipInfra) {
+        requireHealthySkipInfraCluster(detection, options.isolation);
+        const completeness = await detectInfrastructure(
+          rg,
+          {
+            foundryEndpoint: externalFoundryEndpoint,
+            openAiEndpoint: externalOpenAiEndpoint,
+            subscriptionId,
+          },
+        );
+        requireCompleteSkipInfraDeployment(completeness);
+        options.skipInfra = true;
+        checkLine(
+          true,
+          `AKS cluster (${aksName}) — healthy and infrastructure complete; explicit --skip-infra accepted`,
+        );
+      } else if (disposition.action === "reuse") {
+        const completeness = await detectInfrastructure(
+          rg,
+          {
+            foundryEndpoint: externalFoundryEndpoint,
+            openAiEndpoint: externalOpenAiEndpoint,
+            subscriptionId,
+          },
+        );
+        if (completeness.complete) {
+          options.skipInfra = true;
+          checkLine(
+            true,
+            `AKS cluster (${aksName}) — healthy and infrastructure complete; reusing infrastructure`,
+          );
+        } else {
+          requireCompleteSkipInfraDeployment(completeness);
+        }
+      } else if (disposition.action === "recover") {
+        throw new Error(disposition.diagnostic);
+      }
+    } catch (error) {
+      checkLine(false, `Infrastructure reuse validation — ${(error as Error).message}`);
+      console.log(
+        chalk.red(
+          "\n  Cannot safely reuse the retained infrastructure. Follow the guidance above and try again.\n",
+        ),
+      );
+      process.exit(1);
+      return null;
+    }
+  }
 
   // ── 3b. RBAC + provider preflight ──────────────────────────────
   // Fails fast (≤30s) if the caller lacks roles / providers / features
@@ -358,12 +702,14 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   // (the latter implies the cluster already exists and the caller already
   // has cluster creds) and when the operator opts out explicitly.
   if (!options.dryRun && !options.skipInfra && !options.skipPreflight) {
-    const pf = await runPreflightChecks({
+    const pf = await runChecks({
       region: options.region,
       resourceGroup: rg,
+      subscriptionId,
       isolation: options.isolation,
       foundryEndpoint: options.foundryEndpoint,
       skipPreflight: options.skipPreflight,
+      rollbackOnFailure: options.rollbackOnFailure,
       meshTrust: (options as { meshTrust?: string }).meshTrust,
     });
     if (!pf.ok) {
@@ -373,41 +719,85 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
 
   // ── 4. SKU availability check ──────────────────────────────────
   if (!options.dryRun && !options.skipInfra) {
+    try {
+      await ensureDiscoveryProviders(subscriptionId);
+    } catch (error) {
+      checkLine(
+        false,
+        `Azure provider registration — ${(error as Error).message}`,
+      );
+      console.log(
+        chalk.red(
+          "\n  Microsoft.ContainerService and Microsoft.Compute must be registered before regional AKS and quota discovery.\n",
+        ),
+      );
+      process.exit(1);
+      return null;
+    }
+
     console.log();
     console.log(chalk.dim(`  Checking VM SKU availability in ${options.region}...\n`));
 
-    // Resolve the SKUs that the deploy will actually use — auto-picked from
-    // what this subscription allows in the region (or --node-vm-size /
-    // --system-vm-size overrides). This is the same resolution used by the
-    // Bicep deploy, so preflight reflects reality instead of a hardcoded guess.
-    let vmSizes;
+    // Resolve the regional AKS version, selected VM sizes, and complete
+    // VM-family quota footprint before resource-group creation. Unlike the old
+    // availability-only probe, discovery fails closed for new infrastructure.
+    let safety;
     try {
-      vmSizes = await resolveVmSizes(
-        options.region,
-        options.nodeVmSize as string | undefined,
-        options.systemVmSize as string | undefined,
-      );
+      safety = await resolveSafety({
+        region: options.region,
+        subscriptionId,
+        kubernetesVersion: options.kubernetesVersion,
+        kubernetesVersionExplicit: hasCliOption("--kubernetes-version"),
+        nodeCount: options.nodeCount,
+        nodeCountExplicit: hasCliOption("--node-count"),
+        nodeVmSize: options.nodeVmSize,
+        nodeVmSizeExplicit: hasCliOption("--node-vm-size"),
+        kataVmSize: options.kataVmSize,
+        kataVmSizeExplicit: hasCliOption("--kata-vm-size"),
+        systemVmSize: options.systemVmSize,
+        systemVmSizeExplicit: hasCliOption("--system-vm-size"),
+        isolation: options.isolation,
+      });
     } catch (err) {
-      checkLine(false, `VM SKU — ${(err as Error).message}`);
-      console.log(chalk.yellow(`\n  Try a different region: ${chalk.cyan("kars up --region westus3")}\n`));
+      checkLine(false, `Azure deployment safety — ${(err as Error).message}`);
+      console.log(
+        chalk.yellow(
+          `\n  Resolve the reported version/quota issue, or try another region: ${chalk.cyan("kars up --region westus3")}\n`,
+        ),
+      );
       process.exit(1);
     }
 
-    // For confidential isolation the sandbox pool is pinned to a CC SKU.
-    const confidential = options.isolation === "confidential";
-    const agentSku = confidential ? "Standard_DC4as_v5" : vmSizes.node;
-    const agentLabel = confidential
-      ? `AKS Kata pool (${agentSku} — confidential compute)`
-      : `AKS sandbox pool (${agentSku})`;
+    applyAzureDeploymentSafetyResult(options, safety);
 
-    if (vmSizes.checked) {
-      checkLine(true, `AKS system pool (${vmSizes.system}) — available`);
-      checkLine(true, confidential ? agentLabel : `${agentLabel} — available`);
-    } else {
-      // Could not query az vm list-skus — non-fatal; the Bicep preflight will
-      // still surface a hard error if a size is truly unavailable.
-      checkLine(true, `AKS system pool (${vmSizes.system}) — ${chalk.yellow("could not verify")} (continuing)`);
-      checkLine(true, `${agentLabel} — ${chalk.yellow("could not verify")} (continuing)`);
+    checkLine(true, `AKS Kubernetes ${safety.kubernetesVersion} — KubernetesOfficial support`);
+    checkLine(
+      true,
+      `AKS system pool (${safety.vmSizes.system}) — ${safety.systemNodeCount} node${safety.systemNodeCount === 1 ? "" : "s"}, available`,
+    );
+    checkLine(
+      true,
+      `AKS sandbox pool (${safety.vmSizes.node}) — ${safety.nodeCount} node${safety.nodeCount === 1 ? "" : "s"}, available`,
+    );
+    for (const pool of safety.additionalNodePools) {
+      checkLine(
+        true,
+        `AKS ${pool.label} pool (${pool.vmSize}) — ${pool.count} node${pool.count === 1 ? "" : "s"}, available`,
+      );
+    }
+    for (const requirement of safety.quotaRequirements) {
+      checkLine(
+        true,
+        `Quota ${requirement.family} — ${requirement.required} vCPU required, ${requirement.remaining} remaining`,
+      );
+    }
+    if (safety.adaptedNodeCount) {
+      console.log(
+        chalk.yellow(
+          "  Default sandbox footprint (3 nodes) exceeds remaining quota; using 1 sandbox node. " +
+            "Pass --node-count explicitly to require a different footprint.",
+        ),
+      );
     }
 
     // Quick check: can we create resources in this sub+region?
@@ -444,7 +834,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
     console.log(blue(`\n  kars · Dry Run\n`));
     console.log(`  Steps that would execute:\n`);
     console.log(`   1. Check Azure credentials (az account show)`);
-    console.log(`   2. Create resource group '${rg}' in ${options.region}`);
+    console.log(`   2. Create or reuse resource group '${rg}' in ${options.region}`);
     console.log(`   3. Detect caller public IP for firewall rules`);
     console.log(`   4. Register features: EncryptionAtHost${options.isolation === "confidential" ? ", KataVMIsolationPreview + aks-preview ext" : ""}`);
     console.log(`   5. Deploy Bicep: AKS + ACR + KV + AOAI + Monitor + WI${options.isolation === "confidential" ? " + katapool" : ""}`);
@@ -468,5 +858,5 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
     return null;
   }
 
-  return { rg };
+  return { rg, subscriptionId };
 }
