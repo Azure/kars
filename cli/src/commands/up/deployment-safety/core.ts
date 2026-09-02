@@ -36,6 +36,14 @@ export function isAksNotFoundError(error: unknown): boolean {
   );
 }
 
+export function isMissingSubscriptionRegistrationError(error: unknown): boolean {
+  const message = azureCliErrorText(error);
+  return (
+    /\(MissingSubscriptionRegistration\)/i.test(message) ||
+    /["']code["']\s*:\s*["']MissingSubscriptionRegistration["']/i.test(message)
+  );
+}
+
 export async function defaultAzTextRunner(args: string[]): Promise<string> {
   const { stdout } = await execa("az", args, { stdio: "pipe", timeout: 20000 });
   return stdout;
