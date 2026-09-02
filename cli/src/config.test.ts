@@ -12,6 +12,7 @@ vi.mock("fs", () => ({
   writeFileSync: vi.fn(),
   mkdirSync: vi.fn(),
   chmodSync: vi.fn(),
+  renameSync: vi.fn(),
   rmSync: vi.fn(),
 }));
 
@@ -21,13 +22,22 @@ import {
   loadSecrets, saveSecrets, setSecret, deleteSecret, resolveSecret,
   listSecretVariants, KNOWN_SECRETS,
 } from "./config.js";
-import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync, rmSync } from "fs";
+import {
+  existsSync,
+  readFileSync,
+  writeFileSync,
+  mkdirSync,
+  chmodSync,
+  renameSync,
+  rmSync,
+} from "fs";
 
 const mockExistsSync = vi.mocked(existsSync);
 const mockReadFileSync = vi.mocked(readFileSync);
 const mockWriteFileSync = vi.mocked(writeFileSync);
 const mockMkdirSync = vi.mocked(mkdirSync);
 const mockChmodSync = vi.mocked(chmodSync);
+const mockRenameSync = vi.mocked(renameSync);
 const mockRmSync = vi.mocked(rmSync);
 
 beforeEach(() => {
@@ -248,12 +258,28 @@ describe("saveContext", () => {
     expect(written.savedAt).toBeDefined();
   });
 
-  it("sets restrictive file permissions (0o600)", () => {
+  it("atomically replaces context with a restrictive 0o600 temporary file", () => {
     saveContext({ region: "westus" });
-    expect(mockChmodSync).toHaveBeenCalledWith(
-      expect.stringContaining("context.json"),
-      0o600,
+    const temporaryFile = mockWriteFileSync.mock.calls[0][0] as string;
+    expect(temporaryFile).toMatch(/context\.json\.\d+\.\d+\.tmp$/);
+    expect(mockWriteFileSync.mock.calls[0][2]).toEqual({
+      encoding: "utf-8",
+      mode: 0o600,
+    });
+    expect(mockRenameSync).toHaveBeenCalledWith(
+      temporaryFile,
+      join(CONFIG_DIR, "context.json"),
     );
+  });
+
+  it("removes an incomplete temporary file when atomic replacement fails", () => {
+    mockRenameSync.mockImplementationOnce(() => {
+      throw new Error("rename failed");
+    });
+
+    expect(() => saveContext({ region: "westus" })).toThrow("rename failed");
+    const temporaryFile = mockWriteFileSync.mock.calls[0][0] as string;
+    expect(mockRmSync).toHaveBeenCalledWith(temporaryFile, { force: true });
   });
 });
 

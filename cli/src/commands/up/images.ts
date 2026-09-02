@@ -42,6 +42,7 @@ export interface AcquireImagesContext {
   repoRoot: string;
   resumeFromPhase: Parameters<typeof isPhaseSkippable>[1];
   resumeTopology: ResumeTopology;
+  persistResumeState?: boolean;
   runAzure: AzureRunner;
 }
 
@@ -55,6 +56,7 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     repoRoot,
     resumeFromPhase,
     resumeTopology,
+    persistResumeState = true,
     runAzure,
   } = ctx;
 
@@ -322,5 +324,7 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
 
     stepper.done("Images available in ACR");
   }
-  markPhaseDone("images", {}, resumeTopology);
+  if (persistResumeState) {
+    markPhaseDone("images", {}, resumeTopology);
+  }
 }

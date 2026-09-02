@@ -15,7 +15,10 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import chalk from "chalk";
 import type { Stepper } from "../../stepper.js";
 import { section, kvLine, checkLine } from "../../stepper.js";
-import { saveContext } from "../../config.js";
+import {
+  saveContext,
+  type DeploymentContext,
+} from "../../config.js";
 import {
   buildInferencePolicy,
   buildToolPolicy,
@@ -51,6 +54,23 @@ export interface SandboxBringUpContext {
   registryMode: "local" | "global";
   globalRegistryUrl?: string;
   globalRelayUrl?: string;
+}
+
+export function saveFinalDeploymentContext(
+  context: DeploymentContext,
+  rollbackOnFailure: boolean,
+  persist: (context: DeploymentContext) => void = saveContext,
+): void {
+  try {
+    persist(context);
+  } catch (error) {
+    if (rollbackOnFailure) {
+      throw new Error(
+        "Deployment completed but the local deployment context could not be saved; rolling back the generated resource group to avoid an unmanageable deployment.",
+        { cause: error },
+      );
+    }
+  }
 }
 
 /**
@@ -676,8 +696,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   // Cache deployment context for subsequent commands (add, status, list, push,
   // etc.). Setting phase: "complete" also marks the auto-resume state as fully
   // consumed so the next `kars up` starts fresh.
-  try {
-    saveContext({
+  saveFinalDeploymentContext({
       subscription: subscriptionId,
       region: options.region,
       resourceGroup: rg,
@@ -698,8 +717,9 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       phase: "complete",
       sandboxName: options.name,
       sourceAcr: typeof options.sourceAcr === "string" ? options.sourceAcr : undefined,
-    });
-  } catch { /* non-critical */ }
+    },
+    options.rollbackOnFailure === true,
+  );
 
   console.log();
 }

@@ -20,7 +20,6 @@
  */
 
 import {
-  clearDeploymentContext,
   loadContext,
   saveContext,
   type DeploymentContext,
@@ -108,16 +107,12 @@ export function loadResumeState(
   return { resumeFromPhase: ctx.phase, ctx, ageMs };
 }
 
-/**
- * Run successful fresh-resource-group cleanup before invalidating cached
- * infrastructure. A failed cleanup leaves the context available for recovery.
- */
-export async function cleanupAndClearDeploymentContext<T>(
-  cleanup: () => Promise<T>,
-): Promise<T> {
-  const result = await cleanup();
-  clearDeploymentContext();
-  return result;
+/** Rollback-owned resource groups are deleted on failure, so never persist
+ * resumable phase state for those invocations. */
+export function shouldPersistResumeState(
+  rollbackOnFailure?: boolean,
+): boolean {
+  return !rollbackOnFailure;
 }
 
 /**
