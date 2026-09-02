@@ -210,13 +210,19 @@ Auto-resume:
       // sandbox / source-acr) changed, when the saved state is stale, or
       // when the user passed --from-scratch.
       const {
-        cleanupAndClearDeploymentContext,
         loadResumeState,
         isPhaseSkippable,
         markPhaseDone,
+        shouldPersistResumeState,
         formatAge,
       } =
         await import("./up/resume.js");
+      const persistResumeState = shouldPersistResumeState(
+        options.rollbackOnFailure,
+      );
+      const recordPhaseDone: typeof markPhaseDone = (...args) => {
+        if (persistResumeState) markPhaseDone(...args);
+      };
       const resumeTopology = {
         subscription: subscriptionId,
         region: options.region,
@@ -395,7 +401,7 @@ Auto-resume:
         await runAzure(["provider", "register", "-n", "Microsoft.ContainerService", "--output", "none"]).catch(() => {});
 
         stepper.done(`Resource group '${rg}' ready${callerIp ? ` (IP: ${callerIp})` : ""}`);
-        markPhaseDone("rg", {}, resumeTopology);
+        recordPhaseDone("rg", {}, resumeTopology);
 
         // ── Step 3: Deploy Bicep (AKS + ACR + KV + AOAI + Monitor + WI) ─
         let acrLoginServer: string;
@@ -518,7 +524,7 @@ Auto-resume:
             }
 
             stepper.done("Azure resources provisioned");
-            markPhaseDone(
+            recordPhaseDone(
               "infra",
               { acrLoginServer, acrName, foundryEndpoint: options.foundryEndpoint, wiClientId, keyVaultName: kvName },
               resumeTopology,
@@ -565,7 +571,7 @@ Auto-resume:
           stepper.detail("ok", `Workload Identity — ${wiClientId.slice(0, 8)}...`);
 
           stepper.done("Infrastructure verified (Bicep skipped)");
-          markPhaseDone(
+          recordPhaseDone(
             "infra",
             { acrLoginServer, acrName, foundryEndpoint: options.foundryEndpoint, wiClientId, keyVaultName: kvName },
             resumeTopology,
@@ -662,7 +668,7 @@ Auto-resume:
 
         stepper.done("Network access configured");
         }
-        markPhaseDone("network", {}, resumeTopology);
+        recordPhaseDone("network", {}, resumeTopology);
 
         // ── Step 5: Get AKS credentials ──────────────────────────────
         stepper.step("Configuring kubectl...");
@@ -674,7 +680,7 @@ Auto-resume:
           "--output", "none",
         ]);
         stepper.done("kubectl configured");
-        markPhaseDone("kubectl", {}, resumeTopology);
+        recordPhaseDone("kubectl", {}, resumeTopology);
 
         // ── Step 6: Get images into ACR ──────────────────────────────
         const acr = acrLoginServer.replace(".azurecr.io", "");
@@ -686,6 +692,7 @@ Auto-resume:
           repoRoot,
           resumeFromPhase,
           resumeTopology,
+          persistResumeState,
           runAzure,
         });
 
@@ -940,7 +947,7 @@ Auto-resume:
         ], { stdio: "pipe" }).catch(() => {});
 
         stepper.done(`Controller ${helmExists ? "upgraded" : "deployed"}`);
-        markPhaseDone("helm", {}, resumeTopology);
+        recordPhaseDone("helm", {}, resumeTopology);
 
         // ── Step 6b: Entra Agent ID trust anchor (idempotent) ────────
         // Only fires when --mesh-trust=entra (default is 'anonymous').
@@ -1047,7 +1054,7 @@ Auto-resume:
         const registryMode = meshResult.registryMode;
         const globalRegistryUrl = meshResult.globalRegistryUrl;
         const globalRelayUrl = meshResult.globalRelayUrl;
-        markPhaseDone("mesh", { registryMode, globalRegistryUrl, globalRelayUrl }, resumeTopology);
+        recordPhaseDone("mesh", { registryMode, globalRegistryUrl, globalRelayUrl }, resumeTopology);
 
         // ── Step 7+8: Sandbox bring-up (S15.d.4: extracted to ./up/sandbox_bringup.ts) ──
         // Federated credentials, MI Contributor, Foundry RBAC, KarsSandbox CR,
@@ -1083,7 +1090,6 @@ Auto-resume:
         await reportDeploymentFailure({
           error, stepper, resourceGroup: rg,
           cleanupContext, resourceGroupOwnership, runAzure,
-          cleanupAndClearDeploymentContext,
         });
         process.exit(1);
       }

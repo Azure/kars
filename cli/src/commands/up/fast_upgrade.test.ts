@@ -234,7 +234,7 @@ describe("runFastUpgrade Azure subscription pinning", () => {
       "utf8",
     );
     expect(source).toMatch(
-      /saveContext\(\{\s*subscription: subscriptionId,\s*region:/,
+      /saveFinalDeploymentContext\(\{\s*subscription: subscriptionId,\s*region:/,
     );
   });
 });

@@ -193,33 +193,10 @@ describe("up/resume", () => {
     expect(existsSync(CONTEXT_PATH())).toBe(true);
   });
 
-  it("clears deployment context after successful rollback cleanup", async () => {
-    writeContext({
-      phase: "network",
-      subscription: "sub-current",
-      savedAt: new Date().toISOString(),
-    });
-    const { cleanupAndClearDeploymentContext } = await loadModules();
-
-    await expect(
-      cleanupAndClearDeploymentContext(async () => "cleaned"),
-    ).resolves.toBe("cleaned");
-    expect(existsSync(CONTEXT_PATH())).toBe(false);
-  });
-
-  it("retains deployment context when rollback cleanup fails", async () => {
-    writeContext({
-      phase: "network",
-      subscription: "sub-current",
-      savedAt: new Date().toISOString(),
-    });
-    const { cleanupAndClearDeploymentContext } = await loadModules();
-
-    await expect(
-      cleanupAndClearDeploymentContext(async () => {
-        throw new Error("cleanup failed");
-      }),
-    ).rejects.toThrow("cleanup failed");
-    expect(existsSync(CONTEXT_PATH())).toBe(true);
+  it("disables resumable phase state for rollback-owned resource groups", async () => {
+    const { shouldPersistResumeState } = await loadModules();
+    expect(shouldPersistResumeState(true)).toBe(false);
+    expect(shouldPersistResumeState(false)).toBe(true);
+    expect(shouldPersistResumeState()).toBe(true);
   });
 });

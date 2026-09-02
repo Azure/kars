@@ -22,9 +22,6 @@ export interface DeploymentFailureInput {
   cleanupContext?: CleanupContext;
   resourceGroupOwnership?: ResourceGroupOwnershipProof;
   runAzure: AzureRunner;
-  cleanupAndClearDeploymentContext: (
-    cleanup: () => Promise<CleanupResult>,
-  ) => Promise<CleanupResult>;
 }
 
 export async function reportDeploymentFailure({
@@ -34,7 +31,6 @@ export async function reportDeploymentFailure({
   cleanupContext,
   resourceGroupOwnership,
   runAzure,
-  cleanupAndClearDeploymentContext,
 }: DeploymentFailureInput): Promise<void> {
   stepper.stop();
   console.error(chalk.red(`\n  Deployment failed`));
@@ -70,8 +66,9 @@ export async function reportDeploymentFailure({
             `  Cleaning up resource group '${resourceGroup}' created by this run...`,
           ),
         );
-        cleanupResult = await cleanupAndClearDeploymentContext(() =>
-          cleanupCreatedResourceGroup(cleanupContext, runAzure),
+        cleanupResult = await cleanupCreatedResourceGroup(
+          cleanupContext,
+          runAzure,
         );
       },
     });
