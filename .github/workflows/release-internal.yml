@@ -101,7 +101,7 @@ jobs:
         if: steps.find-ci.outputs.reuse != 'true'
         with:
           targets: x86_64-unknown-linux-gnu,aarch64-unknown-linux-gnu
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         if: steps.find-ci.outputs.reuse != 'true'
         with:
           shared-key: rust-glibc-release-multiarch
@@ -384,7 +384,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
-      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+      - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: rust-glibc-release
           save-if: false
