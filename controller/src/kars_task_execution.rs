@@ -96,8 +96,16 @@ fn default_model() -> (String, String) {
     let deployment = std::env::var("KARS_TASK_DEFAULT_MODEL")
         .ok()
         .filter(|s| !s.is_empty())
-        .or_else(|| std::env::var("AZURE_OPENAI_DEPLOYMENT").ok().filter(|s| !s.is_empty()))
-        .or_else(|| std::env::var("DEFAULT_MODEL").ok().filter(|s| !s.is_empty()))
+        .or_else(|| {
+            std::env::var("AZURE_OPENAI_DEPLOYMENT")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
+        .or_else(|| {
+            std::env::var("DEFAULT_MODEL")
+                .ok()
+                .filter(|s| !s.is_empty())
+        })
         .unwrap_or_else(|| "gpt-4o-mini".to_string());
     let provider = std::env::var("KARS_TASK_DEFAULT_PROVIDER")
         .ok()

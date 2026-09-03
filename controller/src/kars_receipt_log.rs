@@ -446,8 +446,7 @@ mod tests {
         for e in &tampered {
             rebuilt.push(next_entry(&rebuilt, &e.receipt, &e.payload_sha256));
         }
-        let tampered_note =
-            checkpoint_note(rebuilt.len() as u64, &chain_root(&rebuilt));
+        let tampered_note = checkpoint_note(rebuilt.len() as u64, &chain_root(&rebuilt));
         assert_ne!(note, tampered_note);
     }
 }

@@ -300,15 +300,27 @@ mod tests {
 
     #[test]
     fn approve_is_terminal_and_records_decider() {
-        let out = evaluate(Some(&decision("approve")), Some("sha256:aa"), Some("sha256:aa"), false);
+        let out = evaluate(
+            Some(&decision("approve")),
+            Some("sha256:aa"),
+            Some("sha256:aa"),
+            false,
+        );
         assert_eq!(out.phase(), PHASE_APPROVED);
         assert!(out.is_terminal());
-        assert!(matches!(out, ApprovalOutcome::Approved { decider } if decider == "alice@example.com"));
+        assert!(
+            matches!(out, ApprovalOutcome::Approved { decider } if decider == "alice@example.com")
+        );
     }
 
     #[test]
     fn deny_is_terminal() {
-        let out = evaluate(Some(&decision("deny")), Some("sha256:aa"), Some("sha256:aa"), false);
+        let out = evaluate(
+            Some(&decision("deny")),
+            Some("sha256:aa"),
+            Some("sha256:aa"),
+            false,
+        );
         assert_eq!(out.phase(), PHASE_DENIED);
         assert!(out.is_terminal());
     }
@@ -316,13 +328,23 @@ mod tests {
     #[test]
     fn decision_wins_over_expiry_and_staleness() {
         // Expired + drifted, but a human decided → the decision stands.
-        let out = evaluate(Some(&decision("approve")), Some("sha256:aa"), Some("sha256:bb"), true);
+        let out = evaluate(
+            Some(&decision("approve")),
+            Some("sha256:aa"),
+            Some("sha256:bb"),
+            true,
+        );
         assert_eq!(out.phase(), PHASE_APPROVED);
     }
 
     #[test]
     fn unknown_verdict_fails_closed_to_pending() {
-        let out = evaluate(Some(&decision("maybe")), Some("sha256:aa"), Some("sha256:aa"), false);
+        let out = evaluate(
+            Some(&decision("maybe")),
+            Some("sha256:aa"),
+            Some("sha256:aa"),
+            false,
+        );
         assert_eq!(out.phase(), crate::status::phase::PHASE_PENDING);
     }
 

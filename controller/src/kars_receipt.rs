@@ -39,6 +39,7 @@
 //! [in-toto Statement]: https://github.com/in-toto/attestation/blob/main/spec/v1/statement.md
 //! [DSSE]: https://github.com/secure-systems-lab/dsse
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -66,6 +67,7 @@ pub const PREDICATE_TYPE: &str = "https://kars.azure.com/attestations/Governance
     printcolumn = r#"{"name":"Task","type":"string","jsonPath":".spec.taskRef.name"}"#,
     printcolumn = r#"{"name":"EnvelopeDigest","type":"string","jsonPath":".spec.envelopeDigest"}"#,
     printcolumn = r#"{"name":"KeyId","type":"string","jsonPath":".spec.keyId"}"#,
+    printcolumn = r#"{"name":"State","type":"string","jsonPath":".status.conditions[-1:].type"}"#,
     printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
@@ -125,6 +127,10 @@ impl Claim {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KarsReceiptStatus {
+    /// Standard Kubernetes conditions describing the advisory receipt lifecycle.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub conditions: Option<Vec<Condition>>,
+
     /// RFC3339 issuance time (unsigned — not part of the attested payload).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub issued_at: Option<String>,
@@ -532,18 +538,37 @@ mod tests {
     fn no_receipt_without_digest() {
         let (task, mut status) = ready_task(false);
         status.envelope_digest = None;
-        assert!(build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).is_none());
+        assert!(
+            build_statement(
+                &task,
+                &status,
+                "kid",
+                &[],
+                PredicateCompleteness::default().with_rollup()
+            )
+            .is_none()
+        );
     }
 
     #[test]
     fn root_statement_shape() {
         let (task, status) = ready_task(false);
-        let st = build_statement(&task, &status, "kid123", &[], PredicateCompleteness::default().with_rollup()).unwrap();
+        let st = build_statement(
+            &task,
+            &status,
+            "kid123",
+            &[],
+            PredicateCompleteness::default().with_rollup(),
+        )
+        .unwrap();
         assert_eq!(st.typ, STATEMENT_TYPE);
         assert_eq!(st.predicate_type, PREDICATE_TYPE);
         assert_eq!(st.subject[0].name, "kars-system/demo");
         // sha256: prefix stripped for the in-toto digest field.
-        assert_eq!(st.subject[0].digest.sha256, "deadbeefdeadbeefdeadbeefdeadbeef");
+        assert_eq!(
+            st.subject[0].digest.sha256,
+            "deadbeefdeadbeefdeadbeefdeadbeef"
+        );
         assert!(!st.predicate.delegation.is_child);
         assert_eq!(st.predicate.conformance.attenuates_parent, None);
         assert_eq!(st.predicate.issuer.key_id, "kid123");
@@ -552,9 +577,19 @@ mod tests {
     #[test]
     fn child_statement_records_attenuation_and_lineage() {
         let (task, status) = ready_task(true);
-        let st = build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).unwrap();
+        let st = build_statement(
+            &task,
+            &status,
+            "kid",
+            &[],
+            PredicateCompleteness::default().with_rollup(),
+        )
+        .unwrap();
         assert!(st.predicate.delegation.is_child);
-        assert_eq!(st.predicate.delegation.parent_ref.as_deref(), Some("parent"));
+        assert_eq!(
+            st.predicate.delegation.parent_ref.as_deref(),
+            Some("parent")
+        );
         assert_eq!(st.predicate.delegation.depth_from_root, 2);
         assert_eq!(st.predicate.conformance.attenuates_parent, Some(true));
         assert_eq!(st.predicate.lineage, vec!["root", "parent"]);
@@ -563,7 +598,14 @@ mod tests {
     #[test]
     fn claim_matrix_is_honest() {
         let (task, status) = ready_task(false);
-        let st = build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).unwrap();
+        let st = build_statement(
+            &task,
+            &status,
+            "kid",
+            &[],
+            PredicateCompleteness::default().with_rollup(),
+        )
+        .unwrap();
         let by = |c: &str| {
             st.predicate
                 .claims
@@ -582,8 +624,26 @@ mod tests {
     #[test]
     fn canonical_json_is_stable() {
         let (task, status) = ready_task(true);
-        let a = canonical_json(&build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).unwrap());
-        let b = canonical_json(&build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).unwrap());
+        let a = canonical_json(
+            &build_statement(
+                &task,
+                &status,
+                "kid",
+                &[],
+                PredicateCompleteness::default().with_rollup(),
+            )
+            .unwrap(),
+        );
+        let b = canonical_json(
+            &build_statement(
+                &task,
+                &status,
+                "kid",
+                &[],
+                PredicateCompleteness::default().with_rollup(),
+            )
+            .unwrap(),
+        );
         assert_eq!(a, b);
         // Sanity: it really is the in-toto envelope.
         let s = String::from_utf8(a).unwrap();
@@ -594,7 +654,14 @@ mod tests {
     #[test]
     fn launched_execution_is_recorded() {
         let (task, status) = ready_task(false);
-        let st = build_statement(&task, &status, "kid", &[], PredicateCompleteness::default().with_rollup()).unwrap();
+        let st = build_statement(
+            &task,
+            &status,
+            "kid",
+            &[],
+            PredicateCompleteness::default().with_rollup(),
+        )
+        .unwrap();
         assert!(st.predicate.execution.launched);
         assert_eq!(st.predicate.execution.phase.as_deref(), Some("Degraded"));
     }
@@ -611,7 +678,14 @@ mod tests {
             decided_at: "2026-06-26T10:00:00+00:00".to_string(),
             requested_tier: Some(4),
         }];
-        let st = build_statement(&task, &status, "kid", &approvals, PredicateCompleteness::default().with_rollup()).unwrap();
+        let st = build_statement(
+            &task,
+            &status,
+            "kid",
+            &approvals,
+            PredicateCompleteness::default().with_rollup(),
+        )
+        .unwrap();
         assert_eq!(st.predicate.approvals.len(), 1);
         assert_eq!(st.predicate.approvals[0].verdict, "approve");
         assert_eq!(st.predicate.approvals[0].requested_tier, Some(4));

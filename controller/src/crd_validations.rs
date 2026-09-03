@@ -51,8 +51,8 @@ use kube::CustomResourceExt;
 use crate::a2a_agent::A2AAgent;
 use crate::egress_approval::EgressApproval;
 use crate::inference_policy::InferencePolicy;
-use crate::kars_eval::KarsEval;
 use crate::kars_approval::KarsApproval;
+use crate::kars_eval::KarsEval;
 use crate::kars_memory::KarsMemory;
 use crate::kars_receipt::KarsReceipt;
 use crate::kars_sre_action::KarsSREAction;
@@ -617,20 +617,54 @@ pub fn kars_task_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on KarsTask")
 }
 
-/// `KarsReceipt` CRD. The Governance Receipt is written solely by the
-/// controller (never by users), so it carries no admission CEL rules — its
-/// integrity comes from the DSSE/Ed25519 signature, not from schema gates.
 #[must_use]
-pub fn kars_receipt_crd() -> CustomResourceDefinition {
-    KarsReceipt::crd()
+pub fn kars_receipt_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.claims) > 0".into(),
+            message: Some("spec.claims must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.envelopeDigest) > 0".into(),
+            message: Some("spec.envelopeDigest must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
 }
 
-/// `KarsApproval` CRD. The HITL approval primitive carries no admission CEL in
-/// V0 — the controller is the sole writer of `status` (the binding, phase, and
-/// immutable timestamps), and `spec.decision` is a human steer, not a gate.
+/// `KarsReceipt` CRD with basic malformed-object rejection.
+#[must_use]
+pub fn kars_receipt_crd() -> CustomResourceDefinition {
+    inject_spec_validations(KarsReceipt::crd(), kars_receipt_validations())
+        .expect("kube-rs derive must produce a spec property on KarsReceipt")
+}
+
+#[must_use]
+pub fn kars_approval_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.action.kind) > 0".into(),
+            message: Some("spec.action.kind must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.taskRef.name) > 0".into(),
+            message: Some("spec.taskRef.name must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `KarsApproval` CRD with immutable request-shape validation.
 #[must_use]
 pub fn kars_approval_crd() -> CustomResourceDefinition {
-    KarsApproval::crd()
+    inject_spec_validations(KarsApproval::crd(), kars_approval_validations())
+        .expect("kube-rs derive must produce a spec property on KarsApproval")
 }
 
 /// `TrustGraph.spec` CEL rules. Phase F1.
