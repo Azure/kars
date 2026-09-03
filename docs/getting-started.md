@@ -353,7 +353,10 @@ kars destroy --all                # everything, including the resource group
 
 ## Bring your own AKS / Foundry / ACR
 
-If you already have an AKS cluster and a Foundry project, you can install kars into them directly with the Helm chart:
+If you already have a Kubernetes cluster and inference backend, install Kars
+directly with the Helm chart. AKS uses the default values; non-AKS clusters
+start with `values-generic.yaml`. See the
+[Helm installation guide](how-to/helm-installation.md).
 
 ```bash
 helm install kars deploy/helm/kars \

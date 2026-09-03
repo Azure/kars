@@ -67,6 +67,9 @@ sandbox:
   runAsNonRoot: true
   runAsUser: 1000
   runAsGroup: 1000
+  # Optional environment-specific node selector. Empty preserves the existing
+  # `kars.azure.com/pool=<isolation pool>` scheduling contract.
+  nodeSelector: {}
   writablePaths:
     - /sandbox
     - /tmp

@@ -400,6 +400,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - run: helm lint deploy/helm/kars
+      - name: Render installation profiles
+        run: |
+          helm template kars deploy/helm/kars --namespace kars-system >/dev/null
+          helm template kars deploy/helm/kars --namespace kars-system \
+            --values deploy/helm/kars/values-local-dev.yaml >/dev/null
+          helm template kars deploy/helm/kars --namespace kars-system \
+            --values deploy/helm/kars/values-generic.yaml >/dev/null
 
   security-scan:
     name: Security Scan

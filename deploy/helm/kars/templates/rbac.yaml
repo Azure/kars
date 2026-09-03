@@ -8,8 +8,10 @@ metadata:
   labels:
     app.kubernetes.io/name: kars
     app.kubernetes.io/component: controller
+  {{- if .Values.azure.workloadIdentity.enabled }}
   annotations:
     azure.workload.identity/client-id: {{ .Values.azure.workloadIdentity.clientId | quote }}
+  {{- end }}
 ---
 # Controller ClusterRole
 apiVersion: rbac.authorization.k8s.io/v1

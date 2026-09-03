@@ -1,0 +1,48 @@
+# Install Kars with Helm
+
+Use the Helm chart when the Kubernetes cluster, registry, inference backend,
+identity, and AgentMesh services already exist.
+
+## Local kind
+
+```bash
+helm upgrade --install kars deploy/helm/kars \
+  --namespace kars-system \
+  --create-namespace \
+  --values deploy/helm/kars/values-local-dev.yaml
+```
+
+Load all referenced development images into kind before installation.
+
+## Existing non-AKS Kubernetes cluster
+
+Start with the generic overlay and layer environment-specific values on top:
+
+```bash
+helm upgrade --install kars deploy/helm/kars \
+  --namespace kars-system \
+  --create-namespace \
+  --values deploy/helm/kars/values-generic.yaml \
+  --values my-generic-values.yaml
+```
+
+The generic overlay leaves AKS defaults untouched. It disables Azure identity
+metadata, uses RuntimeDefault seccomp, and schedules sandboxes with the
+portable `kubernetes.io/os=linux` selector. Supply pullable images, inference
+authentication, AGT relay/registry endpoints, a NetworkPolicy-capable CNI, and
+any environment-specific integrations.
+
+## Existing AKS
+
+Use the default values as the AKS baseline and provide your registry, Foundry,
+Workload Identity, and environment settings in an override file:
+
+```bash
+helm upgrade --install kars deploy/helm/kars \
+  --namespace kars-system \
+  --create-namespace \
+  --values my-aks-values.yaml
+```
+
+The CLI remains optional. After Helm installation, Kars resources can be
+submitted directly with `kubectl apply`.

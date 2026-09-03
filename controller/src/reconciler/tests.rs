@@ -97,6 +97,37 @@ fn isolation_scheduling_confidential() {
 }
 
 #[test]
+fn sandbox_node_selector_defaults_to_kars_pool() {
+    assert_eq!(
+        sandbox_node_selector_from("", "sandbox").expect("default selector"),
+        serde_json::json!({"kars.azure.com/pool": "sandbox"})
+    );
+}
+
+#[test]
+fn sandbox_node_selector_accepts_portable_labels() {
+    let selector = sandbox_node_selector_from(
+        r#"{"kubernetes.io/os":"linux","node.kubernetes.io/instance-type":"worker"}"#,
+        "sandbox",
+    )
+    .expect("configured selector");
+    assert_eq!(
+        selector,
+        serde_json::json!({
+            "kubernetes.io/os": "linux",
+            "node.kubernetes.io/instance-type": "worker"
+        })
+    );
+}
+
+#[test]
+fn sandbox_node_selector_rejects_non_string_values() {
+    let error = sandbox_node_selector_from(r#"{"kubernetes.io/os":true}"#, "sandbox")
+        .expect_err("selector values must be strings");
+    assert!(error.contains("non-empty string map"));
+}
+
+#[test]
 fn crd_defaults_are_secure() {
     let cfg = SandboxConfig::default();
     assert_eq!(cfg.isolation, "enhanced");
