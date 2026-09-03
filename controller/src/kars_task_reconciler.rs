@@ -339,7 +339,10 @@ fn task_is_ready(task: &KarsTask) -> bool {
     let Some(status) = task.status.as_ref() else {
         return false;
     };
-    let digest_ok = status.envelope_digest.as_ref().is_some_and(|d| !d.is_empty());
+    let digest_ok = status
+        .envelope_digest
+        .as_ref()
+        .is_some_and(|d| !d.is_empty());
     let ready_ok = status
         .conditions
         .iter()
@@ -498,7 +501,9 @@ async fn reconcile_receipt(
     signer: &crate::providers::signing::ReceiptSigner,
 ) {
     use crate::kars_approval::KarsApproval;
-    use crate::kars_receipt::{KarsReceipt, approval_facts, build_spec, build_statement, canonical_json};
+    use crate::kars_receipt::{
+        KarsReceipt, approval_facts, build_spec, build_statement, canonical_json,
+    };
 
     let name = task.name_any();
     let receipts: Api<KarsReceipt> = Api::namespaced(client.clone(), ns);
@@ -526,7 +531,8 @@ async fn reconcile_receipt(
     // concrete and re-derivable by an auditor.
     let completeness = gather_completeness(client).await;
 
-    let Some(statement) = build_statement(task, status, &signer.key_id, &facts, completeness) else {
+    let Some(statement) = build_statement(task, status, &signer.key_id, &facts, completeness)
+    else {
         // No digest → no receipt. Retract any prior one.
         match receipts
             .delete(&name, &kube::api::DeleteParams::default())
@@ -652,7 +658,8 @@ async fn gather_completeness(client: &kube::Client) -> crate::kars_receipt::Pred
 
     let vaps: Api<ValidatingAdmissionPolicy> = Api::all(client.clone());
     let vap_present = |name: &str, list: &[ValidatingAdmissionPolicy]| -> bool {
-        list.iter().any(|p| p.metadata.name.as_deref() == Some(name))
+        list.iter()
+            .any(|p| p.metadata.name.as_deref() == Some(name))
     };
     let vap_list = vaps
         .list(&ListParams::default())
@@ -758,64 +765,6 @@ pub async fn run(client: Client) -> Result<()> {
     Ok(())
 }
 
-// ─────────────────────────────────────────────────────────────────────
-// Unit tests — pure helpers only. K8s-API-touching paths are exercised
-// by the kind-based integration harness.
-// ─────────────────────────────────────────────────────────────────────
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::kars_task::{KarsTaskSpec, TaskEnvelope};
-
-    fn task_with(tier: i32, authority_ceiling: i32, delegation_depth: i32) -> KarsTask {
-        let mut t = KarsTask::new(
-            "t",
-            KarsTaskSpec {
-                objective: "do the thing".into(),
-                envelope: TaskEnvelope {
-                    tier,
-                    authority_ceiling,
-                    delegation_depth,
-                    ..TaskEnvelope::default()
-                },
-                parent_ref: None,
-                execution: None,
-                blueprint: None,
-                display_name: None,
-            },
-        );
-        t.metadata.namespace = Some("default".into());
-        t
-    }
-
-    #[test]
-    fn valid_envelope_passes() {
-        let t = task_with(3, 3, 2);
-        assert!(matches!(check_envelope(&t), EnvelopeCheck::Valid));
-    }
-
-    #[test]
-    fn authority_ceiling_above_tier_is_rejected() {
-        let t = task_with(2, 4, 1);
-        match check_envelope(&t) {
-            EnvelopeCheck::Invalid(why) => assert!(why.contains("authorityCeiling")),
-            EnvelopeCheck::Valid => panic!("expected rejection"),
-        }
-    }
-
-    #[test]
-    fn tier_out_of_range_is_rejected() {
-        let t = task_with(9, 5, 0);
-        assert!(matches!(check_envelope(&t), EnvelopeCheck::Invalid(_)));
-    }
-
-    #[test]
-    fn finalizer_roundtrip() {
-        let mut t = task_with(1, 1, 0);
-        assert!(!has_finalizer(&t));
-        t.metadata.finalizers = Some(vec![FINALIZER.to_string(), "other/keep".to_string()]);
-        assert!(has_finalizer(&t));
-        let dropped = drop_finalizer(&t);
-        assert_eq!(dropped, vec!["other/keep".to_string()]);
-    }
-}
+#[path = "kars_task_reconciler_tests.rs"]
+mod tests;

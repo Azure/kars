@@ -114,6 +114,13 @@ spec:
             - action
             - taskRef
             type: object
+            x-kubernetes-validations:
+            - message: spec.action.kind must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.action.kind) > 0
+            - message: spec.taskRef.name must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.taskRef.name) > 0
           status:
             description: '`KarsApproval.status` — the controller is the sole writer.'
             nullable: true
@@ -198,4 +205,3 @@ spec:
     storage: true
     subresources:
       status: {}
-

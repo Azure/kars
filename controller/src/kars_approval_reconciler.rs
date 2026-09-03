@@ -221,16 +221,16 @@ fn build_status(
         ApprovalOutcome::Approved { decider } => {
             (cond_status::TRUE, format!("approved by {decider}"))
         }
-        ApprovalOutcome::Denied { decider } => {
-            (cond_status::TRUE, format!("denied by {decider}"))
-        }
+        ApprovalOutcome::Denied { decider } => (cond_status::TRUE, format!("denied by {decider}")),
         ApprovalOutcome::Expired => (cond_status::TRUE, "expired before a decision".to_string()),
         ApprovalOutcome::Stale(why) => (cond_status::TRUE, why.clone()),
     };
 
     let reason_value = match outcome {
         ApprovalOutcome::Pending(_) => cond_reason::RECONCILING,
-        ApprovalOutcome::Approved { .. } | ApprovalOutcome::Denied { .. } => cond_reason::RECONCILED,
+        ApprovalOutcome::Approved { .. } | ApprovalOutcome::Denied { .. } => {
+            cond_reason::RECONCILED
+        }
         ApprovalOutcome::Expired => cond_reason::TIMED_OUT,
         ApprovalOutcome::Stale(_) => cond_reason::DEPENDENCY_MISSING,
     };
@@ -256,10 +256,7 @@ fn build_status(
         _ => prior.decider.clone(),
     };
     let decided_at = if decided {
-        prior
-            .decided_at
-            .clone()
-            .or_else(|| Some(now.to_rfc3339()))
+        prior.decided_at.clone().or_else(|| Some(now.to_rfc3339()))
     } else {
         prior.decided_at.clone()
     };
@@ -389,7 +386,15 @@ mod tests {
 
         // A later re-reconcile preserves the original decidedAt.
         let later = now + ChronoDuration::minutes(10);
-        let s2 = build_status(&s1, Some(1), &approved("alice"), req, exp, Some("sha256:aa".to_string()), later);
+        let s2 = build_status(
+            &s1,
+            Some(1),
+            &approved("alice"),
+            req,
+            exp,
+            Some("sha256:aa".to_string()),
+            later,
+        );
         assert_eq!(s2.decided_at, Some(first_decided));
     }
 
