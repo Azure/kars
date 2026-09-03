@@ -78,8 +78,12 @@ async fn reconcile(skill: Arc<KarsSkill>, ctx: Arc<Ctx>) -> Result<Action, Recon
         "kind": "KarsSkill",
         "status": status,
     });
-    api.patch_status(&name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(patch))
-        .await?;
+    api.patch_status(
+        &name,
+        &PatchParams::apply(FIELD_MANAGER).force(),
+        &Patch::Apply(patch),
+    )
+    .await?;
     Ok(Action::requeue(REQUEUE_OK))
 }
 

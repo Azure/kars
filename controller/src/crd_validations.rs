@@ -671,17 +671,60 @@ pub fn kars_team_crd() -> CustomResourceDefinition {
         .expect("kube-rs derive must produce a spec property on KarsTeam")
 }
 
-/// `KarsSkill` CRD (§13) — a reusable, versioned capability bundle. The
-/// controller is the sole writer of status; no admission CEL beyond the schema.
 #[must_use]
-pub fn kars_skill_crd() -> CustomResourceDefinition {
-    crate::kars_skill::KarsSkill::crd()
+pub fn kars_skill_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.version) > 0".into(),
+            message: Some("spec.version must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.summary) > 0 && size(self.summary) <= 512".into(),
+            message: Some("spec.summary must be 1-512 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
 }
 
-/// `KarsProfile` CRD (§17) — a vetted team template.
+/// `KarsSkill` CRD (§13) with admission validation.
+#[must_use]
+pub fn kars_skill_crd() -> CustomResourceDefinition {
+    inject_spec_validations(
+        crate::kars_skill::KarsSkill::crd(),
+        kars_skill_validations(),
+    )
+    .expect("kube-rs derive must produce a spec property on KarsSkill")
+}
+
+#[must_use]
+pub fn kars_profile_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.charterTemplate) > 0".into(),
+            message: Some("spec.charterTemplate must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.domain) > 0".into(),
+            message: Some("spec.domain must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `KarsProfile` CRD (§17) with admission validation.
 #[must_use]
 pub fn kars_profile_crd() -> CustomResourceDefinition {
-    crate::kars_profile::KarsProfile::crd()
+    inject_spec_validations(
+        crate::kars_profile::KarsProfile::crd(),
+        kars_profile_validations(),
+    )
+    .expect("kube-rs derive must produce a spec property on KarsProfile")
 }
 
 #[must_use]

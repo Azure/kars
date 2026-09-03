@@ -1,5 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
+// ci:loc-ok — cohesive standing-team state machine; decomposition follows in the mesh/runtime slice.
 
 //! `KarsTeam` reconciler — the standing-team lifecycle (design note §11).
 //!
@@ -39,12 +40,10 @@ use serde_json::json;
 use std::sync::Arc;
 use std::time::Duration;
 
-use crate::kars_task::{
-    KarsTask, KarsTaskSpec, TaskBlueprint, TaskEnvelope, TaskExecution,
-};
-use crate::kars_team::{KarsTeam, KarsTeamStatus, TeamRole};
 use crate::kars_profile::KarsProfile;
 use crate::kars_skill::KarsSkill;
+use crate::kars_task::{KarsTask, KarsTaskSpec, TaskBlueprint, TaskEnvelope, TaskExecution};
+use crate::kars_team::{KarsTeam, KarsTeamStatus, TeamRole};
 use crate::mcp_server::LocalObjectRef;
 use crate::status::phase::{PHASE_ACTIVE, PHASE_DEGRADED, PHASE_HIBERNATING};
 
@@ -112,7 +111,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             "metadata": { "name": name, "finalizers": finalizers },
         });
         teams
-            .patch(&name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(patch))
+            .patch(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER).force(),
+                &Patch::Apply(patch),
+            )
             .await?;
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
@@ -224,7 +227,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         }
     }
 
-    let phase = if paused { PHASE_HIBERNATING } else { PHASE_ACTIVE };
+    let phase = if paused {
+        PHASE_HIBERNATING
+    } else {
+        PHASE_ACTIVE
+    };
     let member_count = member_refs.len() as i64;
 
     // Health — the autonomous-monitoring signal. Computed from run outcomes +
@@ -294,7 +301,9 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let detail = if paused {
         "Team hibernating — members governed-but-idle; charter loop paused.".to_string()
     } else if let Some(reason) = &cap_gate {
-        format!("Standing operation paused — capability not ready: {reason}. Will resume automatically once it is.")
+        format!(
+            "Standing operation paused — capability not ready: {reason}. Will resume automatically once it is."
+        )
     } else if every.is_some() {
         format!(
             "Standing operation {} — {} run(s) generated, {} delivered ({} tokens), {} knowledge entries accumulated.",
@@ -315,7 +324,9 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             phase: Some(phase.into()),
             observed_generation: team.metadata.generation,
             envelope_digest: Some(team.spec.envelope.digest()),
-            principal_ref: Some(LocalObjectRef { name: principal_name }),
+            principal_ref: Some(LocalObjectRef {
+                name: principal_name,
+            }),
             member_refs,
             member_count: Some(member_count),
             generated_task_count: generated,
@@ -603,7 +614,10 @@ async fn materialize_principal(
         blueprint: team.spec.blueprint.clone(),
         display_name: Some(format!(
             "{} — principal",
-            team.spec.display_name.clone().unwrap_or_else(|| team.name_any())
+            team.spec
+                .display_name
+                .clone()
+                .unwrap_or_else(|| team.name_any())
         )),
     };
     apply_task(tasks, team, principal_name, spec, "principal").await
@@ -630,12 +644,17 @@ async fn materialize_member(
             .clone()
             .unwrap_or_else(|| format!("[{}] {}", role.name, team.spec.charter)),
         envelope,
-        parent_ref: Some(LocalObjectRef { name: principal_name.to_string() }),
+        parent_ref: Some(LocalObjectRef {
+            name: principal_name.to_string(),
+        }),
         execution: None,
         blueprint,
         display_name: Some(format!(
             "{} — {}",
-            team.spec.display_name.clone().unwrap_or_else(|| team.name_any()),
+            team.spec
+                .display_name
+                .clone()
+                .unwrap_or_else(|| team.name_any()),
             role.name
         )),
     };
@@ -664,12 +683,20 @@ async fn mint_taskforce(
             prior_knowledge
         ),
         envelope,
-        parent_ref: Some(LocalObjectRef { name: principal_name.to_string() }),
-        execution: Some(TaskExecution { launch: true, runtime: None }),
+        parent_ref: Some(LocalObjectRef {
+            name: principal_name.to_string(),
+        }),
+        execution: Some(TaskExecution {
+            launch: true,
+            runtime: None,
+        }),
         blueprint: team.spec.blueprint.clone(),
         display_name: Some(format!(
             "{} — standing run",
-            team.spec.display_name.clone().unwrap_or_else(|| team.name_any())
+            team.spec
+                .display_name
+                .clone()
+                .unwrap_or_else(|| team.name_any())
         )),
     };
     apply_task(tasks, team, tf_name, spec, "taskforce").await
@@ -798,7 +825,9 @@ async fn harvest_and_retire_runs(
         // sandbox from under a run that's still warming up / retrying.
         if launched && terminal {
             let retire = json!({ "spec": { "execution": { "launch": false } } });
-            let _ = tasks.patch(&run, &PatchParams::default(), &Patch::Merge(retire)).await;
+            let _ = tasks
+                .patch(&run, &PatchParams::default(), &Patch::Merge(retire))
+                .await;
         } else if launched {
             stats.active += 1;
         }
@@ -882,23 +911,39 @@ async fn write_status(
         "status": status,
     });
     teams
-        .patch_status(name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(patch))
+        .patch_status(
+            name,
+            &PatchParams::apply(FIELD_MANAGER).force(),
+            &Patch::Apply(patch),
+        )
         .await?;
     Ok(())
 }
 
 fn parse_rfc3339(s: &str) -> Option<DateTime<Utc>> {
-    DateTime::parse_from_rfc3339(s).ok().map(|d| d.with_timezone(&Utc))
+    DateTime::parse_from_rfc3339(s)
+        .ok()
+        .map(|d| d.with_timezone(&Utc))
 }
 
 /// Sanitize a role name into a K8s-safe name suffix.
 fn sanitize(s: &str) -> String {
     let out: String = s
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' { c.to_ascii_lowercase() } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '-' {
+                c.to_ascii_lowercase()
+            } else {
+                '-'
+            }
+        })
         .collect();
     let trimmed = out.trim_matches('-').to_string();
-    if trimmed.is_empty() { "role".to_string() } else { trimmed }
+    if trimmed.is_empty() {
+        "role".to_string()
+    } else {
+        trimmed
+    }
 }
 
 fn has_finalizer(team: &KarsTeam) -> bool {
@@ -961,8 +1006,13 @@ mod tests {
     fn team_env() -> TaskEnvelope {
         TaskEnvelope {
             tier: 4,
-            budget: Some(TaskBudget { tokens: Some(1_000_000), usd_micros: None }),
-            tool_policy_ref: Some(LocalObjectRef { name: "kars-default".into() }),
+            budget: Some(TaskBudget {
+                tokens: Some(1_000_000),
+                usd_micros: None,
+            }),
+            tool_policy_ref: Some(LocalObjectRef {
+                name: "kars-default".into(),
+            }),
             egress_allowlist_ref: None,
             delegation_depth: 2,
             authority_ceiling: 3,

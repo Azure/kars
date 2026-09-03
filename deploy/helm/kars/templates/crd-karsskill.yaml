@@ -86,6 +86,13 @@ spec:
             - summary
             - version
             type: object
+            x-kubernetes-validations:
+            - message: spec.version must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.version) > 0
+            - message: spec.summary must be 1-512 characters
+              reason: FieldValueInvalid
+              rule: size(self.summary) > 0 && size(self.summary) <= 512
           status:
             description: '`KarsSkill.status` — controller-owned.'
             nullable: true

@@ -33,8 +33,8 @@
 #[cfg(test)]
 use crate::crd_validations::{
     a2a_agent_crd, egress_approval_crd, inference_policy_crd, kars_approval_crd, kars_eval_crd,
-    kars_memory_crd, kars_receipt_crd, kars_sre_action_crd, kars_task_crd, kars_team_crd,
-    kars_skill_crd, kars_profile_crd, mcp_server_crd, tool_policy_crd, trust_graph_crd,
+    kars_memory_crd, kars_profile_crd, kars_receipt_crd, kars_skill_crd, kars_sre_action_crd,
+    kars_task_crd, kars_team_crd, mcp_server_crd, tool_policy_crd, trust_graph_crd,
 };
 
 const MCP_HELM_CRD_PATH: &str = concat!(
