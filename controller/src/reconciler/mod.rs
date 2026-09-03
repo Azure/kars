@@ -44,13 +44,25 @@ use mcp_egress::mcp_egress_rule;
 mod pod_spec;
 pub(crate) use pod_spec::{
     build_egress_guard_command, build_pod_security_context, isolation_scheduling,
+    sandbox_node_selector_from,
 };
+
+fn sandbox_node_selector(default_pool: &str) -> Result<serde_json::Value, ReconcileError> {
+    sandbox_node_selector_from(
+        &std::env::var("KARS_SANDBOX_NODE_SELECTOR_JSON").unwrap_or_default(),
+        default_pool,
+    )
+    .map_err(ReconcileError::Configuration)
+}
+
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
     #[error("Kubernetes API error: {0}")]
     Kube(#[from] kube::Error),
     #[error("JSON serialization error: {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("Controller configuration error: {0}")]
+    Configuration(String),
 }
 
 /// Shared controller context.
@@ -1342,6 +1354,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         let image = runtime_plan.image.clone();
 
         let (runtime_class, pool_label) = isolation_scheduling(&sandbox_config.isolation);
+        let node_selector = sandbox_node_selector(pool_label)?;
 
         let pull_policy = if ctx.dev_profile || !image.ends_with(":latest") {
             "IfNotPresent"
@@ -2119,9 +2132,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                             "value": "true",
                             "effect": "NoSchedule"
                         }],
-                        "nodeSelector": {
-                            "kars.azure.com/pool": pool_label
-                        }
+                        "nodeSelector": node_selector
         });
 
         // Set runtimeClassName for Kata (confidential) isolation
@@ -3200,7 +3211,7 @@ fn error_requeue_duration(error: &ReconcileError) -> Duration {
         // Serde errors are deterministic — the same body will fail again.
         // Back off longer so we don't spam logs while a human fixes the
         // bad CR.
-        ReconcileError::SerdeJson(_) => 300,
+        ReconcileError::SerdeJson(_) | ReconcileError::Configuration(_) => 300,
     };
     crate::backoff::requeue_secs_with_jitter(base)
 }
@@ -3210,6 +3221,7 @@ fn error_policy(sandbox: Arc<KarsSandbox>, error: &ReconcileError, _ctx: Arc<Con
     let class = match error {
         ReconcileError::Kube(_) => "kube_api",
         ReconcileError::SerdeJson(_) => "serde",
+        ReconcileError::Configuration(_) => "configuration",
     };
     crate::metrics::record_reconcile_error("KarsSandbox", class);
     tracing::error!(

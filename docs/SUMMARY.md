@@ -6,6 +6,7 @@
 
 - [Quickstart](quickstart.md)
 - [Getting started](getting-started.md)
+- [Install with Helm](how-to/helm-installation.md)
 - [CLI reference](cli-reference.md)
 - [Use cases](use-cases.md)
   - [Exec-brief walkthrough](use-cases/exec-brief-walkthrough.md)

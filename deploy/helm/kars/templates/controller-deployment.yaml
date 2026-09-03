@@ -17,7 +17,9 @@ spec:
       labels:
         app.kubernetes.io/name: kars
         app.kubernetes.io/component: controller
+        {{- if .Values.azure.workloadIdentity.enabled }}
         azure.workload.identity/use: "true"
+        {{- end }}
     spec:
       serviceAccountName: kars-controller
       automountServiceAccountToken: true
@@ -47,6 +49,8 @@ spec:
                   fieldPath: metadata.name
             - name: AZURE_WI_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
+            - name: KARS_SANDBOX_NODE_SELECTOR_JSON
+              value: {{ .Values.sandbox.nodeSelector | toJson | quote }}
             {{- if .Values.controller.byoStrict }}
             - name: BYO_STRICT_MODE
               value: "1"

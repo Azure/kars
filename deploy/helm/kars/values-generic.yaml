@@ -1,0 +1,45 @@
+# Generic Kubernetes overlay for an existing non-AKS cluster.
+#
+# Azure/AKS defaults remain authoritative in values.yaml. This opt-in overlay
+# removes Azure identity metadata and the AKS-specific sandbox pool selector.
+# Operators must provide registry access, an inference backend and credential,
+# and a compatible AGT relay/registry.
+
+controller:
+  image:
+    repository: ghcr.io/azure/kars-controller
+
+inferenceRouter:
+  image:
+    repository: ghcr.io/azure/kars-inference-router
+  azure:
+    contentSafety:
+      enabled: false
+    promptShields:
+      enabled: false
+
+sandbox:
+  image:
+    repository: ghcr.io/azure/openclaw-sandbox
+  isolation: standard
+  seccompProfile: RuntimeDefault
+  nodeSelector:
+    kubernetes.io/os: linux
+
+monitoring:
+  containerInsights: false
+
+azure:
+  workloadIdentity:
+    enabled: false
+    clientId: ""
+  keyVaultCsi:
+    enabled: false
+    keyVaultName: ""
+  policy:
+    enabled: false
+  entraAuth:
+    enabled: false
+
+signerPolicy:
+  enabled: false
