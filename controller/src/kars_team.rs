@@ -382,7 +382,11 @@ mod tests {
             blueprint: None,
             skills: vec![],
         }]);
-        assert!(t.validation_errors().is_empty(), "{:?}", t.validation_errors());
+        assert!(
+            t.validation_errors().is_empty(),
+            "{:?}",
+            t.validation_errors()
+        );
     }
 
     #[test]

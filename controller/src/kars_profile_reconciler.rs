@@ -78,8 +78,12 @@ async fn reconcile(profile: Arc<KarsProfile>, ctx: Arc<Ctx>) -> Result<Action, R
         "kind": "KarsProfile",
         "status": status,
     });
-    api.patch_status(&name, &PatchParams::apply(FIELD_MANAGER).force(), &Patch::Apply(patch))
-        .await?;
+    api.patch_status(
+        &name,
+        &PatchParams::apply(FIELD_MANAGER).force(),
+        &Patch::Apply(patch),
+    )
+    .await?;
     Ok(Action::requeue(REQUEUE_OK))
 }
 

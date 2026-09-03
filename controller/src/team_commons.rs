@@ -78,7 +78,13 @@ pub fn commons_cm_name(commons: &str) -> String {
 fn content_key(id: &str) -> String {
     let safe: String = id
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') { c } else { '_' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
+                c
+            } else {
+                '_'
+            }
+        })
         .collect();
     format!("entry-{safe}")
 }
@@ -112,7 +118,12 @@ pub async fn ensure_commons(
     let ns = namespace();
     let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &ns);
     let name = commons_cm_name(commons);
-    if cms.get_opt(&name).await.context("get commons cm")?.is_some() {
+    if cms
+        .get_opt(&name)
+        .await
+        .context("get commons cm")?
+        .is_some()
+    {
         return Ok(());
     }
     let patch = json!({
@@ -169,9 +180,7 @@ pub async fn record_entry(
     };
 
     // Rebuild data from the existing ConfigMap, preserving prior entry content.
-    let mut data: BTreeMap<String, String> = existing
-        .and_then(|cm| cm.data)
-        .unwrap_or_default();
+    let mut data: BTreeMap<String, String> = existing.and_then(|cm| cm.data).unwrap_or_default();
     data.insert(content_key(&entry.id), trimmed);
     index.push(entry);
 
@@ -278,7 +287,10 @@ mod tests {
         assert!(read_index(&empty).is_empty());
         let mut data = BTreeMap::new();
         data.insert("index.json".to_string(), "not json".to_string());
-        let cm = ConfigMap { data: Some(data), ..Default::default() };
+        let cm = ConfigMap {
+            data: Some(data),
+            ..Default::default()
+        };
         assert!(read_index(&cm).is_empty());
     }
 }

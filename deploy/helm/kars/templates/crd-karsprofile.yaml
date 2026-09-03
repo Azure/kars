@@ -156,6 +156,13 @@ spec:
             - defaultEnvelope
             - domain
             type: object
+            x-kubernetes-validations:
+            - message: spec.charterTemplate must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.charterTemplate) > 0
+            - message: spec.domain must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.domain) > 0
           status:
             description: '`KarsProfile.status` — controller-owned.'
             nullable: true
