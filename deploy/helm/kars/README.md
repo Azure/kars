@@ -3,7 +3,8 @@
 This chart installs the Kars CRDs, controller, RBAC, admission controls,
 policies, and optional operational components into an existing Kubernetes
 cluster. It does not provision the cluster, registry, inference backend, cloud
-identity, or AGT relay/registry.
+identity, or inference credentials. The generic profile also deploys the
+Microsoft AGT AgentMesh relay and registry from the public Kars release images.
 
 ## Support status
 
@@ -28,11 +29,18 @@ helm upgrade --install kars deploy/helm/kars \
 ```
 
 `my-generic-values.yaml` must provide pullable images, an inference endpoint
-and router-side authentication, a reachable AGT relay/registry, and any
-environment-specific secret-store, policy, monitoring, ingress, and signing
-integrations. A NetworkPolicy-capable CNI is required.
+and router-side authentication, and any environment-specific secret-store,
+policy, monitoring, ingress, and signing integrations. A NetworkPolicy-capable
+CNI is required.
 
 The overlay is opt-in and does not change existing AKS defaults.
+
+To use an externally managed AgentMesh deployment instead, set:
+
+```yaml
+agentMesh:
+  enabled: false
+```
 
 ## Validate
 
@@ -43,8 +51,6 @@ helm template kars deploy/helm/kars \
   --values deploy/helm/kars/values-generic.yaml >/tmp/kars.yaml
 ```
 
-Install the matching AGT stack separately before creating sandboxes:
-
-```bash
-kubectl apply -f deploy/agentmesh-agt.yaml
-```
+The chart templates all Kars `CustomResourceDefinition` objects during Helm
+installation. CRDs added by later Kars versions are installed when that chart
+version is upgraded.
