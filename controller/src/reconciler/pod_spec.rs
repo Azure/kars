@@ -61,6 +61,25 @@ pub(crate) fn isolation_scheduling(isolation: &str) -> (Option<&'static str>, &'
     }
 }
 
+pub(crate) fn sandbox_node_selector_from(
+    raw: &str,
+    default_pool: &str,
+) -> Result<serde_json::Value, String> {
+    if raw.trim().is_empty() || raw.trim() == "{}" {
+        return Ok(serde_json::json!({ "kars.azure.com/pool": default_pool }));
+    }
+    let selector: serde_json::Map<String, serde_json::Value> = serde_json::from_str(raw)
+        .map_err(|error| format!("KARS_SANDBOX_NODE_SELECTOR_JSON is invalid JSON: {error}"))?;
+    if selector.is_empty()
+        || selector
+            .iter()
+            .any(|(key, value)| key.trim().is_empty() || !value.is_string())
+    {
+        return Err("KARS_SANDBOX_NODE_SELECTOR_JSON must be a non-empty string map".into());
+    }
+    Ok(serde_json::Value::Object(selector))
+}
+
 /// Build the egress-guard init-container command.
 ///
 /// Standard sandboxes (every kind except SRE) get the full lockdown:

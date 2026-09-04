@@ -37,6 +37,13 @@ import * as path from "node:path";
 
 const HELP_FLAGS = new Set(["--help", "-h", "--version", "-V"]);
 
+export function explicitContextArg(argv: string[]): string | undefined {
+  const inline = argv.find((arg) => arg.startsWith("--context="));
+  if (inline) return inline.slice("--context=".length).trim() || undefined;
+  const index = argv.indexOf("--context");
+  return index >= 0 ? argv[index + 1]?.trim() || undefined : undefined;
+}
+
 // Commands that talk to an EXISTING cluster and therefore need a
 // kubeconfig context resolved up front. Everything not in this set
 // is allowed to run with no kubeconfig at all — most notably:
@@ -63,6 +70,10 @@ export async function bootstrapKubeContext(argv: string[]): Promise<void> {
   const cmd = (argv[2] ?? "").split("=", 1)[0];
   if (!cmd || cmd.startsWith("-") || !KUBE_COMMANDS.has(cmd)) return;
   if (process.env.KUBECONFIG) return;
+  // Commands that expose --context pass it to every kubectl call themselves.
+  // Treat that explicit user choice as sufficient even when kubeconfig has no
+  // global current-context.
+  if (explicitContextArg(argv)) return;
 
   try {
     await execa("which", ["kubectl"], { stdio: "pipe" });
@@ -120,4 +131,3 @@ function writeOverlay(ctx: string): void {
     try { fs.rmSync(tmp, { recursive: true, force: true }); } catch {}
   });
 }
-
