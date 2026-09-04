@@ -22,8 +22,9 @@ import inquirer from "inquirer";
 import { existsSync, unlinkSync, writeFileSync, chmodSync, mkdirSync, readFileSync } from "fs";
 
 import {
-  loadConfig, saveSecrets, resetFirstRunFlag,
+  loadConfig, saveContext, saveSecrets, resetFirstRunFlag,
   CONFIG_DIR, CONFIG_FILE, CREDENTIALS_FILE, SECRETS_FILE,
+  type DeploymentContext,
   validateGithubModelsConfig,
 } from "../config.js";
 import {
@@ -38,6 +39,7 @@ export function configCommand(): Command {
 
   cmd.addCommand(showCmd());
   cmd.addCommand(modelCmd());
+  cmd.addCommand(adoptAksCmd());
   cmd.addCommand(resetCmd());
 
   return cmd;
@@ -81,6 +83,101 @@ function showCmd(): Command {
         }
         console.log();
       }
+    });
+}
+
+export function buildAdoptedAksContext(input: {
+  subscription: string;
+  region: string;
+  resourceGroup: string;
+  cluster: string;
+  acrLoginServer: string;
+  wiClientId?: string;
+  identityName?: string;
+  identityResourceGroup?: string;
+  oidcIssuerUrl?: string;
+  foundryEndpoint?: string;
+  foundryProjectEndpoint?: string;
+  keyVaultName?: string;
+}): DeploymentContext {
+  const acrLoginServer = input.acrLoginServer.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
+  if (!acrLoginServer.endsWith(".azurecr.io")) {
+    throw new Error("--acr-login-server must be an Azure Container Registry host (*.azurecr.io)");
+  }
+  return {
+    subscription: input.subscription.trim(),
+    region: input.region.trim(),
+    resourceGroup: input.resourceGroup.trim(),
+    aksCluster: input.cluster.trim(),
+    acrLoginServer,
+    acrName: acrLoginServer.slice(0, -".azurecr.io".length),
+    wiClientId: input.wiClientId?.trim() || undefined,
+    identityName: input.identityName?.trim() || undefined,
+    identityResourceGroup: input.identityResourceGroup?.trim() || input.resourceGroup.trim(),
+    oidcIssuerUrl: input.oidcIssuerUrl?.trim() || undefined,
+    foundryEndpoint: input.foundryEndpoint?.trim() || undefined,
+    foundryProjectEndpoint: input.foundryProjectEndpoint?.trim() || undefined,
+    keyVaultName: input.keyVaultName?.trim() || undefined,
+    registryMode: "local",
+    phase: "complete",
+  };
+}
+
+function adoptAksCmd(): Command {
+  return new Command("adopt-aks")
+    .description("Register an existing Helm-installed AKS cluster with this CLI")
+    .requiredOption("--subscription <id>", "Azure subscription ID")
+    .requiredOption("--region <region>", "AKS region")
+    .requiredOption("--resource-group <name>", "AKS resource group")
+    .requiredOption("--cluster <name>", "AKS cluster name")
+    .requiredOption("--acr-login-server <host>", "ACR login server, e.g. contoso.azurecr.io")
+    .option("--context <name>", "Kubernetes context (defaults to current context)")
+    .option("--wi-client-id <id>", "Kars controller Workload Identity client ID")
+    .option("--identity-name <name>", "Kars managed identity name")
+    .option("--identity-resource-group <name>", "Managed identity resource group")
+    .option("--oidc-issuer-url <url>", "AKS OIDC issuer URL")
+    .option("--foundry-endpoint <url>", "Foundry/Azure OpenAI endpoint")
+    .option("--foundry-project-endpoint <url>", "Foundry project endpoint")
+    .option("--key-vault-name <name>", "Key Vault name")
+    .action(async (options) => {
+      const { execa } = await import("execa");
+      const kubectlContext = options.context ? ["--context", options.context] : [];
+      await execa(
+        "kubectl",
+        [
+          ...kubectlContext,
+          "get",
+          "crd",
+          "karssandboxes.kars.azure.com",
+          "--output",
+          "name",
+        ],
+        { stdio: "pipe" },
+      );
+      const helmContext = options.context ? ["--kube-context", options.context] : [];
+      await execa("helm", [...helmContext, "status", "kars", "--namespace", "kars-system"], {
+        stdio: "pipe",
+      });
+
+      const context = buildAdoptedAksContext({
+        subscription: options.subscription,
+        region: options.region,
+        resourceGroup: options.resourceGroup,
+        cluster: options.cluster,
+        acrLoginServer: options.acrLoginServer,
+        wiClientId: options.wiClientId,
+        identityName: options.identityName,
+        identityResourceGroup: options.identityResourceGroup,
+        oidcIssuerUrl: options.oidcIssuerUrl,
+        foundryEndpoint: options.foundryEndpoint,
+        foundryProjectEndpoint: options.foundryProjectEndpoint,
+        keyVaultName: options.keyVaultName,
+      });
+      saveContext(context);
+      console.log(chalk.green("\n  ✔ Existing AKS installation registered with the Kars CLI."));
+      console.log(chalk.dim(`    Cluster: ${context.aksCluster} (${context.resourceGroup})`));
+      console.log(chalk.dim(`    ACR:     ${context.acrLoginServer}`));
+      console.log(chalk.dim(`    Context: ~/.kars/context.json\n`));
     });
 }
 
