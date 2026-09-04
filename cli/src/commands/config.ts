@@ -91,7 +91,7 @@ export function buildAdoptedAksContext(input: {
   region: string;
   resourceGroup: string;
   cluster: string;
-  acrLoginServer: string;
+  acrLoginServer?: string;
   wiClientId?: string;
   identityName?: string;
   identityResourceGroup?: string;
@@ -100,8 +100,11 @@ export function buildAdoptedAksContext(input: {
   foundryProjectEndpoint?: string;
   keyVaultName?: string;
 }): DeploymentContext {
-  const acrLoginServer = input.acrLoginServer.trim().replace(/^https?:\/\//, "").replace(/\/+$/, "");
-  if (!acrLoginServer.endsWith(".azurecr.io")) {
+  const acrLoginServer = input.acrLoginServer
+    ?.trim()
+    .replace(/^https?:\/\//, "")
+    .replace(/\/+$/, "");
+  if (acrLoginServer && !acrLoginServer.endsWith(".azurecr.io")) {
     throw new Error("--acr-login-server must be an Azure Container Registry host (*.azurecr.io)");
   }
   return {
@@ -109,8 +112,8 @@ export function buildAdoptedAksContext(input: {
     region: input.region.trim(),
     resourceGroup: input.resourceGroup.trim(),
     aksCluster: input.cluster.trim(),
-    acrLoginServer,
-    acrName: acrLoginServer.slice(0, -".azurecr.io".length),
+    acrLoginServer: acrLoginServer || undefined,
+    acrName: acrLoginServer?.slice(0, -".azurecr.io".length),
     wiClientId: input.wiClientId?.trim() || undefined,
     identityName: input.identityName?.trim() || undefined,
     identityResourceGroup: input.identityResourceGroup?.trim() || input.resourceGroup.trim(),
@@ -130,7 +133,7 @@ function adoptAksCmd(): Command {
     .requiredOption("--region <region>", "AKS region")
     .requiredOption("--resource-group <name>", "AKS resource group")
     .requiredOption("--cluster <name>", "AKS cluster name")
-    .requiredOption("--acr-login-server <host>", "ACR login server, e.g. contoso.azurecr.io")
+    .option("--acr-login-server <host>", "Optional ACR mirror used by kars push/upgrade")
     .option("--context <name>", "Kubernetes context (defaults to current context)")
     .option("--wi-client-id <id>", "Kars controller Workload Identity client ID")
     .option("--identity-name <name>", "Kars managed identity name")
@@ -176,7 +179,7 @@ function adoptAksCmd(): Command {
       saveContext(context);
       console.log(chalk.green("\n  ✔ Existing AKS installation registered with the Kars CLI."));
       console.log(chalk.dim(`    Cluster: ${context.aksCluster} (${context.resourceGroup})`));
-      console.log(chalk.dim(`    ACR:     ${context.acrLoginServer}`));
+      console.log(chalk.dim(`    Images:  ${context.acrLoginServer ?? "public ghcr.io/azure"}`));
       console.log(chalk.dim(`    Context: ~/.kars/context.json\n`));
     });
 }

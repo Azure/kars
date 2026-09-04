@@ -54,17 +54,17 @@ Vault, kubelet IMDS identity, federated-credential metadata, AgentMesh, and the
 release stamp. The referenced Azure resources and role assignments must already
 exist.
 
-Before installation, import every image referenced by the template into the
-selected ACR and grant the AKS kubelet identity `AcrPull`. The public source
-images and exact names are listed in the release notes; use the same release
-tag for every component, then set `karsRelease` to that tag. Mixing tags can
-create controller/router/runtime protocol drift.
+The template uses the fixed public `ghcr.io/azure/*` image repositories. To
+mirror images into a private ACR instead, replace the repository values, import
+every referenced image, and grant the AKS kubelet identity `AcrPull`. Keep one
+release tag across every component and set `karsRelease` to that tag; mixing
+tags can create controller/router/runtime protocol drift.
 
 The minimum Azure-side prerequisites are:
 
 - AKS with OIDC issuer and Workload Identity enabled;
-- ACR containing the Kars controller, router, sandbox, runtime, and any
-  privately mirrored AgentMesh images referenced by your values;
+- public GHCR access, or an ACR containing every privately mirrored image
+  referenced by your values;
 - a federated controller managed identity and its client ID;
 - Foundry/Azure OpenAI data-plane access for the identities used by the router;
 - Key Vault/CSI permissions when `azure.keyVaultCsi.enabled=true`;
@@ -89,11 +89,11 @@ kars config adopt-aks \
   --region eastus2 \
   --resource-group <aks-resource-group> \
   --cluster <aks-cluster-name> \
-  --acr-login-server <registry>.azurecr.io \
   --context <kubectl-context>
 ```
 
 The command verifies the Kars Helm release and `KarsSandbox` CRD, then writes
-`~/.kars/context.json`. Optional Workload Identity, OIDC, Foundry, identity, and
-Key Vault flags enable the corresponding advanced `add`, mesh, and lifecycle
-flows.
+`~/.kars/context.json`. Add `--acr-login-server <registry>.azurecr.io` when
+using a private mirror or when enabling `kars push` and the current ACR-based
+`kars upgrade` flow. Optional Workload Identity, OIDC, Foundry, identity, and
+Key Vault flags enable the corresponding advanced flows.
