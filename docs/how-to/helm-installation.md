@@ -51,3 +51,25 @@ submitted directly with `kubectl apply`.
 
 All Kars CRDs are rendered by the chart and installed by Helm before the
 controller begins reconciling custom resources.
+
+## Register an existing AKS installation with the CLI
+
+Kubernetes-facing commands recognize any explicit/current kube context.
+Azure lifecycle commands also need the deployment metadata normally written by
+`kars up`. After a manual Helm installation, register that metadata without
+provisioning or changing infrastructure:
+
+```bash
+kars config adopt-aks \
+  --subscription <subscription-id> \
+  --region eastus2 \
+  --resource-group <aks-resource-group> \
+  --cluster <aks-cluster-name> \
+  --acr-login-server <registry>.azurecr.io \
+  --context <kubectl-context>
+```
+
+The command verifies the Kars Helm release and `KarsSandbox` CRD, then writes
+`~/.kars/context.json`. Optional Workload Identity, OIDC, Foundry, identity, and
+Key Vault flags enable the corresponding advanced `add`, mesh, and lifecycle
+flows.

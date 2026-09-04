@@ -54,3 +54,8 @@ helm template kars deploy/helm/kars \
 The chart templates all Kars `CustomResourceDefinition` objects during Helm
 installation. CRDs added by later Kars versions are installed when that chart
 version is upgraded.
+
+For an existing AKS cluster, run `kars config adopt-aks` after Helm installation
+to write the local deployment context used by `kars upgrade`, `kars push`, and
+mesh lifecycle commands. Kubernetes-only commands already use the selected
+kube context directly.
