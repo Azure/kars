@@ -1,0 +1,93 @@
+# Existing AKS installation template.
+#
+# Copy this file, replace every REPLACE_ME value, and install with:
+#   helm upgrade --install kars deploy/helm/kars \
+#     --namespace kars-system --create-namespace \
+#     --values my-aks-values.yaml
+#
+# This mirrors the Helm values emitted by `kars up` after Azure infrastructure
+# provisioning. It does not create or grant access to AKS, ACR, Foundry,
+# Key Vault, managed identities, federated credentials, or Azure RBAC.
+
+controller:
+  image:
+    repository: REPLACE_ME.azurecr.io/kars-controller
+    tag: "latest"
+    pullPolicy: Always
+
+inferenceRouter:
+  image:
+    repository: REPLACE_ME.azurecr.io/kars-inference-router
+    tag: "latest"
+    pullPolicy: Always
+  azure:
+    openai:
+      endpoint: https://REPLACE_ME.openai.azure.com
+
+sandbox:
+  image:
+    repository: REPLACE_ME.azurecr.io/openclaw-sandbox
+    tag: "latest"
+    pullPolicy: Always
+  # Portable baseline for an existing cluster. Replace with a dedicated
+  # agentpool selector and enhanced/confidential isolation when available.
+  isolation: standard
+  seccompProfile: RuntimeDefault
+  nodeSelector:
+    kubernetes.io/os: linux
+
+runtimes:
+  openaiAgents:
+    image: REPLACE_ME.azurecr.io/kars-runtime-openai-agents:latest
+  mafPython:
+    image: REPLACE_ME.azurecr.io/kars-runtime-maf-python:latest
+  anthropic:
+    image: REPLACE_ME.azurecr.io/kars-runtime-anthropic:latest
+  langgraph:
+    image: REPLACE_ME.azurecr.io/kars-runtime-langgraph:latest
+  langgraphTs:
+    image: REPLACE_ME.azurecr.io/kars-runtime-langgraph-ts:latest
+  pydanticAi:
+    image: REPLACE_ME.azurecr.io/kars-runtime-pydantic-ai:latest
+  hermes:
+    image: REPLACE_ME.azurecr.io/kars-runtime-hermes:latest
+
+foundry:
+  endpoint: https://REPLACE_ME.services.ai.azure.com
+  projectEndpoint: https://REPLACE_ME.services.ai.azure.com/api/projects/REPLACE_ME
+  deployments: '["REPLACE_ME-chat-deployment"]'
+  # AKS kubelet managed-identity client ID used for IMDS fallback.
+  imdsClientId: REPLACE_ME
+
+contentSafety:
+  endpoint: https://REPLACE_ME.cognitiveservices.azure.com
+
+azure:
+  workloadIdentity:
+    enabled: true
+    # Federated managed-identity client ID used by the Kars controller.
+    clientId: REPLACE_ME
+  keyVaultCsi:
+    enabled: true
+    keyVaultName: REPLACE_ME
+  policy:
+    enabled: true
+  entraAuth:
+    enabled: false
+
+fedcred:
+  subscriptionId: REPLACE_ME
+  identityName: REPLACE_ME
+  identityResourceGroup: REPLACE_ME
+  oidcIssuerUrl: https://REPLACE_ME.oic.prod-aks.azure.com/REPLACE_ME/
+
+mesh:
+  provider: agt
+
+# A manual Helm-only install owns AgentMesh. Set enabled=false only when an
+# existing external relay/registry already expose the standard Service names.
+agentMesh:
+  enabled: true
+
+# Stamp the installed Kars version used by `kars upgrade` discovery.
+karsRelease: latest
