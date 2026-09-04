@@ -89,5 +89,6 @@ mesh:
 agentMesh:
   enabled: true
 
-# Stamp the installed Kars version used by `kars upgrade` discovery.
-karsRelease: latest
+# Stamp the actual installed Kars release used by `kars upgrade` discovery,
+# for example v0.1.26. Do not use the literal value "latest".
+karsRelease: REPLACE_ME_KARS_VERSION
