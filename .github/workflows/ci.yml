@@ -406,7 +406,9 @@ jobs:
           helm template kars deploy/helm/kars --namespace kars-system \
             --values deploy/helm/kars/values-local-dev.yaml >/dev/null
           helm template kars deploy/helm/kars --namespace kars-system \
-            --values deploy/helm/kars/values-generic.yaml >/dev/null
+            --values deploy/helm/kars/values-generic.yaml >/tmp/kars-generic.yaml
+          grep -q 'name: agentmesh-relay' /tmp/kars-generic.yaml
+          grep -q 'name: agentmesh-registry' /tmp/kars-generic.yaml
 
   security-scan:
     name: Security Scan
