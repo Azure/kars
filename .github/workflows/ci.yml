@@ -265,7 +265,7 @@ jobs:
       # of denying warnings (cargo's default warning bar is roughly
       # equivalent to RUSTSEC `high`).
       - name: npm audit (CLI dependencies)
-        run: npm audit --audit-level=high
+        run: npm audit --package-lock-only --audit-level=high
 
   runtime-openclaw-build:
     name: Runtime OpenClaw Build & Test
@@ -288,7 +288,10 @@ jobs:
       - run: npm run build
       - run: npm test
       - name: npm audit (Runtime OpenClaw dependencies)
-        run: npm audit --audit-level=high
+        # Audit the lockfile rather than the installed tree: @kars/mesh is a
+        # local file dependency, which the retiring quick-audit endpoint rejects
+        # as an "invalid package tree" even after a successful npm install.
+        run: npm audit --package-lock-only --audit-level=high
 
   mesh-plugin-build:
     name: Mesh Plugin Build & Test
@@ -307,7 +310,7 @@ jobs:
       - run: npm test
       - name: npm audit (Mesh Plugin dependencies)
         working-directory: mesh-plugin
-        run: npm audit --audit-level=high
+        run: npm audit --package-lock-only --audit-level=high
 
   python-sidecar:
     name: Python Lint & Test (AGT Sidecar)
