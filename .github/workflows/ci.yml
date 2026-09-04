@@ -411,7 +411,7 @@ jobs:
           grep -q 'name: agentmesh-registry' /tmp/kars-generic.yaml
           helm template kars deploy/helm/kars --namespace kars-system \
             --values deploy/helm/kars/values-existing-aks.yaml >/tmp/kars-existing-aks.yaml
-          grep -q 'REPLACE_ME.azurecr.io/kars-controller:latest' /tmp/kars-existing-aks.yaml
+          grep -q 'ghcr.io/azure/kars-controller:latest' /tmp/kars-existing-aks.yaml
           grep -q 'name: agentmesh-relay' /tmp/kars-existing-aks.yaml
 
   security-scan:

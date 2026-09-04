@@ -5,19 +5,20 @@
 #     --namespace kars-system --create-namespace \
 #     --values my-aks-values.yaml
 #
-# This mirrors the Helm values emitted by `kars up` after Azure infrastructure
-# provisioning. It does not create or grant access to AKS, ACR, Foundry,
+# This mirrors the Helm configuration emitted by `kars up` after Azure
+# infrastructure provisioning, but pulls the fixed public Kars images directly
+# from GHCR. It does not create or grant access to AKS, ACR, Foundry,
 # Key Vault, managed identities, federated credentials, or Azure RBAC.
 
 controller:
   image:
-    repository: REPLACE_ME.azurecr.io/kars-controller
+    repository: ghcr.io/azure/kars-controller
     tag: "latest"
     pullPolicy: Always
 
 inferenceRouter:
   image:
-    repository: REPLACE_ME.azurecr.io/kars-inference-router
+    repository: ghcr.io/azure/kars-inference-router
     tag: "latest"
     pullPolicy: Always
   azure:
@@ -26,7 +27,7 @@ inferenceRouter:
 
 sandbox:
   image:
-    repository: REPLACE_ME.azurecr.io/openclaw-sandbox
+    repository: ghcr.io/azure/openclaw-sandbox
     tag: "latest"
     pullPolicy: Always
   # Portable baseline for an existing cluster. Replace with a dedicated
@@ -38,19 +39,19 @@ sandbox:
 
 runtimes:
   openaiAgents:
-    image: REPLACE_ME.azurecr.io/kars-runtime-openai-agents:latest
+    image: ghcr.io/azure/kars-runtime-openai-agents:latest
   mafPython:
-    image: REPLACE_ME.azurecr.io/kars-runtime-maf-python:latest
+    image: ghcr.io/azure/kars-runtime-maf-python:latest
   anthropic:
-    image: REPLACE_ME.azurecr.io/kars-runtime-anthropic:latest
+    image: ghcr.io/azure/kars-runtime-anthropic:latest
   langgraph:
-    image: REPLACE_ME.azurecr.io/kars-runtime-langgraph:latest
+    image: ghcr.io/azure/kars-runtime-langgraph:latest
   langgraphTs:
-    image: REPLACE_ME.azurecr.io/kars-runtime-langgraph-ts:latest
+    image: ghcr.io/azure/kars-runtime-langgraph-ts:latest
   pydanticAi:
-    image: REPLACE_ME.azurecr.io/kars-runtime-pydantic-ai:latest
+    image: ghcr.io/azure/kars-runtime-pydantic-ai:latest
   hermes:
-    image: REPLACE_ME.azurecr.io/kars-runtime-hermes:latest
+    image: ghcr.io/azure/kars-runtime-hermes:latest
 
 foundry:
   endpoint: https://REPLACE_ME.services.ai.azure.com
