@@ -36,15 +36,23 @@ externally.
 
 ## Existing AKS
 
-Use the default values as the AKS baseline and provide your registry, Foundry,
-Workload Identity, and environment settings in an override file:
+Copy the checked-in template that mirrors the values emitted by `kars up`:
 
 ```bash
+cp deploy/helm/kars/values-existing-aks.yaml my-aks-values.yaml
+# Replace every REPLACE_ME value.
+
 helm upgrade --install kars deploy/helm/kars \
   --namespace kars-system \
   --create-namespace \
   --values my-aks-values.yaml
 ```
+
+The template includes controller/router/sandbox and runtime images, Foundry
+account/project/deployment values, Content Safety, Workload Identity, Key
+Vault, kubelet IMDS identity, federated-credential metadata, AgentMesh, and the
+release stamp. The referenced Azure resources and role assignments must already
+exist.
 
 The CLI remains optional. After Helm installation, Kars resources can be
 submitted directly with `kubectl apply`.
