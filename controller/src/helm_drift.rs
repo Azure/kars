@@ -33,8 +33,8 @@
 #[cfg(test)]
 use crate::crd_validations::{
     a2a_agent_crd, egress_approval_crd, inference_policy_crd, kars_approval_crd, kars_eval_crd,
-    kars_memory_crd, kars_receipt_crd, kars_sre_action_crd, kars_task_crd, mcp_server_crd,
-    tool_policy_crd, trust_graph_crd,
+    kars_memory_crd, kars_profile_crd, kars_receipt_crd, kars_skill_crd, kars_sre_action_crd,
+    kars_task_crd, kars_team_crd, mcp_server_crd, tool_policy_crd, trust_graph_crd,
 };
 
 const MCP_HELM_CRD_PATH: &str = concat!(
@@ -70,6 +70,21 @@ const CLAWEVAL_HELM_CRD_PATH: &str = concat!(
 const KARSTASK_HELM_CRD_PATH: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/../deploy/helm/kars/templates/crd-karstask.yaml"
+);
+
+const KARSTEAM_HELM_CRD_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../deploy/helm/kars/templates/crd-karsteam.yaml"
+);
+
+const KARSSKILL_HELM_CRD_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../deploy/helm/kars/templates/crd-karsskill.yaml"
+);
+
+const KARSPROFILE_HELM_CRD_PATH: &str = concat!(
+    env!("CARGO_MANIFEST_DIR"),
+    "/../deploy/helm/kars/templates/crd-karsprofile.yaml"
 );
 
 const KARSRECEIPT_HELM_CRD_PATH: &str = concat!(
@@ -297,6 +312,61 @@ mod tests {
         let rust_crd_value =
             serde_json::to_value(kars_task_crd()).expect("rust crd serializes to JSON");
         assert_helm_matches_rust(KARSTASK_HELM_CRD_PATH, rust_crd_value, "karstask");
+    }
+
+    /// One-shot dumper for the karsteam CRD. Run via:
+    ///
+    ///   DUMP_KARSTEAM_CRD_YAML=1 cargo test --bin kars-controller \
+    ///       helm_drift::tests::dump_karsteam_crd_yaml -- --nocapture
+    #[test]
+    fn dump_karsteam_crd_yaml() {
+        if std::env::var("DUMP_KARSTEAM_CRD_YAML").is_err() {
+            return;
+        }
+        let crd = kars_team_crd();
+        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        println!("---\n{yaml}");
+    }
+
+    #[test]
+    fn helm_karsteam_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(kars_team_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(KARSTEAM_HELM_CRD_PATH, rust_crd_value, "karsteam");
+    }
+
+    #[test]
+    fn dump_karsskill_crd_yaml() {
+        if std::env::var("DUMP_KARSSKILL_CRD_YAML").is_err() {
+            return;
+        }
+        let crd = kars_skill_crd();
+        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        println!("---\n{yaml}");
+    }
+
+    #[test]
+    fn helm_karsskill_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(kars_skill_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(KARSSKILL_HELM_CRD_PATH, rust_crd_value, "karsskill");
+    }
+
+    #[test]
+    fn dump_karsprofile_crd_yaml() {
+        if std::env::var("DUMP_KARSPROFILE_CRD_YAML").is_err() {
+            return;
+        }
+        let crd = kars_profile_crd();
+        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        println!("---\n{yaml}");
+    }
+
+    #[test]
+    fn helm_karsprofile_crd_matches_rust_schema() {
+        let rust_crd_value =
+            serde_json::to_value(kars_profile_crd()).expect("rust crd serializes to JSON");
+        assert_helm_matches_rust(KARSPROFILE_HELM_CRD_PATH, rust_crd_value, "karsprofile");
     }
 
     /// One-shot dumper for the karsreceipt CRD. Run via:

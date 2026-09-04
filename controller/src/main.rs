@@ -45,13 +45,19 @@ mod kars_eval_reconciler;
 mod kars_memory;
 mod kars_memory_compile;
 mod kars_memory_reconciler;
+mod kars_profile;
+mod kars_profile_reconciler;
 mod kars_receipt;
 mod kars_receipt_log;
+mod kars_skill;
+mod kars_skill_reconciler;
 mod kars_sre_action;
 mod kars_sre_action_reconciler;
 mod kars_task;
 mod kars_task_execution;
 mod kars_task_reconciler;
+mod kars_team;
+mod kars_team_reconciler;
 mod leader_election;
 mod mcp_server;
 mod mcp_server_reconciler;
@@ -66,6 +72,8 @@ mod providers;
 mod reconciler;
 mod signer_policy;
 mod status;
+mod team_commons;
+mod team_digest;
 #[allow(dead_code)] // helpers consumed by tool_policy_reconciler + future slices.
 mod tool_policy;
 mod tool_policy_compile;
@@ -255,6 +263,18 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { kars_task_reconciler::run(client).await })
     };
+    let kars_team_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { kars_team_reconciler::run(client).await })
+    };
+    let kars_skill_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { kars_skill_reconciler::run(client).await })
+    };
+    let kars_profile_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { kars_profile_reconciler::run(client).await })
+    };
     let kars_approval_handle = {
         let client = client.clone();
         tokio::spawn(async move { kars_approval_reconciler::run(client).await })
@@ -412,6 +432,15 @@ async fn main() -> Result<()> {
             res??;
         }
         res = kars_task_handle => {
+            res??;
+        }
+        res = kars_team_handle => {
+            res??;
+        }
+        res = kars_skill_handle => {
+            res??;
+        }
+        res = kars_profile_handle => {
             res??;
         }
         res = kars_approval_handle => {

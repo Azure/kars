@@ -57,6 +57,17 @@ pub const CLAW_EVAL: &str = "kars-controller/karseval";
 /// envelope digest + lifecycle phase on status.
 pub const CLAW_TASK: &str = "kars-controller/karstask";
 
+/// `KarsTeam` reconciler — the standing-team primitive. Authors the principal +
+/// member `KarsTask`s and the charter-loop task-force tasks; sole writer of
+/// `KarsTeam.status`.
+pub const CLAW_TEAM: &str = "kars-controller/karsteam";
+
+/// `KarsSkill` reconciler — validates + versions reusable capability bundles.
+pub const CLAW_SKILL: &str = "kars-controller/karsskill";
+
+/// `KarsProfile` reconciler — validates team templates + instantiates teams.
+pub const CLAW_PROFILE: &str = "kars-controller/karsprofile";
+
 /// `TrustGraph` reconciler (Phase F1) — verifies signed trust edges
 /// and publishes a `ConfigMap` projection to `kars-system`.
 pub const TRUST_GRAPH: &str = "kars-controller/trustgraph";
@@ -114,6 +125,9 @@ pub const ALL_FIELD_MANAGERS: &[&str] = &[
     MESH,
     RECONCILER,
     EGRESS_APPROVAL,
+    CLAW_TEAM,
+    CLAW_SKILL,
+    CLAW_PROFILE,
 ];
 
 #[cfg(test)]
