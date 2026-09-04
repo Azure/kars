@@ -18,6 +18,9 @@ inferenceRouter:
     promptShields:
       enabled: false
 
+agentMesh:
+  enabled: true
+
 sandbox:
   image:
     repository: ghcr.io/azure/openclaw-sandbox
