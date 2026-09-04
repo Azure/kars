@@ -20,6 +20,7 @@ import {
   loadSecrets, saveSecrets, setSecret, deleteSecret, resolveSecret,
   listSecretVariants, KNOWN_SECRETS,
 } from "./config.js";
+import { buildAdoptedAksContext } from "./commands/config.js";
 import { existsSync, readFileSync, writeFileSync, mkdirSync, chmodSync } from "fs";
 
 const mockExistsSync = vi.mocked(existsSync);
@@ -231,6 +232,37 @@ describe("saveContext", () => {
     expect(written.subscription).toBe("sub-123");
     expect(written.region).toBe("eastus2");
     expect(written.savedAt).toBeDefined();
+  });
+
+  describe("buildAdoptedAksContext", () => {
+    it("creates the deployment context required by upgrade and push", () => {
+      expect(buildAdoptedAksContext({
+        subscription: "sub-123",
+        region: "eastus2",
+        resourceGroup: "rg-existing",
+        cluster: "aks-existing",
+        acrLoginServer: "https://contoso.azurecr.io/",
+      })).toMatchObject({
+        subscription: "sub-123",
+        region: "eastus2",
+        resourceGroup: "rg-existing",
+        aksCluster: "aks-existing",
+        acrLoginServer: "contoso.azurecr.io",
+        acrName: "contoso",
+        registryMode: "local",
+        phase: "complete",
+      });
+    });
+
+    it("rejects non-ACR registries", () => {
+      expect(() => buildAdoptedAksContext({
+        subscription: "sub-123",
+        region: "eastus2",
+        resourceGroup: "rg-existing",
+        cluster: "aks-existing",
+        acrLoginServer: "ghcr.io/example",
+      })).toThrow("*.azurecr.io");
+    });
   });
 
   it("sets restrictive file permissions (0o600)", () => {
