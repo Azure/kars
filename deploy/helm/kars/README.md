@@ -62,6 +62,7 @@ kube context directly.
 
 Start from `values-existing-aks.yaml`; it mirrors the Helm values written by
 `kars up` after provisioning and marks every customer-specific value with
-`REPLACE_ME`. Import the referenced images into the selected ACR, grant the AKS
-kubelet identity `AcrPull`, and stamp `karsRelease` with the exact common
-release tag before installation.
+`REPLACE_ME`. It uses the fixed public GHCR repositories. When a private mirror
+is required, replace those repositories, import every image into the selected
+ACR, and grant the AKS kubelet identity `AcrPull`. Stamp `karsRelease` with the
+exact common release tag before installation.

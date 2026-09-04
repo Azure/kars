@@ -263,6 +263,20 @@ describe("saveContext", () => {
         acrLoginServer: "ghcr.io/example",
       })).toThrow("*.azurecr.io");
     });
+
+    it("supports public GHCR installs without an ACR mirror", () => {
+      expect(buildAdoptedAksContext({
+        subscription: "sub-123",
+        region: "eastus2",
+        resourceGroup: "rg-existing",
+        cluster: "aks-existing",
+      })).toMatchObject({
+        aksCluster: "aks-existing",
+        acrLoginServer: undefined,
+        acrName: undefined,
+        phase: "complete",
+      });
+    });
   });
 
   it("sets restrictive file permissions (0o600)", () => {
