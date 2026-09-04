@@ -1,0 +1,207 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: karsapprovals.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
+spec:
+  group: kars.azure.com
+  names:
+    categories: []
+    kind: KarsApproval
+    plural: karsapprovals
+    shortNames:
+    - cappr
+    singular: karsapproval
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.taskRef.name
+      name: Task
+      type: string
+    - jsonPath: .spec.action.kind
+      name: Action
+      type: string
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.decider
+      name: Decider
+      type: string
+    - jsonPath: .status.expiresAt
+      name: Expires
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for KarsApprovalSpec via `CustomResource`
+        properties:
+          spec:
+            description: '`KarsApproval.spec` — a human decision a task is waiting on.'
+            properties:
+              action:
+                description: What needs a human decision.
+                properties:
+                  detail:
+                    description: Optional longer detail (e.g. the exact tool args or egress host).
+                    nullable: true
+                    type: string
+                  kind:
+                    description: |-
+                      One of [`ACTION_KINDS`]. Not enum-constrained on the wire so the
+                      primitive stays open; the Bridge treats unknown kinds as `custom`.
+                    type: string
+                  requestedTier:
+                    description: |-
+                      For a `tierRaise`, the autonomy tier (1..5) being requested. Surfaced
+                      so an approver sees exactly how much authority they are granting.
+                    format: int32
+                    nullable: true
+                    type: integer
+                  summary:
+                    description: One-line, human-readable statement of what the agent wants to do.
+                    type: string
+                required:
+                - kind
+                - summary
+                type: object
+              decision:
+                description: |-
+                  The human decision. Absent while the approval is pending; a person (or
+                  the Bridge acting for them) patches this to drive the terminal
+                  transition. The controller is the sole writer of `status`.
+                nullable: true
+                properties:
+                  decider:
+                    description: |-
+                      Identity of the human (or delegated principal) who decided. Recorded
+                      verbatim into status and, for granted approvals, into the receipt.
+                    type: string
+                  reason:
+                    description: Optional justification, surfaced to auditors.
+                    nullable: true
+                    type: string
+                  verdict:
+                    description: '`approve` or `deny`.'
+                    type: string
+                required:
+                - decider
+                - verdict
+                type: object
+              taskRef:
+                description: |-
+                  The `KarsTask` this approval gates, in the **same namespace**. The
+                  controller binds the approval to this task's envelope digest.
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              ttl:
+                description: |-
+                  Time-to-live as an ISO-8601 duration (`PT15M`, `PT4H`, `P1D`). An
+                  undecided approval past `requestedAt + ttl` becomes `Expired`. Defaults
+                  to `PT1H` when omitted.
+                nullable: true
+                type: string
+            required:
+            - action
+            - taskRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec.action.kind must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.action.kind) > 0
+            - message: spec.taskRef.name must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.taskRef.name) > 0
+          status:
+            description: '`KarsApproval.status` — the controller is the sole writer.'
+            nullable: true
+            properties:
+              boundEnvelopeDigest:
+                description: |-
+                  The task envelope digest this approval is bound to. Set once by the
+                  controller from the task's `status.envelopeDigest`; never changes.
+                nullable: true
+                type: string
+              conditions:
+                description: |-
+                  Standard K8s conditions; the `Decided` condition message surfaces
+                  *why* (e.g. the staleness reason).
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              decidedAt:
+                description: |-
+                  RFC-3339 time the human decision was first recorded. Immutable once
+                  set — re-reconciles preserve it.
+                nullable: true
+                type: string
+              decider:
+                description: Echo of `spec.decision.decider` once decided, for the printer column.
+                nullable: true
+                type: string
+              expiresAt:
+                description: RFC-3339 expiry (`requestedAt + ttl`). Stable across re-reconciles.
+                nullable: true
+                type: string
+              observedGeneration:
+                description: '`metadata.generation` last reconciled.'
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: '`Pending` | `Approved` | `Denied` | `Expired` | `Stale`.'
+                nullable: true
+                type: string
+              requestedAt:
+                description: |-
+                  RFC-3339 time the controller first reconciled the request. The TTL is
+                  measured from here; re-reconciles never bump it.
+                nullable: true
+                type: string
+            type: object
+        required:
+        - spec
+        title: KarsApproval
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

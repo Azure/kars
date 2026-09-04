@@ -1,0 +1,213 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: karsreceipts.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
+spec:
+  group: kars.azure.com
+  names:
+    categories: []
+    kind: KarsReceipt
+    plural: karsreceipts
+    shortNames:
+    - crcpt
+    singular: karsreceipt
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.taskRef.name
+      name: Task
+      type: string
+    - jsonPath: .spec.envelopeDigest
+      name: EnvelopeDigest
+      type: string
+    - jsonPath: .spec.keyId
+      name: KeyId
+      type: string
+    - jsonPath: .status.conditions[-1:].type
+      name: State
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for KarsReceiptSpec via `CustomResource`
+        properties:
+          spec:
+            description: |-
+              `KarsReceipt.spec` — the persisted, signed Governance Receipt for one
+              `KarsTask`. The controller is the sole writer; it owns the object via an
+              owner reference to the task, so the receipt is garbage-collected with it.
+            properties:
+              claims:
+                description: |-
+                  The claim matrix, surfaced for `kubectl`/Bridge without base64-decoding
+                  the payload. This is a copy of `predicate.claims`; the signed source of
+                  truth is inside `dsse.payload`.
+                items:
+                  description: |-
+                    One claim-class assertion in the receipt. `class`/`status` are constrained
+                    to the small vocabularies below; kept as strings for forward-compatible
+                    wire stability.
+                  properties:
+                    class:
+                      description: 'One of: `integrity`, `conformance`, `completeness`, `regulatory`.'
+                      type: string
+                    detail:
+                      description: Human-readable justification, surfaced verbatim to the auditor.
+                      type: string
+                    status:
+                      description: 'One of: `PASS`, `PARTIAL`, `FAIL`, `OMITTED`.'
+                      type: string
+                  required:
+                  - class
+                  - detail
+                  - status
+                  type: object
+                type: array
+              dsse:
+                description: 'The DSSE envelope: base64 in-toto Statement + Ed25519 signature(s).'
+                properties:
+                  payload:
+                    description: Base64 of the in-toto Statement JSON (the signed payload).
+                    type: string
+                  payloadType:
+                    description: Always [`DSSE_PAYLOAD_TYPE`].
+                    type: string
+                  signatures:
+                    description: One Ed25519 signature in V0.
+                    items:
+                      description: A single DSSE signature line.
+                      properties:
+                        keyid:
+                          description: Hex SHA-256 fingerprint of the signing public key.
+                          type: string
+                        sig:
+                          description: Base64 of the 64-byte Ed25519 signature over the PAE.
+                          type: string
+                      required:
+                      - keyid
+                      - sig
+                      type: object
+                    type: array
+                required:
+                - payload
+                - payloadType
+                - signatures
+                type: object
+              envelopeDigest:
+                description: |-
+                  `sha256:` digest of the trust envelope the task ran under. Mirrors the
+                  task's `status.envelopeDigest` and is bound into the signed subject.
+                type: string
+              keyId:
+                description: |-
+                  Hex SHA-256 fingerprint of the signing public key. A verifier matches
+                  this against the out-of-band trust anchor, never the reverse.
+                type: string
+              predicateType:
+                description: in-toto predicate type URI — always [`PREDICATE_TYPE`] for V0.
+                type: string
+              scheme:
+                description: Signing scheme, e.g. `DSSEv1+ed25519`.
+                type: string
+              taskRef:
+                description: The `KarsTask` this receipt attests, in the same namespace.
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - claims
+            - dsse
+            - envelopeDigest
+            - keyId
+            - predicateType
+            - scheme
+            - taskRef
+            type: object
+            x-kubernetes-validations:
+            - message: spec.claims must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.claims) > 0
+            - message: spec.envelopeDigest must be non-empty
+              reason: FieldValueInvalid
+              rule: size(self.envelopeDigest) > 0
+          status:
+            description: |-
+              `KarsReceipt.status` — informational echo. The receipt's authority comes
+              from its signature, not from this block.
+            nullable: true
+            properties:
+              conditions:
+                description: Standard Kubernetes conditions describing the advisory receipt lifecycle.
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              inclusionEntryHash:
+                description: |-
+                  Hash of this receipt's inclusion-log entry. An auditor checks the log
+                  chain is intact and that this hash is present (`kars receipt verify`).
+                nullable: true
+                type: string
+              inclusionSeq:
+                description: |-
+                  Sequence number of this receipt's entry in the `kars-receipt-log`
+                  inclusion log (the cross-receipt tamper-evidence chain).
+                format: int64
+                nullable: true
+                type: integer
+              issuedAt:
+                description: RFC3339 issuance time (unsigned — not part of the attested payload).
+                nullable: true
+                type: string
+              observedTaskGeneration:
+                description: The task `metadata.generation` this receipt was minted from.
+                format: int64
+                nullable: true
+                type: integer
+            type: object
+        required:
+        - spec
+        title: KarsReceipt
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

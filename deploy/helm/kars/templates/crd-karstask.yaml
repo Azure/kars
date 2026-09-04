@@ -1,0 +1,413 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: karstasks.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
+spec:
+  group: kars.azure.com
+  names:
+    categories: []
+    kind: KarsTask
+    plural: karstasks
+    shortNames:
+    - ctask
+    singular: karstask
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.envelope.tier
+      name: Tier
+      type: integer
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .status.executionPhase
+      name: Execution
+      type: string
+    - jsonPath: .spec.envelope.delegationDepth
+      name: Depth
+      type: integer
+    - jsonPath: .status.envelopeDigest
+      name: EnvelopeDigest
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: Auto-generated derived type for KarsTaskSpec via `CustomResource`
+        properties:
+          spec:
+            description: '`KarsTask.spec` — a governed unit of work plus its trust envelope.'
+            properties:
+              blueprint:
+                description: |-
+                  The **run blueprint** — the concrete, editable shape of the agent that
+                  will run this task: which harness, which model, the system prompt, the
+                  connected services (MCP) and tools it may use, the network destinations
+                  it may reach, and the sandbox isolation. This is the substance a human
+                  reviews and edits on the §20 launch package; every field here drives a
+                  real field on the materialized `InferencePolicy` / `KarsSandbox`. When a
+                  field is unset the controller falls back to a safe default.
+                nullable: true
+                properties:
+                  egress:
+                    description: |-
+                      Network destinations the mission may reach. Drives
+                      `KarsSandbox.spec.networkPolicy.allowedEndpoints`. When non-empty the
+                      sandbox runs in strict egress mode bounded to exactly these hosts.
+                    items:
+                      description: A network destination the mission may reach.
+                      properties:
+                        host:
+                          description: Hostname, e.g. `api.github.com`.
+                          type: string
+                        port:
+                          description: Optional TCP port (e.g. `443`); any port when omitted.
+                          format: uint16
+                          maximum: 65535.0
+                          minimum: 0.0
+                          nullable: true
+                          type: integer
+                      required:
+                      - host
+                      type: object
+                    type: array
+                  instructions:
+                    description: |-
+                      System prompt / standing instructions for the agent, in addition to the
+                      objective. Drives `KarsSandbox.spec.agent.instructions`.
+                    nullable: true
+                    type: string
+                  isolation:
+                    description: |-
+                      Sandbox isolation level (`standard`, `enhanced`, `confidential`). Drives
+                      `KarsSandbox.spec.sandbox.isolation`. Defaults to `standard`.
+                    nullable: true
+                    type: string
+                  mcpServers:
+                    description: |-
+                      Connected services (MCP server names, same namespace) the mission may
+                      use. Drives `KarsSandbox.spec.governance.mcpServerRefs`. Requires
+                      `toolPolicy` to be set (governed MCP access is bounded by the tool
+                      policy).
+                    items:
+                      type: string
+                    type: array
+                  memory:
+                    description: |-
+                      Shared team memory — the name of a same-namespace `KarsMemory` the agent
+                      reads/writes. Drives `KarsSandbox.spec.memoryRef`. This is how a
+                      persistent team shares knowledge across members and over time; a short
+                      one-off task usually leaves it unset.
+                    nullable: true
+                    type: string
+                  model:
+                    description: |-
+                      The model the agent reasons with. Drives
+                      `InferencePolicy.spec.modelPreference.primary`. Defaults from controller
+                      env when unset.
+                    nullable: true
+                    properties:
+                      deployment:
+                        description: Deployment / model name as the provider advertises it.
+                        type: string
+                      provider:
+                        description: |-
+                          Provider tag: `azure-openai`, `anthropic`, `gemini`, `bedrock`,
+                          `ollama`, `github-models`.
+                        type: string
+                    required:
+                    - deployment
+                    - provider
+                    type: object
+                  runtime:
+                    description: |-
+                      Harness/runtime the agent runs on (`OpenClaw`, `OpenAIAgents`, `MAF`,
+                      `Hermes`, `BYO`). Drives `KarsSandbox.spec.runtime.kind`. Defaults to
+                      `OpenClaw`.
+                    nullable: true
+                    type: string
+                  toolPolicy:
+                    description: |-
+                      Tools the agent may call, expressed as the name of an existing
+                      same-namespace `ToolPolicy`. Drives `KarsSandbox.spec.governance`
+                      (`enabled: true` + `toolPolicyRef`). Composing the existing `ToolPolicy`
+                      CRD keeps the AGT profile + `appliesTo` scope authoritative rather than
+                      duplicating an allow-list here. Required whenever `mcpServers` is set —
+                      governed MCP access is meaningless without a tool policy to bound it.
+                    nullable: true
+                    type: string
+                type: object
+              displayName:
+                description: Optional short label surfaced in CLI / UI listings.
+                nullable: true
+                type: string
+              envelope:
+                description: The trust envelope that governs this task and bounds any delegation.
+                properties:
+                  authorityCeiling:
+                    description: |-
+                      The maximum autonomy tier any *descendant* task may hold. Must be in
+                      `1..5` and `<= tier` — a task can never authorize a child to act with
+                      more authority than it holds itself.
+                    format: int32
+                    type: integer
+                  budget:
+                    description: Optional resource budget for the whole task subtree.
+                    nullable: true
+                    properties:
+                      tokens:
+                        description: |-
+                          Maximum total tokens the task subtree may consume. `0`/absent means
+                          "no token cap declared" (governance still applies at the router).
+                        format: int64
+                        nullable: true
+                        type: integer
+                      usdMicros:
+                        description: |-
+                          Maximum total spend in micro-USD (1e-6 USD) for the task subtree.
+                          Integer micro-USD avoids floating-point in an audit-bound field.
+                        format: int64
+                        nullable: true
+                        type: integer
+                    type: object
+                  delegationDepth:
+                    default: 0
+                    description: |-
+                      Remaining number of delegation hops this task may still spawn. A child
+                      task is minted with `delegationDepth = parent.delegationDepth - 1`;
+                      at `0` no further delegation is permitted. Must be `>= 0`.
+                    format: int32
+                    type: integer
+                  egressAllowlistRef:
+                    description: |-
+                      Optional reference to a same-namespace `EgressAllowlist`-style CR that
+                      bounds the network destinations this task (and its descendants) may
+                      reach through the inference router.
+                    nullable: true
+                    properties:
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                  tier:
+                    description: Autonomy tier (1..5). See the module docs for the taxonomy.
+                    format: int32
+                    type: integer
+                  toolPolicyRef:
+                    description: |-
+                      Optional reference to a same-namespace `ToolPolicy` CR that bounds
+                      which tools/MCP servers this task (and its descendants) may call.
+                    nullable: true
+                    properties:
+                      name:
+                        type: string
+                    required:
+                    - name
+                    type: object
+                required:
+                - authorityCeiling
+                - tier
+                type: object
+              execution:
+                description: |-
+                  Execution gate (plan §20). A task is *governed-but-idle* by default —
+                  validated and digested, but not running. Execution begins only on an
+                  explicit launch, mirroring the "review the package, then launch"
+                  principle: the human reviews the trust envelope, then opts in. When
+                  `execution.launch` is `true` and the envelope is valid, the controller
+                  materializes a governed `KarsSandbox` (the running agent) bounded by
+                  the envelope.
+                nullable: true
+                properties:
+                  launch:
+                    default: false
+                    description: |-
+                      When `true`, the controller materializes a governed `KarsSandbox` from
+                      this task. Defaults to `false` — review before launch.
+                    type: boolean
+                  runtime:
+                    description: |-
+                      Runtime to launch the agent on. Defaults to `OpenClaw`. Must match the
+                      controller's `RuntimeKind` enum. Superseded by `blueprint.runtime` when
+                      both are set.
+                    nullable: true
+                    type: string
+                type: object
+              objective:
+                description: |-
+                  Human-readable statement of the task to be performed. This is the
+                  instruction a task-giver writes; the agent fleet works to satisfy it.
+                type: string
+              parentRef:
+                description: |-
+                  Optional reference to a parent `KarsTask` in the **same namespace**.
+
+                  When set, this task is a *delegated child*: the controller verifies
+                  that this task's `envelope` is a strict subset of the parent's
+                  (capability-attenuating delegation — a child may narrow authority but
+                  never amplify it), and mints `status.lineage` from the parent's
+                  ancestry. A child whose envelope exceeds its parent on any axis is
+                  rejected as `Degraded` and never receives an envelope digest. This is
+                  the substrate enforcement of OWASP ASI-08 (cascading authority) — done
+                  by the controller, not asked of the model.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+            required:
+            - envelope
+            - objective
+            type: object
+            x-kubernetes-validations:
+            - message: spec.objective must be 1-4096 characters
+              reason: FieldValueInvalid
+              rule: size(self.objective) > 0 && size(self.objective) <= 4096
+            - message: spec.envelope.tier must be in 1..5
+              reason: FieldValueInvalid
+              rule: self.envelope.tier >= 1 && self.envelope.tier <= 5
+            - message: spec.envelope.authorityCeiling must be in 1..5
+              reason: FieldValueInvalid
+              rule: self.envelope.authorityCeiling >= 1 && self.envelope.authorityCeiling <= 5
+            - message: spec.envelope.authorityCeiling must be <= spec.envelope.tier (a task cannot grant a child more authority than it holds)
+              reason: FieldValueInvalid
+              rule: self.envelope.authorityCeiling <= self.envelope.tier
+            - message: spec.envelope.delegationDepth must be in 0..16
+              reason: FieldValueInvalid
+              rule: self.envelope.delegationDepth >= 0 && self.envelope.delegationDepth <= 16
+            - message: spec.envelope.budget.tokens, when set, must be >= 0
+              reason: FieldValueInvalid
+              rule: '!has(self.envelope.budget) || !has(self.envelope.budget.tokens) || self.envelope.budget.tokens >= 0'
+            - message: spec.envelope.budget.usdMicros, when set, must be >= 0
+              reason: FieldValueInvalid
+              rule: '!has(self.envelope.budget) || !has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros >= 0'
+            - message: spec.displayName, when set, must be 1-253 characters
+              reason: FieldValueInvalid
+              rule: '!has(self.displayName) || (size(self.displayName) > 0 && size(self.displayName) <= 253)'
+            - message: spec.blueprint.runtime must be one of OpenClaw, OpenAIAgents, MAF, MicrosoftAgentFramework, Hermes, BYO
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.runtime) || self.blueprint.runtime in [''OpenClaw'',''OpenAIAgents'',''MAF'',''MicrosoftAgentFramework'',''Hermes'',''BYO'']'
+            - message: spec.blueprint.isolation must be one of standard, enhanced, confidential
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.isolation) || self.blueprint.isolation in [''standard'',''enhanced'',''confidential'']'
+            - message: spec.blueprint.instructions, when set, must be <= 8192 characters
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.instructions) || size(self.blueprint.instructions) <= 8192'
+            - message: spec.blueprint.mcpServers may list at most 8 connected services
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.mcpServers) || size(self.blueprint.mcpServers) <= 8'
+            - message: spec.blueprint.mcpServers requires spec.blueprint.toolPolicy — governed MCP access must be bounded by a tool policy
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.mcpServers) || size(self.blueprint.mcpServers) == 0 || has(self.blueprint.toolPolicy)'
+            - message: spec.blueprint.egress may list at most 32 destinations
+              reason: FieldValueInvalid
+              rule: '!has(self.blueprint) || !has(self.blueprint.egress) || size(self.blueprint.egress) <= 32'
+          status:
+            description: '`KarsTask.status`.'
+            nullable: true
+            properties:
+              conditions:
+                description: |-
+                  Standard K8s conditions. `Ready` is set `True` once the envelope has
+                  been validated and its digest stamped.
+                items:
+                  description: Condition contains details for one aspect of the current state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: lastTransitionTime is the last time the condition transitioned from one status to another. This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: message is a human readable message indicating details about the transition. This may be an empty string.
+                      type: string
+                    observedGeneration:
+                      description: observedGeneration represents the .metadata.generation that the condition was set based upon. For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date with respect to the current state of the instance.
+                      format: int64
+                      type: integer
+                    reason:
+                      description: reason contains a programmatic identifier indicating the reason for the condition's last transition. Producers of specific condition types may define expected values and meanings for this field, and whether the values are considered a guaranteed API. The value should be a CamelCase string. This field may not be empty.
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                nullable: true
+                type: array
+              envelopeDigest:
+                description: |-
+                  `sha256:` digest of the validated trust envelope. Stable for a given
+                  envelope; recomputed whenever the spec changes.
+                nullable: true
+                type: string
+              executionDetail:
+                description: |-
+                  Human-readable detail about the execution state — surfaced verbatim in
+                  the product so a user understands *why* (e.g. the kind/Foundry caveat).
+                nullable: true
+                type: string
+              executionPhase:
+                description: |-
+                  Execution phase (the §20 launch lifecycle), distinct from the
+                  governance `phase`:
+                  - `Idle` — governed but not launched (the default).
+                  - `Launching` — a `KarsSandbox` has been materialized; awaiting it.
+                  - `Running` — the sandbox reports Running.
+                  - `Degraded` — the sandbox degraded (e.g. no inference endpoint).
+                nullable: true
+                type: string
+              lineage:
+                description: |-
+                  Ancestry of this task, oldest-first: the chain of parent task names
+                  from the root delegation down to (but excluding) this task. Empty for
+                  a root task. Populated by the delegation minting path (next slice).
+                items:
+                  type: string
+                type: array
+              observedGeneration:
+                description: |-
+                  The `.metadata.generation` most recently reconciled, so clients can
+                  tell whether `status` reflects the current `spec`.
+                format: int64
+                nullable: true
+                type: integer
+              phase:
+                description: 'One of: `Pending`, `Ready`, `Degraded`.'
+                nullable: true
+                type: string
+              sandboxRef:
+                description: Name of the `KarsSandbox` materialized for this task, when launched.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+            type: object
+        required:
+        - spec
+        title: KarsTask
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}
+

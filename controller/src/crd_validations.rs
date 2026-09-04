@@ -51,9 +51,12 @@ use kube::CustomResourceExt;
 use crate::a2a_agent::A2AAgent;
 use crate::egress_approval::EgressApproval;
 use crate::inference_policy::InferencePolicy;
+use crate::kars_approval::KarsApproval;
 use crate::kars_eval::KarsEval;
 use crate::kars_memory::KarsMemory;
+use crate::kars_receipt::KarsReceipt;
 use crate::kars_sre_action::KarsSREAction;
+use crate::kars_task::KarsTask;
 use crate::mcp_server::McpServer;
 use crate::tool_policy::ToolPolicy;
 
@@ -505,6 +508,163 @@ pub fn kars_eval_validations() -> Vec<ValidationRule> {
 pub fn kars_eval_crd() -> CustomResourceDefinition {
     inject_spec_validations(KarsEval::crd(), kars_eval_validations())
         .expect("kube-rs derive must produce a spec property on KarsEval")
+}
+
+/// `KarsTask.spec` CEL rules — enforce the trust-envelope invariants at
+/// admission time, before the reconciler ever sees the CR. These are the
+/// substrate guarantees that capability-attenuating delegation builds on.
+#[must_use]
+pub fn kars_task_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.objective) > 0 && size(self.objective) <= 4096".into(),
+            message: Some("spec.objective must be 1-4096 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.envelope.tier >= 1 && self.envelope.tier <= 5".into(),
+            message: Some("spec.envelope.tier must be in 1..5".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.envelope.authorityCeiling >= 1 && self.envelope.authorityCeiling <= 5".into(),
+            message: Some("spec.envelope.authorityCeiling must be in 1..5".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            // A task can never authorize a descendant to act with more
+            // authority than it holds itself. This is the load-bearing
+            // anti-amplification rule.
+            rule: "self.envelope.authorityCeiling <= self.envelope.tier".into(),
+            message: Some(
+                "spec.envelope.authorityCeiling must be <= spec.envelope.tier (a task cannot grant a child more authority than it holds)".into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "self.envelope.delegationDepth >= 0 && self.envelope.delegationDepth <= 16".into(),
+            message: Some("spec.envelope.delegationDepth must be in 0..16".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.envelope.budget) || !has(self.envelope.budget.tokens) || self.envelope.budget.tokens >= 0".into(),
+            message: Some("spec.envelope.budget.tokens, when set, must be >= 0".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.envelope.budget) || !has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros >= 0".into(),
+            message: Some("spec.envelope.budget.usdMicros, when set, must be >= 0".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.displayName) || (size(self.displayName) > 0 && size(self.displayName) <= 253)".into(),
+            message: Some("spec.displayName, when set, must be 1-253 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.runtime) || self.blueprint.runtime in ['OpenClaw','OpenAIAgents','MAF','MicrosoftAgentFramework','Hermes','BYO']".into(),
+            message: Some("spec.blueprint.runtime must be one of OpenClaw, OpenAIAgents, MAF, MicrosoftAgentFramework, Hermes, BYO".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.isolation) || self.blueprint.isolation in ['standard','enhanced','confidential']".into(),
+            message: Some("spec.blueprint.isolation must be one of standard, enhanced, confidential".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.instructions) || size(self.blueprint.instructions) <= 8192".into(),
+            message: Some("spec.blueprint.instructions, when set, must be <= 8192 characters".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.mcpServers) || size(self.blueprint.mcpServers) <= 8".into(),
+            message: Some("spec.blueprint.mcpServers may list at most 8 connected services".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.mcpServers) || size(self.blueprint.mcpServers) == 0 || has(self.blueprint.toolPolicy)".into(),
+            message: Some("spec.blueprint.mcpServers requires spec.blueprint.toolPolicy — governed MCP access must be bounded by a tool policy".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.blueprint) || !has(self.blueprint.egress) || size(self.blueprint.egress) <= 32".into(),
+            message: Some("spec.blueprint.egress may list at most 32 destinations".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `KarsTask` CRD with [`kars_task_validations`] injected.
+///
+/// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
+#[must_use]
+pub fn kars_task_crd() -> CustomResourceDefinition {
+    inject_spec_validations(KarsTask::crd(), kars_task_validations())
+        .expect("kube-rs derive must produce a spec property on KarsTask")
+}
+
+#[must_use]
+pub fn kars_receipt_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.claims) > 0".into(),
+            message: Some("spec.claims must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.envelopeDigest) > 0".into(),
+            message: Some("spec.envelopeDigest must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `KarsReceipt` CRD with basic malformed-object rejection.
+#[must_use]
+pub fn kars_receipt_crd() -> CustomResourceDefinition {
+    inject_spec_validations(KarsReceipt::crd(), kars_receipt_validations())
+        .expect("kube-rs derive must produce a spec property on KarsReceipt")
+}
+
+#[must_use]
+pub fn kars_approval_validations() -> Vec<ValidationRule> {
+    vec![
+        ValidationRule {
+            rule: "size(self.action.kind) > 0".into(),
+            message: Some("spec.action.kind must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "size(self.taskRef.name) > 0".into(),
+            message: Some("spec.taskRef.name must be non-empty".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+    ]
+}
+
+/// `KarsApproval` CRD with immutable request-shape validation.
+#[must_use]
+pub fn kars_approval_crd() -> CustomResourceDefinition {
+    inject_spec_validations(KarsApproval::crd(), kars_approval_validations())
+        .expect("kube-rs derive must produce a spec property on KarsApproval")
 }
 
 /// `TrustGraph.spec` CEL rules. Phase F1.

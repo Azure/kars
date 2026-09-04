@@ -30,6 +30,8 @@ import { pairCommand } from "./commands/pair.js";
 import { convertCommand } from "./commands/convert.js";
 import { a2aCommand, a2aAgentCommand } from "./commands/a2a.js";
 import { attestCommand } from "./commands/attest.js";
+import { receiptCommand } from "./commands/receipt.js";
+import { approvalCommand } from "./commands/approval.js";
 import { migrateCommand } from "./commands/migrate.js";
 import { toolPolicyCommand } from "./commands/toolpolicy.js";
 import { inferencePolicyCommand } from "./commands/inferencepolicy.js";
@@ -100,9 +102,13 @@ export function createCli(): Command {
 
   // Attestation
   program.addCommand(attestCommand());
+  program.addCommand(receiptCommand());
 
   // Self-management
   program.addCommand(updateCommand());
+
+  // Steering
+  program.addCommand(approvalCommand());
 
   program.addHelpText("after", `
 Command groups:
@@ -113,8 +119,9 @@ Command groups:
   Agent mobility  handoff, mesh, pair
   Interop         convert, a2a, a2a-agent, migrate
   Governance      toolpolicy, inferencepolicy, mcp, memory
-  Attestation     attest
+  Attestation     attest, receipt
   Self            update
+  Steering        approval
 
 Quick start:
   kars up                    # Provision Azure + deploy controller + first sandbox
