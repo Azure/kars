@@ -185,8 +185,32 @@ On first launch you pick an inference provider — **GitHub Copilot** is easiest
 (one device-code login, no Azure account). The CLI on npm is **build-provenance
 attested** (SLSA) — verify with `npm audit signatures` after install.
 
-When you're ready for a managed cluster, `kars up` provisions AKS (see
-[Getting started → Deploy to AKS](docs/getting-started.md#step-2--deploy-to-aks)).
+When you're ready for a managed cluster, either let `kars up` provision the
+complete Azure stack, or install the Helm chart into infrastructure you already
+operate. See [Deploy to AKS](docs/getting-started.md#step-2--deploy-to-aks) and
+[Install with Helm](docs/how-to/helm-installation.md).
+
+For an existing AKS cluster:
+
+```bash
+helm upgrade --install kars deploy/helm/kars \
+  --namespace kars-system \
+  --create-namespace \
+  --values my-aks-values.yaml
+
+kars config adopt-aks \
+  --subscription <subscription-id> \
+  --region <region> \
+  --resource-group <resource-group> \
+  --cluster <aks-name> \
+  --acr-login-server <registry>.azurecr.io \
+  --context <kube-context>
+```
+
+Helm installs the Kars CRDs and controller. The adoption command verifies the
+installation and records its existing Azure metadata for `kars upgrade`,
+`push`, mesh lifecycle, and advanced `add` flows; it does not provision or
+change infrastructure.
 
 <details>
 <summary>Other ways to install</summary>
