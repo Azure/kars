@@ -59,3 +59,7 @@ For an existing AKS cluster, run `kars config adopt-aks` after Helm installation
 to write the local deployment context used by `kars upgrade`, `kars push`, and
 mesh lifecycle commands. Kubernetes-only commands already use the selected
 kube context directly.
+
+Start from `values-existing-aks.yaml`; it mirrors the Helm values written by
+`kars up` after provisioning and marks every customer-specific value with
+`REPLACE_ME`.
