@@ -359,6 +359,9 @@ start with `values-generic.yaml`. See the
 [Helm installation guide](how-to/helm-installation.md).
 
 ```bash
+cp deploy/helm/kars/values-existing-aks.yaml my-aks-values.yaml
+# Replace every REPLACE_ME value.
+
 helm upgrade --install kars deploy/helm/kars \
   --namespace kars-system \
   --create-namespace \
