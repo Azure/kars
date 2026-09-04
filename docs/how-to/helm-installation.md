@@ -29,8 +29,10 @@ helm upgrade --install kars deploy/helm/kars \
 The generic overlay leaves AKS defaults untouched. It disables Azure identity
 metadata, uses RuntimeDefault seccomp, and schedules sandboxes with the
 portable `kubernetes.io/os=linux` selector. Supply pullable images, inference
-authentication, AGT relay/registry endpoints, a NetworkPolicy-capable CNI, and
-any environment-specific integrations.
+authentication, a NetworkPolicy-capable CNI, and any environment-specific
+integrations. The profile deploys the Microsoft AGT AgentMesh relay and
+registry; set `agentMesh.enabled=false` only when those services are managed
+externally.
 
 ## Existing AKS
 
@@ -46,3 +48,6 @@ helm upgrade --install kars deploy/helm/kars \
 
 The CLI remains optional. After Helm installation, Kars resources can be
 submitted directly with `kubectl apply`.
+
+All Kars CRDs are rendered by the chart and installed by Helm before the
+controller begins reconciling custom resources.

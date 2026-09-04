@@ -1,0 +1,143 @@
+{{- if .Values.agentMesh.enabled }}
+{{- if .Values.agentMesh.createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ .Values.agentMesh.namespace }}
+  labels:
+    app.kubernetes.io/name: agentmesh
+    app.kubernetes.io/part-of: kars
+    kars.azure.com/mesh-provider: agt
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: {{ .Values.agentMesh.namespace }}
+  labels:
+    app.kubernetes.io/name: agentmesh-registry
+    app.kubernetes.io/part-of: kars
+spec:
+  replicas: {{ .Values.agentMesh.registry.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentmesh-registry
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentmesh-registry
+        app.kubernetes.io/part-of: kars
+        kars.azure.com/mesh-provider: agt
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: registry
+          image: "{{ .Values.agentMesh.registry.image.repository }}:{{ .Values.agentMesh.registry.image.tag }}"
+          imagePullPolicy: {{ .Values.agentMesh.registry.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8082
+          env:
+            - { name: HOST, value: "0.0.0.0" }
+            - { name: PORT, value: "8082" }
+            - { name: LOG_LEVEL, value: "info" }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentmesh-registry
+  namespace: {{ .Values.agentMesh.namespace }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentmesh-registry
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: {{ .Values.agentMesh.namespace }}
+  labels:
+    app.kubernetes.io/name: agentmesh-relay
+    app.kubernetes.io/part-of: kars
+spec:
+  replicas: {{ .Values.agentMesh.relay.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: agentmesh-relay
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: agentmesh-relay
+        app.kubernetes.io/part-of: kars
+        kars.azure.com/mesh-provider: agt
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          image: "{{ .Values.agentMesh.relay.image.repository }}:{{ .Values.agentMesh.relay.image.tag }}"
+          imagePullPolicy: {{ .Values.agentMesh.relay.image.pullPolicy }}
+          ports:
+            - name: websocket
+              containerPort: 8083
+          env:
+            - { name: HOST, value: "0.0.0.0" }
+            - { name: PORT, value: "8083" }
+            - { name: LOG_LEVEL, value: "info" }
+            - name: REGISTRY_URL
+              value: "http://agentmesh-registry.{{ .Values.agentMesh.namespace }}.svc.cluster.local:8080"
+            - { name: REQUIRE_REGISTRATION, value: "true" }
+          readinessProbe:
+            httpGet: { path: /health, port: websocket }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: websocket }
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentmesh-relay
+  namespace: {{ .Values.agentMesh.namespace }}
+spec:
+  selector:
+    app.kubernetes.io/name: agentmesh-relay
+  ports:
+    - name: websocket
+      port: 8765
+      targetPort: websocket
+{{- end }}

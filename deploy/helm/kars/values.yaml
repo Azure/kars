@@ -51,6 +51,27 @@ inferenceRouter:
     promptShields:
       enabled: true
 
+# Microsoft AGT AgentMesh relay + registry.
+#
+# Disabled by default because existing `kars up` and `kars dev` flows deploy
+# AgentMesh separately. Enable this for a self-contained Helm installation.
+agentMesh:
+  enabled: false
+  namespace: agentmesh
+  createNamespace: true
+  registry:
+    replicas: 1
+    image:
+      repository: ghcr.io/azure/kars-agentmesh-registry
+      tag: "latest"
+      pullPolicy: Always
+  relay:
+    replicas: 1
+    image:
+      repository: ghcr.io/azure/kars-agentmesh-relay
+      tag: "latest"
+      pullPolicy: Always
+
 # Default sandbox configuration
 sandbox:
   image:
