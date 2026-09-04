@@ -54,6 +54,22 @@ Vault, kubelet IMDS identity, federated-credential metadata, AgentMesh, and the
 release stamp. The referenced Azure resources and role assignments must already
 exist.
 
+Before installation, import every image referenced by the template into the
+selected ACR and grant the AKS kubelet identity `AcrPull`. The public source
+images and exact names are listed in the release notes; use the same release
+tag for every component, then set `karsRelease` to that tag. Mixing tags can
+create controller/router/runtime protocol drift.
+
+The minimum Azure-side prerequisites are:
+
+- AKS with OIDC issuer and Workload Identity enabled;
+- ACR containing the Kars controller, router, sandbox, runtime, and any
+  privately mirrored AgentMesh images referenced by your values;
+- a federated controller managed identity and its client ID;
+- Foundry/Azure OpenAI data-plane access for the identities used by the router;
+- Key Vault/CSI permissions when `azure.keyVaultCsi.enabled=true`;
+- NetworkPolicy-capable networking and nodes matching `sandbox.nodeSelector`.
+
 The CLI remains optional. After Helm installation, Kars resources can be
 submitted directly with `kubectl apply`.
 
