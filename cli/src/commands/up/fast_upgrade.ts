@@ -13,6 +13,7 @@ import { loadContext } from "../../config.js";
 import { requireBundledAsset } from "../../lib/repo-assets.js";
 import { cliReleaseTag } from "../../lib/version.js";
 import { rolloutRestartAll } from "../upgrade.js";
+import { inspectNamespaceOwnership } from "../../lib/namespace-ownership.js";
 
 export interface UpOptionsForUpgrade {
   upgrade?: boolean;
@@ -36,6 +37,7 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
         let spin = ora("Connecting to AKS...").start();
         await execa("az", ["aks", "get-credentials", "--name", ctx.aksCluster, "--resource-group", ctx.resourceGroup, "--overwrite-existing"], { stdio: "pipe" });
         spin.succeed("AKS connected");
+        for (const result of await inspectNamespaceOwnership(execa)) console.log(result);
 
         // Resolve the Helm chart from a repo checkout OR the bundled package
         // copy (so `kars up --upgrade` works with no source tree).
