@@ -101,6 +101,16 @@ describe("npm audit gate", () => {
     expect(result.stdout).toContain("1 blocking");
   });
 
+  it.each(["info", "low", "moderate", "high", "critical"])(
+    "handles standard npm bulk %s records whose package name is only in the map key",
+    (severity) => {
+      const result = audit([{ body: { example: [{ ...advisory, name: undefined, severity }] } }]);
+      expect(result.status).toBe(["high", "critical"].includes(severity) ? 1 : 0);
+      expect(result.stdout).toContain(`${severity}: example`);
+      expect(result.stderr).not.toContain("Invalid npm advisory");
+    },
+  );
+
   it.each(["info", "low", "moderate"])("reports nonblocking %s advisories", (severity) => {
     const result = audit([{ body: { example: [{ ...advisory, severity }] } }]);
     expect(result.status).toBe(0);
@@ -112,6 +122,7 @@ describe("npm audit gate", () => {
     { example: advisory }, { example: [null] },
     { example: [{ ...advisory, severity: "unknown" }] },
     { example: [{ ...advisory, name: "another-package" }] },
+    { example: [{ ...advisory, name: null }] },
     { example: [{ ...advisory, id: undefined }] },
     { example: [{ ...advisory, vulnerable_versions: "" }] },
     { unknown: [] },
