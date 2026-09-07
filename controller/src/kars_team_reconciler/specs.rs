@@ -7,6 +7,9 @@ use crate::kars_task::{KarsTaskSpec, TaskBlueprint, TaskEnvelope, TaskExecution}
 use crate::kars_team::{KarsTeam, TeamRole};
 use crate::mcp_server::LocalObjectRef;
 
+/// Matches the existing KarsTask objective CEL rule; covered by a drift test.
+pub(crate) const MAX_OBJECTIVE_CHARS: usize = 4096;
+
 /// The foundation cannot enforce durable total/subtree or monetary budgets.
 /// Finite budgets are valid plans, but must never become running tasks.
 pub(crate) fn has_positive_budget(envelope: &TaskEnvelope) -> bool {
@@ -71,14 +74,34 @@ pub(crate) fn member_spec(team: &KarsTeam, role: &TeamRole) -> KarsTaskSpec {
     }
 }
 
-pub(crate) fn run_spec(team: &KarsTeam, knowledge: &str) -> KarsTaskSpec {
-    KarsTaskSpec {
-        objective: format!(
-            "Standing-operation run for team '{}'. Charter: {}{}",
-            display_name(team),
-            team.spec.charter,
-            knowledge,
-        ),
+fn run_objective_prefix(team: &KarsTeam) -> String {
+    format!(
+        "Standing-operation run for team '{}'. Charter: {}",
+        display_name(team),
+        team.spec.charter,
+    )
+}
+
+pub(crate) fn run_knowledge_budget(team: &KarsTeam) -> Result<usize, String> {
+    let fixed_chars = run_objective_prefix(team).chars().count();
+    MAX_OBJECTIVE_CHARS.checked_sub(fixed_chars).ok_or_else(|| {
+        format!(
+            "cadence objective fixed prefix (team identity and charter) is {fixed_chars} characters, exceeding the KarsTask limit of {MAX_OBJECTIVE_CHARS}; shorten the charter or team display name"
+        )
+    })
+}
+
+pub(crate) fn run_spec(team: &KarsTeam, knowledge: &str) -> Result<KarsTaskSpec, String> {
+    let remaining = run_knowledge_budget(team)?;
+    if knowledge.chars().count() > remaining {
+        return Err(format!(
+            "cadence history exceeds the remaining objective allowance of {remaining} characters; refusing to truncate JSON references or the charter"
+        ));
+    }
+    let mut objective = run_objective_prefix(team);
+    objective.push_str(knowledge);
+    Ok(KarsTaskSpec {
+        objective,
         envelope: default_member_envelope(&team.spec.envelope),
         parent_ref: Some(LocalObjectRef {
             name: principal_name(team),
@@ -89,7 +112,7 @@ pub(crate) fn run_spec(team: &KarsTeam, knowledge: &str) -> KarsTaskSpec {
         }),
         blueprint: team.spec.blueprint.clone(),
         display_name: Some(format!("{} — standing run", display_name(team))),
-    }
+    })
 }
 
 fn display_name(team: &KarsTeam) -> String {

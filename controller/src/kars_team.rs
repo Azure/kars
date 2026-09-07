@@ -335,13 +335,17 @@ impl KarsTeam {
                 errs.push("cadence.digestEveryMinutes must be >= 1".into());
             }
             if c.every_minutes.is_some() {
-                let child = specs::run_spec(self, "");
-                errs.extend(specs::envelope_errors(&child.envelope));
-                errs.extend(
-                    spec_attenuation_violations(&child, &principal)
-                        .iter()
-                        .map(|e| format!("cadence task: {e}")),
-                );
+                match specs::run_spec(self, "") {
+                    Ok(child) => {
+                        errs.extend(specs::envelope_errors(&child.envelope));
+                        errs.extend(
+                            spec_attenuation_violations(&child, &principal)
+                                .iter()
+                                .map(|e| format!("cadence task: {e}")),
+                        );
+                    }
+                    Err(error) => errs.push(error),
+                }
             }
         }
         if self

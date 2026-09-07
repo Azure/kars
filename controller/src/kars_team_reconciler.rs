@@ -224,12 +224,13 @@ async fn reconcile_valid(
         let due = previous.is_none_or(|previous| now >= previous + interval);
         if !team.spec.paused && !bounded_plan && due && stats.active < MAX_CONCURRENT_RUNS {
             let name = runs::cadence_name(team)?;
-            let knowledge = crate::team_commons::prior_knowledge(client, team).await?;
+            let allowance = specs::run_knowledge_budget(team).map_err(ReconcileError::Invalid)?;
+            let knowledge = crate::team_commons::prior_knowledge(client, team, allowance).await?;
             let task = tasks::apply_task(
                 tasks_api,
                 team,
                 &name,
-                specs::run_spec(team, &knowledge),
+                specs::run_spec(team, &knowledge).map_err(ReconcileError::Invalid)?,
                 "taskforce",
             )
             .await?;
