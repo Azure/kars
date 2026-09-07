@@ -25,7 +25,7 @@ fn inherited_fallbacks_reach_principal_member_and_run_authority_without_weakenin
         ..Default::default()
     });
     assert!(
-        crate::kars_task::validate_execution_contract(&specs::run_spec(&team, ""))
+        crate::kars_task::validate_execution_contract(&specs::run_spec(&team, "").unwrap())
             .unwrap_err()
             .contains("UnsupportedLaunchBudget")
     );
@@ -37,7 +37,7 @@ fn inherited_fallbacks_reach_principal_member_and_run_authority_without_weakenin
     for spec in [
         specs::principal_spec(&team),
         specs::member_spec(&team, &role),
-        specs::run_spec(&team, ""),
+        specs::run_spec(&team, "").unwrap(),
     ] {
         let effective =
             crate::kars_task::blueprint::effective_blueprint_with_model(&spec, &primary);
