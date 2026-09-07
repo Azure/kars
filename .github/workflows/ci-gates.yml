@@ -2,7 +2,7 @@ name: ci-gates
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, 'public/pr*']
   push:
     branches: [main]
 
