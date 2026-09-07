@@ -86,6 +86,16 @@ failure now stops the harness instead of producing cascading secondary failures.
 Fifteen targeted schema/Helm tests, typecheck, scoped lint, Helm lint and shell
 syntax pass locally; the repaired head still requires real API-server execution.
 
+The next hosted run at `693a46ca` installed the CRD and passed the intended
+overlay admission rejection. The real BYO consumer then passed initial
+delivery, rotation with key removal, source-deletion revocation without legacy
+fallback, and explicit opt-out. Sandbox namespace cleanup also completed.
+The run subsequently hit its job deadline while deleting the InferencePolicy
+fixture; full lifecycle cleanup is therefore not qualified. The fixture now
+bounds that deletion to 90 seconds and captures policy/ConfigMap/controller
+diagnostics on failure rather than hanging until the job cancels. This is a
+diagnostic change, not a claimed repair of the underlying cleanup failure.
+
 Diff-based publication gates still run on the parent's eventual atomic commit;
 the candidate was intentionally not committed or pushed here. No live
 Kubernetes admission or customer rollout was executed. Real-cluster

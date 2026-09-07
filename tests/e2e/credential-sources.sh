@@ -4,6 +4,21 @@
 
 # Uses only the existing disposable Kind cluster and its loaded BYO test image.
 # The consumer emits fixed markers, never environment values.
+cleanup_credential_source_policy() {
+    local k=(kubectl --context kind-kars-e2e)
+    if ! "${k[@]}" delete inferencepolicy e2e-source-inference -n kars-system \
+        --timeout=90s --request-timeout=20s >/dev/null; then
+        fail "Credential-source InferencePolicy cleanup did not complete within 90s"
+        "${k[@]}" get inferencepolicy e2e-source-inference -n kars-system \
+            --request-timeout=20s -o yaml || true
+        "${k[@]}" get configmap inferencepolicy-e2e-source-inference-profile -n kars-system \
+            --request-timeout=20s -o go-template='{{.metadata}}{{"\n"}}' || true
+        "${k[@]}" logs -n kars-system -l app.kubernetes.io/component=controller \
+            --tail=1000 --since=5m --request-timeout=20s || true
+        return 1
+    fi
+}
+
 wait_for_credential_consumer() {
     local marker="$1" deadline=$(($(date +%s) + 150)) pod namespace
     local k=(kubectl --context kind-kars-e2e)
@@ -197,7 +212,7 @@ YAML
 
     "${k[@]}" delete karssandbox e2e-source -n kars-system --wait=false >/dev/null || return 1
     "${k[@]}" wait --for=delete namespace/kars-e2e-source --timeout=120s || return 1
-    "${k[@]}" delete inferencepolicy e2e-source-inference -n kars-system >/dev/null || return 1
+    cleanup_credential_source_policy || return 1
     if [ "$("${k[@]}" get namespace kars-system -o jsonpath='{.metadata.uid}')" != "$namespace_uid" ]; then
         fail "Credential-source cleanup changed the core namespace"; return 1
     fi
