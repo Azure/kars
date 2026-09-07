@@ -239,7 +239,7 @@ admission:
     # Requires Kubernetes >= 1.30 (VAP GA).
     enabled: true
   taskNamespaceFloor:
-    # Missing sections/flags remain enabled on --reuse-values upgrades.
+    # Missing/null sections and flags remain enabled on --reuse-values upgrades.
     # Deploy ValidatingAdmissionPolicy that enforces the CREATE-time
     # completeness floor (design note §24b) on pods in sandbox / task
     # namespaces (kars.azure.com/isolated=strict): deny hostNetwork /
