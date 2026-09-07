@@ -364,9 +364,12 @@ fn prepare_entry_update(
 }
 
 /// Build the **prior-knowledge** preamble injected into the next run objective —
-/// the read path that makes the commons functional memory. Returns an empty
-/// string when the commons has no entries (a cold team starts honestly).
-pub async fn prior_knowledge(client: &Client, team: &KarsTeam) -> Result<String> {
+/// the read path that makes the commons functional memory. `max_chars` is the
+/// remaining objective allowance after its fixed prefix and charter. Includes
+/// only complete JSON entries plus their complete untrusted-data framing.
+/// An empty store or insufficient allowance returns no history, but ownership
+/// and full store integrity are still verified even with a zero allowance.
+pub async fn prior_knowledge(client: &Client, team: &KarsTeam, max_chars: usize) -> Result<String> {
     let identity = CommonsIdentity::for_team(team)?;
     let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &identity.namespace);
     let cm = cms
@@ -375,7 +378,7 @@ pub async fn prior_knowledge(client: &Client, team: &KarsTeam) -> Result<String>
         .context("get commons prior knowledge")?;
     identity.validate(&cm)?;
     let index = read_index(&cm)?;
-    prompt::prior_knowledge(&cm, &index)
+    prompt::prior_knowledge(&cm, &index, max_chars)
 }
 
 /// Number of entries currently in a team's commons (shared-memory size).
