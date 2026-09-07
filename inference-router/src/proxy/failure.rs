@@ -82,18 +82,62 @@ impl ForwardFailure {
     }
 }
 
-pub fn retryable_transport(error: &anyhow::Error) -> bool {
+pub fn retryable_rejection(status: StatusCode) -> bool {
+    status == StatusCode::TOO_MANY_REQUESTS || status.is_server_error()
+}
+
+pub fn retryable_failure(error: &anyhow::Error) -> bool {
     error
         .downcast_ref::<ForwardFailure>()
-        .is_some_and(|failure| {
-            failure.category == FailureCategory::Transport
-                && failure.acceptance == Acceptance::NotAccepted
+        .is_some_and(|failure| match (failure.category, failure.acceptance) {
+            (FailureCategory::Transport, Acceptance::NotAccepted) => true,
+            (FailureCategory::ResponseBody, Acceptance::Rejected(status)) => {
+                retryable_rejection(status)
+            }
+            _ => false,
         })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn body_failures_retry_only_known_retryable_rejections() {
+        for code in [
+            200, 201, 204, 400, 401, 403, 404, 422, 429, 500, 502, 503, 504, 599,
+        ] {
+            let status = StatusCode::from_u16(code).unwrap();
+            let acceptance = if status.is_success() {
+                Acceptance::Accepted(status)
+            } else {
+                Acceptance::Rejected(status)
+            };
+            let error: anyhow::Error = ForwardFailure {
+                category: FailureCategory::ResponseBody,
+                acceptance,
+                source: anyhow::anyhow!("truncated body after headers"),
+            }
+            .into();
+            assert_eq!(
+                retryable_failure(&error),
+                code == 429 || code >= 500,
+                "{code}"
+            );
+        }
+        for category in [
+            FailureCategory::Authentication,
+            FailureCategory::Configuration,
+        ] {
+            let error: anyhow::Error = ForwardFailure {
+                category,
+                acceptance: Acceptance::Rejected(StatusCode::SERVICE_UNAVAILABLE),
+                source: anyhow::anyhow!("not an inference rejection"),
+            }
+            .into();
+            assert!(!retryable_failure(&error));
+        }
+    }
 
     #[test]
     fn unknown_auth_config_and_accepted_body_errors_cannot_trigger_failover() {
@@ -114,7 +158,7 @@ mod tests {
             }
             .into(),
         ] {
-            assert!(!retryable_transport(&error));
+            assert!(!retryable_failure(&error));
         }
     }
 }
