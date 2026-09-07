@@ -96,6 +96,18 @@ bounds that deletion to 90 seconds and captures policy/ConfigMap/controller
 diagnostics on failure rather than hanging until the job cancels. This is a
 diagnostic change, not a claimed repair of the underlying cleanup failure.
 
+The bounded follow-up at `d444656b` identified the cleanup cause: the
+InferencePolicy reconciler sent a partial server-side-apply finalizer payload
+without `metadata.name`, which the API server rejected with HTTP 400 after the
+profile ConfigMap had already been deleted. The same error affected SRE's
+inference policy. The repair uses complete name/namespace/UID/resourceVersion
+metadata in merge patches for finalizer registration and removal, preserving
+unrelated finalizers. Profile cleanup errors other than 404 now propagate before
+the cleanup finalizer can be released. No force apply or finalizer bypass is
+used. Fourteen focused reconciler tests, including HTTP request shape,
+cleanup ordering and API/CAS error cases, and strict controller all-target
+Clippy pass. Real Kind cleanup and independent repair review remain pending.
+
 Diff-based publication gates still run on the parent's eventual atomic commit;
 the candidate was intentionally not committed or pushed here. No live
 Kubernetes admission or customer rollout was executed. Real-cluster

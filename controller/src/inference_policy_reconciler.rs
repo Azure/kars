@@ -86,6 +86,8 @@ enum ReconcileError {
     Kube(#[from] kube::Error),
     #[error("JSON serialization error: {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("InferencePolicy metadata is missing {0}")]
+    MissingIdentity(&'static str),
 }
 
 impl ReconcileError {
@@ -95,6 +97,7 @@ impl ReconcileError {
         match self {
             ReconcileError::Kube(_) => "kube_api",
             ReconcileError::SerdeJson(_) => "serde",
+            ReconcileError::MissingIdentity(_) => "identity",
         }
     }
 }
@@ -124,13 +127,9 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
         .map(|f| f.iter().any(|s| s == FINALIZER))
         .unwrap_or(false)
     {
-        let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"InferencePolicy","metadata":{"finalizers":[FINALIZER]}});
-        api.patch(
-            &name,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(patch),
-        )
-        .await?;
+        let mut finalizers = policy.metadata.finalizers.clone().unwrap_or_default();
+        finalizers.push(FINALIZER.into());
+        patch_finalizers(&api, &policy, finalizers).await?;
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
 
@@ -766,6 +765,38 @@ async fn ensure_profile_configmap(
     Ok(())
 }
 
+async fn patch_finalizers(
+    api: &Api<InferencePolicy>,
+    policy: &InferencePolicy,
+    finalizers: Vec<String>,
+) -> Result<(), ReconcileError> {
+    let required = |value: Option<&str>, field| {
+        value
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .ok_or(ReconcileError::MissingIdentity(field))
+    };
+    let name = required(policy.metadata.name.as_deref(), "name")?;
+    let namespace = required(policy.metadata.namespace.as_deref(), "namespace")?;
+    let uid = required(policy.metadata.uid.as_deref(), "UID")?;
+    let resource_version = required(
+        policy.metadata.resource_version.as_deref(),
+        "resourceVersion",
+    )?;
+    // Finalizers are metadata, not an apply-owned partial policy. Fence the
+    // update so a stale watch event cannot remove another writer's finalizers.
+    api.patch(
+        &name,
+        &PatchParams::default(),
+        &Patch::Merge(json!({"metadata": {
+            "name": name, "namespace": namespace, "uid": uid,
+            "resourceVersion": resource_version, "finalizers": finalizers
+        }})),
+    )
+    .await?;
+    Ok(())
+}
+
 async fn finalize(
     api: &Api<InferencePolicy>,
     configmaps: &Api<ConfigMap>,
@@ -773,7 +804,7 @@ async fn finalize(
     name: &str,
 ) -> Result<Action, ReconcileError> {
     let cm_name = format!("inferencepolicy-{name}-profile");
-    let _ = configmaps
+    configmaps
         .delete(&cm_name, &Default::default())
         .await
         .map(|_| ())
@@ -783,7 +814,7 @@ async fn finalize(
             } else {
                 Err(e)
             }
-        });
+        })?;
 
     let finalizers: Vec<String> = policy
         .metadata
@@ -791,13 +822,7 @@ async fn finalize(
         .as_ref()
         .map(|v| v.iter().filter(|f| *f != FINALIZER).cloned().collect())
         .unwrap_or_default();
-    let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"InferencePolicy","metadata":{"finalizers": finalizers}});
-    api.patch(
-        name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(patch),
-    )
-    .await?;
+    patch_finalizers(api, policy, finalizers).await?;
     tracing::info!(inferencepolicy = %name, "InferencePolicyDeleted");
     Ok(Action::await_change())
 }
@@ -877,6 +902,10 @@ pub async fn run(client: Client) -> Result<()> {
         .await;
     Ok(())
 }
+
+#[cfg(test)]
+#[path = "inference_policy_finalizer_tests.rs"]
+mod finalizer_tests;
 
 #[cfg(test)]
 mod tests {
