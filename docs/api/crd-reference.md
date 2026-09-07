@@ -54,6 +54,11 @@ envelope lattice identifier. `KarsTask::envelope_digest()` (or
 reference and full effective blueprint with a versioned domain and full SHA-256.
 Canonical JSON uses UTF-8, compact encoding and recursively sorted object keys;
 array order is preserved. The domain is `kars.azure.com/task-authorization/v1`.
+Receipt producers can reuse `KarsTaskSpec::authorization_configuration_with_model`
+to obtain this exact serializable effective snapshot. Resolve defaults once with
+`kars_task::blueprint::controller_default_model()` and pass that value to both
+the snapshot accessor and `authorization_digest_with_model`; do not duplicate
+default resolution or substitute the raw declared spec for effective evidence.
 This includes egress hosts/ports, tool/MCP/memory references, runtime, isolation,
 model/provider and combined objective/instructions. Materialization consumes the
 same normalizer: `MAF` equals `MicrosoftAgentFramework`, blueprint runtime overrides
