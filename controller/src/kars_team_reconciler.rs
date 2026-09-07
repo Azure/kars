@@ -261,7 +261,7 @@ async fn reconcile_valid(
     let health = if team.spec.paused {
         "Hibernating"
     } else if cadence_blocked {
-        "Degraded"
+        PHASE_DEGRADED
     } else if generated == 0 {
         "Watching"
     } else if overdue {

@@ -79,6 +79,8 @@ afterEach(() => {
 });
 
 describe("existing Helm installation compatibility", () => {
+  // Archive copying and a bounded Helm subprocess are integration work, not
+  // a five-second unit test, especially with the expanded governance CRDs.
   it("preserves saved customer values and the legacy selector when new maps are absent", () => {
     const manifests = render(reusedValuesChart());
     expect(manifests.some((item) => item.metadata?.name === "agentmesh-registry")).toBe(false);
@@ -90,7 +92,7 @@ describe("existing Helm installation compatibility", () => {
     expect(env).toContainEqual({
       name: "SANDBOX_IMAGE", value: "registry.customer.example/existing-agent:latest",
     });
-  });
+  }, 45_000);
 
   it("can enable the new mesh using reused values without missing nested defaults", () => {
     const manifests = render(reusedValuesChart(true));
@@ -100,7 +102,7 @@ describe("existing Helm installation compatibility", () => {
       expect(deployment.spec?.template?.spec?.containers?.[0]?.image)
         .toBe(`ghcr.io/azure/kars-agentmesh-${component}:latest`);
     }
-  });
+  }, 45_000);
 
   it("treats removed/null new configuration as the compatible disabled/default state", () => {
     const manifests = render(chart, ["--set", "agentMesh=null,sandbox.nodeSelector=null"]);
