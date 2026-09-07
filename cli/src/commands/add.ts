@@ -6,6 +6,7 @@ import chalk from "chalk";
 import ora from "ora";
 import { loadContext, resolveSecret } from "../config.js";
 import { assertRuntimeWired, buildRuntimeBlock, flagToKind } from "../runtime.js";
+import { CLAIM, prepareCredentialNamespace } from "../lib/namespace-ownership.js";
 import {
   buildInferencePolicy,
   buildToolPolicy,
@@ -449,9 +450,13 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         };
         if (Object.keys(allSecrets).length > 0) {
           spinner.text = "Creating credential secret...";
+          const namespaceUid = await prepareCredentialNamespace(execa, name, "kars-system");
+          const metadata = sandbox.metadata as Record<string, unknown>;
+          metadata.annotations = {
+            ...(metadata.annotations as Record<string, string> | undefined),
+            [CLAIM.namespaceUid]: namespaceUid,
+          };
           try {
-            // Ensure namespace exists
-            await execa("kubectl", ["create", "namespace", namespace], { stdio: "pipe" }).catch(() => {});
             const secretArgs = ["create", "secret", "generic", `${name}-credentials`, "-n", namespace];
             for (const [envVar, value] of Object.entries(allSecrets)) {
               secretArgs.push(`--from-literal=${envVar}=${value}`);

@@ -11,6 +11,7 @@ import { upgradeCommand } from "./commands/upgrade.js";
 import { devCommand } from "./commands/dev.js";
 import { addCommand } from "./commands/add.js";
 import { credentialsCommand } from "./commands/credentials.js";
+import { namespaceCommand } from "./commands/namespace.js";
 import { configCommand } from "./commands/config.js";
 import { connectCommand } from "./commands/connect.js";
 import { statusCommand } from "./commands/status.js";
@@ -71,6 +72,7 @@ export function createCli(): Command {
 
   // Configuration
   program.addCommand(credentialsCommand());
+  program.addCommand(namespaceCommand());
   program.addCommand(configCommand());
   program.addCommand(modelCommand());
   program.addCommand(policyCommand());

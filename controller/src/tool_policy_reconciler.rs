@@ -235,7 +235,8 @@ async fn reconcile(tp: Arc<ToolPolicy>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                         Vec::new()
                     }
                 };
-                let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &referrers).await;
+                let results =
+                    poll_referencing_sandboxes(&ctx.client, &ctx.http, &ns, &referrers).await;
                 decide_enforcement_state(expected, "AgtProfile", &results)
             }
             _ => RouterEnforcementState::NotApplicable,

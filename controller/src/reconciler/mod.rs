@@ -38,6 +38,7 @@ mod dev_env;
 pub(crate) mod governance_mounts;
 mod inference;
 mod mcp_egress;
+pub(crate) mod namespace_ownership;
 pub(crate) mod trustgraph_mount;
 
 use mcp_egress::mcp_egress_rule;
@@ -58,6 +59,8 @@ fn sandbox_node_selector(default_pool: &str) -> Result<serde_json::Value, Reconc
 
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
+    #[error(transparent)]
+    NamespaceOwnership(#[from] namespace_ownership::Error),
     #[error("Kubernetes API error: {0}")]
     Kube(#[from] kube::Error),
     #[error("JSON serialization error: {0}")]
@@ -177,6 +180,16 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     let sandbox_ns = format!("kars-{name}");
     let client = &ctx.client;
+    let _namespace_lock = namespace_ownership::lock(&name).await;
+    let (sandbox, owned_namespace) = match namespace_ownership::ensure(client, &sandbox).await {
+        Ok((live, namespace)) => (Arc::new(live), namespace),
+        Err(error) => {
+            if matches!(error, namespace_ownership::Error::Conflict(_)) {
+                namespace_ownership::report_conflict(client, &sandbox, &error.to_string()).await?;
+            }
+            return Err(error.into());
+        }
+    };
 
     // Detect SRE-mode sandbox via the kars.azure.com/role=sre label.
     // Computed once at the top of reconcile and threaded through the
@@ -219,23 +232,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     tracing::info!("Reconciling KarsSandbox {name}");
 
     // ── Finalizer: cascading namespace deletion ──────────────────────────
-    const FINALIZER: &str = "kars.azure.com/namespace-cleanup";
-
     if sandbox.metadata.deletion_timestamp.is_some() {
         tracing::info!("KarsSandbox {name} is being deleted — cleaning up namespace {sandbox_ns}");
 
-        // Delete the namespace (cascades to all resources within it)
-        let ns_api: Api<Namespace> = Api::all(client.clone());
-        match ns_api.delete(&sandbox_ns, &DeleteParams::default()).await {
-            Ok(_) => tracing::info!("Namespace {sandbox_ns} deletion initiated"),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                tracing::info!("Namespace {sandbox_ns} already gone");
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "Failed to delete namespace {sandbox_ns}");
-                return Ok(Action::requeue(Duration::from_secs(10)));
-            }
-        }
+        namespace_ownership::delete(client, &sandbox, owned_namespace.as_ref()).await?;
 
         // Clean up the spawner ClusterRoleBinding
         let crb_api: Api<ClusterRoleBinding> = Api::all(client.clone());
@@ -243,7 +243,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         match crb_api.delete(&crb_name, &DeleteParams::default()).await {
             Ok(_) => tracing::info!("ClusterRoleBinding {crb_name} deleted"),
             Err(kube::Error::Api(ae)) if ae.code == 404 => {}
-            Err(e) => tracing::warn!(error = %e, "Failed to delete ClusterRoleBinding {crb_name}"),
+            Err(e) => return Err(e.into()),
         }
 
         // Clean up the Azure federated identity credential.
@@ -305,39 +305,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         .await;
 
         // Remove the finalizer so K8s can complete CRD deletion
-        let sandbox_api: Api<KarsSandbox> =
-            Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-        let patch = json!({
-            "metadata": {
-                "finalizers": sandbox.metadata.finalizers.as_ref()
-                    .map(|f| f.iter().filter(|x| x.as_str() != FINALIZER).collect::<Vec<_>>())
-                    .unwrap_or_default()
-            }
-        });
-        let _ = sandbox_api
-            .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
-            .await;
+        namespace_ownership::remove_finalizer(client, &sandbox).await?;
 
         tracing::info!("KarsSandbox {name} cleanup complete");
         return Ok(Action::await_change());
-    }
-
-    // Ensure our finalizer is present (add it if missing)
-    let has_finalizer = sandbox
-        .metadata
-        .finalizers
-        .as_ref()
-        .is_some_and(|f| f.iter().any(|x| x == FINALIZER));
-    if !has_finalizer {
-        let sandbox_api: Api<KarsSandbox> =
-            Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
-        let mut finalizers = sandbox.metadata.finalizers.clone().unwrap_or_default();
-        finalizers.push(FINALIZER.to_string());
-        let patch = json!({ "metadata": { "finalizers": finalizers } });
-        sandbox_api
-            .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
-            .await?;
-        tracing::info!("Added finalizer to KarsSandbox {name}");
     }
 
     let spec = sandbox.spec.clone();
@@ -688,33 +659,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // gated by `governance_config.enabled`).
         String::new()
     };
-
-    // ── Step 1: Create namespace ─────────────────────────────────────────
-    let ns_api: Api<Namespace> = Api::all(client.clone());
-    let ns: Namespace = serde_json::from_value(json!({
-        "apiVersion": "v1",
-        "kind": "Namespace",
-        "metadata": {
-            "name": sandbox_ns,
-            "labels": {
-                "app.kubernetes.io/name": "kars",
-                "app.kubernetes.io/component": "sandbox",
-                "kars.azure.com/sandbox": name,
-                "kars.azure.com/role": "sandbox",
-                "kars.azure.com/isolated": "strict",
-                "pod-security.kubernetes.io/enforce": "privileged",
-                "pod-security.kubernetes.io/audit": "baseline",
-                "pod-security.kubernetes.io/warn": "baseline"
-            }
-        }
-    }))?;
-    ns_api
-        .patch(
-            &sandbox_ns,
-            &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
-            &Patch::Apply(ns),
-        )
-        .await?;
 
     // ── Step 2: Create ServiceAccount with Workload Identity ─────────────
     let sa_api: Api<ServiceAccount> = Api::namespaced(client.clone(), &sandbox_ns);
@@ -3233,7 +3177,7 @@ fn error_requeue_duration(error: &ReconcileError) -> Duration {
     let base = match error {
         // Transient kube API errors (throttling, connection reset, 5xx):
         // retry soon so we don't starve legitimate work.
-        ReconcileError::Kube(_) => 30,
+        ReconcileError::Kube(_) | ReconcileError::NamespaceOwnership(_) => 30,
         // Serde errors are deterministic — the same body will fail again.
         // Back off longer so we don't spam logs while a human fixes the
         // bad CR.
@@ -3248,6 +3192,7 @@ fn error_policy(sandbox: Arc<KarsSandbox>, error: &ReconcileError, _ctx: Arc<Con
         ReconcileError::Kube(_) => "kube_api",
         ReconcileError::SerdeJson(_) => "serde",
         ReconcileError::Configuration(_) => "configuration",
+        ReconcileError::NamespaceOwnership(_) => "namespace_ownership",
     };
     crate::metrics::record_reconcile_error("KarsSandbox", class);
     tracing::error!(
@@ -3425,6 +3370,11 @@ pub async fn run(client: Client) -> Result<()> {
     });
 
     Controller::new(sandboxes, crate::watch_config::bounded())
+        .watches(
+            Api::<Namespace>::all(ctx.client.clone()),
+            crate::watch_config::bounded(),
+            namespace_ownership::to_sandbox_ref,
+        )
         .watches(
             Api::<Deployment>::all(ctx.client.clone()),
             crate::watch_config::bounded(),
