@@ -48,10 +48,38 @@ governance `Ready`. `execution.launch` is a separate opt-in:
   concurrency checks. Cleanup remains `Stopping` and retries API errors or
   resources awaiting finalization, even if the task's sandbox status reference is lost.
 
+`status.envelopeDigest` is the **task authorization digest**, not merely the
+envelope lattice identifier. `KarsTask::envelope_digest()` (or
+`KarsTaskSpec::authorization_digest()`) hashes the normalized envelope, parent
+reference and full effective blueprint with a versioned domain and full SHA-256.
+Canonical JSON uses UTF-8, compact encoding and recursively sorted object keys;
+array order is preserved. The domain is `kars.azure.com/task-authorization/v1`.
+This includes egress hosts/ports, tool/MCP/memory references, runtime, isolation,
+model/provider and combined objective/instructions. Materialization consumes the
+same normalizer: `MAF` equals `MicrosoftAgentFramework`, blueprint runtime overrides
+execution runtime, absent isolation is `standard`, and zero/absent budget caps
+normalize to unbounded. The launch switch and display label do not change authority.
+Model defaults resolve `KARS_TASK_DEFAULT_MODEL` → `AZURE_OPENAI_DEPLOYMENT` →
+`DEFAULT_MODEL` → `gpt-4o-mini`; default provider resolves
+`KARS_TASK_DEFAULT_PROVIDER` → `azure-openai`. Changing an effective controller
+default invalidates prior task bindings. The pure `TaskEnvelope::digest()` remains
+available for lattice/team uses, **not** task approval authorization.
+Reference names are bound; this digest does not attest mutable referenced resource
+contents or container images. Those require separate policy/runtime evidence.
+
 `KarsApproval` freezes `taskRef`, action and TTL at admission; the human may set
 `spec.decision` once. The controller snapshots the request, binds the task UID
-and current Ready envelope, and checks expiry before accepting the first decision.
-Terminal decisions remain stable; they cannot be replayed for a replacement task.
+and current Ready authorization digest, and checks expiry before accepting the
+first decision. Blueprint changes invalidate pending requests even if the
+envelope-only lattice fields did not change. Terminal decisions remain immutable
+historical facts, **not perpetual grants**: consumers must compare the current
+task UID and authorization digest before acting. `approval_authorizes_task`
+checks current Ready authority, immutable request/decision coherence and the
+`Approved` phase. Consumers must additionally check action kind, target, owner
+identity and one-shot semantics. The existing status fields are
+`boundEnvelopeDigest`, `boundTaskUid` and `boundRequest`; no new spec fields are
+needed. Current receipts exclude approvals bound to old authority and refuse
+stale task status when constructing their signed subject.
 Legacy pending bindings without task/request identity become Stale and require a
 new request. Controller snapshots also prevent mutated request echoes entering receipts.
 Approval strings are schema-bounded for CEL evaluation: task names 253, kinds/TTL

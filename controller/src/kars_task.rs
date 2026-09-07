@@ -42,6 +42,9 @@ use sha2::{Digest, Sha256};
 
 use crate::mcp_server::LocalObjectRef;
 
+#[path = "kars_task_blueprint.rs"]
+pub mod blueprint;
+
 /// Lowest valid autonomy tier.
 pub const TIER_MIN: i32 = 1;
 /// Highest valid autonomy tier.
@@ -108,6 +111,46 @@ pub struct KarsTaskSpec {
     /// Optional short label surfaced in CLI / UI listings.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub display_name: Option<String>,
+}
+
+impl KarsTask {
+    /// Current authorization digest, not the envelope-only delegation lattice
+    /// digest. Approval consumers must also match the bound Kubernetes task UID.
+    #[must_use]
+    pub fn envelope_digest(&self) -> String {
+        self.spec.authorization_digest()
+    }
+}
+
+impl KarsTaskSpec {
+    /// Domain-separated SHA-256 over the envelope and full effective blueprint.
+    /// Changes to controller model defaults invalidate old authority bindings.
+    #[must_use]
+    pub fn authorization_digest(&self) -> String {
+        self.authorization_digest_with_model(&blueprint::controller_default_model())
+    }
+
+    #[must_use]
+    pub fn authorization_digest_with_model(&self, default_model: &TaskModel) -> String {
+        let mut envelope = self.envelope.clone();
+        if let Some(budget) = &mut envelope.budget {
+            budget.tokens = budget.tokens.filter(|n| *n != 0);
+            budget.usd_micros = budget.usd_micros.filter(|n| *n != 0);
+            if budget.tokens.is_none() && budget.usd_micros.is_none() {
+                envelope.budget = None;
+            }
+        }
+        let mut authority = serde_json::json!({
+            "domain": "kars.azure.com/task-authorization/v1",
+            "envelope": envelope,
+            "parentRef": self.parent_ref,
+            "blueprint": blueprint::effective_blueprint_with_model(self, default_model),
+            "networkPolicy": { "defaultDeny": true, "egressMode": "Strict" },
+        });
+        authority.sort_all_objects();
+        let bytes = serde_json::to_vec(&authority).expect("task authority always serializes");
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
 }
 
 /// The concrete, editable run blueprint reviewed on the launch package.
@@ -265,10 +308,9 @@ impl TaskEnvelope {
     ///
     /// The digest is a `sha256:`-prefixed hex string over the canonical JSON
     /// serialization of the envelope. serde serializes struct fields in
-    /// declaration order deterministically, so the same envelope always
-    /// produces the same digest across processes — the property the
-    /// Governance Receipt relies on to bind a task to the authority it ran
-    /// under.
+    /// declaration order deterministically. This is the envelope-only lattice
+    /// identifier; task approvals and receipts use `KarsTask::envelope_digest`
+    /// to bind the full effective governed blueprint as well.
     #[must_use]
     pub fn digest(&self) -> String {
         let bytes = serde_json::to_vec(self).expect("TaskEnvelope always serializes");
@@ -537,7 +579,8 @@ pub fn effective_tool_policy(spec: &KarsTaskSpec) -> Option<&str> {
             spec.envelope
                 .tool_policy_ref
                 .as_ref()
-                .map(|r| r.name.as_str())
+                .map(|r| r.name.trim())
+                .filter(|name| !name.is_empty())
         })
 }
 
@@ -555,16 +598,11 @@ pub fn effective_egress(spec: &KarsTaskSpec) -> &[TaskEgress] {
 /// Normalize the task's effective runtime to the existing sandbox contract.
 pub fn task_runtime(spec: &KarsTaskSpec) -> Result<crate::crd::RuntimeKind, String> {
     use crate::crd::RuntimeKind;
-    let runtime = spec
-        .blueprint
-        .as_ref()
-        .and_then(|b| b.runtime.as_deref())
-        .or_else(|| spec.execution.as_ref().and_then(|e| e.runtime.as_deref()))
-        .unwrap_or("OpenClaw");
+    let runtime = blueprint::effective_runtime_name(spec);
     match runtime {
         "OpenClaw" => Ok(RuntimeKind::OpenClaw),
         "OpenAIAgents" => Ok(RuntimeKind::OpenAIAgents),
-        "MAF" | "MicrosoftAgentFramework" => Ok(RuntimeKind::MicrosoftAgentFramework),
+        "MicrosoftAgentFramework" => Ok(RuntimeKind::MicrosoftAgentFramework),
         "Hermes" => Ok(RuntimeKind::Hermes),
         "BYO" => {
             Err("BYO task runtime requires configuration not supported by task blueprints".into())
@@ -678,8 +716,8 @@ pub struct KarsTaskStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub conditions: Option<Vec<Condition>>,
 
-    /// `sha256:` digest of the validated trust envelope. Stable for a given
-    /// envelope; recomputed whenever the spec changes.
+    /// `sha256:` authorization digest of the validated envelope and effective
+    /// governed blueprint, including resolved model defaults and capability refs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub envelope_digest: Option<String>,
 
@@ -711,3 +749,7 @@ pub struct KarsTaskStatus {
 #[cfg(test)]
 #[path = "kars_task_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "kars_task_authorization_tests.rs"]
+mod authorization_tests;

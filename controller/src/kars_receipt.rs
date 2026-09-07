@@ -75,8 +75,8 @@ pub struct KarsReceiptSpec {
     /// The `KarsTask` this receipt attests, in the same namespace.
     pub task_ref: LocalObjectRef,
 
-    /// `sha256:` digest of the trust envelope the task ran under. Mirrors the
-    /// task's `status.envelopeDigest` and is bound into the signed subject.
+    /// `sha256:` authorization digest of the envelope and effective blueprint.
+    /// Mirrors `status.envelopeDigest` and is bound into the signed subject.
     pub envelope_digest: String,
 
     /// in-toto predicate type URI — always [`PREDICATE_TYPE`] for V0.
@@ -318,7 +318,10 @@ pub fn build_statement(
     approvals: &[PredicateApproval],
     completeness: PredicateCompleteness,
 ) -> Option<Statement> {
-    let digest = status.envelope_digest.clone()?;
+    let digest = status
+        .envelope_digest
+        .clone()
+        .filter(|digest| digest == &task.envelope_digest())?;
     let namespace = task
         .metadata
         .namespace
@@ -345,10 +348,7 @@ pub fn build_statement(
     } else {
         "Trust envelope validated; root task with no delegation to attenuate."
     };
-    // The completeness claim stays PARTIAL in V0 (the runtime iptables-ruleset
-    // hash, the token/cost audit chain, and the eBPF witness are not yet
-    // bound), but its detail now reflects *which* enforced floor controls the
-    // controller actually observed — concrete, re-derivable, never overstated.
+    // Completeness stays PARTIAL: runtime/kernel evidence is not bound.
     let completeness_detail = if completeness.floor_enforced {
         "Completeness-floor controls observed enforced (CREATE-time task-namespace VAP, exec-ban VAP, posture-lock VAP, default-deny egress). NOT yet bound: the runtime egress-guard iptables-ruleset hash (V1), the router token/cost audit chain (V1), and the eBPF kernel-datapath witness (V2)."
     } else {
@@ -517,7 +517,7 @@ mod tests {
         task.metadata.namespace = Some("kars-system".to_string());
         let status = KarsTaskStatus {
             phase: Some("Ready".to_string()),
-            envelope_digest: Some("sha256:deadbeefdeadbeefdeadbeefdeadbeef".to_string()),
+            envelope_digest: Some(task.envelope_digest()),
             lineage: if child {
                 vec!["root".to_string(), "parent".to_string()]
             } else {
@@ -562,7 +562,7 @@ mod tests {
         // sha256: prefix stripped for the in-toto digest field.
         assert_eq!(
             st.subject[0].digest.sha256,
-            "deadbeefdeadbeefdeadbeefdeadbeef"
+            task.envelope_digest().strip_prefix("sha256:").unwrap()
         );
         assert!(!st.predicate.delegation.is_child);
         assert_eq!(st.predicate.conformance.attenuates_parent, None);

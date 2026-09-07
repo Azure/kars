@@ -190,8 +190,8 @@ pub struct KarsApprovalStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
 
-    /// The task envelope digest this approval is bound to. Set once by the
-    /// controller from the task's `status.envelopeDigest`; never changes.
+    /// The task authorization digest (envelope plus effective blueprint).
+    /// Copied once from `status.envelopeDigest`; never changes after binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_envelope_digest: Option<String>,
 
@@ -313,6 +313,53 @@ pub fn request_snapshot(spec: &KarsApprovalSpec) -> String {
         "ttl": spec.ttl,
     })
     .to_string()
+}
+
+/// Match immutable request identity and the task's current effective authority.
+/// This does not assert task readiness or a verdict; receipts may record denials.
+pub fn approval_binding_matches_task(
+    approval: &KarsApproval,
+    task: &crate::kars_task::KarsTask,
+) -> bool {
+    let Some(status) = &approval.status else {
+        return false;
+    };
+    let Some(uid) = task.metadata.uid.as_deref().filter(|uid| !uid.is_empty()) else {
+        return false;
+    };
+    task.metadata.name.as_deref() == Some(approval.spec.task_ref.name.as_str())
+        && task.metadata.namespace.as_deref().unwrap_or("default")
+            == approval.metadata.namespace.as_deref().unwrap_or("default")
+        && status.bound_task_uid.as_deref() == Some(uid)
+        && status.bound_envelope_digest.as_deref() == Some(task.envelope_digest().as_str())
+        && status.bound_request.as_deref() == Some(request_snapshot(&approval.spec).as_str())
+}
+
+/// Consumer guard for a terminal approval. A historical Approved phase alone
+/// never authorizes a replacement task or changed blueprint. Consumers must
+/// additionally validate their action kind, target, owner and one-shot semantics.
+pub fn approval_authorizes_task(
+    approval: &KarsApproval,
+    task: &crate::kars_task::KarsTask,
+) -> bool {
+    let Some(status) = &approval.status else {
+        return false;
+    };
+    let Some(decision) = &approval.spec.decision else {
+        return false;
+    };
+    approval.metadata.deletion_timestamp.is_none()
+        && status.phase.as_deref() == Some(PHASE_APPROVED)
+        && decision.verdict == VERDICT_APPROVE
+        && !decision.decider.trim().is_empty()
+        && status.decider.as_deref() == Some(decision.decider.as_str())
+        && status
+            .decided_at
+            .as_ref()
+            .is_some_and(|time| !time.is_empty())
+        && status.observed_generation == approval.metadata.generation
+        && approval_binding_matches_task(approval, task)
+        && crate::kars_task_reconciler::task_is_ready(task)
 }
 
 #[cfg(test)]

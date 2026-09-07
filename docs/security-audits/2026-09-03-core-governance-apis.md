@@ -26,6 +26,10 @@ submit or verify typed resources.
   log.
 - Approval requests are bound to a task envelope digest and guarded by CEL
   request-shape validation.
+- The task authorization digest includes the full effective governed blueprint,
+  not only the envelope lattice: blueprint/default changes invalidate pending
+  bindings. Terminal decisions remain immutable, but consumers must recheck
+  current task UID, authorization digest, request and decision coherence.
 - Task deletion removes owned execution resources so stale sandboxes do not
   retain authority.
 
