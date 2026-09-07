@@ -115,9 +115,9 @@ pub struct KarsTaskSpec {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskBlueprint {
-    /// Harness/runtime the agent runs on (`OpenClaw`, `OpenAIAgents`, `MAF`,
-    /// `Hermes`, `BYO`). Drives `KarsSandbox.spec.runtime.kind`. Defaults to
-    /// `OpenClaw`.
+    /// Harness/runtime (`OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework`,
+    /// `Hermes`; `MAF` is an alias). BYO requires configuration not supported
+    /// by task blueprints and is rejected. Defaults to `OpenClaw`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub runtime: Option<String>,
 
@@ -149,8 +149,8 @@ pub struct TaskBlueprint {
     pub mcp_servers: Vec<String>,
 
     /// Network destinations the mission may reach. Drives
-    /// `KarsSandbox.spec.networkPolicy.allowedEndpoints`. When non-empty the
-    /// sandbox runs in strict egress mode bounded to exactly these hosts.
+    /// `KarsSandbox.spec.networkPolicy.allowedEndpoints`. Task sandboxes always
+    /// use Strict mode, including an empty list (no additional destinations).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub egress: Vec<TaskEgress>,
 
@@ -228,9 +228,9 @@ pub struct TaskEnvelope {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tool_policy_ref: Option<LocalObjectRef>,
 
-    /// Optional reference to a same-namespace `EgressAllowlist`-style CR that
-    /// bounds the network destinations this task (and its descendants) may
-    /// reach through the inference router.
+    /// Reserved egress policy reference. This foundation cannot resolve it
+    /// and rejects it before Ready. Use `blueprint.egress` for Strict inline
+    /// destinations; standalone sandbox signed OCI allowlists are unchanged.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub egress_allowlist_ref: Option<LocalObjectRef>,
 
@@ -483,11 +483,11 @@ fn attenuate_budget_axis(
     axis: BudgetAxis,
     out: &mut Vec<EnvelopeViolation>,
 ) {
-    let Some(parent_cap) = parent else {
+    let Some(parent_cap) = parent.filter(|cap| *cap > 0) else {
         // Parent is unbounded on this axis — any child value is an attenuation.
         return;
     };
-    match child {
+    match child.filter(|cap| *cap > 0) {
         None => out.push(EnvelopeViolation::BudgetUnbounded {
             axis,
             parent: parent_cap,
@@ -531,6 +531,7 @@ pub fn effective_tool_policy(spec: &KarsTaskSpec) -> Option<&str> {
     spec.blueprint
         .as_ref()
         .and_then(|b| b.tool_policy.as_deref())
+        .map(str::trim)
         .filter(|s| !s.is_empty())
         .or_else(|| {
             spec.envelope
@@ -549,6 +550,52 @@ pub fn effective_egress(spec: &KarsTaskSpec) -> &[TaskEgress] {
         .as_ref()
         .map(|b| b.egress.as_slice())
         .unwrap_or(&[])
+}
+
+/// Normalize the task's effective runtime to the existing sandbox contract.
+pub fn task_runtime(spec: &KarsTaskSpec) -> Result<crate::crd::RuntimeKind, String> {
+    use crate::crd::RuntimeKind;
+    let runtime = spec
+        .blueprint
+        .as_ref()
+        .and_then(|b| b.runtime.as_deref())
+        .or_else(|| spec.execution.as_ref().and_then(|e| e.runtime.as_deref()))
+        .unwrap_or("OpenClaw");
+    match runtime {
+        "OpenClaw" => Ok(RuntimeKind::OpenClaw),
+        "OpenAIAgents" => Ok(RuntimeKind::OpenAIAgents),
+        "MAF" | "MicrosoftAgentFramework" => Ok(RuntimeKind::MicrosoftAgentFramework),
+        "Hermes" => Ok(RuntimeKind::Hermes),
+        "BYO" => {
+            Err("BYO task runtime requires configuration not supported by task blueprints".into())
+        }
+        _ => Err(format!("unsupported task runtime `{runtime}`")),
+    }
+}
+
+/// Check that the effective launch contract does not exceed the declared
+/// envelope or promise a ceiling this foundation cannot enforce.
+pub fn validate_execution_contract(spec: &KarsTaskSpec) -> Result<(), String> {
+    task_runtime(spec)?;
+    if let Some(bound) = &spec.envelope.tool_policy_ref
+        && effective_tool_policy(spec) != Some(bound.name.as_str())
+    {
+        return Err("blueprint.toolPolicy must match envelope.toolPolicyRef".into());
+    }
+    if spec.envelope.egress_allowlist_ref.is_some() {
+        return Err("envelope.egressAllowlistRef cannot be resolved by this foundation; use blueprint.egress for enforced Strict destinations".into());
+    }
+    if let Some(budget) = &spec.envelope.budget {
+        if budget.tokens.is_some_and(|n| n < 0) || budget.usd_micros.is_some_and(|n| n < 0) {
+            return Err("task budget values must be >= 0".into());
+        }
+        if spec.execution.as_ref().is_some_and(|e| e.launch)
+            && (budget.tokens.is_some_and(|n| n > 0) || budget.usd_micros.is_some_and(|n| n > 0))
+        {
+            return Err("UnsupportedLaunchBudget: total/subtree token and usdMicros ceilings are not enforced by this foundation; bounded tasks may be planned but cannot launch".into());
+        }
+    }
+    Ok(())
 }
 
 /// Whether a child egress destination is covered by the parent's allow-list.
@@ -601,12 +648,14 @@ pub fn spec_attenuation_violations(
 #[serde(rename_all = "camelCase")]
 pub struct TaskBudget {
     /// Maximum total tokens the task subtree may consume. `0`/absent means
-    /// "no token cap declared" (governance still applies at the router).
+    /// "no token cap declared". Positive ceilings are planning declarations:
+    /// launch is rejected until durable total/subtree enforcement is available.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub tokens: Option<i64>,
 
     /// Maximum total spend in micro-USD (1e-6 USD) for the task subtree.
-    /// Integer micro-USD avoids floating-point in an audit-bound field.
+    /// `0`/absent means no cap declared. Positive ceilings block launch in this
+    /// foundation. Integer micro-USD avoids floating-point in an audit field.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub usd_micros: Option<i64>,
 }

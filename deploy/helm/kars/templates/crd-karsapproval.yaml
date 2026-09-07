@@ -49,12 +49,14 @@ spec:
                 properties:
                   detail:
                     description: Optional longer detail (e.g. the exact tool args or egress host).
+                    maxLength: 8192
                     nullable: true
                     type: string
                   kind:
                     description: |-
                       One of [`ACTION_KINDS`]. Not enum-constrained on the wire so the
                       primitive stays open; the Bridge treats unknown kinds as `custom`.
+                    maxLength: 64
                     type: string
                   requestedTier:
                     description: |-
@@ -65,6 +67,7 @@ spec:
                     type: integer
                   summary:
                     description: One-line, human-readable statement of what the agent wants to do.
+                    maxLength: 4096
                     type: string
                 required:
                 - kind
@@ -81,13 +84,16 @@ spec:
                     description: |-
                       Identity of the human (or delegated principal) who decided. Recorded
                       verbatim into status and, for granted approvals, into the receipt.
+                    maxLength: 320
                     type: string
                   reason:
                     description: Optional justification, surfaced to auditors.
+                    maxLength: 8192
                     nullable: true
                     type: string
                   verdict:
                     description: '`approve` or `deny`.'
+                    maxLength: 7
                     type: string
                 required:
                 - decider
@@ -99,6 +105,7 @@ spec:
                   controller binds the approval to this task's envelope digest.
                 properties:
                   name:
+                    maxLength: 253
                     type: string
                 required:
                 - name
@@ -108,6 +115,7 @@ spec:
                   Time-to-live as an ISO-8601 duration (`PT15M`, `PT4H`, `P1D`). An
                   undecided approval past `requestedAt + ttl` becomes `Expired`. Defaults
                   to `PT1H` when omitted.
+                maxLength: 64
                 nullable: true
                 type: string
             required:
@@ -121,6 +129,18 @@ spec:
             - message: spec.taskRef.name must be non-empty
               reason: FieldValueInvalid
               rule: size(self.taskRef.name) > 0
+            - message: spec.taskRef and spec.action are immutable
+              reason: FieldValueForbidden
+              rule: self.taskRef == oldSelf.taskRef && self.action == oldSelf.action
+            - message: spec.ttl is immutable
+              reason: FieldValueForbidden
+              rule: '(!has(self.ttl) && !has(oldSelf.ttl)) || (has(self.ttl) && has(oldSelf.ttl) && self.ttl == oldSelf.ttl)'
+            - message: spec.decision is immutable once recorded
+              reason: FieldValueForbidden
+              rule: '!has(oldSelf.decision) || (has(self.decision) && self.decision == oldSelf.decision)'
+            - message: spec.decision requires approve/deny and a non-empty decider
+              reason: FieldValueInvalid
+              rule: '!has(self.decision) || (self.decision.verdict in [''approve'',''deny''] && size(self.decision.decider) > 0)'
           status:
             description: '`KarsApproval.status` — the controller is the sole writer.'
             nullable: true
@@ -129,6 +149,16 @@ spec:
                 description: |-
                   The task envelope digest this approval is bound to. Set once by the
                   controller from the task's `status.envelopeDigest`; never changes.
+                nullable: true
+                type: string
+              boundRequest:
+                description: |-
+                  Controller snapshot of taskRef/action/ttl, excluding the later decision.
+                  Prevents request mutation even on clusters with outdated admission rules.
+                nullable: true
+                type: string
+              boundTaskUid:
+                description: Immutable Kubernetes identity of the task whose authority was bound.
                 nullable: true
                 type: string
               conditions:
@@ -192,8 +222,8 @@ spec:
                 type: string
               requestedAt:
                 description: |-
-                  RFC-3339 time the controller first reconciled the request. The TTL is
-                  measured from here; re-reconciles never bump it.
+                  RFC-3339 request creation time (first observation when unavailable).
+                  The TTL is measured from here; re-reconciles never bump it.
                 nullable: true
                 type: string
             type: object

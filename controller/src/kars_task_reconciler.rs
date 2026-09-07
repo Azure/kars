@@ -12,10 +12,9 @@
 //!    condition, and `status.envelopeDigest`, preserving any `lineage`
 //!    written by the delegation-minting path (next slice).
 //!
-//! This reconciler is intentionally side-effect-free on the cluster for V0:
-//! it materializes verifiable *status* (the digest a Governance Receipt binds
-//! to), not yet a governed sandbox. Sandbox materialization and
-//! capability-attenuating child minting build on this in the following slices.
+//! Launched tasks also materialize owned execution resources. Cleanup retains
+//! the task finalizer until those resources are gone; invalid contracts cannot
+//! launch or retain an execution sandbox.
 
 use anyhow::Result;
 use futures::StreamExt;
@@ -89,11 +88,14 @@ fn check_envelope(task: &KarsTask) -> EnvelopeCheck {
             e.authority_ceiling, e.tier
         ));
     }
-    if e.delegation_depth < 0 {
+    if !(0..=16).contains(&e.delegation_depth) {
         return EnvelopeCheck::Invalid(format!(
-            "delegationDepth {} must be >= 0",
+            "delegationDepth {} must be in 0..16",
             e.delegation_depth
         ));
+    }
+    if let Err(why) = crate::kars_task::validate_execution_contract(&task.spec) {
+        return EnvelopeCheck::Invalid(why);
     }
     EnvelopeCheck::Valid
 }
@@ -110,17 +112,22 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let ns = task.namespace().unwrap_or_else(|| "default".into());
     let tasks: Api<KarsTask> = Api::namespaced(ctx.client.clone(), &ns);
 
-    // Deletion: drop the finalizer and let the API server reap the object.
-    // There is nothing cluster-side to clean up in V0.
+    // Keep the finalizer until all owned execution resources are gone.
     if task.metadata.deletion_timestamp.is_some() {
         if has_finalizer(&task) {
+            if !crate::kars_task_execution::teardown(&ctx.client, &ns, &task).await? {
+                return Ok(Action::requeue(REQUEUE_PENDING));
+            }
             // Drop our finalizer with a merge patch. A server-side *apply* that
             // sets `finalizers: []` does not reliably remove a finalizer the
             // apiserver no longer attributes to this manager (it 400s with
             // "name must be provided"), which would strand the object in
             // Terminating forever and leak its sandbox. A merge patch replaces
             // the array deterministically.
-            let patch = json!({ "metadata": { "finalizers": drop_finalizer(&task) } });
+            let patch = json!({ "metadata": {
+                "uid": task.uid(), "resourceVersion": task.resource_version(),
+                "finalizers": drop_finalizer(&task),
+            } });
             tasks
                 .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
                 .await?;
@@ -251,7 +258,11 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     reconcile_receipt(&ctx.client, &ns, &task, &new_status, &ctx.signer).await;
 
     // A child still waiting on its parent requeues quickly to converge.
-    let requeue = if new_status.phase.as_deref() == Some(PHASE_PENDING) {
+    let requeue = if new_status.phase.as_deref() == Some(PHASE_PENDING)
+        || matches!(
+            new_status.execution_phase.as_deref(),
+            Some("Stopping" | "Degraded")
+        ) {
         REQUEUE_PENDING
     } else {
         REQUEUE_OK
@@ -335,20 +346,22 @@ async fn resolve_delegation(
 
 /// A task is governance-`Ready` when its `Ready` condition is `True` and it
 /// carries a stamped envelope digest — the proof its authority was validated.
-fn task_is_ready(task: &KarsTask) -> bool {
+pub(crate) fn task_is_ready(task: &KarsTask) -> bool {
     let Some(status) = task.status.as_ref() else {
         return false;
     };
-    let digest_ok = status
-        .envelope_digest
-        .as_ref()
-        .is_some_and(|d| !d.is_empty());
+    let digest_ok = status.envelope_digest.as_deref() == Some(task.spec.envelope.digest().as_str());
     let ready_ok = status
         .conditions
         .iter()
         .flatten()
         .any(|c| c.type_ == TYPE_READY && c.status == cond_status::TRUE);
-    digest_ok && ready_ok
+    digest_ok
+        && ready_ok
+        && status.phase.as_deref() == Some(PHASE_READY)
+        && status.observed_generation == task.metadata.generation
+        && task.metadata.deletion_timestamp.is_none()
+        && matches!(check_envelope(task), EnvelopeCheck::Valid)
 }
 
 /// Build a `Ready` status with the given digest + lineage.
@@ -463,23 +476,27 @@ async fn reconcile_execution(
                 tracing::warn!(karstask = %task.name_any(), ns = %ns, error = %e, "KarsTask execution materialize failed");
                 status.execution_phase = Some(PHASE_DEGRADED.to_string());
                 status.execution_detail = Some(format!("failed to materialize sandbox: {e}"));
+                status.sandbox_ref = task.status.as_ref().and_then(|s| s.sandbox_ref.clone());
             }
         }
     } else {
         // Not launched (or not Ready): ensure no sandbox lingers from a prior
         // launch, and report Idle.
-        if task
-            .status
-            .as_ref()
-            .and_then(|s| s.sandbox_ref.as_ref())
-            .is_some()
-            && let Err(e) = crate::kars_task_execution::teardown(client, ns, task).await
-        {
-            tracing::warn!(karstask = %task.name_any(), ns = %ns, error = %e, "KarsTask execution teardown failed");
+        match crate::kars_task_execution::teardown(client, ns, task).await {
+            Ok(true) => {
+                status.execution_phase = Some("Idle".to_string());
+                status.sandbox_ref = None;
+                status.execution_detail = None;
+            }
+            result => {
+                status.execution_phase = Some("Stopping".to_string());
+                status.sandbox_ref = task.status.as_ref().and_then(|s| s.sandbox_ref.clone());
+                status.execution_detail = Some(match result {
+                    Err(error) => format!("execution cleanup failed; retrying: {error}"),
+                    _ => "waiting for owned execution resources to terminate".into(),
+                });
+            }
         }
-        status.execution_phase = Some("Idle".to_string());
-        status.sandbox_ref = None;
-        status.execution_detail = None;
     }
 }
 
@@ -516,7 +533,12 @@ async fn reconcile_receipt(
         Ok(list) => list
             .items
             .into_iter()
-            .filter(|a| a.spec.task_ref.name == name)
+            .filter(|a| {
+                a.spec.task_ref.name == name
+                    && task.uid().is_some()
+                    && a.status.as_ref().and_then(|s| s.bound_task_uid.as_ref())
+                        == task.metadata.uid.as_ref()
+            })
             .collect::<Vec<_>>(),
         Err(e) => {
             tracing::debug!(karstask = %name, ns = %ns, error = %e, "could not list KarsApprovals for receipt");
@@ -529,7 +551,7 @@ async fn reconcile_receipt(
     // a read failure yields a conservative "not enforced" observation, never a
     // false positive). This is what makes the receipt's completeness claim
     // concrete and re-derivable by an auditor.
-    let completeness = gather_completeness(client).await;
+    let completeness = gather_completeness();
 
     let Some(statement) = build_statement(task, status, &signer.key_id, &facts, completeness)
     else {
@@ -647,50 +669,11 @@ async fn reconcile_receipt(
     tracing::info!(karstask = %name, ns = %ns, key_id = %signer.key_id, "Governance Receipt emitted");
 }
 
-/// Observe which completeness-floor controls (design note §24b) are enforced
-/// on the cluster, for binding into the receipt. Best-effort: any read error
-/// yields a conservative `false` (we never claim a control is enforced unless
-/// we positively observed it). The runtime egress-guard iptables hash and the
-/// eBPF witness are intentionally NOT gathered here — they are V1/V2.
-async fn gather_completeness(client: &kube::Client) -> crate::kars_receipt::PredicateCompleteness {
-    use k8s_openapi::api::admissionregistration::v1::ValidatingAdmissionPolicy;
-    use k8s_openapi::api::networking::v1::NetworkPolicy;
-
-    let vaps: Api<ValidatingAdmissionPolicy> = Api::all(client.clone());
-    let vap_present = |name: &str, list: &[ValidatingAdmissionPolicy]| -> bool {
-        list.iter()
-            .any(|p| p.metadata.name.as_deref() == Some(name))
-    };
-    let vap_list = vaps
-        .list(&ListParams::default())
-        .await
-        .map(|l| l.items)
-        .unwrap_or_default();
-
-    // A cluster-wide default-deny egress NetworkPolicy is installed by the
-    // operator chart in kars-system; treat its presence there as the floor.
-    let nps: Api<NetworkPolicy> = Api::namespaced(client.clone(), "kars-system");
-    let default_deny_egress = nps
-        .list(&ListParams::default())
-        .await
-        .map(|l| {
-            l.items.iter().any(|np| {
-                np.spec
-                    .as_ref()
-                    .and_then(|s| s.policy_types.as_ref())
-                    .is_some_and(|t| t.iter().any(|pt| pt == "Egress"))
-            })
-        })
-        .unwrap_or(false);
-
-    crate::kars_receipt::PredicateCompleteness {
-        task_namespace_floor_vap: vap_present("kars-task-namespace-floor", &vap_list),
-        exec_ban_vap: vap_present("kars-sandbox-exec-ban", &vap_list),
-        posture_lock_vap: vap_present("kars-sandbox-posture-lock", &vap_list),
-        default_deny_egress,
-        floor_enforced: false,
-    }
-    .with_rollup()
+/// Policy names alone prove neither binding nor applicability to the actual
+/// sandbox namespace, pod selectors or tier exemptions. This foundation does
+/// not verify those effective controls: false means NOT VERIFIED, not absent.
+fn gather_completeness() -> crate::kars_receipt::PredicateCompleteness {
+    crate::kars_receipt::PredicateCompleteness::default().with_rollup()
 }
 
 /// True iff the task carries our cleanup finalizer.
@@ -725,25 +708,29 @@ fn error_policy(task: Arc<KarsTask>, error: &ReconcileError, _ctx: Arc<Ctx>) -> 
 
 pub async fn run(client: Client) -> Result<()> {
     let tasks: Api<KarsTask> = Api::all(client.clone());
-    match tasks.list(&ListParams::default().limit(1)).await {
-        Ok(_) => tracing::info!("KarsTask CRD found — starting controller"),
-        Err(e) => {
-            tracing::warn!("KarsTask CRD not installed — reconciler disabled: {e}");
-            std::future::pending::<()>().await;
-            #[allow(unreachable_code)]
-            return Ok(());
+    loop {
+        match tasks.list(&ListParams::default().limit(1)).await {
+            Ok(_) => {
+                tracing::info!("KarsTask CRD found — starting controller");
+                break;
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "KarsTask API unavailable; retrying discovery in 30s");
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
         }
     }
-    let signer = match crate::providers::signing::load_or_create(&client).await {
-        Ok(s) => {
-            tracing::info!(key_id = %s.key_id, "Governance Receipt signer ready");
-            s
-        }
-        Err(e) => {
-            tracing::error!(error = %e, "failed to initialise receipt signer — KarsTask reconciler disabled");
-            std::future::pending::<()>().await;
-            #[allow(unreachable_code)]
-            return Ok(());
+    let signer = loop {
+        match crate::providers::signing::load_or_create(&client).await {
+            Ok(s) => {
+                tracing::info!(key_id = %s.key_id, "Governance Receipt signer ready");
+                break s;
+            }
+            Err(e) => {
+                crate::metrics::record_reconcile_error("KarsTask", "signer_init");
+                tracing::error!(error = %e, "KarsTask signer unavailable; retrying initialization in 30s");
+                tokio::time::sleep(Duration::from_secs(30)).await;
+            }
         }
     };
     let ctx = Arc::new(Ctx { client, signer });
