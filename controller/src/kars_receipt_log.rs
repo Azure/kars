@@ -40,7 +40,7 @@ use kube::{
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::mesh_peer::IDENTITY_NAMESPACE;
+use crate::providers::signing::receipt_namespace;
 pub use crate::providers::signing::sha256_hex;
 
 /// ConfigMap holding the hash-chained inclusion log.
@@ -155,7 +155,7 @@ pub async fn append(
     receipt: &str,
     payload_sha256: &str,
 ) -> Result<InclusionEntry> {
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &receipt_namespace());
 
     for _ in 0..MAX_APPEND_RETRIES {
         let existing = cms.get_opt(LOG_CONFIGMAP_NAME).await?;
@@ -194,7 +194,7 @@ pub async fn append(
                 "kind": "ConfigMap",
                 "metadata": {
                     "name": LOG_CONFIGMAP_NAME,
-                    "namespace": IDENTITY_NAMESPACE,
+                    "namespace": receipt_namespace(),
                     "labels": {
                         "app.kubernetes.io/name": "kars",
                         "app.kubernetes.io/component": "receipt-inclusion-log",
@@ -210,7 +210,7 @@ pub async fn append(
                 "kind": "ConfigMap",
                 "metadata": {
                     "name": LOG_CONFIGMAP_NAME,
-                    "namespace": IDENTITY_NAMESPACE,
+                    "namespace": receipt_namespace(),
                     "resourceVersion": resource_version,
                 },
                 "data": { CHAIN_KEY: chain_json },
@@ -235,7 +235,7 @@ pub async fn append(
 
 /// Read and parse the full inclusion chain (for checkpointing + the CLI).
 pub async fn read_chain(client: &Client) -> Result<Vec<InclusionEntry>> {
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &receipt_namespace());
     let cm = cms.get_opt(LOG_CONFIGMAP_NAME).await?;
     Ok(cm
         .and_then(|c| {
@@ -298,13 +298,13 @@ pub async fn publish_checkpoint(
         signature,
     };
 
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &receipt_namespace());
     let cm: ConfigMap = serde_json::from_value(serde_json::json!({
         "apiVersion": "v1",
         "kind": "ConfigMap",
         "metadata": {
             "name": CHECKPOINT_CONFIGMAP_NAME,
-            "namespace": IDENTITY_NAMESPACE,
+            "namespace": receipt_namespace(),
             "labels": {
                 "app.kubernetes.io/name": "kars",
                 "app.kubernetes.io/component": "receipt-checkpoint",

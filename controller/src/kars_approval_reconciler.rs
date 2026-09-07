@@ -34,7 +34,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::egress_approval_reconciler::parse_iso8601_duration_secs;
-use crate::kars_approval::{ApprovalOutcome, KarsApproval, KarsApprovalStatus, evaluate};
+use crate::kars_approval::{
+    ApprovalOutcome, KarsApproval, KarsApprovalStatus, evaluate, request_snapshot,
+};
 use crate::kars_task::KarsTask;
 use crate::status::conditions::{self, reason as cond_reason, status as cond_status};
 
@@ -88,14 +90,13 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
             let patch = json!({
                 "apiVersion": "kars.azure.com/v1alpha1",
                 "kind": "KarsApproval",
-                "metadata": { "finalizers": drop_finalizer(&approval) },
+                "metadata": {
+                    "uid": approval.uid(), "resourceVersion": approval.resource_version(),
+                    "finalizers": drop_finalizer(&approval),
+                },
             });
             approvals
-                .patch(
-                    &name,
-                    &PatchParams::apply(FIELD_MANAGER).force(),
-                    &Patch::Apply(patch),
-                )
+                .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
                 .await?;
         }
         return Ok(Action::await_change());
@@ -107,7 +108,11 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
         let patch = json!({
             "apiVersion": "kars.azure.com/v1alpha1",
             "kind": "KarsApproval",
-            "metadata": { "finalizers": finalizers },
+            "metadata": {
+                "name": name, "namespace": ns,
+                "uid": approval.uid(), "resourceVersion": approval.resource_version(),
+                "finalizers": finalizers,
+            },
         });
         approvals
             .patch(
@@ -121,14 +126,22 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
 
     let generation = approval.metadata.generation;
     let prior = approval.status.clone().unwrap_or_default();
+    if prior
+        .phase
+        .as_deref()
+        .is_some_and(is_terminal_approval_phase)
+    {
+        return Ok(Action::await_change());
+    }
 
     // Resolve the gated task's live envelope digest (None unless it is
     // governance-Ready and has a digest).
     let tasks: Api<KarsTask> = Api::namespaced(ctx.client.clone(), &ns);
-    let live_task_digest = tasks
-        .get_opt(&approval.spec.task_ref.name)
-        .await?
-        .and_then(|t| t.status.and_then(|s| s.envelope_digest));
+    let live_task = tasks.get_opt(&approval.spec.task_ref.name).await?;
+    let live_task_digest = live_task
+        .as_ref()
+        .filter(|task| crate::kars_task_reconciler::task_is_ready(task))
+        .and_then(|task| task.status.as_ref()?.envelope_digest.clone());
 
     // Bind on first observation where the task is Ready. The controller owns
     // this; once set it is immutable.
@@ -136,6 +149,11 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
         .bound_envelope_digest
         .clone()
         .or_else(|| live_task_digest.clone());
+    let bound_task_uid = prior
+        .bound_task_uid
+        .clone()
+        .or_else(|| live_task.as_ref()?.uid());
+    let snapshot = request_snapshot(&approval.spec);
 
     let now = Utc::now();
     let requested_at = prior
@@ -143,20 +161,31 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
         .as_ref()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc))
+        .or_else(|| {
+            approval
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .and_then(|time| DateTime::parse_from_rfc3339(&time.0.to_string()).ok())
+                .map(|time| time.with_timezone(&Utc))
+        })
         .unwrap_or(now);
 
     let ttl_secs = resolve_ttl_secs(approval.spec.ttl.as_deref());
     let expires_at = requested_at + ChronoDuration::seconds(ttl_secs as i64);
     let expired = now >= expires_at;
 
-    let outcome = evaluate(
-        approval.spec.decision.as_ref(),
-        bound_digest.as_deref(),
-        live_task_digest.as_deref(),
-        expired,
-    );
+    let outcome = match binding_violation(&prior, &snapshot, live_task.as_ref()) {
+        Some(why) => ApprovalOutcome::Stale(why.into()),
+        None => evaluate(
+            approval.spec.decision.as_ref(),
+            bound_digest.as_deref().filter(|_| bound_task_uid.is_some()),
+            live_task_digest.as_deref(),
+            expired,
+        ),
+    };
 
-    let new_status = build_status(
+    let mut new_status = build_status(
         &prior,
         generation,
         &outcome,
@@ -165,20 +194,21 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
         bound_digest,
         now,
     );
+    new_status.bound_task_uid = bound_task_uid;
+    new_status.bound_request = prior.bound_request.clone().or(Some(snapshot));
 
     let terminal = outcome.is_terminal();
 
     let status_patch = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsApproval",
+        "metadata": {
+            "uid": approval.uid(), "resourceVersion": approval.resource_version(),
+        },
         "status": new_status,
     });
     approvals
-        .patch_status(
-            &name,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(status_patch),
-        )
+        .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_patch))
         .await?;
 
     tracing::debug!(karsapproval = %name, ns = %ns, phase = outcome.phase(), "KarsApproval reconciled");
@@ -188,6 +218,37 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
     } else {
         REQUEUE_PENDING
     }))
+}
+
+fn is_terminal_approval_phase(phase: &str) -> bool {
+    matches!(phase, "Approved" | "Denied" | "Expired" | "Stale")
+}
+
+fn binding_violation(
+    prior: &KarsApprovalStatus,
+    snapshot: &str,
+    live_task: Option<&KarsTask>,
+) -> Option<&'static str> {
+    if prior
+        .bound_request
+        .as_deref()
+        .is_some_and(|bound| bound != snapshot)
+    {
+        return Some("approval request changed after first observation");
+    }
+    if prior.bound_envelope_digest.is_some()
+        && (prior.bound_task_uid.is_none() || prior.bound_request.is_none())
+    {
+        return Some(
+            "legacy approval lacks an immutable task/request binding; create a new request",
+        );
+    }
+    if let Some(uid) = &prior.bound_task_uid
+        && live_task.and_then(|task| task.metadata.uid.as_ref()) != Some(uid)
+    {
+        return Some("bound task UID changed or task was deleted");
+    }
+    None
 }
 
 /// Resolve the effective TTL in seconds, clamped to [`MAX_TTL_SECS`], falling
@@ -281,6 +342,8 @@ fn build_status(
                 .unwrap_or_else(|| expires_at.to_rfc3339()),
         ),
         bound_envelope_digest: bound_digest.or_else(|| prior.bound_envelope_digest.clone()),
+        bound_task_uid: prior.bound_task_uid.clone(),
+        bound_request: prior.bound_request.clone(),
         decider,
         conditions: Some(vec![condition]),
     }
@@ -362,6 +425,117 @@ mod tests {
         assert_eq!(resolve_ttl_secs(Some("garbage")), 3600);
         // 30d clamps to the 7d ceiling.
         assert_eq!(resolve_ttl_secs(Some("P30D")), MAX_TTL_SECS);
+    }
+
+    #[test]
+    fn bindings_reject_request_mutation_and_task_replacement() {
+        let mut task = KarsTask::new("task", Default::default());
+        task.metadata.uid = Some("original-task".into());
+        let prior = KarsApprovalStatus {
+            bound_task_uid: task.uid(),
+            bound_request: Some("original-request".into()),
+            bound_envelope_digest: Some("digest".into()),
+            ..Default::default()
+        };
+        assert!(binding_violation(&prior, "original-request", Some(&task)).is_none());
+        assert!(binding_violation(&prior, "changed-action", Some(&task)).is_some());
+        task.metadata.uid = Some("replacement-task".into());
+        assert!(
+            binding_violation(&prior, "original-request", Some(&task))
+                .unwrap()
+                .contains("UID")
+        );
+        assert!(binding_violation(&prior, "original-request", None).is_some());
+    }
+
+    #[test]
+    fn pending_legacy_bindings_cannot_be_replayed_without_task_uid() {
+        let prior = KarsApprovalStatus {
+            bound_envelope_digest: Some("digest".into()),
+            ..Default::default()
+        };
+        assert!(
+            binding_violation(&prior, "request", None)
+                .unwrap()
+                .contains("legacy")
+        );
+    }
+
+    #[tokio::test]
+    async fn terminal_decisions_are_stable_without_reading_a_replaced_task() {
+        let server = wiremock::MockServer::start().await;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        for phase in ["Approved", "Denied", "Expired", "Stale"] {
+            let mut approval = KarsApproval::new("approval", Default::default());
+            approval.metadata.finalizers = Some(vec![FINALIZER.into()]);
+            approval.status = Some(KarsApprovalStatus {
+                phase: Some(phase.into()),
+                decider: Some("original-human".into()),
+                ..Default::default()
+            });
+            approval.spec.decision = Some(ApprovalDecision {
+                verdict: "deny".into(),
+                decider: "different-human".into(),
+                reason: None,
+            });
+            reconcile(
+                Arc::new(approval),
+                Arc::new(Ctx {
+                    client: client.clone(),
+                }),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(server.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn status_write_cannot_cross_approval_entity_replacement() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        Mock::given(method("GET"))
+            .and(path(
+                "/apis/kars.azure.com/v1alpha1/namespaces/default/karstasks/task",
+            ))
+            .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+                "status": "Failure", "message": "not found", "reason": "NotFound", "code": 404,
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path(
+                "/apis/kars.azure.com/v1alpha1/namespaces/default/karsapprovals/approval/status",
+            ))
+            .respond_with(ResponseTemplate::new(409).set_body_json(json!({
+                "status": "Failure", "message": "changed UID", "reason": "Conflict", "code": 409,
+            })))
+            .mount(&server)
+            .await;
+        let mut approval = KarsApproval::new("approval", Default::default());
+        approval.spec.task_ref.name = "task".into();
+        approval.metadata.uid = Some("original-approval-uid".into());
+        approval.metadata.resource_version = Some("42".into());
+        approval.metadata.creation_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                "2020-01-01T00:00:00Z".parse().unwrap(),
+            ));
+        approval.metadata.finalizers = Some(vec![FINALIZER.into()]);
+        assert!(
+            reconcile(Arc::new(approval), Arc::new(Ctx { client }))
+                .await
+                .is_err()
+        );
+        let requests = server.received_requests().await.unwrap();
+        let patch: serde_json::Value = requests.last().unwrap().body_json().unwrap();
+        assert_eq!(patch["metadata"]["uid"], "original-approval-uid");
+        assert_eq!(patch["metadata"]["resourceVersion"], "42");
+        assert_eq!(patch["status"]["phase"], "Expired");
+        assert_eq!(patch["status"]["requestedAt"], "2020-01-01T00:00:00+00:00");
     }
 
     #[test]

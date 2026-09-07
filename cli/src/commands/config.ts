@@ -19,6 +19,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import inquirer from "inquirer";
+import { verifyAdoptedTarget } from "../lib/deployment-target.js";
 import { existsSync, unlinkSync, writeFileSync, chmodSync, mkdirSync, readFileSync } from "fs";
 
 import {
@@ -144,24 +145,6 @@ function adoptAksCmd(): Command {
     .option("--key-vault-name <name>", "Key Vault name")
     .action(async (options) => {
       const { execa } = await import("execa");
-      const kubectlContext = options.context ? ["--context", options.context] : [];
-      await execa(
-        "kubectl",
-        [
-          ...kubectlContext,
-          "get",
-          "crd",
-          "karssandboxes.kars.azure.com",
-          "--output",
-          "name",
-        ],
-        { stdio: "pipe" },
-      );
-      const helmContext = options.context ? ["--kube-context", options.context] : [];
-      await execa("helm", [...helmContext, "status", "kars", "--namespace", "kars-system"], {
-        stdio: "pipe",
-      });
-
       const context = buildAdoptedAksContext({
         subscription: options.subscription,
         region: options.region,
@@ -176,6 +159,9 @@ function adoptAksCmd(): Command {
         foundryProjectEndpoint: options.foundryProjectEndpoint,
         keyVaultName: options.keyVaultName,
       });
+      const scoped = await verifyAdoptedTarget(execa, context, options.context);
+      await scoped("kubectl", ["get", "crd", "karssandboxes.kars.azure.com", "--output", "name"], { stdio: "pipe" });
+      await scoped("helm", ["status", "kars", "--namespace", "kars-system"], { stdio: "pipe" });
       saveContext(context);
       console.log(chalk.green("\n  ✔ Existing AKS installation registered with the Kars CLI."));
       console.log(chalk.dim(`    Cluster: ${context.aksCluster} (${context.resourceGroup})`));

@@ -1,6 +1,6 @@
 # CRD reference
 
-kars exposes its API through **twelve** CustomResourceDefinitions in the `kars.azure.com` group, all at version `v1alpha1`. **Ten are workload CRDs** you author per agent or per policy (or, for `KarsSREAction`, that the SRE operator proposes on your behalf) — catalogued in [At a glance](#at-a-glance) below. **Two are infrastructure CRDs** you do not hand-write: [`KarsAuthConfig`](#karsauthconfig--cluster-trust-anchor) (a cluster-scoped singleton created by `kars mesh setup-trust`) and [`KarsPairing`](#infrastructure-crds) (a controller-internal binding record). This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.
+kars exposes its API through **fifteen** CustomResourceDefinitions in the `kars.azure.com` group, all at version `v1alpha1`. **Thirteen are workload CRDs** you author per agent, task or policy (or, for `KarsSREAction`, that the SRE operator proposes on your behalf) — catalogued in [At a glance](#at-a-glance) below. **Two are infrastructure CRDs** you do not hand-write: [`KarsAuthConfig`](#karsauthconfig--cluster-trust-anchor) (a cluster-scoped singleton created by `kars mesh setup-trust`) and [`KarsPairing`](#infrastructure-crds) (a controller-internal binding record). This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.
 
 > **Version.** All CRDs are served at `kars.azure.com/v1alpha1`. The project is at `v0.1.18`; see [`CHANGELOG.md`](../../CHANGELOG.md) for what's shipped and [`docs/roadmap.md`](../roadmap.md) for what's next.
 
@@ -18,6 +18,81 @@ kars exposes its API through **twelve** CustomResourceDefinitions in the `kars.a
 | `trustgraphs.kars.azure.com` | `TrustGraph` | `tg` | Cluster | Inline `spec.edges[].signature` (Ed25519 per edge, domain-separated payload) | Cross-namespace / cross-cluster mesh trust topology. |
 | `egressapprovals.kars.azure.com` | `EgressApproval` | `eappr` | Namespaced | None on the CR itself (it's a sibling overlay); the sandbox's signed `allowlistRef` is the cryptographic baseline | Ephemeral, TTL-bounded extra egress hosts (overlay on baseline allowlist). |
 | `karssreactions.kars.azure.com` | `KarsSREAction` | `sreaction` | Namespaced | None on the CR; execution is gated by `spec.approval.state` + a one-shot minted writer token | An approval-gated, TTL-bounded cluster remediation the SRE operator proposes. |
+| `karstasks.kars.azure.com` | `KarsTask` | `ctask` | Namespaced | Envelope digest attested by a receipt | A governed task, optionally launched as an owned sandbox. |
+| `karsapprovals.kars.azure.com` | `KarsApproval` | `cappr` | Namespaced | Immutable bound decisions enter receipts | A human decision on a task's current authority. |
+| `karsreceipts.kars.azure.com` | `KarsReceipt` | `crcpt` | Namespaced | DSSE/Ed25519 signed predicate | Independently verifiable governance facts, not proof of complete runtime enforcement. |
+
+### Governed task foundation: supported limits
+
+`KarsTask` planning validates the envelope and effective blueprint before reporting
+governance `Ready`. `execution.launch` is a separate opt-in:
+
+- Task sandboxes always use **Strict egress**, including an empty destination list.
+  This does not change the standalone `KarsSandbox` Learn default.
+- `blueprint.toolPolicy` must equal a pinned `envelope.toolPolicyRef`.
+  `envelope.egressAllowlistRef` is rejected because this foundation cannot resolve
+  that reference; `blueprint.egress` supplies enforced inline destinations.
+- `OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework` (`MAF` alias), and `Hermes`
+  use the existing sandbox runtime contract. Task `BYO` is rejected until the
+  blueprint can carry its required image/contract configuration.
+- **Budget ceilings are planning declarations, not operative quotas.**
+  `budget.tokens` and `budget.usdMicros` describe total task-subtree limits;
+  `0` or absence means no cap declared on that axis. An unbounded child cannot
+  attenuate a positive parent cap. Launch with either positive ceiling is
+  rejected as `UnsupportedLaunchBudget`. The existing per-sandbox daily/monthly
+  token counters reset independently and do not enforce subtree totals or money.
+  Bounded Bridge launches require durable aggregate enforcement before support
+  can be claimed. Do not clear a reviewed budget merely to bypass this gate.
+- Same-name sandbox/policy conflicts are preserved. Only resources controller-owned
+  by the exact task UID can be updated or deleted, with UID/resourceVersion
+  concurrency checks. Cleanup remains `Stopping` and retries API errors or
+  resources awaiting finalization, even if the task's sandbox status reference is lost.
+
+`status.envelopeDigest` is the **task authorization digest**, not merely the
+envelope lattice identifier. `KarsTask::envelope_digest()` (or
+`KarsTaskSpec::authorization_digest()`) hashes the normalized envelope, parent
+reference and full effective blueprint with a versioned domain and full SHA-256.
+Canonical JSON uses UTF-8, compact encoding and recursively sorted object keys;
+array order is preserved. The domain is `kars.azure.com/task-authorization/v1`.
+This includes egress hosts/ports, tool/MCP/memory references, runtime, isolation,
+model/provider and combined objective/instructions. Materialization consumes the
+same normalizer: `MAF` equals `MicrosoftAgentFramework`, blueprint runtime overrides
+execution runtime, absent isolation is `standard`, and zero/absent budget caps
+normalize to unbounded. The launch switch and display label do not change authority.
+Model defaults resolve `KARS_TASK_DEFAULT_MODEL` → `AZURE_OPENAI_DEPLOYMENT` →
+`DEFAULT_MODEL` → `gpt-4o-mini`; default provider resolves
+`KARS_TASK_DEFAULT_PROVIDER` → `azure-openai`. Changing an effective controller
+default invalidates prior task bindings. The pure `TaskEnvelope::digest()` remains
+available for lattice/team uses, **not** task approval authorization.
+Reference names are bound; this digest does not attest mutable referenced resource
+contents or container images. Those require separate policy/runtime evidence.
+
+`KarsApproval` freezes `taskRef`, action and TTL at admission; the human may set
+`spec.decision` once. The controller snapshots the request, binds the task UID
+and current Ready authorization digest, and checks expiry before accepting the
+first decision. Blueprint changes invalidate pending requests even if the
+envelope-only lattice fields did not change. Terminal decisions remain immutable
+historical facts, **not perpetual grants**: consumers must compare the current
+task UID and authorization digest before acting. `approval_authorizes_task`
+checks current Ready authority, immutable request/decision coherence and the
+`Approved` phase. Consumers must additionally check action kind, target, owner
+identity and one-shot semantics. The existing status fields are
+`boundEnvelopeDigest`, `boundTaskUid` and `boundRequest`; no new spec fields are
+needed. Current receipts exclude approvals bound to old authority and refuse
+stale task status when constructing their signed subject.
+Legacy pending bindings without task/request identity become Stale and require a
+new request. Controller snapshots also prevent mutated request echoes entering receipts.
+Approval strings are schema-bounded for CEL evaluation: task names 253, kinds/TTL
+64, summaries 4096, details/reasons 8192, and decider identities 320 characters.
+
+Receipt verification derives claims only from the verified signed predicate and
+rejects conflicting unsigned echoes, including task identity, digest, issuer and
+scheme. Completeness remains **PARTIAL**: false control flags mean **NOT VERIFIED**,
+not necessarily absent. This foundation does not infer enforcement from policy
+names or from a NetworkPolicy in the operator namespace. Signer secrets, public
+anchors and receipt logs resolve `KARS_NAMESPACE`, then `POD_NAMESPACE`, then
+`kars-system`; set the same namespace environment for the CLI verifier.
+Initialization failures are logged and retried, without silently rotating malformed keys.
 
 ### Infrastructure CRDs
 
@@ -28,7 +103,7 @@ Two more CRDs round out the API. You don't author these per agent, but the same 
 | `karsauthconfigs.kars.azure.com` | `KarsAuthConfig` | `kac` | Cluster | `kars mesh setup-trust` (singleton, `metadata.name: default`) | Tenant-wide Entra Agent ID trust anchor. When absent, sandboxes run in the AGT anonymous tier. Fully documented in [KarsAuthConfig](#karsauthconfig--cluster-trust-anchor) below. |
 | `karspairings.kars.azure.com` | `KarsPairing` | `cp` | Namespaced | Controller | Binds two agents to their AgentMesh registry IDs and tracks handshake/trust state. Created from a one-time pairing token; read-only from your side. |
 
-The full Kubernetes schema for all twelve lives in `deploy/helm/kars/templates/crd*.yaml`. Below we summarise what each CRD does, the spec fields you write, and the status fields the controller reports back.
+The full Kubernetes schema lives in `deploy/helm/kars/templates/crd*.yaml`. Below we summarise what each CRD does, the spec fields you write, and the status fields the controller reports back.
 
 > **A note on short names.** The `c`-prefixed aliases (`cs`, `cmem`, `ceval`, `cp`) are retained from the project's earlier name and kept stable for API compatibility. One caveat: `cs` overlaps with kubectl's deprecated built-in `componentstatuses` alias, so in scripts prefer the unambiguous full plural (`karssandboxes`) or the kind (`KarsSandbox`).
 

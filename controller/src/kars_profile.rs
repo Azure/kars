@@ -110,16 +110,9 @@ impl KarsProfile {
     /// Deterministic `sha256:` digest pinning the template content.
     #[must_use]
     pub fn template_digest(&self) -> String {
-        let canonical = serde_json::json!({
-            "domain": self.spec.domain,
-            "charterTemplate": self.spec.charter_template,
-            "roles": self.spec.roles,
-            "tier": self.spec.default_envelope.tier,
-            "authorityCeiling": self.spec.default_envelope.authority_ceiling,
-            "toolPolicy": self.spec.tool_policy,
-            "knowledgeCommons": self.spec.knowledge_commons,
-        });
-        let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
+        // Hash the complete typed template so additional authority fields cannot
+        // silently disappear from a hand-maintained digest projection.
+        let bytes = serde_json::to_vec(&self.spec).expect("KarsProfileSpec always serializes");
         content_digest(&bytes)
     }
 }
@@ -203,5 +196,83 @@ mod tests {
         let mut p2 = profile();
         p2.spec.charter_template = "different".into();
         assert_ne!(d, p2.template_digest());
+    }
+
+    #[test]
+    fn template_digest_matches_complete_spec_golden_encoding() {
+        let p = profile();
+        let canonical = r#"{"displayName":"Engineering maintainer","domain":"eng","charterTemplate":"Keep the repo healthy.","roles":[{"name":"triager","systemPrompt":"Triage issues.","skills":["repo-triage"]}],"defaultEnvelope":{"tier":4,"delegationDepth":2,"authorityCeiling":3},"toolPolicy":"kars-default"}"#;
+        assert_eq!(serde_json::to_string(&p.spec).unwrap(), canonical);
+        assert_eq!(p.template_digest(), content_digest(canonical.as_bytes()));
+        assert_eq!(
+            p.template_digest(),
+            "sha256:44109ef6a4706b013502e1d239fd70f8"
+        );
+    }
+
+    #[test]
+    fn every_template_and_envelope_axis_changes_the_digest() {
+        let mut p = profile();
+        p.spec.default_envelope.budget = Some(crate::kars_task::TaskBudget {
+            tokens: Some(1000),
+            usd_micros: Some(2000),
+        });
+        p.spec.default_envelope.tool_policy_ref = Some(crate::mcp_server::LocalObjectRef {
+            name: "bounded-tools".into(),
+        });
+        p.spec.default_envelope.egress_allowlist_ref = Some(crate::mcp_server::LocalObjectRef {
+            name: "bounded-egress".into(),
+        });
+        p.spec.knowledge_commons = Some("eng-commons".into());
+        let original = serde_json::to_value(&p.spec).unwrap();
+        let digest = p.template_digest();
+        for (pointer, replacement) in [
+            ("/displayName", serde_json::json!("Different display name")),
+            ("/domain", serde_json::json!("different-domain")),
+            ("/charterTemplate", serde_json::json!("Different charter")),
+            ("/roles/0/name", serde_json::json!("different-role")),
+            (
+                "/roles/0/systemPrompt",
+                serde_json::json!("Different instructions"),
+            ),
+            ("/roles/0/skills", serde_json::json!(["different-skill"])),
+            ("/defaultEnvelope/tier", serde_json::json!(3)),
+            ("/defaultEnvelope/authorityCeiling", serde_json::json!(2)),
+            ("/defaultEnvelope/delegationDepth", serde_json::json!(1)),
+            ("/defaultEnvelope/budget/tokens", serde_json::json!(999)),
+            ("/defaultEnvelope/budget/usdMicros", serde_json::json!(1999)),
+            (
+                "/defaultEnvelope/toolPolicyRef/name",
+                serde_json::json!("other-tools"),
+            ),
+            (
+                "/defaultEnvelope/egressAllowlistRef/name",
+                serde_json::json!("other-egress"),
+            ),
+            ("/defaultEnvelope/budget", serde_json::Value::Null),
+            ("/defaultEnvelope/toolPolicyRef", serde_json::Value::Null),
+            (
+                "/defaultEnvelope/egressAllowlistRef",
+                serde_json::Value::Null,
+            ),
+            ("/toolPolicy", serde_json::json!("other-bounding-tools")),
+            ("/knowledgeCommons", serde_json::json!("other-commons")),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = replacement;
+            let mut candidate = p.clone();
+            candidate.spec = serde_json::from_value(changed).unwrap();
+            assert_ne!(digest, candidate.template_digest(), "{pointer}");
+        }
+    }
+
+    #[test]
+    fn template_digest_does_not_bind_incidental_kubernetes_metadata() {
+        let p = profile();
+        let mut updated = p.clone();
+        updated.metadata.resource_version = Some("2".into());
+        updated.metadata.namespace = Some("tenant".into());
+        updated.metadata.generation = Some(2);
+        assert_eq!(p.template_digest(), updated.template_digest());
     }
 }

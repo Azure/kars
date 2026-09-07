@@ -13,6 +13,8 @@
     * RAISE `.spec.envelope.tier`,
       `.spec.envelope.authorityCeiling`,
       or `.spec.envelope.delegationDepth` — i.e. self-escalate authority
+    * remove, unbound or raise a finite token/spend budget
+    * remove or repoint an existing tool-policy or egress-allowlist bound
 
   Lowering envelope fields (voluntary attenuation) and editing non-authority
   spec fields (objective, paused, execution.launch, annotations) remain allowed
@@ -22,7 +24,17 @@
   Applies on UPDATE only (CREATE-time envelope bounds are enforced by the CRD's
   own CEL: tier/ceiling ranges + ceiling<=tier). Requires Kubernetes >= 1.30.
 */}}
-{{- if .Values.admission.envelopeWriteLock.enabled -}}
+{{- $admission := .Values.admission | default dict -}}
+{{- $lock := $admission.envelopeWriteLock | default dict -}}
+{{- $enabled := true -}}
+{{- if hasKey $lock "enabled" -}}
+  {{- if kindIs "bool" $lock.enabled -}}
+    {{- $enabled = $lock.enabled -}}
+  {{- else if not (kindIs "invalid" $lock.enabled) -}}
+    {{- fail "admission.envelopeWriteLock.enabled must be a boolean" -}}
+  {{- end -}}
+{{- end -}}
+{{- if $enabled -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
@@ -58,6 +70,26 @@ spec:
     - name: depthRaised
       expression: >-
         variables.newEnv.?delegationDepth.orValue(0) > variables.oldEnv.?delegationDepth.orValue(0)
+    # Zero and omission mean unbounded, not a smaller finite budget. An
+    # unbounded old budget may be narrowed; a finite one may never be removed.
+    - name: tokenBudgetRaised
+      expression: >-
+        variables.oldEnv.?budget.?tokens.orValue(0) > 0 &&
+        (variables.newEnv.?budget.?tokens.orValue(0) <= 0 ||
+         variables.newEnv.?budget.?tokens.orValue(0) > variables.oldEnv.?budget.?tokens.orValue(0))
+    - name: usdBudgetRaised
+      expression: >-
+        variables.oldEnv.?budget.?usdMicros.orValue(0) > 0 &&
+        (variables.newEnv.?budget.?usdMicros.orValue(0) <= 0 ||
+         variables.newEnv.?budget.?usdMicros.orValue(0) > variables.oldEnv.?budget.?usdMicros.orValue(0))
+    - name: toolPolicyChanged
+      expression: >-
+        has(oldObject.spec.envelope.toolPolicyRef) &&
+        variables.newEnv.?toolPolicyRef.?name.orValue('') != variables.oldEnv.?toolPolicyRef.?name.orValue('')
+    - name: egressRefChanged
+      expression: >-
+        has(oldObject.spec.envelope.egressAllowlistRef) &&
+        variables.newEnv.?egressAllowlistRef.?name.orValue('') != variables.oldEnv.?egressAllowlistRef.?name.orValue('')
     - name: statusChanged
       expression: >-
         has(object.status) != has(oldObject.status) ||
@@ -71,6 +103,18 @@ spec:
       reason: Forbidden
     - expression: "!variables.depthRaised"
       message: "spec.envelope.delegationDepth cannot be raised by a non-controller principal (self-escalation blocked)"
+      reason: Forbidden
+    - expression: "!variables.tokenBudgetRaised"
+      message: "spec.envelope.budget.tokens cannot be raised or made unbounded by a non-controller principal"
+      reason: Forbidden
+    - expression: "!variables.usdBudgetRaised"
+      message: "spec.envelope.budget.usdMicros cannot be raised or made unbounded by a non-controller principal"
+      reason: Forbidden
+    - expression: "!variables.toolPolicyChanged"
+      message: "spec.envelope.toolPolicyRef cannot be removed or repointed by a non-controller principal"
+      reason: Forbidden
+    - expression: "!variables.egressRefChanged"
+      message: "spec.envelope.egressAllowlistRef cannot be removed or repointed by a non-controller principal"
       reason: Forbidden
     - expression: "!variables.statusChanged"
       message: ".status is controller-writable-only — a non-controller principal cannot write governance status"
