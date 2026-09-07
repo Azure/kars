@@ -58,6 +58,7 @@ mod kars_task_execution;
 mod kars_task_reconciler;
 mod kars_team;
 mod kars_team_reconciler;
+mod labels;
 mod leader_election;
 mod mcp_server;
 mod mcp_server_reconciler;
@@ -72,6 +73,7 @@ mod providers;
 mod reconciler;
 mod signer_policy;
 mod status;
+mod task_models;
 mod team_commons;
 mod team_digest;
 #[allow(dead_code)] // helpers consumed by tool_policy_reconciler + future slices.

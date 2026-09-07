@@ -52,6 +52,18 @@ unsafe fn set_env(k: &str, v: &str) {
     unsafe { std::env::set_var(k, v) }
 }
 
+fn azure_endpoint(base: &str) -> (String, reqwest::Client) {
+    let mut url = reqwest::Url::parse(base).unwrap();
+    let address = url.socket_addrs(|| None).unwrap()[0];
+    url.set_host(Some("test.openai.azure.com")).unwrap();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .resolve("test.openai.azure.com", address)
+        .build()
+        .unwrap();
+    (url.to_string().trim_end_matches('/').into(), client)
+}
+
 #[tokio::test]
 async fn api_key_mode_proxies_chat_completion_with_filter_results() {
     let _g = ENV_LOCK.lock().unwrap();
@@ -68,15 +80,15 @@ async fn api_key_mode_proxies_chat_completion_with_filter_results() {
     let auth = WorkloadIdentityAuth::new();
     assert!(auth.is_api_key_mode(), "expected API-key mode");
 
+    let (endpoint, client) = azure_endpoint(&azure.base_url());
     let upstream = UpstreamConfig {
-        endpoint: azure.base_url(),
+        endpoint,
         deployment: "gpt-4o".to_string(),
         sandbox_name: "test-sandbox".to_string(),
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
+        provider_api_key: None,
     };
-    let client = reqwest::Client::new();
-
     let req_body = serde_json::json!({
         "messages": [{"role": "user", "content": "hello fixture"}]
     });
@@ -148,14 +160,15 @@ async fn wi_mode_falls_back_to_imds_and_proxies_embeddings() {
     let auth = WorkloadIdentityAuth::new();
     assert!(!auth.is_api_key_mode(), "expected WI mode");
 
+    let (endpoint, client) = azure_endpoint(&azure.base_url());
     let upstream = UpstreamConfig {
-        endpoint: azure.base_url(),
+        endpoint,
         deployment: "text-embedding-3-small".to_string(),
         sandbox_name: "test-sandbox-wi".to_string(),
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
+        provider_api_key: None,
     };
-    let client = reqwest::Client::new();
     let body = Bytes::from(r#"{"input":"hello"}"#.as_bytes().to_vec());
 
     let (status, _headers, resp) = forward(
@@ -219,14 +232,15 @@ async fn upstream_error_status_is_propagated() {
     .await;
 
     let auth = WorkloadIdentityAuth::new();
+    let (endpoint, client) = azure_endpoint(&azure.base_url());
     let upstream = UpstreamConfig {
-        endpoint: azure.base_url(),
+        endpoint,
         deployment: "gpt-4o".to_string(),
         sandbox_name: "test-sandbox-429".to_string(),
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
+        provider_api_key: None,
     };
-    let client = reqwest::Client::new();
 
     let (status, _headers, resp) = forward(
         &auth,

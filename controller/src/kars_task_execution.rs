@@ -167,6 +167,9 @@ pub async fn materialize(
         "appliesTo": { "sandboxName": task_name },
         "modelPreference": {
             "primary": { "provider": model_provider, "deployment": model_deployment },
+            "fallback": crate::task_models::fallback_routes(
+                &blueprint.model_fallbacks, &model_provider, &model_deployment,
+            ),
         },
     });
     if let Some(tokens) = envelope.budget.as_ref().and_then(|b| b.tokens)

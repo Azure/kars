@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use bytes::Bytes;
 use reqwest::Client;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::auth::WorkloadIdentityAuth;
 use crate::copilot_auth::{
@@ -20,6 +20,8 @@ use crate::copilot_auth::{
 use crate::metrics;
 use crate::provider::ProviderKind;
 use std::sync::Arc;
+
+const INFERENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
 /// Upstream configuration for a single request.
 #[derive(Clone)]
@@ -35,6 +37,8 @@ pub struct UpstreamConfig {
     /// Filled by `provider::resolve` from router-side config only —
     /// never from the inbound request.
     pub api_key: Option<String>,
+    /// Credential for this named provider only; never inherited across providers.
+    pub provider_api_key: Option<String>,
 }
 
 impl UpstreamConfig {
@@ -48,6 +52,7 @@ impl UpstreamConfig {
             sandbox_name,
             provider: ProviderKind::AzureOpenAI,
             api_key: None,
+            provider_api_key: None,
         }
     }
 }
@@ -156,7 +161,31 @@ fn build_upstream_headers(
 /// compatible *but* requires its own short-lived JWT (exchanged from the
 /// user's GitHub OAuth token) and three static integration headers.
 pub fn is_copilot_endpoint(endpoint: &str) -> bool {
-    endpoint.contains("api.githubcopilot.com")
+    endpoint_host(endpoint).as_deref() == Some("api.githubcopilot.com")
+}
+
+pub(crate) fn endpoint_host(endpoint: &str) -> Option<String> {
+    reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
+}
+
+pub(crate) fn is_azure_ai_host(host: &str) -> bool {
+    [
+        ".openai.azure.com",
+        ".cognitiveservices.azure.com",
+        ".services.ai.azure.com",
+        ".openai.azure.us",
+        ".cognitiveservices.azure.us",
+        ".openai.azure.cn",
+        ".cognitiveservices.azure.cn",
+    ]
+    .iter()
+    .any(|suffix| host.ends_with(suffix))
+}
+
+pub(crate) fn is_local_inference_host(host: &str) -> bool {
+    host.ends_with(".kars-local-inference.svc.cluster.local")
 }
 
 /// Acquire the right auth token for a given upstream endpoint.
@@ -170,8 +199,9 @@ pub fn is_copilot_endpoint(endpoint: &str) -> bool {
 pub async fn token_for_endpoint(
     auth: &WorkloadIdentityAuth,
     copilot: Option<&CopilotTokenCache>,
-    endpoint: &str,
+    upstream: &UpstreamConfig,
 ) -> Result<String> {
+    let endpoint = upstream.endpoint.as_str();
     if is_copilot_endpoint(endpoint) {
         match copilot {
             Some(cache) => cache.get_jwt().await,
@@ -180,7 +210,20 @@ pub async fn token_for_endpoint(
                  set COPILOT_GITHUB_TOKEN or mount /run/secrets/copilot-github-token"
             ),
         }
+    } else if let Some(key) = upstream.provider_api_key.as_deref() {
+        Ok(key.to_string())
+    } else if is_local_inference_host(&endpoint_host(endpoint).unwrap_or_default()) {
+        Ok(String::new())
     } else {
+        if !auth.is_api_key_mode() && !auth.is_sidecar_mode() {
+            let host = endpoint_host(endpoint).unwrap_or_default();
+            if !is_azure_ai_host(&host) {
+                anyhow::bail!(
+                    "Refusing to send a Workload Identity / IMDS token to '{host}': \
+                     configure this provider's own credential or an Azure AI endpoint"
+                );
+            }
+        }
         auth.get_token(token_audience(endpoint)).await
     }
 }
@@ -200,9 +243,15 @@ pub async fn credential_for_upstream(
     upstream: &UpstreamConfig,
 ) -> Result<UpstreamCredential> {
     match upstream.provider {
-        ProviderKind::AzureOpenAI => token_for_endpoint(auth, copilot, &upstream.endpoint)
-            .await
-            .map(UpstreamCredential::Bearer),
+        ProviderKind::AzureOpenAI => {
+            if is_local_inference_host(&endpoint_host(&upstream.endpoint).unwrap_or_default()) {
+                Ok(UpstreamCredential::None)
+            } else {
+                token_for_endpoint(auth, copilot, upstream)
+                    .await
+                    .map(UpstreamCredential::Bearer)
+            }
+        }
         ProviderKind::Anthropic => upstream
             .api_key
             .clone()
@@ -427,7 +476,7 @@ async fn send_with_retry(
             .request(method.clone(), url)
             .headers(headers.clone())
             .body(body.clone())
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(INFERENCE_REQUEST_TIMEOUT)
             .send()
             .await;
 
@@ -530,7 +579,7 @@ pub async fn forward_stream(
         .post(&upstream_url)
         .headers(headers)
         .body(body)
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(INFERENCE_REQUEST_TIMEOUT)
         .send()
         .await
         .context("Streaming upstream request failed")?;
@@ -664,16 +713,8 @@ fn inject_stream_usage(body: Bytes) -> Bytes {
     body
 }
 
-/// Returns true if the endpoint is a GitHub Models endpoint
-/// (https://models.github.ai/inference or the legacy
-/// https://models.inference.ai.azure.com URL). GitHub Models is OpenAI-API
-/// compatible but does NOT use the Azure `/openai/v1/` URL prefix.
-fn is_github_models_endpoint(endpoint: &str) -> bool {
-    endpoint.contains("models.github.ai") || endpoint.contains("models.inference.ai.azure.com")
-}
-
 /// Build the upstream URL and optionally inject model into request body.
-/// Uses the unified /openai/v1/ format — works with both API-key and Entra auth.
+/// Azure hosts use /openai/v1/; custom OpenAI-compatible endpoints retain their base path.
 ///
 /// Routing rules:
 ///  - Anthropic: no path rewrite — callers pass Messages-API paths
@@ -703,9 +744,7 @@ fn build_upstream_url(
             path.trim_start_matches('/').trim_start_matches("v1/"),
         ),
         ProviderKind::AzureOpenAI => {
-            if is_github_models_endpoint(&upstream.endpoint)
-                || is_copilot_endpoint(&upstream.endpoint)
-            {
+            if !endpoint_host(&upstream.endpoint).is_some_and(|host| is_azure_ai_host(&host)) {
                 format!(
                     "{}/{}",
                     upstream.endpoint.trim_end_matches('/'),
@@ -722,8 +761,10 @@ fn build_upstream_url(
     };
     let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body)
     {
-        if body_json.get("model").is_none() {
-            body_json.as_object_mut().unwrap().insert(
+        if body_json.get("model").is_none()
+            && let Some(object) = body_json.as_object_mut()
+        {
+            object.insert(
                 "model".into(),
                 serde_json::Value::String(upstream.deployment.clone()),
             );
@@ -746,8 +787,7 @@ fn build_upstream_url(
         // for output and Azure rejects it on the input side anyway.
         if path.trim_start_matches('/').starts_with("responses")
             && upstream.provider == ProviderKind::AzureOpenAI
-            && !is_github_models_endpoint(&upstream.endpoint)
-            && !is_copilot_endpoint(&upstream.endpoint)
+            && endpoint_host(&upstream.endpoint).is_some_and(|host| is_azure_ai_host(&host))
             && let Some(obj) = body_json.as_object_mut()
         {
             if let Some(inputs) = obj.get_mut("input").and_then(|v| v.as_array_mut()) {
@@ -758,11 +798,42 @@ fn build_upstream_url(
                 include.retain(|s| s.as_str() != Some("reasoning.encrypted_content"));
             }
         }
+        rewrite_unsupported_thinking(&mut body_json);
         serde_json::to_vec(&body_json)?.into()
     } else {
         request_body
     };
     Ok((url, body))
+}
+
+pub(crate) fn model_requires_adaptive_thinking(model: &str) -> bool {
+    let model = model.to_ascii_lowercase().replace(['.', '_'], "-");
+    [
+        "opus-4-8",
+        "opus-4-7",
+        "sonnet-5",
+        "fable-5",
+        "mythos-5",
+        "mythos-preview",
+    ]
+    .iter()
+    .any(|family| model.contains(family))
+}
+
+pub(crate) fn rewrite_unsupported_thinking(body: &mut serde_json::Value) {
+    if !body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .is_some_and(model_requires_adaptive_thinking)
+    {
+        return;
+    }
+    if let Some(thinking) = body.get_mut("thinking").and_then(|v| v.as_object_mut())
+        && thinking.get("type").and_then(|v| v.as_str()) == Some("enabled")
+    {
+        thinking.clear();
+        thinking.insert("type".into(), "adaptive".into());
+    }
 }
 
 // ── Retry-logic unit tests (R3) ──────────────────────────────────────────────
@@ -782,6 +853,96 @@ mod retry_tests {
     fn get_and_head_are_idempotent() {
         assert!(is_idempotent(&Method::GET, "/anything"));
         assert!(is_idempotent(&Method::HEAD, "/anything"));
+    }
+
+    #[cfg(test)]
+    mod provider_routing_tests {
+        use super::super::*;
+        use serde_json::json;
+
+        #[test]
+        fn host_classification_rejects_substring_spoofing() {
+            assert!(is_copilot_endpoint("https://api.githubcopilot.com"));
+            for endpoint in [
+                "https://api.githubcopilot.com.evil.example",
+                "https://evil.example/api.githubcopilot.com",
+                "https://evil.example?api.githubcopilot.com",
+            ] {
+                assert!(!is_copilot_endpoint(endpoint));
+            }
+            assert!(is_azure_ai_host("account.openai.azure.com"));
+            assert!(!is_azure_ai_host("account.openai.azure.com.evil.example"));
+            assert!(is_local_inference_host(
+                "model.kars-local-inference.svc.cluster.local"
+            ));
+            assert!(!is_local_inference_host(
+                "model.kars-local-inference.svc.cluster.local.evil.example"
+            ));
+        }
+
+        #[tokio::test]
+        async fn local_service_never_receives_credentials_even_when_configured() {
+            let mut upstream = UpstreamConfig::azure(
+                "http://model.kars-local-inference.svc.cluster.local/v1".into(),
+                "model".into(),
+                "sandbox".into(),
+            );
+            upstream.provider_api_key = Some("must-not-leak".into());
+            let credential = credential_for_upstream(&WorkloadIdentityAuth::new(), None, &upstream)
+                .await
+                .unwrap();
+            assert!(matches!(credential, UpstreamCredential::None));
+        }
+
+        #[test]
+        fn azure_and_custom_urls_keep_their_own_api_prefix() {
+            for (endpoint, expected) in [
+                (
+                    "https://account.openai.azure.com",
+                    "https://account.openai.azure.com/openai/v1/chat/completions",
+                ),
+                (
+                    "http://model.kars-local-inference.svc.cluster.local/v1",
+                    "http://model.kars-local-inference.svc.cluster.local/v1/chat/completions",
+                ),
+                (
+                    "https://custom.example/v1",
+                    "https://custom.example/v1/chat/completions",
+                ),
+                (
+                    "https://models.github.ai/inference",
+                    "https://models.github.ai/inference/chat/completions",
+                ),
+            ] {
+                let upstream =
+                    UpstreamConfig::azure(endpoint.into(), "model".into(), "sandbox".into());
+                let (url, _) = build_upstream_url(
+                    &WorkloadIdentityAuth::new(),
+                    &upstream,
+                    "chat/completions",
+                    Bytes::from("{}"),
+                )
+                .unwrap();
+                assert_eq!(url, expected);
+            }
+        }
+
+        #[test]
+        fn thinking_migration_preserves_legacy_models() {
+            for model in ["claude-opus-4.8", "claude-opus-4-7", "claude-sonnet-5"] {
+                let mut body =
+                    json!({"model":model,"thinking":{"type":"enabled","budget_tokens":12000}});
+                rewrite_unsupported_thinking(&mut body);
+                assert_eq!(body["thinking"], json!({"type":"adaptive"}));
+            }
+            for model in ["claude-opus-4.6", "claude-sonnet-4.5", "gpt-5.4"] {
+                let mut body =
+                    json!({"model":model,"thinking":{"type":"enabled","budget_tokens":12000}});
+                let original = body.clone();
+                rewrite_unsupported_thinking(&mut body);
+                assert_eq!(body, original);
+            }
+        }
     }
 
     #[test]

@@ -1,13 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Slice 2d.2 — health-aware deployment failover.
+//! Health-aware provider and deployment failover.
 //!
 //! Wraps [`crate::proxy::forward`] with a candidate-walk that honours
 //! `InferencePolicy.spec.modelPreference.{primary,fallback[]}.deployment`.
-//! Same-provider only — the router still holds a single Foundry/AOAI
-//! client at process start (`UpstreamConfig.endpoint`); we only swap
-//! the `deployment` field per attempt.
+//! Every candidate is resolved from the original default endpoint, never the
+//! preceding candidate, so fallback cannot retain another provider's credentials.
 //!
 //! Per-attempt outcome feeds [`DeploymentHealthRegistry`]:
 //! * 2xx ⇒ `record_success` (clears any streak)
@@ -30,10 +29,27 @@ use reqwest::Client;
 use std::sync::Arc;
 
 use crate::auth::WorkloadIdentityAuth;
+use crate::config::Config;
 use crate::copilot_auth::CopilotTokenCache;
 use crate::deployment_health::DeploymentHealthRegistry;
 use crate::inference_policy_loader::{InferencePolicySnapshot, ModelRef};
 use crate::proxy::{UpstreamConfig, forward};
+
+mod stream;
+pub use stream::forward_stream_with_failover;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Candidate {
+    pub provider: Option<String>,
+    pub deployment: String,
+}
+
+fn health_key(candidate: &Candidate) -> String {
+    match candidate.provider.as_deref().filter(|tag| !tag.is_empty()) {
+        Some(provider) => format!("{provider}::{}", candidate.deployment),
+        None => candidate.deployment.clone(),
+    }
+}
 
 /// Decide whether an upstream response status is a *retry-worthy*
 /// failure that should mark the deployment unhealthy and trigger a
@@ -55,44 +71,140 @@ pub fn is_failover_trigger(status: StatusCode) -> bool {
 /// `upstream.deployment` is returned as a single-element list, so the
 /// caller always has at least one attempt to make.
 ///
-/// Deduplicates while preserving order: if `primary.deployment` and
-/// `fallback[0].deployment` happen to be the same, we only try it
-/// once. Empty strings are skipped.
+/// Deduplicates provider/deployment pairs while preserving order. The same
+/// model on another provider remains a distinct candidate.
 #[must_use]
 pub fn build_candidates(
     upstream: &UpstreamConfig,
     snapshot: &InferencePolicySnapshot,
-) -> Vec<String> {
-    let mut out: Vec<String> = Vec::new();
-    let mut push = |dep: &str| {
+) -> Vec<Candidate> {
+    let mut out: Vec<Candidate> = Vec::new();
+    let mut push = |dep: &str, provider: Option<String>| {
         if dep.is_empty() {
             return;
         }
-        if !out.iter().any(|d| d == dep) {
-            out.push(dep.to_string());
+        if !out
+            .iter()
+            .any(|d| d.deployment == dep && d.provider == provider)
+        {
+            out.push(Candidate {
+                deployment: dep.to_string(),
+                provider,
+            });
         }
     };
 
     if let Some(ref pref) = snapshot.model_preference {
-        push(&pref.primary.deployment);
-        for ModelRef { deployment, .. } in &pref.fallback {
-            push(deployment);
+        push(
+            &pref.primary.deployment,
+            Some(pref.primary.provider.clone()).filter(|p| !p.is_empty()),
+        );
+        for ModelRef {
+            deployment,
+            provider,
+        } in &pref.fallback
+        {
+            push(deployment, Some(provider.clone()).filter(|p| !p.is_empty()));
         }
+    } else if let Some(provider) = snapshot.provider.as_ref().filter(|p| !p.trim().is_empty()) {
+        push(&upstream.deployment, Some(provider.clone()));
     }
 
     // Always keep the env-driven default as a final safety net so a
     // mid-flight policy unload (or a policy with only an empty
     // primary) never produces a zero-candidate list.
-    push(&upstream.deployment);
+    push(&upstream.deployment, None);
 
     if out.is_empty() {
         // Theoretically unreachable (`upstream.deployment` is set
         // from `Config::default_model` which has its own default),
         // but defence-in-depth: empty list ⇒ one attempt at the
         // caller-supplied upstream as-is.
-        out.push(upstream.deployment.clone());
+        out.push(Candidate {
+            provider: None,
+            deployment: upstream.deployment.clone(),
+        });
     }
     out
+}
+
+pub(crate) fn resolve_candidate(
+    base: &UpstreamConfig,
+    config: &Config,
+    candidate: &Candidate,
+) -> UpstreamConfig {
+    let mut upstream = base.clone();
+    upstream.deployment = candidate.deployment.clone();
+    let Some(tag) = candidate.provider.as_deref() else {
+        return upstream;
+    };
+    match crate::provider::parse_tag(tag) {
+        Ok(Some(crate::provider::ProviderKind::Anthropic)) => {
+            if let Ok(crate::provider::ProviderTarget::Anthropic { endpoint, api_key }) =
+                crate::provider::resolve(Some(tag), config)
+            {
+                upstream.endpoint = endpoint;
+                upstream.provider = crate::provider::ProviderKind::Anthropic;
+                upstream.api_key = Some(api_key);
+                upstream.provider_api_key = None;
+            }
+        }
+        Ok(Some(crate::provider::ProviderKind::Ollama)) => {
+            if let Ok(crate::provider::ProviderTarget::Ollama { endpoint }) =
+                crate::provider::resolve(Some(tag), config)
+            {
+                upstream.endpoint = endpoint;
+                upstream.provider = crate::provider::ProviderKind::Ollama;
+                upstream.api_key = None;
+                upstream.provider_api_key = None;
+            }
+        }
+        _ => {
+            if let Some(target) = config.resolve_provider(tag) {
+                upstream.endpoint = target.endpoint;
+                upstream.provider = crate::provider::ProviderKind::AzureOpenAI;
+                upstream.api_key = None;
+                upstream.provider_api_key = target.api_key;
+            }
+        }
+    }
+    upstream
+}
+
+pub(crate) fn candidates_for_request(
+    base: &UpstreamConfig,
+    policy: &InferencePolicySnapshot,
+    body: &[u8],
+) -> Vec<Candidate> {
+    let mut candidates = build_candidates(base, policy);
+    if policy.model_preference.is_none()
+        && let Ok(value) = serde_json::from_slice::<serde_json::Value>(body)
+        && let Some(model) = value
+            .get("model")
+            .and_then(|model| model.as_str())
+            .filter(|model| !model.trim().is_empty())
+        && model != candidates[0].deployment
+    {
+        // No policy-selected model: preserve the pre-existing public API's
+        // caller-selected model, then retain the configured safety net.
+        let mut requested = candidates[0].clone();
+        requested.deployment = model.to_string();
+        candidates.insert(0, requested);
+    }
+    candidates
+}
+
+fn request_body_for_candidate(body: &Bytes, deployment: &str) -> Bytes {
+    let Ok(mut value) = serde_json::from_slice::<serde_json::Value>(body) else {
+        return body.clone();
+    };
+    let Some(object) = value.as_object_mut() else {
+        return body.clone();
+    };
+    object.insert("model".into(), deployment.into());
+    serde_json::to_vec(&value)
+        .map(Bytes::from)
+        .unwrap_or_else(|_| body.clone())
 }
 
 /// Walks `build_candidates(...)`, skipping deployments the health
@@ -113,29 +225,31 @@ pub async fn forward_with_failover(
     client: &Client,
     health: &Arc<DeploymentHealthRegistry>,
     upstream_base: &UpstreamConfig,
+    config: &Config,
     snapshot: &InferencePolicySnapshot,
     method: Method,
     path: &str,
     request_headers: &HeaderMap,
     request_body: Bytes,
-) -> Result<(StatusCode, HeaderMap, Bytes)> {
-    let candidates = build_candidates(upstream_base, snapshot);
+) -> Result<(StatusCode, HeaderMap, Bytes, UpstreamConfig)> {
+    let candidates = candidates_for_request(upstream_base, snapshot, &request_body);
 
     // Track the last *actually attempted* response so we can surface
     // a real upstream error if every candidate fails.
-    let mut last_result: Option<Result<(StatusCode, HeaderMap, Bytes)>> = None;
+    let mut last_result = None;
     // The very first candidate (regardless of health) — used as a
     // fallback-of-last-resort when every candidate was skipped
     // because the cache flagged them all unhealthy.
     let first_candidate = candidates
         .first()
         .cloned()
-        .unwrap_or_else(|| upstream_base.deployment.clone());
+        .expect("candidate list is non-empty");
 
-    for (idx, deployment) in candidates.iter().enumerate() {
+    for (idx, candidate) in candidates.iter().enumerate() {
+        let deployment = health_key(candidate);
         // Skip unhealthy candidates *unless* this is the only one
         // we have left to try (i.e. we've exhausted the list).
-        if !health.is_healthy(deployment) {
+        if !health.is_healthy(&deployment) {
             tracing::info!(
                 sandbox = %upstream_base.sandbox_name,
                 deployment = %deployment,
@@ -144,13 +258,12 @@ pub async fn forward_with_failover(
             continue;
         }
 
-        let mut upstream = upstream_base.clone();
-        upstream.deployment = deployment.clone();
+        let upstream = resolve_candidate(upstream_base, config, candidate);
 
         if idx > 0 {
             tracing::warn!(
                 sandbox = %upstream_base.sandbox_name,
-                from = %first_candidate,
+                from = %health_key(&first_candidate),
                 to = %deployment,
                 attempt = idx + 1,
                 digest = %snapshot.digest,
@@ -166,13 +279,13 @@ pub async fn forward_with_failover(
             method.clone(),
             path,
             request_headers,
-            request_body.clone(),
+            request_body_for_candidate(&request_body, &candidate.deployment),
         )
         .await;
 
         match &attempt {
             Ok((status, _, _)) if is_failover_trigger(*status) => {
-                health.record_failure(deployment);
+                health.record_failure(&deployment);
                 tracing::warn!(
                     sandbox = %upstream_base.sandbox_name,
                     deployment = %deployment,
@@ -180,17 +293,18 @@ pub async fn forward_with_failover(
                     digest = %snapshot.digest,
                     "InferencePolicy failover: upstream returned retry-worthy status"
                 );
-                last_result = Some(attempt);
+                last_result =
+                    Some(attempt.map(|(status, headers, body)| (status, headers, body, upstream)));
                 continue;
             }
             Ok((status, _, _)) => {
                 if status.is_success() {
-                    health.record_success(deployment);
+                    health.record_success(&deployment);
                 }
-                return attempt;
+                return attempt.map(|(status, headers, body)| (status, headers, body, upstream));
             }
             Err(e) => {
-                health.record_failure(deployment);
+                health.record_failure(&deployment);
                 tracing::warn!(
                     sandbox = %upstream_base.sandbox_name,
                     deployment = %deployment,
@@ -198,7 +312,8 @@ pub async fn forward_with_failover(
                     digest = %snapshot.digest,
                     "InferencePolicy failover: transport error"
                 );
-                last_result = Some(attempt);
+                last_result =
+                    Some(attempt.map(|(status, headers, body)| (status, headers, body, upstream)));
                 continue;
             }
         }
@@ -215,12 +330,11 @@ pub async fn forward_with_failover(
     // error that hides the real cause.
     tracing::warn!(
         sandbox = %upstream_base.sandbox_name,
-        deployment = %first_candidate,
+        deployment = %health_key(&first_candidate),
         digest = %snapshot.digest,
         "InferencePolicy failover: all candidates unhealthy, retrying primary anyway"
     );
-    let mut upstream = upstream_base.clone();
-    upstream.deployment = first_candidate.clone();
+    let upstream = resolve_candidate(upstream_base, config, &first_candidate);
     let attempt = forward(
         auth,
         copilot,
@@ -229,24 +343,33 @@ pub async fn forward_with_failover(
         method,
         path,
         request_headers,
-        request_body,
+        request_body_for_candidate(&request_body, &first_candidate.deployment),
     )
     .await;
     match &attempt {
-        Ok((status, _, _)) if status.is_success() => health.record_success(&first_candidate),
-        Ok((status, _, _)) if is_failover_trigger(*status) => {
-            health.record_failure(&first_candidate);
+        Ok((status, _, _)) if status.is_success() => {
+            health.record_success(&health_key(&first_candidate))
         }
-        Err(_) => health.record_failure(&first_candidate),
+        Ok((status, _, _)) if is_failover_trigger(*status) => {
+            health.record_failure(&health_key(&first_candidate));
+        }
+        Err(_) => health.record_failure(&health_key(&first_candidate)),
         _ => {}
     }
-    attempt
+    attempt.map(|(status, headers, body)| (status, headers, body, upstream))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::inference_policy_loader::{ModelPreference, ModelRef};
+
+    fn deployments(candidates: &[Candidate]) -> Vec<&str> {
+        candidates
+            .iter()
+            .map(|candidate| candidate.deployment.as_str())
+            .collect()
+    }
 
     fn upstream(dep: &str) -> UpstreamConfig {
         UpstreamConfig {
@@ -255,6 +378,7 @@ mod tests {
             sandbox_name: "sbx".into(),
             provider: crate::provider::ProviderKind::AzureOpenAI,
             api_key: None,
+            provider_api_key: None,
         }
     }
 
@@ -305,28 +429,28 @@ mod tests {
     fn build_candidates_includes_primary_then_fallback_chain() {
         let snap = snapshot_with("primary", &["fb-a", "fb-b"]);
         let c = build_candidates(&upstream("default"), &snap);
-        assert_eq!(c, vec!["primary", "fb-a", "fb-b", "default"]);
+        assert_eq!(deployments(&c), vec!["primary", "fb-a", "fb-b", "default"]);
     }
 
     #[test]
     fn build_candidates_dedups_overlap() {
         let snap = snapshot_with("primary", &["primary", "fb-a"]);
         let c = build_candidates(&upstream("primary"), &snap);
-        assert_eq!(c, vec!["primary", "fb-a"]);
+        assert_eq!(deployments(&c), vec!["primary", "fb-a", "primary"]);
     }
 
     #[test]
     fn build_candidates_skips_empty_deployment_strings() {
         let snap = snapshot_with("", &["", "fb-a"]);
         let c = build_candidates(&upstream("default"), &snap);
-        assert_eq!(c, vec!["fb-a", "default"]);
+        assert_eq!(deployments(&c), vec!["fb-a", "default"]);
     }
 
     #[test]
     fn build_candidates_no_policy_yields_just_default() {
         let snap = InferencePolicySnapshot::default();
         let c = build_candidates(&upstream("env-default"), &snap);
-        assert_eq!(c, vec!["env-default"]);
+        assert_eq!(deployments(&c), vec!["env-default"]);
     }
 
     #[test]
@@ -334,6 +458,6 @@ mod tests {
         // Even with everything blank, we get a one-element list.
         let snap = snapshot_with("", &[]);
         let c = build_candidates(&upstream(""), &snap);
-        assert_eq!(c, vec![""]);
+        assert_eq!(deployments(&c), vec![""]);
     }
 }

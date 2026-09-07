@@ -127,6 +127,11 @@ pub struct TaskBlueprint {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub model: Option<TaskModel>,
 
+    /// Ordered alternative inference routes; absent preserves the default route.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[schemars(schema_with = "crate::task_models::fallback_schema")]
+    pub model_fallbacks: Vec<TaskModel>,
+
     /// System prompt / standing instructions for the agent, in addition to the
     /// objective. Drives `KarsSandbox.spec.agent.instructions`.
     #[serde(default, skip_serializing_if = "Option::is_none")]

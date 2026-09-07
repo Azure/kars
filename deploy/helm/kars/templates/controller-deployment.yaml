@@ -51,6 +51,10 @@ spec:
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             - name: KARS_SANDBOX_NODE_SELECTOR_JSON
               value: {{ .Values.sandbox.nodeSelector | toJson | quote }}
+            - name: LOCAL_INFERENCE_NAMESPACES
+              value: {{ join "," .Values.localInference.namespaces | quote }}
+            - name: LOCAL_INFERENCE_TARGETS_JSON
+              value: {{ .Values.localInference.targets | toJson | quote }}
             {{- if .Values.controller.byoStrict }}
             - name: BYO_STRICT_MODE
               value: "1"

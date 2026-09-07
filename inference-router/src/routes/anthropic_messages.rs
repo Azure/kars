@@ -342,7 +342,7 @@ pub(super) async fn anthropic_messages(
 
     let mut upstream = state.upstream_config(sandbox_name);
     // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
-    crate::routes::apply_model_preference_override(&mut upstream, &policy);
+    crate::routes::apply_model_preference_override(&mut upstream, &policy, &state.config);
 
     // Retarget at the policy-selected provider (fails closed).
     if let Err(e) = crate::routes::apply_provider_resolution(&state, &mut upstream, &policy) {
