@@ -107,50 +107,6 @@ fn network_policy(blueprint: &TaskBlueprint) -> serde_json::Value {
     })
 }
 
-/// Resolve the default `(deployment, provider)` a task-materialized
-/// InferencePolicy should request. The deployment is required by the sandbox
-/// reconciler — without it the pod degrades — so we derive a sane default from
-/// the controller's own configured inference model and let an operator override
-/// it for the task lane specifically.
-///
-/// Resolution order for the deployment:
-/// `KARS_TASK_DEFAULT_MODEL` → `AZURE_OPENAI_DEPLOYMENT` → `DEFAULT_MODEL` →
-/// `gpt-4o-mini`. The provider tag is `KARS_TASK_DEFAULT_PROVIDER` →
-/// `azure-openai` (the router routes by the configured endpoint URL, so this
-/// tag only needs to be a valid non-empty value).
-fn default_model() -> (String, String) {
-    let deployment = std::env::var("KARS_TASK_DEFAULT_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("AZURE_OPENAI_DEPLOYMENT")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(|| {
-            std::env::var("DEFAULT_MODEL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
-    let provider = std::env::var("KARS_TASK_DEFAULT_PROVIDER")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "azure-openai".to_string());
-    (deployment, provider)
-}
-
-/// Build the agent's standing instructions (system prompt) from the task
-/// objective plus any blueprint instructions. Pure + testable.
-fn build_instructions(objective: &str, extra: Option<&str>) -> String {
-    let mut out = format!("Your objective:\n{}", objective.trim());
-    if let Some(extra) = extra.map(str::trim).filter(|s| !s.is_empty()) {
-        out.push_str("\n\nAdditional instructions:\n");
-        out.push_str(extra);
-    }
-    out
-}
-
 /// Materialize the InferencePolicy + KarsSandbox for a launched task using
 /// atomic creation or version-checked owned updates, then read sandbox status.
 pub async fn materialize(
@@ -162,26 +118,15 @@ pub async fn materialize(
     let task_name = task.name_any();
     let inference_name = format!("{task_name}-inference");
     let envelope = &task.spec.envelope;
-    let blueprint = task.spec.blueprint.clone().unwrap_or_default();
+    let blueprint = crate::kars_task::blueprint::effective_blueprint(&task.spec);
     let runtime = runtime_spec(task)?;
 
     // 1. InferencePolicy scoped to this sandbox. Model: blueprint wins, else
     //    the controller default (required — without it the sandbox degrades).
-    let (model_deployment, model_provider) = match &blueprint.model {
-        Some(m) if !m.deployment.trim().is_empty() => {
-            let provider = if m.provider.trim().is_empty() {
-                "azure-openai".to_string()
-            } else {
-                m.provider.clone()
-            };
-            (m.deployment.clone(), provider)
-        }
-        _ => default_model(),
-    };
     let inference_spec = json!({
         "appliesTo": { "sandboxName": task_name },
         "modelPreference": {
-            "primary": { "provider": model_provider, "deployment": model_deployment },
+            "primary": blueprint.model,
         },
     });
     apply_dynamic(
@@ -197,23 +142,17 @@ pub async fn materialize(
 
     // 2. KarsSandbox bounded by the envelope + shaped by the blueprint. Each
     //    blueprint field drives a real sandbox field; unset → safe default.
-    let isolation = blueprint
-        .isolation
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "standard".to_string());
     let mut sandbox_spec = json!({
         "runtime": runtime,
         "inferenceRef": { "name": inference_name },
-        "sandbox": { "isolation": isolation },
+        "sandbox": { "isolation": blueprint.isolation },
         "networkPolicy": network_policy(&blueprint),
     });
 
     // Agent instructions (the system prompt) — combine the objective with any
     // standing instructions the blueprint carries, so the agent knows both
     // *what* to do and *how* to behave.
-    let instructions = build_instructions(&task.spec.objective, blueprint.instructions.as_deref());
-    sandbox_spec["agent"] = json!({ "instructions": instructions });
+    sandbox_spec["agent"] = json!({ "instructions": blueprint.instructions });
 
     // Governance: tools = an existing ToolPolicy (composed by reference), from
     // the blueprint or the envelope; MCP servers (connected services) ride on
@@ -494,6 +433,7 @@ async fn apply_dynamic(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kars_task::blueprint::build_instructions;
 
     #[test]
     fn build_instructions_includes_objective_and_extra() {
@@ -510,34 +450,6 @@ mod tests {
         // Blank extra is ignored.
         let blank = build_instructions("X", Some("   "));
         assert!(!blank.contains("Additional instructions"));
-    }
-
-    #[test]
-    fn default_model_resolution() {
-        // Single test (env is process-global; avoid cross-test races).
-        unsafe {
-            std::env::remove_var("KARS_TASK_DEFAULT_MODEL");
-            std::env::remove_var("AZURE_OPENAI_DEPLOYMENT");
-            std::env::remove_var("DEFAULT_MODEL");
-            std::env::remove_var("KARS_TASK_DEFAULT_PROVIDER");
-        }
-        // No knobs → safe builtin default + valid provider tag.
-        let (deployment, provider) = default_model();
-        assert!(!deployment.is_empty());
-        assert_eq!(provider, "azure-openai");
-
-        // Explicit task overrides win.
-        unsafe {
-            std::env::set_var("KARS_TASK_DEFAULT_MODEL", "openai/gpt-4o-mini");
-            std::env::set_var("KARS_TASK_DEFAULT_PROVIDER", "github-models");
-        }
-        let (deployment, provider) = default_model();
-        assert_eq!(deployment, "openai/gpt-4o-mini");
-        assert_eq!(provider, "github-models");
-        unsafe {
-            std::env::remove_var("KARS_TASK_DEFAULT_MODEL");
-            std::env::remove_var("KARS_TASK_DEFAULT_PROVIDER");
-        }
     }
 
     #[test]

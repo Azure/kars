@@ -48,12 +48,7 @@ fn root_policy_conflict_never_becomes_ready() {
 fn readiness_requires_current_generation_digest_and_valid_contract() {
     let mut task = task_with(3, 3, 2);
     task.metadata.generation = Some(1);
-    task.status = Some(ready_status(
-        None,
-        Some(1),
-        task.spec.envelope.digest(),
-        vec![],
-    ));
+    task.status = Some(ready_status(None, Some(1), task.envelope_digest(), vec![]));
     assert!(task_is_ready(&task));
     task.metadata.generation = Some(2);
     assert!(!task_is_ready(&task));

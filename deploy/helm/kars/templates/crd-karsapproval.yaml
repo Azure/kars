@@ -147,8 +147,8 @@ spec:
             properties:
               boundEnvelopeDigest:
                 description: |-
-                  The task envelope digest this approval is bound to. Set once by the
-                  controller from the task's `status.envelopeDigest`; never changes.
+                  The task authorization digest (envelope plus effective blueprint).
+                  Copied once from `status.envelopeDigest`; never changes after binding.
                 nullable: true
                 type: string
               boundRequest:

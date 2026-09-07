@@ -176,12 +176,9 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
             delegation.lineage(),
         ),
         EnvelopeCheck::Valid => match delegation {
-            Delegation::Root => ready_status(
-                prior_ready,
-                generation,
-                task.spec.envelope.digest(),
-                Vec::new(),
-            ),
+            Delegation::Root => {
+                ready_status(prior_ready, generation, task.envelope_digest(), Vec::new())
+            }
             Delegation::ParentMissing { parent } => {
                 tracing::warn!(karstask = %name, ns = %ns, %parent, "KarsTask parent not found");
                 degraded_status(
@@ -204,12 +201,7 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                 violations,
             } if violations.is_empty() => {
                 tracing::info!(karstask = %name, ns = %ns, depth = lineage.len(), "KarsTask delegated child ready");
-                ready_status(
-                    prior_ready,
-                    generation,
-                    task.spec.envelope.digest(),
-                    lineage,
-                )
+                ready_status(prior_ready, generation, task.envelope_digest(), lineage)
             }
             Delegation::Child {
                 lineage,
@@ -354,7 +346,7 @@ pub(crate) fn task_is_ready(task: &KarsTask) -> bool {
     let Some(status) = task.status.as_ref() else {
         return false;
     };
-    let digest_ok = status.envelope_digest.as_deref() == Some(task.spec.envelope.digest().as_str());
+    let digest_ok = status.envelope_digest.as_deref() == Some(task.envelope_digest().as_str());
     let ready_ok = status
         .conditions
         .iter()
@@ -532,16 +524,17 @@ async fn reconcile_receipt(
     // Gather the human decisions (HITL approvals) bound to this task, so every
     // steer is recorded in the signed receipt. Best-effort: a list failure
     // must not block the receipt (it just omits approvals this pass).
+    let mut current_task = task.clone();
+    current_task.status = Some(status.clone());
     let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
     let task_approvals = match approvals.list(&ListParams::default()).await {
         Ok(list) => list
             .items
             .into_iter()
             .filter(|a| {
-                a.spec.task_ref.name == name
-                    && task.uid().is_some()
-                    && a.status.as_ref().and_then(|s| s.bound_task_uid.as_ref())
-                        == task.metadata.uid.as_ref()
+                crate::kars_approval::approval_binding_matches_task(a, &current_task)
+                    && (a.status.as_ref().and_then(|s| s.phase.as_deref()) != Some("Approved")
+                        || crate::kars_approval::approval_authorizes_task(a, &current_task))
             })
             .collect::<Vec<_>>(),
         Err(e) => {

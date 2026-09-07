@@ -367,8 +367,8 @@ spec:
                 type: array
               envelopeDigest:
                 description: |-
-                  `sha256:` digest of the validated trust envelope. Stable for a given
-                  envelope; recomputed whenever the spec changes.
+                  `sha256:` authorization digest of the validated envelope and effective
+                  governed blueprint, including resolved model defaults and capability refs.
                 nullable: true
                 type: string
               executionDetail:

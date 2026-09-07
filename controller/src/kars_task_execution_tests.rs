@@ -190,3 +190,88 @@ async fn deleting_an_already_absent_object_is_successful() {
     assert!(delete_owned(&api, "demo", &task()).await.unwrap());
     assert_eq!(server.received_requests().await.unwrap().len(), 1);
 }
+
+#[tokio::test]
+async fn materialized_resources_match_the_authorization_blueprint() {
+    use crate::kars_task::{TaskEgress, TaskModel};
+    let server = MockServer::start().await;
+    let mut task = task();
+    task.spec.objective = "Review the patch".into();
+    task.spec.blueprint = Some(TaskBlueprint {
+        runtime: Some("MAF".into()),
+        model: Some(TaskModel {
+            deployment: "reviewed-model".into(),
+            provider: String::new(),
+        }),
+        instructions: Some(" Cite evidence. ".into()),
+        tool_policy: Some("read-only".into()),
+        mcp_servers: vec!["docs".into()],
+        memory: Some(" team-memory ".into()),
+        isolation: Some("enhanced".into()),
+        egress: vec![TaskEgress {
+            host: "docs.example.com".into(),
+            port: Some(443),
+        }],
+    });
+    Mock::given(method("GET"))
+        .and(path(OBJECT_PATH))
+        .respond_with(api_error(404))
+        .with_priority(1)
+        .up_to_n_times(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(OBJECT_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(object(&task)))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/default/inferencepolicies/demo-inference",
+        ))
+        .respond_with(api_error(404))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .respond_with(|request: &wiremock::Request| {
+            let mut resource: serde_json::Value = request.body_json().unwrap();
+            resource["metadata"]["uid"] = json!("created-resource");
+            resource["metadata"]["resourceVersion"] = json!("1");
+            ResponseTemplate::new(201).set_body_json(resource)
+        })
+        .expect(2)
+        .mount(&server)
+        .await;
+    let effective = crate::kars_task::blueprint::effective_blueprint(&task.spec);
+    let outcome = materialize(&client(&server), "default", &task)
+        .await
+        .unwrap();
+    assert_eq!(outcome.phase, "Running");
+    let requests = server.received_requests().await.unwrap();
+    let specs: Vec<serde_json::Value> = requests
+        .iter()
+        .filter(|r| r.method == "POST")
+        .map(|r| r.body_json::<serde_json::Value>().unwrap()["spec"].clone())
+        .collect();
+    assert_eq!(
+        specs[0]["modelPreference"]["primary"],
+        json!(effective.model)
+    );
+    assert_eq!(specs[1]["runtime"]["kind"], "MicrosoftAgentFramework");
+    assert_eq!(specs[1]["sandbox"]["isolation"], json!(effective.isolation));
+    assert_eq!(
+        specs[1]["agent"]["instructions"],
+        json!(effective.instructions)
+    );
+    assert_eq!(
+        specs[1]["networkPolicy"]["allowedEndpoints"],
+        json!(effective.egress)
+    );
+    assert_eq!(specs[1]["networkPolicy"]["egressMode"], "Strict");
+    assert_eq!(
+        specs[1]["governance"]["toolPolicyRef"]["name"],
+        json!(effective.tool_policy)
+    );
+    assert_eq!(specs[1]["governance"]["mcpServerRefs"][0]["name"], "docs");
+    assert_eq!(specs[1]["memoryRef"]["name"], json!(effective.memory));
+}
