@@ -266,7 +266,7 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let requeue = if new_status.phase.as_deref() == Some(PHASE_PENDING)
         || matches!(
             new_status.execution_phase.as_deref(),
-            Some("Stopping" | "Degraded")
+            Some("Stopping" | PHASE_DEGRADED)
         ) {
         REQUEUE_PENDING
     } else {
