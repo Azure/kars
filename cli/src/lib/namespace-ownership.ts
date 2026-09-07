@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import type { Execute } from "./deployment-target.js";
+type Execute = (
+  file: string, args: readonly string[], options: { stdio: "pipe"; input?: string },
+) => Promise<{ stdout: string }>;
 
 export const CLAIM = {
   version: "kars.azure.com/namespace-claim-version",

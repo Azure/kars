@@ -313,6 +313,47 @@ fn new_namespace(sandbox: &KarsSandbox) -> Result<Namespace, Error> {
     }))?)
 }
 
+/// Namespace GC may remove a legacy Deployment before deleting the self-hosted
+/// Sandbox CR. No ownership adoption is needed to release only our finalizer on
+/// that live CR: namespace deletion is already in progress independently of us.
+/// A true result must stop reconciliation, including all other cleanup.
+pub async fn finalize_legacy_namespace_gc(
+    client: &Client,
+    observed: &KarsSandbox,
+) -> Result<bool, Error> {
+    let namespace_name = format!("kars-{}", observed.name_any());
+    if observed.metadata.deletion_timestamp.is_none()
+        || observed.namespace().as_deref() != Some(namespace_name.as_str())
+    {
+        return Ok(false);
+    }
+    let sandbox = live_sandbox(client, observed).await?;
+    if sandbox.metadata.deletion_timestamp.is_none()
+        || sandbox.namespace().as_deref() != Some(namespace_name.as_str())
+    {
+        return Ok(false);
+    }
+    let namespaces: Api<Namespace> = Api::all(client.clone());
+    let Some(namespace) = namespaces.get_opt(&namespace_name).await? else {
+        return Ok(false);
+    };
+    if namespace.metadata.deletion_timestamp.is_none()
+        || prestaged(&namespace, &sandbox)
+        || claimed(&namespace, &sandbox)?
+    {
+        return Ok(false);
+    }
+    // claimed() rejects conflicting/partial claims, ownerReferences, and any
+    // recorded namespace-UID mismatch. Only its unclaimed legacy case gets here.
+    let mut finalizers = sandbox.metadata.finalizers.clone().unwrap_or_default();
+    let before = finalizers.len();
+    finalizers.retain(|finalizer| finalizer != FINALIZER);
+    if finalizers.len() != before {
+        patch_sandbox(client, &sandbox, json!({"finalizers": finalizers})).await?;
+    }
+    Ok(true)
+}
+
 /// Establish authority before *any* target-namespace operations. HTTP conflicts
 /// propagate to the controller's retry queue; every retry re-reads all evidence.
 pub async fn ensure(
@@ -565,3 +606,7 @@ pub async fn report_conflict(
 #[cfg(test)]
 #[path = "namespace_ownership_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "namespace_ownership_finalization_tests.rs"]
+mod finalization_tests;
