@@ -20,9 +20,9 @@ use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::kars_task::TaskEnvelope;
+use crate::providers::signing::content_digest;
 
 /// A role in the profile's roster template.
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -120,12 +120,7 @@ impl KarsProfile {
             "knowledgeCommons": self.spec.knowledge_commons,
         });
         let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-        let full = Sha256::digest(&bytes);
-        let mut out = String::from("sha256:");
-        for b in &full[..16] {
-            out.push_str(&format!("{b:02x}"));
-        }
-        out
+        content_digest(&bytes)
     }
 }
 
