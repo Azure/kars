@@ -5,6 +5,8 @@
 // `kars dev --release`, and `kars upgrade`: the canonical GHCR image plan,
 // semantic-version comparison, and latest-release discovery.
 
+import { RUNTIME_IMAGE_TARGETS } from "./image-targets.js";
+
 export const RELEASE_GHCR = "ghcr.io/azure";
 
 export interface ReleaseImage {
@@ -37,11 +39,7 @@ export function releaseImagePlan(
     { src: `${G}/kars-agentmesh-registry:${version}`, target: "agentmesh-registry-agt:latest", required: true },
   ];
   if (opts.includeRuntimes !== false) {
-    for (const rt of [
-      "kars-runtime-openai-agents", "kars-runtime-maf-python", "kars-runtime-anthropic",
-      "kars-runtime-langgraph", "kars-runtime-langgraph-ts", "kars-runtime-pydantic-ai",
-      "kars-runtime-hermes",
-    ]) {
+    for (const { repo: rt } of RUNTIME_IMAGE_TARGETS) {
       images.push({ src: `${G}/${rt}:${version}`, target: `${rt}:latest`, required: false });
     }
   }

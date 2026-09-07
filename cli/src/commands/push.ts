@@ -11,6 +11,7 @@ import { loadContext } from "../config.js";
 import { preparePushTarget } from "../lib/deployment-target.js";
 import { inspectMeshInstallation } from "../lib/mesh-release.js";
 import { applyPushedImages } from "./push-apply.js";
+import { dockerPushDigest, PUSH_COMPONENTS, RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
 import { stageRustBinaries } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
 import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
@@ -24,9 +25,9 @@ export function pushCommand(): Command {
     .description("Build and push images to ACR (uses cached context from last deploy)")
     .option("--acr <name>", "ACR name (default: from last deploy)")
     .option("--subscription <id>", "Azure subscription (must match saved deployment when present)")
-    .option("--only <image>", "Build only one image: controller, router, sandbox, sandbox-base, relay, registry")
+    .option("--only <image>", "Build one image: controller, router, sandbox, sandbox-base, relay, registry, or runtime-*")
     .option("--include-base", "Include sandbox-base in a full push (skipped by default — rebuild only when upgrading OpenClaw/Python/Go)")
-    .option("--apply", "Restart deployments after push so pods pick up new images")
+    .option("--apply", "Apply selected image configuration and verify the resulting rollouts")
     .option(
       "-m, --mesh-provider <provider>",
       "Mesh stack to build. Only 'agt' is supported (Microsoft AGT, in-memory). " +
@@ -55,6 +56,10 @@ export function pushCommand(): Command {
         process.exit(1);
       }
       const meshProvider = "agt" as const;
+      if (options.only && !PUSH_COMPONENTS.includes(options.only)) throw new Error(`Unknown image component: ${options.only}`);
+      if (options.apply && options.only === "sandbox-base") {
+        throw new Error("sandbox-base is build-only; omit --apply and rebuild a deployable sandbox image.");
+      }
 
       // Resolve AGT repo path — required to (re)build relay/registry images
       // Find repo root (look for deploy/helm directory). Done up-front
@@ -75,6 +80,9 @@ export function pushCommand(): Command {
       const updatesMesh = !options.only || options.only === "relay" || options.only === "registry";
       const mesh = options.apply && updatesMesh ? await inspectMeshInstallation(execa) : undefined;
       if (mesh?.kind === "absent") throw new Error("AgentMesh is not installed; install it before pushing mesh updates");
+      if (mesh?.kind === "external") {
+        throw new Error("External AgentMesh will not be changed. Select an explicit core --only target (controller, router, sandbox, or runtime-*).");
+      }
 
       let agtRepo: string;
       const agtDockerfileRel = "agent-governance-python/agent-mesh/docker/Dockerfile";
@@ -248,27 +256,11 @@ export function pushCommand(): Command {
         { name: "sandbox", tag: "openclaw-sandbox:latest", dockerfile: "sandbox-images/openclaw/Dockerfile",
           buildArgs: sandboxBuildArgs },
         ...meshImages,
-        // Multi-runtime adapter images — must match controller defaults in
-        // `controller/src/reconciler/runtime.rs` (DEFAULT_*_IMAGE constants).
-        { name: "runtime-openai-agents", tag: "kars-runtime-openai-agents:latest",
-          dockerfile: "sandbox-images/openai-agents/Dockerfile" },
-        { name: "runtime-maf-python", tag: "kars-runtime-maf-python:latest",
-          dockerfile: "sandbox-images/maf-python/Dockerfile" },
-        { name: "runtime-anthropic", tag: "kars-runtime-anthropic:latest",
-          dockerfile: "sandbox-images/anthropic/Dockerfile" },
-        { name: "runtime-langgraph", tag: "kars-runtime-langgraph:latest",
-          dockerfile: "sandbox-images/langgraph/Dockerfile" },
-        { name: "runtime-langgraph-ts", tag: "kars-runtime-langgraph-ts:latest",
-          dockerfile: "sandbox-images/langgraph-ts/Dockerfile" },
-        { name: "runtime-pydantic-ai", tag: "kars-runtime-pydantic-ai:latest",
-          dockerfile: "sandbox-images/pydantic-ai/Dockerfile" },
-        // Hermes runtime — ships the kars plugin (governance hook,
-        // kars_spawn family, Foundry tool wrappers) + the real Python
-        // AGT MeshClient (kars-agt-mesh). Controller default tag is
-        // `kars-runtime-hermes:latest` from reconciler/runtime.rs
-        // DEFAULT_HERMES_IMAGE.
-        { name: "runtime-hermes", tag: "kars-runtime-hermes:latest",
-          dockerfile: "sandbox-images/hermes/Dockerfile" },
+        // Shared with release imports, upgrade values, and push application.
+        ...RUNTIME_IMAGE_TARGETS.map(runtime => ({
+          name: runtime.name, tag: `${runtime.repo}:latest`,
+          dockerfile: `sandbox-images/${runtime.name.slice("runtime-".length)}/Dockerfile`,
+        })),
       ];
 
       // Sandbox images whose Dockerfile `COPY runtimes/wheels/` and
@@ -312,6 +304,7 @@ export function pushCommand(): Command {
       }
 
       let failures = 0;
+      const pushedArtifacts = new Map<string, string>();
       for (const img of targets) {
         const spin = ora(`Building ${img.tag}...`).start();
         try {
@@ -368,7 +361,12 @@ export function pushCommand(): Command {
           for (let attempt = 1; attempt <= 3; attempt++) {
             try {
               if (attempt > 1) await execa("az", ["acr", "login", "--name", acrName], { stdio: "pipe" });
-              await execa("docker", ["push", `${acrLoginServer}/${img.tag}`], { stdio: "pipe" });
+              const pushed = await execa("docker", ["push", `${acrLoginServer}/${img.tag}`], { stdio: "pipe" });
+              if (options.apply && img.name !== "sandbox-base") {
+                const digest = dockerPushDigest(`${pushed.stdout}\n${pushed.stderr}`);
+                if (!digest) throw new Error(`Docker did not provide an unambiguous pushed digest for ${img.name}; refusing to apply a mutable tag`);
+                pushedArtifacts.set(img.name, `${acrLoginServer}/${img.tag}@${digest}`);
+              }
               break;
             } catch (e: any) {
               if (attempt === 3) throw e;
@@ -394,10 +392,12 @@ export function pushCommand(): Command {
       if (options.apply) {
         const spin = ora("Applying pushed images to their owning deployments...").start();
         try {
-          await applyPushedImages(execa, targets.map(image => ({
-            name: image.name, image: `${acrLoginServer}/${image.tag}`,
+          const applied = await applyPushedImages(execa, targets.map(image => ({
+            name: image.name, image: pushedArtifacts.get(image.name) ?? `${acrLoginServer}/${image.tag}`,
           })), path.join(repoRoot, "deploy/helm/kars"), mesh);
-          spin.succeed("Selected deployments updated and rollouts verified");
+          spin.succeed(`Selected image configuration applied; ${applied.updatedSandboxes} eligible sandbox deployment(s) verified`);
+          if (applied.preservedOverrides) console.log(chalk.dim(`  Preserved ${applied.preservedOverrides} explicit sandbox/overlay image override(s).`));
+          if (applied.buildOnly.length) console.log(chalk.dim(`  Build-only (not deployed): ${applied.buildOnly.join(", ")}.`));
         } catch (e: any) {
           spin.fail(`Image apply failed: ${e.message?.split("\n")[0]}`);
           throw e;
