@@ -27,6 +27,30 @@ import { upgradeCommand } from "./upgrade.js";
 afterEach(() => { vi.restoreAllMocks(); vi.clearAllMocks(); });
 
 describe("real command handlers stop before mutations on target failure", () => {
+  it("rejects sandbox-base --apply before even requesting credentials or build preparation", async () => {
+    await expect(pushCommand().parseAsync(["--only", "sandbox-base", "--apply"], { from: "user" })).rejects.toThrow("build-only");
+    expect(mocked.execute).not.toHaveBeenCalled();
+    expect(mocked.ensureAgtRepo).not.toHaveBeenCalled();
+  });
+
+  it("default all-image push refuses an external mesh before image builds or ACR mutations", async () => {
+    mocked.execute.mockImplementation(async (bin: string, args: string[]) => {
+      if (bin === "az" && args[1] === "show") return { stdout: JSON.stringify({
+        id: "/subscriptions/sub-b/resourceGroups/shared-rg/providers/Microsoft.ContainerService/managedClusters/shared-aks",
+        fqdn: "cluster-b.example.test",
+      }) };
+      if (bin === "kubectl" && args[0] === "config") return { stdout: "https://cluster-b.example.test" };
+      if (bin === "kubectl" && args[1] === "deployment,service") return { stdout: JSON.stringify({ items: [
+        { kind: "Service", metadata: { name: "agentmesh-registry", ownerReferences: [{ name: "platform" }] } },
+        { kind: "Service", metadata: { name: "agentmesh-relay", ownerReferences: [{ name: "platform" }] } },
+      ] }) };
+      return { stdout: "" };
+    });
+    await expect(pushCommand().parseAsync(["--apply"], { from: "user" })).rejects.toThrow("External AgentMesh");
+    expect(mocked.ensureAgtRepo).not.toHaveBeenCalled();
+    expect(mocked.execute.mock.calls.some(([bin, args]) => bin === "docker" || (args as string[]).includes("acr"))).toBe(false);
+  });
+
   for (const command of ["push", "upgrade"] as const) {
     it(`${command} rejects Azure identity A instead of mutating adopted B or the ambient cluster`, async () => {
       mocked.execute.mockResolvedValue({ stdout: JSON.stringify({
