@@ -571,9 +571,33 @@ pub fn kars_task_validations() -> Vec<ValidationRule> {
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "!has(self.blueprint) || !has(self.blueprint.runtime) || self.blueprint.runtime in ['OpenClaw','OpenAIAgents','MAF','MicrosoftAgentFramework','Hermes','BYO']".into(),
-            message: Some("spec.blueprint.runtime must be one of OpenClaw, OpenAIAgents, MAF, MicrosoftAgentFramework, Hermes, BYO".into()),
+            rule: "!has(self.blueprint) || !has(self.blueprint.runtime) || self.blueprint.runtime in ['OpenClaw','OpenAIAgents','MAF','MicrosoftAgentFramework','Hermes']".into(),
+            message: Some("spec.blueprint.runtime must be OpenClaw, OpenAIAgents, MAF, MicrosoftAgentFramework or Hermes; BYO task configuration is unsupported".into()),
             reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.execution) || !has(self.execution.runtime) || self.execution.runtime in ['OpenClaw','OpenAIAgents','MAF','MicrosoftAgentFramework','Hermes']".into(),
+            message: Some("spec.execution.runtime must name a supported task runtime; BYO task configuration is unsupported".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.envelope.toolPolicyRef) || !has(self.blueprint) || !has(self.blueprint.toolPolicy) || self.blueprint.toolPolicy == self.envelope.toolPolicyRef.name".into(),
+            message: Some("spec.blueprint.toolPolicy must match spec.envelope.toolPolicyRef".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.envelope.egressAllowlistRef)".into(),
+            message: Some("envelope.egressAllowlistRef is unsupported by this foundation; use blueprint.egress for enforced Strict destinations".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.execution) || !self.execution.launch || !has(self.envelope.budget) || ((!has(self.envelope.budget.tokens) || self.envelope.budget.tokens == 0) && (!has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros == 0))".into(),
+            message: Some("UnsupportedLaunchBudget: total/subtree token and usdMicros ceilings are not enforced; bounded tasks may be planned but cannot launch".into()),
+            reason: Some("FieldValueForbidden".into()),
             ..ValidationRule::default()
         },
         ValidationRule {
@@ -767,14 +791,65 @@ pub fn kars_approval_validations() -> Vec<ValidationRule> {
             reason: Some("FieldValueInvalid".into()),
             ..ValidationRule::default()
         },
+        ValidationRule {
+            rule: "self.taskRef == oldSelf.taskRef && self.action == oldSelf.action".into(),
+            message: Some("spec.taskRef and spec.action are immutable".into()),
+            reason: Some("FieldValueForbidden".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "(!has(self.ttl) && !has(oldSelf.ttl)) || (has(self.ttl) && has(oldSelf.ttl) && self.ttl == oldSelf.ttl)".into(),
+            message: Some("spec.ttl is immutable".into()),
+            reason: Some("FieldValueForbidden".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(oldSelf.decision) || (has(self.decision) && self.decision == oldSelf.decision)".into(),
+            message: Some("spec.decision is immutable once recorded".into()),
+            reason: Some("FieldValueForbidden".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.decision) || (self.decision.verdict in ['approve','deny'] && size(self.decision.decider) > 0)".into(),
+            message: Some("spec.decision requires approve/deny and a non-empty decider".into()),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
     ]
 }
 
 /// `KarsApproval` CRD with immutable request-shape validation.
 #[must_use]
 pub fn kars_approval_crd() -> CustomResourceDefinition {
-    inject_spec_validations(KarsApproval::crd(), kars_approval_validations())
-        .expect("kube-rs derive must produce a spec property on KarsApproval")
+    let mut crd = inject_spec_validations(KarsApproval::crd(), kars_approval_validations())
+        .expect("kube-rs derive must produce a spec property on KarsApproval");
+    // Bound the shared reference locally, not for unrelated CRDs. Along with
+    // the action/decision string bounds this keeps CEL equality cost bounded.
+    let schema = crd.spec.versions[0]
+        .schema
+        .as_mut()
+        .unwrap()
+        .open_api_v3_schema
+        .as_mut()
+        .unwrap();
+    schema
+        .properties
+        .as_mut()
+        .unwrap()
+        .get_mut("spec")
+        .unwrap()
+        .properties
+        .as_mut()
+        .unwrap()
+        .get_mut("taskRef")
+        .unwrap()
+        .properties
+        .as_mut()
+        .unwrap()
+        .get_mut("name")
+        .unwrap()
+        .max_length = Some(253);
+    crd
 }
 
 /// `TrustGraph.spec` CEL rules. Phase F1.

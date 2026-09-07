@@ -58,8 +58,8 @@ spec:
                   egress:
                     description: |-
                       Network destinations the mission may reach. Drives
-                      `KarsSandbox.spec.networkPolicy.allowedEndpoints`. When non-empty the
-                      sandbox runs in strict egress mode bounded to exactly these hosts.
+                      `KarsSandbox.spec.networkPolicy.allowedEndpoints`. Task sandboxes always
+                      use Strict mode, including an empty list (no additional destinations).
                     items:
                       description: A network destination the mission may reach.
                       properties:
@@ -127,9 +127,9 @@ spec:
                     type: object
                   runtime:
                     description: |-
-                      Harness/runtime the agent runs on (`OpenClaw`, `OpenAIAgents`, `MAF`,
-                      `Hermes`, `BYO`). Drives `KarsSandbox.spec.runtime.kind`. Defaults to
-                      `OpenClaw`.
+                      Harness/runtime (`OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework`,
+                      `Hermes`; `MAF` is an alias). BYO requires configuration not supported
+                      by task blueprints and is rejected. Defaults to `OpenClaw`.
                     nullable: true
                     type: string
                   toolPolicy:
@@ -164,14 +164,16 @@ spec:
                       tokens:
                         description: |-
                           Maximum total tokens the task subtree may consume. `0`/absent means
-                          "no token cap declared" (governance still applies at the router).
+                          "no token cap declared". Positive ceilings are planning declarations:
+                          launch is rejected until durable total/subtree enforcement is available.
                         format: int64
                         nullable: true
                         type: integer
                       usdMicros:
                         description: |-
                           Maximum total spend in micro-USD (1e-6 USD) for the task subtree.
-                          Integer micro-USD avoids floating-point in an audit-bound field.
+                          `0`/absent means no cap declared. Positive ceilings block launch in this
+                          foundation. Integer micro-USD avoids floating-point in an audit field.
                         format: int64
                         nullable: true
                         type: integer
@@ -186,9 +188,9 @@ spec:
                     type: integer
                   egressAllowlistRef:
                     description: |-
-                      Optional reference to a same-namespace `EgressAllowlist`-style CR that
-                      bounds the network destinations this task (and its descendants) may
-                      reach through the inference router.
+                      Reserved egress policy reference. This foundation cannot resolve it
+                      and rejects it before Ready. Use `blueprint.egress` for Strict inline
+                      destinations; standalone sandbox signed OCI allowlists are unchanged.
                     nullable: true
                     properties:
                       name:
@@ -293,9 +295,21 @@ spec:
             - message: spec.displayName, when set, must be 1-253 characters
               reason: FieldValueInvalid
               rule: '!has(self.displayName) || (size(self.displayName) > 0 && size(self.displayName) <= 253)'
-            - message: spec.blueprint.runtime must be one of OpenClaw, OpenAIAgents, MAF, MicrosoftAgentFramework, Hermes, BYO
+            - message: spec.blueprint.runtime must be OpenClaw, OpenAIAgents, MAF, MicrosoftAgentFramework or Hermes; BYO task configuration is unsupported
               reason: FieldValueInvalid
-              rule: '!has(self.blueprint) || !has(self.blueprint.runtime) || self.blueprint.runtime in [''OpenClaw'',''OpenAIAgents'',''MAF'',''MicrosoftAgentFramework'',''Hermes'',''BYO'']'
+              rule: '!has(self.blueprint) || !has(self.blueprint.runtime) || self.blueprint.runtime in [''OpenClaw'',''OpenAIAgents'',''MAF'',''MicrosoftAgentFramework'',''Hermes'']'
+            - message: spec.execution.runtime must name a supported task runtime; BYO task configuration is unsupported
+              reason: FieldValueInvalid
+              rule: '!has(self.execution) || !has(self.execution.runtime) || self.execution.runtime in [''OpenClaw'',''OpenAIAgents'',''MAF'',''MicrosoftAgentFramework'',''Hermes'']'
+            - message: spec.blueprint.toolPolicy must match spec.envelope.toolPolicyRef
+              reason: FieldValueInvalid
+              rule: '!has(self.envelope.toolPolicyRef) || !has(self.blueprint) || !has(self.blueprint.toolPolicy) || self.blueprint.toolPolicy == self.envelope.toolPolicyRef.name'
+            - message: envelope.egressAllowlistRef is unsupported by this foundation; use blueprint.egress for enforced Strict destinations
+              reason: FieldValueInvalid
+              rule: '!has(self.envelope.egressAllowlistRef)'
+            - message: 'UnsupportedLaunchBudget: total/subtree token and usdMicros ceilings are not enforced; bounded tasks may be planned but cannot launch'
+              reason: FieldValueForbidden
+              rule: '!has(self.execution) || !self.execution.launch || !has(self.envelope.budget) || ((!has(self.envelope.budget.tokens) || self.envelope.budget.tokens == 0) && (!has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros == 0))'
             - message: spec.blueprint.isolation must be one of standard, enhanced, confidential
               reason: FieldValueInvalid
               rule: '!has(self.blueprint) || !has(self.blueprint.isolation) || self.blueprint.isolation in [''standard'',''enhanced'',''confidential'']'
@@ -353,8 +367,8 @@ spec:
                 type: array
               envelopeDigest:
                 description: |-
-                  `sha256:` digest of the validated trust envelope. Stable for a given
-                  envelope; recomputed whenever the spec changes.
+                  `sha256:` authorization digest of the validated envelope and effective
+                  governed blueprint, including resolved model defaults and capability refs.
                 nullable: true
                 type: string
               executionDetail:
@@ -410,4 +424,3 @@ spec:
     storage: true
     subresources:
       status: {}
-
