@@ -50,6 +50,26 @@ spec:
                   message: "spec.governance.toolPolicyRef.name must be a same-namespace name (no '/' or ':' separators); cross-namespace refs are forbidden"
                   reason: "FieldValueInvalid"
               properties:
+                upstreamCompatibility:
+                  type: object
+                  description: "Existing upstream interoperability settings; omitted by native Sandboxes."
+                  x-kubernetes-validations:
+                    - rule: "!has(self.sigsAgentSandbox) || self.sigsAgentSandbox != 'overlay' || has(self.upstreamSandboxRef)"
+                      message: "overlay mode requires a same-namespace upstreamSandboxRef"
+                  properties:
+                    sigsAgentSandbox:
+                      type: string
+                      enum: ["off", "observe", "translate", "overlay"]
+                    upstreamSandboxRef:
+                      type: object
+                      required: ["name"]
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                          maxLength: 253
+                    aiConformanceReference:
+                      type: boolean
                 credentialsRef:
                   type: object
                   description: "Explicit agent credential collection in this Sandbox's workspace; replaces legacy credentials while set. Missing/replaced sources fail closed."

@@ -23,7 +23,24 @@ describe("credential source public integration", () => {
     const schema = resource.spec.versions[0].schema.openAPIV3Schema;
     const spec = schema.properties.spec;
     expect(spec.required).not.toContain("credentialsRef");
+    expect(spec.required).not.toContain("upstreamCompatibility");
     expect(spec.properties.credentialsRef.required).toEqual(["name", "uid"]);
+    // CEL compiles against declared schema fields, including those inside has().
+    expect(spec.properties.upstreamCompatibility).toMatchObject({
+      type: "object",
+      properties: {
+        sigsAgentSandbox: { type: "string", enum: ["off", "observe", "translate", "overlay"] },
+        upstreamSandboxRef: {
+          type: "object", required: ["name"],
+          properties: { name: { type: "string", minLength: 1, maxLength: 253 } },
+        },
+        aiConformanceReference: { type: "boolean" },
+      },
+    });
+    expect(spec.properties.upstreamCompatibility["x-kubernetes-validations"])
+      .toContainEqual(expect.objectContaining({
+        rule: "!has(self.sigsAgentSandbox) || self.sigsAgentSandbox != 'overlay' || has(self.upstreamSandboxRef)",
+      }));
     expect(schema["x-kubernetes-validations"].some((rule: { rule: string }) =>
       rule.rule.includes("self.metadata.name") && rule.rule.includes("kars-credential-source-"))).toBe(true);
     expect(spec["x-kubernetes-validations"].some((rule: { rule: string }) =>
