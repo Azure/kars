@@ -29,8 +29,40 @@ wait_for_credential_consumer() {
 
 test_credential_sources() {
     local k=(kubectl --context kind-kars-e2e)
-    local source_uid projection_uid direct_uid namespace_uid projection
+    local source_uid projection_uid direct_uid namespace_uid projection admission
     namespace_uid=$("${k[@]}" get namespace kars-system -o jsonpath='{.metadata.uid}') || return 1
+    if admission=$("${k[@]}" create --dry-run=server -f - 2>&1 <<'YAML'
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: e2e-source-overlay
+  namespace: kars-system
+spec:
+  inferenceRef:
+    name: e2e-source-inference
+  runtime:
+    kind: BYO
+    byo:
+      image: kars-sandbox-e2e:dev
+      contractVersion: v1
+  sandbox:
+    isolation: standard
+  credentialsRef:
+    name: kars-credential-source-e2e-source-overlay
+    uid: fixture-uid
+  upstreamCompatibility:
+    sigsAgentSandbox: overlay
+    upstreamSandboxRef:
+      name: upstream-fixture
+YAML
+    ); then
+        fail "Admission accepted source credentials on an overlay-managed runtime"; return 1
+    fi
+    if ! printf '%s\n' "$admission" | grep -q "credentialsRef requires a controller-managed runtime"; then
+        printf '%s\n' "$admission"
+        fail "Overlay admission failed for a reason other than the intended source guard"; return 1
+    fi
+    pass "The API server compiles the source schema and rejects overlay credentials for the intended reason"
     if ! "${k[@]}" create -f - <<'YAML'
 apiVersion: v1
 kind: Secret

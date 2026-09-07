@@ -188,6 +188,7 @@ install_crds() {
         kubectl get all -n kars-system || true
         kubectl describe pod -n kars-system -l app.kubernetes.io/component=controller || true
         kubectl logs -n kars-system -l app.kubernetes.io/component=controller --tail=200 || true
+        return 1
     fi
 }
 

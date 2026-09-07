@@ -71,6 +71,21 @@ legacy fallback; explicit opt-out restoring the preserved direct collection;
 and cleanup preserving the core namespace. Shell syntax is checked locally;
 execution of this new case awaits hosted CI.
 
+Hosted Kind execution at `b69a6ad6` exposed a real installation blocker:
+the new CEL rule referenced `upstreamCompatibility`, which was missing from the
+handwritten Helm schema. Kubernetes rejected the entire Sandbox CRD, so no
+credential-consumer lifecycle result was established. Local rendering and
+source review were insufficient to catch that API-server compilation failure.
+
+The repair declares the existing Rust compatibility fields in the optional
+Helm schema, retains the source/overlay admission guard, and requires an upstream
+reference for overlay mode. The targeted schema assertion now checks the
+referenced field definitions, not just the presence of rule text. The Kind
+fixture also requires the intended overlay rejection message, and Helm setup
+failure now stops the harness instead of producing cascading secondary failures.
+Fifteen targeted schema/Helm tests, typecheck, scoped lint, Helm lint and shell
+syntax pass locally; the repaired head still requires real API-server execution.
+
 Diff-based publication gates still run on the parent's eventual atomic commit;
 the candidate was intentionally not committed or pushed here. No live
 Kubernetes admission or customer rollout was executed. Real-cluster
