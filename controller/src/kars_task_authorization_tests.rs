@@ -216,6 +216,38 @@ fn defaults_aliases_and_runtime_precedence_have_one_canonical_digest() {
 }
 
 #[test]
+fn shared_authorization_snapshot_exposes_the_exact_effective_digest_input() {
+    let mut task = KarsTaskSpec {
+        objective: "Review".into(),
+        ..Default::default()
+    };
+    task.envelope.budget = Some(TaskBudget {
+        tokens: Some(0),
+        usd_micros: Some(0),
+    });
+    let configuration = task.authorization_configuration_with_model(&model());
+    assert_eq!(
+        configuration,
+        serde_json::json!({
+            "domain": "kars.azure.com/task-authorization/v1",
+            "envelope": { "tier": 1, "authorityCeiling": 1, "delegationDepth": 0 },
+            "parentRef": null,
+            "blueprint": {
+                "runtime": "OpenClaw",
+                "model": { "deployment": "reviewed-model", "provider": "azure-openai" },
+                "instructions": "Your objective:\nReview",
+                "isolation": "standard"
+            },
+            "networkPolicy": { "defaultDeny": true, "egressMode": "Strict" }
+        })
+    );
+    assert_eq!(
+        task.authorization_digest_with_model(&model()),
+        "sha256:7089e6622e2ef5528f047701def62469360a849441ab9b285604da5f50b0c0c8"
+    );
+}
+
+#[test]
 fn effective_controller_model_defaults_are_authority_not_invisible_ambient_config() {
     let baseline = KarsTaskSpec::default();
     let different = TaskModel {
