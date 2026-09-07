@@ -2,13 +2,14 @@
 // Licensed under the MIT License.
 
 import type { Execute } from "./deployment-target.js";
+import { splitImage } from "./image-targets.js";
 
 export const MESH_NAMESPACE = "agentmesh";
 export type MeshComponent = "registry" | "relay";
 export type MeshImages = Partial<Record<MeshComponent, string>>;
 interface MeshDeployment { component: MeshComponent; name: string; container: string; image: string }
 export type MeshInstallation = {
-  kind: "absent" | "legacy";
+  kind: "absent" | "legacy" | "external";
   namespace: string;
   deployments: MeshDeployment[];
 } | {
@@ -23,7 +24,7 @@ export type MeshInstallation = {
 interface Resource {
   kind?: string;
   metadata?: { name?: string; annotations?: Record<string, string>; labels?: Record<string, string>; generation?: number; ownerReferences?: unknown[] };
-  spec?: { replicas?: number; template?: { spec?: { containers?: Array<{ name?: string; image?: string }> } } };
+  spec?: { replicas?: number; selector?: Record<string, string>; template?: { metadata?: { labels?: Record<string, string> }; spec?: { containers?: Array<{ name?: string; image?: string }> } } };
   status?: { observedGeneration?: number; readyReplicas?: number; updatedReplicas?: number; conditions?: Array<{ type?: string; status?: string }> };
 }
 
@@ -72,23 +73,58 @@ export async function inspectMeshInstallation(execute: Execute): Promise<MeshIns
   }
   const list = parseObject(raw, "AgentMesh inventory");
   if (!Array.isArray(list.items)) throw new Error("AgentMesh inventory has no items array");
-  const resources = (list.items as Resource[]).filter(resource => componentOf(resource));
+  const items = list.items as Resource[];
+  if (items.some(item => !item || typeof item !== "object")) throw new Error("Invalid AgentMesh resource inventory");
+  const services = items.filter(item => item.kind === "Service" && componentOf(item));
+  const resources = items.filter(resource => componentOf(resource) || (
+    resource.kind === "Deployment" && services.some(service => {
+      const selector = service.spec?.selector;
+      return selector && Object.keys(selector).length > 0
+        && Object.entries(selector).every(([key, value]) => resource.spec?.template?.metadata?.labels?.[key] === value);
+    })
+  ));
   if (!resources.length) return { kind: "absent", namespace: MESH_NAMESPACE, deployments: [] };
-  if (resources.some(resource => resource.metadata?.ownerReferences?.length)) {
-    throw new Error("AgentMesh resources have another Kubernetes owner; refusing an unmanaged update.");
+  const external = (): MeshInstallation => ({ kind: "external", namespace: MESH_NAMESPACE, deployments: [] });
+  const claimsKars = resources.some(resource =>
+    resource.metadata?.annotations?.["meta.helm.sh/release-name"] === "kars"
+      && (!resource.metadata.annotations["meta.helm.sh/release-namespace"]
+        || resource.metadata.annotations["meta.helm.sh/release-namespace"] === "kars-system"));
+  const foreignOwnership = resources.some(resource => resource.metadata?.ownerReferences?.length
+    || (!!resource.metadata?.labels?.["app.kubernetes.io/managed-by"]
+      && resource.metadata.labels["app.kubernetes.io/managed-by"] !== "Helm")
+    || (!!resource.metadata?.annotations?.["meta.helm.sh/release-name"]
+      && (resource.metadata.annotations["meta.helm.sh/release-name"] !== "kars"
+        || resource.metadata.annotations["meta.helm.sh/release-namespace"] !== "kars-system")));
+  if (foreignOwnership) {
+    if (claimsKars) throw new Error("AgentMesh has mixed Kars/external ownership; refusing adoption.");
+    return external();
   }
+  if (!claimsKars && resources.some(resource => resource.metadata?.labels?.["app.kubernetes.io/managed-by"] === "Helm")) {
+    return external();
+  }
+  if (!claimsKars && resources.some(resource => resource.kind === "Deployment" && !componentOf(resource))) return external();
   const deployments: MeshDeployment[] = [];
   for (const component of ["registry", "relay"] as const) {
     const matching = resources.filter(resource => componentOf(resource) === component);
     const workload = matching.filter(resource => resource.kind === "Deployment");
     const services = matching.filter(resource => resource.kind === "Service");
     if (workload.length !== 1 || services.length !== 1) {
-      throw new Error(`AgentMesh ${component} has incomplete or ambiguous deployment/service ownership; refusing to adopt or replace selectors.`);
+      if (!claimsKars) return external();
+      throw new Error(`AgentMesh ${component} has incomplete or ambiguous Kars deployment/service ownership; refusing selector adoption.`);
+    }
+    if (!claimsKars) {
+      const selector = services[0].spec?.selector;
+      const labels = workload[0].spec?.template?.metadata?.labels;
+      if (!selector || !Object.keys(selector).length
+        || !Object.entries(selector).every(([key, value]) => labels?.[key] === value)) return external();
     }
     const containers = workload[0].spec?.template?.spec?.containers ?? [];
     const container = containers.find(item => item.name === component || item.name === `agentmesh-${component}`)
       ?? (containers.length === 1 ? containers[0] : undefined);
-    if (!container?.name || !container.image) throw new Error(`Cannot identify AgentMesh ${component} container`);
+    if (!container?.name || !container.image) {
+      if (!claimsKars) return external();
+      throw new Error(`Cannot identify AgentMesh ${component} container`);
+    }
     deployments.push({ component, name: workload[0].metadata!.name!, container: container.name, image: container.image });
   }
   const owners = resources.map(resource => ({
@@ -97,6 +133,10 @@ export async function inspectMeshInstallation(execute: Execute): Promise<MeshIns
     manager: resource.metadata?.labels?.["app.kubernetes.io/managed-by"],
   }));
   if (owners.every(owner => !owner.release && !owner.namespace && !owner.manager)) {
+    // Canonical names alone are not a management grant. The standalone Kars
+    // manifest explicitly marks both workloads as its AGT installation.
+    if (!resources.filter(resource => resource.kind === "Deployment").every(resource =>
+      resource.metadata?.labels?.["kars.azure.com/mesh-provider"] === "agt")) return external();
     return { kind: "legacy", namespace: MESH_NAMESPACE, deployments };
   }
   const owner = owners[0];
@@ -142,12 +182,9 @@ export function meshImageValueArgs(images: MeshImages): string[] {
   for (const component of ["registry", "relay"] as const) {
     const image = images[component];
     if (!image) continue;
-    const colon = image.lastIndexOf(":");
-    if (image.includes("@") || colon <= image.lastIndexOf("/") || colon === image.length - 1) {
-      throw new Error(`AgentMesh ${component} requires the actual repository:tag artifact`);
-    }
-    args.push("--set-string", `agentMesh.${component}.image.repository=${image.slice(0, colon)}`,
-      "--set-string", `agentMesh.${component}.image.tag=${image.slice(colon + 1)}`);
+    const { repository, tag } = splitImage(image);
+    args.push("--set-string", `agentMesh.${component}.image.repository=${repository}`,
+      "--set-string", `agentMesh.${component}.image.tag=${tag}`);
   }
   return args;
 }
@@ -157,6 +194,7 @@ export function releaseMeshImages(registry: string, tag: string): MeshImages {
 }
 
 export async function restartMesh(execute: Execute, mesh: MeshInstallation, components?: MeshComponent[]): Promise<void> {
+  if (mesh.kind === "external" || mesh.kind === "absent") return;
   for (const deployment of mesh.deployments.filter(item => !components || components.includes(item.component))) {
     await execute("kubectl", ["rollout", "restart", `deployment/${deployment.name}`, "-n", mesh.namespace], { stdio: "pipe" });
     await execute("kubectl", ["rollout", "status", `deployment/${deployment.name}`, "-n", mesh.namespace, "--timeout=180s"], { stdio: "pipe" });
@@ -164,6 +202,7 @@ export async function restartMesh(execute: Execute, mesh: MeshInstallation, comp
 }
 
 export async function verifyMeshHealth(execute: Execute, mesh: MeshInstallation, expected: MeshImages = {}): Promise<void> {
+  if (mesh.kind === "external" || mesh.kind === "absent") return;
   for (const deployment of mesh.deployments) {
     const { stdout } = await execute("kubectl", ["get", "deployment", deployment.name, "-n", mesh.namespace, "-o", "json"], { stdio: "pipe" });
     const resource = parseObject(String(stdout), `AgentMesh ${deployment.name}`) as Resource;
@@ -193,6 +232,7 @@ export async function updateLegacyMeshImages(execute: Execute, mesh: MeshInstall
 
 export async function applyMeshImages(execute: Execute, mesh: MeshInstallation, images: MeshImages, chart: string): Promise<void> {
   if (mesh.kind === "absent") throw new Error("AgentMesh is not installed; install it explicitly before pushing mesh updates");
+  if (mesh.kind === "external") throw new Error("External AgentMesh is not managed by Kars; explicit mesh updates are refused.");
   await recheckMeshOwnership(execute, mesh);
   if (mesh.kind === "helm") {
     await execute("helm", ["upgrade", mesh.release, chart, "--namespace", mesh.releaseNamespace,
