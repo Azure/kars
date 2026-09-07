@@ -233,11 +233,14 @@ async fn reconcile_valid(
                 "taskforce",
             )
             .await?;
-            let created = task
+            let created_timestamp = task
                 .metadata
                 .creation_timestamp
-                .map(|time| time.0)
-                .unwrap_or(now);
+                .as_ref()
+                .map(|time| time.0.to_string());
+            let created =
+                parse_optional_time(created_timestamp.as_deref(), "task creationTimestamp")?
+                    .unwrap_or(now);
             generated = generated.saturating_add(1);
             last_generated = Some(name);
             last_run_at = Some(created.to_rfc3339());

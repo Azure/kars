@@ -13,7 +13,8 @@ use wiremock::{
     matchers::{method, path},
 };
 
-async fn client(server: &MockServer) -> Client {
+pub(super) async fn client(server: &MockServer) -> Client {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap()
 }
 
@@ -205,7 +206,9 @@ async fn removed_role_retires_with_uid_and_resource_version_preconditions() {
         .and(path(
             "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karstasks",
         ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(task_list(&[member.clone()])))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(task_list(std::slice::from_ref(&member))),
+        )
         .mount(&server)
         .await;
     Mock::given(method("DELETE"))
@@ -238,7 +241,9 @@ async fn revocation_delete_failure_is_retryable_not_success() {
         .and(path(
             "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karstasks",
         ))
-        .respond_with(ResponseTemplate::new(200).set_body_json(task_list(&[member.clone()])))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(task_list(std::slice::from_ref(&member))),
+        )
         .mount(&server)
         .await;
     Mock::given(method("DELETE"))
