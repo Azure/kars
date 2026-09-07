@@ -31,6 +31,7 @@ fn named_target(endpoint: String, credential: Option<&str>, id: &str) -> Upstrea
         &Candidate {
             provider: Some(id.into()),
             deployment: "model".into(),
+            routing_intent: crate::failover::RoutingIntent::Explicit,
         },
     )
     .unwrap()

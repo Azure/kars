@@ -27,6 +27,7 @@ import chalk from "chalk";
 import { Stepper, banner, section, kvLine } from "../stepper.js";
 import { loadContext, type DeploymentContext } from "../config.js";
 import { requireBundledAsset } from "../lib/repo-assets.js";
+import { RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
 import { connectDeploymentTarget } from "../lib/deployment-target.js";
 import { restartController, restartSandboxes } from "../lib/deployment-rollout.js";
 import { inspectNamespaceOwnership } from "../lib/namespace-ownership.js";
@@ -128,15 +129,6 @@ export function buildUpgradeContext(ctx: DeploymentContext): UpgradeContext {
  *  upgrade path enumerates the multi-runtime adapter images, so adding a
  *  runtime (e.g. langgraph-ts) is a one-line change that stays in sync with
  *  the import plan + the `kars up` install. */
-const RUNTIME_IMAGE_VALUES: ReadonlyArray<readonly [valueKey: string, repo: string]> = [
-  ["runtimes.openaiAgents.image", "kars-runtime-openai-agents"],
-  ["runtimes.mafPython.image", "kars-runtime-maf-python"],
-  ["runtimes.anthropic.image", "kars-runtime-anthropic"],
-  ["runtimes.langgraph.image", "kars-runtime-langgraph"],
-  ["runtimes.langgraphTs.image", "kars-runtime-langgraph-ts"],
-  ["runtimes.pydanticAi.image", "kars-runtime-pydantic-ai"],
-  ["runtimes.hermes.image", "kars-runtime-hermes"],
-];
 
 /** Build the `helm upgrade` args.
  *
@@ -187,7 +179,7 @@ export function buildHelmUpgradeArgs(
   // when the operator opted out of importing them — then we leave whatever the
   // prior install set (via --reuse-values) untouched.
   if (!opts.skipRuntimeImages) {
-    for (const [valueKey, repo] of RUNTIME_IMAGE_VALUES) {
+    for (const { valueKey, repo } of RUNTIME_IMAGE_TARGETS) {
       args.push("--set", `${valueKey}=${ctx.acrLoginServer}/${repo}:${tag}`);
     }
   }
@@ -436,6 +428,7 @@ Examples:
         const mesh = await inspectMeshInstallation(execa);
         const values = mesh.kind === "helm" ? mesh.values : await readReleaseValues(execa);
         assertMeshReleaseConsistency(mesh, values);
+        if (mesh.kind === "external") stepper.detail("info", "External AgentMesh is not part of this upgrade and will remain untouched.");
 
         // ── Pre-flight: cluster must be able to run the upgrade ────────
         // Fail fast on a degraded/stopped cluster (e.g. all nodes NotReady)
@@ -499,7 +492,9 @@ Examples:
         stepper.done(`Target release: ${target}`);
 
         // ── Dry-run: print plan + exit ────────────────────────────────
-        const images = releaseImagePlan(target, { includeRuntimes: !options.skipRuntimeImages });
+        const images = releaseImagePlan(target, { includeRuntimes: !options.skipRuntimeImages })
+          .filter(image => !["external", "absent"].includes(mesh.kind)
+            || !/^agentmesh-(relay|registry)-agt:/.test(image.target));
         if (options.dryRun) {
           stepper.stop();
           await printChangelog(current, target);
@@ -615,7 +610,7 @@ Examples:
         // Helm-managed pods; this also refreshes the standalone AgentMesh
         // relay/registry (not Helm-managed) and is a harmless belt-and-braces
         // for the Helm-managed ones.
-        stepper.step("Rolling AgentMesh, controller, router, and sandboxes to the new images...");
+        stepper.step("Rolling Kars-managed workloads to the new images...");
         if (mesh.kind === "legacy") {
           await updateLegacyMeshImages(execa, mesh, releaseMeshImages(ctx.acrLoginServer, target));
         }
@@ -636,7 +631,7 @@ Examples:
           ));
           process.exit(1);
         }
-        stepper.done("Cluster healthy on the new release");
+        stepper.done("Kars-managed workloads healthy on the new release");
 
         // ── Step 7: Reconcile Foundry Memory Store access ─────────────
         // Memory persistence depends on the Foundry PROJECT managed

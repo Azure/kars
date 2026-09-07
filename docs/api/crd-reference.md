@@ -54,6 +54,11 @@ envelope lattice identifier. `KarsTask::envelope_digest()` (or
 reference and full effective blueprint with a versioned domain and full SHA-256.
 Canonical JSON uses UTF-8, compact encoding and recursively sorted object keys;
 array order is preserved. The domain is `kars.azure.com/task-authorization/v1`.
+Receipt producers can reuse `KarsTaskSpec::authorization_configuration_with_model`
+to obtain this exact serializable effective snapshot. Resolve defaults once with
+`kars_task::blueprint::controller_default_model()` and pass that value to both
+the snapshot accessor and `authorization_digest_with_model`; do not duplicate
+default resolution or substitute the raw declared spec for effective evidence.
 This includes egress hosts/ports, tool/MCP/memory references, runtime, isolation,
 model/provider and combined objective/instructions. Materialization consumes the
 same normalizer: `MAF` equals `MicrosoftAgentFramework`, blueprint runtime overrides
@@ -78,8 +83,20 @@ checks current Ready authority, immutable request/decision coherence and the
 `Approved` phase. Consumers must additionally check action kind, target, owner
 identity and one-shot semantics. The existing status fields are
 `boundEnvelopeDigest`, `boundTaskUid` and `boundRequest`; no new spec fields are
-needed. Current receipts exclude approvals bound to old authority and refuse
-stale task status when constructing their signed subject.
+needed. The current-authority approval collection excludes old bindings, and
+receipt subjects still refuse stale task status. A separate signed
+`predicate.approvalHistory` retains valid historical decisions for the same
+immutable task UID/name/namespace, including their original `boundEnvelopeDigest`
+and `boundRequest`. Thus a D0 approval is recorded even when a promotion reaches
+D1 before the first receipt observes it.
+Historical records require matching immutable request and terminal decision
+echoes, an observed approval generation, and
+`requestedAt <= decidedAt < expiresAt`. They are explicitly tagged
+`evidenceScope: historicalDecision`, `authorizesCurrentTask: false`, and
+`consumptionAttested: false`.
+They do not grant current authority or claim that an approval was consumed or
+caused a transition. Current authorization still requires
+`approval_authorizes_task()` and the consumer's action/owner/one-shot checks.
 Legacy pending bindings without task/request identity become Stale and require a
 new request. Controller snapshots also prevent mutated request echoes entering receipts.
 Approval strings are schema-bounded for CEL evaluation: task names 253, kinds/TTL

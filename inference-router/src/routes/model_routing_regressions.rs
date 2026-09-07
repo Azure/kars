@@ -17,7 +17,7 @@ use wiremock::{
     matchers::{body_partial_json, header, method},
 };
 
-fn config(default: &str, providers: &[(&str, &str, Option<&str>)]) -> Config {
+pub(super) fn config(default: &str, providers: &[(&str, &str, Option<&str>)]) -> Config {
     let mut config = Config::from_env().unwrap();
     config.azure_openai_endpoint = Some(default.into());
     config.default_model = "true-default-model".into();
@@ -39,7 +39,7 @@ fn config(default: &str, providers: &[(&str, &str, Option<&str>)]) -> Config {
     config
 }
 
-fn policy(provider: &str, model: &str) -> InferencePolicySnapshot {
+pub(super) fn policy(provider: &str, model: &str) -> InferencePolicySnapshot {
     InferencePolicySnapshot {
         model_preference: Some(ModelPreference {
             primary: ModelRef {
@@ -52,7 +52,7 @@ fn policy(provider: &str, model: &str) -> InferencePolicySnapshot {
     }
 }
 
-fn state(config: Config) -> AppState {
+pub(super) fn state(config: Config) -> AppState {
     let mut state = super::tests::test_state(config);
     state.auth = Arc::new(WorkloadIdentityAuth::for_test(
         Some("ambient-default-key"),
@@ -67,7 +67,7 @@ fn state(config: Config) -> AppState {
     state
 }
 
-async fn router(state: AppState, policy: &InferencePolicySnapshot) -> Router {
+pub(super) async fn router(state: AppState, policy: &InferencePolicySnapshot) -> Router {
     *state.inference_policy.write().await = Some(LoadedInferencePolicy {
         digest: "routing-regression".into(),
         source_path: "routing-regression".into(),
@@ -85,7 +85,7 @@ async fn router(state: AppState, policy: &InferencePolicySnapshot) -> Router {
         .with_state(state)
 }
 
-async fn post_chat(app: Router, stream: bool) -> (StatusCode, Bytes) {
+pub(super) async fn post_chat(app: Router, stream: bool) -> (StatusCode, Bytes) {
     let response = app.oneshot(Request::builder().method("POST")
         .uri("/v1/chat/completions").header("content-type", "application/json")
         .body(Body::from(json!({
@@ -199,7 +199,7 @@ async fn availability_cache_does_not_skip_another_credential_on_the_same_endpoin
     }
 }
 
-async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
+pub(super) async fn read_request(socket: &mut tokio::net::TcpStream) -> String {
     use tokio::io::AsyncReadExt;
     let mut bytes = Vec::new();
     loop {
@@ -317,6 +317,9 @@ async fn auth_and_configuration_acquisition_failures_do_not_attempt_fallback() {
         config.ollama_endpoint = None;
         let state = state(config);
         let mut policy = policy(provider, "primary-model");
+        if matches!(provider, "ollama" | "bedrock") {
+            policy.provider = Some(provider.into());
+        }
         policy
             .model_preference
             .as_mut()

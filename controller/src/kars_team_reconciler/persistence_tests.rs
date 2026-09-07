@@ -37,7 +37,9 @@ fn failure(code: u16) -> ResponseTemplate {
         code,
         json!({
             "apiVersion": "v1", "kind": "Status", "status": "Failure",
-            "reason": if code == 404 { "NotFound" } else { "Conflict" }, "code": code,
+            "reason": match code {
+                404 => "NotFound", 409 => "Conflict", 422 => "Invalid", _ => "InternalError",
+            }, "code": code,
         }),
     )
 }
@@ -121,6 +123,13 @@ impl Respond for KubeServer {
         }
         let mut body: Value = serde_json::from_slice(&request.body).unwrap();
         if method == "POST" {
+            if is_task
+                && body["spec"]["objective"]
+                    .as_str()
+                    .is_some_and(|objective| objective.chars().count() > specs::MAX_OBJECTIVE_CHARS)
+            {
+                return failure(422);
+            }
             let name = body["metadata"]["name"].as_str().unwrap().to_owned();
             if if is_task {
                 store.tasks.contains_key(&name)
@@ -283,7 +292,7 @@ async fn commons_must_commit_before_retirement_and_write_conflicts_retry() {
         &tasks_api,
         &team,
         &name,
-        specs::run_spec(&team, ""),
+        specs::run_spec(&team, "").unwrap(),
         "taskforce",
     )
     .await
@@ -403,5 +412,120 @@ async fn positive_budget_existing_owned_launches_are_stopped() {
     assert_eq!(
         store.lock().unwrap().tasks["eng-principal"]["spec"]["execution"]["launch"],
         false
+    );
+}
+
+#[tokio::test]
+async fn five_entry_history_recovers_cadence_after_oversized_objective_rejection() {
+    let mut team = team();
+    team.spec.charter = "c".repeat(160);
+    team.spec.envelope.budget = None;
+    team.spec.cadence = Some(TeamCadence {
+        every_minutes: Some(1),
+        ..Default::default()
+    });
+    team.status = Some(KarsTeamStatus {
+        phase: Some(PHASE_DEGRADED.into()),
+        detail: Some("spec.objective must be 1-4096 characters".into()),
+        ..Default::default()
+    });
+    let (_server, client, store) = setup(&team).await;
+    crate::team_commons::ensure_commons(&client, &team)
+        .await
+        .unwrap();
+    for n in 0..5 {
+        crate::team_commons::record_entry(
+            &client,
+            &team,
+            &format!("00000000-0000-4000-8000-{n:012}"),
+            &team.spec.charter,
+            &format!("engineering-run-{n:032x}"),
+            &format!("engineering-run-{n:032x}"),
+            &"f".repeat(400),
+        )
+        .await
+        .unwrap();
+    }
+    let name = runs::cadence_name(&team).unwrap();
+    let all_history = crate::team_commons::prior_knowledge(&client, &team, usize::MAX)
+        .await
+        .unwrap();
+    let mut legacy_run = specs::run_spec(&team, "").unwrap();
+    legacy_run.objective.push_str(&all_history);
+    assert!(legacy_run.objective.chars().count() > specs::MAX_OBJECTIVE_CHARS);
+    let task_api = Api::namespaced(client.clone(), "tenant-a");
+    let error = tasks::apply_task(&task_api, &team, &name, legacy_run, "taskforce")
+        .await
+        .unwrap_err();
+    assert!(matches!(error, ReconcileError::Kube(kube::Error::Api(error)) if error.code == 422));
+
+    reconcile(
+        Arc::new(team.clone()),
+        Arc::new(Ctx {
+            client: client.clone(),
+        }),
+    )
+    .await
+    .unwrap();
+    {
+        let state = store.lock().unwrap();
+        assert_eq!(state.team["status"]["phase"], PHASE_ACTIVE);
+        assert_eq!(state.team["status"]["generatedTaskCount"], 1);
+        assert_eq!(state.team["status"]["lastGeneratedTask"], name);
+        let objective = state.tasks[&name]["spec"]["objective"].as_str().unwrap();
+        assert!(objective.chars().count() <= specs::MAX_OBJECTIVE_CHARS);
+        assert!(objective.starts_with(&specs::run_spec(&team, "").unwrap().objective));
+        let entries: Vec<Value> = objective
+            .lines()
+            .filter(|line| line.starts_with('{'))
+            .map(|line| serde_json::from_str(line).unwrap())
+            .collect();
+        assert!(!entries.is_empty() && entries.len() < 5);
+        assert!(objective.ends_with("--- END UNTRUSTED REFERENCE DATA ---\n"));
+        assert_eq!(
+            state.tasks.len(),
+            2,
+            "one principal and one admitted cadence run"
+        );
+    }
+    assert_eq!(
+        crate::team_commons::entry_count(&client, &team)
+            .await
+            .unwrap(),
+        5
+    );
+}
+
+#[tokio::test]
+async fn zero_history_allowance_still_checks_store_ownership_and_integrity() {
+    let team = team();
+    let (_server, client, store) = setup(&team).await;
+    crate::team_commons::ensure_commons(&client, &team)
+        .await
+        .unwrap();
+    assert!(
+        crate::team_commons::prior_knowledge(&client, &team, 0)
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    let name = crate::team_commons::commons_cm_name(&team.commons_name());
+    store.lock().unwrap().cms.get_mut(&name).unwrap()["metadata"]["ownerReferences"][0]["uid"] =
+        json!("foreign");
+    assert!(
+        crate::team_commons::prior_knowledge(&client, &team, 0)
+            .await
+            .is_err()
+    );
+    {
+        let mut state = store.lock().unwrap();
+        let cm = state.cms.get_mut(&name).unwrap();
+        cm["metadata"]["ownerReferences"][0]["uid"] = json!(team.metadata.uid);
+        cm["data"]["index.json"] = json!("malformed");
+    }
+    assert!(
+        crate::team_commons::prior_knowledge(&client, &team, 0)
+            .await
+            .is_err()
     );
 }

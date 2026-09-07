@@ -67,6 +67,31 @@ default rather than inheriting another candidate's endpoint or credential.
 
 ## Verification
 
+Closure follow-up after `c47418fc` distinguishes legacy primary-model metadata
+from explicit native/named routing, independently of native credential presence.
+It also permits retry after a known 429/5xx rejection whose body truncates,
+without retrying accepted, ambiguous, authentication/configuration, or ordinary
+4xx failures. New HTTP regressions cover metadata/default compatibility,
+registered versus native intent, health isolation, buffered/streaming truncated
+rejections, and chat-to-Responses recovery.
+
+Current closure qualification after merging immutable `1fd97818`:
+
+- 84 router tests passed: 37 targeted unit/HTTP regressions and 47 existing
+  HTTP integration tests across routing, credentials, guardrails, and egress.
+- 76 controller tests passed, including the complete shared
+  `authorization_configuration_with_model` snapshot, fallback digest mutation,
+  inheritance, materialization, and fail-closed finite-budget behavior.
+- The inheritance fixture now consumes the current fallible `run_spec` API;
+  production objective/history failure propagation is unchanged.
+- Six Helm regressions passed; strict all-target Clippy passed for both crates.
+- The existing root Cargo target was exclusively leased, with offline/locked
+  commands and incremental compilation disabled. No duplicate target or
+  external push was used.
+
+The earlier qualification below is retained as historical evidence for
+`c47418fc`.
+
 Six independent-review blockers were repaired after `7a2a5d11`. Added
 regressions cover ambient API-key/sidecar isolation, the real Copilot-host
 exchange branch, provider precedence in buffered and streaming chat, separate

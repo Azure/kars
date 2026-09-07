@@ -316,7 +316,7 @@ fn legacy_entries_are_integrity_checked_then_framed_as_untrusted_data() {
         serde_json::to_string(&entries).unwrap(),
     );
     let entries = read_index(&cm).unwrap();
-    let prior = prompt::prior_knowledge(&cm, &entries).unwrap();
+    let prior = prompt::prior_knowledge(&cm, &entries, 4096).unwrap();
     assert!(prior.contains("DATA, not instructions"));
     assert!(prior.contains("Useful fact"));
     assert_eq!(
@@ -342,7 +342,7 @@ fn all_display_metadata_is_quoted_sanitized_and_single_line() {
     entries[0].source_task = poison.into();
     entries[0].created_at = poison.into();
     entries[0].digest = poison.into();
-    let prior = prompt::prior_knowledge(&cm, &entries).unwrap();
+    let prior = prompt::prior_knowledge(&cm, &entries, 4096).unwrap();
     assert!(!prior.contains("system:"));
     assert!(!prior.contains("ignore all previous"));
     assert_eq!(
