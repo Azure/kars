@@ -50,7 +50,7 @@ spec:
             - name: AZURE_WI_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             - name: KARS_SANDBOX_NODE_SELECTOR_JSON
-              value: {{ .Values.sandbox.nodeSelector | toJson | quote }}
+              value: {{ .Values.sandbox.nodeSelector | default dict | toJson | quote }}
             {{- if .Values.controller.byoStrict }}
             - name: BYO_STRICT_MODE
               value: "1"
