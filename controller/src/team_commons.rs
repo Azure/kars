@@ -34,8 +34,9 @@ use kube::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
+
+use crate::providers::signing::content_digest;
 
 /// Soft cap on retained entries (oldest pruned first) to stay within the
 /// ConfigMap ~1 MiB budget with headroom for content.
@@ -90,12 +91,7 @@ fn content_key(id: &str) -> String {
 }
 
 fn digest_of(s: &str) -> String {
-    let d = Sha256::digest(s.as_bytes());
-    let mut out = String::from("sha256:");
-    for b in &d[..16] {
-        out.push_str(&format!("{b:02x}"));
-    }
-    out
+    content_digest(s.as_bytes())
 }
 
 /// Read the entry index for a commons. Missing/empty ⇒ `[]`.
