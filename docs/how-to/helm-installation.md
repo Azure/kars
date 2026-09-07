@@ -127,3 +127,14 @@ The command verifies the Kars Helm release and `KarsSandbox` CRD, then writes
 using a private mirror or when enabling `kars push` and the current ACR-based
 `kars upgrade` flow. Optional Workload Identity, OIDC, Foundry, identity, and
 Key Vault flags enable the corresponding advanced flows.
+
+`kars push --apply` updates the owning image configuration and verifies the
+pushed artifact, rather than merely restarting an old image. Explicit sandbox
+image pins are preserved. `sandbox-base` is a build dependency, not a deployable
+target; rebuild the sandbox image before applying it.
+
+Core upgrades leave external AgentMesh services untouched. Mesh image updates
+are limited to the owning Kars Helm release or the standalone Kars deployment
+marked `kars.azure.com/mesh-provider=agt`. Matching service/deployment names alone
+do not authorize an update. With external mesh, select an explicit core
+`kars push --only` target; the CLI will not adopt or replace external workloads.

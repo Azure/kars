@@ -10,16 +10,19 @@ import {
 import { applyPushedImages } from "../commands/push-apply.js";
 
 function fixture(owned: boolean) {
+  const labels: Record<string, string> = owned
+    ? { "app.kubernetes.io/managed-by": "Helm" }
+    : { "kars.azure.com/mesh-provider": "agt" };
   const metadata = (name: string) => ({
     name, generation: 1, ownerReferences: [] as Array<{ controller: boolean }>,
-    labels: owned ? { "app.kubernetes.io/managed-by": "Helm" } : {},
+    labels: { ...labels },
     annotations: owned ? { "meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": "kars-system" } : {},
   });
   return ["registry", "relay"].flatMap(component => [
     {
       kind: "Deployment", metadata: metadata(component),
       spec: { replicas: 1, selector: { matchLabels: { app: `agentmesh-${component}` } },
-        template: { spec: { containers: [{ name: component, image: `old.example/${component}:old` }] } } },
+        template: { metadata: { labels: { app: `agentmesh-${component}` } }, spec: { containers: [{ name: component, image: `old.example/${component}:old` }] } } },
       status: { observedGeneration: 1, readyReplicas: 1, updatedReplicas: 1, conditions: [{ type: "Available", status: "True" }] },
     },
     { kind: "Service", metadata: metadata(`agentmesh-${component}`), spec: { selector: { app: `agentmesh-${component}` } } },
@@ -34,6 +37,7 @@ function mockInstallation(owned: boolean, fail?: (bin: string, args: readonly st
   const resources = fixture(owned);
   const execute = vi.fn(async (bin: string, args: readonly string[]) => {
     fail?.(bin, args);
+    if (bin === "az") return { stdout: `sha256:${"a".repeat(64)}` };
     if (bin === "kubectl" && args[1] === "deployment,service") return { stdout: JSON.stringify({ items: resources }) };
     if (bin === "helm" && args[0] === "list") return { stdout: JSON.stringify([{ name: "kars", chart: "kars-0.1.0" }]) };
     if (bin === "helm" && args[0] === "get") return { stdout: JSON.stringify({ agentMesh: { enabled: true } }) };
@@ -70,7 +74,7 @@ describe("AgentMesh ownership and image application", () => {
     expect(upgrade?.[1]).toEqual(expect.arrayContaining([
       "kars", "chart", "--namespace", "kars-system", "--reuse-values",
       "agentMesh.relay.image.repository=mirror.azurecr.io/agentmesh-relay-agt",
-      "agentMesh.relay.image.tag=latest", "--atomic",
+      `agentMesh.relay.image.tag=latest@sha256:${"a".repeat(64)}`, "--atomic",
     ]));
     expect(calls.some(([bin, args]) => bin === "kubectl" && (args?.[0] === "apply" || args?.[0] === "set"))).toBe(false);
     expect(calls.some(([, args]) => args?.some(arg => ["--take-ownership", "--force", "--force-recreate", "--force-conflicts"].includes(arg)))).toBe(false);
@@ -123,16 +127,16 @@ describe("AgentMesh ownership and image application", () => {
     expect(recorded(execute).some(([bin]) => bin === "helm")).toBe(false);
   });
 
-  it("rejects ownership by another controller", async () => {
+  it("classifies another controller's installation as external", async () => {
     const { execute, resources } = mockInstallation(false);
     for (const resource of resources) resource.metadata.labels = { "app.kubernetes.io/managed-by": "another-controller" };
-    await expect(inspectMeshInstallation(execute)).rejects.toThrow("ownership");
+    expect((await inspectMeshInstallation(execute)).kind).toBe("external");
   });
 
-  it("does not classify Kubernetes-owned resources as unmanaged", async () => {
+  it("classifies Kubernetes-owned resources as external rather than unmanaged", async () => {
     const { execute, resources } = mockInstallation(false);
     resources[0].metadata.ownerReferences = [{ controller: true }];
-    await expect(inspectMeshInstallation(execute)).rejects.toThrow("another Kubernetes owner");
+    expect((await inspectMeshInstallation(execute)).kind).toBe("external");
     expect(recorded(execute).some(([, args]) => args[0] === "set" || args[0] === "upgrade")).toBe(false);
   });
 
