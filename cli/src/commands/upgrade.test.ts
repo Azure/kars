@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { describe, it, expect } from "vitest";
+import type { MeshInstallation } from "../lib/mesh-release.js";
 import {
   isFoundryProjectHost,
   resolveTargetVersion,
@@ -12,6 +13,14 @@ import {
   parseHelmFieldConflicts,
   suggestConflictRemediation,
 } from "./upgrade.js";
+
+const legacyMesh: MeshInstallation = {
+  kind: "legacy", namespace: "agentmesh",
+  deployments: [
+    { component: "registry", name: "registry", container: "registry", image: "example/registry:latest" },
+    { component: "relay", name: "relay", container: "relay", image: "example/relay:latest" },
+  ],
+};
 
 describe("isFoundryProjectHost", () => {
   it("accepts a real Foundry project endpoint", () => {
@@ -290,36 +299,37 @@ describe("detectCurrentVersion — honest, un-spoofable version detection", () =
 describe("rolloutRestartAll — refreshes every workload, mesh first", () => {
   it("restarts agentmesh relay+registry, the controller, and every sandbox", async () => {
     const calls: string[][] = [];
-    const execa = fakeExeca(() => "", calls);
-    await rolloutRestartAll(execa);
+    const execa = fakeExeca((_bin, args) => args[0] === "get" && args[1] === "deployments"
+      ? JSON.stringify({ items: [{ metadata: { name: "agent", namespace: "kars-agent" } }] }) : "", calls);
+    await rolloutRestartAll(execa, legacyMesh);
     const restarts = calls
       .filter((c) => c[0] === "kubectl" && c[1] === "rollout" && c[2] === "restart")
       .map((c) => c.join(" "));
     // mesh relay + registry by name (narrow, not --all)
-    expect(restarts.some((c) => c.includes("deployment/agentmesh-relay") && c.includes("-n agentmesh"))).toBe(true);
-    expect(restarts.some((c) => c.includes("deployment/agentmesh-registry") && c.includes("-n agentmesh"))).toBe(true);
+    expect(restarts.some((c) => c.includes("deployment/relay") && c.includes("-n agentmesh"))).toBe(true);
+    expect(restarts.some((c) => c.includes("deployment/registry") && c.includes("-n agentmesh"))).toBe(true);
     expect(restarts.some((c) => c.includes("--all"))).toBe(false);
     // controller + sandboxes
-    expect(restarts.some((c) => c.includes("-n kars-system") && c.includes("app.kubernetes.io/name=kars"))).toBe(true);
-    expect(restarts.some((c) => c.includes("-A") && c.includes("kars.azure.com/component=sandbox"))).toBe(true);
+    expect(restarts.some((c) => c.includes("-n kars-system") && c.includes("deployment/kars-controller"))).toBe(true);
+    expect(restarts.some((c) => c.includes("-n kars-agent") && c.includes("deployment/agent"))).toBe(true);
   });
 
   it("restarts the mesh BEFORE the controller (so deps come up against new mesh)", async () => {
     const calls: string[][] = [];
-    await rolloutRestartAll(fakeExeca(() => "", calls));
+    await rolloutRestartAll(fakeExeca((_bin, args) => args[0] === "get" ? '{"items":[]}' : "", calls), legacyMesh);
     const order = calls
       .filter((c) => c[0] === "kubectl" && c[1] === "rollout" && c[2] === "restart")
       .map((c) => c.join(" "));
-    const meshIdx = order.findIndex((c) => c.includes("agentmesh-relay"));
-    const ctrlIdx = order.findIndex((c) => c.includes("app.kubernetes.io/name=kars"));
+    const meshIdx = order.findIndex((c) => c.includes("deployment/relay"));
+    const ctrlIdx = order.findIndex((c) => c.includes("deployment/kars-controller"));
     expect(meshIdx).toBeGreaterThanOrEqual(0);
     expect(ctrlIdx).toBeGreaterThan(meshIdx);
   });
 
-  it("never throws even if every kubectl call fails (best-effort)", async () => {
+  it("propagates restart failures instead of reporting a success-shaped outcome", async () => {
     const calls: string[][] = [];
     const execa = fakeExeca(() => "THROW", calls);
-    await expect(rolloutRestartAll(execa)).resolves.toBeUndefined();
+    await expect(rolloutRestartAll(execa, legacyMesh)).rejects.toThrow("command failed");
   });
 });
 
@@ -327,6 +337,11 @@ describe("verifyHealth — strong enough to gate success", () => {
   const route = (ctrlAvail: string, podReasons: Record<string, string>) =>
     (bin: string, args: string[]): string | undefined => {
       if (bin === "kubectl" && args.includes("deployment") && args.includes("kars-controller")) return ctrlAvail;
+      if (bin === "kubectl" && args[0] === "get" && args[1] === "deployment") return JSON.stringify({
+        metadata: { generation: 1 },
+        spec: { replicas: 1 },
+        status: { observedGeneration: 1, readyReplicas: 1, updatedReplicas: 1, conditions: [{ type: "Available", status: "True" }] },
+      });
       if (bin === "kubectl" && args.includes("pods")) {
         const ns = args[args.indexOf("-n") + 1];
         return podReasons[ns] ?? "";
@@ -335,30 +350,31 @@ describe("verifyHealth — strong enough to gate success", () => {
     };
 
   it("healthy when controller Available and no bad pods", async () => {
-    const r = await verifyHealth(fakeExeca(route("True", {}), []));
+    const r = await verifyHealth(fakeExeca(route("True", {}), []), legacyMesh);
     expect(r.healthy).toBe(true);
   });
 
   it("unhealthy when the controller is not Available", async () => {
-    const r = await verifyHealth(fakeExeca(route("False", {}), []));
+    const r = await verifyHealth(fakeExeca(route("False", {}), []), legacyMesh);
     expect(r.healthy).toBe(false);
     expect(r.reason).toMatch(/controller/i);
   });
 
   it("unhealthy on ImagePullBackOff (the bad-image symptom)", async () => {
-    const r = await verifyHealth(fakeExeca(route("True", { "kars-system": "ImagePullBackOff " }), []));
+    const r = await verifyHealth(fakeExeca(route("True", { "kars-system": "ImagePullBackOff " }), []), legacyMesh);
     expect(r.healthy).toBe(false);
     expect(r.reason).toMatch(/ImagePullBackOff/);
   });
 
   it("unhealthy on CrashLoopBackOff in the agentmesh namespace", async () => {
-    const r = await verifyHealth(fakeExeca(route("True", { agentmesh: "CrashLoopBackOff " }), []));
+    const r = await verifyHealth(fakeExeca(route("True", { agentmesh: "CrashLoopBackOff " }), []), legacyMesh);
     expect(r.healthy).toBe(false);
     expect(r.reason).toMatch(/CrashLoopBackOff/);
   });
 
   it("unhealthy (not a false-positive) when the controller probe errors", async () => {
-    const r = await verifyHealth(fakeExeca(() => "THROW", []));
+    const r = await verifyHealth(fakeExeca(() => "THROW", []), legacyMesh);
     expect(r.healthy).toBe(false);
   });
+
 });
