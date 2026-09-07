@@ -1,0 +1,9 @@
+{
+  "admission": {
+    "nullProviderBlock": { "enabled": false },
+    "contentSafetyFloor": { "enabled": true, "minimum": "High" },
+    "podExecBan": { "enabled": false },
+    "sandboxPostureLock": { "enabled": true },
+    "seccompAutoStamp": { "enabled": false }
+  }
+}

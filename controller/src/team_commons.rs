@@ -6,7 +6,7 @@
 //!
 //! A team accumulates knowledge across its standing-operation runs. The commons
 //! is the durable, in-cluster store of that knowledge: a ConfigMap
-//! `kars-commons-<team>` in the controller namespace, owned by the `KarsTeam`,
+//! `kars-commons-<team>` alongside and exclusively owned by the `KarsTeam`,
 //! holding an append-only set of **entries**. Each entry carries full
 //! provenance — *which* task authored it, *when*, and a content digest — so the
 //! commons is auditable, not a black box.
@@ -24,19 +24,21 @@
 //! The store is ConfigMap-backed so it is honest and reproducible on a plain
 //! (kind) cluster with no external dependency, and bounded to the ConfigMap
 //! budget (oldest entries are pruned first).
+//! Legacy global stores are never implicitly adopted or shared across teams.
 
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, ensure};
 use chrono::Utc;
 use k8s_openapi::api::core::v1::ConfigMap;
-use kube::{
-    Api, Client,
-    api::{Patch, PatchParams},
-};
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::{ObjectMeta, OwnerReference};
+use kube::{Api, Client, Resource, ResourceExt, api::PostParams};
 use serde::{Deserialize, Serialize};
-use serde_json::json;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
+use crate::kars_team::KarsTeam;
 use crate::providers::signing::content_digest;
+
+#[path = "team_commons_prompt.rs"]
+mod prompt;
 
 /// Soft cap on retained entries (oldest pruned first) to stay within the
 /// ConfigMap ~1 MiB budget with headroom for content.
@@ -66,8 +68,94 @@ pub struct CommonsEntry {
     pub size_bytes: i64,
 }
 
-fn namespace() -> String {
-    std::env::var("KARS_NAMESPACE").unwrap_or_else(|_| "kars-system".into())
+struct CommonsIdentity {
+    namespace: String,
+    name: String,
+    owner: OwnerReference,
+}
+
+impl CommonsIdentity {
+    fn for_team(team: &KarsTeam) -> Result<Self> {
+        let namespace = team.namespace().context("commons team has no namespace")?;
+        ensure!(
+            !namespace.trim().is_empty(),
+            "commons team namespace is empty"
+        );
+        ensure!(
+            team.metadata
+                .name
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty()),
+            "commons team has no name"
+        );
+        ensure!(
+            team.metadata
+                .uid
+                .as_ref()
+                .is_some_and(|s| !s.trim().is_empty()),
+            "commons team has no UID"
+        );
+        let name = commons_cm_name(&team.commons_name());
+        ensure!(
+            name.len() <= 253
+                && name.split('.').all(|label| {
+                    !label.is_empty()
+                        && label
+                            .bytes()
+                            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                        && label.as_bytes()[0].is_ascii_alphanumeric()
+                        && label.as_bytes()[label.len() - 1].is_ascii_alphanumeric()
+                }),
+            "invalid commons ConfigMap name"
+        );
+        Ok(Self {
+            namespace,
+            name,
+            owner: team
+                .controller_owner_ref(&())
+                .context("commons team has no owner identity")?,
+        })
+    }
+
+    fn validate(&self, cm: &ConfigMap) -> Result<()> {
+        ensure!(
+            cm.metadata.namespace.as_deref() == Some(self.namespace.as_str())
+                && cm.metadata.name.as_deref() == Some(self.name.as_str()),
+            "commons ConfigMap namespace or name does not match the team"
+        );
+        let owners = cm.metadata.owner_references.as_deref().unwrap_or_default();
+        ensure!(
+            owners.len() == 1
+                && owners[0].controller == Some(true)
+                && owners[0].uid == self.owner.uid
+                && owners[0].name == self.owner.name
+                && owners[0].kind == self.owner.kind
+                && owners[0].api_version == self.owner.api_version,
+            "commons ConfigMap is not exclusively controller-owned by this KarsTeam"
+        );
+        ensure!(
+            cm.metadata.deletion_timestamp.is_none(),
+            "commons ConfigMap is terminating"
+        );
+        Ok(())
+    }
+
+    fn seed(&self, commons: &str) -> ConfigMap {
+        ConfigMap {
+            metadata: ObjectMeta {
+                name: Some(self.name.clone()),
+                namespace: Some(self.namespace.clone()),
+                owner_references: Some(vec![self.owner.clone()]),
+                labels: Some(BTreeMap::from([(
+                    "kars.azure.com/commons".into(),
+                    commons.into(),
+                )])),
+                ..Default::default()
+            },
+            data: Some(BTreeMap::from([("index.json".into(), "[]".into())])),
+            ..Default::default()
+        }
+    }
 }
 
 /// ConfigMap name for a team's commons.
@@ -94,51 +182,62 @@ fn digest_of(s: &str) -> String {
     content_digest(s.as_bytes())
 }
 
-/// Read the entry index for a commons. Missing/empty ⇒ `[]`.
-fn read_index(cm: &ConfigMap) -> Vec<CommonsEntry> {
-    cm.data
-        .as_ref()
-        .and_then(|d| d.get("index.json"))
-        .and_then(|s| serde_json::from_str::<Vec<CommonsEntry>>(s).ok())
-        .unwrap_or_default()
+/// Validate the entire store, including old entries not shown in the next prompt.
+fn read_index(cm: &ConfigMap) -> Result<Vec<CommonsEntry>> {
+    let data = cm.data.as_ref().context("commons data is missing")?;
+    let encoded = data.get("index.json").context("commons index is missing")?;
+    let index: Vec<CommonsEntry> =
+        serde_json::from_str(encoded).context("invalid commons index")?;
+    ensure!(
+        index.len() <= MAX_ENTRIES,
+        "commons index exceeds its entry limit"
+    );
+    let mut ids = BTreeSet::new();
+    let mut keys = BTreeSet::new();
+    for entry in &index {
+        ensure!(!entry.id.trim().is_empty(), "commons entry ID is empty");
+        ensure!(ids.insert(entry.id.clone()), "duplicate commons entry ID");
+        let key = content_key(&entry.id);
+        ensure!(
+            keys.insert(key.clone()),
+            "commons entry IDs collide after key normalization"
+        );
+        let content = data.get(&key).context("commons entry content is missing")?;
+        ensure!(
+            entry.size_bytes == content.len() as i64 && entry.digest == digest_of(content),
+            "commons entry content failed integrity validation"
+        );
+        chrono::DateTime::parse_from_rfc3339(&entry.created_at)
+            .context("invalid commons entry timestamp")?;
+    }
+    ensure!(
+        data.keys()
+            .filter(|key| key.starts_with("entry-"))
+            .all(|key| keys.contains(key)),
+        "commons contains unindexed entry content"
+    );
+    Ok(index)
 }
 
-/// Ensure the commons ConfigMap exists, owned by the team. Idempotent SSA that
-/// only seeds metadata (never clobbers existing entries — `data` is omitted on
-/// the create so a present ConfigMap's content is preserved).
-pub async fn ensure_commons(
-    client: &Client,
-    commons: &str,
-    owner: serde_json::Value,
-) -> Result<()> {
-    let ns = namespace();
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &ns);
-    let name = commons_cm_name(commons);
-    if cms
-        .get_opt(&name)
+/// Create only when absent. A naming collision never adopts another team's data.
+pub async fn ensure_commons(client: &Client, team: &KarsTeam) -> Result<()> {
+    let identity = CommonsIdentity::for_team(team)?;
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &identity.namespace);
+    if let Some(cm) = cms
+        .get_opt(&identity.name)
         .await
-        .context("get commons cm")?
-        .is_some()
+        .context("get commons ConfigMap")?
     {
+        identity.validate(&cm)?;
+        read_index(&cm)?;
         return Ok(());
     }
-    let patch = json!({
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": {
-            "name": name,
-            "ownerReferences": [owner],
-            "labels": { "kars.azure.com/commons": commons },
-        },
-        "data": { "index.json": "[]" },
-    });
-    cms.patch(
-        &name,
-        &PatchParams::apply(crate::field_managers::CLAW_TEAM).force(),
-        &Patch::Apply(patch),
-    )
-    .await
-    .context("create commons cm")?;
+    let created = cms
+        .create(&PostParams::default(), &identity.seed(&team.commons_name()))
+        .await
+        .context("create commons ConfigMap; conflicts require a fresh reconcile")?;
+    identity.validate(&created)?;
+    read_index(&created)?;
     Ok(())
 }
 
@@ -147,36 +246,108 @@ pub async fn ensure_commons(
 /// when a new entry was written.
 pub async fn record_entry(
     client: &Client,
-    commons: &str,
+    team: &KarsTeam,
     id: &str,
     title: &str,
     author: &str,
     source_task: &str,
     content: &str,
 ) -> Result<bool> {
-    let ns = namespace();
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &ns);
-    let name = commons_cm_name(commons);
-
-    let existing = cms.get_opt(&name).await.context("get commons cm")?;
-    let mut index = existing.as_ref().map(read_index).unwrap_or_default();
-    if index.iter().any(|e| e.id == id) {
+    let identity = CommonsIdentity::for_team(team)?;
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &identity.namespace);
+    let existing = cms
+        .get(&identity.name)
+        .await
+        .context("get commons ConfigMap for append")?;
+    let Some(updated) = prepare_entry_update(
+        &identity,
+        &existing,
+        id,
+        title,
+        author,
+        source_task,
+        content,
+    )?
+    else {
         return Ok(false);
-    }
+    };
+    cms.replace(&identity.name, &PostParams::default(), &updated)
+        .await
+        .context(
+            "replace commons ConfigMap; resourceVersion conflicts require a fresh reconcile",
+        )?;
+    Ok(true)
+}
 
-    let trimmed: String = content.chars().take(MAX_ENTRY_CHARS).collect();
+fn prepare_entry_update(
+    identity: &CommonsIdentity,
+    existing: &ConfigMap,
+    id: &str,
+    title: &str,
+    author: &str,
+    source_task: &str,
+    content: &str,
+) -> Result<Option<ConfigMap>> {
+    identity.validate(existing)?;
+    ensure!(
+        existing
+            .metadata
+            .resource_version
+            .as_ref()
+            .is_some_and(|s| !s.is_empty())
+            && existing
+                .metadata
+                .uid
+                .as_ref()
+                .is_some_and(|s| !s.is_empty()),
+        "commons update requires its original UID and resourceVersion"
+    );
+    let mut index = read_index(existing)?;
+    ensure!(
+        !id.trim().is_empty() && content_key(id).len() <= 253,
+        "invalid commons entry ID"
+    );
+    let trimmed: String = prompt::sanitize_untrusted(content)
+        .chars()
+        .take(MAX_ENTRY_CHARS)
+        .collect();
     let entry = CommonsEntry {
         id: id.to_string(),
-        title: title.chars().take(160).collect(),
-        author: author.to_string(),
-        source_task: source_task.to_string(),
+        title: prompt::metadata(title, 160),
+        author: prompt::metadata(author, 253),
+        source_task: prompt::metadata(source_task, 253),
         created_at: Utc::now().to_rfc3339(),
         digest: digest_of(&trimmed),
         size_bytes: trimmed.len() as i64,
     };
 
-    // Rebuild data from the existing ConfigMap, preserving prior entry content.
-    let mut data: BTreeMap<String, String> = existing.and_then(|cm| cm.data).unwrap_or_default();
+    if let Some(prior) = index.iter().find(|prior| prior.id == id) {
+        let prior_content = existing
+            .data
+            .as_ref()
+            .and_then(|data| data.get(&content_key(id)))
+            .context("commons entry content is missing")?;
+        // Old entries predate sanitization. An identical normalized retry must
+        // remain idempotent without rewriting the original audited bytes.
+        let normalized_prior: String = prompt::sanitize_untrusted(prior_content)
+            .chars()
+            .take(MAX_ENTRY_CHARS)
+            .collect();
+        ensure!(
+            normalized_prior == trimmed
+                && prompt::metadata(&prior.title, 160) == entry.title
+                && prompt::metadata(&prior.author, 253) == entry.author
+                && prompt::metadata(&prior.source_task, 253) == entry.source_task,
+            "commons entry ID already exists with different content or provenance"
+        );
+        return Ok(None);
+    }
+    let mut updated = existing.clone();
+    let data = updated.data.as_mut().context("commons data is missing")?;
+    ensure!(
+        !data.contains_key(&content_key(id)),
+        "commons entry key collision"
+    );
     data.insert(content_key(&entry.id), trimmed);
     index.push(entry);
 
@@ -187,106 +358,38 @@ pub async fn record_entry(
     }
     data.insert(
         "index.json".into(),
-        serde_json::to_string(&index).unwrap_or_else(|_| "[]".into()),
+        serde_json::to_string(&index).context("encode commons index")?,
     );
-
-    let patch = json!({
-        "apiVersion": "v1",
-        "kind": "ConfigMap",
-        "metadata": {
-            "name": name,
-            "labels": { "kars.azure.com/commons": commons },
-        },
-        "data": data,
-    });
-    cms.patch(
-        &name,
-        &PatchParams::apply(crate::field_managers::CLAW_TEAM).force(),
-        &Patch::Apply(patch),
-    )
-    .await
-    .context("write commons entry")?;
-    Ok(true)
+    Ok(Some(updated))
 }
 
 /// Build the **prior-knowledge** preamble injected into the next run objective —
 /// the read path that makes the commons functional memory. Returns an empty
 /// string when the commons has no entries (a cold team starts honestly).
-pub async fn prior_knowledge(client: &Client, commons: &str) -> String {
-    let ns = namespace();
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &ns);
-    let name = commons_cm_name(commons);
-    let Ok(Some(cm)) = cms.get_opt(&name).await else {
-        return String::new();
-    };
-    let index = read_index(&cm);
-    if index.is_empty() {
-        return String::new();
-    }
-    let data = cm.data.unwrap_or_default();
-    let recent: Vec<&CommonsEntry> = index.iter().rev().take(PRIOR_KNOWLEDGE_ENTRIES).collect();
-    let mut out = String::from(
-        "\n\nPrior knowledge from your team's shared memory (most recent first) — \
-         build on this rather than starting over:\n",
-    );
-    for e in recent {
-        let snippet = data
-            .get(&content_key(&e.id))
-            .map(|c| {
-                let s: String = c.chars().take(400).collect();
-                s.replace('\n', " ")
-            })
-            .unwrap_or_default();
-        out.push_str(&format!("- [{}] {}: {}\n", e.created_at, e.title, snippet));
-    }
-    out
+pub async fn prior_knowledge(client: &Client, team: &KarsTeam) -> Result<String> {
+    let identity = CommonsIdentity::for_team(team)?;
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &identity.namespace);
+    let cm = cms
+        .get(&identity.name)
+        .await
+        .context("get commons prior knowledge")?;
+    identity.validate(&cm)?;
+    let index = read_index(&cm)?;
+    prompt::prior_knowledge(&cm, &index)
 }
 
 /// Number of entries currently in a team's commons (shared-memory size).
-pub async fn entry_count(client: &Client, commons: &str) -> i64 {
-    let ns = namespace();
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &ns);
-    let name = commons_cm_name(commons);
-    match cms.get_opt(&name).await {
-        Ok(Some(cm)) => read_index(&cm).len() as i64,
-        _ => 0,
-    }
+pub async fn entry_count(client: &Client, team: &KarsTeam) -> Result<i64> {
+    let identity = CommonsIdentity::for_team(team)?;
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &identity.namespace);
+    let cm = cms
+        .get(&identity.name)
+        .await
+        .context("get commons entry count")?;
+    identity.validate(&cm)?;
+    Ok(read_index(&cm)?.len() as i64)
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn commons_cm_name_is_stable() {
-        assert_eq!(commons_cm_name("repo-watch"), "kars-commons-repo-watch");
-    }
-
-    #[test]
-    fn content_key_sanitizes() {
-        assert_eq!(content_key("repo-watch-run-1"), "entry-repo-watch-run-1");
-        assert_eq!(content_key("a/b c"), "entry-a_b_c");
-    }
-
-    #[test]
-    fn digest_has_prefix_and_is_stable() {
-        let a = digest_of("hello");
-        let b = digest_of("hello");
-        assert!(a.starts_with("sha256:"));
-        assert_eq!(a, b);
-        assert_ne!(a, digest_of("world"));
-    }
-
-    #[test]
-    fn read_index_handles_missing_and_malformed() {
-        let empty = ConfigMap::default();
-        assert!(read_index(&empty).is_empty());
-        let mut data = BTreeMap::new();
-        data.insert("index.json".to_string(), "not json".to_string());
-        let cm = ConfigMap {
-            data: Some(data),
-            ..Default::default()
-        };
-        assert!(read_index(&cm).is_empty());
-    }
-}
+#[path = "team_commons_tests.rs"]
+mod tests;

@@ -15,7 +15,8 @@
 //!   task-force `KarsTask`s from the charter (autonomous monitoring: "watch the
 //!   repo / reconcile the ledger / keep the docs current" — §20),
 //! - accrues a **knowledge commons** (shared, provenance-tracked memory, §14),
-//! - **hibernates** when idle and resumes on its cadence, budget-capped.
+//! - **hibernates** when idle and resumes on its cadence. Finite token/spend
+//!   budgets are valid plans; execution stays blocked until durably enforceable.
 //!
 //! The team is domain-blind: a finance close team, a docs-review team, an SRE
 //! team, or the eng team maintaining kars are all the *same* primitive — the
@@ -166,6 +167,8 @@ pub struct TeamCadence {
     /// Tick interval in **minutes**. On each tick the charter loop mints one
     /// task-force `KarsTask`. Kept as a simple interval so the standing loop is
     /// honest and reproducible on a plain (kind) cluster. Must be `>= 1`.
+    /// Positive envelope budgets block execution with `UnsupportedLaunchBudget`;
+    /// the foundation does not substitute per-sandbox daily limits for totals.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub every_minutes: Option<u32>,
 
@@ -280,40 +283,73 @@ impl KarsTeam {
     /// the `KarsTask` envelope rules and adds the roster-attenuation check: every
     /// member envelope must be a strict subset of the team envelope.
     pub fn validation_errors(&self) -> Vec<String> {
-        let mut errs = Vec::new();
-        let env = &self.spec.envelope;
-        if env.tier < crate::kars_task::TIER_MIN || env.tier > crate::kars_task::TIER_MAX {
-            errs.push(format!(
-                "envelope.tier {} out of range [{}..{}]",
-                env.tier,
-                crate::kars_task::TIER_MIN,
-                crate::kars_task::TIER_MAX
-            ));
+        use crate::kars_task::spec_attenuation_violations;
+        use crate::kars_team_reconciler::specs;
+        let mut errs = specs::envelope_errors(&self.spec.envelope);
+        if !errs.is_empty() {
+            // Do not feed invalid arithmetic bounds (including i32::MIN depth)
+            // into a validator whose parent envelope must already be valid.
+            return errs;
         }
-        if env.authority_ceiling > env.tier {
-            errs.push(format!(
-                "envelope.authorityCeiling {} exceeds tier {}",
-                env.authority_ceiling, env.tier
-            ));
-        }
-        if env.delegation_depth < 0 {
-            errs.push("envelope.delegationDepth must be >= 0".to_string());
-        }
+        let principal = specs::principal_spec(self);
+        errs.extend(specs::policy_errors(&principal));
         if self.spec.charter.trim().is_empty() {
             errs.push("charter must not be empty".to_string());
         }
+        let mut names = std::collections::BTreeSet::new();
         for role in &self.spec.roster {
-            if let Some(role_env) = &role.envelope {
-                for v in role_env.attenuation_violations(&self.spec.envelope) {
-                    errs.push(format!("roster role '{}': {}", role.name, v));
-                }
+            let suffix = specs::sanitize(&role.name);
+            if role.name.trim().is_empty()
+                || !role.name.chars().any(|c| c.is_ascii_alphanumeric())
+                || suffix == "principal"
+                || suffix.starts_with("run-")
+                || !names.insert(suffix)
+                || specs::member_name(self, role).len() > 253
+            {
+                errs.push(format!(
+                    "roster role '{}': empty, duplicate, reserved or invalid generated name",
+                    role.name
+                ));
+            }
+            let child = specs::member_spec(self, role);
+            for error in specs::envelope_errors(&child.envelope)
+                .into_iter()
+                .chain(specs::policy_errors(&child))
+                .chain(
+                    spec_attenuation_violations(&child, &principal)
+                        .iter()
+                        .map(ToString::to_string),
+                )
+            {
+                errs.push(format!("roster role '{}': {error}", role.name));
             }
         }
-        if let Some(c) = &self.spec.cadence
-            && let Some(m) = c.every_minutes
-            && m < 1
+        if specs::principal_name(self).len() > 253 {
+            errs.push("team name is too long for its principal task".into());
+        }
+        if let Some(c) = &self.spec.cadence {
+            if c.every_minutes == Some(0) {
+                errs.push("cadence.everyMinutes must be >= 1".into());
+            }
+            if c.digest_every_minutes == Some(0) {
+                errs.push("cadence.digestEveryMinutes must be >= 1".into());
+            }
+            if c.every_minutes.is_some() {
+                let child = specs::run_spec(self, "");
+                errs.extend(specs::envelope_errors(&child.envelope));
+                errs.extend(
+                    spec_attenuation_violations(&child, &principal)
+                        .iter()
+                        .map(|e| format!("cadence task: {e}")),
+                );
+            }
+        }
+        if self
+            .spec
+            .requested_tier
+            .is_some_and(|tier| !(1..=5).contains(&tier))
         {
-            errs.push("cadence.everyMinutes must be >= 1".to_string());
+            errs.push("requestedTier must be in 1..5".into());
         }
         errs
     }
