@@ -44,7 +44,17 @@
 
   Requires Kubernetes >= 1.30 (VAP GA).
 */}}
-{{- if .Values.admission.taskNamespaceFloor.enabled -}}
+{{- $admission := .Values.admission | default dict -}}
+{{- $floor := $admission.taskNamespaceFloor | default dict -}}
+{{- $enabled := true -}}
+{{- /* `default true` would overwrite an existing explicit false. */ -}}
+{{- if hasKey $floor "enabled" -}}
+{{- $enabled = $floor.enabled -}}
+{{- end -}}
+{{- if not (kindIs "bool" $enabled) -}}
+{{- fail "admission.taskNamespaceFloor.enabled must be a boolean" -}}
+{{- end -}}
+{{- if $enabled -}}
 apiVersion: admissionregistration.k8s.io/v1
 kind: ValidatingAdmissionPolicy
 metadata:
