@@ -150,3 +150,122 @@ fn finalizer_roundtrip() {
     let dropped = drop_finalizer(&task);
     assert_eq!(dropped, vec!["other/keep".to_string()]);
 }
+
+#[tokio::test]
+async fn receipt_collector_signs_d0_history_after_promotion_to_d1() {
+    use crate::kars_approval::{KarsApproval, KarsApprovalStatus, request_snapshot};
+    use base64::Engine as _;
+    use wiremock::matchers::{method, path, path_regex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+    let server = MockServer::start().await;
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let mut task = task_with(1, 1, 0);
+    task.metadata.uid = Some("task-uid".into());
+    task.metadata.generation = Some(1);
+    task.spec.blueprint = Some(crate::kars_task::TaskBlueprint {
+        model: Some(crate::kars_task::TaskModel {
+            deployment: "reviewed-model".into(),
+            provider: "azure-openai".into(),
+        }),
+        ..Default::default()
+    });
+    let d0 = task.envelope_digest();
+    let mut approval = KarsApproval::new(
+        "promotion",
+        serde_json::from_value(json!({
+            "taskRef": { "name": "t" },
+            "action": { "kind": "tierRaise", "summary": "Permit tier 2", "requestedTier": 2 },
+            "ttl": "PT1H",
+            "decision": { "verdict": "approve", "decider": "alice" },
+        }))
+        .unwrap(),
+    );
+    approval.metadata.uid = Some("approval-uid".into());
+    approval.metadata.namespace = Some("default".into());
+    approval.metadata.generation = Some(2);
+    approval.status = Some(KarsApprovalStatus {
+        phase: Some("Approved".into()),
+        observed_generation: Some(2),
+        bound_envelope_digest: Some(d0.clone()),
+        bound_task_uid: task.metadata.uid.clone(),
+        bound_request: Some(request_snapshot(&approval.spec)),
+        requested_at: Some("2026-09-07T08:00:00Z".into()),
+        decided_at: Some("2026-09-07T08:15:00Z".into()),
+        expires_at: Some("2026-09-07T09:00:00Z".into()),
+        decider: Some("alice".into()),
+        ..Default::default()
+    });
+    task.spec.envelope.tier = 2;
+    task.metadata.generation = Some(2);
+    let status = ready_status(None, Some(2), task.envelope_digest(), Vec::new());
+    task.status = Some(status.clone());
+    assert!(!crate::kars_approval::approval_authorizes_task(
+        &approval, &task
+    ));
+    Mock::given(method("GET"))
+        .and(path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/default/karsapprovals",
+        ))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+            "apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsApprovalList",
+            "metadata": { "resourceVersion": "1" }, "items": [approval],
+        })))
+        .mount(&server)
+        .await;
+    let receipt_path = "/apis/kars.azure.com/v1alpha1/namespaces/default/karsreceipts/t";
+    Mock::given(method("PATCH"))
+        .and(path(receipt_path))
+        .respond_with(|request: &wiremock::Request| {
+            ResponseTemplate::new(200)
+                .set_body_json(request.body_json::<serde_json::Value>().unwrap())
+        })
+        .expect(1)
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(
+            "/api/v1/namespaces/[^/]+/configmaps/kars-receipt-log",
+        ))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "status": "Failure", "code": 403, "reason": "Forbidden", "message": "log unavailable",
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH")).and(path(format!("{receipt_path}/status")))
+        .respond_with(ResponseTemplate::new(503).set_body_json(json!({
+            "status": "Failure", "code": 503, "reason": "ServiceUnavailable", "message": "echo unavailable",
+        }))).mount(&server).await;
+    let signer = crate::providers::signing::ReceiptSigner::from_bytes(&[7; 32]);
+    reconcile_receipt(&client, "default", &task, &status, &signer).await;
+    let requests = server.received_requests().await.unwrap();
+    let receipt: serde_json::Value = requests
+        .iter()
+        .find(|request| request.method == "PATCH" && request.url.path() == receipt_path)
+        .unwrap()
+        .body_json()
+        .unwrap();
+    let bytes = base64::engine::general_purpose::STANDARD
+        .decode(receipt["spec"]["dsse"]["payload"].as_str().unwrap())
+        .unwrap();
+    let payload: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+    let history = &payload["predicate"]["approvalHistory"][0];
+    assert_eq!(
+        receipt["spec"]["dsse"]["signatures"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(history["boundEnvelopeDigest"], d0);
+    assert_eq!(history["taskUid"], "task-uid");
+    assert_eq!(history["decision"]["verdict"], "approve");
+    assert_eq!(history["evidenceScope"], "historicalDecision");
+    assert_eq!(history["authorizesCurrentTask"], false);
+    assert_eq!(history["consumptionAttested"], false);
+    assert_eq!(
+        payload["subject"][0]["digest"]["sha256"],
+        task.envelope_digest().trim_start_matches("sha256:")
+    );
+    assert!(payload["predicate"].get("approvals").is_none());
+}

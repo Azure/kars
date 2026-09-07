@@ -48,7 +48,7 @@
 {{- $floor := $admission.taskNamespaceFloor | default dict -}}
 {{- $enabled := true -}}
 {{- /* `default true` would overwrite an existing explicit false. */ -}}
-{{- if hasKey $floor "enabled" -}}
+{{- if and (hasKey $floor "enabled") (ne $floor.enabled nil) -}}
 {{- $enabled = $floor.enabled -}}
 {{- end -}}
 {{- if not (kindIs "bool" $enabled) -}}

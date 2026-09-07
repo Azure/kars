@@ -68,6 +68,10 @@ mod tests {
             serde_json::to_value(effective).unwrap()["modelFallbacks"],
             original["blueprint"]["modelFallbacks"]
         );
+        assert_eq!(
+            spec.authorization_configuration_with_model(&primary)["blueprint"]["modelFallbacks"],
+            original["blueprint"]["modelFallbacks"]
+        );
         let digest = spec.authorization_digest_with_model(&primary);
         for (pointer, value) in [
             (

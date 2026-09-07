@@ -266,7 +266,7 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let requeue = if new_status.phase.as_deref() == Some(PHASE_PENDING)
         || matches!(
             new_status.execution_phase.as_deref(),
-            Some("Stopping" | "Degraded")
+            Some("Stopping" | PHASE_DEGRADED)
         ) {
         REQUEUE_PENDING
     } else {
@@ -525,6 +525,7 @@ async fn reconcile_receipt(
     use crate::kars_approval::KarsApproval;
     use crate::kars_receipt::{
         KarsReceipt, approval_facts, build_spec, build_statement, canonical_json,
+        historical_approval_facts,
     };
 
     let name = task.name_any();
@@ -537,21 +538,24 @@ async fn reconcile_receipt(
     current_task.status = Some(status.clone());
     let approvals: Api<KarsApproval> = Api::namespaced(client.clone(), ns);
     let task_approvals = match approvals.list(&ListParams::default()).await {
-        Ok(list) => list
-            .items
-            .into_iter()
-            .filter(|a| {
-                crate::kars_approval::approval_binding_matches_task(a, &current_task)
-                    && (a.status.as_ref().and_then(|s| s.phase.as_deref()) != Some("Approved")
-                        || crate::kars_approval::approval_authorizes_task(a, &current_task))
-            })
-            .collect::<Vec<_>>(),
+        Ok(list) => list.items,
         Err(e) => {
             tracing::debug!(karstask = %name, ns = %ns, error = %e, "could not list KarsApprovals for receipt");
             Vec::new()
         }
     };
-    let facts = approval_facts(&task_approvals);
+    // Capture valid decisions before current-authority filtering: a promotion
+    // may have moved D0 to D1 before any receipt observed its D0 approval.
+    let history = historical_approval_facts(&current_task, &task_approvals);
+    let current_approvals = task_approvals
+        .into_iter()
+        .filter(|a| {
+            crate::kars_approval::approval_binding_matches_task(a, &current_task)
+                && (a.status.as_ref().and_then(|s| s.phase.as_deref()) != Some("Approved")
+                    || crate::kars_approval::approval_authorizes_task(a, &current_task))
+        })
+        .collect::<Vec<_>>();
+    let facts = approval_facts(&current_approvals);
 
     // Gather the completeness-floor posture from cluster state (best-effort —
     // a read failure yields a conservative "not enforced" observation, never a
@@ -559,7 +563,7 @@ async fn reconcile_receipt(
     // concrete and re-derivable by an auditor.
     let completeness = gather_completeness();
 
-    let Some(statement) = build_statement(task, status, &signer.key_id, &facts, completeness)
+    let Some(mut statement) = build_statement(task, status, &signer.key_id, &facts, completeness)
     else {
         // No digest → no receipt. Retract any prior one.
         match receipts
@@ -574,6 +578,7 @@ async fn reconcile_receipt(
         }
         return;
     };
+    statement.predicate.approval_history = history;
 
     let digest = status
         .envelope_digest

@@ -25,6 +25,7 @@ pub(super) fn model_capability_key(upstream: &UpstreamConfig) -> String {
     // accounts even when endpoint/model match; credentials never enter keys.
     serde_json::to_string(&(
         &upstream.authentication,
+        upstream.provider.as_tag(),
         upstream.endpoint.trim_end_matches('/'),
         &upstream.deployment,
     ))
@@ -180,7 +181,12 @@ pub(super) async fn forward_responses(
             })
             .collect();
         let mut response_policy = policy.clone();
-        response_policy.provider = candidates[start].provider.clone();
+        response_policy.provider =
+            if candidates[start].routing_intent == failover::RoutingIntent::Explicit {
+                candidates[start].provider.clone()
+            } else {
+                None
+            };
         response_policy.model_preference = Some(ModelPreference {
             primary: models[0].clone(),
             fallback: models[1..].to_vec(),
@@ -348,6 +354,10 @@ pub(super) async fn forward_stream_chat(
 #[cfg(test)]
 #[path = "model_routing_regressions.rs"]
 mod regressions;
+
+#[cfg(test)]
+#[path = "model_routing_closure_tests.rs"]
+mod closure_tests;
 
 #[cfg(test)]
 mod tests {

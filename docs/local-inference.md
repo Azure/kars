@@ -101,6 +101,13 @@ primary candidate, even if `modelPreference.primary.provider` contains a
 conflicting informational tag. Each fallback keeps its own provider, and the
 true legacy default remains a separate final candidate.
 
+Without that authoritative field, the existing primary provider label remains
+metadata unless its named endpoint is separately registered. For example,
+`anthropic` / `claude-prod` can continue using the default Azure/Foundry route.
+Merely supplying a global native-provider key or Ollama URL does not change
+that intent. Metadata and explicit native routes have separate health identities
+when the same label can select different backends.
+
 The router tracks health per provider/deployment and tries another candidate
 on connection failures known to precede acceptance, HTTP 429, or HTTP 5xx.
 Authentication/configuration acquisition failures and ambiguous transport
@@ -109,6 +116,10 @@ rather than retried. An unavailable-model response can additionally recover
 once to the configured default model; capability caches include the immutable
 provider identity as well as endpoint/model, never credential text. Credential
 updates roll the sandbox process and its capability caches.
+
+Known 429/5xx rejections remain retryable if their bodies truncate after headers.
+That is distinct from an accepted 2xx response, an ordinary 4xx rejection, or an
+ambiguous connection loss; those body/transport failures are never replayed.
 
 Both buffered and streaming failover end when successful response headers are
 accepted. A later body failure is never replayed onto another provider,
