@@ -30,10 +30,9 @@ sandbox:
     repository: ghcr.io/azure/openclaw-sandbox
     tag: "latest"
     pullPolicy: Always
-  # Portable baseline for an existing cluster. Replace with a dedicated
-  # agentpool selector and enhanced/confidential isolation when available.
-  isolation: standard
-  seccompProfile: RuntimeDefault
+  # Keep the profile used by existing/default enhanced sandbox CRs installed.
+  # Portable CRs select standard/RuntimeDefault explicitly.
+  seccompProfile: kars-strict
   nodeSelector:
     kubernetes.io/os: linux
 

@@ -1,7 +1,8 @@
 # Install Kars with Helm
 
-Use the Helm chart when the Kubernetes cluster, registry, inference backend,
-identity, and AgentMesh services already exist.
+Use the Helm chart when the Kubernetes cluster, image access, inference backend,
+and required identity configuration already exist. The chart can manage
+AgentMesh or use an existing external deployment.
 
 ## Local kind
 
@@ -27,12 +28,41 @@ helm upgrade --install kars deploy/helm/kars \
 ```
 
 The generic overlay leaves AKS defaults untouched. It disables Azure identity
-metadata, uses RuntimeDefault seccomp, and schedules sandboxes with the
-portable `kubernetes.io/os=linux` selector. Supply pullable images, inference
+metadata and schedules sandboxes with the portable `kubernetes.io/os=linux`
+selector. It still installs `profiles/kars-strict.json` for existing/default
+enhanced sandbox CRs; Helm values do not change those CRD defaults. To use the
+portable standard/RuntimeDefault posture, declare it explicitly in each CR as
+shown below. Supply pullable images, inference
 authentication, a NetworkPolicy-capable CNI, and any environment-specific
 integrations. The profile deploys the Microsoft AGT AgentMesh relay and
 registry; set `agentMesh.enabled=false` only when those services are managed
 externally.
+
+The shipped AgentMesh implementation supports the fixed `agentmesh` namespace
+and one registry/relay replica each (zero is allowed for deliberate maintenance).
+Other namespaces or multiple replicas are rejected rather than accepted with
+broken routing or independent in-memory state. Updates use `Recreate`; expect
+clients to reconnect during a mesh upgrade.
+
+After creating a suitable `InferencePolicy` in `kars-system`, replace
+`existing-inference-policy` with its name and submit a portable sandbox:
+
+```yaml
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsSandbox
+metadata:
+  name: portable-agent
+  namespace: kars-system
+spec:
+  runtime:
+    kind: OpenClaw
+    openclaw: {}
+  inferenceRef:
+    name: existing-inference-policy
+  sandbox:
+    isolation: standard
+    seccompProfile: RuntimeDefault
+```
 
 ## Existing AKS
 
