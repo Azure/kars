@@ -5,18 +5,36 @@ import { readFile } from "node:fs/promises";
 
 const lockPath = process.argv[2] ?? "package-lock.json";
 const lock = JSON.parse(await readFile(lockPath, "utf8"));
+const isRecord = (value) =>
+  value !== null && typeof value === "object" && !Array.isArray(value);
+const isNonemptyString = (value) =>
+  typeof value === "string" && value.trim().length > 0;
+if (!isRecord(lock) || ![2, 3].includes(lock.lockfileVersion) || !isRecord(lock.packages)) {
+  throw new Error("npm audit requires a version 2 or 3 lockfile with a packages map");
+}
 const versions = new Map();
 
-for (const [path, metadata] of Object.entries(lock.packages ?? {})) {
-  if (!path || metadata.link || typeof metadata.version !== "string") continue;
+for (const [path, metadata] of Object.entries(lock.packages)) {
+  if (!isRecord(metadata)) throw new Error(`Invalid lockfile entry: ${path}`);
+  if (!path || metadata.link === true) continue;
   const marker = "node_modules/";
   const index = path.lastIndexOf(marker);
   if (index < 0) continue;
+  if (!isNonemptyString(metadata.version)) {
+    throw new Error(`Missing package version in lockfile: ${path}`);
+  }
   const parts = path.slice(index + marker.length).split("/");
-  const name = parts[0]?.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0];
-  if (!name) continue;
+  // npm aliases retain the registry package name in metadata.name.
+  const name = metadata.name ??
+    (parts[0]?.startsWith("@") ? parts.slice(0, 2).join("/") : parts[0]);
+  if (typeof name !== "string" || !/^(?:@[^/@\s]+\/)?[^/@\s]+$/.test(name)) {
+    throw new Error(`Invalid package name in lockfile: ${path}`);
+  }
   if (!versions.has(name)) versions.set(name, new Set());
   versions.get(name).add(metadata.version);
+}
+if (versions.size === 0) {
+  throw new Error("Lockfile contains no auditable package versions");
 }
 
 const payload = Object.fromEntries(
@@ -27,7 +45,6 @@ const payload = Object.fromEntries(
 
 const endpoint = "https://registry.npmjs.org/-/npm/v1/security/advisories/bulk";
 let response;
-let lastError;
 for (let attempt = 1; attempt <= 4; attempt += 1) {
   try {
     response = await fetch(endpoint, {
@@ -40,40 +57,56 @@ for (let attempt = 1; attempt <= 4; attempt += 1) {
       signal: AbortSignal.timeout(60_000),
     });
   } catch (error) {
-    lastError = error;
-    if (attempt < 4) {
-      await new Promise((resolve) => setTimeout(resolve, attempt * 5_000));
-      continue;
+    if (attempt === 4) {
+      throw new Error("npm bulk advisory request failed after four attempts", { cause: error });
     }
+    console.error(`npm audit transport failure (${attempt}/4): ${error.message}`);
+    await new Promise((resolve) => setTimeout(resolve, attempt * 5_000));
+    continue;
   }
-  if (!response) continue;
   if (response.ok || (response.status !== 429 && response.status < 500)) break;
-  if (attempt < 4) await new Promise((resolve) => setTimeout(resolve, attempt * 5_000));
+  if (attempt < 4) {
+    console.error(`npm audit HTTP ${response.status} (${attempt}/4); retrying`);
+    await response.body?.cancel();
+    await new Promise((resolve) => setTimeout(resolve, attempt * 5_000));
+  }
 }
 
-if (!response) {
-  throw new Error("npm bulk advisory request failed after four transport attempts", {
-    cause: lastError,
-  });
-}
-if (!response?.ok) {
-  const body = await response?.text();
+if (!response.ok) {
+  const body = await response.text();
   throw new Error(
-    `npm bulk advisory request failed (${response?.status ?? "no response"}): ${body?.slice(0, 500) ?? ""}`,
+    `npm bulk advisory request failed (${response.status}): ${body.slice(0, 500)}`,
   );
 }
 
 const result = await response.json();
-const advisories = Object.values(result).flatMap((entries) =>
-  Array.isArray(entries) ? entries : [],
-);
+if (!isRecord(result)) throw new Error("Invalid npm advisory response: expected a package map");
+const severities = new Set(["info", "low", "moderate", "high", "critical"]);
+const advisories = [];
+for (const [name, entries] of Object.entries(result)) {
+  if (!versions.has(name) || !Array.isArray(entries)) {
+    throw new Error(`Invalid npm advisory response for package: ${name}`);
+  }
+  for (const advisory of entries) {
+    if (!isRecord(advisory) ||
+        advisory.name !== name ||
+        !Number.isSafeInteger(advisory.id) || advisory.id <= 0 ||
+        !severities.has(advisory.severity) ||
+        !isNonemptyString(advisory.title) ||
+        !isNonemptyString(advisory.url) ||
+        !isNonemptyString(advisory.vulnerable_versions)) {
+      throw new Error(`Invalid npm advisory entry for package: ${name}`);
+    }
+    advisories.push(advisory);
+  }
+}
 const blocking = advisories.filter((advisory) =>
   advisory.severity === "high" || advisory.severity === "critical",
 );
 
 for (const advisory of advisories) {
   console.log(
-    `${advisory.severity ?? "unknown"}: ${advisory.name ?? "package"} — ${advisory.title ?? advisory.url ?? "advisory"}`,
+    `${advisory.severity}: ${advisory.name} - ${advisory.title} (${advisory.url})`,
   );
 }
 console.log(
