@@ -89,7 +89,7 @@ for (const [name, entries] of Object.entries(result)) {
   }
   for (const advisory of entries) {
     if (!isRecord(advisory) ||
-        advisory.name !== name ||
+        (Object.hasOwn(advisory, "name") && advisory.name !== name) ||
         !Number.isSafeInteger(advisory.id) || advisory.id <= 0 ||
         !severities.has(advisory.severity) ||
         !isNonemptyString(advisory.title) ||
@@ -97,7 +97,9 @@ for (const [name, entries] of Object.entries(result)) {
         !isNonemptyString(advisory.vulnerable_versions)) {
       throw new Error(`Invalid npm advisory entry for package: ${name}`);
     }
-    advisories.push(advisory);
+    // npm's bulk fixtures identify the package by the map key, without a
+    // redundant name field (npm/metavuln-calculator normalizes it likewise).
+    advisories.push({ ...advisory, name });
   }
 }
 const blocking = advisories.filter((advisory) =>

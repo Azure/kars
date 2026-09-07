@@ -19,7 +19,7 @@
 //! sandbox materializes but degrades at the inference step — the controller
 //! surfaces that verbatim in `status.executionDetail` rather than hiding it.
 
-use kube::api::{Api, DynamicObject, ObjectMeta, Patch, PatchParams};
+use kube::api::{Api, DeleteParams, DynamicObject, ObjectMeta, PostParams, Preconditions};
 use kube::core::ApiResource;
 use kube::{Client, ResourceExt};
 use serde_json::json;
@@ -58,8 +58,7 @@ pub struct ExecutionOutcome {
     pub detail: String,
 }
 
-/// The owner reference making materialized resources cascade-delete with the
-/// task and be server-side-apply-owned by this controller.
+/// Controller owner reference binding materialized resources to the task UID.
 fn owner_ref(task: &KarsTask) -> serde_json::Value {
     json!([{
         "apiVersion": "kars.azure.com/v1alpha1",
@@ -71,112 +70,72 @@ fn owner_ref(task: &KarsTask) -> serde_json::Value {
     }])
 }
 
-/// Runtime variant key for the sandbox spec discriminator.
-fn runtime_variant_key(kind: &str) -> &'static str {
+fn runtime_spec(task: &KarsTask) -> Result<crate::crd::RuntimeSpec, kube::Error> {
+    use crate::crd::{RuntimeKind, RuntimeSpec};
+    let kind = crate::kars_task::task_runtime(&task.spec).map_err(contract_error)?;
+    let mut runtime = RuntimeSpec {
+        kind: kind.clone(),
+        openclaw: None,
+        ..RuntimeSpec::default()
+    };
     match kind {
-        "Hermes" => "hermes",
-        "OpenAIAgents" => "openaiAgents",
-        "MAF" => "maf",
-        _ => "openclaw",
+        RuntimeKind::OpenClaw => runtime.openclaw = Some(Default::default()),
+        RuntimeKind::OpenAIAgents => runtime.openai_agents = Some(Default::default()),
+        RuntimeKind::MicrosoftAgentFramework => {
+            runtime.microsoft_agent_framework = Some(Default::default());
+        }
+        RuntimeKind::Hermes => runtime.hermes = Some(Default::default()),
+        _ => return Err(contract_error("unsupported task runtime".into())),
     }
+    Ok(runtime)
 }
 
-/// Resolve the default `(deployment, provider)` a task-materialized
-/// InferencePolicy should request. The deployment is required by the sandbox
-/// reconciler — without it the pod degrades — so we derive a sane default from
-/// the controller's own configured inference model and let an operator override
-/// it for the task lane specifically.
-///
-/// Resolution order for the deployment:
-/// `KARS_TASK_DEFAULT_MODEL` → `AZURE_OPENAI_DEPLOYMENT` → `DEFAULT_MODEL` →
-/// `gpt-4o-mini`. The provider tag is `KARS_TASK_DEFAULT_PROVIDER` →
-/// `azure-openai` (the router routes by the configured endpoint URL, so this
-/// tag only needs to be a valid non-empty value).
-fn default_model() -> (String, String) {
-    let deployment = std::env::var("KARS_TASK_DEFAULT_MODEL")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .or_else(|| {
-            std::env::var("AZURE_OPENAI_DEPLOYMENT")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .or_else(|| {
-            std::env::var("DEFAULT_MODEL")
-                .ok()
-                .filter(|s| !s.is_empty())
-        })
-        .unwrap_or_else(|| "gpt-4o-mini".to_string());
-    let provider = std::env::var("KARS_TASK_DEFAULT_PROVIDER")
-        .ok()
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "azure-openai".to_string());
-    (deployment, provider)
+fn contract_error(message: String) -> kube::Error {
+    kube::Error::Api(Box::new(kube::core::Status {
+        message,
+        reason: "Conflict".into(),
+        code: 409,
+        ..Default::default()
+    }))
 }
 
-/// Build the agent's standing instructions (system prompt) from the task
-/// objective plus any blueprint instructions. Pure + testable.
-fn build_instructions(objective: &str, extra: Option<&str>) -> String {
-    let mut out = format!("Your objective:\n{}", objective.trim());
-    if let Some(extra) = extra.map(str::trim).filter(|s| !s.is_empty()) {
-        out.push_str("\n\nAdditional instructions:\n");
-        out.push_str(extra);
-    }
-    out
+fn network_policy(blueprint: &TaskBlueprint) -> serde_json::Value {
+    json!({
+        "defaultDeny": true,
+        "egressMode": "Strict",
+        "allowedEndpoints": blueprint.egress,
+    })
 }
 
-/// Materialize (or re-apply) the InferencePolicy + KarsSandbox for a launched
-/// task, then read back the sandbox phase. Idempotent via server-side apply.
+/// Materialize the InferencePolicy + KarsSandbox for a launched task using
+/// atomic creation or version-checked owned updates, then read sandbox status.
 pub async fn materialize(
     client: &Client,
     namespace: &str,
     task: &KarsTask,
 ) -> Result<ExecutionOutcome, kube::Error> {
+    crate::kars_task::validate_execution_contract(&task.spec).map_err(contract_error)?;
     let task_name = task.name_any();
     let inference_name = format!("{task_name}-inference");
     let envelope = &task.spec.envelope;
-    let blueprint = task.spec.blueprint.clone().unwrap_or_default();
-    // Runtime: blueprint wins, then execution.runtime, then OpenClaw.
-    let runtime_kind = blueprint
-        .runtime
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .or_else(|| {
-            task.spec
-                .execution
-                .as_ref()
-                .and_then(|e| e.runtime.clone())
-                .filter(|s| !s.trim().is_empty())
-        })
-        .unwrap_or_else(|| "OpenClaw".to_string());
+    let blueprint = crate::kars_task::blueprint::effective_blueprint(&task.spec);
+    let primary_model = blueprint
+        .model
+        .as_ref()
+        .ok_or_else(|| contract_error("effective task model is missing".into()))?;
+    let runtime = runtime_spec(task)?;
 
     // 1. InferencePolicy scoped to this sandbox. Model: blueprint wins, else
     //    the controller default (required — without it the sandbox degrades).
-    let (model_deployment, model_provider) = match &blueprint.model {
-        Some(m) if !m.deployment.trim().is_empty() => {
-            let provider = if m.provider.trim().is_empty() {
-                "azure-openai".to_string()
-            } else {
-                m.provider.clone()
-            };
-            (m.deployment.clone(), provider)
-        }
-        _ => default_model(),
-    };
-    let mut inference_spec = json!({
+    let inference_spec = json!({
         "appliesTo": { "sandboxName": task_name },
         "modelPreference": {
-            "primary": { "provider": model_provider, "deployment": model_deployment },
+            "primary": primary_model,
             "fallback": crate::task_models::fallback_routes(
-                &blueprint.model_fallbacks, &model_provider, &model_deployment,
+                &blueprint.model_fallbacks, &primary_model.provider, &primary_model.deployment,
             ),
         },
     });
-    if let Some(tokens) = envelope.budget.as_ref().and_then(|b| b.tokens)
-        && tokens > 0
-    {
-        inference_spec["tokenBudget"] = json!({ "dailyTokens": tokens });
-    }
     apply_dynamic(
         client,
         namespace,
@@ -190,44 +149,17 @@ pub async fn materialize(
 
     // 2. KarsSandbox bounded by the envelope + shaped by the blueprint. Each
     //    blueprint field drives a real sandbox field; unset → safe default.
-    let isolation = blueprint
-        .isolation
-        .clone()
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| "standard".to_string());
     let mut sandbox_spec = json!({
-        "runtime": {
-            "kind": runtime_kind,
-            runtime_variant_key(&runtime_kind): {},
-        },
+        "runtime": runtime,
         "inferenceRef": { "name": inference_name },
-        "sandbox": { "isolation": isolation },
-        "networkPolicy": { "defaultDeny": true },
+        "sandbox": { "isolation": blueprint.isolation },
+        "networkPolicy": network_policy(&blueprint),
     });
-
-    // Egress: when the blueprint names destinations, bound the sandbox to
-    // exactly those hosts in strict mode (the substance of "what it can reach").
-    if !blueprint.egress.is_empty() {
-        let endpoints: Vec<serde_json::Value> = blueprint
-            .egress
-            .iter()
-            .map(|e| match e.port {
-                Some(p) => json!({ "host": e.host, "port": p }),
-                None => json!({ "host": e.host }),
-            })
-            .collect();
-        sandbox_spec["networkPolicy"] = json!({
-            "defaultDeny": true,
-            "egressMode": "Strict",
-            "allowedEndpoints": endpoints,
-        });
-    }
 
     // Agent instructions (the system prompt) — combine the objective with any
     // standing instructions the blueprint carries, so the agent knows both
     // *what* to do and *how* to behave.
-    let instructions = build_instructions(&task.spec.objective, blueprint.instructions.as_deref());
-    sandbox_spec["agent"] = json!({ "instructions": instructions });
+    sandbox_spec["agent"] = json!({ "instructions": blueprint.instructions });
 
     // Governance: tools = an existing ToolPolicy (composed by reference), from
     // the blueprint or the envelope; MCP servers (connected services) ride on
@@ -274,6 +206,11 @@ pub async fn materialize(
         Api::namespaced_with(client.clone(), namespace, &sandbox_api_resource());
     let (phase, detail) = match sb_api.get_opt(&task_name).await? {
         Some(sb) => {
+            if !owned_by_task(&sb, task) {
+                return Err(contract_error(
+                    "sandbox was replaced after materialization".into(),
+                ));
+            }
             let sb_phase = sb
                 .data
                 .get("status")
@@ -299,23 +236,90 @@ pub async fn materialize(
 /// Tear down the materialized sandbox + inference policy when a task is
 /// un-launched (`execution.launch` flipped back to false). Owner references
 /// also cascade on task deletion; this handles the in-place un-launch.
+/// Returns true only once no owned execution resources remain.
 pub async fn teardown(
     client: &Client,
     namespace: &str,
     task: &KarsTask,
-) -> Result<(), kube::Error> {
-    use kube::api::DeleteParams;
+) -> Result<bool, kube::Error> {
     let task_name = task.name_any();
     let sb_api: Api<DynamicObject> =
         Api::namespaced_with(client.clone(), namespace, &sandbox_api_resource());
     let ip_api: Api<DynamicObject> =
         Api::namespaced_with(client.clone(), namespace, &inference_policy_api_resource());
-    // Best-effort: ignore 404s.
-    let _ = sb_api.delete(&task_name, &DeleteParams::default()).await;
-    let _ = ip_api
-        .delete(&format!("{task_name}-inference"), &DeleteParams::default())
-        .await;
-    Ok(())
+    let sandbox_gone = delete_owned(&sb_api, &task_name, task).await?;
+    let policy_gone = delete_owned(&ip_api, &format!("{task_name}-inference"), task).await?;
+    Ok(sandbox_gone && policy_gone)
+}
+
+fn owned_by_task(object: &DynamicObject, task: &KarsTask) -> bool {
+    task.metadata
+        .uid
+        .as_deref()
+        .filter(|uid| !uid.is_empty())
+        .is_some_and(|uid| {
+            object
+                .metadata
+                .owner_references
+                .as_ref()
+                .is_some_and(|owners| {
+                    owners
+                        .iter()
+                        .filter(|owner| owner.controller == Some(true))
+                        .count()
+                        == 1
+                        && owners.iter().any(|owner| {
+                            owner.controller == Some(true)
+                                && owner.uid == uid
+                                && owner.name == task.name_any()
+                                && owner.kind == "KarsTask"
+                                && owner.api_version == "kars.azure.com/v1alpha1"
+                        })
+                })
+        })
+}
+
+fn object_preconditions(object: &DynamicObject) -> Result<Preconditions, kube::Error> {
+    let uid = object
+        .uid()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| contract_error("resource UID missing".into()))?;
+    let resource_version = object
+        .resource_version()
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| contract_error("resourceVersion missing".into()))?;
+    Ok(Preconditions {
+        uid: Some(uid),
+        resource_version: Some(resource_version),
+    })
+}
+
+async fn delete_owned(
+    api: &Api<DynamicObject>,
+    name: &str,
+    task: &KarsTask,
+) -> Result<bool, kube::Error> {
+    let Some(object) = api.get_opt(name).await? else {
+        return Ok(true);
+    };
+    if !owned_by_task(&object, task) {
+        return Ok(true);
+    }
+    if object.metadata.deletion_timestamp.is_none() {
+        let params = DeleteParams {
+            preconditions: Some(object_preconditions(&object)?),
+            ..Default::default()
+        };
+        match api.delete(name, &params).await {
+            Ok(_) => {}
+            Err(kube::Error::Api(error)) if error.code == 404 => return Ok(true),
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(api
+        .get_opt(name)
+        .await?
+        .is_none_or(|object| !owned_by_task(&object, task)))
 }
 
 /// Build the sandbox governance block by composing an existing `ToolPolicy`
@@ -370,8 +374,8 @@ fn map_sandbox_phase(sb_phase: &str) -> (String, String) {
     }
 }
 
-/// Server-side-apply an owned dynamic object (spec only; status is the target
-/// reconciler's). Idempotent — safe to call every reconcile.
+/// Create atomically or replace an already-owned object using its UID and
+/// resourceVersion. Never adopt a same-name customer object or force ownership.
 async fn apply_dynamic(
     client: &Client,
     namespace: &str,
@@ -381,6 +385,9 @@ async fn apply_dynamic(
     spec: serde_json::Value,
     annotations: Option<std::collections::BTreeMap<String, String>>,
 ) -> Result<(), kube::Error> {
+    if task.uid().is_none_or(|uid| uid.is_empty()) {
+        return Err(contract_error("task UID missing".into()));
+    }
     let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), namespace, ar);
     let mut obj = DynamicObject::new(name, ar).within(namespace);
     obj.metadata = ObjectMeta {
@@ -398,18 +405,46 @@ async fn apply_dynamic(
         ..Default::default()
     };
     obj.data = json!({ "spec": spec });
-    api.patch(
-        name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(&obj),
-    )
-    .await?;
+    let params = PostParams {
+        field_manager: Some(FIELD_MANAGER.into()),
+        ..Default::default()
+    };
+    match api.get_opt(name).await? {
+        None => {
+            api.create(&params, &obj).await?;
+        }
+        Some(mut current) => {
+            if !owned_by_task(&current, task) || current.metadata.deletion_timestamp.is_some() {
+                return Err(contract_error(format!(
+                    "refusing to replace {name}: not owned by this task UID or terminating"
+                )));
+            }
+            object_preconditions(&current)?;
+            current.data["spec"] = obj.data["spec"].clone();
+            current
+                .metadata
+                .labels
+                .get_or_insert_default()
+                .extend(obj.metadata.labels.unwrap_or_default());
+            current
+                .metadata
+                .annotations
+                .get_or_insert_default()
+                .extend(obj.metadata.annotations.unwrap_or_default());
+            api.replace(name, &params, &current).await?;
+        }
+    }
     Ok(())
 }
 
 #[cfg(test)]
+#[path = "kars_task_execution_tests.rs"]
+mod api_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kars_task::blueprint::build_instructions;
 
     #[test]
     fn build_instructions_includes_objective_and_extra() {
@@ -429,39 +464,47 @@ mod tests {
     }
 
     #[test]
-    fn default_model_resolution() {
-        // Single test (env is process-global; avoid cross-test races).
-        unsafe {
-            std::env::remove_var("KARS_TASK_DEFAULT_MODEL");
-            std::env::remove_var("AZURE_OPENAI_DEPLOYMENT");
-            std::env::remove_var("DEFAULT_MODEL");
-            std::env::remove_var("KARS_TASK_DEFAULT_PROVIDER");
-        }
-        // No knobs → safe builtin default + valid provider tag.
-        let (deployment, provider) = default_model();
-        assert!(!deployment.is_empty());
-        assert_eq!(provider, "azure-openai");
-
-        // Explicit task overrides win.
-        unsafe {
-            std::env::set_var("KARS_TASK_DEFAULT_MODEL", "openai/gpt-4o-mini");
-            std::env::set_var("KARS_TASK_DEFAULT_PROVIDER", "github-models");
-        }
-        let (deployment, provider) = default_model();
-        assert_eq!(deployment, "openai/gpt-4o-mini");
-        assert_eq!(provider, "github-models");
-        unsafe {
-            std::env::remove_var("KARS_TASK_DEFAULT_MODEL");
-            std::env::remove_var("KARS_TASK_DEFAULT_PROVIDER");
+    fn runtime_variants_follow_the_sandbox_contract() {
+        for (input, canonical, key) in [
+            ("OpenClaw", "OpenClaw", "openclaw"),
+            ("OpenAIAgents", "OpenAIAgents", "openaiAgents"),
+            ("MAF", "MicrosoftAgentFramework", "microsoftAgentFramework"),
+            (
+                "MicrosoftAgentFramework",
+                "MicrosoftAgentFramework",
+                "microsoftAgentFramework",
+            ),
+            ("Hermes", "Hermes", "hermes"),
+        ] {
+            let task = KarsTask::new(
+                "t",
+                crate::kars_task::KarsTaskSpec {
+                    blueprint: Some(TaskBlueprint {
+                        runtime: Some(input.into()),
+                        ..Default::default()
+                    }),
+                    ..Default::default()
+                },
+            );
+            let runtime = runtime_spec(&task).unwrap();
+            crate::reconciler::runtime::validate_runtime_shape(&runtime).unwrap();
+            let value = serde_json::to_value(runtime).unwrap();
+            assert_eq!(value["kind"], canonical);
+            assert!(value.get(key).is_some());
         }
     }
 
     #[test]
-    fn runtime_variant_keys() {
-        assert_eq!(runtime_variant_key("OpenClaw"), "openclaw");
-        assert_eq!(runtime_variant_key("Hermes"), "hermes");
-        assert_eq!(runtime_variant_key("OpenAIAgents"), "openaiAgents");
-        assert_eq!(runtime_variant_key("anything-else"), "openclaw");
+    fn empty_task_egress_is_strict_without_changing_standalone_default() {
+        let policy = network_policy(&TaskBlueprint::default());
+        assert_eq!(policy["egressMode"], "Strict");
+        assert_eq!(policy["allowedEndpoints"], json!([]));
+        let standalone: crate::crd::NetworkPolicyConfig =
+            serde_json::from_value(json!({})).unwrap();
+        assert_eq!(
+            serde_json::to_value(standalone).unwrap()["egressMode"],
+            "Learn"
+        );
     }
 
     #[test]

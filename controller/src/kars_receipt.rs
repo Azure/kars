@@ -48,6 +48,11 @@ use crate::kars_task::{KarsTask, KarsTaskStatus};
 use crate::mcp_server::LocalObjectRef;
 use crate::providers::signing::{DsseEnvelope, SIGNING_SCHEME};
 
+#[path = "kars_receipt_launch.rs"]
+mod launch_package;
+use launch_package::build_launch_package;
+pub use launch_package::{PredicateEnvelope, PredicateExecution, PredicateLaunchPackage};
+
 /// in-toto Statement type URI.
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 /// kars Governance Receipt predicate type URI (V0).
@@ -75,8 +80,8 @@ pub struct KarsReceiptSpec {
     /// The `KarsTask` this receipt attests, in the same namespace.
     pub task_ref: LocalObjectRef,
 
-    /// `sha256:` digest of the trust envelope the task ran under. Mirrors the
-    /// task's `status.envelopeDigest` and is bound into the signed subject.
+    /// `sha256:` authorization digest of the envelope and effective blueprint.
+    /// Mirrors `status.envelopeDigest` and is bound into the signed subject.
     pub envelope_digest: String,
 
     /// in-toto predicate type URI — always [`PREDICATE_TYPE`] for V0.
@@ -174,11 +179,11 @@ pub struct Subject {
     pub digest: SubjectDigest,
 }
 
-/// Subject digest. kars truncates the envelope SHA-256 to 16 bytes for
-/// compact status; the verifier compares the same truncated form.
+/// Newly issued subjects carry the full task-authorization SHA-256.
+/// Historical signed subjects may contain the earlier truncated envelope hash.
 #[derive(Debug, Serialize, Clone)]
 pub struct SubjectDigest {
-    /// 32-hex-char (16-byte) truncated SHA-256 of the trust envelope.
+    /// 64-hex-char SHA-256 of the authorized task configuration.
     pub sha256: String,
 }
 
@@ -187,10 +192,11 @@ pub struct SubjectDigest {
 #[serde(rename_all = "camelCase")]
 pub struct Predicate {
     pub task: PredicateTask,
-    /// The validated launch package recorded at the head of the receipt (design
-    /// note §20): the editable composition the operator reviewed and approved —
-    /// runtime/model/tool-policy/isolation — pinned by a deterministic digest.
-    /// Absent for a governed-but-never-composed task (no blueprint).
+    /// Complete declared and effective configuration, including resolved model
+    /// defaults, pinned by a deterministic digest. This does not establish
+    /// human approval; approval facts and their binding need separate checks.
+    /// Contents of mutable policy references and observed runtime behavior are
+    /// not attested. Absent when neither blueprint nor execution settings exist.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub launch_package: Option<PredicateLaunchPackage>,
     pub envelope: PredicateEnvelope,
@@ -211,23 +217,16 @@ pub struct Predicate {
     pub issuer: PredicateIssuer,
 }
 
-/// The enforced-controls evidence behind the `completeness` claim. Every field
-/// is an observation the controller can verify from cluster state, so an
-/// auditor can re-derive it. The *runtime* iptables-ruleset hash and the eBPF
-/// kernel-datapath witness are deliberately absent in V0 (named V1/V2 in the
-/// claim detail) — we never imply we captured them.
+/// Effective controls; false means NOT VERIFIED, not absent. Policy names
+/// alone are not enforcement evidence. Runtime/kernel witnesses are not bound.
 #[derive(Debug, Serialize, Clone, Default)]
 #[serde(rename_all = "camelCase")]
 pub struct PredicateCompleteness {
-    /// The CREATE-time task-namespace floor VAP is installed.
     pub task_namespace_floor_vap: bool,
-    /// The exec/attach ban VAP is installed.
     pub exec_ban_vap: bool,
-    /// The posture-lock (UPDATE downgrade) VAP is installed.
     pub posture_lock_vap: bool,
-    /// A cluster-default-deny egress NetworkPolicy is installed.
     pub default_deny_egress: bool,
-    /// `true` once **all** of the above floor controls are present.
+    /// `true` only when all effective controls above are verified.
     pub floor_enforced: bool,
 }
 
@@ -267,56 +266,11 @@ pub struct PredicateTask {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct PredicateEnvelope {
-    pub tier: i32,
-    pub authority_ceiling: i32,
-    pub delegation_depth: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_policy_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub egress_allowlist_ref: Option<String>,
-    pub digest: String,
-}
-
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct PredicateDelegation {
     pub is_child: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_ref: Option<String>,
     pub depth_from_root: usize,
-}
-
-/// The validated launch package — the editable composition the operator
-/// reviewed before launch, recorded at the head of the receipt (§20). Every
-/// field maps to a real materialized setting; `digest` pins the exact package.
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PredicateLaunchPackage {
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub runtime: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub model: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_policy: Option<String>,
-    #[serde(skip_serializing_if = "Vec::is_empty")]
-    pub mcp_servers: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub isolation: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub memory: Option<String>,
-    /// `sha256:` digest over the canonical launch package — re-derivable.
-    pub digest: String,
-}
-
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PredicateExecution {
-    pub launched: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sandbox_ref: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -339,51 +293,13 @@ pub struct PredicateIssuer {
     pub scheme: String,
 }
 
-/// Build the validated launch package for the receipt head from the task's
-/// blueprint (the editable composition). Returns `None` when no blueprint was
-/// composed. The digest is a stable `sha256:` over the canonical package, so a
-/// verifier can confirm the receipt binds the exact composition that was run.
-fn build_launch_package(task: &KarsTask) -> Option<PredicateLaunchPackage> {
-    let bp = task.spec.blueprint.as_ref()?;
-    let model = bp
-        .model
-        .as_ref()
-        .map(|m| format!("{}/{}", m.provider, m.deployment));
-    // Canonical, order-stable representation hashed into the digest.
-    let canonical = serde_json::json!({
-        "runtime": bp.runtime,
-        "model": model,
-        "toolPolicy": bp.tool_policy,
-        "mcpServers": bp.mcp_servers,
-        "isolation": bp.isolation,
-        "memory": bp.memory,
-        "instructions": bp.instructions,
-    });
-    let bytes = serde_json::to_vec(&canonical).unwrap_or_default();
-    use sha2::Digest;
-    let full = sha2::Sha256::digest(&bytes);
-    let mut digest = String::from("sha256:");
-    for b in &full[..16] {
-        digest.push_str(&format!("{b:02x}"));
-    }
-    Some(PredicateLaunchPackage {
-        runtime: bp.runtime.clone(),
-        model,
-        tool_policy: bp.tool_policy.clone(),
-        mcp_servers: bp.mcp_servers.clone(),
-        isolation: bp.isolation.clone(),
-        memory: bp.memory.clone(),
-        digest,
-    })
-}
-
 /// Build the in-toto Statement for a governed task. Pure and deterministic —
 /// no timestamps, no I/O — so it is unit-testable and re-derivable by a
 /// verifier.
 ///
 /// `key_id` is the controller's signing fingerprint (bound into the issuer).
-/// Returns `None` when the task is not governance-`Ready` (no envelope digest),
-/// because a receipt must never bind to authority that did not validate.
+/// Returns `None` without a current authorization digest, because a receipt
+/// must never bind to stale or unvalidated effective task authority.
 pub fn build_statement(
     task: &KarsTask,
     status: &KarsTaskStatus,
@@ -391,7 +307,10 @@ pub fn build_statement(
     approvals: &[PredicateApproval],
     completeness: PredicateCompleteness,
 ) -> Option<Statement> {
-    let digest = status.envelope_digest.clone()?;
+    let digest = status
+        .envelope_digest
+        .clone()
+        .filter(|digest| digest == &task.envelope_digest())?;
     let namespace = task
         .metadata
         .namespace
@@ -418,10 +337,7 @@ pub fn build_statement(
     } else {
         "Trust envelope validated; root task with no delegation to attenuate."
     };
-    // The completeness claim stays PARTIAL in V0 (the runtime iptables-ruleset
-    // hash, the token/cost audit chain, and the eBPF witness are not yet
-    // bound), but its detail now reflects *which* enforced floor controls the
-    // controller actually observed — concrete, re-derivable, never overstated.
+    // Completeness stays PARTIAL: runtime/kernel evidence is not bound.
     let completeness_detail = if completeness.floor_enforced {
         "Completeness-floor controls observed enforced (CREATE-time task-namespace VAP, exec-ban VAP, posture-lock VAP, default-deny egress). NOT yet bound: the runtime egress-guard iptables-ruleset hash (V1), the router token/cost audit chain (V1), and the eBPF kernel-datapath witness (V2)."
     } else {
@@ -486,8 +402,8 @@ pub fn build_statement(
         typ: STATEMENT_TYPE.to_string(),
         subject: vec![Subject {
             name: format!("{namespace}/{name}"),
-            // Bind to the same truncated SHA-256 the envelope digest carries,
-            // stripping the `sha256:` algorithm prefix for the in-toto field.
+            // Preserve the complete authorization hash while stripping its
+            // algorithm prefix for the in-toto subject field.
             digest: SubjectDigest {
                 sha256: digest
                     .strip_prefix("sha256:")
@@ -527,10 +443,7 @@ pub fn build_spec(
     }
 }
 
-/// Convert decided `KarsApproval`s for a task into deterministic receipt
-/// facts. Only **Approved** or **Denied** approvals (a real human decision)
-/// are included; Pending/Expired/Stale ones are not part of the attested
-/// human-decision record. Sorted by name so the signed payload is stable.
+/// Stable, sorted receipt facts from decided approvals with unchanged requests.
 pub fn approval_facts(approvals: &[crate::kars_approval::KarsApproval]) -> Vec<PredicateApproval> {
     use crate::kars_approval::{PHASE_APPROVED, PHASE_DENIED};
     use kube::ResourceExt;
@@ -539,6 +452,11 @@ pub fn approval_facts(approvals: &[crate::kars_approval::KarsApproval]) -> Vec<P
         .iter()
         .filter_map(|a| {
             let status = a.status.as_ref()?;
+            if status.bound_request.as_deref()
+                != Some(crate::kars_approval::request_snapshot(&a.spec).as_str())
+            {
+                return None;
+            }
             let phase = status.phase.as_deref()?;
             let verdict = match phase {
                 PHASE_APPROVED => "approve",
@@ -589,7 +507,7 @@ mod tests {
         task.metadata.namespace = Some("kars-system".to_string());
         let status = KarsTaskStatus {
             phase: Some("Ready".to_string()),
-            envelope_digest: Some("sha256:deadbeefdeadbeefdeadbeefdeadbeef".to_string()),
+            envelope_digest: Some(task.envelope_digest()),
             lineage: if child {
                 vec!["root".to_string(), "parent".to_string()]
             } else {
@@ -634,7 +552,7 @@ mod tests {
         // sha256: prefix stripped for the in-toto digest field.
         assert_eq!(
             st.subject[0].digest.sha256,
-            "deadbeefdeadbeefdeadbeefdeadbeef"
+            task.envelope_digest().strip_prefix("sha256:").unwrap()
         );
         assert!(!st.predicate.delegation.is_child);
         assert_eq!(st.predicate.conformance.attenuates_parent, None);
@@ -756,7 +674,6 @@ mod tests {
         assert_eq!(st.predicate.approvals.len(), 1);
         assert_eq!(st.predicate.approvals[0].verdict, "approve");
         assert_eq!(st.predicate.approvals[0].requested_tier, Some(4));
-        // The signed payload carries the human decision.
         let json = String::from_utf8(canonical_json(&st)).unwrap();
         assert!(json.contains("\"approvals\""));
         assert!(json.contains("alice@example.com"));
@@ -787,6 +704,7 @@ mod tests {
                 phase: phase.map(|s| s.to_string()),
                 decider: decider.map(|s| s.to_string()),
                 decided_at: decider.map(|_| "2026-06-26T10:00:00+00:00".to_string()),
+                bound_request: Some(crate::kars_approval::request_snapshot(&a.spec)),
                 ..Default::default()
             });
             a
@@ -798,12 +716,14 @@ mod tests {
             mk("stale-one", Some("Stale"), None),
         ];
         let facts = approval_facts(&approvals);
-        // Only the two decided ones, sorted by name.
         assert_eq!(facts.len(), 2);
         assert_eq!(facts[0].name, "alpha");
         assert_eq!(facts[0].verdict, "deny");
         assert_eq!(facts[1].name, "zebra");
         assert_eq!(facts[1].verdict, "approve");
+        let mut mutated = approvals[0].clone();
+        mutated.spec.action.summary = "a different action".into();
+        assert!(approval_facts(&[mutated]).is_empty());
     }
 
     #[test]
