@@ -90,14 +90,13 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
             let patch = json!({
                 "apiVersion": "kars.azure.com/v1alpha1",
                 "kind": "KarsApproval",
-                "metadata": { "finalizers": drop_finalizer(&approval) },
+                "metadata": {
+                    "uid": approval.uid(), "resourceVersion": approval.resource_version(),
+                    "finalizers": drop_finalizer(&approval),
+                },
             });
             approvals
-                .patch(
-                    &name,
-                    &PatchParams::apply(FIELD_MANAGER).force(),
-                    &Patch::Apply(patch),
-                )
+                .patch(&name, &PatchParams::default(), &Patch::Merge(patch))
                 .await?;
         }
         return Ok(Action::await_change());
@@ -109,7 +108,11 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
         let patch = json!({
             "apiVersion": "kars.azure.com/v1alpha1",
             "kind": "KarsApproval",
-            "metadata": { "finalizers": finalizers },
+            "metadata": {
+                "name": name, "namespace": ns,
+                "uid": approval.uid(), "resourceVersion": approval.resource_version(),
+                "finalizers": finalizers,
+            },
         });
         approvals
             .patch(

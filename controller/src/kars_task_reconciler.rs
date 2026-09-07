@@ -240,6 +240,10 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let status_patch = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsTask",
+        "metadata": {
+            "name": name, "namespace": ns,
+            "uid": task.uid(), "resourceVersion": task.resource_version(),
+        },
         "status": new_status,
     });
     tasks
