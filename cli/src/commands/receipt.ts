@@ -28,13 +28,18 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
+import { isDeepStrictEqual } from "node:util";
 
-const ANCHOR_NAMESPACE = "kars-system";
+function anchorNamespace(): string {
+  return process.env.KARS_NAMESPACE?.trim() || process.env.POD_NAMESPACE?.trim() || "kars-system";
+}
 const ANCHOR_CONFIGMAP = "kars-receipt-pubkey";
 const LOG_CONFIGMAP = "kars-receipt-log";
 const CHECKPOINT_CONFIGMAP = "kars-receipt-checkpoint";
 const CHECKPOINT_ORIGIN = "kars-receipt-log";
 const DSSE_PAYLOAD_TYPE = "application/vnd.in-toto+json";
+const PREDICATE_TYPE = "https://kars.azure.com/attestations/GovernanceReceipt/v0";
+const SIGNING_SCHEME = "DSSEv1+ed25519";
 // Fixed ASN.1/DER SubjectPublicKeyInfo prefix for an Ed25519 public key
 // (RFC 8410). Prepending it to the 32 raw key bytes yields a SPKI DER that
 // Node's crypto can import.
@@ -131,6 +136,7 @@ export function verifyReceipt(receipt: ReceiptCr, anchor: TrustAnchor): VerifyRe
   const dsse = spec.dsse;
   let statement: unknown = null;
   let payloadBody: Buffer | null = null;
+  let signatureVerified = false;
 
   if (!dsse || !Array.isArray(dsse.signatures) || dsse.signatures.length === 0) {
     checks.push({ name: "envelope", ok: false, detail: "receipt has no DSSE envelope or signatures" });
@@ -183,25 +189,64 @@ export function verifyReceipt(receipt: ReceiptCr, anchor: TrustAnchor): VerifyRe
         sigDetail = `signature verification error: ${(e as Error).message}`;
       }
       checks.push({ name: "signature", ok: sigOk, detail: sigDetail });
+      signatureVerified = sigOk && keyMatchesAnchor && declaredMatches && ptOk;
     }
   }
 
-  // Binding: the signed subject digest must match the receipt's claimed
-  // envelopeDigest (sans the `sha256:` prefix the in-toto field drops).
-  const claimedDigest = spec.envelopeDigest ?? null;
-  if (statement && claimedDigest) {
-    const subj = (statement as { subject?: Array<{ digest?: { sha256?: string } }> }).subject;
-    const signedDigest = subj?.[0]?.digest?.sha256 ?? null;
-    const want = claimedDigest.replace(/^sha256:/, "");
-    const bound = signedDigest === want;
-    checks.push({
-      name: "envelopeBinding",
-      ok: bound,
-      detail: bound
-        ? `subject bound to envelope ${claimedDigest}`
-        : `subject digest '${signedDigest}' != claimed '${want}'`,
-    });
-  }
+  const signed = statement as {
+    _type?: string;
+    predicateType?: string;
+    subject?: Array<{ name?: string; digest?: { sha256?: string } }>;
+    predicate?: {
+      task?: { name?: string; namespace?: string };
+      envelope?: { digest?: string };
+      issuer?: { keyId?: string; scheme?: string };
+      claims?: Claim[];
+    };
+  } | null;
+  const predicate = signed?.predicate;
+  const signedDigest = predicate?.envelope?.digest;
+  const signedTask = predicate?.task;
+  const signedClaims = predicate?.claims;
+  checks.push({
+    name: "statementType",
+    ok: signed?._type === "https://in-toto.io/Statement/v1"
+      && signed.predicateType === PREDICATE_TYPE
+      && (spec.predicateType === undefined || spec.predicateType === signed.predicateType),
+    detail: "signed statement and predicate types must match the supported governance contract",
+  });
+  checks.push({
+    name: "envelopeBinding",
+    ok: typeof signedDigest === "string" && signedDigest.startsWith("sha256:")
+      && spec.envelopeDigest === signedDigest
+      && Array.isArray(signed?.subject) && signed.subject.length === 1
+      && signed.subject[0]?.digest?.sha256 === signedDigest.slice(7),
+    detail: "signed subject, predicate envelope and digest echo must agree",
+  });
+  checks.push({
+    name: "taskBinding",
+    ok: typeof signedTask?.name === "string" && typeof signedTask.namespace === "string"
+      && signedTask.name === task && signedTask.namespace === namespace
+      && spec.taskRef?.name === signedTask.name
+      && signed?.subject?.[0]?.name === `${signedTask.namespace}/${signedTask.name}`,
+    detail: "signed task and subject must match receipt metadata and taskRef",
+  });
+  checks.push({
+    name: "issuerBinding",
+    ok: predicate?.issuer?.keyId === anchor.keyId
+      && predicate.issuer.scheme === SIGNING_SCHEME
+      && anchor.scheme === SIGNING_SCHEME && anchor.payloadType === DSSE_PAYLOAD_TYPE
+      && (spec.scheme === undefined || spec.scheme === SIGNING_SCHEME),
+    detail: "signed issuer and unsigned scheme echoes must match the trusted signing contract",
+  });
+  const claimsValid = Array.isArray(signedClaims) && signedClaims.length > 0
+    && signedClaims.every((claim) => claim && typeof claim.class === "string"
+      && typeof claim.status === "string" && typeof claim.detail === "string");
+  checks.push({
+    name: "claimsBinding",
+    ok: claimsValid && (spec.claims === undefined || isDeepStrictEqual(spec.claims, signedClaims)),
+    detail: "claim echoes must match the verified signed predicate; unsigned claims are never trusted",
+  });
 
   const ok = checks.length > 0 && checks.every((c) => c.ok);
   return {
@@ -209,9 +254,9 @@ export function verifyReceipt(receipt: ReceiptCr, anchor: TrustAnchor): VerifyRe
     task,
     namespace,
     keyId: anchor.keyId,
-    envelopeDigest: claimedDigest,
+    envelopeDigest: signatureVerified && typeof signedDigest === "string" ? signedDigest : null,
     checks,
-    claims: spec.claims ?? [],
+    claims: signatureVerified && claimsValid ? signedClaims : [],
     statement,
   };
 }
@@ -232,7 +277,7 @@ async function fetchAnchor(): Promise<TrustAnchor | null> {
     "configmap",
     ANCHOR_CONFIGMAP,
     "-n",
-    ANCHOR_NAMESPACE,
+    anchorNamespace(),
   ])) as { data?: Record<string, string> } | null;
   const data = cm?.data;
   if (!data?.keyId || !data?.publicKey) return null;
@@ -285,7 +330,7 @@ async function fetchInclusionChain(): Promise<InclusionEntry[] | null> {
     "configmap",
     LOG_CONFIGMAP,
     "-n",
-    ANCHOR_NAMESPACE,
+    anchorNamespace(),
   ])) as { data?: Record<string, string> } | null;
   const raw = cm?.data?.["chain.json"];
   if (!raw) return null;
@@ -321,7 +366,7 @@ async function fetchCheckpoint(): Promise<CheckpointData | null> {
     "configmap",
     CHECKPOINT_CONFIGMAP,
     "-n",
-    ANCHOR_NAMESPACE,
+    anchorNamespace(),
   ])) as { data?: Record<string, string> } | null;
   const d = cm?.data;
   if (!d?.signature || !d?.rootHash || d?.treeSize === undefined) return null;
@@ -505,7 +550,7 @@ export function receiptCommand(): Command {
       if (!anchor) {
         process.stderr.write(
           chalk.red(
-            `✗ trust anchor '${ANCHOR_CONFIGMAP}' not found in '${ANCHOR_NAMESPACE}'.\n` +
+            `✗ trust anchor '${ANCHOR_CONFIGMAP}' not found in '${anchorNamespace()}'.\n` +
               `  Cannot verify a receipt without the controller's published public key.\n`,
           ),
         );
@@ -575,7 +620,7 @@ export function receiptCommand(): Command {
       if (!chain) {
         process.stderr.write(
           chalk.yellow(
-            `No inclusion log found (${LOG_CONFIGMAP} in ${ANCHOR_NAMESPACE}). ` +
+            `No inclusion log found (${LOG_CONFIGMAP} in ${anchorNamespace()}). ` +
               `It is created when the first Governance Receipt is emitted.\n`,
           ),
         );
@@ -616,7 +661,7 @@ export function receiptCommand(): Command {
       if (!checkpoint) {
         process.stderr.write(
           chalk.yellow(
-            `No signed checkpoint found (${CHECKPOINT_CONFIGMAP} in ${ANCHOR_NAMESPACE}). ` +
+            `No signed checkpoint found (${CHECKPOINT_CONFIGMAP} in ${anchorNamespace()}). ` +
               `It is published when the first Governance Receipt is emitted.\n`,
           ),
         );
@@ -625,7 +670,7 @@ export function receiptCommand(): Command {
       const anchor = await fetchAnchor();
       if (!anchor) {
         process.stderr.write(
-          chalk.red(`✗ trust anchor '${ANCHOR_CONFIGMAP}' not found in '${ANCHOR_NAMESPACE}'.\n`),
+          chalk.red(`✗ trust anchor '${ANCHOR_CONFIGMAP}' not found in '${anchorNamespace()}'.\n`),
         );
         process.exit(5);
         return;
