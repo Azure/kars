@@ -204,10 +204,12 @@ pub struct Predicate {
     pub lineage: Vec<String>,
     pub delegation: PredicateDelegation,
     pub execution: PredicateExecution,
-    /// The human decisions (HITL approvals) recorded for this task — every
-    /// steer is itself part of the signed record. Empty when none were taken.
+    /// Decisions whose bindings match current task authority, not proof of consumption.
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub approvals: Vec<PredicateApproval>,
+    /// Historical decisions retain their original binding and never grant current authority.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub approval_history: Vec<PredicateHistoricalApproval>,
     pub conformance: PredicateConformance,
     /// Which completeness-floor controls (design note §24b) the controller
     /// observed enforced when the receipt was minted. This is what makes the
@@ -256,6 +258,10 @@ pub struct PredicateApproval {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub requested_tier: Option<i32>,
 }
+
+#[path = "kars_receipt_approvals.rs"]
+mod approval_evidence;
+pub use approval_evidence::{PredicateHistoricalApproval, historical_approval_facts};
 
 #[derive(Debug, Serialize, Clone)]
 pub struct PredicateTask {
@@ -385,6 +391,7 @@ pub fn build_statement(
             sandbox_ref: status.sandbox_ref.as_ref().map(|r| r.name.clone()),
         },
         approvals: approvals.to_vec(),
+        approval_history: Vec::new(),
         conformance: PredicateConformance {
             envelope_valid: true,
             attenuates_parent,
@@ -445,37 +452,7 @@ pub fn build_spec(
 
 /// Stable, sorted receipt facts from decided approvals with unchanged requests.
 pub fn approval_facts(approvals: &[crate::kars_approval::KarsApproval]) -> Vec<PredicateApproval> {
-    use crate::kars_approval::{PHASE_APPROVED, PHASE_DENIED};
-    use kube::ResourceExt;
-
-    let mut facts: Vec<PredicateApproval> = approvals
-        .iter()
-        .filter_map(|a| {
-            let status = a.status.as_ref()?;
-            if status.bound_request.as_deref()
-                != Some(crate::kars_approval::request_snapshot(&a.spec).as_str())
-            {
-                return None;
-            }
-            let phase = status.phase.as_deref()?;
-            let verdict = match phase {
-                PHASE_APPROVED => "approve",
-                PHASE_DENIED => "deny",
-                _ => return None,
-            };
-            Some(PredicateApproval {
-                name: a.name_any(),
-                action_kind: a.spec.action.kind.clone(),
-                summary: a.spec.action.summary.clone(),
-                verdict: verdict.to_string(),
-                decider: status.decider.clone().unwrap_or_default(),
-                decided_at: status.decided_at.clone().unwrap_or_default(),
-                requested_tier: a.spec.action.requested_tier,
-            })
-        })
-        .collect();
-    facts.sort_by(|a, b| a.name.cmp(&b.name));
-    facts
+    approval_evidence::decision_facts(approvals)
 }
 
 #[cfg(test)]
@@ -682,7 +659,7 @@ mod tests {
     #[test]
     fn approval_facts_filters_to_decided_and_sorts() {
         use crate::kars_approval::{
-            ApprovalAction, KarsApproval, KarsApprovalSpec, KarsApprovalStatus,
+            ApprovalAction, ApprovalDecision, KarsApproval, KarsApprovalSpec, KarsApprovalStatus,
         };
         let mk = |name: &str, phase: Option<&str>, decider: Option<&str>| {
             let mut a = KarsApproval::new(
@@ -697,12 +674,25 @@ mod tests {
                         ..Default::default()
                     },
                     ttl: None,
-                    decision: None,
+                    decision: decider.map(|decider| ApprovalDecision {
+                        verdict: if phase == Some("Approved") {
+                            "approve"
+                        } else {
+                            "deny"
+                        }
+                        .into(),
+                        decider: decider.into(),
+                        reason: None,
+                    }),
                 },
             );
+            a.metadata.generation = Some(2);
             a.status = Some(KarsApprovalStatus {
                 phase: phase.map(|s| s.to_string()),
+                observed_generation: Some(2),
                 decider: decider.map(|s| s.to_string()),
+                requested_at: Some("2026-06-26T09:30:00+00:00".into()),
+                expires_at: Some("2026-06-26T10:30:00+00:00".into()),
                 decided_at: decider.map(|_| "2026-06-26T10:00:00+00:00".to_string()),
                 bound_request: Some(crate::kars_approval::request_snapshot(&a.spec)),
                 ..Default::default()

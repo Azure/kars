@@ -264,7 +264,7 @@ async fn already_created_cadence_slot_is_not_relaunched() {
     let mut team = team();
     team.spec.envelope.budget = None;
     let name = runs::cadence_name(&team).unwrap();
-    let mut run = KarsTask::new(&name, specs::run_spec(&team, "previous knowledge"));
+    let mut run = KarsTask::new(&name, specs::run_spec(&team, "previous knowledge").unwrap());
     run.metadata.namespace = team.metadata.namespace.clone();
     run.metadata.uid = Some("run-uid".into());
     run.metadata.resource_version = Some("50".into());
@@ -286,7 +286,7 @@ async fn already_created_cadence_slot_is_not_relaunched() {
         &Api::namespaced(client(&server).await, "tenant-a"),
         &team,
         &name,
-        specs::run_spec(&team, "new knowledge"),
+        specs::run_spec(&team, "new knowledge").unwrap(),
         "taskforce",
     )
     .await
