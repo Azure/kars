@@ -142,13 +142,24 @@ impl ReceiptSigner {
 
 /// Hex SHA-256 fingerprint of an Ed25519 public key.
 fn fingerprint(verifying_key: &VerifyingKey) -> String {
-    let hash = Sha256::digest(verifying_key.to_bytes());
+    sha256_hex(&verifying_key.to_bytes())
+}
+
+/// Hex SHA-256 of arbitrary bytes, through the shared cryptographic provider.
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    let hash = Sha256::digest(bytes);
     let mut out = String::with_capacity(64);
     for b in hash.iter() {
         use std::fmt::Write;
         let _ = write!(out, "{b:02x}");
     }
     out
+}
+
+/// Preserve the existing 128-bit content identifier used by skills, profiles
+/// and commons. Signed receipt payloads continue using the full SHA-256 digest.
+pub fn content_digest(bytes: &[u8]) -> String {
+    format!("sha256:{}", &sha256_hex(bytes)[..32])
 }
 
 /// DSSE Pre-Authentication Encoding:
@@ -319,5 +330,21 @@ mod tests {
         let signer = ReceiptSigner::generate();
         assert_eq!(signer.key_id.len(), 64);
         assert!(signer.key_id.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn content_digest_preserves_existing_identifiers() {
+        assert_eq!(
+            content_digest(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb924"
+        );
+        assert_eq!(
+            content_digest(b"hello"),
+            "sha256:2cf24dba5fb0a30e26e83b2ac5b9e29e"
+        );
+        assert_eq!(
+            sha256_hex(b"hello"),
+            "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824"
+        );
     }
 }

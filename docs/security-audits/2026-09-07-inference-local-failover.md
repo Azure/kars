@@ -5,14 +5,16 @@ Review status: Implementation evidence prepared; independent review and sign-off
 
 ## Scope
 
-PR4, based on `8fe755b4`, extracts inference routing from canonical reference
-`ce9044077`. Gated paths include `controller/src/reconciler/`,
+PR4, initially based on `8fe755b4`, extracts inference routing from canonical
+reference `ce9044077` and integrates foundation hash centralization `ea6f5789`.
+Gated paths include `controller/src/reconciler/`,
 `controller/src/kars_task.rs`, `inference-router/src/routes/`, and the
 corresponding Helm CRD and configuration templates.
 
 No runtime orchestration, task delivery, access-request service, GitHub write
 service, witness deployment, private cluster values, or publishing workflow is
-introduced. No cluster changes, image publication, or merges were performed.
+introduced. No cluster changes, image publication, or pull-request merges were
+performed.
 
 ## T1: New capability / attack surface? YES
 
@@ -58,7 +60,8 @@ default rather than inheriting another candidate's endpoint or credential.
 
 ## Verification
 
-Local validation before independent review:
+Local validation at implementation commit `df0540c3`, before foundation
+integration and independent review:
 
 - Controller/router Rust suites: 2,119 tests passed; three existing doctests
   ignored.
@@ -72,6 +75,12 @@ Local validation before independent review:
   4.1.8. Locked dependency validation remains the responsibility of GitHub CI.
 - Helm lint and default, local-dev, generic, and existing-AKS renders passed.
 - Strict Clippy passed for all controller/router targets with warnings denied.
+
+The foundation integration preserves the existing `sha256_hex` re-export used
+by PR4's label helper. No Rust rebuild was performed after integration; the
+shared build target had been released for coordinated use. Review of PR4's
+added documentation and Helm example/configuration lines found no private
+hardware, registry, subscription, or resource identifiers.
 
 ## Verdict
 
