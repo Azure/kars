@@ -9,6 +9,10 @@ updated CLI and resolve all ownership conflicts. See
 [namespace ownership migration and adoption](namespace-ownership.md). The check
 does not read Secrets or change namespaces, workloads, or Helm values.
 
+Optional [workspace credential sources](credential-sources.md) require the
+matching controller and CRD. Upgrade both before using `--credential-source`;
+legacy direct credential Secrets remain the default.
+
 ## Local kind
 
 ```bash
