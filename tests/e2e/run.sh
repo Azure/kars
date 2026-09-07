@@ -3015,6 +3015,7 @@ EOF
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 source "$SCRIPT_DIR/namespace-ownership.sh"
+source "$SCRIPT_DIR/credential-sources.sh"
 
 main() {
     echo ""
@@ -3115,6 +3116,7 @@ main() {
     esac
 
     test_sre_namespace_ownership || fail "SRE namespace lifecycle gate failed"
+    test_credential_sources || fail "Credential-source lifecycle gate failed"
 
     echo ""
     echo "═══════════════════════════════════════════════════════"
