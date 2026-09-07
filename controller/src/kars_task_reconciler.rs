@@ -223,6 +223,15 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         },
     };
 
+    if new_status.phase.as_deref() == Some(PHASE_READY) {
+        tracing::debug!(
+            karstask = %name,
+            envelope_lattice_digest = %task.spec.envelope.digest(),
+            authorization_digest = ?new_status.envelope_digest,
+            "Task authority validated; blueprint drift is distinct from envelope-lattice drift"
+        );
+    }
+
     // Execution bridge (§20 launch gate). Only a governance-Ready task may
     // execute. Launch materializes a governed sandbox; un-launch tears it down.
     // Any execution error is surfaced (Degraded) but never fails the whole
