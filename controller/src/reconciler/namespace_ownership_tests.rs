@@ -556,8 +556,10 @@ async fn read_errors_do_not_become_absence_or_trigger_creation() {
 
 #[tokio::test]
 async fn full_prestage_flow_binds_uid_atomically_and_preserves_existing_data() {
-    let mut initial = Store::default();
-    initial.deployment = None;
+    let mut initial = Store {
+        deployment: None,
+        ..Store::default()
+    };
     initial.sandboxes[0]["status"] = Value::Null;
     initial.sandboxes[0]["metadata"]["annotations"] = json!({NAMESPACE_UID: "namespace-a"});
     let annotations = &mut initial.namespace.as_mut().unwrap()["metadata"]["annotations"];
