@@ -24,8 +24,9 @@ agentMesh:
 sandbox:
   image:
     repository: ghcr.io/azure/openclaw-sandbox
-  isolation: standard
-  seccompProfile: RuntimeDefault
+  # Installer filename, not a sandbox CR default. Keep enhanced/default CRs
+  # runnable; portable CRs select standard/RuntimeDefault explicitly.
+  seccompProfile: kars-strict
   nodeSelector:
     kubernetes.io/os: linux
 
