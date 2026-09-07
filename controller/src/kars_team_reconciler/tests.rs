@@ -3,7 +3,9 @@
 
 use super::*;
 use crate::kars_approval::{ApprovalDecision, KarsApproval, KarsApprovalSpec, request_snapshot};
-use crate::kars_task::{KarsTaskStatus, TaskBlueprint, TaskBudget, TaskEgress, TaskEnvelope};
+use crate::kars_task::{
+    KarsTaskStatus, TaskBlueprint, TaskBudget, TaskEgress, TaskEnvelope, TaskModel,
+};
 use crate::kars_team::{KarsTeamSpec, TeamCadence, TeamRole};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 
@@ -35,6 +37,14 @@ pub(super) fn team() -> KarsTeam {
 
 pub(super) fn principal(team: &KarsTeam) -> KarsTask {
     let mut task = KarsTask::new(&specs::principal_name(team), specs::principal_spec(team));
+    task.spec
+        .blueprint
+        .get_or_insert_with(Default::default)
+        .model
+        .get_or_insert_with(|| TaskModel {
+            provider: "azure-openai".into(),
+            deployment: "reviewed-model".into(),
+        });
     task.metadata.namespace = team.metadata.namespace.clone();
     task.metadata.uid = Some("principal-uid".into());
     task.metadata.generation = Some(2);
@@ -309,11 +319,11 @@ fn blueprint_only_authority_drift_invalidates_promotion_and_ticket() {
     let mut principal = principal(&team);
     let approval = approved(&team, &principal);
     let ticket = promotion::ticket_name(&team, &principal, 5).unwrap();
-    principal.spec.blueprint = Some(TaskBlueprint {
-        isolation: Some("confidential".into()),
-        ..Default::default()
-    });
+    principal.spec.blueprint.as_mut().unwrap().isolation = Some("confidential".into());
     principal.metadata.generation = Some(3);
+    principal.status.as_mut().unwrap().observed_generation = Some(3);
+    assert!(promotion::ticket_name(&team, &principal, 5).is_err());
+    assert!(!promotion::authorized(&team, &principal, &approval, 5));
     let digest = principal.envelope_digest();
     let status = principal.status.as_mut().unwrap();
     status.observed_generation = Some(3);
