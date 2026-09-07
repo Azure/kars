@@ -81,6 +81,9 @@ class TaskFloorReuseValues(unittest.TestCase):
     def test_absent_enabled_flag_enables_floor(self):
         self.assert_floor(render("admission:\n  taskNamespaceFloor: {}\n"))
 
+    def test_null_enabled_flag_enables_floor(self):
+        self.assert_floor(render("admission:\n  taskNamespaceFloor:\n    enabled: null\n"))
+
     def test_explicit_true_enables_floor(self):
         self.assert_floor(render("admission:\n  taskNamespaceFloor:\n    enabled: true\n"))
 
@@ -92,7 +95,7 @@ class TaskFloorReuseValues(unittest.TestCase):
         self.assertIn("name: kars-sandbox-posture-lock\n", result.stdout)
 
     def test_non_boolean_flag_fails_instead_of_disabling_security(self):
-        for value in ['"false"', "0", "null"]:
+        for value in ['"false"', "0"]:
             with self.subTest(value=value):
                 result = render(f"admission:\n  taskNamespaceFloor:\n    enabled: {value}\n")
                 self.assertNotEqual(result.returncode, 0)

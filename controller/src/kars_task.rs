@@ -132,6 +132,19 @@ impl KarsTaskSpec {
 
     #[must_use]
     pub fn authorization_digest_with_model(&self, default_model: &TaskModel) -> String {
+        let authority = self.authorization_configuration_with_model(default_model);
+        let bytes = serde_json::to_vec(&authority).expect("task authority always serializes");
+        format!("sha256:{:x}", Sha256::digest(bytes))
+    }
+
+    /// Serializable effective snapshot hashed by `authorization_digest_with_model`.
+    /// Resolve the model once with `blueprint::controller_default_model()` and
+    /// pass that same value to the snapshot and digest consumers.
+    #[must_use]
+    pub fn authorization_configuration_with_model(
+        &self,
+        default_model: &TaskModel,
+    ) -> serde_json::Value {
         let mut envelope = self.envelope.clone();
         if let Some(budget) = &mut envelope.budget {
             budget.tokens = budget.tokens.filter(|n| *n != 0);
@@ -148,8 +161,7 @@ impl KarsTaskSpec {
             "networkPolicy": { "defaultDeny": true, "egressMode": "Strict" },
         });
         authority.sort_all_objects();
-        let bytes = serde_json::to_vec(&authority).expect("task authority always serializes");
-        format!("sha256:{:x}", Sha256::digest(bytes))
+        authority
     }
 }
 
