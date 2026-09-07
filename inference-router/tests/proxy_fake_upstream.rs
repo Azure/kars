@@ -88,6 +88,7 @@ async fn api_key_mode_proxies_chat_completion_with_filter_results() {
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
         provider_api_key: None,
+        authentication: Default::default(),
     };
     let req_body = serde_json::json!({
         "messages": [{"role": "user", "content": "hello fixture"}]
@@ -168,6 +169,7 @@ async fn wi_mode_falls_back_to_imds_and_proxies_embeddings() {
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
         provider_api_key: None,
+        authentication: Default::default(),
     };
     let body = Bytes::from(r#"{"input":"hello"}"#.as_bytes().to_vec());
 
@@ -240,6 +242,7 @@ async fn upstream_error_status_is_propagated() {
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
         provider_api_key: None,
+        authentication: Default::default(),
     };
 
     let (status, _headers, resp) = forward(

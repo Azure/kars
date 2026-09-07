@@ -37,7 +37,8 @@ pub async fn forward_stream_with_failover(
     let mut last_result = None;
     for candidate in eligible {
         let key = health_key(candidate);
-        let upstream = resolve_candidate(upstream_base, config, candidate);
+        let upstream = resolve_candidate(upstream_base, config, candidate)
+            .map_err(ForwardFailure::configuration)?;
         let body = request_body_for_candidate(&request_body, &candidate.deployment);
         let attempt = crate::proxy::forward_stream(
             auth.clone(),
@@ -74,10 +75,11 @@ pub async fn forward_stream_with_failover(
                 }
                 return Ok((status, headers, stream, upstream));
             }
-            Err(error) => {
+            Err(error) if retryable_transport(&error) => {
                 health.record_failure(&key);
                 last_result = Some(Err(error));
             }
+            Err(error) => return Err(error),
         }
     }
     last_result.expect("at least one candidate is attempted")

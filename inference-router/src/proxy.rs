@@ -23,6 +23,14 @@ use std::sync::Arc;
 
 const INFERENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
 
+mod authentication;
+pub mod failure;
+pub use authentication::{AuthenticationProvenance, credential_for_upstream, token_for_endpoint};
+use failure::ForwardFailure;
+
+#[cfg(test)]
+mod authentication_tests;
+
 /// Upstream configuration for a single request.
 #[derive(Clone)]
 pub struct UpstreamConfig {
@@ -39,6 +47,7 @@ pub struct UpstreamConfig {
     pub api_key: Option<String>,
     /// Credential for this named provider only; never inherited across providers.
     pub provider_api_key: Option<String>,
+    pub authentication: AuthenticationProvenance,
 }
 
 impl UpstreamConfig {
@@ -53,6 +62,7 @@ impl UpstreamConfig {
             provider: ProviderKind::AzureOpenAI,
             api_key: None,
             provider_api_key: None,
+            authentication: AuthenticationProvenance::LegacyDefault,
         }
     }
 }
@@ -188,84 +198,6 @@ pub(crate) fn is_local_inference_host(host: &str) -> bool {
     host.ends_with(".kars-local-inference.svc.cluster.local")
 }
 
-/// Acquire the right auth token for a given upstream endpoint.
-///
-/// - GitHub Copilot endpoints → exchanged Copilot JWT (cached, refreshed proactively).
-/// - Everything else → Azure auth (API key in dev mode, WI/IMDS in AKS mode).
-///
-/// Returning `Result<String>` lets the caller surface a clean 502 if the
-/// Copilot token cache is uninitialised or the GitHub token is missing —
-/// rather than panicking inside `forward()`.
-pub async fn token_for_endpoint(
-    auth: &WorkloadIdentityAuth,
-    copilot: Option<&CopilotTokenCache>,
-    upstream: &UpstreamConfig,
-) -> Result<String> {
-    let endpoint = upstream.endpoint.as_str();
-    if is_copilot_endpoint(endpoint) {
-        match copilot {
-            Some(cache) => cache.get_jwt().await,
-            None => anyhow::bail!(
-                "Copilot endpoint configured but no CopilotTokenCache available — \
-                 set COPILOT_GITHUB_TOKEN or mount /run/secrets/copilot-github-token"
-            ),
-        }
-    } else if let Some(key) = upstream.provider_api_key.as_deref() {
-        Ok(key.to_string())
-    } else if is_local_inference_host(&endpoint_host(endpoint).unwrap_or_default()) {
-        Ok(String::new())
-    } else {
-        if !auth.is_api_key_mode() && !auth.is_sidecar_mode() {
-            let host = endpoint_host(endpoint).unwrap_or_default();
-            if !is_azure_ai_host(&host) {
-                anyhow::bail!(
-                    "Refusing to send a Workload Identity / IMDS token to '{host}': \
-                     configure this provider's own credential or an Azure AI endpoint"
-                );
-            }
-        }
-        auth.get_token(token_audience(endpoint)).await
-    }
-}
-
-/// Provider-aware credential resolution for a single upstream request.
-///
-/// - `AzureOpenAI` → the historic [`token_for_endpoint`] path (Azure
-///   WI/IMDS, API key, or Copilot JWT depending on endpoint).
-/// - `Anthropic` → the static API key `provider::resolve` copied from
-///   router-side config onto `UpstreamConfig.api_key`. Its absence
-///   here is a programmer error (resolution fails closed earlier),
-///   surfaced as a clean 502 rather than a panic.
-/// - `Ollama` → no credential.
-pub async fn credential_for_upstream(
-    auth: &WorkloadIdentityAuth,
-    copilot: Option<&CopilotTokenCache>,
-    upstream: &UpstreamConfig,
-) -> Result<UpstreamCredential> {
-    match upstream.provider {
-        ProviderKind::AzureOpenAI => {
-            if is_local_inference_host(&endpoint_host(&upstream.endpoint).unwrap_or_default()) {
-                Ok(UpstreamCredential::None)
-            } else {
-                token_for_endpoint(auth, copilot, upstream)
-                    .await
-                    .map(UpstreamCredential::Bearer)
-            }
-        }
-        ProviderKind::Anthropic => upstream
-            .api_key
-            .clone()
-            .map(UpstreamCredential::AnthropicApiKey)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Anthropic upstream selected but no API key on UpstreamConfig — \
-                     provider resolution must run before forward()"
-                )
-            }),
-        ProviderKind::Ollama => Ok(UpstreamCredential::None),
-    }
-}
-
 /// Record Prometheus metrics from a completed request.
 fn record_metrics(
     upstream: &UpstreamConfig,
@@ -324,7 +256,8 @@ pub async fn forward(
 ) -> Result<(StatusCode, HeaderMap, Bytes)> {
     let start = Instant::now();
 
-    let (upstream_url, body) = build_upstream_url(auth, upstream, path, request_body)?;
+    let (upstream_url, body) = build_upstream_url(auth, upstream, path, request_body)
+        .map_err(ForwardFailure::configuration)?;
 
     let mode = match upstream.provider {
         ProviderKind::Anthropic => "anthropic",
@@ -343,9 +276,10 @@ pub async fn forward(
 
     let credential = credential_for_upstream(auth, copilot, upstream)
         .await
-        .context("Failed to acquire auth token")?;
+        .map_err(ForwardFailure::authentication)?;
 
-    let headers = build_upstream_headers(request_headers, auth, &credential, &upstream.endpoint)?;
+    let headers = build_upstream_headers(request_headers, auth, &credential, &upstream.endpoint)
+        .map_err(ForwardFailure::configuration)?;
 
     tracing::info!(sandbox = %upstream.sandbox_name, url = %upstream_url, body_len = body.len(), "Sending upstream request");
 
@@ -381,7 +315,7 @@ pub async fn forward(
     let response_body = response
         .bytes()
         .await
-        .context("Failed to read Foundry response")?;
+        .map_err(|error| ForwardFailure::response_body(status, error))?;
     let latency = start.elapsed();
 
     record_metrics(upstream, status, latency, &response_body);
@@ -516,10 +450,12 @@ async fn send_with_retry(
                         BACKOFF_MS[(attempt - 1) as usize],
                     ))
                     .await;
-                    last_err = Some(anyhow::Error::from(err));
+                    last_err = Some(ForwardFailure::transport(err));
                     continue;
                 }
-                return Err(anyhow::Error::from(err).context("Foundry upstream request failed"));
+                return Err(
+                    ForwardFailure::transport(err).context("Foundry upstream request failed")
+                );
             }
         }
     }
@@ -564,14 +500,16 @@ pub async fn forward_stream(
     } else {
         inject_stream_usage(request_body)
     };
-    let (upstream_url, body) = build_upstream_url(&auth, &upstream, path, body_with_usage)?;
+    let (upstream_url, body) = build_upstream_url(&auth, &upstream, path, body_with_usage)
+        .map_err(ForwardFailure::configuration)?;
 
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = "stream", "Forwarding SSE stream");
 
     let credential = credential_for_upstream(&auth, copilot.as_deref(), &upstream)
         .await
-        .context("Failed to acquire auth token")?;
-    let headers = build_upstream_headers(&request_headers, &auth, &credential, &upstream.endpoint)?;
+        .map_err(ForwardFailure::authentication)?;
+    let headers = build_upstream_headers(&request_headers, &auth, &credential, &upstream.endpoint)
+        .map_err(ForwardFailure::configuration)?;
 
     let start = Instant::now();
 
@@ -582,7 +520,7 @@ pub async fn forward_stream(
         .timeout(INFERENCE_REQUEST_TIMEOUT)
         .send()
         .await
-        .context("Streaming upstream request failed")?;
+        .map_err(ForwardFailure::transport)?;
 
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -622,7 +560,10 @@ pub async fn forward_stream(
     // see "status=413" and have to guess at causes (token cap? bytes cap?
     // schema break?). Cap at 4 KiB so a misbehaving upstream can't blow logs.
     if !status.is_success() {
-        let body_bytes = response.bytes().await.unwrap_or_default();
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(|error| ForwardFailure::response_body(status, error))?;
         let preview = String::from_utf8_lossy(&body_bytes);
         let preview_trimmed: String = preview.chars().take(2048).collect();
         tracing::warn!(

@@ -36,6 +36,69 @@ mod tests {
     use super::*;
 
     #[test]
+    fn canonical_blueprint_preserves_fallbacks_and_authorization_binds_every_route() {
+        use crate::kars_task::{
+            KarsTaskSpec, TaskBlueprint, blueprint::effective_blueprint_with_model,
+        };
+        let primary = TaskModel {
+            provider: "azure-openai".into(),
+            deployment: "primary".into(),
+        };
+        let spec = KarsTaskSpec {
+            objective: "Review".into(),
+            blueprint: Some(TaskBlueprint {
+                model: Some(primary.clone()),
+                model_fallbacks: vec![
+                    TaskModel {
+                        provider: "account-a".into(),
+                        deployment: "model-a".into(),
+                    },
+                    TaskModel {
+                        provider: "account-b".into(),
+                        deployment: "model-b".into(),
+                    },
+                ],
+                ..Default::default()
+            }),
+            ..Default::default()
+        };
+        let original = serde_json::to_value(&spec).unwrap();
+        let effective = effective_blueprint_with_model(&spec, &primary);
+        assert_eq!(
+            serde_json::to_value(effective).unwrap()["modelFallbacks"],
+            original["blueprint"]["modelFallbacks"]
+        );
+        let digest = spec.authorization_digest_with_model(&primary);
+        for (pointer, value) in [
+            (
+                "/blueprint/modelFallbacks/0/provider",
+                json!("other-account"),
+            ),
+            (
+                "/blueprint/modelFallbacks/0/deployment",
+                json!("other-model"),
+            ),
+            ("/blueprint/modelFallbacks", json!([])),
+            (
+                "/blueprint/modelFallbacks",
+                json!([
+                    {"provider":"account-b","deployment":"model-b"},
+                    {"provider":"account-a","deployment":"model-a"},
+                ]),
+            ),
+        ] {
+            let mut changed = original.clone();
+            *changed.pointer_mut(pointer).unwrap() = value;
+            let changed: KarsTaskSpec = serde_json::from_value(changed).unwrap();
+            assert_ne!(
+                digest,
+                changed.authorization_digest_with_model(&primary),
+                "{pointer}"
+            );
+        }
+    }
+
+    #[test]
     fn fallback_routes_preserve_order_and_provider_identity() {
         let routes = [
             ("a", "primary"),

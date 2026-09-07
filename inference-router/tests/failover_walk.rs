@@ -137,6 +137,7 @@ async fn primary_503_falls_through_to_fallback_200() {
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
         provider_api_key: None,
+        authentication: Default::default(),
     };
     let snap = snapshot("primary-down", &["fallback-up"]);
 
@@ -203,6 +204,7 @@ async fn unhealthy_primary_is_skipped_in_second_pass() {
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
         provider_api_key: None,
+        authentication: Default::default(),
     };
     let snap = snapshot("primary-down", &["fallback-up"]);
 
@@ -261,6 +263,7 @@ async fn all_unhealthy_still_punches_primary_for_last_resort() {
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
         provider_api_key: None,
+        authentication: Default::default(),
     };
     let snap = snapshot("primary-down", &["fallback-up"]);
 

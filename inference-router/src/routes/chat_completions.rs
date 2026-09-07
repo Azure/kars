@@ -426,10 +426,12 @@ pub(super) async fn chat_completions(
     let mut upstream = state.upstream_config(sandbox_name);
     let true_default_upstream = upstream.clone();
     // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
-    crate::routes::apply_model_preference_override(&mut upstream, &policy, &state.config);
+    let provider_resolution =
+        crate::routes::apply_model_preference_override(&mut upstream, &policy, &state.config)
+            .and_then(|_| crate::routes::apply_provider_resolution(&state, &mut upstream, &policy));
 
     // Retarget at the policy-selected provider; fails closed.
-    if let Err(e) = crate::routes::apply_provider_resolution(&state, &mut upstream, &policy) {
+    if let Err(e) = provider_resolution {
         tracing::warn!(
             target: "inference.audit",
             sandbox = %sandbox_name,
@@ -539,8 +541,23 @@ pub(super) async fn chat_completions(
         .ok()
         .and_then(|v| v.get("model")?.as_str().map(String::from))
         .unwrap_or_else(|| upstream.deployment.clone());
-    upstream =
-        super::model_routing::effective_primary(&state, &true_default_upstream, &policy, &body);
+    upstream = match super::model_routing::effective_primary(
+        &state,
+        &true_default_upstream,
+        &policy,
+        &body,
+    ) {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            tracing::warn!(%error, "Inference provider configuration is unavailable");
+            return errors::openai(
+                StatusCode::BAD_GATEWAY,
+                "Inference provider configuration is unavailable",
+                errors::PROXY_ERROR,
+            )
+            .into_response();
+        }
+    };
     let is_responses_only = state
         .responses_only_models
         .read()

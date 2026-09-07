@@ -21,11 +21,14 @@ type StreamingResult = (
 );
 
 pub(super) fn model_capability_key(upstream: &UpstreamConfig) -> String {
-    format!(
-        "{}::{}",
+    // Config is immutable for this AppState. Its explicit provider ID separates
+    // accounts even when endpoint/model match; credentials never enter keys.
+    serde_json::to_string(&(
+        &upstream.authentication,
         upstream.endpoint.trim_end_matches('/'),
-        upstream.deployment
-    )
+        &upstream.deployment,
+    ))
+    .expect("provider capability key always serializes")
 }
 
 pub(super) fn is_responses_only_error(body: &[u8]) -> bool {
@@ -108,9 +111,10 @@ fn primary_target(
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
     body: &[u8],
-) -> UpstreamConfig {
+) -> Result<UpstreamConfig> {
     let candidates = failover::candidates_for_request(base, policy, body);
     failover::resolve_candidate(base, &state.config, &candidates[0])
+        .map_err(proxy::failure::ForwardFailure::configuration)
 }
 
 fn cached_unavailable(
@@ -136,13 +140,13 @@ pub(super) fn effective_primary(
     base: &UpstreamConfig,
     policy: &InferencePolicySnapshot,
     body: &[u8],
-) -> UpstreamConfig {
-    let primary = primary_target(state, base, policy, body);
+) -> Result<UpstreamConfig> {
+    let primary = primary_target(state, base, policy, body)?;
     let fallback = default_target(state, base);
     if cached_unavailable(state, &primary, &fallback) {
-        fallback
+        Ok(fallback)
     } else {
-        primary
+        Ok(primary)
     }
 }
 
@@ -158,12 +162,15 @@ pub(super) async fn forward_responses(
 ) -> Result<BufferedResult> {
     use crate::inference_policy_loader::{ModelPreference, ModelRef};
     let candidates = failover::build_candidates(base, policy);
-    let start = candidates.iter().position(|candidate| {
-        let target = failover::resolve_candidate(base, &state.config, candidate);
-        model_capability_key(&target) == model_capability_key(selected)
-            && target.provider_api_key == selected.provider_api_key
-            && target.api_key == selected.api_key
-    });
+    let mut start = None;
+    for (index, candidate) in candidates.iter().enumerate() {
+        let target = failover::resolve_candidate(base, &state.config, candidate)
+            .map_err(proxy::failure::ForwardFailure::configuration)?;
+        if model_capability_key(&target) == model_capability_key(selected) {
+            start = Some(index);
+            break;
+        }
+    }
     if let Some(start) = start {
         let models: Vec<_> = candidates[start..]
             .iter()
@@ -173,6 +180,7 @@ pub(super) async fn forward_responses(
             })
             .collect();
         let mut response_policy = policy.clone();
+        response_policy.provider = candidates[start].provider.clone();
         response_policy.model_preference = Some(ModelPreference {
             primary: models[0].clone(),
             fallback: models[1..].to_vec(),
@@ -214,7 +222,7 @@ pub(super) async fn forward_chat(
     body: Bytes,
 ) -> Result<BufferedResult> {
     let fallback = default_target(state, base);
-    let primary = primary_target(state, base, policy, &body);
+    let primary = primary_target(state, base, policy, &body)?;
     let result = if cached_unavailable(state, &primary, &fallback) {
         proxy::forward(
             &state.auth,
@@ -274,7 +282,7 @@ pub(super) async fn forward_stream_chat(
     body: Bytes,
 ) -> Result<StreamingResult> {
     let fallback = default_target(state, base);
-    let primary = primary_target(state, base, policy, &body);
+    let primary = primary_target(state, base, policy, &body)?;
     let (status, response_headers, stream, selected) =
         if cached_unavailable(state, &primary, &fallback) {
             proxy::forward_stream(
@@ -338,6 +346,10 @@ pub(super) async fn forward_stream_chat(
 }
 
 #[cfg(test)]
+#[path = "model_routing_regressions.rs"]
+mod regressions;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
@@ -347,7 +359,7 @@ mod tests {
         matchers::{body_partial_json, header, path},
     };
 
-    fn test_state(config: crate::config::Config) -> AppState {
+    pub(super) fn test_state(config: crate::config::Config) -> AppState {
         let policy_status = Arc::new(crate::policy_status::PolicyStatusRegistry::new());
         let governance = Arc::new(crate::governance::Governance::new_with_status(
             "test",
