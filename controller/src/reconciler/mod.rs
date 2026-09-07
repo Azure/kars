@@ -39,6 +39,7 @@ pub(crate) mod governance_mounts;
 mod inference;
 mod mcp_egress;
 pub(crate) mod namespace_ownership;
+mod sre_writer;
 pub(crate) mod trustgraph_mount;
 
 use mcp_egress::mcp_egress_rule;
@@ -181,6 +182,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     let sandbox_ns = format!("kars-{name}");
     let client = &ctx.client;
     let _namespace_lock = namespace_ownership::lock(&name).await;
+    if namespace_ownership::finalize_legacy_namespace_gc(client, &sandbox).await? {
+        return Ok(Action::await_change());
+    }
     let (sandbox, owned_namespace) = match namespace_ownership::ensure(client, &sandbox).await {
         Ok((live, namespace)) => (Arc::new(live), namespace),
         Err(error) => {
@@ -683,6 +687,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             &Patch::Apply(sa),
         )
         .await?;
+    if is_sre_sandbox && name == "sre" {
+        sre_writer::ensure(client, &sandbox, &sa_api, owned_namespace.as_ref()).await?;
+    }
 
     // ── Step 2b: Create Azure federated identity credential ──────────────
     // Maps system:serviceaccount:{namespace}:sandbox → managed identity so

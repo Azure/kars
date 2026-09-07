@@ -20,8 +20,9 @@ Sandbox CRs, namespace metadata, and Deployments; it never reads Secrets. API,
 RBAC, malformed-response, and transport errors fail the check rather than
 appearing as an empty cluster.
 
-`kars upgrade` (including `--dry-run`) and `kars up --upgrade` run the same check
-before changing the controller. Direct Helm/GitOps upgrades must run it explicitly.
+`kars upgrade` (including `--dry-run`), `kars up --upgrade`, and `kars sre install`
+against an existing controller run the same check before changing the controller.
+Direct Helm/GitOps upgrades must run it explicitly.
 No `up` provisioning or operator defaults change. A healthy controller Deployment
 alone does **not** prove that sandbox ownership migration will succeed.
 
@@ -117,7 +118,8 @@ namespace claims or bypassing Kubernetes lifecycle controls.
 
 ## Credential prestaging compatibility
 
-Updated `kars add` still creates credentials **before** the Sandbox CR/pod. For a
+Updated `kars add` and local-Kubernetes `kars dev` still create credentials
+**before** the Sandbox CR/pod. For a
 new namespace it writes an explicit v1 reservation with source namespace/name,
 no sandbox UID yet, and
 `kars.azure.com/namespace-prestage: bind-next-sandbox`. The CR CREATE includes
@@ -140,6 +142,36 @@ This feature does not change `credentials update/remove`, Secret contents,
 EnvFrom behavior, or workspace/team credential merging. It is the namespace
 safety prerequisite for a separate future credential-source feature.
 
+The existing handoff credential writer also waits for the created Sandbox's
+exact workspace/UID claim and namespace backlink. It establishes a metadata-only
+Secret anchor, rechecks ownership, and writes values with Secret
+UID/resourceVersion preconditions. Namespace or Secret replacement cannot turn
+that update into a blind write to a new target. Failed or incomplete claims do
+not authorize credential copying; errors are surfaced without credential values.
+
+## Built-in SRE installation
+
+Fresh `kars sre install` and Helm installations with `sre.enabled=true` let the
+controller create and claim `kars-sre`. The chart's InferencePolicy, ToolPolicy
+and Sandbox already reside in the Helm release namespace; they do not require
+precreating the runtime namespace. The controller creates the existing
+`sre-writer` ServiceAccount only after the namespace is claimed, with token
+automount disabled. The SRE role/binding targets are unchanged.
+
+On a real Helm upgrade, live lookup retains a Namespace and writer account owned
+by that exact release. The Namespace also receives `helm.sh/resource-policy:
+keep`, even when the upgrade disables SRE, so removing an old chart resource
+cannot bypass controller cleanup. Customer metadata is preserved. Namespace
+lookup errors stop rendering rather than silently dropping a possibly owned
+resource. Other releases' resources are never imported.
+
+Client-only `helm template` cannot discover previous Helm ownership. Do not
+replace a legacy Helm release with a pruning GitOps deployment using a fresh
+render: first perform the live Helm migration and preserve the retained namespace
+in the GitOps ownership/pruning policy. Existing template/apply installations
+must likewise keep previously managed runtime namespaces out of pruning; run
+preflight and resolve any ambiguous legacy claim before updating the controller.
+
 ## Cleanup and rollback
 
 Deletion rechecks ownership and namespace UID, then sends UID/resourceVersion
@@ -151,6 +183,16 @@ retain their claim and cannot be adopted by another Sandbox.
 Non-404 failures retain the CR finalizer and retry;
 a stuck namespace is diagnosed, not force-finalized. Other CR finalizers are
 preserved.
+
+A narrow legacy exception handles a Sandbox stored inside its own runtime
+namespace when both are already terminating. Namespace GC may have removed the
+Deployment before claim-v1 adoption. The controller then uses the live CR UID
+and resourceVersion to release only its own CR cleanup finalizer and stops
+reconciling; it does not adopt, write, or delete the unproven namespace or other
+resources. Foreign/partial claims and recorded namespace-UID mismatches still
+fail closed. This prevents a namespace-GC deadlock without inventing ownership.
+Valid two-way v1 reservations are not legacy namespaces: cancellation during
+binding follows the normal guarded cleanup path instead of the legacy shortcut.
 
 Rolling back to a controller without claim-v1 support removes these protections:
 older binaries ignore the claim metadata. Avoid provisioning, deleting, or

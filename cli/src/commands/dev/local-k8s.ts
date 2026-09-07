@@ -30,6 +30,7 @@ import { stageMeshPlugin } from "../../lib/stage-mesh-plugin.js";
 import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
 import { resolveBundledAsset, requireBundledAsset, findRepoRootOrNull } from "../../lib/repo-assets.js";
 import { buildCopilotFallbackChain } from "../../github-copilot.js";
+import { CLAIM, prepareCredentialNamespace } from "../../lib/namespace-ownership.js";
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -2581,10 +2582,9 @@ function resolveTelegramAllowFrom(channels: string | undefined): string | undefi
 }
 
 /**
- * Auto-create the sandbox in the cluster: a one-shot YAML bundle with
- * the namespace, optional credentials Secret (telegram/slack/discord
- * tokens), the InferencePolicy CR, and the KarsSandbox CR. Server-side
- * apply so re-running `kars dev` is idempotent.
+ * Reserve the runtime namespace before staging credentials, then apply the
+ * policies and Sandbox with the namespace UID backlink. Re-running `kars dev`
+ * preserves an existing, proven Sandbox namespace.
  *
  * The InferencePolicy `provider` field is just a tag — the actual
  * upstream is governed by the controller env (set by the per-run
@@ -2592,7 +2592,7 @@ function resolveTelegramAllowFrom(channels: string | undefined): string | undefi
  * (Foundry / GitHub Models / GitHub Copilot) end up in the same
  * `azure-openai` provider tag here.
  */
-async function autoCreateSandbox(
+export async function autoCreateSandbox(
   tools: Tooling,
   opts: LocalK8sOptions,
   creds: KarsConfig,
@@ -2600,6 +2600,12 @@ async function autoCreateSandbox(
 ): Promise<void> {
   const ns = `kars-${opts.name}`;
   const policyName = `${opts.name}-inference`;
+  const namespaceUid = await prepareCredentialNamespace(
+    (_file, args, options) => execa(tools.kubectl, [
+      "--context", `kind-${opts.clusterName}`, ...args,
+    ], options),
+    opts.name, "kars-system",
+  );
 
   // Channels: convert tokens to a base64-encoded Secret block. The
   // controller mounts `<name>-credentials` via `envFrom: secretRef`
@@ -2662,13 +2668,6 @@ async function autoCreateSandbox(
   const memoryStoreName = `memory-${opts.name.substring(0, 56)}`;
 
   const yaml = [
-    "---",
-    "apiVersion: v1",
-    "kind: Namespace",
-    "metadata:",
-    `  name: ${ns}`,
-    "  labels:",
-    `    kars.azure.com/sandbox: ${opts.name}`,
     credsBlock,
     "---",
     "apiVersion: kars.azure.com/v1alpha1",
@@ -2805,6 +2804,8 @@ async function autoCreateSandbox(
     "metadata:",
     `  name: ${opts.name}`,
     "  namespace: kars-system",
+    "  annotations:",
+    `    ${CLAIM.namespaceUid}: ${JSON.stringify(namespaceUid)}`,
     ...(mcpGithub.enabled
       ? ["  labels:", "    mcp-github: allow"]
       : []),
