@@ -49,7 +49,22 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::mesh_peer::IDENTITY_NAMESPACE;
+/// Receipt identity, trust anchor and inclusion log share the controller
+/// namespace. Keep the historical default for existing installations.
+pub fn receipt_namespace() -> String {
+    resolve_namespace(
+        std::env::var("KARS_NAMESPACE").ok().as_deref(),
+        std::env::var("POD_NAMESPACE").ok().as_deref(),
+    )
+}
+
+fn resolve_namespace(kars: Option<&str>, pod: Option<&str>) -> String {
+    kars.map(str::trim)
+        .filter(|s| !s.is_empty())
+        .or_else(|| pod.map(str::trim).filter(|s| !s.is_empty()))
+        .unwrap_or("kars-system")
+        .to_string()
+}
 
 /// Secret holding the controller's receipt-signing private key.
 const IDENTITY_SECRET_NAME: &str = "controller-receipt-identity";
@@ -174,7 +189,7 @@ pub fn pae(payload_type: &str, body: &[u8]) -> Vec<u8> {
 /// persisting one on first start, then publish the public-key anchor
 /// ConfigMap so verifiers can check signatures out of band.
 pub async fn load_or_create(client: &Client) -> Result<ReceiptSigner> {
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), &receipt_namespace());
 
     let signer = match secrets.get(IDENTITY_SECRET_NAME).await {
         Ok(secret) => {
@@ -190,8 +205,9 @@ pub async fn load_or_create(client: &Client) -> Result<ReceiptSigner> {
                     signer
                 }
                 None => {
-                    tracing::warn!("Receipt identity Secret malformed — regenerating");
-                    create_identity(&secrets).await?
+                    anyhow::bail!(
+                        "Receipt identity Secret malformed; refusing to rotate the trust anchor"
+                    )
                 }
             }
         }
@@ -214,7 +230,7 @@ async fn create_identity(secrets: &Api<Secret>) -> Result<ReceiptSigner> {
         "kind": "Secret",
         "metadata": {
             "name": IDENTITY_SECRET_NAME,
-            "namespace": IDENTITY_NAMESPACE,
+            "namespace": receipt_namespace(),
         },
         "data": {
             "signing_key": BASE64.encode(signer.signing_key.to_bytes()),
@@ -233,13 +249,13 @@ async fn create_identity(secrets: &Api<Secret>) -> Result<ReceiptSigner> {
 /// This is the out-of-band trust anchor a verifier reads — never the key
 /// inside a receipt.
 async fn publish_pubkey(client: &Client, signer: &ReceiptSigner) -> Result<()> {
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), IDENTITY_NAMESPACE);
+    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &receipt_namespace());
     let cm: ConfigMap = serde_json::from_value(serde_json::json!({
         "apiVersion": "v1",
         "kind": "ConfigMap",
         "metadata": {
             "name": PUBKEY_CONFIGMAP_NAME,
-            "namespace": IDENTITY_NAMESPACE,
+            "namespace": receipt_namespace(),
             "labels": {
                 "app.kubernetes.io/name": "kars",
                 "app.kubernetes.io/component": "receipt-trust-anchor",
@@ -267,6 +283,16 @@ async fn publish_pubkey(client: &Client, signer: &ReceiptSigner) -> Result<()> {
 mod tests {
     use super::*;
     use ed25519_dalek::Verifier;
+
+    #[test]
+    fn namespace_precedence_and_default() {
+        assert_eq!(resolve_namespace(None, None), "kars-system");
+        assert_eq!(resolve_namespace(Some(" "), Some("operator")), "operator");
+        assert_eq!(
+            resolve_namespace(Some("custom"), Some("operator")),
+            "custom"
+        );
+    }
 
     #[test]
     fn pae_matches_dsse_spec() {
