@@ -83,8 +83,20 @@ checks current Ready authority, immutable request/decision coherence and the
 `Approved` phase. Consumers must additionally check action kind, target, owner
 identity and one-shot semantics. The existing status fields are
 `boundEnvelopeDigest`, `boundTaskUid` and `boundRequest`; no new spec fields are
-needed. Current receipts exclude approvals bound to old authority and refuse
-stale task status when constructing their signed subject.
+needed. The current-authority approval collection excludes old bindings, and
+receipt subjects still refuse stale task status. A separate signed
+`predicate.approvalHistory` retains valid historical decisions for the same
+immutable task UID/name/namespace, including their original `boundEnvelopeDigest`
+and `boundRequest`. Thus a D0 approval is recorded even when a promotion reaches
+D1 before the first receipt observes it.
+Historical records require matching immutable request and terminal decision
+echoes, an observed approval generation, and
+`requestedAt <= decidedAt < expiresAt`. They are explicitly tagged
+`evidenceScope: historicalDecision`, `authorizesCurrentTask: false`, and
+`consumptionAttested: false`.
+They do not grant current authority or claim that an approval was consumed or
+caused a transition. Current authorization still requires
+`approval_authorizes_task()` and the consumer's action/owner/one-shot checks.
 Legacy pending bindings without task/request identity become Stale and require a
 new request. Controller snapshots also prevent mutated request echoes entering receipts.
 Approval strings are schema-bounded for CEL evaluation: task names 253, kinds/TTL
