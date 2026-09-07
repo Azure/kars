@@ -194,7 +194,7 @@ async fn setup(team: &KarsTeam) -> (MockServer, Client, Arc<Mutex<Store>>) {
         .respond_with(KubeServer(store.clone()))
         .mount(&server)
         .await;
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let client = super::state_tests::client(&server).await;
     (server, client, store)
 }
 

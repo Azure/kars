@@ -60,7 +60,7 @@ pub(super) fn principal(team: &KarsTeam) -> KarsTask {
             status: "True".into(),
             reason: "Validated".into(),
             message: "Validated".into(),
-            last_transition_time: Time(Utc::now()),
+            last_transition_time: Time(k8s_openapi::jiff::Timestamp::now()),
             observed_generation: task.metadata.generation,
         }]),
         ..Default::default()

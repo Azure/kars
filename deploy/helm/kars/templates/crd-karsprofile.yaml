@@ -60,14 +60,16 @@ spec:
                       tokens:
                         description: |-
                           Maximum total tokens the task subtree may consume. `0`/absent means
-                          "no token cap declared" (governance still applies at the router).
+                          "no token cap declared". Positive ceilings are planning declarations:
+                          launch is rejected until durable total/subtree enforcement is available.
                         format: int64
                         nullable: true
                         type: integer
                       usdMicros:
                         description: |-
                           Maximum total spend in micro-USD (1e-6 USD) for the task subtree.
-                          Integer micro-USD avoids floating-point in an audit-bound field.
+                          `0`/absent means no cap declared. Positive ceilings block launch in this
+                          foundation. Integer micro-USD avoids floating-point in an audit field.
                         format: int64
                         nullable: true
                         type: integer
@@ -82,9 +84,9 @@ spec:
                     type: integer
                   egressAllowlistRef:
                     description: |-
-                      Optional reference to a same-namespace `EgressAllowlist`-style CR that
-                      bounds the network destinations this task (and its descendants) may
-                      reach through the inference router.
+                      Reserved egress policy reference. This foundation cannot resolve it
+                      and rejects it before Ready. Use `blueprint.egress` for Strict inline
+                      destinations; standalone sandbox signed OCI allowlists are unchanged.
                     nullable: true
                     properties:
                       name:
