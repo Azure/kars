@@ -208,8 +208,32 @@ describe("stacked publication gates", () => {
     (name) => {
       const workflow = parse(readFileSync(join(root, `.github/workflows/${name}.yml`), "utf8"));
       expect(workflow.on.pull_request.branches).toContain("main");
+      expect(workflow.on.pull_request.branches).toContain("kars-bridge");
       expect(workflow.on.pull_request.branches).toContain("public/pr*");
       expect(workflow.on.pull_request_target).toBeUndefined();
+    },
+  );
+
+  it.each(["ci", "ci-gates", "codeql", "secret-scanning"])(
+    "%s checks the combined integration head after a staged merge",
+    (name) => {
+      const workflow = parse(readFileSync(join(root, `.github/workflows/${name}.yml`), "utf8"));
+      expect(workflow.on.push.branches).toContain("kars-bridge");
+    },
+  );
+
+  it.each(["image-cache-publish", "image-sign-sbom", "release", "release-internal", "release-public-interim"])(
+    "%s cannot automatically publish from an integration-branch push",
+    (name) => {
+      const workflow = parse(readFileSync(join(root, `.github/workflows/${name}.yml`), "utf8"));
+      const push = workflow.on.push;
+      if (push) {
+        expect(Array.isArray(push.branches) || Array.isArray(push.tags)).toBe(true);
+        expect(push.branches ?? []).not.toContain("kars-bridge");
+        expect(push.branches ?? []).not.toContain("*");
+        expect(push.branches ?? []).not.toContain("**");
+      }
+      expect(workflow.on.workflow_run).toBeUndefined();
     },
   );
 

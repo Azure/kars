@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main, dev, kars-bridge]
   pull_request:
-    branches: [main, dev, 'public/pr*']
+    branches: [main, dev, kars-bridge, 'public/pr*']
   workflow_call:      # allow reuse from release.yml
   workflow_dispatch:  # manual trigger
 
