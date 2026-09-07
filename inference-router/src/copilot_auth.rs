@@ -35,6 +35,7 @@ const TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/tok
 
 /// Refresh window: ask for a new JWT this long before the cached one expires.
 const REFRESH_BUFFER: Duration = Duration::from_secs(60);
+const DIRECT_REFRESH_SECS: u64 = 1500;
 
 /// Static integration headers Copilot expects on every request.
 /// Without these, Copilot returns 400 "missing required header" or, worse,
@@ -187,6 +188,20 @@ impl CopilotTokenCache {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            // Non-editor OAuth tokens can authenticate directly even when the
+            // editor-only exchange endpoint rejects their scope.
+            if status.is_client_error() {
+                tracing::warn!(%status, "Copilot token exchange rejected; trying configured direct token");
+                let now = Instant::now();
+                let cached = CachedJwt {
+                    token: gh.to_string(),
+                    refresh_at: now + Duration::from_secs(DIRECT_REFRESH_SECS),
+                    expires_at: now + Duration::from_secs(DIRECT_REFRESH_SECS + 300),
+                };
+                let token = cached.token.clone();
+                *self.cached.write().await = Some(cached);
+                return Ok(token);
+            }
             bail!("Copilot token exchange returned {status}: {body}");
         }
 
@@ -233,6 +248,22 @@ impl CopilotTokenCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn direct_token_fallback_preserves_non_editor_oauth_support() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/copilot_internal/v2/token"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let cache = CopilotTokenCache::with_token("gho_direct");
+        let token = cache
+            .get_jwt_with_base(&format!("{}/copilot_internal/v2/token", server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(token, "gho_direct");
+    }
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
     use wiremock::matchers::{header, method, path};
@@ -288,7 +319,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/copilot_internal/v2/token"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("bad credentials"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("service unavailable"))
             .mount(&server)
             .await;
 
@@ -298,7 +329,7 @@ mod tests {
             .await
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("401"), "expected 401 in error, got: {msg}");
+        assert!(msg.contains("503"), "expected 503 in error, got: {msg}");
     }
 
     /// Regression: when GitHub returns `refresh_in` LARGER than the actual

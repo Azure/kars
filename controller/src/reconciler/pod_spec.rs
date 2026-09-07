@@ -61,6 +61,18 @@ pub(crate) fn isolation_scheduling(isolation: &str) -> (Option<&'static str>, &'
     }
 }
 
+pub(crate) fn cluster_default_model() -> Option<String> {
+    [
+        "KARS_TASK_DEFAULT_MODEL",
+        "AZURE_OPENAI_DEPLOYMENT",
+        "DEFAULT_MODEL",
+    ]
+    .into_iter()
+    .filter_map(|key| std::env::var(key).ok())
+    .map(|value| value.trim().to_string())
+    .find(|value| !value.is_empty())
+}
+
 pub(crate) fn sandbox_node_selector_from(
     raw: &str,
     default_pool: &str,

@@ -743,7 +743,10 @@ async fn ensure_profile_configmap(
                     "app.kubernetes.io/managed-by".into(),
                     "kars-controller".into(),
                 ),
-                ("kars.azure.com/inferencepolicy".into(), owner.into()),
+                (
+                    "kars.azure.com/inferencepolicy".into(),
+                    crate::labels::value(owner),
+                ),
                 (
                     "kars.azure.com/artifact".into(),
                     "inference-policy-profile".into(),

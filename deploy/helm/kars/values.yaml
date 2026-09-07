@@ -2,6 +2,13 @@
 # NOTE: For production, replace "latest" tags with specific image digests
 #       (e.g., sha256:abc123...) and set pullPolicy to IfNotPresent.
 
+localInference:
+  # Opt in to namespace-wide model egress, or prefer precise pod targets below.
+  namespaces: []
+  # Explicit targets replace namespace-wide allowances. Each requires a
+  # namespace, nonempty matchLabels and destination pod TCP ports.
+  targets: []
+
 # Controller configuration
 controller:
   image:
