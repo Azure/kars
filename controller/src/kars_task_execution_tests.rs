@@ -35,9 +35,16 @@ fn client(server: &MockServer) -> Client {
 }
 
 fn api_error(code: u16) -> ResponseTemplate {
+    let reason = match code {
+        403 => "Forbidden",
+        404 => "NotFound",
+        409 => "Conflict",
+        500 => "InternalError",
+        _ => "Failure",
+    };
     ResponseTemplate::new(code).set_body_json(json!({
         "apiVersion": "v1", "kind": "Status", "status": "Failure",
-        "message": "test API failure", "reason": "Failure", "code": code,
+        "message": "test API failure", "reason": reason, "code": code,
     }))
 }
 

@@ -91,12 +91,12 @@ fn runtime_spec(task: &KarsTask) -> Result<crate::crd::RuntimeSpec, kube::Error>
 }
 
 fn contract_error(message: String) -> kube::Error {
-    kube::Error::Api(kube::core::ErrorResponse {
-        status: "Failure".into(),
+    kube::Error::Api(Box::new(kube::core::Status {
         message,
         reason: "Conflict".into(),
         code: 409,
-    })
+        ..Default::default()
+    }))
 }
 
 fn network_policy(blueprint: &TaskBlueprint) -> serde_json::Value {
@@ -431,6 +431,10 @@ async fn apply_dynamic(
 }
 
 #[cfg(test)]
+#[path = "kars_task_execution_tests.rs"]
+mod api_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::kars_task::blueprint::build_instructions;
@@ -495,10 +499,6 @@ mod tests {
             "Learn"
         );
     }
-
-    #[cfg(test)]
-    #[path = "kars_task_execution_tests.rs"]
-    mod api_tests;
 
     #[test]
     fn governance_disabled_without_tool_policy() {

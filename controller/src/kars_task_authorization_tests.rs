@@ -100,8 +100,9 @@ fn approved_task() -> (KarsTask, KarsApproval) {
 
 #[test]
 fn every_effective_blueprint_axis_changes_task_authority() {
+    type SpecChange = fn(&mut KarsTaskSpec);
     let original = spec();
-    let changes: &[(&str, fn(&mut KarsTaskSpec))] = &[
+    let changes: &[(&str, SpecChange)] = &[
         ("runtime", |s| {
             s.blueprint.as_mut().unwrap().runtime = Some("Hermes".into())
         }),
