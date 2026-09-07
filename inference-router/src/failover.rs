@@ -33,7 +33,7 @@ use crate::config::Config;
 use crate::copilot_auth::CopilotTokenCache;
 use crate::deployment_health::DeploymentHealthRegistry;
 use crate::inference_policy_loader::{InferencePolicySnapshot, ModelRef};
-use crate::proxy::failure::{ForwardFailure, retryable_transport};
+use crate::proxy::failure::{ForwardFailure, retryable_failure};
 use crate::proxy::{AuthenticationProvenance, UpstreamConfig, forward};
 
 mod stream;
@@ -43,10 +43,53 @@ pub use stream::forward_stream_with_failover;
 pub struct Candidate {
     pub provider: Option<String>,
     pub deployment: String,
+    pub routing_intent: RoutingIntent,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RoutingIntent {
+    /// Historical primary-model metadata routes only when a named endpoint
+    /// was separately registered. Native key presence is not routing intent.
+    Metadata,
+    /// An authoritative policy provider or a newly declared fallback route.
+    Explicit,
+}
+
+impl RoutingIntent {
+    pub(crate) fn primary(policy: &InferencePolicySnapshot) -> Self {
+        if policy
+            .provider
+            .as_ref()
+            .is_some_and(|provider| !provider.trim().is_empty())
+        {
+            Self::Explicit
+        } else {
+            Self::Metadata
+        }
+    }
+}
+
+// Native families and implicit Copilot selection can change destination with
+// intent alone; their metadata route must not poison a native route's health.
+fn intent_can_change_backend(provider: Option<&str>) -> bool {
+    let Some(provider) = provider else {
+        return false;
+    };
+    match crate::provider::parse_tag(provider) {
+        Ok(Some(kind)) => kind != crate::provider::ProviderKind::AzureOpenAI,
+        Err(_) => true,
+        Ok(None) => provider.trim().eq_ignore_ascii_case("github-copilot"),
+    }
 }
 
 fn health_key(candidate: &Candidate) -> String {
     match candidate.provider.as_deref().filter(|tag| !tag.is_empty()) {
+        Some(provider)
+            if candidate.routing_intent == RoutingIntent::Metadata
+                && intent_can_change_backend(Some(provider)) =>
+        {
+            format!("metadata:{provider}::{}", candidate.deployment)
+        }
         Some(provider) => format!("{provider}::{}", candidate.deployment),
         None => candidate.deployment.clone(),
     }
@@ -61,8 +104,7 @@ fn health_key(candidate: &Candidate) -> String {
 /// must be a deliberate change, not an accident.
 #[must_use]
 pub fn is_failover_trigger(status: StatusCode) -> bool {
-    let code = status.as_u16();
-    code == 429 || (500..=599).contains(&code)
+    crate::proxy::failure::retryable_rejection(status)
 }
 
 /// Build the ordered candidate list the failover walk will try.
@@ -72,25 +114,28 @@ pub fn is_failover_trigger(status: StatusCode) -> bool {
 /// `upstream.deployment` is returned as a single-element list, so the
 /// caller always has at least one attempt to make.
 ///
-/// Deduplicates provider/deployment pairs while preserving order. The same
-/// model on another provider remains a distinct candidate.
+/// Deduplicates provider/deployment pairs while preserving order, except when
+/// metadata and explicit intent can select different native/default backends.
 #[must_use]
 pub fn build_candidates(
     upstream: &UpstreamConfig,
     snapshot: &InferencePolicySnapshot,
 ) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
-    let mut push = |dep: &str, provider: Option<String>| {
+    let mut push = |dep: &str, provider: Option<String>, routing_intent: RoutingIntent| {
         if dep.is_empty() {
             return;
         }
-        if !out
-            .iter()
-            .any(|d| d.deployment == dep && d.provider == provider)
-        {
+        if !out.iter().any(|d| {
+            d.deployment == dep
+                && d.provider == provider
+                && (d.routing_intent == routing_intent
+                    || !intent_can_change_backend(provider.as_deref()))
+        }) {
             out.push(Candidate {
                 deployment: dep.to_string(),
                 provider,
+                routing_intent,
             });
         }
     };
@@ -103,22 +148,31 @@ pub fn build_candidates(
                 .clone()
                 .filter(|p| !p.trim().is_empty())
                 .or_else(|| Some(pref.primary.provider.clone()).filter(|p| !p.trim().is_empty())),
+            RoutingIntent::primary(snapshot),
         );
         for ModelRef {
             deployment,
             provider,
         } in &pref.fallback
         {
-            push(deployment, Some(provider.clone()).filter(|p| !p.is_empty()));
+            push(
+                deployment,
+                Some(provider.clone()).filter(|p| !p.is_empty()),
+                RoutingIntent::Explicit,
+            );
         }
     } else if let Some(provider) = snapshot.provider.as_ref().filter(|p| !p.trim().is_empty()) {
-        push(&upstream.deployment, Some(provider.clone()));
+        push(
+            &upstream.deployment,
+            Some(provider.clone()),
+            RoutingIntent::Explicit,
+        );
     }
 
     // Always keep the env-driven default as a final safety net so a
     // mid-flight policy unload (or a policy with only an empty
     // primary) never produces a zero-candidate list.
-    push(&upstream.deployment, None);
+    push(&upstream.deployment, None, RoutingIntent::Explicit);
 
     if out.is_empty() {
         // Theoretically unreachable (`upstream.deployment` is set
@@ -128,6 +182,7 @@ pub fn build_candidates(
         out.push(Candidate {
             provider: None,
             deployment: upstream.deployment.clone(),
+            routing_intent: RoutingIntent::Explicit,
         });
     }
     out
@@ -146,6 +201,16 @@ pub(crate) fn resolve_candidate(
     let identity = AuthenticationProvenance::Named {
         provider_id: tag.trim().to_ascii_lowercase(),
     };
+    if candidate.routing_intent == RoutingIntent::Metadata {
+        if let Some(target) = config.providers.get(&tag.trim().to_ascii_lowercase()) {
+            upstream.endpoint = target.endpoint.clone();
+            upstream.provider = crate::provider::ProviderKind::AzureOpenAI;
+            upstream.api_key = None;
+            upstream.provider_api_key = target.api_key.clone();
+            upstream.authentication = identity;
+        }
+        return Ok(upstream);
+    }
     match crate::provider::parse_tag(tag)? {
         Some(crate::provider::ProviderKind::Anthropic) => {
             if let crate::provider::ProviderTarget::Anthropic { endpoint, api_key } =
@@ -325,14 +390,14 @@ pub async fn forward_with_failover(
                 }
                 return attempt.map(|(status, headers, body)| (status, headers, body, upstream));
             }
-            Err(e) if retryable_transport(e) => {
+            Err(e) if retryable_failure(e) => {
                 health.record_failure(&deployment);
                 tracing::warn!(
                     sandbox = %upstream_base.sandbox_name,
                     deployment = %deployment,
                     error = %format!("{e:#}"),
                     digest = %snapshot.digest,
-                    "InferencePolicy failover: transport error"
+                    "InferencePolicy failover: retryable upstream failure"
                 );
                 last_result =
                     Some(attempt.map(|(status, headers, body)| (status, headers, body, upstream)));
@@ -379,7 +444,7 @@ pub async fn forward_with_failover(
         Ok((status, _, _)) if is_failover_trigger(*status) => {
             health.record_failure(&health_key(&first_candidate));
         }
-        Err(error) if retryable_transport(error) => {
+        Err(error) if retryable_failure(error) => {
             health.record_failure(&health_key(&first_candidate))
         }
         _ => {}
@@ -466,6 +531,34 @@ mod tests {
         let snap = snapshot_with("primary", &["primary", "fb-a"]);
         let c = build_candidates(&upstream("primary"), &snap);
         assert_eq!(deployments(&c), vec!["primary", "fb-a", "primary"]);
+    }
+
+    #[test]
+    fn legacy_metadata_and_explicit_native_fallback_are_distinct_routing_intents() {
+        let snapshot = InferencePolicySnapshot {
+            model_preference: Some(ModelPreference {
+                primary: ModelRef {
+                    provider: "anthropic".into(),
+                    deployment: "claude-prod".into(),
+                },
+                fallback: vec![
+                    ModelRef {
+                        provider: "anthropic".into(),
+                        deployment: "claude-prod".into(),
+                    },
+                    ModelRef {
+                        provider: "anthropic".into(),
+                        deployment: "claude-prod".into(),
+                    },
+                ],
+            }),
+            ..Default::default()
+        };
+        let candidates = build_candidates(&upstream("default"), &snapshot);
+        assert_eq!(candidates.len(), 3);
+        assert_eq!(candidates[0].routing_intent, RoutingIntent::Metadata);
+        assert_eq!(candidates[1].routing_intent, RoutingIntent::Explicit);
+        assert_eq!(candidates[2].provider, None);
     }
 
     #[test]

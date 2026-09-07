@@ -67,6 +67,16 @@ default rather than inheriting another candidate's endpoint or credential.
 
 ## Verification
 
+Closure follow-up after `c47418fc` distinguishes legacy primary-model metadata
+from explicit native/named routing, independently of native credential presence.
+It also permits retry after a known 429/5xx rejection whose body truncates,
+without retrying accepted, ambiguous, authentication/configuration, or ordinary
+4xx failures. New HTTP regressions cover metadata/default compatibility,
+registered versus native intent, health isolation, buffered/streaming truncated
+rejections, and chat-to-Responses recovery. These closure regressions await the
+parent-controlled Cargo lease; the earlier qualification below covers
+`c47418fc`, not this follow-up.
+
 Six independent-review blockers were repaired after `7a2a5d11`. Added
 regressions cover ambient API-key/sidecar isolation, the real Copilot-host
 exchange branch, provider precedence in buffered and streaming chat, separate

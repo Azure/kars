@@ -75,7 +75,7 @@ pub async fn forward_stream_with_failover(
                 }
                 return Ok((status, headers, stream, upstream));
             }
-            Err(error) if retryable_transport(&error) => {
+            Err(error) if retryable_failure(&error) => {
                 health.record_failure(&key);
                 last_result = Some(Err(error));
             }

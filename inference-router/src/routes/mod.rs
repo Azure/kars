@@ -449,6 +449,7 @@ pub(crate) fn apply_model_preference_override(
                 .filter(|p| !p.trim().is_empty())
                 .or_else(|| Some(pref.primary.provider.clone()).filter(|p| !p.trim().is_empty())),
             deployment: target.to_string(),
+            routing_intent: crate::failover::RoutingIntent::primary(policy),
         },
     )?;
     Ok(())
