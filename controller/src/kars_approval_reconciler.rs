@@ -161,7 +161,14 @@ async fn reconcile(approval: Arc<KarsApproval>, ctx: Arc<Ctx>) -> Result<Action,
         .as_ref()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|| approval.metadata.creation_timestamp.as_ref().map(|t| t.0))
+        .or_else(|| {
+            approval
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .and_then(|time| DateTime::parse_from_rfc3339(&time.0.to_string()).ok())
+                .map(|time| time.with_timezone(&Utc))
+        })
         .unwrap_or(now);
 
     let ttl_secs = resolve_ttl_secs(approval.spec.ttl.as_deref());
@@ -513,6 +520,10 @@ mod tests {
         approval.spec.task_ref.name = "task".into();
         approval.metadata.uid = Some("original-approval-uid".into());
         approval.metadata.resource_version = Some("42".into());
+        approval.metadata.creation_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                "2020-01-01T00:00:00Z".parse().unwrap(),
+            ));
         approval.metadata.finalizers = Some(vec![FINALIZER.into()]);
         assert!(
             reconcile(Arc::new(approval), Arc::new(Ctx { client }))
@@ -523,6 +534,8 @@ mod tests {
         let patch: serde_json::Value = requests.last().unwrap().body_json().unwrap();
         assert_eq!(patch["metadata"]["uid"], "original-approval-uid");
         assert_eq!(patch["metadata"]["resourceVersion"], "42");
+        assert_eq!(patch["status"]["phase"], "Expired");
+        assert_eq!(patch["status"]["requestedAt"], "2020-01-01T00:00:00+00:00");
     }
 
     #[test]

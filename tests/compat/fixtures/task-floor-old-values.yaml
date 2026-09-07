@@ -1,0 +1,13 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Saved release settings predating admission.taskNamespaceFloor.
+admission:
+  nullProviderBlock:
+    enabled: false
+  podExecBan:
+    enabled: false
+  sandboxPostureLock:
+    enabled: true
+  seccompAutoStamp:
+    enabled: false
