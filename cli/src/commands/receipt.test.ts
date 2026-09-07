@@ -26,6 +26,9 @@ function makeSignedReceipt(overrides?: { tamperPayload?: boolean; wrongKey?: boo
     ],
     predicateType: "https://kars.azure.com/attestations/GovernanceReceipt/v0",
     predicate: {
+      task: { name: "demo", namespace: "kars-system" },
+      envelope: { digest: envelopeDigest },
+      issuer: { keyId, scheme: "DSSEv1+ed25519" },
       claims: [
         { class: "integrity", status: "PASS", detail: "signed" },
         { class: "completeness", status: "PARTIAL", detail: "governance only" },
@@ -116,6 +119,45 @@ describe("receipt verify — verifyReceipt", () => {
     );
     expect(res.ok).toBe(false);
   });
+
+  it("rejects forged PASS echoes while returning only signed PARTIAL claims", () => {
+    const { receipt, anchor } = makeSignedReceipt();
+    receipt.spec.claims = receipt.spec.claims.map((claim) => ({ ...claim, status: "PASS" }));
+    const result = verifyReceipt(receipt, anchor);
+    expect(result.checks.find((c) => c.name === "signature")?.ok).toBe(true);
+    expect(result.checks.find((c) => c.name === "claimsBinding")?.ok).toBe(false);
+    expect(result.ok).toBe(false);
+    expect(result.claims.find((c) => c.class === "completeness")?.status).toBe("PARTIAL");
+  });
+
+  it("derives claims from the payload when the unsigned echo is absent", () => {
+    const { receipt, anchor } = makeSignedReceipt();
+    const { claims: _, ...spec } = receipt.spec;
+    const result = verifyReceipt({ ...receipt, spec }, anchor);
+    expect(result.ok).toBe(true);
+    expect(result.claims).toHaveLength(2);
+  });
+
+  it("does not expose claims from an invalidly signed payload", () => {
+    const { receipt, anchor } = makeSignedReceipt({ tamperPayload: true });
+    expect(verifyReceipt(receipt, anchor).claims).toEqual([]);
+  });
+
+  it.each(["taskRef", "metadata", "namespace", "predicateType", "scheme", "envelopeDigest"])(
+    "rejects a mismatched %s echo without needing a forged signature",
+    (field) => {
+      const { receipt, anchor } = makeSignedReceipt();
+      if (field === "taskRef") receipt.spec.taskRef.name = "victim";
+      else if (field === "metadata") receipt.metadata.name = "victim";
+      else if (field === "namespace") receipt.metadata.namespace = "victim";
+      else if (field === "predicateType") receipt.spec.predicateType = "evil";
+      else if (field === "scheme") receipt.spec.scheme = "unsigned";
+      else receipt.spec.envelopeDigest = "";
+      const result = verifyReceipt(receipt, anchor);
+      expect(result.checks.find((c) => c.name === "signature")?.ok).toBe(true);
+      expect(result.ok).toBe(false);
+    },
+  );
 });
 
 describe("receipt verify — inclusion chain", () => {

@@ -26,6 +26,112 @@ fn envelope_digest_is_deterministic() {
 }
 
 #[test]
+fn zero_and_absent_budgets_are_unbounded_on_both_axes() {
+    for axis in [BudgetAxis::Tokens, BudgetAxis::UsdMicros] {
+        for child in [None, Some(0)] {
+            let mut violations = Vec::new();
+            attenuate_budget_axis(child, Some(100), axis, &mut violations);
+            assert_eq!(
+                violations,
+                vec![EnvelopeViolation::BudgetUnbounded { axis, parent: 100 }]
+            );
+        }
+        for parent in [None, Some(0)] {
+            let mut violations = Vec::new();
+            attenuate_budget_axis(Some(100), parent, axis, &mut violations);
+            assert!(violations.is_empty());
+        }
+    }
+}
+
+#[test]
+fn bounded_launch_fails_closed_but_planning_remains_available() {
+    for budget in [
+        TaskBudget {
+            tokens: Some(100),
+            usd_micros: None,
+        },
+        TaskBudget {
+            tokens: None,
+            usd_micros: Some(100),
+        },
+    ] {
+        let mut spec = KarsTaskSpec::default();
+        spec.envelope.budget = Some(budget);
+        assert!(validate_execution_contract(&spec).is_ok());
+        spec.execution = Some(TaskExecution {
+            launch: true,
+            runtime: None,
+        });
+        assert!(
+            validate_execution_contract(&spec)
+                .unwrap_err()
+                .contains("UnsupportedLaunchBudget")
+        );
+    }
+    let mut spec = KarsTaskSpec {
+        execution: Some(TaskExecution {
+            launch: true,
+            runtime: None,
+        }),
+        ..Default::default()
+    };
+    assert!(validate_execution_contract(&spec).is_ok());
+    spec.envelope.budget = Some(TaskBudget {
+        tokens: Some(0),
+        usd_micros: Some(0),
+    });
+    assert!(validate_execution_contract(&spec).is_ok());
+}
+
+#[test]
+fn root_blueprint_cannot_override_its_own_envelope() {
+    let mut spec = KarsTaskSpec::default();
+    spec.envelope.tool_policy_ref = Some(LocalObjectRef {
+        name: "read-only".into(),
+    });
+    spec.blueprint = Some(TaskBlueprint {
+        tool_policy: Some("write-enabled".into()),
+        ..Default::default()
+    });
+    assert!(
+        validate_execution_contract(&spec)
+            .unwrap_err()
+            .contains("toolPolicy")
+    );
+    spec.blueprint.as_mut().unwrap().tool_policy = Some("read-only".into());
+    assert!(validate_execution_contract(&spec).is_ok());
+    spec.envelope.egress_allowlist_ref = Some(LocalObjectRef {
+        name: "unresolved".into(),
+    });
+    assert!(
+        validate_execution_contract(&spec)
+            .unwrap_err()
+            .contains("egressAllowlistRef")
+    );
+}
+
+#[test]
+fn unsupported_runtime_is_rejected_in_both_task_fields() {
+    for runtime in ["BYO", "unknown", ""] {
+        let mut spec = KarsTaskSpec {
+            execution: Some(TaskExecution {
+                launch: true,
+                runtime: Some(runtime.into()),
+            }),
+            ..Default::default()
+        };
+        assert!(validate_execution_contract(&spec).is_err());
+        spec.execution = None;
+        spec.blueprint = Some(TaskBlueprint {
+            runtime: Some(runtime.into()),
+            ..Default::default()
+        });
+        assert!(validate_execution_contract(&spec).is_err());
+    }
+}
+
+#[test]
 fn envelope_digest_has_sha256_prefix_and_length() {
     let digest = sample_envelope().digest();
     assert!(digest.starts_with("sha256:"));

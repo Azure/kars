@@ -102,8 +102,8 @@ spec:
                 type: object
               envelopeDigest:
                 description: |-
-                  `sha256:` digest of the trust envelope the task ran under. Mirrors the
-                  task's `status.envelopeDigest` and is bound into the signed subject.
+                  `sha256:` authorization digest of the envelope and effective blueprint.
+                  Mirrors `status.envelopeDigest` and is bound into the signed subject.
                 type: string
               keyId:
                 description: |-

@@ -35,8 +35,8 @@
 //!   - `Stale` — the bound task envelope drifted (or the task vanished) before
 //!     a decision; the request no longer applies to current authority.
 //!
-//! A human decision wins over expiry/staleness: if a person decided, that is
-//! the governance truth and it is recorded.
+//! A first decision requires a current, unexpired binding. Already recorded
+//! terminal decisions remain stable even if the task later changes.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
@@ -96,6 +96,7 @@ pub struct KarsApprovalSpec {
     /// undecided approval past `requestedAt + ttl` becomes `Expired`. Defaults
     /// to `PT1H` when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 64))]
     pub ttl: Option<String>,
 
     /// The human decision. Absent while the approval is pending; a person (or
@@ -111,13 +112,16 @@ pub struct KarsApprovalSpec {
 pub struct ApprovalAction {
     /// One of [`ACTION_KINDS`]. Not enum-constrained on the wire so the
     /// primitive stays open; the Bridge treats unknown kinds as `custom`.
+    #[schemars(length(max = 64))]
     pub kind: String,
 
     /// One-line, human-readable statement of what the agent wants to do.
+    #[schemars(length(max = 4096))]
     pub summary: String,
 
     /// Optional longer detail (e.g. the exact tool args or egress host).
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 8192))]
     pub detail: Option<String>,
 
     /// For a `tierRaise`, the autonomy tier (1..5) being requested. Surfaced
@@ -142,14 +146,17 @@ impl Default for ApprovalAction {
 #[serde(rename_all = "camelCase")]
 pub struct ApprovalDecision {
     /// `approve` or `deny`.
+    #[schemars(length(max = 7))]
     pub verdict: String,
 
     /// Identity of the human (or delegated principal) who decided. Recorded
     /// verbatim into status and, for granted approvals, into the receipt.
+    #[schemars(length(max = 320))]
     pub decider: String,
 
     /// Optional justification, surfaced to auditors.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = 8192))]
     pub reason: Option<String>,
 }
 
@@ -169,8 +176,8 @@ pub struct KarsApprovalStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub observed_generation: Option<i64>,
 
-    /// RFC-3339 time the controller first reconciled the request. The TTL is
-    /// measured from here; re-reconciles never bump it.
+    /// RFC-3339 request creation time (first observation when unavailable).
+    /// The TTL is measured from here; re-reconciles never bump it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub requested_at: Option<String>,
 
@@ -183,10 +190,19 @@ pub struct KarsApprovalStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
 
-    /// The task envelope digest this approval is bound to. Set once by the
-    /// controller from the task's `status.envelopeDigest`; never changes.
+    /// The task authorization digest (envelope plus effective blueprint).
+    /// Copied once from `status.envelopeDigest`; never changes after binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_envelope_digest: Option<String>,
+
+    /// Immutable Kubernetes identity of the task whose authority was bound.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_task_uid: Option<String>,
+
+    /// Controller snapshot of taskRef/action/ttl, excluding the later decision.
+    /// Prevents request mutation even on clusters with outdated admission rules.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_request: Option<String>,
 
     /// Echo of `spec.decision.decider` once decided, for the printer column.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -236,21 +252,22 @@ impl ApprovalOutcome {
 /// and the bound digest (binding the latter on first observation) and supplies
 /// them here, so all decision logic is testable without a cluster.
 ///
-/// Precedence:
-/// 1. A recorded human decision wins over everything (it is the governance
-///    truth, even if the request later expired or went stale).
-/// 2. Otherwise, an unbound approval is `Pending` (awaiting the task envelope).
-/// 3. A bound approval whose task digest drifted (or whose task vanished) is
-///    `Stale`.
-/// 4. A bound, current approval past its TTL is `Expired`.
-/// 5. Otherwise `Pending` (awaiting a decision).
+/// Evaluates only a first decision; the reconciler preserves terminal status.
+/// Binding and expiry are checked before accepting any supplied verdict.
 pub fn evaluate(
     decision: Option<&ApprovalDecision>,
     bound_digest: Option<&str>,
     live_task_digest: Option<&str>,
     expired: bool,
 ) -> ApprovalOutcome {
+    let pending = undecided_outcome(bound_digest, live_task_digest, expired);
+    if pending.is_terminal() || bound_digest.is_none() {
+        return pending;
+    }
     if let Some(d) = decision {
+        if d.decider.trim().is_empty() {
+            return ApprovalOutcome::Pending("decision requires a non-empty decider");
+        }
         return match d.verdict.as_str() {
             VERDICT_APPROVE => ApprovalOutcome::Approved {
                 decider: d.decider.clone(),
@@ -271,6 +288,9 @@ fn undecided_outcome(
     live_task_digest: Option<&str>,
     expired: bool,
 ) -> ApprovalOutcome {
+    if expired {
+        return ApprovalOutcome::Expired;
+    }
     let Some(bound) = bound_digest else {
         return ApprovalOutcome::Pending("awaiting task envelope (not yet bindable)");
     };
@@ -281,9 +301,65 @@ fn undecided_outcome(
         Some(live) if live != bound => ApprovalOutcome::Stale(format!(
             "task envelope drifted since the request (bound {bound}, current {live})"
         )),
-        Some(_) if expired => ApprovalOutcome::Expired,
         Some(_) => ApprovalOutcome::Pending("awaiting a human decision"),
     }
+}
+
+/// Stable request snapshot for controller-side immutability checks and receipts.
+pub fn request_snapshot(spec: &KarsApprovalSpec) -> String {
+    serde_json::json!({
+        "taskRef": spec.task_ref,
+        "action": spec.action,
+        "ttl": spec.ttl,
+    })
+    .to_string()
+}
+
+/// Match immutable request identity and the task's current effective authority.
+/// This does not assert task readiness or a verdict; receipts may record denials.
+pub fn approval_binding_matches_task(
+    approval: &KarsApproval,
+    task: &crate::kars_task::KarsTask,
+) -> bool {
+    let Some(status) = &approval.status else {
+        return false;
+    };
+    let Some(uid) = task.metadata.uid.as_deref().filter(|uid| !uid.is_empty()) else {
+        return false;
+    };
+    task.metadata.name.as_deref() == Some(approval.spec.task_ref.name.as_str())
+        && task.metadata.namespace.as_deref().unwrap_or("default")
+            == approval.metadata.namespace.as_deref().unwrap_or("default")
+        && status.bound_task_uid.as_deref() == Some(uid)
+        && status.bound_envelope_digest.as_deref() == Some(task.envelope_digest().as_str())
+        && status.bound_request.as_deref() == Some(request_snapshot(&approval.spec).as_str())
+}
+
+/// Consumer guard for a terminal approval. A historical Approved phase alone
+/// never authorizes a replacement task or changed blueprint. Consumers must
+/// additionally validate their action kind, target, owner and one-shot semantics.
+pub fn approval_authorizes_task(
+    approval: &KarsApproval,
+    task: &crate::kars_task::KarsTask,
+) -> bool {
+    let Some(status) = &approval.status else {
+        return false;
+    };
+    let Some(decision) = &approval.spec.decision else {
+        return false;
+    };
+    approval.metadata.deletion_timestamp.is_none()
+        && status.phase.as_deref() == Some(PHASE_APPROVED)
+        && decision.verdict == VERDICT_APPROVE
+        && !decision.decider.trim().is_empty()
+        && status.decider.as_deref() == Some(decision.decider.as_str())
+        && status
+            .decided_at
+            .as_ref()
+            .is_some_and(|time| !time.is_empty())
+        && status.observed_generation == approval.metadata.generation
+        && approval_binding_matches_task(approval, task)
+        && crate::kars_task_reconciler::task_is_ready(task)
 }
 
 #[cfg(test)]
@@ -296,6 +372,46 @@ mod tests {
             decider: "alice@example.com".to_string(),
             reason: None,
         }
+    }
+
+    #[test]
+    fn snapshot_freezes_request_but_allows_the_first_decision() {
+        let mut spec = KarsApprovalSpec::default();
+        let original = request_snapshot(&spec);
+        spec.decision = Some(decision("approve"));
+        assert_eq!(request_snapshot(&spec), original);
+        spec.action.summary = "different request".into();
+        assert_ne!(request_snapshot(&spec), original);
+        spec.action.summary.clear();
+        spec.task_ref.name = "replacement-task".into();
+        assert_ne!(request_snapshot(&spec), original);
+    }
+
+    #[test]
+    fn admission_freezes_request_and_write_once_decision() {
+        let crd = serde_json::to_value(crate::crd_validations::kars_approval_crd()).unwrap();
+        let spec = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
+        let rules = spec["x-kubernetes-validations"].as_array().unwrap();
+        for fragment in [
+            "self.taskRef == oldSelf.taskRef",
+            "self.action == oldSelf.action",
+            "self.ttl == oldSelf.ttl",
+            "self.decision == oldSelf.decision",
+        ] {
+            assert!(
+                rules
+                    .iter()
+                    .any(|r| r["rule"].as_str().unwrap().contains(fragment))
+            );
+        }
+        assert_eq!(
+            spec["properties"]["taskRef"]["properties"]["name"]["maxLength"],
+            253
+        );
+        assert_eq!(
+            spec["properties"]["action"]["properties"]["detail"]["maxLength"],
+            8192
+        );
     }
 
     #[test]
@@ -326,15 +442,23 @@ mod tests {
     }
 
     #[test]
-    fn decision_wins_over_expiry_and_staleness() {
-        // Expired + drifted, but a human decided → the decision stands.
+    fn first_decision_cannot_override_expiry_or_staleness() {
         let out = evaluate(
             Some(&decision("approve")),
             Some("sha256:aa"),
             Some("sha256:bb"),
             true,
         );
-        assert_eq!(out.phase(), PHASE_APPROVED);
+        assert_eq!(out.phase(), PHASE_EXPIRED);
+        assert_eq!(
+            evaluate(Some(&decision("approve")), Some("aa"), Some("bb"), false).phase(),
+            PHASE_STALE
+        );
+        assert!(matches!(
+            evaluate(Some(&decision("approve")), None, Some("aa"), false),
+            ApprovalOutcome::Pending(_)
+        ));
+        assert_eq!(evaluate(None, None, None, true), ApprovalOutcome::Expired);
     }
 
     #[test]
