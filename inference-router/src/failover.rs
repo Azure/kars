@@ -33,7 +33,8 @@ use crate::config::Config;
 use crate::copilot_auth::CopilotTokenCache;
 use crate::deployment_health::DeploymentHealthRegistry;
 use crate::inference_policy_loader::{InferencePolicySnapshot, ModelRef};
-use crate::proxy::{UpstreamConfig, forward};
+use crate::proxy::failure::{ForwardFailure, retryable_transport};
+use crate::proxy::{AuthenticationProvenance, UpstreamConfig, forward};
 
 mod stream;
 pub use stream::forward_stream_with_failover;
@@ -97,7 +98,11 @@ pub fn build_candidates(
     if let Some(ref pref) = snapshot.model_preference {
         push(
             &pref.primary.deployment,
-            Some(pref.primary.provider.clone()).filter(|p| !p.is_empty()),
+            snapshot
+                .provider
+                .clone()
+                .filter(|p| !p.trim().is_empty())
+                .or_else(|| Some(pref.primary.provider.clone()).filter(|p| !p.trim().is_empty())),
         );
         for ModelRef {
             deployment,
@@ -132,43 +137,59 @@ pub(crate) fn resolve_candidate(
     base: &UpstreamConfig,
     config: &Config,
     candidate: &Candidate,
-) -> UpstreamConfig {
+) -> std::result::Result<UpstreamConfig, crate::provider::ProviderError> {
     let mut upstream = base.clone();
     upstream.deployment = candidate.deployment.clone();
     let Some(tag) = candidate.provider.as_deref() else {
-        return upstream;
+        return Ok(upstream);
     };
-    match crate::provider::parse_tag(tag) {
-        Ok(Some(crate::provider::ProviderKind::Anthropic)) => {
-            if let Ok(crate::provider::ProviderTarget::Anthropic { endpoint, api_key }) =
-                crate::provider::resolve(Some(tag), config)
+    let identity = AuthenticationProvenance::Named {
+        provider_id: tag.trim().to_ascii_lowercase(),
+    };
+    match crate::provider::parse_tag(tag)? {
+        Some(crate::provider::ProviderKind::Anthropic) => {
+            if let crate::provider::ProviderTarget::Anthropic { endpoint, api_key } =
+                crate::provider::resolve(Some(tag), config)?
             {
                 upstream.endpoint = endpoint;
                 upstream.provider = crate::provider::ProviderKind::Anthropic;
                 upstream.api_key = Some(api_key);
                 upstream.provider_api_key = None;
+                upstream.authentication = identity;
             }
         }
-        Ok(Some(crate::provider::ProviderKind::Ollama)) => {
-            if let Ok(crate::provider::ProviderTarget::Ollama { endpoint }) =
-                crate::provider::resolve(Some(tag), config)
+        Some(crate::provider::ProviderKind::Ollama) => {
+            if let crate::provider::ProviderTarget::Ollama { endpoint } =
+                crate::provider::resolve(Some(tag), config)?
             {
                 upstream.endpoint = endpoint;
                 upstream.provider = crate::provider::ProviderKind::Ollama;
                 upstream.api_key = None;
                 upstream.provider_api_key = None;
+                upstream.authentication = identity;
             }
         }
         _ => {
-            if let Some(target) = config.resolve_provider(tag) {
+            if let Some(target) = config.resolve_provider(tag.trim()) {
+                // An informational tag on the unchanged legacy Copilot default
+                // does not manufacture a second named account.
+                if !config
+                    .providers
+                    .contains_key(&tag.trim().to_ascii_lowercase())
+                    && crate::proxy::is_copilot_endpoint(&base.endpoint)
+                    && crate::proxy::is_copilot_endpoint(&target.endpoint)
+                {
+                    return Ok(upstream);
+                }
                 upstream.endpoint = target.endpoint;
                 upstream.provider = crate::provider::ProviderKind::AzureOpenAI;
                 upstream.api_key = None;
                 upstream.provider_api_key = target.api_key;
+                upstream.authentication = identity;
             }
         }
     }
-    upstream
+    Ok(upstream)
 }
 
 pub(crate) fn candidates_for_request(
@@ -258,7 +279,8 @@ pub async fn forward_with_failover(
             continue;
         }
 
-        let upstream = resolve_candidate(upstream_base, config, candidate);
+        let upstream = resolve_candidate(upstream_base, config, candidate)
+            .map_err(ForwardFailure::configuration)?;
 
         if idx > 0 {
             tracing::warn!(
@@ -303,7 +325,7 @@ pub async fn forward_with_failover(
                 }
                 return attempt.map(|(status, headers, body)| (status, headers, body, upstream));
             }
-            Err(e) => {
+            Err(e) if retryable_transport(e) => {
                 health.record_failure(&deployment);
                 tracing::warn!(
                     sandbox = %upstream_base.sandbox_name,
@@ -315,6 +337,9 @@ pub async fn forward_with_failover(
                 last_result =
                     Some(attempt.map(|(status, headers, body)| (status, headers, body, upstream)));
                 continue;
+            }
+            Err(_) => {
+                return attempt.map(|(status, headers, body)| (status, headers, body, upstream));
             }
         }
     }
@@ -334,7 +359,8 @@ pub async fn forward_with_failover(
         digest = %snapshot.digest,
         "InferencePolicy failover: all candidates unhealthy, retrying primary anyway"
     );
-    let upstream = resolve_candidate(upstream_base, config, &first_candidate);
+    let upstream = resolve_candidate(upstream_base, config, &first_candidate)
+        .map_err(ForwardFailure::configuration)?;
     let attempt = forward(
         auth,
         copilot,
@@ -353,7 +379,9 @@ pub async fn forward_with_failover(
         Ok((status, _, _)) if is_failover_trigger(*status) => {
             health.record_failure(&health_key(&first_candidate));
         }
-        Err(_) => health.record_failure(&health_key(&first_candidate)),
+        Err(error) if retryable_transport(error) => {
+            health.record_failure(&health_key(&first_candidate))
+        }
         _ => {}
     }
     attempt.map(|(status, headers, body)| (status, headers, body, upstream))
@@ -379,6 +407,7 @@ mod tests {
             provider: crate::provider::ProviderKind::AzureOpenAI,
             api_key: None,
             provider_api_key: None,
+            authentication: AuthenticationProvenance::LegacyDefault,
         }
     }
 

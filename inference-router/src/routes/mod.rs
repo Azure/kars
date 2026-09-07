@@ -392,6 +392,10 @@ pub(crate) fn apply_provider_resolution(
             upstream.endpoint = endpoint;
             upstream.provider = crate::provider::ProviderKind::Anthropic;
             upstream.api_key = Some(api_key);
+            upstream.provider_api_key = None;
+            upstream.authentication = crate::proxy::AuthenticationProvenance::Named {
+                provider_id: "anthropic".into(),
+            };
         }
         crate::provider::ProviderTarget::Ollama { endpoint } => {
             tracing::info!(
@@ -403,6 +407,10 @@ pub(crate) fn apply_provider_resolution(
             upstream.endpoint = endpoint;
             upstream.provider = crate::provider::ProviderKind::Ollama;
             upstream.api_key = None;
+            upstream.provider_api_key = None;
+            upstream.authentication = crate::proxy::AuthenticationProvenance::Named {
+                provider_id: "ollama".into(),
+            };
         }
     }
     Ok(())
@@ -415,13 +423,13 @@ pub(crate) fn apply_model_preference_override(
     upstream: &mut UpstreamConfig,
     policy: &crate::inference_policy_loader::InferencePolicySnapshot,
     config: &crate::config::Config,
-) {
+) -> Result<(), crate::provider::ProviderError> {
     let Some(ref pref) = policy.model_preference else {
-        return;
+        return Ok(());
     };
     let target = pref.primary.deployment.as_str();
     if target.is_empty() {
-        return;
+        return Ok(());
     }
     tracing::info!(
         sandbox = %upstream.sandbox_name,
@@ -435,10 +443,15 @@ pub(crate) fn apply_model_preference_override(
         upstream,
         config,
         &crate::failover::Candidate {
-            provider: Some(pref.primary.provider.clone()).filter(|p| !p.is_empty()),
+            provider: policy
+                .provider
+                .clone()
+                .filter(|p| !p.trim().is_empty())
+                .or_else(|| Some(pref.primary.provider.clone()).filter(|p| !p.trim().is_empty())),
             deployment: target.to_string(),
         },
-    );
+    )?;
+    Ok(())
 }
 
 /// Extract the admin bearer token from either `Authorization: Bearer <token>`

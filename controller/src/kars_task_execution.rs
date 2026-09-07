@@ -22,7 +22,7 @@
 use kube::api::{Api, DeleteParams, DynamicObject, ObjectMeta, PostParams, Preconditions};
 use kube::core::ApiResource;
 use kube::{Client, ResourceExt};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::kars_task::{KarsTask, TaskBlueprint, TaskEnvelope};
 
@@ -107,6 +107,23 @@ fn network_policy(blueprint: &TaskBlueprint) -> serde_json::Value {
     })
 }
 
+/// Build primary and fallback routes from the shared normalized blueprint.
+fn inference_spec(task_name: &str, blueprint: &TaskBlueprint) -> Result<Value, kube::Error> {
+    let primary = blueprint
+        .model
+        .as_ref()
+        .ok_or_else(|| contract_error("effective task model is missing".into()))?;
+    Ok(json!({
+        "appliesTo": { "sandboxName": task_name },
+        "modelPreference": {
+            "primary": primary,
+            "fallback": crate::task_models::fallback_routes(
+                &blueprint.model_fallbacks, &primary.provider, &primary.deployment,
+            ),
+        },
+    }))
+}
+
 /// Materialize the InferencePolicy + KarsSandbox for a launched task using
 /// atomic creation or version-checked owned updates, then read sandbox status.
 pub async fn materialize(
@@ -119,23 +136,11 @@ pub async fn materialize(
     let inference_name = format!("{task_name}-inference");
     let envelope = &task.spec.envelope;
     let blueprint = crate::kars_task::blueprint::effective_blueprint(&task.spec);
-    let primary_model = blueprint
-        .model
-        .as_ref()
-        .ok_or_else(|| contract_error("effective task model is missing".into()))?;
     let runtime = runtime_spec(task)?;
 
     // 1. InferencePolicy scoped to this sandbox. Model: blueprint wins, else
     //    the controller default (required — without it the sandbox degrades).
-    let inference_spec = json!({
-        "appliesTo": { "sandboxName": task_name },
-        "modelPreference": {
-            "primary": primary_model,
-            "fallback": crate::task_models::fallback_routes(
-                &blueprint.model_fallbacks, &primary_model.provider, &primary_model.deployment,
-            ),
-        },
-    });
+    let inference_spec = inference_spec(&task_name, &blueprint)?;
     apply_dynamic(
         client,
         namespace,

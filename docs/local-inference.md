@@ -13,7 +13,7 @@ contains router environment variables:
 |---|---|
 | `KARS_PROVIDER_<TAG>_ENDPOINT` | Provider's complete API base URL |
 | `KARS_PROVIDER_<TAG>_API_KEY` | Optional credential for that provider |
-| `KARS_PROVIDER_<TAG>_TOKEN` | Alternative bearer credential; API key takes precedence |
+| `KARS_PROVIDER_<TAG>_TOKEN` | Alternative provider credential; API key takes precedence |
 
 For example, `KARS_PROVIDER_LOCAL_ENDPOINT` maps to provider tag `local`.
 Tags are case-insensitive; underscores in environment names become hyphens.
@@ -26,11 +26,18 @@ Use a base URL including `/v1` for servers such as vLLM or llama.cpp that serve
 prefix behavior. Custom endpoints do not receive that Azure prefix. Typed
 Ollama routes retain their `/v1` translation and receive no credential.
 
-Services under `*.kars-local-inference.svc.cluster.local` receive no
-authentication credential, including on Workload Identity clusters.
-An arbitrary non-Azure endpoint must have an explicitly configured credential
-when ambient Workload Identity/IMDS would otherwise be used. Additional provider
-configuration does not change the existing default endpoint.
+Each named route uses only its own credential, or no authentication when that
+credential is absent. It never borrows the default API key, Workload Identity,
+IMDS, or sidecar identity. This also applies to model Services in arbitrary
+Kubernetes namespaces. The legacy default route's authentication behavior and
+its dedicated `kars-local-inference` namespace exclusion remain unchanged.
+
+For a named **Copilot** endpoint, the credential must be a GitHub OAuth/seat
+token accepted by Copilot, not an Azure/OpenAI API key or an already-exchanged
+inference JWT. The router performs Copilot's exchange and maintains a separate
+cache for each selected provider identity/credential. Missing named Copilot
+credentials fail before inference HTTP; they cannot borrow another account.
+The global `COPILOT_GITHUB_TOKEN` cache is reserved for the legacy default route.
 
 ## Allow local model traffic
 
@@ -54,6 +61,9 @@ For operators intentionally trusting all model services in a namespace,
 `localInference.namespaces` accepts namespace names instead. Its default is
 empty. Existing default-deny, agent UID isolation, Content Safety, prompt
 shields, policy floors, and declared guardrail pipelines remain enforced.
+Older installations using Helm `--reuse-values` may have no `localInference`
+section at all. Missing sections or lists remain empty and keep local egress
+disabled, without replacing customer values.
 
 ## Select primary and fallback routes
 
@@ -86,16 +96,24 @@ Exact duplicate pairs and repeats of the primary are removed without changing
 the remaining order. Existing primary route fields and team roster sizes are
 not restricted by the new field's limits.
 
-The router tracks health per provider/deployment and tries another candidate
-on transport failures, HTTP 429, or HTTP 5xx. Ordinary client/auth/policy errors
-are returned rather than retried. The original default route is retained as a
-safety net. An unavailable-model response can additionally recover once to the
-configured default model; capability caches are scoped to the endpoint/model.
+An explicit `InferencePolicy.spec.provider` remains authoritative for the
+primary candidate, even if `modelPreference.primary.provider` contains a
+conflicting informational tag. Each fallback keeps its own provider, and the
+true legacy default remains a separate final candidate.
 
-Streaming failover ends as soon as a provider returns a successful response.
-A later stream failure is never replayed onto another provider, preventing
-duplicate generations. Responses-only model recovery retains the selected
-provider and effective deployment.
+The router tracks health per provider/deployment and tries another candidate
+on connection failures known to precede acceptance, HTTP 429, or HTTP 5xx.
+Authentication/configuration acquisition failures and ambiguous transport
+errors are not retry triggers. Ordinary client/auth/policy errors are returned
+rather than retried. An unavailable-model response can additionally recover
+once to the configured default model; capability caches include the immutable
+provider identity as well as endpoint/model, never credential text. Credential
+updates roll the sandbox process and its capability caches.
+
+Both buffered and streaming failover end when successful response headers are
+accepted. A later body failure is never replayed onto another provider,
+including the chat-to-Responses recovery path. Responses-only model recovery
+retains the selected provider and effective deployment.
 
 Provider families must support the request API. The public typed Anthropic
 provider continues to use `/anthropic/v1/messages`; Kars does not silently
