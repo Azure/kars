@@ -4,11 +4,11 @@ These APIs provide an in-process capability-request queue and bounded router
 telemetry. They do **not** deliver assignments, run agents, create approvals,
 grant capabilities, install resources, or provide a durable execution ledger.
 
-**Publication blocker:** the legacy SRE agent's Kubernetes permissions can read
-the new control Secret despite its router-only mount. This candidate is not
-ready for deployment. A separate operator-authorized SRE identity/migration
-prerequisite must close that API credential-access path; changing mounts alone
-does not establish operator-only authority.
+**Qualification gate:** the combined source includes the operator-authorized
+[SRE identity/migration prerequisite](how-to/sre-authority.md). Its real-API
+migration acceptance (#551) remains pending; merging its implementation locally
+does not establish successful hosted qualification or make this candidate ready
+for deployment. Changing mounts alone does not establish operator-only authority.
 
 ## Identity and operator authentication
 
@@ -24,6 +24,32 @@ Operator endpoints require a separate bearer credential. The controller creates
 `control-token` key **only in the inference-router**, at
 `/etc/kars/services/control-token`. The legacy `router-admin-token` is also
 available to some agent plugins and is deliberately not accepted here.
+
+Issuance and reuse require the shared live Secret GET/LIST/WATCH denial checks
+for the legacy SRE principal. If an SRE registration exists, it must carry current
+verified v2 authority: either Ready with its exact source/controller/namespace
+identities, enforcing admission and no unsafe token aliases, or fully Retired
+with current denial evidence. A Ready registration's privacy epoch is recorded
+on newly issued control credentials. No registration is needed for ordinary
+standalone installations where the legacy principal is actually denied.
+
+Existing unqualified **controller-owned** credentials rotate with Secret UID/RV
+preconditions; matching names or partial ownership labels never authorize
+adoption. The Deployment's credential-version annotation restarts cached-token
+consumers without changing their image pins, selectors or unrelated annotations.
+The controller does not report its credential transition complete while old
+version Pods remain, including terminating Pods. Loss of the checked privacy
+proof quarantines the owned credential and scales only a proven owned consumer
+to zero. Restoring authority requires a new token, not reuse of the potentially
+exposed cache. Foreign consumers remain untouched and block automatic recovery.
+Initial qualification still pending is not permission to issue or reuse a
+credential, but it is not itself evidence of privacy loss and does not stop the
+rollout being qualified. An already-qualified current v2 epoch survives ordinary
+availability failures only while fresh privacy checks pass and no old-epoch or
+old-control-version Pods remain. Canonical SRE's early authorization failure
+also performs the ownership-fenced, no-issuance privacy-loss quarantine.
+These checks occur during reconciliation; they are not a claim of instantaneous
+cluster-wide revocation or cancellation of already accepted upstream work.
 
 Standalone operators can provide `KARS_SERVICES_ADMIN_TOKEN` (32–256 nonblank
 ASCII characters). Without a control credential, operator APIs return 503;

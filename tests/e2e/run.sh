@@ -28,6 +28,8 @@ CLUSTER_NAME="kars-e2e"
 RUNTIME="${KARS_E2E_RUNTIME:-openclaw}"
 PASS=0
 FAIL=0
+SRE_LEGACY_PREPARED=0
+E2E_KUBECONFIG="$ROOT_DIR/.e2e-kind-kubeconfig"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -44,12 +46,18 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 setup_cluster() {
     info "Creating Kind cluster: $CLUSTER_NAME"
-    if kind get clusters 2>/dev/null | grep -q "$CLUSTER_NAME"; then
+    if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
         info "Cluster already exists, reusing"
+        kind get kubeconfig --name "$CLUSTER_NAME" > "$E2E_KUBECONFIG"
+        chmod 600 "$E2E_KUBECONFIG"
+        export KUBECONFIG="$E2E_KUBECONFIG"
         return
     fi
 
     kind create cluster --name "$CLUSTER_NAME" --config "$SCRIPT_DIR/kind-config.yaml"
+    kind get kubeconfig --name "$CLUSTER_NAME" > "$E2E_KUBECONFIG"
+    chmod 600 "$E2E_KUBECONFIG"
+    export KUBECONFIG="$E2E_KUBECONFIG"
     info "Cluster created"
 }
 
@@ -171,6 +179,13 @@ install_crds() {
             --set-string "controller.extraEnv[0].value=false"
         )
     fi
+    if [ "$SRE_LEGACY_PREPARED" = "1" ]; then
+        # Legacy fixtures predate the new admission policies. Explicit CLI
+        # authority staging already installed those APIs with controller=0;
+        # start the qualified controller while retaining the reviewed shapes.
+        extra_set_args+=(--set sre.enabled=true --set sre.authorityStage=true
+            --set-string runtimes.hermes.image=kars-sandbox-e2e:dev)
+    fi
     if ! helm upgrade --install kars "$ROOT_DIR/deploy/helm/kars" \
         --namespace kars-system \
         --create-namespace \
@@ -193,8 +208,10 @@ install_crds() {
 }
 
 teardown() {
+    sre_authority_cleanup || true
     info "Tearing down Kind cluster"
     kind delete cluster --name "$CLUSTER_NAME" 2>/dev/null || true
+    rm -f "$E2E_KUBECONFIG"
 }
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
@@ -3015,22 +3032,30 @@ EOF
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+source "$SCRIPT_DIR/sre-authority.sh"
 source "$SCRIPT_DIR/namespace-ownership.sh"
 source "$SCRIPT_DIR/credential-sources.sh"
 source "$SCRIPT_DIR/governed-services.sh"
 
 main() {
+    umask 077
     echo ""
     echo "═══════════════════════════════════════════════════════"
     echo "  kars E2E Test Suite (runtime: $RUNTIME)"
     echo "═══════════════════════════════════════════════════════"
     echo ""
 
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_DIR" \
+        python3 -m unittest discover -s "$SCRIPT_DIR/sre_authority" -p '*_test.py'
     trap teardown EXIT
 
     setup_cluster
     build_images
+    prepare_sre_authority_legacy
     install_crds
+    # Finish real legacy retirement before unrelated tests can create private
+    # namespaces/credentials. Failure is fatal, not a skipped/false-positive gate.
+    test_sre_authority_migration
 
     echo ""
     info "Running tests..."

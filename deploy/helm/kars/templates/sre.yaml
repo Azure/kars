@@ -1,10 +1,9 @@
 {{- /*
 kars-sre — the built-in SRE agent (Slice 1 MVP).
 
-Gated on `.Values.sre.enabled` (default: false). Enable via:
-  helm upgrade --reuse-values --set sre.enabled=true ...
-or — preferred — via the CLI:
-  kars sre install
+Gated on `.Values.sre.enabled` (default: false). `kars sre install` creates
+and enrolls a fresh source. Existing installs require reviewed authority
+migration; Helm/GitOps users follow docs/how-to/sre-authority.md.
 
 What this template creates (when sre.enabled=true):
   - InferencePolicy `sre-inference` (Release.Namespace)
@@ -14,15 +13,14 @@ What this template creates (when sre.enabled=true):
     `sre.py` but only registers its tools when this env is set —
     standard Hermes sandboxes don't get the SRE tool surface)
   - ClusterRole `kars-sre-reader` — kars-CR read scope (Slice 1)
-  - ClusterRoleBinding `kars-sre-reader` — bound to the SA
-    `sandbox` in namespace `kars-sre` (the controller-created default)
+  - No fresh privileged runtime binding. Registration reconciliation grants
+    only the separate router identity after verified legacy credential denial.
   - ToolPolicy `sre-tools` (Release.Namespace) — gates the sre_* tool surface
 
 Per design (docs/blueprints/07-kars-sre-proposal.md §7.8 — privilege
 containment):
-  - Sandbox uniqueness VAP (kars-sre-uniqueness) — Slice 1 ships the
-    label `kars.azure.com/role=sre`; the VAP itself lands in Slice 3
-    alongside the typed apply-fix path
+  - Admission protects the registered source and private runtime identities;
+    labels alone never authorize SRE privileges.
   - kars_spawn family deregistered when KARS_SRE_ENABLED=true
     (enforced in the plugin __init__.py — §7.8.5)
   - kars_mesh_* family deregistered when KARS_SRE_ENABLED=true
@@ -35,7 +33,28 @@ containment):
 {{- $retainNamespace := false }}
 {{- $legacyWriter := dict }}
 {{- $retainWriter := false }}
+{{- $retainedBindings := list }}
 {{- if .Release.IsUpgrade }}
+{{- range $name := list "kars-sre-reader" "kars-sre-action-author" }}
+{{- $binding := lookup "rbac.authorization.k8s.io/v1" "ClusterRoleBinding" "" $name }}
+{{- if $binding }}
+{{- $annotations := default dict $binding.metadata.annotations }}
+{{- if and (eq (index $annotations "meta.helm.sh/release-name") $.Release.Name) (eq (index $annotations "meta.helm.sh/release-namespace") $.Release.Namespace) }}
+{{- range $subject := default list $binding.subjects }}
+{{- if or (and (eq $subject.kind "ServiceAccount") (eq $subject.name "sandbox") (eq (default "" $subject.namespace) "kars-sre")) (and (eq $subject.kind "User") (eq $subject.name "system:serviceaccount:kars-sre:sandbox")) }}
+{{- if not (($.Values.sre | default dict).authorityStage | default false) }}
+{{- fail "Legacy SRE grants must be explicitly reviewed/enrolled and retired before this upgrade; run kars sre authority stage/preview/enroll/migrate" }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- $_ := set $binding.metadata "annotations" (mergeOverwrite (deepCopy $annotations) (dict "helm.sh/resource-policy" "keep")) }}
+{{- $_ := unset $binding.metadata "managedFields" }}
+{{- $retainedBindings = append $retainedBindings $binding }}
+{{- else if ($.Values.sre | default dict).enabled }}
+{{- fail "An existing SRE binding belongs to another release; no adoption or privilege grant is permitted" }}
+{{- end }}
+{{- end }}
+{{- end }}
 {{- $legacyNamespace = lookup "v1" "Namespace" "" "kars-sre" }}
 {{- if $legacyNamespace }}
 {{- $annotations := default dict $legacyNamespace.metadata.annotations }}
@@ -52,6 +71,12 @@ containment):
       (eq (index $annotations "meta.helm.sh/release-namespace") .Release.Namespace) }}
 {{- end }}
 {{- end }}
+{{- end }}
+{{- range $binding := $retainedBindings }}
+---
+# Keep the reviewed retired binding, preserving unrelated subjects and CAS
+# identity. No fresh SRE privilege binding is emitted by Helm.
+{{ toYaml $binding }}
 {{- end }}
 {{- if $retainNamespace }}
 ---
@@ -112,15 +137,27 @@ spec:
     dailyTokens: {{ (.Values.sre | default dict).dailyTokens | default 2000000 }}
 ---
 # kars-sre KarsSandbox — Hermes runtime, SRE plugin gated on env.
+{{- if ((.Values.sre | default dict).authorityStage | default false) }}
+{{- $source := lookup "kars.azure.com/v1alpha1" "KarsSandbox" .Release.Namespace "sre" }}
+{{- if not $source }}
+{{- fail "Authority staging cannot CREATE an enabled SRE source by name; stage disabled core, then use atomic authority stage-source" }}
+{{- end }}
+{{- $sourceAnnotations := default dict $source.metadata.annotations }}
+{{- if not (and (eq (index $sourceAnnotations "meta.helm.sh/release-name") .Release.Name) (eq (index $sourceAnnotations "meta.helm.sh/release-namespace") .Release.Namespace)) }}
+{{- fail "Authority staging cannot adopt an unowned SRE source; explicitly review its identity outside Helm" }}
+{{- end }}
+# Stage the controller/API without rewriting the source being reviewed.
+{{- $retainedSource := omit (deepCopy $source) "status" }}
+{{- $_ := unset $retainedSource.metadata "managedFields" }}
+{{ toYaml $retainedSource }}
+{{- else }}
 apiVersion: kars.azure.com/v1alpha1
 kind: KarsSandbox
 metadata:
   name: sre
   namespace: {{ .Release.Namespace }}
   labels:
-    # The label the future kars-sre-uniqueness VAP keys on (Slice 3).
-    # Slice 1 ships the label so by-the-time-VAP-lands no operator can
-    # have applied a second role=sre sandbox first.
+    # Admission reserves SRE sources; this label alone never grants authority.
     kars.azure.com/role: sre
     kars.azure.com/channels: none
     app.kubernetes.io/name: kars
@@ -194,7 +231,7 @@ spec:
     # registry. The SRE agent does not use the mesh (§7.8.6 — three
     # layers: spec, image plugin, networkPolicy; this is layer 3).
     allowedEndpoints:
-      # In-cluster apiserver — the SRE agent's primary counterparty.
+      # Router-only upstream; the agent uses the filtered loopback HTTPS API.
       - host: kubernetes.default.svc.cluster.local
         port: 443
       # Telegram Bot API — required when the operator configures
@@ -213,6 +250,7 @@ spec:
 {{- range (.Values.sre | default dict).extraAllowedEndpoints }}
       - host: {{ .host | quote }}
         port: {{ .port }}
+{{- end }}
 {{- end }}
 {{- end }}
 ---
@@ -384,23 +422,6 @@ rules:
 # kubectl accepts CRBs that reference not-yet-existing SAs — the
 # binding activates when the SA appears on first sandbox
 # reconciliation.
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: kars-sre-reader
-  labels:
-    app.kubernetes.io/name: kars
-    app.kubernetes.io/component: sre
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: kars-sre-reader
-subjects:
-  - kind: ServiceAccount
-    name: sandbox
-    namespace: kars-sre
----
 # ---------------------------------------------------------------------
 # Slice 3 — Typed apply-fix path (KarsSREAction CRD + writer SA)
 # ---------------------------------------------------------------------
@@ -486,23 +507,6 @@ rules:
   - apiGroups: ["kars.azure.com"]
     resources: ["karssreactions/status"]
     verbs: ["get"]
----
-apiVersion: rbac.authorization.k8s.io/v1
-kind: ClusterRoleBinding
-metadata:
-  name: kars-sre-action-author
-  labels:
-    app.kubernetes.io/name: kars
-    app.kubernetes.io/component: sre
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
-roleRef:
-  apiGroup: rbac.authorization.k8s.io
-  kind: ClusterRole
-  name: kars-sre-action-author
-subjects:
-  - kind: ServiceAccount
-    name: sandbox
-    namespace: kars-sre
 ---
 # Operator-facing role. Cluster admin binds humans / groups to
 # this manually (e.g.
