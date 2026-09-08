@@ -66,6 +66,8 @@ def command_error_category(stderr):
                        r"AlreadyExists|Conflict|BadRequest|InternalError|ServiceUnavailable)\)", stderr)
     if status:
         return status.group(1)
+    if re.search(r'The CustomResourceDefinition "[^"\r\n]+" is invalid:', stderr):
+        return "Invalid"
     text = stderr.lower()
     for needle, category in (("error validating", "schema-validation"),
                              ("unknown flag", "cli-argument"),
