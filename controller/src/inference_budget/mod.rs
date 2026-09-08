@@ -7,6 +7,7 @@ pub mod auth;
 pub mod binding;
 pub mod claim;
 pub mod config;
+pub mod launch;
 pub mod pod;
 pub mod recovery;
 pub mod scope;

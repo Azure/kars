@@ -95,6 +95,8 @@ pub struct StreamUsage {
     usage: Option<Usage>,
     terminal: bool,
     invalid: bool,
+    native_final_usage: bool,
+    native_content: bool,
 }
 
 impl StreamUsage {
@@ -105,6 +107,8 @@ impl StreamUsage {
             usage: None,
             terminal: false,
             invalid: false,
+            native_final_usage: false,
+            native_content: false,
         }
     }
 
@@ -180,39 +184,122 @@ impl StreamUsage {
                 Some("response.failed" | "error") => self.invalid = true,
                 _ => {}
             },
-            Operation::AnthropicMessages => match event.get("type").and_then(Value::as_str) {
-                Some("message_start") => {
-                    self.usage = event
-                        .pointer("/message/usage")
-                        .and_then(|usage| parse(usage, self.operation));
-                    if self.usage.is_none() {
-                        self.invalid = true;
+            Operation::AnthropicMessages => self.native_event(event),
+        }
+    }
+
+    fn native_event(&mut self, event: &Value) {
+        match event.get("type").and_then(Value::as_str) {
+            Some("message_start") => {
+                if self.usage.is_some() {
+                    self.invalid = true;
+                    return;
+                }
+                self.usage = event
+                    .pointer("/message/usage")
+                    .and_then(|usage| parse(usage, self.operation));
+                if self.usage.is_none() {
+                    self.invalid = true;
+                }
+            }
+            Some("content_block_start" | "content_block_delta" | "content_block_stop") => {
+                if self.usage.is_none() || self.native_final_usage {
+                    self.invalid = true;
+                    return;
+                }
+                for object in ["delta", "content_block"] {
+                    if let Some(value) = event.get(object) {
+                        self.native_content |= ["text", "partial_json", "thinking", "data"]
+                            .iter()
+                            .any(|key| {
+                                value
+                                    .get(key)
+                                    .and_then(Value::as_str)
+                                    .is_some_and(|text| !text.is_empty())
+                            })
+                            || value.get("type").and_then(Value::as_str) == Some("tool_use");
                     }
                 }
-                Some("message_delta") => {
-                    match (
-                        self.usage.as_mut(),
-                        event
-                            .get("usage")
-                            .and_then(|usage| number(usage, "output_tokens")),
-                    ) {
-                        (Some(usage), Some(output)) if output >= usage.output_tokens => {
-                            usage.output_tokens = output
-                        }
-                        _ => self.invalid = true,
-                    }
+            }
+            Some("message_delta") => {
+                let Some(usage) = self.usage.as_mut() else {
+                    self.invalid = true;
+                    return;
+                };
+                let Some(final_usage) = event.get("usage") else {
+                    self.invalid = true;
+                    return;
+                };
+                let Some(output) = number(final_usage, "output_tokens") else {
+                    self.invalid = true;
+                    return;
+                };
+                let fresh = usage
+                    .input_tokens
+                    .checked_sub(usage.cached_input_tokens)
+                    .and_then(|value| value.checked_sub(usage.cache_creation_input_tokens));
+                let inconsistent = [
+                    ("input_tokens", fresh),
+                    ("cache_read_input_tokens", Some(usage.cached_input_tokens)),
+                    (
+                        "cache_creation_input_tokens",
+                        Some(usage.cache_creation_input_tokens),
+                    ),
+                ]
+                .iter()
+                .any(|(key, expected)| {
+                    final_usage
+                        .get(*key)
+                        .is_some_and(|value| value.as_u64() != *expected)
+                });
+                if self.native_final_usage || output < usage.output_tokens || inconsistent {
+                    self.invalid = true;
+                    return;
                 }
-                Some("message_stop") => self.terminal = true,
-                Some("error") => self.invalid = true,
-                _ => {}
-            },
+                usage.output_tokens = output;
+                self.native_final_usage = matches!(
+                    event.pointer("/delta/stop_reason").and_then(Value::as_str),
+                    Some(
+                        "end_turn"
+                            | "max_tokens"
+                            | "stop_sequence"
+                            | "tool_use"
+                            | "pause_turn"
+                            | "refusal"
+                            | "model_context_window_exceeded"
+                    )
+                );
+                if event
+                    .pointer("/delta/stop_reason")
+                    .is_some_and(|reason| !reason.is_null() && !self.native_final_usage)
+                {
+                    self.invalid = true;
+                }
+            }
+            Some("message_stop") => {
+                self.terminal = true;
+                if !self.native_final_usage
+                    || self
+                        .usage
+                        .as_ref()
+                        .is_none_or(|usage| self.native_content && usage.output_tokens == 0)
+                {
+                    self.invalid = true;
+                }
+            }
+            Some("ping") => {}
+            _ => self.invalid = true,
         }
     }
 
     /// Only a cleanly completed transport with a terminal provider event is
     /// eligible for a refund. Client disconnect/drop uses None instead.
     pub fn finish(self) -> Option<Usage> {
-        if self.invalid || !self.terminal || !self.buffer.iter().all(u8::is_ascii_whitespace) {
+        if self.invalid
+            || !self.terminal
+            || !self.buffer.iter().all(u8::is_ascii_whitespace)
+            || (self.operation == Operation::AnthropicMessages && !self.native_final_usage)
+        {
             return None;
         }
         self.usage
@@ -261,7 +348,7 @@ mod tests {
     fn native_stream_requires_start_usage_and_terminal_stop() {
         let mut stream = StreamUsage::new(Operation::AnthropicMessages);
         stream.push(b"data: {\"type\":\"message_start\",\"message\":{\"usage\":{\"input_tokens\":2,\"output_tokens\":0}}}\n\n");
-        stream.push(b"data: {\"type\":\"message_delta\",\"usage\":{\"output_tokens\":7}}\n\n");
+        stream.push(b"data: {\"type\":\"message_delta\",\"delta\":{\"stop_reason\":\"end_turn\"},\"usage\":{\"output_tokens\":7}}\n\n");
         stream.push(b"data: {\"type\":\"message_stop\"}\n\n");
         assert_eq!(stream.finish().unwrap().output_tokens, 7);
     }

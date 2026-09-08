@@ -221,9 +221,6 @@ async fn reconcile_valid(
     } else {
         None
     };
-    if budget_error.is_some() {
-        tasks::revoke_all(tasks_api, team).await?;
-    }
     let bounded_plan = unsupported || budget_error.is_some();
     let cadence_blocked = bounded_plan && every.is_some() && !team.spec.paused;
     let mut generated = prior.generated_task_count;
@@ -321,7 +318,7 @@ async fn reconcile_valid(
         "Team hibernating — members and runs governed-but-idle; charter loop paused.".into()
     } else if let Some(error) = &budget_error {
         format!(
-            "Governed inference accounting unavailable: {error}. No cadence or finite execution is permitted."
+            "Governed inference admissions paused: {error}. No new cadence or launch is admitted; existing Task UIDs and funded work are retained."
         )
     } else if unsupported {
         "UnsupportedLaunchBudget: Team and member plans are governed-but-idle. Finite total/subtree token or monetary budgets require durable enforcement; cadence and bounded execution are unavailable.".into()

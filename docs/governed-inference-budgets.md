@@ -92,9 +92,20 @@ Only provably **undispatched Reserved** attempts expire/refund (30-second maximu
 An InFlight attempt never refunds merely because its TTL, router, Pod, or Task
 disappears. Recovery commits stale InFlight maxima after the transport deadline
 and a margin. Cancellation closes sessions/subtrees without erasing spend.
+Quota held by active reservations, pending enrollment, and catalog/store outages
+block **new admissions**, not revoke already funded executions. Team seats/runs
+retain their Task UIDs and launch intent during such waits; the Task controller
+does not tear down an existing execution solely for a budget-admission failure.
+Explicit pause, removed authority, invalid policy and UID replacement retain
+their normal fail-closed revocation paths. Every new send still needs the broker.
 Normal terminal rows compact behind durable Pod sequence high-water marks.
 Uncertain attempts retain their contract as tombstones: late over-bound usage
 freezes the account without granting another refund.
+Anthropic streams require a valid final usage-bearing `message_delta` with a
+recognized stop reason, followed by `message_stop` and clean transport completion.
+Start-of-message usage or a terminal event alone never proves final output usage.
+Missing, malformed, reset, decreasing or inconsistent final evidence commits the
+complete token and maximum-price reservation.
 
 Arithmetic is checked, uses signed-Kubernetes-compatible integer ranges, and
 rounds input/output tariff categories upward separately. An observed provider

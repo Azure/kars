@@ -18,6 +18,72 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
 #[tokio::test]
+async fn native_stream_settlement_never_refunds_missing_or_inconsistent_final_usage() {
+    for (name, wire) in super::super::anthropic_cases::incomplete() {
+        let fixture = Fixture::for_operation(100, false, Operation::AnthropicMessages).await;
+        Mock::given(wiremock::matchers::method("POST"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-type", "text/event-stream")
+                    .set_body_string(wire),
+            )
+            .mount(&fixture.provider)
+            .await;
+        let (_, _, stream) = crate::proxy::forward_stream(
+            Arc::new(WorkloadIdentityAuth::new()),
+            None,
+            reqwest::Client::new(),
+            fixture.upstream(),
+            "v1/messages",
+            HeaderMap::new(),
+            bytes::Bytes::from_static(
+                br#"{"stream":true,"messages":[{"role":"user","content":"text"}]}"#,
+            ),
+        )
+        .await
+        .unwrap();
+        let _: Vec<_> = stream.try_collect().await.unwrap();
+        let ledger = fixture.ledger.lock().unwrap();
+        assert_eq!(ledger.meters.uncertain.tokens, 30, "{name}");
+        assert_eq!(ledger.meters.uncertain.usd_micros, 30, "{name}");
+        assert_eq!(ledger.meters.settled.tokens, 0, "{name}");
+        assert_eq!(ledger.meters.reserved.tokens, 0, "{name}");
+    }
+}
+
+#[tokio::test]
+async fn native_stream_with_final_usage_settles_exact_evidence_once() {
+    let fixture = Fixture::for_operation(100, false, Operation::AnthropicMessages).await;
+    Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("content-type", "text/event-stream")
+                .set_body_string(super::super::anthropic_cases::complete()),
+        )
+        .mount(&fixture.provider)
+        .await;
+    let (_, _, stream) = crate::proxy::forward_stream(
+        Arc::new(WorkloadIdentityAuth::new()),
+        None,
+        reqwest::Client::new(),
+        fixture.upstream(),
+        "v1/messages",
+        HeaderMap::new(),
+        bytes::Bytes::from_static(
+            br#"{"stream":true,"messages":[{"role":"user","content":"text"}]}"#,
+        ),
+    )
+    .await
+    .unwrap();
+    let _: Vec<_> = stream.try_collect().await.unwrap();
+    let ledger = fixture.ledger.lock().unwrap();
+    assert_eq!(ledger.meters.settled.tokens, 9);
+    assert_eq!(ledger.meters.settled.usd_micros, 9);
+    assert_eq!(ledger.meters.uncertain.tokens, 0);
+    assert_eq!(ledger.meters.reserved.tokens, 0);
+}
+
+#[tokio::test]
 async fn finite_fence_cannot_be_bypassed_by_disabling_blocklist_or_enabling_learning() {
     let fixture = Fixture::new(100, false).await;
     let blocklist = crate::blocklist::Blocklist::disabled();
@@ -126,6 +192,10 @@ impl Drop for Fixture {
 
 impl Fixture {
     async fn new(limit: u64, lose_begin_ack: bool) -> Self {
+        Self::for_operation(limit, lose_begin_ack, Operation::ChatCompletions).await
+    }
+
+    async fn for_operation(limit: u64, lose_begin_ack: bool, operation: Operation) -> Self {
         let provider = MockServer::start().await;
         let broker = MockServer::start().await;
         let task = ResourceIdentity {
@@ -164,13 +234,21 @@ impl Fixture {
             provider_id: "ollama".into(),
             endpoint: provider.uri(),
             model: "model".into(),
-            operation: Operation::ChatCompletions,
+            operation,
             output_field: OutputField::MaxTokens,
             maximum_input_tokens: 10,
             maximum_output_tokens: 20,
             maximum_wire_bytes: 4096,
             output_bound_includes_reasoning: true,
-            maximum_price: Some(MaximumPrice::PerRequest { maximum_micros: 5 }),
+            maximum_price: Some(if operation == Operation::AnthropicMessages {
+                MaximumPrice::TokenRates {
+                    input_micros_per_million: 1_000_000,
+                    output_micros_per_million: 1_000_000,
+                    fixed_micros: 0,
+                }
+            } else {
+                MaximumPrice::PerRequest { maximum_micros: 5 }
+            }),
         };
         Mock::given(wiremock::matchers::method("POST"))
             .respond_with(BrokerFixture {

@@ -61,6 +61,13 @@ pub fn has_finite(envelope: &TaskEnvelope) -> bool {
     })
 }
 
+fn explicitly_governed(envelope: &TaskEnvelope) -> bool {
+    envelope
+        .budget
+        .as_ref()
+        .is_some_and(|budget| budget.scope == Some(BudgetScope::GovernedInference))
+}
+
 fn resource(task: &KarsTask) -> Result<ResourceIdentity, StoreError> {
     let resource = ResourceIdentity {
         namespace: task.namespace().ok_or(BudgetError::Identity)?,
@@ -106,9 +113,17 @@ async fn chain(
 }
 
 pub(super) async fn needs_account(client: &Client, task: &KarsTask) -> Result<bool, StoreError> {
-    let lineage = chain(client, task).await?;
+    // Selection must not interpret a legacy planning declaration as an
+    // enforcement request. Only validate budget semantics after opt-in or an
+    // existing lineage/account pin establishes governed continuity.
+    let lineage = crate::task_identity::resolve(
+        client,
+        task,
+        crate::task_identity::LeafReadiness::AllowPending,
+    )
+    .await?;
     if lineage.nodes.iter().any(|node| {
-        has_finite(&node.task.spec.envelope)
+        explicitly_governed(&node.task.spec.envelope)
             || node
                 .task
                 .status
@@ -118,7 +133,7 @@ pub(super) async fn needs_account(client: &Client, task: &KarsTask) -> Result<bo
         return Ok(true);
     }
     Ok(lineage.team.as_ref().is_some_and(|team| {
-        has_finite(&team.spec.envelope)
+        explicitly_governed(&team.spec.envelope)
             || team
                 .status
                 .as_ref()
@@ -158,11 +173,17 @@ pub async fn close_task(client: &Client, task: &KarsTask) -> Result<(), StoreErr
 }
 
 pub async fn prepare_task(client: &Client, task: &KarsTask) -> Result<KarsTask, StoreError> {
-    if !has_finite(&task.spec.envelope)
+    if !explicitly_governed(&task.spec.envelope)
         && task
             .status
             .as_ref()
             .is_none_or(|status| status.inference_budget.is_none())
+        && task.spec.parent_ref.is_none()
+        && !task.owner_references().iter().any(|owner| {
+            owner.controller == Some(true)
+                && owner.kind == "KarsTeam"
+                && owner.api_version == "kars.azure.com/v1alpha1"
+        })
     {
         return Ok(task.clone());
     }

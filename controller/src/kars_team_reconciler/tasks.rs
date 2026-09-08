@@ -238,7 +238,7 @@ pub(super) async fn apply_task(
             spec.execution = Some(execution);
         }
     }
-    if (team.spec.paused || specs::has_positive_budget(&spec.envelope))
+    if (team.spec.paused || specs::unsupported_budget(&spec.envelope))
         && let Some(execution) = &mut spec.execution
     {
         execution.launch = false;
