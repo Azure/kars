@@ -9,6 +9,7 @@ import { inspectNamespaceOwnership } from "../lib/namespace-ownership.js";
 import { authorityCommand } from "./sre-authority.js";
 import { assertDestroySafe, assertSafeMutation, enroll, get, preview, registration, requireRegistrar, waitForAuthority } from "../lib/sre-authority.js";
 import { stageSource } from "../lib/sre-source.js";
+import { listSreHelmReleases } from "../lib/sre-helm.js";
 
 const HELM_RELEASE_NAME = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$/;
 
@@ -82,9 +83,9 @@ export function sreCommand(): Command {
       //   C. no chart at all → install unprivileged core first, then
       //      atomically create and enroll the fresh SRE source.
       let mode: "upgrade" | "template" | "install" = "install";
-      const listArgs = ["list", "-n", options.namespace, "--all", "-o", "json"];
-      if (options.context) listArgs.push("--kube-context", options.context);
-      const { stdout: releasesOutput } = await execa("helm", listArgs, { stdio: "pipe", timeout: 30_000 });
+      const releasesOutput = await listSreHelmReleases((file, args, commandOptions) =>
+        execa(file, [...args, ...(options.context ? ["--kube-context", options.context] : [])],
+          { ...commandOptions, timeout: 30_000 }), options.namespace);
       const releases: unknown = JSON.parse(releasesOutput);
       if (!Array.isArray(releases) || releases.some(release =>
         !release || typeof release !== "object" || typeof release.name !== "string"
