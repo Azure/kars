@@ -35,7 +35,10 @@ this repository.
 Rust parser checks and Helm lint have run without Cargo. Nineteen
 operator CLI/schema/v1 compatibility tests pass using the existing verified
 cache; CLI typecheck passes. Eighteen private add-on/packaging tests and the
-gateway lint pass. Newly added Rust observer-route, purpose-issuer and GitHub
+gateway lint pass. After the exact GitHub forward merge, the 19 core fast
+tests and CLI typecheck pass again, along with all seven GitHub client
+regressions. Merged Rust files pass syntax parsing and Helm lint remains
+successful. Newly added Rust observer-route, purpose-issuer and GitHub
 configuration tests have **not run**. Full formatting and Rust type/Clippy
 qualification are pending. No dependency
 installation, Docker build, live cluster call, H100/cloud action or image push
@@ -54,9 +57,13 @@ Any author waiver on earlier publication PRs does not apply to this change.
 
 - No Cargo lease was assigned to this candidate; neither core nor private BFF
   has been compiled or Rust-tested.
-- The exact GitHub runtime schema was read at `d3dc3ce8`; that consumer has not
-  been forward-integrated/qualified here. Its optional mount must be reconciled
-  with the source issuer's owned projection, not duplicated on merge.
+- The exact GitHub consumer `d3dc3ce85b72869497a8f0a32815609e48a26c62`
+  is forward-integrated after the local `b3f6ca83` issuer checkpoint. Its
+  reviewed projection helper is reused once: optional for legacy standalone
+  configuration, required for a successfully issued governed binding.
+  The combined issuer/consumer candidate still requires Rust qualification;
+  the parent's separate 33 Rust tests/strict Clippy and seven Node tests do
+  not qualify the additional issuer or observation code.
 - The issuer consumes the full strict `privacy_epoch` helper from `7dc72810`.
   The observation RPC currently rechecks registration status and real legacy
   GET/LIST/WATCH denials, but not the full admission/private-token-alias scan.
@@ -87,6 +94,7 @@ Only after a direct parent lease, using the existing shared target,
 ```sh
 cargo test --offline --locked -p kars-controller -p kars-inference-router credential
 cargo test --offline --locked -p kars-controller -p kars-inference-router observation
+cargo test --offline --locked -p kars-controller -p kars-inference-router github
 cargo clippy --offline --locked -p kars-controller -p kars-inference-router --all-targets -- -D warnings
 ```
 
@@ -98,5 +106,5 @@ cargo test --offline --locked --manifest-path bff/Cargo.toml credential
 cargo clippy --offline --locked --manifest-path bff/Cargo.toml --all-targets -- -D warnings
 ```
 
-Last read-only disk observation: 9.7 GiB available; no cargo/rustc processes
+Last read-only disk observation: 9.8 GiB available; no cargo/rustc processes
 observed. No lease was acquired or implicitly transferred.

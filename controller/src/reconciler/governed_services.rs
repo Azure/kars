@@ -33,7 +33,7 @@ impl Projection {
 
     pub fn mount(&self,pod:&mut Value) {
         mount(pod);
-        crate::credential_grants::github::mount(pod,self.github.as_ref());
+        super::github_services::mount(pod,self.github.is_some());
     }
 
     pub async fn consumers_current(

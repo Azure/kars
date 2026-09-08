@@ -145,9 +145,11 @@ Sandbox credentials. Operator-approved custom credentials remain usable in
 the existing explicitly unbounded standalone mode; that mode is **not**
 repository-enforced by the GitHub gateway.
 
-The GitHub runtime consumer checkpoint must be forward-integrated and jointly
-qualified before this candidate can be used. A mount is not evidence that a
-particular router image contains that consumer.
+The exact GitHub runtime consumer `d3dc3ce8` is locally forward-integrated.
+Its shared mount helper remains optional for ungoverned standalone
+configuration and is required for an issued governed binding. The combined
+issuer/consumer still needs qualification before use. A mount is not evidence
+that any published router image contains this consumer.
 
 Grant finalization revokes its owned writer/operator bindings. Namespace and
 source UID checks prevent adopting a replacement. Source cleanup follows its

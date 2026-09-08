@@ -50,7 +50,10 @@ pub use observations::{routes as observation_routes,purpose_boundary as observat
 mod mesh_token;
 mod task_telemetry;
 pub use access_request::routes as governed_service_routes;
+mod github_policy;
+mod github_proxy;
 mod model_routing;
+pub use github_proxy::routes as github_proxy_routes;
 pub use mesh_token::mesh_token_routes;
 
 mod egress;
