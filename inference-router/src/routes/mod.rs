@@ -44,7 +44,10 @@ pub use governance::sensitive_agt_routes;
 mod mesh;
 pub use mesh::mesh_routes;
 
+mod access_request;
 mod mesh_token;
+mod task_telemetry;
+pub use access_request::routes as governed_service_routes;
 mod model_routing;
 pub use mesh_token::mesh_token_routes;
 
@@ -71,6 +74,7 @@ pub use a2a::{A2aRouteState, a2a_routes};
 /// Shared application state.
 #[derive(Clone)]
 pub struct AppState {
+    pub services: Arc<crate::governed_services::GovernedServices>,
     pub auth: Arc<WorkloadIdentityAuth>,
     /// GitHub Copilot token cache. Constructed unconditionally (cheap, lazy)
     /// — `proxy::forward()` only consults it when the upstream endpoint is
@@ -310,7 +314,13 @@ impl AppState {
         )
         .await;
 
+        let services = Arc::new(crate::governed_services::GovernedServices::from_env(
+            &sandbox_name,
+        ));
+        let blocked_egress = Arc::new(BlockedBuffer::with_defaults());
+        blocked_egress.bind_services(&services);
         Ok(Self {
+            services,
             auth: Arc::new(WorkloadIdentityAuth::new()),
             copilot: Arc::new(CopilotTokenCache::from_env()),
             client: client.clone(),
@@ -321,7 +331,7 @@ impl AppState {
             signing_provider: Arc::clone(&governance) as Arc<dyn SigningProvider>,
             governance,
             blocklist,
-            blocked_egress: Arc::new(BlockedBuffer::with_defaults()),
+            blocked_egress,
             sandbox_name: Arc::new(sandbox_name),
             inbox: Arc::new(MeshInbox::new()),
             mesh_metrics: Arc::new(MeshMetrics::new()),
@@ -367,7 +377,11 @@ impl AppState {
             .and_then(|g| g.clone())
             .unwrap_or_else(|| self.config.default_model.clone());
 
-        UpstreamConfig::azure(endpoint, deployment, sandbox_name.to_string())
+        let mut upstream = UpstreamConfig::azure(endpoint, deployment, sandbox_name.to_string());
+        if self.services.identity_valid {
+            upstream.telemetry = Some(self.services.telemetry.clone());
+        }
+        upstream
     }
 }
 

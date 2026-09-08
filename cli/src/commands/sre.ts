@@ -6,6 +6,10 @@ import chalk from "chalk";
 import { execa } from "execa";
 import { requireBundledAsset } from "../lib/repo-assets.js";
 import { inspectNamespaceOwnership } from "../lib/namespace-ownership.js";
+import { authorityCommand } from "./sre-authority.js";
+import { assertDestroySafe, assertSafeMutation, enroll, get, preview, registration, requireRegistrar, waitForAuthority } from "../lib/sre-authority.js";
+import { stageSource } from "../lib/sre-source.js";
+import { listSreHelmReleases } from "../lib/sre-helm.js";
 
 const HELM_RELEASE_NAME = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$/;
 
@@ -27,6 +31,7 @@ const HELM_RELEASE_NAME = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z
 export function sreCommand(): Command {
   const cmd = new Command("sre");
   cmd.description("Manage the built-in kars-sre agent (Kubernetes SRE on the cluster)");
+  cmd.addCommand(authorityCommand());
 
   cmd
     .command("install")
@@ -74,15 +79,13 @@ export function sreCommand(): Command {
       //   B. operator deployed via `kars dev --target local-k8s`
       //      (which renders `helm template | kubectl apply` and so
       //      never creates a helm release record) → use `helm template
-      //      | kubectl apply --server-side --force-conflicts` with
-      //      `sre.enabled=true` baked in. The chart is already in
-      //      the cluster; this just adds the SRE bits idempotently.
-      //   C. no chart at all → `helm install` with --take-ownership +
-      //      a fallback workload-identity client-id (local dev).
+      //      | kubectl apply --server-side` without force adoption.
+      //   C. no chart at all → install unprivileged core first, then
+      //      atomically create and enroll the fresh SRE source.
       let mode: "upgrade" | "template" | "install" = "install";
-      const listArgs = ["list", "-n", options.namespace, "--all", "-o", "json"];
-      if (options.context) listArgs.push("--kube-context", options.context);
-      const { stdout: releasesOutput } = await execa("helm", listArgs, { stdio: "pipe", timeout: 30_000 });
+      const releasesOutput = await listSreHelmReleases((file, args, commandOptions) =>
+        execa(file, [...args, ...(options.context ? ["--kube-context", options.context] : [])],
+          { ...commandOptions, timeout: 30_000 }), options.namespace);
       const releases: unknown = JSON.parse(releasesOutput);
       if (!Array.isArray(releases) || releases.some(release =>
         !release || typeof release !== "object" || typeof release.name !== "string"
@@ -124,6 +127,43 @@ export function sreCommand(): Command {
           execa(file, [...(options.context ? ["--context", options.context] : []), ...args], commandOptions));
       }
 
+      const execute = (file: string, args: readonly string[], commandOptions: { stdio: "pipe"; input?: string }) =>
+        execa(file, [...(options.context ? [file === "helm" ? "--kube-context" : "--context", options.context] : []), ...args], commandOptions);
+      await requireRegistrar(execute);
+      if (mode === "install") {
+        await execute("helm", ["install", options.release, chartPath, "--namespace", options.namespace,
+          "--create-namespace", "--set", "sre.enabled=false",
+          "--set", "azure.workloadIdentity.clientId=dummy", "--wait", "--timeout", "8m"], { stdio: "pipe" });
+        mode = "upgrade";
+      }
+      if (!await get(execute, "crd", "karssreregistrations.kars.azure.com")) {
+        throw new Error("Stage the SRE authority prerequisite controller/APIs before installing SRE");
+      }
+      const enrolled = await registration(execute);
+      if (enrolled) {
+        if (enrolled.spec?.controller?.namespace?.name !== options.namespace
+            || enrolled.spec?.controller?.release !== options.release) {
+          throw new Error("Canonical SRE is registered to another source/release; no privilege was granted");
+        }
+        if (enrolled.spec?.enabled === false) {
+          throw new Error("Retired SRE authority must be explicitly re-enrolled with reviewed current UIDs before install");
+        }
+        await assertSafeMutation(execute);
+      } else {
+        const rendered = await execute("helm", ["template", options.release, chartPath,
+          "--namespace", options.namespace, "--show-only", "templates/sre.yaml",
+          "--set", "sre.enabled=true", "--set", "azure.workloadIdentity.clientId=dummy",
+          ...(options.model ? ["--set-string", `sre.model=${options.model}`] : [])], { stdio: "pipe" });
+        const created = await stageSource(execute, rendered.stdout, options.namespace, options.release);
+        const spec = await preview(execute, options.namespace, options.release);
+        if (spec.legacyBindings.length) throw new Error("A legacy grant appeared during staging; explicit review is required");
+        if (spec.legacyConsumer) throw new Error("An SRE consumer appeared during staging; explicitly review its UID/resourceVersion before enrollment");
+        await enroll(execute, spec, {
+          sandboxUid: created.uid, namespaceUid: created.namespaceUid, binding: [],
+        }, false);
+        await waitForAuthority(execute, "Ready");
+      }
+
       const helmArgs =
         mode === "upgrade"
           ? [
@@ -137,14 +177,8 @@ export function sreCommand(): Command {
               // release values predate fields like runtimes.hermes — a plain
               // --reuse-values would carry the gap forward and fail templating.
               "--reset-then-reuse-values",
-              // --force-conflicts: helm 4 uses server-side apply by default,
-              // which conflicts with field managers from prior `kubectl set
-              // image` / `kars push --apply` runs that touched the same
-              // fields. This flag tells SSA to take ownership on conflict,
-              // matching the operator's intent (helm-managed chart is the
-              // source of truth).
-              "--force-conflicts",
               "--set", "sre.enabled=true",
+              "--set", "sre.authorityStage=false",
             ]
           : mode === "template"
           ? [
@@ -165,15 +199,6 @@ export function sreCommand(): Command {
               chartPath,
               "--namespace", options.namespace,
               "--create-namespace",
-              "--force-conflicts",
-              // --take-ownership: adopt resources that already exist in the
-              // cluster but don't carry helm metadata (the kars-system
-              // namespace, default-deny NetworkPolicy, etc. created
-              // out-of-band by a prior `kars dev` or partial helm
-              // install). Without this, install dies on the first such
-              // resource with a "cannot be imported" error. Requires
-              // helm >= 3.17 (`kars dev` pins helm 4 — safe).
-              "--take-ownership",
               "--set", "sre.enabled=true",
               // Brand-new chart install on a fresh cluster has no prior
               // azure.workloadIdentity.clientId — use a dummy fallback for
@@ -205,7 +230,6 @@ export function sreCommand(): Command {
               "apply",
               "-f", "-",
               "--server-side",
-              "--force-conflicts",
             ],
             {
               input: stdout,
@@ -280,9 +304,11 @@ export function sreCommand(): Command {
         chartPath,
         "--namespace", options.namespace,
         "--reset-then-reuse-values",
-        "--force-conflicts",
         "--set", "sre.enabled=false",
       ];
+      await assertDestroySafe((file,args,commandOptions) => execa(file,[
+        ...(options.context ? [file === "helm" ? "--kube-context" : "--context",options.context] : []),...args,
+      ],commandOptions));
       if (options.context) helmArgs.push("--kube-context", options.context);
 
       console.log(chalk.cyan("▸ disabling kars-sre via helm upgrade --reuse-values…"));

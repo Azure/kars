@@ -34,6 +34,7 @@ mod authentication_tests;
 /// Upstream configuration for a single request.
 #[derive(Clone)]
 pub struct UpstreamConfig {
+    pub telemetry: Option<Arc<crate::task_telemetry::TaskTelemetry>>,
     pub endpoint: String,
     pub deployment: String,
     pub sandbox_name: String,
@@ -51,11 +52,18 @@ pub struct UpstreamConfig {
 }
 
 impl UpstreamConfig {
+    fn telemetry_provider(&self) -> &str {
+        match &self.authentication {
+            AuthenticationProvenance::Named { provider_id } => provider_id,
+            AuthenticationProvenance::LegacyDefault => self.provider.as_tag(),
+        }
+    }
     /// The historic constructor shape: an Azure OpenAI / Foundry
     /// upstream authenticated via Workload Identity / API-key mode.
     #[must_use]
     pub fn azure(endpoint: String, deployment: String, sandbox_name: String) -> Self {
         Self {
+            telemetry: None,
             endpoint,
             deployment,
             sandbox_name,
@@ -255,9 +263,22 @@ pub async fn forward(
     request_body: Bytes,
 ) -> Result<(StatusCode, HeaderMap, Bytes)> {
     let start = Instant::now();
+    let mut observation = upstream.telemetry.as_ref().and_then(|telemetry| {
+        telemetry.begin(
+            path,
+            upstream.telemetry_provider(),
+            &upstream.deployment,
+            &request_body,
+        )
+    });
 
-    let (upstream_url, body) = build_upstream_url(auth, upstream, path, request_body)
-        .map_err(ForwardFailure::configuration)?;
+    let (upstream_url, body) =
+        build_upstream_url(auth, upstream, path, request_body).map_err(|error| {
+            if let Some(observation) = observation.as_mut() {
+                observation.fail("configuration_error");
+            }
+            ForwardFailure::configuration(error)
+        })?;
 
     let mode = match upstream.provider {
         ProviderKind::Anthropic => "anthropic",
@@ -276,12 +297,22 @@ pub async fn forward(
 
     let credential = credential_for_upstream(auth, copilot, upstream)
         .await
-        .map_err(ForwardFailure::authentication)?;
+        .map_err(|error| {
+            if let Some(observation) = observation.as_mut() {
+                observation.fail("authentication_error");
+            }
+            ForwardFailure::authentication(error)
+        })?;
 
     let headers = build_upstream_headers(request_headers, auth, &credential, &upstream.endpoint)
-        .map_err(ForwardFailure::configuration)?;
+        .map_err(|error| {
+            if let Some(observation) = observation.as_mut() {
+                observation.fail("configuration_error");
+            }
+            ForwardFailure::configuration(error)
+        })?;
 
-    tracing::info!(sandbox = %upstream.sandbox_name, url = %upstream_url, body_len = body.len(), "Sending upstream request");
+    tracing::info!(sandbox = %upstream.sandbox_name, body_len = body.len(), "Sending upstream request");
 
     let retryable = is_idempotent(&method, path);
     let response = send_with_retry(
@@ -293,11 +324,19 @@ pub async fn forward(
         retryable,
         &upstream.sandbox_name,
     )
-    .await?;
+    .await
+    .inspect_err(|_| {
+        if let Some(observation) = observation.as_mut() {
+            observation.fail("transport_error");
+        }
+    })?;
 
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let response_headers = response.headers().clone();
+    if let Some(observation) = observation.as_mut() {
+        observation.headers(status.as_u16());
+    }
 
     // r6 — surface Azure-side request ids so one log line carries both our
     // trace_id (from the outer tracing span) and Azure's correlation ids.
@@ -312,13 +351,18 @@ pub async fn forward(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
 
-    let response_body = response
-        .bytes()
-        .await
-        .map_err(|error| ForwardFailure::response_body(status, error))?;
+    let response_body = response.bytes().await.map_err(|error| {
+        if let Some(observation) = observation.as_mut() {
+            observation.fail("response_body_error");
+        }
+        ForwardFailure::response_body(status, error)
+    })?;
     let latency = start.elapsed();
 
     record_metrics(upstream, status, latency, &response_body);
+    if let Some(observation) = observation.as_mut() {
+        observation.buffered(status.as_u16(), &response_body);
+    }
 
     tracing::info!(
         sandbox = %upstream.sandbox_name,
@@ -485,6 +529,14 @@ pub async fn forward_stream(
     HeaderMap,
     futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
 )> {
+    let mut observation = upstream.telemetry.as_ref().and_then(|telemetry| {
+        telemetry.begin(
+            path,
+            upstream.telemetry_provider(),
+            &upstream.deployment,
+            &request_body,
+        )
+    });
     // Inject stream_options.include_usage into request body so the final
     // SSE chunk contains a `usage` object with token counts. ONLY for
     // chat/completions — Anthropic Messages API (/v1/messages) rejects
@@ -501,15 +553,30 @@ pub async fn forward_stream(
         inject_stream_usage(request_body)
     };
     let (upstream_url, body) = build_upstream_url(&auth, &upstream, path, body_with_usage)
-        .map_err(ForwardFailure::configuration)?;
+        .map_err(|error| {
+            if let Some(observation) = observation.as_mut() {
+                observation.fail("configuration_error");
+            }
+            ForwardFailure::configuration(error)
+        })?;
 
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = "stream", "Forwarding SSE stream");
 
     let credential = credential_for_upstream(&auth, copilot.as_deref(), &upstream)
         .await
-        .map_err(ForwardFailure::authentication)?;
+        .map_err(|error| {
+            if let Some(observation) = observation.as_mut() {
+                observation.fail("authentication_error");
+            }
+            ForwardFailure::authentication(error)
+        })?;
     let headers = build_upstream_headers(&request_headers, &auth, &credential, &upstream.endpoint)
-        .map_err(ForwardFailure::configuration)?;
+        .map_err(|error| {
+            if let Some(observation) = observation.as_mut() {
+                observation.fail("configuration_error");
+            }
+            ForwardFailure::configuration(error)
+        })?;
 
     let start = Instant::now();
 
@@ -520,11 +587,19 @@ pub async fn forward_stream(
         .timeout(INFERENCE_REQUEST_TIMEOUT)
         .send()
         .await
-        .map_err(ForwardFailure::transport)?;
+        .map_err(|error| {
+            if let Some(observation) = observation.as_mut() {
+                observation.fail("transport_error");
+            }
+            ForwardFailure::transport(error)
+        })?;
 
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
     let response_headers = response.headers().clone();
+    if let Some(observation) = observation.as_mut() {
+        observation.headers(status.as_u16());
+    }
 
     // r6 — log Azure correlation ids for the stream path too. Emitted at
     // stream-start because headers arrive before any bytes.
@@ -555,22 +630,24 @@ pub async fn forward_stream(
         .inc();
 
     // On non-success, the upstream body is a short JSON error (not an SSE
-    // stream). Eagerly drain it, log the contents (capped), and forward as a
+    // stream). Eagerly drain it and forward as a
     // single chunk so callers see the actual reason. Without this we only
     // see "status=413" and have to guess at causes (token cap? bytes cap?
-    // schema break?). Cap at 4 KiB so a misbehaving upstream can't blow logs.
+    // schema break?). Do not put provider API bodies into logs.
     if !status.is_success() {
-        let body_bytes = response
-            .bytes()
-            .await
-            .map_err(|error| ForwardFailure::response_body(status, error))?;
-        let preview = String::from_utf8_lossy(&body_bytes);
-        let preview_trimmed: String = preview.chars().take(2048).collect();
+        let body_bytes = response.bytes().await.map_err(|error| {
+            if let Some(observation) = observation.as_mut() {
+                observation.fail("response_body_error");
+            }
+            ForwardFailure::response_body(status, error)
+        })?;
+        if let Some(observation) = observation.as_mut() {
+            observation.buffered(status.as_u16(), &body_bytes);
+        }
         tracing::warn!(
             sandbox = %upstream.sandbox_name,
             status = %status.as_u16(),
             body_len = body_bytes.len(),
-            body = %preview_trimmed,
             "Upstream returned non-success status"
         );
         let stream = futures::stream::once(async move { Ok::<_, reqwest::Error>(body_bytes) });
@@ -632,7 +709,15 @@ pub async fn forward_stream(
         chunk
     });
 
-    Ok((status, response_headers, metered.boxed()))
+    let is_sse = response_headers
+        .get("content-type")
+        .and_then(|header| header.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
+    Ok((
+        status,
+        response_headers,
+        crate::task_telemetry::observe::wrap_stream(metered.boxed(), observation, is_sse),
+    ))
 }
 
 /// Inject `stream_options: { include_usage: true }` into the request body

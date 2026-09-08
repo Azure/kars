@@ -376,6 +376,7 @@ mod tests {
             policy_status.clone(),
         ));
         AppState {
+            services: Default::default(),
             auth: Arc::new(crate::auth::WorkloadIdentityAuth::new()),
             copilot: Arc::new(crate::copilot_auth::CopilotTokenCache::from_env()),
             client: reqwest::Client::new(),

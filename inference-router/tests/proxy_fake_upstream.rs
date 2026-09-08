@@ -82,6 +82,7 @@ async fn api_key_mode_proxies_chat_completion_with_filter_results() {
 
     let (endpoint, client) = azure_endpoint(&azure.base_url());
     let upstream = UpstreamConfig {
+        telemetry: None,
         endpoint,
         deployment: "gpt-4o".to_string(),
         sandbox_name: "test-sandbox".to_string(),
@@ -163,6 +164,7 @@ async fn wi_mode_falls_back_to_imds_and_proxies_embeddings() {
 
     let (endpoint, client) = azure_endpoint(&azure.base_url());
     let upstream = UpstreamConfig {
+        telemetry: None,
         endpoint,
         deployment: "text-embedding-3-small".to_string(),
         sandbox_name: "test-sandbox-wi".to_string(),
@@ -236,6 +238,7 @@ async fn upstream_error_status_is_propagated() {
     let auth = WorkloadIdentityAuth::new();
     let (endpoint, client) = azure_endpoint(&azure.base_url());
     let upstream = UpstreamConfig {
+        telemetry: None,
         endpoint,
         deployment: "gpt-4o".to_string(),
         sandbox_name: "test-sandbox-429".to_string(),

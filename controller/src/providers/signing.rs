@@ -168,6 +168,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         use std::fmt::Write;
         let _ = write!(out, "{b:02x}");
     }
+
     out
 }
 
@@ -175,6 +176,13 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
 /// and commons. Signed receipt payloads continue using the full SHA-256 digest.
 pub fn content_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", &sha256_hex(bytes)[..32])
+}
+
+/// Opaque service credentials; callers must keep them out of agent authority
+/// except where the credential deliberately grants only a filtered interface.
+pub fn generate_service_token() -> String {
+    use rand::distr::{Alphanumeric, SampleString};
+    Alphanumeric.sample_string(&mut rand::rng(), 64)
 }
 
 /// DSSE Pre-Authentication Encoding:

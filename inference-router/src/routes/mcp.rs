@@ -62,6 +62,7 @@ pub const MCP_SESSION_HEADER: &str = "Mcp-Session-Id";
 /// Per-router MCP state. Cheap to clone (everything inside is `Arc`).
 #[derive(Clone)]
 pub struct McpRouteState {
+    pub task_telemetry: Option<Arc<crate::task_telemetry::TaskTelemetry>>,
     pub config: Arc<InitializeConfig>,
     pub minter: Arc<dyn SessionMinter + Send + Sync>,
     pub tools: Arc<dyn AsyncToolDispatcher>,
@@ -76,6 +77,7 @@ impl McpRouteState {
     /// `McpServer.spec.url`; see [`with_tools`].
     pub fn standard() -> Self {
         Self {
+            task_telemetry: None,
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(OsRngSessionMinter),
             tools: Arc::new(SyncToAsync::new(EchoDispatcher::standard())),
@@ -123,6 +125,7 @@ impl McpRouteState {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(OsRngSessionMinter),
             tools: Arc::new(dispatcher),
+            task_telemetry: None,
         }
     }
 }
@@ -188,6 +191,10 @@ async fn method_not_allowed() -> impl IntoResponse {
 }
 
 async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: Bytes) -> Response {
+    let telemetry_scope = state
+        .task_telemetry
+        .as_ref()
+        .map(|telemetry| telemetry.cursor().0);
     let accept = headers
         .get(header::ACCEPT)
         .and_then(|v| v.to_str().ok())
@@ -204,6 +211,15 @@ async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: 
         Some(state.tools.as_ref()),
     )
     .await;
+    if let (Some(telemetry), Some(scope)) = (&state.task_telemetry, telemetry_scope) {
+        crate::task_telemetry::mcp::record(
+            telemetry,
+            &scope,
+            &body,
+            &outcome,
+            started.elapsed().as_millis() as u64,
+        );
+    }
 
     let status_label: &str = match &outcome {
         ProcessOutcome::JsonRpcResponse { .. } => "200",
@@ -304,6 +320,7 @@ mod tests {
 
     fn test_state() -> McpRouteState {
         McpRouteState {
+            task_telemetry: None,
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(FixedMinter("test-session-001")),
             tools: Arc::new(SyncToAsync::new(EchoDispatcher::standard())),
@@ -493,6 +510,7 @@ mod tests {
         McpRouteState {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(FixedMinter("platform-session-001")),
+            task_telemetry: None,
             tools: Arc::new(crate::mcp::PlatformDispatcher::with_base_url(
                 "http://127.0.0.1:1",
             )),
@@ -679,6 +697,7 @@ mod tests {
 
         // Real platform dispatcher, pointed at the mock upstream.
         let state = McpRouteState {
+            task_telemetry: None,
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(FixedMinter("platform-session-001")),
             tools: Arc::new(crate::mcp::PlatformDispatcher::with_base_url(
