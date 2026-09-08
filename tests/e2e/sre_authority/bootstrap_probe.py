@@ -206,12 +206,11 @@ def main(root, diagnostics_only, candidate=False):
         else:
             try:
                 exercise(root, port, objects, policies, wait_seconds=180 if candidate else 90)
-                if candidate:
-                    from sre_authority.bootstrap_cases import admission_cases
-                    cases = admission_cases(port, policies)
-                    write_report(root, "bootstrap-admission-cases.json", {"cases": cases})
-                    if not all(case["matched"] for case in cases):
-                        raise RuntimeError("Schema candidate failed intended ordinary/private admission outcomes")
+                from sre_authority.bootstrap_cases import admission_cases
+                cases = admission_cases(port, policies)
+                write_report(root, "bootstrap-admission-cases.json", {"cases": cases})
+                if not all(case["matched"] for case in cases):
+                    raise RuntimeError("Schema failed intended ordinary/private admission outcomes")
             finally:
                 write_report(root, "bootstrap-final.json", collect(port, policies, request))
                 write_report(root, "bootstrap-controller-stack.json", controller_stack(

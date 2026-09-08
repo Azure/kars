@@ -1,7 +1,7 @@
 # Security audit — registered SRE credential authority
 
-Status: implemented and locally qualified candidate; pending real Kubernetes
-admission/migration proof and independent review. **Not a sign-off.**
+Status: candidate under qualification; the latest schema repair still requires
+Rust and full controller/migration execution. **Not a sign-off.**
 
 ## Scope and trust root
 
@@ -9,6 +9,33 @@ This prerequisite introduces cluster-scoped `KarsSRERegistration/canonical`.
 Only explicitly delegated registrars can author it; the controller can read,
 use, and reconcile status. Namespace occupancy, SRE labels, account names, and
 Helm-looking metadata are not privilege delegation.
+
+## Kubernetes 1.31 controller-manager compatibility
+
+Real Kubernetes v1.31.0 evidence showed that the controller Pod was not rejected:
+Pod dry-run and Deployment creation returned 201, but kube-controller-manager
+repeatedly exited with a nil-pointer panic while the VAP status controller
+converted the SRE action CRD's OpenAPI schema. The trigger was the boolean
+`additionalProperties: true` representation of `spec.action.params`.
+
+The repair keeps `type: object` and arbitrary nested JSON values, using
+`x-kubernetes-preserve-unknown-fields: true` for that field only. Rust schema
+generation and the Helm CRD use the same representation. No admission policy,
+approval requirement, namespace boundary or other field constraint is removed.
+
+The hosted A/B proof at
+https://github.com/Azure/kars/actions/runs/34262068112/job/102182569705
+keeps the original failing step fatal. The separate schema-only candidate
+recovered controller-manager, observed all 22 policies, created a real
+Deployment/ReplicaSet/Pod, and passed nine ordinary/private admission and
+Pending-action JSON round-trip cases. Workload scheduling, image execution and
+application readiness were deliberately not claimed by that admission probe.
+
+The successful shipped-schema probe now runs those admission cases too.
+Local Python discovery covers all 35 diagnostic/harness cases; its imports match
+the actual full-harness discovery command. The new Rust schema/wire regressions,
+existing Helm/Rust drift test and full fatal SRE migration remain required before
+readiness. A CI run, not the unbuilt local repair, supplies that next evidence.
 
 ## Boundaries implemented
 
