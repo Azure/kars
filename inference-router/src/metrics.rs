@@ -51,6 +51,60 @@ pub static GUARDRAIL_SCANS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     .unwrap()
 });
 
+/// Token usage attributed by **task branch** (kars Bridge efficiency pillar).
+///
+/// Distinct from [`TOKENS_USED`] (which is per-sandbox): this series is labelled
+/// by the KarsTask id and its lineage *root*, so the cost of a delegated
+/// sub-task tree rolls up to the root task that authorised it. Only emitted
+/// when the router runs inside a task-materialized sandbox (the controller sets
+/// `KARS_TASK_ID` / `KARS_TASK_ROOT`); non-task sandboxes produce no series, so
+/// cardinality stays bounded by the number of tasks.
+pub static TASK_TOKENS_USED: LazyLock<IntCounterVec> = LazyLock::new(|| {
+    register_int_counter_vec!(
+        opts!(
+            "kars_task_tokens_total",
+            "Total tokens consumed, attributed by task branch"
+        ),
+        &["task", "root_task", "model", "direction"]
+    )
+    .unwrap()
+});
+
+/// Task attribution read once from the environment: `(task_id, root_task)`.
+/// `None` when this router is not inside a task-materialized sandbox.
+pub static TASK_ATTRIBUTION: LazyLock<Option<(String, String)>> = LazyLock::new(|| {
+    parse_task_attribution(
+        std::env::var("KARS_TASK_ID").ok(),
+        std::env::var("KARS_TASK_ROOT").ok(),
+    )
+});
+
+/// Pure attribution resolver (testable): a task id is required; the root
+/// defaults to the task itself when unset (a root task is its own branch).
+pub fn parse_task_attribution(
+    task_id: Option<String>,
+    root: Option<String>,
+) -> Option<(String, String)> {
+    let task = task_id.filter(|s| !s.is_empty())?;
+    let root = root
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| task.clone());
+    Some((task, root))
+}
+
+/// Record token usage on both the per-sandbox and (when this is a task
+/// sandbox) the per-task-branch counters. `direction` is `input` or `output`.
+pub fn record_tokens(sandbox: &str, model: &str, direction: &str, count: u64) {
+    TOKENS_USED
+        .with_label_values(&[sandbox, model, direction])
+        .inc_by(count);
+    if let Some((task, root)) = TASK_ATTRIBUTION.as_ref() {
+        TASK_TOKENS_USED
+            .with_label_values(&[task, root, model, direction])
+            .inc_by(count);
+    }
+}
+
 // ── AGT Governance metrics ──────────────────────────────────────────────────
 
 /// Total AGT policy evaluations by decision (allow, deny, requires_approval, rate_limited).
@@ -369,3 +423,46 @@ pub static POLICY_BUNDLE_RELOADS: LazyLock<IntCounterVec> = LazyLock::new(|| {
     )
     .unwrap()
 });
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn attribution_requires_task_id() {
+        assert_eq!(parse_task_attribution(None, Some("root".into())), None);
+        assert_eq!(parse_task_attribution(Some("".into()), None), None);
+    }
+
+    #[test]
+    fn attribution_defaults_root_to_task() {
+        assert_eq!(
+            parse_task_attribution(Some("child".into()), None),
+            Some(("child".into(), "child".into()))
+        );
+        assert_eq!(
+            parse_task_attribution(Some("child".into()), Some("".into())),
+            Some(("child".into(), "child".into()))
+        );
+    }
+
+    #[test]
+    fn attribution_keeps_distinct_root() {
+        assert_eq!(
+            parse_task_attribution(Some("child".into()), Some("root".into())),
+            Some(("child".into(), "root".into()))
+        );
+    }
+
+    #[test]
+    fn record_tokens_increments_per_sandbox_counter() {
+        let before = TOKENS_USED
+            .with_label_values(&["sb-test", "m", "input"])
+            .get();
+        record_tokens("sb-test", "m", "input", 7);
+        let after = TOKENS_USED
+            .with_label_values(&["sb-test", "m", "input"])
+            .get();
+        assert_eq!(after - before, 7);
+    }
+}

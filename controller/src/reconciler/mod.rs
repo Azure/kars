@@ -1734,6 +1734,21 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         ];
         router_env.extend(router_agt_env);
 
+        // Task attribution (kars Bridge metering). When this sandbox was
+        // materialized by a launched KarsTask, the task reconciler stamps the
+        // task id + lineage root as annotations. Forward them to the router so
+        // it can attribute token cost per task *branch* (a delegated sub-tree
+        // rolls up to its root task) — the foundation of the efficiency
+        // scorecard. Absent for non-task sandboxes (no labels emitted).
+        if let Some(anns) = sandbox.metadata.annotations.as_ref() {
+            if let Some(task_id) = anns.get("kars.azure.com/task-id") {
+                router_env.push(json!({"name": "KARS_TASK_ID", "value": task_id}));
+            }
+            if let Some(task_root) = anns.get("kars.azure.com/task-root") {
+                router_env.push(json!({"name": "KARS_TASK_ROOT", "value": task_root}));
+            }
+        }
+
         // Local-k8s dev mode: when the controller has dev creds (set via
         // `controller.extraEnv` referencing `kars-dev-creds`
         // Secret), forward them to the router so it short-circuits
