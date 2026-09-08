@@ -41,6 +41,7 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::providers::signing::receipt_namespace;
+pub use crate::providers::signing::sha256_hex;
 
 /// ConfigMap holding the hash-chained inclusion log.
 pub const LOG_CONFIGMAP_NAME: &str = "kars-receipt-log";
@@ -87,17 +88,6 @@ pub fn entry_hash(seq: u64, receipt: &str, payload_sha256: &str, prev_hash: &str
     h.update(b"|");
     h.update(prev_hash.as_bytes());
     let digest = h.finalize();
-    let mut out = String::with_capacity(64);
-    for b in digest.iter() {
-        use std::fmt::Write;
-        let _ = write!(out, "{b:02x}");
-    }
-    out
-}
-
-/// Hex SHA-256 of arbitrary bytes (used to digest the signed payload).
-pub fn sha256_hex(bytes: &[u8]) -> String {
-    let digest = Sha256::digest(bytes);
     let mut out = String::with_capacity(64);
     for b in digest.iter() {
         use std::fmt::Write;
