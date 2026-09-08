@@ -19,6 +19,7 @@ This is the documentation index. The top-level [`README`](../README.md) is a fas
 
 <a href="quickstart.md" class="btn-primary">Quickstart — 3 commands</a>
 <a href="getting-started.md#step-2--deploy-to-aks" class="btn-primary">Run it on AKS</a>
+<a href="how-to/helm-installation.md" class="btn-primary">Install on an existing cluster</a>
 <a href="architecture.md" class="btn-primary">Architecture</a>
 <a href="maturity.md" class="btn-primary">Feature status</a>
 

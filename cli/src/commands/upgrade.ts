@@ -25,8 +25,16 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { Stepper, banner, section, kvLine } from "../stepper.js";
-import { loadContext } from "../config.js";
+import { loadContext, type DeploymentContext } from "../config.js";
 import { requireBundledAsset } from "../lib/repo-assets.js";
+import { RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
+import { connectDeploymentTarget } from "../lib/deployment-target.js";
+import { restartController, restartSandboxes } from "../lib/deployment-rollout.js";
+import {
+  assertMeshReleaseConsistency, inspectMeshInstallation, meshImageValueArgs,
+  readReleaseValues, recheckMeshOwnership, releaseMeshImages, restartMesh, updateLegacyMeshImages,
+  verifyMeshHealth, type MeshInstallation,
+} from "../lib/mesh-release.js";
 import {
   releaseImagePlan,
   compareVersions,
@@ -39,8 +47,7 @@ import {
 } from "../lib/release.js";
 
 const NS = "kars-system";
-/** Namespace holding the standalone AgentMesh relay + registry Deployments
- *  (applied from `deploy/agentmesh-agt.yaml`, NOT part of the Helm chart). */
+/** Namespace shared by supported Helm-owned and legacy AgentMesh installations. */
 const MESH_NS = "agentmesh";
 
 /**
@@ -90,7 +97,8 @@ export function isFoundryProjectHost(ep: string): boolean {
   }
 }
 
-interface UpgradeContext {
+export interface UpgradeContext {
+  subscription?: string;
   acrLoginServer: string;
   aksCluster: string;
   resourceGroup: string;
@@ -100,19 +108,26 @@ interface UpgradeContext {
   foundryProjectEndpoint?: string;
 }
 
+export function buildUpgradeContext(ctx: DeploymentContext): UpgradeContext {
+  if (!ctx.acrLoginServer || !ctx.aksCluster || !ctx.resourceGroup) {
+    throw new Error("Deployment context requires its ACR, AKS cluster and resource group");
+  }
+  return {
+    subscription: ctx.subscription,
+    acrLoginServer: ctx.acrLoginServer,
+    aksCluster: ctx.aksCluster,
+    resourceGroup: ctx.resourceGroup,
+    wiClientId: ctx.wiClientId,
+    keyVaultName: ctx.keyVaultName,
+    foundryEndpoint: ctx.foundryEndpoint,
+    foundryProjectEndpoint: ctx.foundryProjectEndpoint,
+  };
+}
+
 /** Chart `runtimes.*` value keys → ACR repo names. The single place the
  *  upgrade path enumerates the multi-runtime adapter images, so adding a
  *  runtime (e.g. langgraph-ts) is a one-line change that stays in sync with
  *  the import plan + the `kars up` install. */
-const RUNTIME_IMAGE_VALUES: ReadonlyArray<readonly [valueKey: string, repo: string]> = [
-  ["runtimes.openaiAgents.image", "kars-runtime-openai-agents"],
-  ["runtimes.mafPython.image", "kars-runtime-maf-python"],
-  ["runtimes.anthropic.image", "kars-runtime-anthropic"],
-  ["runtimes.langgraph.image", "kars-runtime-langgraph"],
-  ["runtimes.langgraphTs.image", "kars-runtime-langgraph-ts"],
-  ["runtimes.pydanticAi.image", "kars-runtime-pydantic-ai"],
-  ["runtimes.hermes.image", "kars-runtime-hermes"],
-];
 
 /** Build the `helm upgrade` args.
  *
@@ -136,7 +151,7 @@ export function buildHelmUpgradeArgs(
   ctx: UpgradeContext,
   helmPath: string,
   target?: string,
-  opts: { skipRuntimeImages?: boolean; forceConflicts?: boolean; dryRunServer?: boolean } = {},
+  opts: { skipRuntimeImages?: boolean; forceConflicts?: boolean; dryRunServer?: boolean; mesh?: MeshInstallation } = {},
 ): string[] {
   const tag = target && target.length > 0 ? target : "latest";
   const args = [
@@ -150,15 +165,20 @@ export function buildHelmUpgradeArgs(
     "--set", `inferenceRouter.image.tag=${tag}`,
     "--set", `sandbox.image.repository=${ctx.acrLoginServer}/openclaw-sandbox`,
     "--set", `sandbox.image.tag=${tag}`,
-    "--set", `azure.workloadIdentity.clientId=${ctx.wiClientId || ""}`,
-    "--set", `azure.keyVaultCsi.keyVaultName=${ctx.keyVaultName || ""}`,
   ];
+  // Optional adoption fields are not clear operations. --reuse-values retains
+  // the verified release's identity and Key Vault when the cache omits them.
+  if (ctx.wiClientId?.trim()) args.push("--set", `azure.workloadIdentity.clientId=${ctx.wiClientId}`);
+  if (ctx.keyVaultName?.trim()) args.push("--set", `azure.keyVaultCsi.keyVaultName=${ctx.keyVaultName}`);
+  if (opts.mesh?.kind === "helm") {
+    args.push(...meshImageValueArgs(releaseMeshImages(ctx.acrLoginServer, tag)));
+  }
   // Pin every runtime adapter image explicitly (don't rely on --reuse-values,
   // which can't materialise a value an older install never set). Skipped only
   // when the operator opted out of importing them — then we leave whatever the
   // prior install set (via --reuse-values) untouched.
   if (!opts.skipRuntimeImages) {
-    for (const [valueKey, repo] of RUNTIME_IMAGE_VALUES) {
+    for (const { valueKey, repo } of RUNTIME_IMAGE_TARGETS) {
       args.push("--set", `${valueKey}=${ctx.acrLoginServer}/${repo}:${tag}`);
     }
   }
@@ -313,17 +333,17 @@ function reportFieldManagerConflicts(conflicts: FieldManagerConflict[]): void {
 /** Server-side dry-run pre-flight: detect field-manager conflicts WITHOUT
  *  changing anything. Returns the parsed conflicts (empty if the dry-run
  *  succeeds). A dry-run that fails for any *other* reason is reported as
- *  `otherError` and is non-fatal: the real upgrade runs next and surfaces the
- *  authoritative error rather than blocking on a flaky pre-flight. */
-async function preflightFieldManagerConflicts(
+ *  `otherError`; the caller stops rather than applying an unverified plan. */
+export async function preflightFieldManagerConflicts(
   execa: Execa,
   ctx: UpgradeContext,
   helmPath: string,
   target: string,
-  opts: { skipRuntimeImages?: boolean },
+  opts: { skipRuntimeImages?: boolean; mesh?: MeshInstallation },
 ): Promise<{ conflicts: FieldManagerConflict[]; otherError?: string }> {
   const args = buildHelmUpgradeArgs(ctx, helmPath, target, {
     skipRuntimeImages: opts.skipRuntimeImages,
+    mesh: opts.mesh,
     dryRunServer: true,
   });
   try {
@@ -368,7 +388,7 @@ Examples:
   kars upgrade --rollback          # Revert to the previous Helm revision
 `)
     .action(async (options) => {
-      const { execa } = await import("execa");
+      const { execa: rawExeca } = await import("execa");
 
       // ── Load + validate cached context ──────────────────────────────
       const ctxRaw = loadContext();
@@ -379,15 +399,7 @@ Examples:
         ));
         process.exit(1);
       }
-      const ctx: UpgradeContext = {
-        acrLoginServer: ctxRaw.acrLoginServer,
-        aksCluster: ctxRaw.aksCluster,
-        resourceGroup: ctxRaw.resourceGroup,
-        wiClientId: ctxRaw.wiClientId,
-        keyVaultName: ctxRaw.keyVaultName,
-        foundryEndpoint: ctxRaw.foundryEndpoint,
-        foundryProjectEndpoint: ctxRaw.foundryProjectEndpoint,
-      };
+      const ctx = buildUpgradeContext(ctxRaw);
       const acrName = ctx.acrLoginServer.replace(/\.azurecr\.io$/, "");
 
       banner("kars · Upgrade", "Move an existing cluster to a published release");
@@ -397,15 +409,13 @@ Examples:
       try {
         // ── Step 1: Connect to the cluster ────────────────────────────
         stepper.step(`Connecting to AKS '${ctx.aksCluster}'...`);
-        await execa("az", [
-          "aks", "get-credentials",
-          "--name", ctx.aksCluster, "--resource-group", ctx.resourceGroup,
-          "--overwrite-existing", "--output", "none",
-        ], { stdio: "pipe" });
+        const connected = await connectDeploymentTarget(rawExeca, ctx);
+        const execa = connected.execute;
+        ctx.subscription = connected.subscription;
         // Sanity: the Helm release must exist to upgrade/rollback.
         const { stdout: relJson } = await execa("helm", [
           "list", "-n", NS, "-o", "json",
-        ], { stdio: "pipe" }).catch(() => ({ stdout: "[]" }));
+        ], { stdio: "pipe" });
         const releases = JSON.parse(relJson || "[]") as Array<{ name: string; revision: string; app_version?: string }>;
         const karsRel = releases.find((r) => r.name === "kars");
         if (!karsRel) {
@@ -414,6 +424,10 @@ Examples:
           process.exit(1);
         }
         stepper.done(`Connected — kars release at revision ${karsRel.revision}`);
+        const mesh = await inspectMeshInstallation(execa);
+        const values = mesh.kind === "helm" ? mesh.values : await readReleaseValues(execa);
+        assertMeshReleaseConsistency(mesh, values);
+        if (mesh.kind === "external") stepper.detail("info", "External AgentMesh is not part of this upgrade and will remain untouched.");
 
         // ── Pre-flight: cluster must be able to run the upgrade ────────
         // Fail fast on a degraded/stopped cluster (e.g. all nodes NotReady)
@@ -440,13 +454,14 @@ Examples:
           stepper.done("Helm release rolled back");
 
           stepper.step("Restarting workloads...");
-          await rolloutRestartAll(execa);
+          const rollbackMesh = await inspectMeshInstallation(execa);
+          await rolloutRestartAll(execa, rollbackMesh);
           stepper.done("Workloads restarted");
 
           stepper.step("Verifying cluster health...");
-          const rbHealth = await verifyHealth(execa);
+          const rbHealth = await verifyHealth(execa, rollbackMesh);
           if (rbHealth.healthy) stepper.done("Cluster healthy after rollback");
-          else stepper.warn(`Rollback applied but the cluster isn't fully healthy yet: ${rbHealth.reason} — check \`kars status\``);
+          else throw new Error(`Rollback applied but cluster health failed: ${rbHealth.reason}`);
           stepper.summary();
           process.exit(0);
         }
@@ -475,7 +490,9 @@ Examples:
         stepper.done(`Target release: ${target}`);
 
         // ── Dry-run: print plan + exit ────────────────────────────────
-        const images = releaseImagePlan(target, { includeRuntimes: !options.skipRuntimeImages });
+        const images = releaseImagePlan(target, { includeRuntimes: !options.skipRuntimeImages })
+          .filter(image => !["external", "absent"].includes(mesh.kind)
+            || !/^agentmesh-(relay|registry)-agt:/.test(image.target));
         if (options.dryRun) {
           stepper.stop();
           await printChangelog(current, target);
@@ -552,6 +569,7 @@ Examples:
         // ── Step 4: Atomic Helm upgrade ───────────────────────────────
         stepper.step("Upgrading controller + CRDs (atomic Helm upgrade)...");
         const helmPath = requireBundledAsset("deploy/helm/kars");
+        await recheckMeshOwnership(execa, mesh);
 
         // Pre-flight: a server-side dry-run detects fields owned by another
         // field manager (e.g. a manual `kubectl set env`). Helm v4 applies
@@ -561,6 +579,7 @@ Examples:
         // silently overwriting a field a live operator may legitimately own.
         const pf = await preflightFieldManagerConflicts(execa, ctx, helmPath, target, {
           skipRuntimeImages: options.skipRuntimeImages,
+          mesh,
         });
         if (pf.conflicts.length > 0 && !options.forceConflicts) {
           stepper.fail("Field-manager conflict — upgrade stopped before any change");
@@ -574,12 +593,13 @@ Examples:
         if (pf.otherError) {
           // Non-conflict dry-run failure: don't block — the real upgrade below
           // surfaces the authoritative error (and its --atomic rolls back).
-          stepper.detail("info", "Pre-flight dry-run inconclusive — proceeding (real upgrade will report any error)");
+          throw new Error(`Helm pre-flight failed: ${pf.otherError}`);
         }
 
         await execa("helm", buildHelmUpgradeArgs(ctx, helmPath, target, {
           skipRuntimeImages: options.skipRuntimeImages,
           forceConflicts: options.forceConflicts,
+          mesh,
         }), { stdio: "pipe" });
         stepper.done("Helm upgrade applied (auto-rollback on failure via --atomic)");
 
@@ -588,13 +608,17 @@ Examples:
         // Helm-managed pods; this also refreshes the standalone AgentMesh
         // relay/registry (not Helm-managed) and is a harmless belt-and-braces
         // for the Helm-managed ones.
-        stepper.step("Rolling AgentMesh, controller, router, and sandboxes to the new images...");
-        await rolloutRestartAll(execa);
+        stepper.step("Rolling Kars-managed workloads to the new images...");
+        if (mesh.kind === "legacy") {
+          await updateLegacyMeshImages(execa, mesh, releaseMeshImages(ctx.acrLoginServer, target));
+        }
+        await rolloutRestartAll(execa, mesh);
         stepper.done("Workloads restarted");
 
         // ── Step 6: Verify health (gates success) ─────────────────────
         stepper.step("Verifying cluster health...");
-        const health = await verifyHealth(execa);
+        const health = await verifyHealth(execa, mesh);
+        await verifyMeshHealth(execa, mesh, releaseMeshImages(ctx.acrLoginServer, target));
         if (!health.healthy) {
           stepper.fail("Cluster is not healthy after the upgrade");
           console.error(chalk.red(`\n  ${health.reason}\n`));
@@ -605,7 +629,7 @@ Examples:
           ));
           process.exit(1);
         }
-        stepper.done("Cluster healthy on the new release");
+        stepper.done("Kars-managed workloads healthy on the new release");
 
         // ── Step 7: Reconcile Foundry Memory Store access ─────────────
         // Memory persistence depends on the Foundry PROJECT managed
@@ -623,8 +647,8 @@ Examples:
             for (const n of mem.notes) stepper.detail("info", n);
             if (mem.granted) stepper.done("Foundry Memory Store access reconciled");
             else stepper.warn("Foundry Memory Store needs manual RBAC — see the notes above");
-          } catch {
-            stepper.warn("Could not reconcile Foundry Memory Store access (non-fatal) — run `kars up` to retry");
+          } catch (error) {
+            throw new Error("Foundry Memory Store reconciliation failed", { cause: error });
           }
         } else {
           stepper.done("No Foundry project bound — Memory Store reconcile skipped");
@@ -752,29 +776,13 @@ async function acrImport(execa: Execa, acrName: string, src: string, target: str
   ], { stdio: "pipe" }).then(() => true).catch(() => false);
 }
 
-/** Rolling-restart every kars workload so the new images are pulled.
- *
- *  Order matters: the AgentMesh relay + registry are restarted (and waited on)
- *  FIRST, so the controller + sandboxes that connect to the mesh come up
- *  against the already-upgraded mesh rather than briefly attaching to the old
- *  one and getting disconnected. The mesh deployments are standalone (in the
- *  `agentmesh` namespace, applied from a manifest, NOT Helm-managed), so
- *  nothing else refreshes them. We target the two known deployments by name
- *  rather than `--all` to keep the blast radius off anything else that might
- *  share the namespace. All best-effort — a missing deployment/namespace is a
- *  no-op, never a hard failure. */
-export async function rolloutRestartAll(execa: Execa): Promise<void> {
-  // 1. AgentMesh relay + registry first, then wait for them.
-  for (const dep of ["agentmesh-relay", "agentmesh-registry"]) {
-    await execa("kubectl", ["rollout", "restart", `deployment/${dep}`, "-n", MESH_NS], { stdio: "pipe" }).catch(() => {});
-    await execa("kubectl", ["rollout", "status", `deployment/${dep}`, "-n", MESH_NS, "--timeout=180s"], { stdio: "pipe" }).catch(() => {});
-  }
-  // 2. Controller (the inference-router runs as a sidecar inside each sandbox).
-  await execa("kubectl", ["rollout", "restart", "deployment", "-n", NS, "-l", "app.kubernetes.io/name=kars"], { stdio: "pipe" }).catch(() => {});
-  // 3. Sandboxes (per-component label, across namespaces).
-  await execa("kubectl", ["rollout", "restart", "deployment", "-A", "-l", "kars.azure.com/component=sandbox"], { stdio: "pipe" }).catch(() => {});
-  // 4. Wait for the controller to settle.
-  await execa("kubectl", ["rollout", "status", "deployment", "-n", NS, "kars-controller", "--timeout=300s"], { stdio: "pipe" }).catch(() => {});
+/** Restart actual mesh workloads first and wait for every changed deployment.
+ * A failed inventory, restart, or rollout is an upgrade failure. */
+export async function rolloutRestartAll(execa: Execa, installation?: MeshInstallation): Promise<void> {
+  const mesh = installation ?? await inspectMeshInstallation(execa);
+  await restartMesh(execa, mesh);
+  await restartController(execa);
+  await restartSandboxes(execa);
 }
 
 /** Structured health verdict for a post-upgrade / post-rollback check. */
@@ -789,7 +797,7 @@ export interface HealthResult {
  *  ImagePullBackOff / ErrImagePull / CrashLoopBackOff (the exact symptoms a bad
  *  `:version` image produces). Best-effort kubectl; any probe error degrades to
  *  a clear, non-healthy reason rather than a false "healthy". */
-export async function verifyHealth(execa: Execa): Promise<HealthResult> {
+export async function verifyHealth(execa: Execa, installation?: MeshInstallation): Promise<HealthResult> {
   const { stdout: ctrl } = await execa("kubectl", [
     "get", "deployment", "kars-controller", "-n", NS,
     "-o", "jsonpath={.status.conditions[?(@.type=='Available')].status}",
@@ -797,16 +805,21 @@ export async function verifyHealth(execa: Execa): Promise<HealthResult> {
   if (ctrl.trim() !== "True") {
     return { healthy: false, reason: "kars-controller Deployment is not Available." };
   }
-  // Scan for image-pull / crash-loop across the control-plane + mesh namespaces.
-  for (const ns of [NS, MESH_NS]) {
-    const { stdout } = await execa("kubectl", [
-      "get", "pods", "-n", ns,
-      "-o", "jsonpath={range .items[*]}{range .status.containerStatuses[*]}{.state.waiting.reason}{\" \"}{end}{end}",
-    ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
-    const bad = ["ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff"].find((r) => stdout.includes(r));
-    if (bad) {
-      return { healthy: false, reason: `One or more pods in '${ns}' are in ${bad} (likely a bad image).` };
+  try {
+    const mesh = installation ?? await inspectMeshInstallation(execa);
+    await verifyMeshHealth(execa, mesh);
+    for (const ns of mesh.deployments.length ? [NS, MESH_NS] : [NS]) {
+      const { stdout } = await execa("kubectl", [
+        "get", "pods", "-n", ns,
+        "-o", "jsonpath={range .items[*]}{range .status.containerStatuses[*]}{.state.waiting.reason}{\" \"}{end}{end}",
+      ], { stdio: "pipe" });
+      const bad = ["ImagePullBackOff", "ErrImagePull", "CrashLoopBackOff"].find((r) => stdout.includes(r));
+      if (bad) {
+        return { healthy: false, reason: `One or more pods in '${ns}' are in ${bad} (likely a bad image).` };
+      }
     }
+  } catch (error) {
+    return { healthy: false, reason: error instanceof Error ? error.message : String(error) };
   }
   return { healthy: true, reason: "" };
 }
@@ -978,13 +991,11 @@ export async function assertClusterUpgradeable(
   const { stdout } = await execa("kubectl", [
     "get", "nodes",
     "-o", "jsonpath={range .items[*]}{.metadata.name}{\"|\"}{range .status.conditions[?(@.type=='Ready')]}{.status}{end}{\"\\n\"}{end}",
-  ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+  ], { stdio: "pipe" });
 
   const lines = stdout.split("\n").map((l) => l.trim()).filter(Boolean);
   if (lines.length === 0) {
-    // Couldn't read nodes — don't hard-block on an unexpected API shape; the
-    // later `helm --wait` still guards correctness.
-    return { ok: true, reason: "", hints: [] };
+    return { ok: false, reason: "No cluster nodes were returned; upgrade stopped before image imports or cluster updates.", hints: [] };
   }
   const total = lines.length;
   const ready = lines.filter((l) => l.endsWith("|True")).length;

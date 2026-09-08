@@ -2,9 +2,9 @@ name: ci-gates
 
 on:
   pull_request:
-    branches: [main]
+    branches: [main, kars-bridge, 'public/pr*']
   push:
-    branches: [main]
+    branches: [main, kars-bridge]
 
 permissions:
   contents: read

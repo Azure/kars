@@ -8,6 +8,10 @@ import path from "path";
 import fs from "fs";
 import os from "os";
 import { loadContext } from "../config.js";
+import { preparePushTarget } from "../lib/deployment-target.js";
+import { inspectMeshInstallation } from "../lib/mesh-release.js";
+import { applyPushedImages } from "./push-apply.js";
+import { dockerPushDigest, PUSH_COMPONENTS, RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
 import { stageRustBinaries } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
 import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
@@ -20,9 +24,10 @@ export function pushCommand(): Command {
   cmd
     .description("Build and push images to ACR (uses cached context from last deploy)")
     .option("--acr <name>", "ACR name (default: from last deploy)")
-    .option("--only <image>", "Build only one image: controller, router, sandbox, sandbox-base, relay, registry")
+    .option("--subscription <id>", "Azure subscription (must match saved deployment when present)")
+    .option("--only <image>", "Build one image: controller, router, sandbox, sandbox-base, relay, registry, or runtime-*")
     .option("--include-base", "Include sandbox-base in a full push (skipped by default — rebuild only when upgrading OpenClaw/Python/Go)")
-    .option("--apply", "Restart deployments after push so pods pick up new images")
+    .option("--apply", "Apply selected image configuration and verify the resulting rollouts")
     .option(
       "-m, --mesh-provider <provider>",
       "Mesh stack to build. Only 'agt' is supported (Microsoft AGT, in-memory). " +
@@ -38,7 +43,7 @@ export function pushCommand(): Command {
       "Path to a locally-packed @microsoft/agent-governance-sdk .tgz to install in the sandbox image (auto-discovered from $KARS_AGT_REPO/agent-governance-typescript otherwise).",
     )
     .action(async (options) => {
-      const { execa } = await import("execa");
+      const { execa: rawExeca } = await import("execa");
       const blue = chalk.hex("#0078D4");
 
       if (options.meshProvider && options.meshProvider !== "agt") {
@@ -51,6 +56,10 @@ export function pushCommand(): Command {
         process.exit(1);
       }
       const meshProvider = "agt" as const;
+      if (options.only && !PUSH_COMPONENTS.includes(options.only)) throw new Error(`Unknown image component: ${options.only}`);
+      if (options.apply && options.only === "sandbox-base") {
+        throw new Error("sandbox-base is build-only; omit --apply and rebuild a deployable sandbox image.");
+      }
 
       // Resolve AGT repo path — required to (re)build relay/registry images
       // Find repo root (look for deploy/helm directory). Done up-front
@@ -64,6 +73,15 @@ export function pushCommand(): Command {
       if (!fs.existsSync(path.join(repoRoot, "deploy", "helm"))) {
         console.error(chalk.red("\n  Not in an kars repo. Run from the repo root.\n"));
         process.exit(1);
+      }
+
+      const ctx = loadContext();
+      const execa = await preparePushTarget(rawExeca, ctx, options);
+      const updatesMesh = !options.only || options.only === "relay" || options.only === "registry";
+      const mesh = options.apply && updatesMesh ? await inspectMeshInstallation(execa) : undefined;
+      if (mesh?.kind === "absent") throw new Error("AgentMesh is not installed; install it before pushing mesh updates");
+      if (mesh?.kind === "external") {
+        throw new Error("External AgentMesh will not be changed. Select an explicit core --only target (controller, router, sandbox, or runtime-*).");
       }
 
       let agtRepo: string;
@@ -92,7 +110,6 @@ export function pushCommand(): Command {
       }
 
       // Resolve ACR from context or flag
-      const ctx = loadContext();
       const acrName = options.acr || ctx?.acrName;
       const acrLoginServer = acrName ? `${acrName}.azurecr.io` : null;
 
@@ -239,27 +256,11 @@ export function pushCommand(): Command {
         { name: "sandbox", tag: "openclaw-sandbox:latest", dockerfile: "sandbox-images/openclaw/Dockerfile",
           buildArgs: sandboxBuildArgs },
         ...meshImages,
-        // Multi-runtime adapter images — must match controller defaults in
-        // `controller/src/reconciler/runtime.rs` (DEFAULT_*_IMAGE constants).
-        { name: "runtime-openai-agents", tag: "kars-runtime-openai-agents:latest",
-          dockerfile: "sandbox-images/openai-agents/Dockerfile" },
-        { name: "runtime-maf-python", tag: "kars-runtime-maf-python:latest",
-          dockerfile: "sandbox-images/maf-python/Dockerfile" },
-        { name: "runtime-anthropic", tag: "kars-runtime-anthropic:latest",
-          dockerfile: "sandbox-images/anthropic/Dockerfile" },
-        { name: "runtime-langgraph", tag: "kars-runtime-langgraph:latest",
-          dockerfile: "sandbox-images/langgraph/Dockerfile" },
-        { name: "runtime-langgraph-ts", tag: "kars-runtime-langgraph-ts:latest",
-          dockerfile: "sandbox-images/langgraph-ts/Dockerfile" },
-        { name: "runtime-pydantic-ai", tag: "kars-runtime-pydantic-ai:latest",
-          dockerfile: "sandbox-images/pydantic-ai/Dockerfile" },
-        // Hermes runtime — ships the kars plugin (governance hook,
-        // kars_spawn family, Foundry tool wrappers) + the real Python
-        // AGT MeshClient (kars-agt-mesh). Controller default tag is
-        // `kars-runtime-hermes:latest` from reconciler/runtime.rs
-        // DEFAULT_HERMES_IMAGE.
-        { name: "runtime-hermes", tag: "kars-runtime-hermes:latest",
-          dockerfile: "sandbox-images/hermes/Dockerfile" },
+        // Shared with release imports, upgrade values, and push application.
+        ...RUNTIME_IMAGE_TARGETS.map(runtime => ({
+          name: runtime.name, tag: `${runtime.repo}:latest`,
+          dockerfile: `sandbox-images/${runtime.name.slice("runtime-".length)}/Dockerfile`,
+        })),
       ];
 
       // Sandbox images whose Dockerfile `COPY runtimes/wheels/` and
@@ -303,6 +304,7 @@ export function pushCommand(): Command {
       }
 
       let failures = 0;
+      const pushedArtifacts = new Map<string, string>();
       for (const img of targets) {
         const spin = ora(`Building ${img.tag}...`).start();
         try {
@@ -359,7 +361,12 @@ export function pushCommand(): Command {
           for (let attempt = 1; attempt <= 3; attempt++) {
             try {
               if (attempt > 1) await execa("az", ["acr", "login", "--name", acrName], { stdio: "pipe" });
-              await execa("docker", ["push", `${acrLoginServer}/${img.tag}`], { stdio: "pipe" });
+              const pushed = await execa("docker", ["push", `${acrLoginServer}/${img.tag}`], { stdio: "pipe" });
+              if (options.apply && img.name !== "sandbox-base") {
+                const digest = dockerPushDigest(`${pushed.stdout}\n${pushed.stderr}`);
+                if (!digest) throw new Error(`Docker did not provide an unambiguous pushed digest for ${img.name}; refusing to apply a mutable tag`);
+                pushedArtifacts.set(img.name, `${acrLoginServer}/${img.tag}@${digest}`);
+              }
               break;
             } catch (e: any) {
               if (attempt === 3) throw e;
@@ -383,112 +390,17 @@ export function pushCommand(): Command {
 
       // Rollout restart if --apply
       if (options.apply) {
-        const ns = "kars-system";
-
-        // The AGT manifest is the only mesh stack now; on --apply we ensure
-        // it's installed and the helm mesh.provider=agt value is set so
-        // future controller restarts and sandbox spawns carry the AGT env.
-        if (!options.only || options.only === "relay" || options.only === "registry") {
-          const meshSpin = ora("Applying AGT mesh manifest (deploy/agentmesh-agt.yaml)...").start();
-          try {
-            const agtManifest = path.join(repoRoot, "deploy/agentmesh-agt.yaml");
-            if (!fs.existsSync(agtManifest)) {
-              throw new Error(`AGT manifest missing: ${agtManifest}`);
-            }
-            await execa("kubectl", ["apply", "-f", agtManifest], { stdio: "pipe" });
-            meshSpin.succeed("AGT mesh manifest applied");
-          } catch (e: any) {
-            meshSpin.fail(`Mesh manifest apply failed: ${e.message?.split("\n")[0]}`);
-          }
-
-          const helmSpin = ora("Setting helm mesh.provider=agt...").start();
-          try {
-            await execa("helm", [
-              "upgrade", "kars", path.join(repoRoot, "deploy/helm/kars"),
-              "--namespace", ns,
-              "--reuse-values",
-              "--set", "mesh.provider=agt",
-            ], { stdio: "pipe" });
-            helmSpin.succeed("helm mesh.provider=agt");
-          } catch (e: any) {
-            helmSpin.fail(`helm upgrade failed: ${e.message?.split("\n")[0]} (apply manually: helm upgrade kars deploy/helm/kars --reuse-values --set mesh.provider=agt)`);
-          }
-        }
-
-        // Restart controller (manages all sandbox pods)
-        const spin = ora("Restarting deployments...").start();
+        const spin = ora("Applying pushed images to their owning deployments...").start();
         try {
-          await execa("kubectl", ["rollout", "restart", "deployment", "kars-controller", "-n", ns], { stdio: "pipe" });
-          spin.text = "Restarted kars-controller";
-
-          // If sandbox/router image changed, roll the sandbox Deployments.
-          // We use `kubectl rollout restart deploy -A -l kars.azure.com/component=sandbox`
-          // — annotation-bump that triggers a real rolling restart. The
-          // previous `delete pods --grace-period=10` approach was racy:
-          // the deletion fired BEFORE ACR/kubelet finished propagating
-          // the new `:latest` digest, so the recreated pod sometimes
-          // grabbed the OLD digest from a node-cache and the new push
-          // silently became "the next latest" with no one to re-pull.
-          // Rollout restart is the K8s-native fix that the deployment
-          // controller waits on (new pod must be Ready before old goes).
-          const sandboxImages = ["sandbox", "router"];
-          if (!options.only || sandboxImages.includes(options.only)) {
-            const { stdout: nsLines } = await execa("kubectl", [
-              "get", "namespaces", "-o", "name",
-            ], { stdio: "pipe" });
-            const perAgentNs = nsLines
-              .split("\n")
-              .map(l => l.replace("namespace/", "").trim())
-              .filter(n => n.startsWith("kars-") && n !== "kars-system");
-            if (perAgentNs.length > 0) {
-              spin.text = `Rolling out new image to ${perAgentNs.length} sandbox(es)...`;
-              // Per-namespace rollout restart of every Deployment labeled
-              // as a sandbox. Runs in parallel; each waits for the
-              // Deployment controller to bring up a Ready replica with
-              // the new pulled image before the old one terminates.
-              await Promise.all(perAgentNs.map(async nsName => {
-                try {
-                  const { stdout: deps } = await execa("kubectl", [
-                    "get", "deploy", "-n", nsName,
-                    "-l", "kars.azure.com/component=sandbox",
-                    "-o", "name",
-                  ], { stdio: "pipe" });
-                  const names = deps.split("\n").map(s => s.trim()).filter(Boolean);
-                  for (const dep of names) {
-                    await execa("kubectl", [
-                      "rollout", "restart", dep, "-n", nsName,
-                    ], { stdio: "pipe" }).catch(() => {});
-                  }
-                } catch { /* skip namespace */ }
-              }));
-              spin.text = `Waiting for ${perAgentNs.length} sandbox rollout(s) to complete...`;
-              // Wait for the rollouts to finish so the user can trust
-              // that on success their pods ARE running the new image.
-              await Promise.all(perAgentNs.map(async nsName => {
-                try {
-                  const { stdout: deps } = await execa("kubectl", [
-                    "get", "deploy", "-n", nsName,
-                    "-l", "kars.azure.com/component=sandbox",
-                    "-o", "name",
-                  ], { stdio: "pipe" });
-                  for (const dep of deps.split("\n").map(s => s.trim()).filter(Boolean)) {
-                    await execa("kubectl", [
-                      "rollout", "status", dep, "-n", nsName, "--timeout=120s",
-                    ], { stdio: "pipe" }).catch(() => {});
-                  }
-                } catch { /* skip */ }
-              }));
-            }
-          }
-
-          // If relay/registry changed, restart agentmesh
-          if (!options.only || options.only === "relay" || options.only === "registry") {
-            await execa("kubectl", ["rollout", "restart", "deployment", "-n", "agentmesh"], { stdio: "pipe" }).catch(() => {});
-          }
-
-          spin.succeed("Deployments restarted — pods will pull new images");
+          const applied = await applyPushedImages(execa, targets.map(image => ({
+            name: image.name, image: pushedArtifacts.get(image.name) ?? `${acrLoginServer}/${image.tag}`,
+          })), path.join(repoRoot, "deploy/helm/kars"), mesh);
+          spin.succeed(`Selected image configuration applied; ${applied.updatedSandboxes} eligible sandbox deployment(s) verified`);
+          if (applied.preservedOverrides) console.log(chalk.dim(`  Preserved ${applied.preservedOverrides} explicit sandbox/overlay image override(s).`));
+          if (applied.buildOnly.length) console.log(chalk.dim(`  Build-only (not deployed): ${applied.buildOnly.join(", ")}.`));
         } catch (e: any) {
-          spin.fail(`Rollout restart failed: ${e.message?.split("\n")[0]}`);
+          spin.fail(`Image apply failed: ${e.message?.split("\n")[0]}`);
+          throw e;
         }
       } else if (ctx?.aksCluster) {
         console.log(chalk.dim(`  To apply: kars push --apply`));

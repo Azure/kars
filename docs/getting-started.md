@@ -353,18 +353,47 @@ kars destroy --all                # everything, including the resource group
 
 ## Bring your own AKS / Foundry / ACR
 
-If you already have an AKS cluster and a Foundry project, you can install kars into them directly with the Helm chart:
+If you already have a Kubernetes cluster and inference backend, install Kars
+directly with the Helm chart. AKS uses the default values; non-AKS clusters
+start with `values-generic.yaml`. See the
+[Helm installation guide](how-to/helm-installation.md).
 
 ```bash
-helm install kars deploy/helm/kars \
-  --namespace kars-system --create-namespace \
-  --set acr.loginServer=<youracr>.azurecr.io \
-  --set foundry.endpoint=https://<your>.openai.azure.com \
-  --set foundry.deploymentName=gpt-4.1 \
-  --set workloadIdentity.clientId=<federated-mi-client-id>
+cp deploy/helm/kars/values-existing-aks.yaml my-aks-values.yaml
+# Replace every REPLACE_ME value.
+
+helm upgrade --install kars deploy/helm/kars \
+  --namespace kars-system \
+  --create-namespace \
+  --values my-aks-values.yaml
 ```
 
-Then submit `KarsSandbox` resources directly with `kubectl apply` — see the [minimal example](api/crd-reference.md#minimal-example) for the smallest valid sandbox + `InferencePolicy` pair. The CLI is convenient but optional — every action it takes is a Helm value, a Kubernetes resource, or an `az` call you can perform yourself. See **[Operations / GitOps](operations/gitops.md)**.
+The override file supplies the existing ACR image repositories, Foundry
+endpoints/deployments, and `azure.workloadIdentity.clientId`. The default chart
+does not double-deploy AgentMesh because `kars up` manages it separately; for a
+Helm-owned mesh, set `agentMesh.enabled=true`.
+
+Register the existing infrastructure with the CLI when you want Azure lifecycle
+commands:
+
+```bash
+kars config adopt-aks \
+  --subscription <subscription-id> \
+  --region <region> \
+  --resource-group <resource-group> \
+  --cluster <aks-name> \
+  --acr-login-server <registry>.azurecr.io \
+  --context <kube-context>
+```
+
+The command verifies the Kars Helm release and CRD before writing local
+metadata; it does not mutate the cluster or Azure resources. `kars operator`,
+`list`, `connect`, and other Kubernetes-facing commands already work directly
+from the selected kube context.
+
+Then submit `KarsSandbox` resources directly with `kubectl apply` — see the
+[minimal example](api/crd-reference.md#minimal-example). The CLI remains
+optional. See **[Operations / GitOps](operations/gitops.md)**.
 
 ---
 
