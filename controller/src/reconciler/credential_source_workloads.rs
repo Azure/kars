@@ -58,11 +58,12 @@ pub(super) async fn pause(
         return Ok(());
     }
     owned(&deployment.metadata, sandbox, ns)?;
-    let strategy = if sandbox.spec.credentials_ref.is_some() {
-        "Recreate"
-    } else {
-        "RollingUpdate"
-    };
+    let strategy =
+        if sandbox.spec.credentials_ref.is_some() || sandbox.spec.credential_bindings.is_some() {
+            "Recreate"
+        } else {
+            "RollingUpdate"
+        };
     if deployment.spec.as_ref().and_then(|spec| spec.replicas) == Some(0)
         && deployment
             .spec

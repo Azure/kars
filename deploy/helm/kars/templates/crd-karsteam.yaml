@@ -121,6 +121,8 @@ spec:
                     - deployment
                     - provider
                     type: object
+                  credentialBindings:
+                    {{- include "kars.credentialBindingsSchema" . | nindent 20 }}
                   modelFallbacks:
                     description: Ordered alternative inference routes; absent preserves the default route.
                     type: array
@@ -404,6 +406,8 @@ spec:
                           - deployment
                           - provider
                           type: object
+                        credentialBindings:
+                          {{- include "kars.credentialBindingsSchema" . | nindent 26 }}
                         modelFallbacks:
                           description: Ordered alternative inference routes; absent preserves the default route.
                           type: array

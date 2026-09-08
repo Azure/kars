@@ -39,9 +39,20 @@ pub(crate) fn default_member_envelope(parent: &TaskEnvelope) -> TaskEnvelope {
 /// An explicit role blueprint is a complete override. In particular, [] egress
 /// is not distinguishable from an omitted Vec and must never inherit more egress.
 pub(crate) fn member_blueprint(team: &KarsTeam, role: &TeamRole) -> Option<TaskBlueprint> {
-    role.blueprint
+    let mut blueprint = role
+        .blueprint
         .clone()
-        .or_else(|| team.spec.blueprint.clone())
+        .or_else(|| team.spec.blueprint.clone());
+    if let Some(member) = &mut blueprint
+        && member.credential_bindings.is_none()
+    {
+        member.credential_bindings = team
+            .spec
+            .blueprint
+            .as_ref()
+            .and_then(|b| b.credential_bindings.clone());
+    }
+    blueprint
 }
 
 pub(crate) fn principal_spec(team: &KarsTeam) -> KarsTaskSpec {

@@ -187,6 +187,10 @@ pub struct TaskBlueprint {
     #[schemars(schema_with = "crate::task_models::fallback_schema")]
     pub model_fallbacks: Vec<TaskModel>,
 
+    /// Explicit governed credential sources and key grants; included in task authority.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_bindings: Option<crate::credential_grant::CredentialBindings>,
+
     /// System prompt / standing instructions for the agent, in addition to the
     /// objective. Drives `KarsSandbox.spec.agent.instructions`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -442,6 +446,7 @@ pub enum PolicyAxis {
 /// Carries enough detail to render an actionable `Degraded` message.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EnvelopeViolation {
+    CredentialGrantNotSubset,
     TierExceedsParentCeiling {
         child_tier: i32,
         parent_ceiling: i32,
@@ -481,6 +486,9 @@ pub enum EnvelopeViolation {
 impl std::fmt::Display for EnvelopeViolation {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            EnvelopeViolation::CredentialGrantNotSubset => {
+                write!(f, "credential sources and key grants exceed the parent")
+            }
             EnvelopeViolation::TierExceedsParentCeiling {
                 child_tier,
                 parent_ceiling,
@@ -632,6 +640,13 @@ pub fn task_runtime(spec: &KarsTaskSpec) -> Result<crate::crd::RuntimeKind, Stri
 /// envelope or promise a ceiling this foundation cannot enforce.
 pub fn validate_execution_contract(spec: &KarsTaskSpec) -> Result<(), String> {
     task_runtime(spec)?;
+    if let Some(bindings) = spec
+        .blueprint
+        .as_ref()
+        .and_then(|b| b.credential_bindings.as_ref())
+    {
+        crate::credential_grant::validate_bindings(bindings)?;
+    }
     if let Some(bound) = &spec.envelope.tool_policy_ref
         && effective_tool_policy(spec) != Some(bound.name.as_str())
     {
@@ -674,6 +689,18 @@ pub fn spec_attenuation_violations(
     parent: &KarsTaskSpec,
 ) -> Vec<EnvelopeViolation> {
     let mut v = child.envelope.attenuation_violations(&parent.envelope);
+    if !crate::credential_grant::attenuates(
+        child
+            .blueprint
+            .as_ref()
+            .and_then(|b| b.credential_bindings.as_ref()),
+        parent
+            .blueprint
+            .as_ref()
+            .and_then(|b| b.credential_bindings.as_ref()),
+    ) {
+        v.push(EnvelopeViolation::CredentialGrantNotSubset);
+    }
 
     // Effective tool policy: same equality rule as the envelope ref axis, but
     // over the value the sandbox actually runs (blueprint-or-envelope).

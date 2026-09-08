@@ -159,6 +159,7 @@ pub async fn materialize(
         "inferenceRef": { "name": inference_name },
         "sandbox": { "isolation": blueprint.isolation },
         "networkPolicy": network_policy(&blueprint),
+        "credentialBindings": blueprint.credential_bindings,
     });
 
     // Agent instructions (the system prompt) — combine the objective with any
