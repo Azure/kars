@@ -110,6 +110,8 @@ const POLICY_KIND_WIRE: &str = "EgressApproval";
 
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
+    #[error(transparent)]
+    NamespaceOwnership(#[from] crate::reconciler::namespace_ownership::Error),
     #[error("Kubernetes API error: {0}")]
     Kube(#[from] kube::Error),
     #[error("JSON serialization error: {0}")]
@@ -121,6 +123,7 @@ impl ReconcileError {
         match self {
             ReconcileError::Kube(_) => "kube_api",
             ReconcileError::SerdeJson(_) => "serde",
+            ReconcileError::NamespaceOwnership(_) => "namespace_ownership",
         }
     }
 }
@@ -499,26 +502,29 @@ async fn remove_finalizer(
     approval: &EgressApproval,
     name: &str,
 ) -> Result<(), ReconcileError> {
+    if approval.metadata.uid.is_none() || approval.metadata.resource_version.is_none() {
+        return Err(crate::reconciler::namespace_ownership::Error::Conflict(
+            "approval cleanup requires UID/resourceVersion".into(),
+        )
+        .into());
+    }
     let remaining: Vec<String> = approval
         .metadata
         .finalizers
         .as_ref()
         .map(|v| v.iter().filter(|f| *f != FINALIZER).cloned().collect())
         .unwrap_or_default();
-    // SSA-applying just the metadata.finalizers field with our
-    // manager so the API server treats removal correctly without
-    // forcing whole-object ownership.
     let patch = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "EgressApproval",
-        "metadata": { "finalizers": remaining },
+        "metadata": {
+            "uid": approval.metadata.uid,
+            "resourceVersion": approval.metadata.resource_version,
+            "finalizers": remaining
+        },
     });
-    api.patch(
-        name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(patch),
-    )
-    .await?;
+    api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await?;
     Ok(())
 }
 
@@ -643,6 +649,33 @@ async fn reconcile(approval: Arc<EgressApproval>, ctx: Arc<Ctx>) -> Result<Actio
     let sandbox_pod_ns = format!("kars-{}", approval.spec.sandbox);
     let configmaps: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &sandbox_pod_ns);
     let sandboxes: Api<KarsSandbox> = Api::namespaced(ctx.client.clone(), &ns);
+    let namespace_lock = crate::reconciler::namespace_ownership::lock(&approval.spec.sandbox).await;
+    // Namespace GC owns the local ConfigMap once this very namespace is
+    // terminating. Only release this approval's UID-guarded finalizer; requiring
+    // its already-deleted sibling Sandbox would deadlock namespace GC.
+    if approval.metadata.deletion_timestamp.is_some()
+        && ns == sandbox_pod_ns
+        && Api::<k8s_openapi::api::core::v1::Namespace>::all(ctx.client.clone())
+            .get_opt(&ns)
+            .await?
+            .is_some_and(|namespace| namespace.metadata.deletion_timestamp.is_some())
+    {
+        remove_finalizer(&api, &approval, &name).await?;
+        return Ok(Action::await_change());
+    }
+    let target_exists = crate::reconciler::namespace_ownership::verify_target(
+        &ctx.client,
+        &ns,
+        &approval.spec.sandbox,
+    )
+    .await?;
+    if !target_exists {
+        if approval.metadata.deletion_timestamp.is_some() {
+            remove_finalizer(&api, &approval, &name).await?;
+            return Ok(Action::await_change());
+        }
+        return Ok(Action::requeue(REQUEUE_AWAITING));
+    }
 
     if approval.metadata.deletion_timestamp.is_some() {
         return finalize(&api, &configmaps, &approval, &name).await;
@@ -817,9 +850,11 @@ async fn reconcile(approval: Arc<EgressApproval>, ctx: Arc<Ctx>) -> Result<Actio
     let expected_digest = compute_merged_digest(&baseline, &approval.spec.hosts, &siblings);
 
     // ── Poll router echo ────────────────────────────────────────
+    drop(namespace_lock);
     let results = poll_referencing_sandboxes(
         &ctx.client,
         &ctx.http,
+        &ns,
         std::slice::from_ref(&approval.spec.sandbox),
     )
     .await;

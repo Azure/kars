@@ -30,6 +30,7 @@ import { requireBundledAsset } from "../lib/repo-assets.js";
 import { RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
 import { connectDeploymentTarget } from "../lib/deployment-target.js";
 import { restartController, restartSandboxes } from "../lib/deployment-rollout.js";
+import { inspectNamespaceOwnership } from "../lib/namespace-ownership.js";
 import {
   assertMeshReleaseConsistency, inspectMeshInstallation, meshImageValueArgs,
   readReleaseValues, recheckMeshOwnership, releaseMeshImages, restartMesh, updateLegacyMeshImages,
@@ -435,6 +436,7 @@ Examples:
         // roll back. Read-only; only hard-blocks when NO node is Ready. The
         // existing post-upgrade health gate still guards correctness.
         if (!options.rollback) {
+          for (const result of await inspectNamespaceOwnership(execa)) stepper.detail("info", result);
           const pre = await assertClusterUpgradeable(execa);
           if (!pre.ok) {
             stepper.stop();

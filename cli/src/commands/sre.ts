@@ -5,6 +5,9 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { execa } from "execa";
 import { requireBundledAsset } from "../lib/repo-assets.js";
+import { inspectNamespaceOwnership } from "../lib/namespace-ownership.js";
+
+const HELM_RELEASE_NAME = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$/;
 
 /**
  * `kars sre` — autonomous incident triage controller.
@@ -77,40 +80,48 @@ export function sreCommand(): Command {
       //   C. no chart at all → `helm install` with --take-ownership +
       //      a fallback workload-identity client-id (local dev).
       let mode: "upgrade" | "template" | "install" = "install";
-      const listArgs = ["list", "-n", options.namespace, "-q"];
+      const listArgs = ["list", "-n", options.namespace, "--all", "-o", "json"];
       if (options.context) listArgs.push("--kube-context", options.context);
-      try {
-        const { stdout } = await execa("helm", listArgs, { stdio: "pipe" });
-        if (
-          stdout
-            .split(/\r?\n/)
-            .map(s => s.trim())
-            .includes(options.release)
-        ) {
-          mode = "upgrade";
-        }
-      } catch {
-        // helm list errored — treat as "not installed"
+      const { stdout: releasesOutput } = await execa("helm", listArgs, { stdio: "pipe", timeout: 30_000 });
+      const releases: unknown = JSON.parse(releasesOutput);
+      if (!Array.isArray(releases) || releases.some(release =>
+        !release || typeof release !== "object" || typeof release.name !== "string"
+          || release.name.length > 53 || !HELM_RELEASE_NAME.test(release.name)
+          || release.namespace !== options.namespace)) {
+        throw new Error("Helm returned an invalid release inventory; SRE installation stopped before making changes.");
+      }
+      if (releases.some(release => release.name === options.release)) {
+        mode = "upgrade";
       }
       if (mode === "install") {
         // Check whether the controller already runs in the namespace.
         // Presence implies `kars dev` deployed it via `helm template
         // | kubectl apply` — adopting via plain `helm install` would
         // fail on every pre-existing resource. Take the template path.
-        try {
-          await execa(
-            "kubectl",
-            [
-              ...(options.context ? ["--context", options.context] : []),
-              "-n", options.namespace,
-              "get", "deploy/kars-controller",
-            ],
-            { stdio: "ignore" },
-          );
+        // Only a successful --ignore-not-found empty result proves absence.
+        // A failed read must never select the forced fresh-install path.
+        const { stdout } = await execa("kubectl", [
+          ...(options.context ? ["--context", options.context] : []),
+          "-n", options.namespace, "get", "deployment", "kars-controller",
+          "--ignore-not-found", "-o", "json",
+        ], { stdio: "pipe", timeout: 30_000 });
+        if (stdout.trim()) {
+          const deployment: unknown = JSON.parse(stdout);
+          if (!deployment || typeof deployment !== "object"
+            || !("kind" in deployment) || deployment.kind !== "Deployment"
+            || !("metadata" in deployment) || !deployment.metadata || typeof deployment.metadata !== "object"
+            || !("name" in deployment.metadata) || deployment.metadata.name !== "kars-controller"
+            || !("namespace" in deployment.metadata) || deployment.metadata.namespace !== options.namespace
+            || !("uid" in deployment.metadata) || typeof deployment.metadata.uid !== "string" || !deployment.metadata.uid) {
+            throw new Error("Kubernetes returned an invalid controller identity; SRE installation stopped before making changes.");
+          }
           mode = "template";
-        } catch {
-          // Controller missing → fresh cluster → safe to helm install.
         }
+      }
+
+      if (mode !== "install") {
+        await inspectNamespaceOwnership((file, args, commandOptions) =>
+          execa(file, [...(options.context ? ["--context", options.context] : []), ...args], commandOptions));
       }
 
       const helmArgs =
