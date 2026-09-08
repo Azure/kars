@@ -111,7 +111,7 @@ spec:
                             name: {type: string}
                             namespace: {type: string}
               x-kubernetes-validations:
-                - rule: "self.sandbox.namespace == self.controller.namespace.name"
+                - rule: "self.sandbox.__namespace__ == self.controller.__namespace__.name"
                   message: "SRE must be registered in its controller/release namespace"
             status:
               type: object
