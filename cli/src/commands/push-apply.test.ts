@@ -146,6 +146,14 @@ function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "ex
 }
 
 describe("selected core push artifacts", () => {
+  it("still requires SRE authority preflight before resolving or applying valid core artifacts", async () => {
+    const f = fixture({ fail: "karssreregistrations.kars.azure.com" });
+    await expect(applyPushedImages(f.execute, [pushed("controller")], "chart"))
+      .rejects.toThrow("karssreregistrations.kars.azure.com");
+    expect(f.calls().some(([bin, args]) => bin === "az"
+      || ["upgrade", "patch", "annotate", "rollout"].includes(args[0]))).toBe(false);
+  });
+
   it("moves a GHCR/pinned Helm controller to its pushed ACR digest without resetting customer values", async () => {
     const f = fixture();
     await applyPushedImages(f.execute, [pushed("controller")], "chart");

@@ -466,6 +466,7 @@ mod tests {
 
     fn upstream(dep: &str) -> UpstreamConfig {
         UpstreamConfig {
+            telemetry: None,
             endpoint: "https://example.openai.azure.com".into(),
             deployment: dep.to_string(),
             sandbox_name: "sbx".into(),
