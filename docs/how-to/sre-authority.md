@@ -48,6 +48,12 @@ kars sre authority stage --namespace kars-system --release kars \
 Review the output, then run the same command without `--dry-run`. Staging does
 not enroll an occupant or issue private SRE credentials.
 
+SRE installation and staging inspect all Helm release statuses. Helm 3 uses
+`list --all`; Helm 4 removed that flag and lists all statuses by default. The
+CLI retries without it only after that exact flag error and a confirmed Helm 4
+version. Other discovery failures remain errors, not an absent release or
+permission to install over existing resources.
+
 ```sh
 kars sre authority preview --namespace kars-system --release kars
 kars sre authority enroll --namespace kars-system --release kars \
