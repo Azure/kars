@@ -1,9 +1,9 @@
 # Agent credential-source capability review — 2026-09-07
 
-**Status:** additive candidate; independent security review and human sign-off
-pending. Automated tests are evidence, not approval. No reviewer identity,
-organizational approval, compliance certification, or production qualification
-is asserted by this document.
+**Status:** additive candidate with maintainer sign-off received; independent
+human security review and sign-off remain pending. Automated tests are evidence,
+not another person's approval. No organizational approval, compliance
+certification, or production qualification is asserted by this document.
 
 ## Scope and base
 
@@ -130,4 +130,21 @@ qualification and independent/human review remain release gates.
 6. Review schema/controller mixed-version handling, consumer rollout behavior,
    and source-authoring permissions before release.
 
-**Human sign-off: pending. Independent security sign-off: pending.**
+## Qualification and maintainer sign-off update
+
+The earlier pending technical evidence above is superseded by closure at
+`8b206065608593667a40665b3f48225ef9ce278d` in Azure/kars#549. Automated bounded
+review closed the finalizer repair, and all hosted technical gates passed.
+The real disposable Kind lifecycle completed 111 cases with zero failures,
+including consumer rotation/revocation, explicit opt-out, mandatory policy
+cleanup and preservation of the core namespace:
+https://github.com/Azure/kars/actions/runs/34169168508/job/101889685225.
+This is not a live customer deployment or Bridge credential/RBAC closure.
+
+The maintainer explicitly signed off and approved that qualified source on
+2026-09-08. This does not approve later functional changes, other unresolved
+slices, customer deployment or promotion to `main`. The separate independent
+reviewer must provide their own sign-off before the two-person audit gate can
+pass; this single maintainer approval must not be counted twice.
+
+Signed-off-by: pallakatos <191481949+pallakatos@users.noreply.github.com>
