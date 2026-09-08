@@ -14,9 +14,20 @@ from unittest.mock import patch
 from sre_authority.binding_probe import (
     CONTROLLER, LEGACY, RETIRED, SURVIVOR, ControllerAPI, authorization_category, retirement_patch,
 )
+from sre_authority.bootstrap_probe import failure_site
 
 
 class BindingProbeTests(unittest.TestCase):
+    def test_proof_failure_reports_only_public_source_coordinate_not_values(self):
+        try:
+            retirement_patch({"subjects": ["private-body-do-not-log"]}, "private-token-do-not-log")
+        except AssertionError as error:
+            facts = failure_site(error)
+        self.assertEqual(facts["category"], "AssertionError")
+        self.assertEqual(facts["source"], "binding_probe.py")
+        self.assertGreater(facts["line"], 0)
+        self.assertNotIn("private", json.dumps(facts))
+
     def test_patch_is_exact_subtractive_review_with_uid_rv_and_registration_fence(self):
         binding = {"metadata": {"uid": "binding-uid", "resourceVersion": "123"},
                    "subjects": [LEGACY, SURVIVOR]}

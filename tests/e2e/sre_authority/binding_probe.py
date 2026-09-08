@@ -45,7 +45,7 @@ def historical_reader(root):
             "https://github.com/Azure/kars.git", LEGACY_COMMIT], root=root)
     chart = root / ".e2e-sre-reader-chart"
     require(not chart.exists(), "Refusing to overwrite an existing historical reader fixture directory")
-    files = ("Chart.yaml", "values.yaml", "templates/_helpers.tpl", "templates/sre.yaml")
+    files = ("Chart.yaml", "values.yaml", "templates/sre.yaml")
     try:
         for name in files:
             contents = command("reader-source", ["git", "show",
