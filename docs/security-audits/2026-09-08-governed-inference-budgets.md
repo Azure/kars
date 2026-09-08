@@ -60,7 +60,10 @@ all-in task spend, invoice accuracy, taxes, or exchange rates.
 | CLI static validation | Existing TypeScript typecheck and targeted oxlint | **Passed locally** |
 | Public API/CEL | Independent pinned Kind v0.24 / Kubernetes v1.31 preflight added, no Rust image dependency | Not executed |
 | Complete broker Kind integration | Real loaded router digest, TLS broker, sibling token/price caps, route closure and cancellation scenario added to the existing E2E runner | Not executed |
-| Affected-crate strict Clippy/static guards | Required, no waivers | Pending |
+| Shared Task UID identity | Seven readiness, ancestry, UID/RV, Team-owner and API failure tests authored | Rust execution pending |
+| Static gates | Existing LOC, no-custom-crypto and no-stubs scripts against `068ae160` | **Passed locally** |
+| Source checks | Rustfmt parsing, JavaScript/shell/YAML/TOML syntax and diff checks | **Passed locally** |
+| Affected-crate strict Clippy | Required, no waivers | Pending |
 | Launch/Team cadence gates | Explicit scope syntax, first-opt-in transition constraints, and mandatory asynchronous broker/account checks | Source implemented; Rust/API qualification pending |
 | Router code identity | Finite mode requires an operator-qualified immutable router manifest digest | Helm configuration tested; runtime qualification pending |
 
@@ -76,6 +79,9 @@ ancestry `068ae16041ecf7bd2b8321dfeb22e381ebbd587b`, including `9d0f8e23` epoch
 transition repairs and the shipped-schema Kubernetes compatibility repair.
 Parent-reported prerequisite tests/Clippy and schema API successes do not
 qualify this budget implementation. Full SRE Kind remains a separate open gate.
+The existing `security-audit-required` script now discovers this correctly placed
+record and fails specifically for **0 of 2 required genuine signer emails**.
+That failure is intentional until human review, not a waived or fabricated pass.
 
 ## Remaining release decisions/gates
 
