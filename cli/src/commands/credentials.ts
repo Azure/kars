@@ -3,6 +3,7 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
+import { removedKeys, updateCredentialSource, updateDirectCredentials } from "../lib/credential-source.js";
 import { banner, section } from "../stepper.js";
 import {
   promptAndSaveCredentials, SECRETS_FILE,
@@ -233,8 +234,12 @@ export function credentialsCommand(): Command {
   // Subcommand: update credentials for a running AKS sandbox
   const update = new Command("update");
   update
-    .description("Update credentials for a running AKS sandbox (updates secret + restarts pod)")
+    .description("Update sandbox credentials (direct Secret or pinned workspace source)")
     .argument("<name>", "Sandbox name")
+    .option("--namespace <workspace>", "Workspace containing the Sandbox CR", "kars-system")
+    .option("--use-source", "Opt in to a UID-pinned workspace source (migrates direct credentials once)")
+    .option("--disable-source", "Explicitly restore the unchanged legacy credential collection")
+    .option("--remove <keys>", "Remove keys (credential flag names or environment keys, comma separated)")
     .option("--telegram-token <token>", "New Telegram bot token")
     .option("--telegram-allow-from <ids>", "Telegram allowed user IDs (comma-separated)")
     .option("--slack-token <token>", "New Slack bot token")
@@ -269,40 +274,29 @@ export function credentialsCommand(): Command {
         if (options[flag]) updates[env] = options[flag];
       }
 
-      if (Object.keys(updates).length === 0) {
+      const remove = removedKeys(options.remove);
+      if (Object.keys(updates).length === 0 && remove.length === 0 && !options.useSource && !options.disableSource) {
         console.error(chalk.red("  No credentials specified. Use --telegram-token, --brave-api-key, etc."));
         process.exit(1);
       }
 
       const namespace = `kars-${name}`;
-      const secretName = `${name}-credentials`;
       const spinner = ora(`Updating credentials for '${name}'...`).start();
 
       try {
-        // Read existing secret (if any) and merge with new values
-        let existing: Record<string, string> = {};
-        try {
-          const { stdout } = await execa("kubectl", [
-            "get", "secret", secretName, "-n", namespace,
-            "-o", "jsonpath={.data}",
-          ], { stdio: "pipe" });
-          if (stdout && stdout !== "{}") {
-            const data = JSON.parse(stdout);
-            for (const [k, v] of Object.entries(data)) {
-              existing[k] = Buffer.from(v as string, "base64").toString();
-            }
-          }
-        } catch { /* secret doesn't exist yet */ }
-
-        const merged = { ...existing, ...updates };
-
-        // Create/replace the secret
-        const secretArgs = ["create", "secret", "generic", secretName, "-n", namespace, "--dry-run=client", "-o", "yaml"];
-        for (const [env, val] of Object.entries(merged)) {
-          secretArgs.push(`--from-literal=${env}=${val}`);
+        const source = await updateCredentialSource(execa, name, options.namespace, {
+          updates, remove, useSource: options.useSource, disableSource: options.disableSource,
+          restart: options.restart,
+        });
+        if (source) {
+          spinner.succeed(source.staged
+            ? `Source staged; bind it with kars add ${name} --credential-source`
+            : source.reference ? "Credential source reconciled; controller owns runtime refresh"
+              : "Source disabled; controller will restore direct credentials");
+          if (source.reference) console.log(chalk.dim(`  Source: ${options.namespace}/${source.reference.name} (UID ${source.reference.uid})`));
+          return;
         }
-        const { stdout: yaml } = await execa("kubectl", secretArgs, { stdio: "pipe" });
-        await execa("kubectl", ["apply", "-f", "-"], { input: yaml, stdio: ["pipe", "pipe", "pipe"] });
+        await updateDirectCredentials(execa, name, updates, remove);
 
         spinner.succeed("Secret updated");
 
@@ -310,6 +304,7 @@ export function credentialsCommand(): Command {
         for (const [env, val] of Object.entries(updates)) {
           console.log(chalk.dim(`  ${env} = ••••${val.slice(-4)}`));
         }
+        for (const key of remove) console.log(chalk.dim(`  Removed ${key}`));
 
         // Restart pod unless --no-restart
         if (options.restart !== false) {

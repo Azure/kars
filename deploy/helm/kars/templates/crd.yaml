@@ -15,11 +15,16 @@ spec:
       schema:
         openAPIV3Schema:
           type: object
+          x-kubernetes-validations:
+            - rule: "!has(self.spec) || !has(self.spec.credentialsRef) || self.spec.credentialsRef.name == 'kars-credential-source-' + self.metadata.name"
+              message: "credentialsRef must use the reserved source name for this Sandbox"
           properties:
             spec:
               type: object
               required: ["runtime", "sandbox", "inferenceRef"]
               x-kubernetes-validations:
+                - rule: "!has(self.credentialsRef) || !has(self.upstreamCompatibility) || !has(self.upstreamCompatibility.sigsAgentSandbox) || self.upstreamCompatibility.sigsAgentSandbox != 'overlay'"
+                  message: "credentialsRef requires a controller-managed runtime, not overlay mode"
                 # P2 #13: top-level cross-field invariants.
                 #
                 # 1. BYO runtime is mutually exclusive with the
@@ -45,6 +50,41 @@ spec:
                   message: "spec.governance.toolPolicyRef.name must be a same-namespace name (no '/' or ':' separators); cross-namespace refs are forbidden"
                   reason: "FieldValueInvalid"
               properties:
+                upstreamCompatibility:
+                  type: object
+                  description: "Existing upstream interoperability settings; omitted by native Sandboxes."
+                  x-kubernetes-validations:
+                    - rule: "!has(self.sigsAgentSandbox) || self.sigsAgentSandbox != 'overlay' || has(self.upstreamSandboxRef)"
+                      message: "overlay mode requires a same-namespace upstreamSandboxRef"
+                  properties:
+                    sigsAgentSandbox:
+                      type: string
+                      enum: ["off", "observe", "translate", "overlay"]
+                    upstreamSandboxRef:
+                      type: object
+                      required: ["name"]
+                      properties:
+                        name:
+                          type: string
+                          minLength: 1
+                          maxLength: 253
+                    aiConformanceReference:
+                      type: boolean
+                credentialsRef:
+                  type: object
+                  description: "Explicit agent credential collection in this Sandbox's workspace; replaces legacy credentials while set. Missing/replaced sources fail closed."
+                  required: ["name", "uid"]
+                  properties:
+                    name:
+                      type: string
+                      minLength: 1
+                      maxLength: 253
+                      pattern: "^kars-credential-source-[a-z0-9][a-z0-9-]*$"
+                    uid:
+                      type: string
+                      minLength: 1
+                      maxLength: 128
+                      pattern: "^[A-Za-z0-9-]+$"
                 runtime:
                   type: object
                   required: ["kind"]

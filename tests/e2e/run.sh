@@ -188,6 +188,7 @@ install_crds() {
         kubectl get all -n kars-system || true
         kubectl describe pod -n kars-system -l app.kubernetes.io/component=controller || true
         kubectl logs -n kars-system -l app.kubernetes.io/component=controller --tail=200 || true
+        return 1
     fi
 }
 
@@ -3015,6 +3016,7 @@ EOF
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 source "$SCRIPT_DIR/namespace-ownership.sh"
+source "$SCRIPT_DIR/credential-sources.sh"
 
 main() {
     echo ""
@@ -3115,6 +3117,7 @@ main() {
     esac
 
     test_sre_namespace_ownership || fail "SRE namespace lifecycle gate failed"
+    test_credential_sources || fail "Credential-source lifecycle gate failed"
 
     echo ""
     echo "═══════════════════════════════════════════════════════"
