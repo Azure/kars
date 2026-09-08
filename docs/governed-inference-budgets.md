@@ -4,7 +4,7 @@
 explicit scope can pass syntactic launch validation; materialization and cadence
 still require the actual configured broker, immutable account and privacy proof.
 Rust qualification and the disposable Kubernetes API gate have not yet run.
-See the [capability audit](audits/governed-inference-budgets-2026-09-08.md).
+See the [security audit](security-audits/2026-09-08-governed-inference-budgets.md).
 
 ## What the limits mean
 

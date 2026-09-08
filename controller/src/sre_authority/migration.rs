@@ -22,7 +22,7 @@ pub(super) const WAITING_FOR_CONSUMERS: &str =
 const WAITING_FOR_ROTATION: &str =
     "Waiting for owned control credential consumers to restart on the new privacy epoch";
 const WAITING_FOR_ROLLOUT: &str =
-    "Owned control credential consumer has not completed its privacy-epoch rollout";
+    "Waiting for prior-epoch or prior-control-version consumers to terminate";
 
 pub(super) fn is_waiting(detail: &str) -> bool {
     matches!(
@@ -331,16 +331,6 @@ pub(super) async fn rotate_owned_control_credentials(
             }))).await.map_err(|e|api_error("Restart owned control credential consumer",e))?;
             return Err(WAITING_FOR_ROTATION.into());
         }
-        let desired = deployment
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.replicas)
-            .unwrap_or(1);
-        let ready = deployment.status.as_ref().is_some_and(|status| {
-            status.observed_generation == deployment.metadata.generation
-                && status.updated_replicas.unwrap_or(0) == desired
-                && status.available_replicas.unwrap_or(0) == desired
-        });
         let selector = deployment
             .spec
             .as_ref()
@@ -366,9 +356,9 @@ pub(super) async fn rotate_owned_control_credentials(
             // router which continues accepting its startup-cached control token.
             return Err(WAITING_FOR_ROLLOUT.into());
         }
-        if !ready && !super::live::currently_qualified(reg) {
-            return Err(WAITING_FOR_ROLLOUT.into());
-        }
+        // Privacy completion is credential/template identity plus termination
+        // of old caches, not workload availability. In particular, the SRE
+        // readiness endpoint itself requires this authority to become Ready.
     }
     Ok(())
 }
