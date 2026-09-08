@@ -64,6 +64,7 @@ fn configuration(
     {
         return Err("Operator App ID or RSA key is invalid or changed".into());
     }
+    let app=app.parse::<u64>().map_err(|_|"Operator App ID is invalid")?.to_string();
     let value=json!({"identity":managed_identity,"app_id":app,"installation_id":approved.installation_id,
         "private_key_pem":key,"repositories":selection.repositories,"write":selection.write});
     let serialized=serde_json::to_string(&value).map_err(|_|"GitHub private configuration serialization failed")?;
@@ -123,10 +124,10 @@ pub(crate) async fn ensure(
         return Ok(None);
     }
     let result=issue(client,sandbox,namespace,managed_identity).await;
-    if result.is_err() && previously_enrolled {
+    if matches!(&result, Err(credentials::IssuanceError::Rejected(_))) && previously_enrolled {
         credentials::retire_for(client,sandbox,namespace,GITHUB).await?;
     }
-    result.map(Some)
+    result.map(Some).map_err(|error|error.to_string())
 }
 
 pub(super) async fn revoke(client:&Client,grant:&KarsCredentialGrant)->Result<(),String> {
@@ -145,7 +146,7 @@ pub(super) async fn revoke(client:&Client,grant:&KarsCredentialGrant)->Result<()
 
 async fn issue(
     client:&Client,sandbox:&KarsSandbox,namespace:&Namespace,managed_identity:&Value,
-) -> Result<Projection,String> {
+) -> Result<Projection,credentials::IssuanceError> {
     let (grant,connection,store,configuration)=prepare(client,sandbox,managed_identity).await?;
     let workspace=sandbox.namespace().ok_or("GitHub workspace missing")?;
     let sandboxes:Api<KarsSandbox>=Api::namespaced(client.clone(),&workspace);
@@ -167,5 +168,17 @@ async fn issue(
     if identity(&live_connection.metadata)?!=identity(&connection.metadata)?
         || identity(&live_store.metadata)?!=identity(&store.metadata)?
     {return Err("GitHub source UID/resourceVersion changed before issuance".into())}
-    credentials::ensure_for(client,sandbox,namespace,GITHUB,Some(&configuration)).await
+    let fresh_identity=governed_services::identity(client,sandbox,namespace).await?;
+    if fresh_identity!=*managed_identity {
+        return Err("GitHub managed authority changed before issuance".into());
+    }
+    let revision=serde_json::to_string(&json!({
+        "grant":{"namespace":workspace,"uid":grant.metadata.uid,"generation":grant.metadata.generation,
+            "workspaceUid":grant.spec.workspace_uid},
+        "appSecret":{"name":store.metadata.name,"uid":store.metadata.uid,"resourceVersion":store.metadata.resource_version},
+        "connection":{"name":connection.metadata.name,"uid":connection.metadata.uid,"resourceVersion":connection.metadata.resource_version},
+        "sandbox":{"uid":sandbox.metadata.uid,"generation":sandbox.metadata.generation},
+        "runtimeNamespaceUid":namespace.metadata.uid,"identity":fresh_identity,
+    })).map_err(|_|"GitHub source revision serialization failed")?;
+    credentials::ensure_bound(client,sandbox,namespace,GITHUB,Some(&configuration),Some(&revision)).await
 }

@@ -68,3 +68,15 @@ fn governed_github_factory_rejects_replacement_adoption_and_scope_expansion() {
         assert!(!error.contains("PRIVATE KEY"),"{changed}");
     }
 }
+
+#[test]
+fn governed_github_factory_canonicalizes_app_id_without_mutating_the_customer_store() {
+    let (selection, mut grant, connection, mut store, identity) = fixture();
+    grant.spec.github_connections[0].app_id = "00123".into();
+    store.data.as_mut().unwrap().insert("GITHUB_APP_ID".into(), k8s_openapi::ByteString(b"00123".to_vec()));
+    let value: Value = serde_json::from_str(
+        &configuration(&selection, &grant, &connection, &store, &identity).unwrap(),
+    ).unwrap();
+    assert_eq!(value["app_id"], "123");
+    assert_eq!(store.data.as_ref().unwrap()["GITHUB_APP_ID"].0, b"00123");
+}

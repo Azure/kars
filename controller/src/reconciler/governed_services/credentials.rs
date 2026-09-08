@@ -16,6 +16,27 @@ use serde_json::json;
 pub(super) const REVISION: &str = "kars.azure.com/services-privacy-revision";
 pub(super) const VERSION: &str = crate::sre_registration::CONTROL_VERSION;
 pub(super) const RETIRED: &str = "kars.azure.com/services-credential-retired";
+pub(super) const SOURCE_REVISION: &str = "kars.azure.com/services-source-revision";
+
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum IssuanceError {
+    #[error("SRE privacy qualification is still pending; no credential issued or reused")]
+    PrivacyPending,
+    #[error("{0}")]
+    Rejected(String),
+}
+
+impl From<String> for IssuanceError {
+    fn from(error: String) -> Self {
+        Self::Rejected(error)
+    }
+}
+
+impl From<&str> for IssuanceError {
+    fn from(error: &str) -> Self {
+        Self::Rejected(error.into())
+    }
+}
 
 #[derive(Clone, Copy)]
 pub(crate) struct Purpose {
@@ -253,15 +274,13 @@ async fn checked_epoch(
     name: &str,
     existing: Option<&Secret>,
     purpose: Purpose,
-) -> Result<Option<String>, String> {
+) -> Result<Option<String>, IssuanceError> {
     let result = match crate::sre_authority::privacy_readiness(client, namespace).await {
         Ok(crate::sre_authority::PrivacyReadiness::Qualified(_)) => {
             crate::sre_authority::privacy_epoch(client, namespace).await
         }
         Ok(crate::sre_authority::PrivacyReadiness::Pending) => {
-            return Err(
-                "SRE privacy qualification is still pending; no credential issued or reused".into(),
-            );
+            return Err(IssuanceError::PrivacyPending);
         }
         Err(error) => Err(error),
     };
@@ -274,7 +293,7 @@ async fn checked_epoch(
                 })?;
         }
     }
-    result
+    result.map_err(IssuanceError::Rejected)
 }
 
 pub(in crate::reconciler) async fn quarantine_on_privacy_loss(
@@ -336,6 +355,19 @@ pub(crate) async fn ensure_for(
     purpose: Purpose,
     configuration: Option<&str>,
 ) -> Result<Projection, String> {
+    ensure_bound(client, sandbox, namespace, purpose, configuration, None)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) async fn ensure_bound(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+    purpose: Purpose,
+    configuration: Option<&str>,
+    source_revision: Option<&str>,
+) -> Result<Projection, IssuanceError> {
     if !super::super::namespace_ownership::claimed(namespace, sandbox)
         .map_err(|_| "Governed service credential namespace claim is invalid")?
         || sandbox.metadata.deletion_timestamp.is_some()
@@ -367,6 +399,11 @@ pub(crate) async fn ensure_for(
     .await?;
     let secret = if let Some(secret) = existing.as_ref().filter(|secret| {
         current(secret, epoch.as_deref())
+            && source_revision.is_none_or(|revision| {
+                secret.metadata.annotations.as_ref()
+                    .and_then(|annotations| annotations.get(SOURCE_REVISION))
+                    .map(String::as_str) == Some(revision)
+            })
             && configuration.is_none_or(|configuration| {
                 secret
                     .data
@@ -394,6 +431,9 @@ pub(crate) async fn ensure_for(
             SOURCE_UID: source_uid, NAMESPACE_UID: namespace.metadata.uid,
             REVISION: crate::sre_privacy::REVISION,
         });
+        if let Some(revision) = source_revision {
+            annotations[SOURCE_REVISION] = json!(revision);
+        }
         if let Some(epoch) = epoch.as_ref() {
             annotations[EPOCH] = json!(epoch);
         }
@@ -433,7 +473,13 @@ pub(crate) async fn ensure_for(
         }
     };
     validate(&secret, source_uid, namespace, purpose)?;
-    if !current(&secret, epoch.as_deref()) {
+    if !current(&secret, epoch.as_deref())
+        || source_revision.is_some_and(|revision| {
+            secret.metadata.annotations.as_ref()
+                .and_then(|annotations| annotations.get(SOURCE_REVISION))
+                .map(String::as_str) != Some(revision)
+        })
+    {
         return Err(
             "Governed service credential privacy stamp did not match the verified write".into(),
         );
@@ -515,7 +561,7 @@ pub(crate) async fn existing_configuration(
         Some(&secret),
         purpose,
     )
-    .await?;
+    .await.map_err(|error| error.to_string())?;
     if !current(&secret, epoch.as_deref()) {
         return Ok(None);
     }

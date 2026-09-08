@@ -138,6 +138,15 @@ exact `router-github-app/config.json` schema through the same strict
 version and require retirement of old consumers. Source stores retain their
 UIDs and values; neither tokens nor App keys enter agent source bundles.
 
+The private Secret's separate source-revision annotation binds grant UID/spec
+generation, App-store and connection UIDs/resourceVersions, Sandbox generation,
+runtime namespace UID and the canonical managed identity. A changed revision
+forces a new projection version and consumer rollout even when `config.json`
+bytes are identical; no unsupported fields are added to the runtime parser.
+Grant status-only resourceVersion changes do not cause perpetual rollouts.
+Pending privacy qualification has a typed non-issuance outcome rather than
+being treated by the GitHub adapter as a source-authority failure.
+
 Keyless mode requires explicit governed agent sources, rejects opaque GitHub
 egress, and currently rejects raw GitHub/custom agent credential combinations
 without a separate purpose review. This is not a migration of legacy bare

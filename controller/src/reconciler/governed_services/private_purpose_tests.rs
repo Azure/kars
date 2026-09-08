@@ -71,3 +71,53 @@ async fn governed_observer_rotated_version_waits_for_old_terminating_router_cons
     state.lock().unwrap().pods.clear();
     assert!(projection.consumers_current(&client,NS,"normal").await.unwrap());
 }
+
+#[tokio::test]
+async fn governed_github_identical_config_with_changed_source_revision_requires_consumer_rotation() {
+    let (_server, client, state) = fixture().await;
+    let first = credentials::ensure_bound(
+        &client, &source(), &namespace(), GITHUB, Some("{}"), Some("source-uid:1"),
+    ).await.unwrap();
+    let initial = state.lock().unwrap().objects[&format!("{SECRETS}/{}", GITHUB.secret)]["data"].clone();
+    let same = credentials::ensure_bound(
+        &client, &source(), &namespace(), GITHUB, Some("{}"), Some("source-uid:1"),
+    ).await.unwrap();
+    assert_eq!(same.version, first.version);
+    let changed = credentials::ensure_bound(
+        &client, &source(), &namespace(), GITHUB, Some("{}"), Some("source-uid:2"),
+    ).await.unwrap();
+    assert_ne!(changed.version, first.version);
+    {
+        let mut data = state.lock().unwrap();
+        let stored = &data.objects[&format!("{SECRETS}/{}", GITHUB.secret)];
+        assert_eq!(stored["data"], initial);
+        assert_eq!(stored["metadata"]["annotations"][credentials::SOURCE_REVISION], "source-uid:2");
+        data.pods = vec![json!({"metadata":{"name":"old","namespace":NS,"uid":"old-pod",
+            "deletionTimestamp":"2026-01-01T00:00:00Z",
+            "annotations":{GITHUB.version_annotation:first.version}}})];
+    }
+    assert!(!changed.consumers_current(&client, NS, "normal").await.unwrap());
+}
+
+#[tokio::test]
+async fn governed_github_pending_privacy_is_typed_and_does_not_retire_a_rollout() {
+    let (_server, client, state) = fixture().await;
+    credentials::ensure_bound(
+        &client, &source(), &namespace(), GITHUB, Some("{}"), Some("source-uid:1"),
+    ).await.unwrap();
+    {
+        let mut data = state.lock().unwrap();
+        enroll(&mut data);
+        data.objects.get_mut(REG).unwrap()["status"]["phase"] = "Migrating".into();
+        data.objects.insert(DEPLOY.into(), deployment());
+        data.calls.clear();
+    }
+    let result = credentials::ensure_bound(
+        &client, &source(), &namespace(), GITHUB, Some("{}"), Some("source-uid:2"),
+    ).await;
+    assert!(matches!(result, Err(credentials::IssuanceError::PrivacyPending)));
+    let data = state.lock().unwrap();
+    assert_eq!(secret_writes(&data), 0);
+    assert_eq!(data.objects[DEPLOY]["spec"]["replicas"], 1);
+    assert!(data.calls.iter().all(|(method, _, _)| method != "PATCH"));
+}
