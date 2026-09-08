@@ -595,8 +595,8 @@ pub fn kars_task_validations() -> Vec<ValidationRule> {
             ..ValidationRule::default()
         },
         ValidationRule {
-            rule: "!has(self.execution) || !self.execution.launch || !has(self.envelope.budget) || ((!has(self.envelope.budget.tokens) || self.envelope.budget.tokens == 0) && (!has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros == 0))".into(),
-            message: Some("UnsupportedLaunchBudget: total/subtree token and usdMicros ceilings are not enforced; bounded tasks may be planned but cannot launch".into()),
+            rule: crate::inference_budget::scope::LAUNCH_RULE.into(),
+            message: Some("UnsupportedLaunchBudget: positive launch budgets require explicit GovernedInference scope and a configured durable broker".into()),
             reason: Some("FieldValueForbidden".into()),
             ..ValidationRule::default()
         },
@@ -638,7 +638,9 @@ pub fn kars_task_validations() -> Vec<ValidationRule> {
 /// Panics only if kube-rs ever produces a CRD whose `spec` is missing.
 #[must_use]
 pub fn kars_task_crd() -> CustomResourceDefinition {
-    inject_spec_validations(KarsTask::crd(), kars_task_validations())
+    let mut validations = kars_task_validations();
+    validations.extend(crate::inference_budget::scope::validations());
+    inject_spec_validations(KarsTask::crd(), validations)
         .expect("kube-rs derive must produce a spec property on KarsTask")
 }
 
@@ -691,7 +693,9 @@ pub fn kars_team_validations() -> Vec<ValidationRule> {
 /// `KarsTeam` CRD — the standing-team / org primitive (design note §11).
 #[must_use]
 pub fn kars_team_crd() -> CustomResourceDefinition {
-    inject_spec_validations(KarsTeam::crd(), kars_team_validations())
+    let mut validations = kars_team_validations();
+    validations.extend(crate::inference_budget::scope::validations());
+    inject_spec_validations(KarsTeam::crd(), validations)
         .expect("kube-rs derive must produce a spec property on KarsTeam")
 }
 

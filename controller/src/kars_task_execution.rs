@@ -137,6 +137,9 @@ pub async fn materialize(
     let envelope = &task.spec.envelope;
     let blueprint = crate::kars_task::blueprint::effective_blueprint(&task.spec);
     let runtime = runtime_spec(task)?;
+    let prepared = crate::inference_budget::binding::prepare_task(client, task)
+        .await
+        .map_err(|error| contract_error(error.to_string()))?;
 
     // 1. InferencePolicy scoped to this sandbox. Model: blueprint wins, else
     //    the controller default (required — without it the sandbox degrades).
@@ -160,6 +163,13 @@ pub async fn materialize(
         "sandbox": { "isolation": blueprint.isolation },
         "networkPolicy": network_policy(&blueprint),
     });
+    if let Some(binding) = prepared
+        .status
+        .as_ref()
+        .and_then(|status| status.inference_budget.as_ref())
+    {
+        sandbox_spec["inferenceBudgetRef"] = json!(binding);
+    }
 
     // Agent instructions (the system prompt) — combine the objective with any
     // standing instructions the blueprint carries, so the agent knows both

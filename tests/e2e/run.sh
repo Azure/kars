@@ -3124,6 +3124,11 @@ main() {
 
     test_sre_namespace_ownership || fail "SRE namespace lifecycle gate failed"
     test_credential_sources || fail "Credential-source lifecycle gate failed"
+    if node "$SCRIPT_DIR/inference-budget-enforcement.mjs"; then
+        pass "Durable governed inference: real broker, sibling caps, route closure and cancellation"
+    else
+        fail "Durable governed-inference enforcement gate failed"
+    fi
 
     echo ""
     echo "═══════════════════════════════════════════════════════"

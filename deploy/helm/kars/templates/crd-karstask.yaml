@@ -181,6 +181,10 @@ spec:
                     description: Optional resource budget for the whole task subtree.
                     nullable: true
                     properties:
+                      scope:
+                        type: string
+                        enum: [GovernedInference]
+                        description: "Explicit governed-inference token/configured maximum-price scope; other costs are excluded"
                       tokens:
                         description: |-
                           Maximum total tokens the task subtree may consume. `0`/absent means
@@ -327,9 +331,18 @@ spec:
             - message: envelope.egressAllowlistRef is unsupported by this foundation; use blueprint.egress for enforced Strict destinations
               reason: FieldValueInvalid
               rule: '!has(self.envelope.egressAllowlistRef)'
-            - message: 'UnsupportedLaunchBudget: total/subtree token and usdMicros ceilings are not enforced; bounded tasks may be planned but cannot launch'
+            - message: 'UnsupportedLaunchBudget: positive launch budgets require explicit GovernedInference scope and a configured durable broker'
               reason: FieldValueForbidden
-              rule: '!has(self.execution) || !self.execution.launch || !has(self.envelope.budget) || ((!has(self.envelope.budget.tokens) || self.envelope.budget.tokens == 0) && (!has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros == 0))'
+              rule: >-
+                !has(self.execution) || !self.execution.launch || !has(self.envelope.budget) || ((!has(self.envelope.budget.tokens) || self.envelope.budget.tokens == 0) && (!has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros == 0)) || (has(self.envelope.budget.scope) && self.envelope.budget.scope == 'GovernedInference')
+            - message: First finite GovernedInference opt-in requires a new Task/Team UID; an existing unbounded runtime cannot be silently converted
+              reason: FieldValueForbidden
+              rule: >-
+                !has(self.envelope.budget) || !has(self.envelope.budget.scope) || self.envelope.budget.scope != 'GovernedInference' || ((!has(self.envelope.budget.tokens) || self.envelope.budget.tokens == 0) && (!has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros == 0)) || (has(oldSelf.envelope.budget) && has(oldSelf.envelope.budget.scope) && oldSelf.envelope.budget.scope == 'GovernedInference' && ((has(oldSelf.envelope.budget.tokens) && oldSelf.envelope.budget.tokens > 0) || (has(oldSelf.envelope.budget.usdMicros) && oldSelf.envelope.budget.usdMicros > 0)))
+            - message: GovernedInference scope cannot be removed or changed for an existing UID
+              reason: FieldValueForbidden
+              rule: >-
+                !has(oldSelf.envelope.budget) || !has(oldSelf.envelope.budget.scope) || oldSelf.envelope.budget.scope != 'GovernedInference' || (has(self.envelope.budget) && has(self.envelope.budget.scope) && self.envelope.budget.scope == 'GovernedInference')
             - message: spec.blueprint.isolation must be one of standard, enhanced, confidential
               reason: FieldValueInvalid
               rule: '!has(self.blueprint) || !has(self.blueprint.isolation) || self.blueprint.isolation in [''standard'',''enhanced'',''confidential'']'
@@ -349,6 +362,10 @@ spec:
             description: '`KarsTask.status`.'
             nullable: true
             properties:
+              inferenceBudget:
+                type: object
+                x-kubernetes-preserve-unknown-fields: true
+                description: "Controller-owned immutable budget account and Task UID ancestry binding"
               conditions:
                 description: |-
                   Standard K8s conditions. `Ready` is set `True` once the envelope has

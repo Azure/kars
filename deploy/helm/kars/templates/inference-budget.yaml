@@ -1,0 +1,112 @@
+{{- /*
+Governed inference only. No prices, model limits, free providers, or TLS
+identities are guessed. Old/reused values without this block render no broker.
+*/ -}}
+{{- $budget := .Values.inferenceBudget | default dict -}}
+{{- if and (hasKey $budget "enabled") (not (kindIs "bool" $budget.enabled)) (not (kindIs "invalid" $budget.enabled)) -}}
+{{- fail "inferenceBudget.enabled must be a boolean" -}}
+{{- end -}}
+{{- if ($budget.enabled | default false) -}}
+{{- $version := required "inferenceBudget.catalogVersion is required" $budget.catalogVersion -}}
+{{- $contracts := required "inferenceBudget.contracts is required" $budget.contracts -}}
+{{- $ca := required "inferenceBudget.caBundle is required" $budget.caBundle -}}
+{{- $tls := required "inferenceBudget.tlsSecretName is required" $budget.tlsSecretName -}}
+{{- $routerDigest := required "inferenceBudget.routerImageDigest is required" $budget.routerImageDigest -}}
+{{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $routerDigest) -}}
+{{- fail "inferenceBudget.routerImageDigest must be a qualified sha256 manifest digest" -}}
+{{- end -}}
+{{- if contains "PRIVATE KEY" $ca -}}{{- fail "inferenceBudget.caBundle must contain public certificates only" -}}{{- end -}}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kars-inference-budget-contracts
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    kars.azure.com/inference-budget-contracts: v1
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: inference-budget
+data:
+  contracts.json: {{ dict "version" $version "contracts" $contracts "nonInferenceEgressHosts" ($budget.nonInferenceEgressHosts | default list) | toJson | quote }}
+  ca.crt: |
+    {{- $ca | nindent 4 }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kars-inference-budget
+  namespace: {{ .Release.Namespace }}
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: controller
+  ports:
+    - name: budget-tls
+      port: 9447
+      targetPort: 9447
+      protocol: TCP
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kars-inference-budget-store
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karsbudgetaccounts", "karsbudgetaccounts/status"]
+    verbs: ["get", "list", "watch", "create", "update", "patch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kars-inference-budget-contracts"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: [{{ $tls | quote }}]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kars-inference-budget-store
+  namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kars-inference-budget-store
+subjects:
+  - kind: ServiceAccount
+    name: kars-controller
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-inference-budget-reviewer
+rules:
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["tokenreviews"]
+    verbs: ["create"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kars-inference-budget-reviewer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kars-inference-budget-reviewer
+subjects:
+  - kind: ServiceAccount
+    name: kars-controller
+    namespace: {{ .Release.Namespace }}
+{{- end }}
