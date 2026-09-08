@@ -32,7 +32,6 @@ export async function applyPushedImages(
   const buildOnly = images.filter(item => item.name === "sandbox-base").map(item => item.name);
   const deployable = images.filter(item => item.name !== "sandbox-base");
   if (!deployable.length) throw new Error("sandbox-base is build-only; no deployment was applied");
-  await assertSafeMutation(execute);
   const isMesh = (item: PushedImage) => item.name === "relay" || item.name === "registry";
   const selectedCore = deployable.filter(item => !isMesh(item));
   const selectedMesh = deployable.some(isMesh);
@@ -43,6 +42,7 @@ export async function applyPushedImages(
     throw new Error("External or absent AgentMesh cannot be updated; choose explicit core targets instead.");
   }
   if (core?.kind === "helm" && mesh) assertMeshReleaseConsistency(mesh, core.values);
+  await assertSafeMutation(execute);
   const artifacts = await resolvePushedArtifacts(execute, deployable);
   const coreImages = artifacts.filter(item => !isMesh(item));
   const meshImages: MeshImages = {};
