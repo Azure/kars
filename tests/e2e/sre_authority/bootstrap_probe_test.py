@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from .bootstrap_diagnostics import api_result, collect, failure_facts, object_status, policy_status
+from .bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, public_stack_facts
 from .bootstrap_probe import builtin_documents, converted_objects, exercise, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
@@ -45,6 +45,26 @@ class BootstrapProofTests(unittest.TestCase):
         obj["metadata"]["name"] = "unrelated-policy"
         with self.assertRaises(AssertionError):
             policy_status(obj, POLICIES)
+
+    def test_control_plane_metadata_and_go_frames_never_publish_logs_or_arguments(self):
+        pod = {"metadata": {"name": "kube-controller-manager-kars-e2e-control-plane"},
+            "spec": {"containers": [{"args": ["do-not-publish"]}]},
+            "status": {"containerStatuses": [{"name": "kube-controller-manager", "ready": False,
+                "restartCount": 4, "state": {"waiting": {"message": "do-not-publish"}},
+                "lastState": {"terminated": {"exitCode": 2, "reason": "Error", "message": "do-not-publish"}}}]}}
+        status = control_plane_status(pod)
+        self.assertEqual(status["containers"][0]["restartCount"], 4)
+        self.assertNotIn("do-not-publish", json.dumps(status))
+        facts = public_stack_facts(
+            "panic: runtime error: invalid memory address or nil pointer dereference\n"
+            "token=do-not-publish request body do-not-publish\n"
+            "k8s.io/apiserver/pkg/admission/plugin/policy/validating.(*TypeChecker).Check(do-not-publish)\n"
+            "panic: do-not-publish\n")
+        self.assertIn("nil-pointer", facts["panicCategories"])
+        self.assertIn("panic-redacted", facts["panicCategories"])
+        self.assertEqual(facts["publicFrames"], [
+            "k8s.io/apiserver/pkg/admission/plugin/policy/validating.(*TypeChecker).Check"])
+        self.assertNotIn("do-not-publish", json.dumps(facts))
 
     def test_no_scheduling_pulls_or_execution_but_original_controller_shape_remains(self):
         original = {"kind": "Deployment", "metadata": {"name": "kars-controller"},
