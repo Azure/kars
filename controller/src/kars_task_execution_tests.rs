@@ -5,6 +5,44 @@ use super::*;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[test]
+fn materialization_keeps_fallbacks_from_the_shared_effective_blueprint() {
+    use crate::kars_task::{KarsTaskSpec, TaskModel, blueprint::effective_blueprint_with_model};
+    let primary = TaskModel {
+        provider: "azure-openai".into(),
+        deployment: "primary".into(),
+    };
+    let spec = KarsTaskSpec {
+        blueprint: Some(TaskBlueprint {
+            model_fallbacks: vec![
+                primary.clone(),
+                TaskModel {
+                    provider: "backup".into(),
+                    deployment: "second".into(),
+                },
+                TaskModel {
+                    provider: "backup".into(),
+                    deployment: "second".into(),
+                },
+            ],
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let effective = effective_blueprint_with_model(&spec, &primary);
+    let policy = inference_spec("demo", &effective).unwrap();
+    assert_eq!(
+        policy["modelPreference"]["primary"],
+        serde_json::to_value(primary).unwrap()
+    );
+    assert_eq!(
+        policy["modelPreference"]["fallback"],
+        json!([
+            {"provider":"backup","deployment":"second"},
+        ])
+    );
+}
+
 const OBJECT_PATH: &str = "/apis/kars.azure.com/v1alpha1/namespaces/default/karssandboxes/demo";
 const COLLECTION_PATH: &str = "/apis/kars.azure.com/v1alpha1/namespaces/default/karssandboxes";
 
@@ -210,6 +248,10 @@ async fn materialized_resources_match_the_authorization_blueprint() {
             deployment: "reviewed-model".into(),
             provider: String::new(),
         }),
+        model_fallbacks: vec![TaskModel {
+            provider: "backup-account".into(),
+            deployment: "fallback-model".into(),
+        }],
         instructions: Some(" Cite evidence. ".into()),
         tool_policy: Some("read-only".into()),
         mcp_servers: vec!["docs".into()],
@@ -263,6 +305,10 @@ async fn materialized_resources_match_the_authorization_blueprint() {
     assert_eq!(
         specs[0]["modelPreference"]["primary"],
         json!(effective.model)
+    );
+    assert_eq!(
+        specs[0]["modelPreference"]["fallback"],
+        json!(effective.model_fallbacks)
     );
     assert_eq!(specs[1]["runtime"]["kind"], "MicrosoftAgentFramework");
     assert_eq!(specs[1]["sandbox"]["isolation"], json!(effective.isolation));

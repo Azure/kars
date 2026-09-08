@@ -9,6 +9,55 @@ use crate::kars_task::{
 use crate::kars_team::{KarsTeamSpec, TeamCadence, TeamRole};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::{Condition, Time};
 
+#[test]
+fn inherited_fallbacks_reach_principal_member_and_run_authority_without_weakening_budget_gate() {
+    let mut team = team();
+    let primary = TaskModel {
+        provider: "azure-openai".into(),
+        deployment: "primary".into(),
+    };
+    team.spec.blueprint = Some(TaskBlueprint {
+        model: Some(primary.clone()),
+        model_fallbacks: vec![TaskModel {
+            provider: "backup".into(),
+            deployment: "secondary".into(),
+        }],
+        ..Default::default()
+    });
+    assert!(
+        crate::kars_task::validate_execution_contract(&specs::run_spec(&team, "").unwrap())
+            .unwrap_err()
+            .contains("UnsupportedLaunchBudget")
+    );
+    team.spec.envelope.budget = None;
+    let role = TeamRole {
+        name: "reviewer".into(),
+        ..Default::default()
+    };
+    for spec in [
+        specs::principal_spec(&team),
+        specs::member_spec(&team, &role),
+        specs::run_spec(&team, "").unwrap(),
+    ] {
+        let effective =
+            crate::kars_task::blueprint::effective_blueprint_with_model(&spec, &primary);
+        assert_eq!(effective.model_fallbacks.len(), 1);
+        assert_eq!(effective.model_fallbacks[0].provider, "backup");
+        let mut changed = spec.clone();
+        changed.blueprint.as_mut().unwrap().model_fallbacks[0].deployment = "changed".into();
+        assert_ne!(
+            spec.authorization_digest_with_model(&primary),
+            changed.authorization_digest_with_model(&primary),
+        );
+    }
+    let explicit = TeamRole {
+        blueprint: Some(TaskBlueprint::default()),
+        ..role
+    };
+    let member = specs::member_spec(&team, &explicit);
+    assert!(member.blueprint.unwrap().model_fallbacks.is_empty());
+}
+
 pub(super) fn team() -> KarsTeam {
     let mut team = KarsTeam::new(
         "eng",

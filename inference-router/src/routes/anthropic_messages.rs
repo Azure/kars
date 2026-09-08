@@ -342,10 +342,12 @@ pub(super) async fn anthropic_messages(
 
     let mut upstream = state.upstream_config(sandbox_name);
     // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
-    crate::routes::apply_model_preference_override(&mut upstream, &policy);
+    let provider_resolution =
+        crate::routes::apply_model_preference_override(&mut upstream, &policy, &state.config)
+            .and_then(|_| crate::routes::apply_provider_resolution(&state, &mut upstream, &policy));
 
     // Retarget at the policy-selected provider (fails closed).
-    if let Err(e) = crate::routes::apply_provider_resolution(&state, &mut upstream, &policy) {
+    if let Err(e) = provider_resolution {
         tracing::warn!(
             target: "inference.audit",
             sandbox = %sandbox_name,

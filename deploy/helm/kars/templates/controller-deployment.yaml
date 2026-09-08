@@ -1,3 +1,4 @@
+{{- $localInference := .Values.localInference | default dict }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -51,6 +52,10 @@ spec:
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             - name: KARS_SANDBOX_NODE_SELECTOR_JSON
               value: {{ .Values.sandbox.nodeSelector | default dict | toJson | quote }}
+            - name: LOCAL_INFERENCE_NAMESPACES
+              value: {{ join "," ($localInference.namespaces | default list) | quote }}
+            - name: LOCAL_INFERENCE_TARGETS_JSON
+              value: {{ ($localInference.targets | default list) | toJson | quote }}
             {{- if .Values.controller.byoStrict }}
             - name: BYO_STRICT_MODE
               value: "1"

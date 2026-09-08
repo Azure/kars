@@ -116,6 +116,17 @@ pub struct SidecarClient {
 }
 
 impl SidecarClient {
+    #[cfg(test)]
+    pub(crate) fn for_test(base_url: String) -> Self {
+        Self {
+            base_url,
+            pinned_agent_id: "test-agent".into(),
+            expected_tenant_id: Some("test-tenant".into()),
+            client: reqwest::Client::new(),
+            cache: Arc::new(RwLock::new(HashMap::new())),
+        }
+    }
+
     /// Construct from `AUTH_SIDECAR_URL` + `PINNED_AGENT_IDENTITY_APP_ID`.
     /// Returns:
     /// - `Ok(None)` when BOTH env vars are absent — sidecar mode is

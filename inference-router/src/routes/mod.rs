@@ -45,6 +45,7 @@ mod mesh;
 pub use mesh::mesh_routes;
 
 mod mesh_token;
+mod model_routing;
 pub use mesh_token::mesh_token_routes;
 
 mod egress;
@@ -110,6 +111,7 @@ pub struct AppState {
     /// Models that don't support chat/completions (need Responses API).
     /// Populated on first 400 "unsupported" — avoids redundant round-trips.
     pub responses_only_models: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
+    pub unavailable_models: Arc<std::sync::RwLock<std::collections::HashSet<String>>>,
     /// Handoff token store (in-memory, TTL-based, one-at-a-time).
     pub handoff_tokens: HandoffTokenStore,
     /// Handoff session tracker (phase, direction, progress).
@@ -327,6 +329,7 @@ impl AppState {
             responses_only_models: Arc::new(std::sync::RwLock::new(
                 std::collections::HashSet::new(),
             )),
+            unavailable_models: Arc::new(std::sync::RwLock::new(std::collections::HashSet::new())),
             admin_token: std::fs::read_to_string("/etc/kars/secrets/admin-token")
                 .or_else(|_| std::fs::read_to_string("/run/secrets/admin-token"))
                 .or_else(|_| std::env::var("ADMIN_TOKEN"))
@@ -389,6 +392,10 @@ pub(crate) fn apply_provider_resolution(
             upstream.endpoint = endpoint;
             upstream.provider = crate::provider::ProviderKind::Anthropic;
             upstream.api_key = Some(api_key);
+            upstream.provider_api_key = None;
+            upstream.authentication = crate::proxy::AuthenticationProvenance::Named {
+                provider_id: "anthropic".into(),
+            };
         }
         crate::provider::ProviderTarget::Ollama { endpoint } => {
             tracing::info!(
@@ -400,41 +407,29 @@ pub(crate) fn apply_provider_resolution(
             upstream.endpoint = endpoint;
             upstream.provider = crate::provider::ProviderKind::Ollama;
             upstream.api_key = None;
+            upstream.provider_api_key = None;
+            upstream.authentication = crate::proxy::AuthenticationProvenance::Named {
+                provider_id: "ollama".into(),
+            };
         }
     }
     Ok(())
 }
 
-/// Slice 2d.1 — apply `modelPreference.primary.deployment` from a
-/// loaded `InferencePolicy` snapshot as a deployment override.
-///
-/// Mutates `upstream.deployment` in place when the policy carries a
-/// non-empty `primary.deployment` that differs from the current
-/// deployment. Logs an `info!` event on every effective override so
-/// operators can correlate router-level traffic shaping against the
-/// policy bytes (digest is included).
-///
-/// Fail-open by design:
-/// * `None` snapshot ⇒ no-op (back-compat for sandboxes without an
-///   `InferencePolicy`).
-/// * Empty-string `primary.deployment` ⇒ no-op (defence-in-depth even
-///   though the controller schema rejects empty strings).
-/// * Same-deployment override ⇒ no-op + no log spam.
-///
-/// **Slice 2d.1 deliberately ignores `primary.provider`** — provider-
-/// tagged routing requires a per-provider client registry the router
-/// doesn't carry today; Slice 2d.2 will pick that up. Until then the
-/// provider tag is informational-only.
+/// Apply the policy's primary model and configured provider together.
+/// An absent preference or empty deployment leaves the default unchanged;
+/// an unconfigured informational provider tag retains the legacy endpoint.
 pub(crate) fn apply_model_preference_override(
     upstream: &mut UpstreamConfig,
     policy: &crate::inference_policy_loader::InferencePolicySnapshot,
-) {
+    config: &crate::config::Config,
+) -> Result<(), crate::provider::ProviderError> {
     let Some(ref pref) = policy.model_preference else {
-        return;
+        return Ok(());
     };
     let target = pref.primary.deployment.as_str();
-    if target.is_empty() || target == upstream.deployment {
-        return;
+    if target.is_empty() {
+        return Ok(());
     }
     tracing::info!(
         sandbox = %upstream.sandbox_name,
@@ -444,7 +439,20 @@ pub(crate) fn apply_model_preference_override(
         digest = %policy.digest,
         "InferencePolicy modelPreference: overriding deployment"
     );
-    upstream.deployment = target.to_string();
+    *upstream = crate::failover::resolve_candidate(
+        upstream,
+        config,
+        &crate::failover::Candidate {
+            provider: policy
+                .provider
+                .clone()
+                .filter(|p| !p.trim().is_empty())
+                .or_else(|| Some(pref.primary.provider.clone()).filter(|p| !p.trim().is_empty())),
+            deployment: target.to_string(),
+            routing_intent: crate::failover::RoutingIntent::primary(policy),
+        },
+    )?;
+    Ok(())
 }
 
 /// Extract the admin bearer token from either `Authorization: Bearer <token>`

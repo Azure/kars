@@ -121,6 +121,26 @@ spec:
                     - deployment
                     - provider
                     type: object
+                  modelFallbacks:
+                    description: Ordered alternative inference routes; absent preserves the default route.
+                    type: array
+                    maxItems: 8
+                    items:
+                      type: object
+                      required:
+                      - deployment
+                      - provider
+                      properties:
+                        deployment:
+                          type: string
+                          minLength: 1
+                          maxLength: 253
+                          pattern: '\S'
+                        provider:
+                          type: string
+                          minLength: 1
+                          maxLength: 253
+                          pattern: '\S'
                   runtime:
                     description: |-
                       Harness/runtime (`OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework`,
@@ -384,6 +404,26 @@ spec:
                           - deployment
                           - provider
                           type: object
+                        modelFallbacks:
+                          description: Ordered alternative inference routes; absent preserves the default route.
+                          type: array
+                          maxItems: 8
+                          items:
+                            type: object
+                            required:
+                            - deployment
+                            - provider
+                            properties:
+                              deployment:
+                                type: string
+                                minLength: 1
+                                maxLength: 253
+                                pattern: '\S'
+                              provider:
+                                type: string
+                                minLength: 1
+                                maxLength: 253
+                                pattern: '\S'
                         runtime:
                           description: |-
                             Harness/runtime (`OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework`,
