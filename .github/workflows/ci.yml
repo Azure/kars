@@ -416,7 +416,7 @@ jobs:
           version: v1.30.5
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Check public-schema diagnostic privacy
-        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test
+        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
       - name: Validate the SRE CRD against the actual API server
@@ -424,7 +424,7 @@ jobs:
         run: python3 tests/e2e/sre_authority/registration_schema.py --exercise
       - name: Prove controller Pod admission with all chart policies and no image execution
         id: sre_bootstrap
-        run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe
+        run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe --retirement-bind-proof
       - name: Collect nil-schema adapter candidate evidence without weakening production gates
         if: failure() && steps.sre_bootstrap.outcome == 'failure'
         run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe --json-params-candidate
