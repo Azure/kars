@@ -144,7 +144,7 @@ async fn review_consumer(
                 .as_deref()
                 .is_none_or(str::is_empty)
             || deployment.metadata.deletion_timestamp.is_some()
-            || !crate::sre_authority::controller_managed(&deployment, name)
+            || !crate::sre_authority::controller_managed(deployment, name)
         {
             return Err(
                 "Governed service credential consumer is not a live controller-owned Deployment"
