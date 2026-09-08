@@ -131,7 +131,11 @@ def exercise(root, port, objects, policies):
         time.sleep(1)
     else:
         write_report(root, "bootstrap-before-create.json", snapshot)
-        raise RuntimeError("Public admission policy observation timed out")
+        # Still collect actual Pod/ReplicaSet admission evidence after the
+        # bounded observation wait. An unrelated policy must not hide the
+        # creation failure; the unobserved-policy gate remains fatal below.
+    observed = all(entry.get("typeChecked") and entry.get("generation") == entry.get("observedGeneration")
+                   for entry in snapshot["policies"])
     write_report(root, "bootstrap-before-create.json", snapshot)
     templates = [obj for obj in objects if obj["kind"] == "Deployment"
                  and obj["metadata"]["name"] == "kars-controller"]
@@ -156,7 +160,10 @@ def exercise(root, port, objects, policies):
     if code != 201 or not result.get("accepted") or not any(obj.get("kind") == "Pod" for obj in snapshot["workloads"]):
         raise RuntimeError("Real controller Deployment/ReplicaSet did not create an admission-only Pod")
     write_report(root, "bootstrap-result.json", {"podCreation": "accepted",
-                 "workloadExecution": "not-attempted", "readiness": "not-claimed"})
+                 "workloadExecution": "not-attempted", "readiness": "not-claimed",
+                 "allPoliciesObservedBeforeCreate": observed})
+    if not observed:
+        raise RuntimeError("Public admission policy observation timed out; Pod evidence was still collected")
 
 
 def main(root, diagnostics_only):

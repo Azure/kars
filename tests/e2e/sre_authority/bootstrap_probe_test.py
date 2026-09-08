@@ -5,9 +5,10 @@ import copy
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 from .bootstrap_diagnostics import api_result, collect, failure_facts, object_status, policy_status
-from .bootstrap_probe import builtin_documents, converted_objects, safe_controller
+from .bootstrap_probe import builtin_documents, converted_objects, exercise, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
     {"message": "Private SRE material requires authority"}]}}}
@@ -97,6 +98,25 @@ class BootstrapProofTests(unittest.TestCase):
         self.assertEqual([o["kind"] for o in result["workloads"]], ["Deployment", "ReplicaSet", "Pod"])
         self.assertNotIn("do-not-publish", json.dumps(result))
         self.assertNotIn("unrelated", json.dumps(result))
+
+    def test_observation_timeout_collects_pod_evidence_but_still_fails(self):
+        deployment = {"kind": "Deployment", "metadata": {"name": "kars-controller"},
+                      "spec": {"template": {"metadata": {"labels": {}}, "spec": {"containers": []}}}}
+        unobserved = {"policies": [{"generation": 1, "typeChecked": False}], "workloads": []}
+        created = dict(unobserved, workloads=[{"kind": "Pod"}])
+        with patch("sre_authority.bootstrap_probe.request", return_value=(201, {})) as api, \
+                patch("sre_authority.bootstrap_probe.upsert", return_value={"accepted": True}), \
+                patch("sre_authority.bootstrap_probe.collect", side_effect=[unobserved, created]), \
+                patch("sre_authority.bootstrap_probe.time.monotonic", side_effect=[0, 1, 91, 100, 101]), \
+                patch("sre_authority.bootstrap_probe.time.sleep"), \
+                patch("sre_authority.bootstrap_probe.write_report") as report:
+            with self.assertRaisesRegex(RuntimeError, "observation timed out"):
+                exercise(Path("."), 1, [deployment], POLICIES)
+        self.assertTrue(any(call.args[2].endswith("pods?dryRun=All") for call in api.call_args_list))
+        result = next(call.args[2] for call in report.call_args_list if call.args[1] == "bootstrap-result.json")
+        self.assertEqual(result["podCreation"], "accepted")
+        self.assertFalse(result["allPoliciesObservedBeforeCreate"])
+        self.assertEqual(result["readiness"], "not-claimed")
 
     def test_failure_diagnostics_precede_teardown_without_pod_spec_or_log_dump(self):
         source = (Path(__file__).resolve().parents[1] / "run.sh").read_text()
