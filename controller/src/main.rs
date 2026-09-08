@@ -81,6 +81,7 @@ mod sre_authority;
 mod sre_privacy;
 mod sre_registration;
 mod status;
+pub(crate) mod task_identity;
 mod task_models;
 mod team_commons;
 mod team_digest;

@@ -27,13 +27,17 @@ all-in task spend, invoice accuracy, taxes, or exchange rates.
 | Router code identity | Finite mode requires an operator-qualified immutable router manifest digest | Helm configuration tested; runtime qualification pending |
 
 No Cargo command, dependency installation, local Docker test, deployment, customer
-mutation, H100 operation, main-branch change, image publication, or budget commit/
-push was performed for this evidence. Existing authorized cached CLI dependencies
-were used after the local runner was found missing.
+mutation, H100 operation, main-branch change, image publication, or public push
+was performed for this evidence. Authorized local checkpoint `eb26efd9` and
+forward merge `0701baed` preserve the candidate and exact privacy parent
+`7dc72810a2e3c87aa751cfa95d9152f8dcd10194`. Existing authorized cached CLI
+dependencies were used after the local runner was found missing.
 
 ## Remaining release decisions/gates
 
-1. Integrate the real privacy issuer prerequisite; no fallback implementation.
+1. Qualify against the real, now-forwarded privacy issuer prerequisite; no
+   fallback implementation. Parent re-review and full SRE Kind remain separate
+   gates, not implied by this merge.
 2. Qualify Team lifecycle/selective launch integration, first-opt-in transition
    constraints, and source/route/cancellation regressions, including the actual
    broker-in-Kind scenario and separate schema/identity preflight.

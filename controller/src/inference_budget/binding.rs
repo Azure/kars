@@ -7,7 +7,6 @@ use kube::{
     api::{Patch, PatchParams},
 };
 use serde_json::json;
-use std::collections::BTreeSet;
 
 use super::{
     account::{KarsBudgetAccountSpec, name_for_root},
@@ -72,62 +71,53 @@ fn resource(task: &KarsTask) -> Result<ResourceIdentity, StoreError> {
     Ok(resource)
 }
 
-async fn chain(client: &Client, task: &KarsTask) -> Result<Vec<KarsTask>, StoreError> {
-    let namespace = task.namespace().ok_or(BudgetError::Identity)?;
-    let api: Api<KarsTask> = Api::namespaced(client.clone(), &namespace);
-    let mut nodes = Vec::new();
-    let mut current = task.clone();
-    let mut seen = BTreeSet::new();
-    loop {
-        let id = resource(&current)?;
-        if !seen.insert(id.uid)
-            || nodes.len() >= crate::inference_budget_contract::MAX_NODES
-            || current.metadata.deletion_timestamp.is_some()
-        {
-            return Err(BudgetError::Authorization.into());
-        }
-        limits(&current.spec.envelope)?;
-        let parent = current
-            .spec
-            .parent_ref
-            .as_ref()
-            .map(|reference| reference.name.clone());
-        nodes.push(current.clone());
-        let Some(name) = parent else { break };
-        let parent = api
-            .get(&name)
-            .await
-            .map_err(|e| api_error("resolve budget parent UID", e))?;
-        if current
+async fn chain(
+    client: &Client,
+    task: &KarsTask,
+) -> Result<crate::task_identity::VerifiedTaskLineage, StoreError> {
+    let lineage = crate::task_identity::resolve(
+        client,
+        task,
+        crate::task_identity::LeafReadiness::AllowPending,
+    )
+    .await?;
+    let mut pins = Vec::new();
+    for node in &lineage.nodes {
+        limits(&node.task.spec.envelope)?;
+        if let Some(binding) = node
+            .task
             .status
             .as_ref()
             .and_then(|status| status.inference_budget.as_ref())
-            .and_then(|binding| binding.parent_task_uid.as_deref())
-            .is_some_and(|uid| parent.metadata.uid.as_deref() != Some(uid))
-            || !crate::kars_task::spec_attenuation_violations(&current.spec, &parent.spec)
-                .is_empty()
         {
-            return Err(BudgetError::Authorization.into());
+            pins.push(crate::task_identity::TaskLineagePin {
+                task: crate::task_identity::ObjectUidRef {
+                    namespace: node.pin.task.namespace.clone(),
+                    name: node.pin.task.name.clone(),
+                    uid: binding.task_uid.clone(),
+                },
+                parent_task_uid: binding.parent_task_uid.clone(),
+                root_task_uid: binding.root_task_uid.clone(),
+            });
         }
-        current = parent;
     }
-    nodes.reverse();
-    Ok(nodes)
+    lineage.verify_pins(&pins)?;
+    Ok(lineage)
 }
 
 pub(super) async fn needs_account(client: &Client, task: &KarsTask) -> Result<bool, StoreError> {
-    let nodes = chain(client, task).await?;
-    if nodes.iter().any(|task| {
-        has_finite(&task.spec.envelope)
-            || task
+    let lineage = chain(client, task).await?;
+    if lineage.nodes.iter().any(|node| {
+        has_finite(&node.task.spec.envelope)
+            || node
+                .task
                 .status
                 .as_ref()
                 .is_some_and(|status| status.inference_budget.is_some())
     }) {
         return Ok(true);
     }
-    let first = nodes.first().ok_or(BudgetError::Identity)?;
-    Ok(team_for_root(client, first).await?.is_some_and(|team| {
+    Ok(lineage.team.as_ref().is_some_and(|team| {
         has_finite(&team.spec.envelope)
             || team
                 .status
@@ -272,35 +262,6 @@ async fn pin_task(
     Ok(updated)
 }
 
-async fn team_for_root(client: &Client, task: &KarsTask) -> Result<Option<KarsTeam>, StoreError> {
-    let owners = task
-        .metadata
-        .owner_references
-        .as_deref()
-        .unwrap_or_default();
-    let Some(owner) = owners.iter().find(|owner| {
-        owner.controller == Some(true)
-            && owner.kind == "KarsTeam"
-            && owner.api_version == "kars.azure.com/v1alpha1"
-    }) else {
-        return Ok(None);
-    };
-    let api: Api<KarsTeam> = Api::namespaced(
-        client.clone(),
-        &task.namespace().ok_or(BudgetError::Identity)?,
-    );
-    let team = api
-        .get(&owner.name)
-        .await
-        .map_err(|e| api_error("resolve lifetime Team UID", e))?;
-    if team.metadata.uid.as_deref() != Some(owner.uid.as_str())
-        || team.metadata.deletion_timestamp.is_some()
-    {
-        return Err(BudgetError::Identity.into());
-    }
-    Ok(Some(team))
-}
-
 /// Bind a complete immutable UID ancestry and current full authorization before
 /// execution. A missing/corrupt pinned account is never recreated as a balance
 /// of zero. This routine does not relax any launch gate by itself.
@@ -312,15 +273,12 @@ pub async fn ensure_task(
     settings
         .catalog(client, chrono::Utc::now().timestamp())
         .await?;
-    let nodes = chain(client, task).await?;
+    let lineage = chain(client, task).await?;
+    let nodes: Vec<_> = lineage.nodes.iter().map(|node| node.task.clone()).collect();
     let first = nodes.first().ok_or(BudgetError::Identity)?;
     let first_id = resource(first)?;
-    let team = team_for_root(client, first).await?;
+    let team = lineage.team;
     let namespaces: Api<Namespace> = Api::all(client.clone());
-    let workspace = namespaces
-        .get(&first_id.namespace)
-        .await
-        .map_err(|e| api_error("resolve budget workspace UID", e))?;
     let cluster = namespaces
         .get("kube-system")
         .await
@@ -339,7 +297,7 @@ pub async fn ensure_task(
             },
             None => first_id.clone(),
         },
-        workspace_uid: workspace.uid().ok_or(BudgetError::Identity)?,
+        workspace_uid: lineage.workspace_uid,
         cluster_uid: cluster.uid().ok_or(BudgetError::Identity)?,
     };
     root.validate()?;
@@ -442,17 +400,14 @@ pub async fn ensure_task(
             })
             .await?;
     }
-    let default_model = crate::kars_task::blueprint::controller_default_model();
     let mut output = None;
     for (index, node) in nodes.iter().enumerate() {
         let authority = TaskAuthority {
             task: resource(node)?,
             parent_uid: index.checked_sub(1).and_then(|index| nodes[index].uid()),
             root_task_uid: first_id.uid.clone(),
-            authorization_digest: node.spec.authorization_digest_with_model(&default_model),
-            effective_authorization: node
-                .spec
-                .authorization_configuration_with_model(&default_model),
+            authorization_digest: lineage.nodes[index].authorization_digest.clone(),
+            effective_authorization: lineage.nodes[index].effective_authorization.clone(),
             limits: limits(&node.spec.envelope)?,
         };
         let current = store.read(&root, &account.uid).await?;

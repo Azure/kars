@@ -29,7 +29,6 @@ use crate::{
         BudgetError, ExecutionIdentity, RootKind, RouterBinding, ledger::Ledger,
     },
     kars_task::KarsTask,
-    kars_team::KarsTeam,
 };
 
 fn api_error(stage: &'static str, error: kube::Error) -> StoreError {
@@ -520,17 +519,30 @@ async fn verify_task_binding(
         };
     }
     let tasks: Api<KarsTask> = Api::namespaced(client.clone(), &ledger.root.resource.namespace);
-    for uid in ledger.ancestors(&identity.task_uid)? {
-        let node = &ledger.nodes[&uid];
-        let task = tasks
-            .get(&node.authority.task.name)
-            .await
-            .map_err(|e| api_error("verify current task authority", e))?;
+    let leaf = tasks
+        .get(&node.authority.task.name)
+        .await
+        .map_err(|error| api_error("verify current task authority", error))?;
+    let lineage = crate::task_identity::resolve(
+        client,
+        &leaf,
+        crate::task_identity::LeafReadiness::RequireReady,
+    )
+    .await?;
+    if lineage.workspace_uid != ledger.root.workspace_uid
+        || lineage.nodes.len() != ledger.ancestors(&identity.task_uid)?.len()
+    {
+        return Err(denied());
+    }
+    let mut pins = Vec::new();
+    for current in &lineage.nodes {
+        let uid = &current.pin.task.uid;
+        let node = ledger.nodes.get(uid).ok_or_else(denied)?;
+        let task = &current.task;
         let status = task.status.as_ref().ok_or_else(denied)?;
         if task.metadata.uid.as_deref() != Some(uid.as_str())
-            || !crate::kars_task_reconciler::task_is_ready(&task)
-            || task.envelope_digest() != node.authority.authorization_digest
-            || (uid == identity.task_uid
+            || current.authorization_digest != node.authority.authorization_digest
+            || (uid == &identity.task_uid
                 && !task
                     .spec
                     .execution
@@ -544,21 +556,28 @@ async fn verify_task_binding(
             || binding.account.name != account.name_any()
             || Some(binding.account.namespace.as_str()) != account.metadata.namespace.as_deref()
             || binding.root != ledger.root
-            || binding.task_uid != uid
+            || binding.task_uid != *uid
             || binding.parent_task_uid != node.authority.parent_uid
             || binding.root_task_uid != node.authority.root_task_uid
             || binding.authorization_digest != node.authority.authorization_digest
         {
             return Err(denied());
         }
+        pins.push(crate::task_identity::TaskLineagePin {
+            task: crate::task_identity::ObjectUidRef {
+                namespace: node.authority.task.namespace.clone(),
+                name: node.authority.task.name.clone(),
+                uid: node.authority.task.uid.clone(),
+            },
+            parent_task_uid: node.authority.parent_uid.clone(),
+            root_task_uid: node.authority.root_task_uid.clone(),
+        });
     }
+    lineage.verify_pins(&pins)?;
     if ledger.root.kind == RootKind::KarsTeam {
-        let teams: Api<KarsTeam> = Api::namespaced(client.clone(), &ledger.root.resource.namespace);
-        let team = teams
-            .get(&ledger.root.resource.name)
-            .await
-            .map_err(|e| api_error("verify team lifetime budget", e))?;
+        let team = lineage.team.as_ref().ok_or_else(denied)?;
         if team.metadata.uid.as_deref() != Some(ledger.root.resource.uid.as_str())
+            || team.name_any() != ledger.root.resource.name
             || team.metadata.deletion_timestamp.is_some()
             || team.spec.paused
             || super::binding::limits(&team.spec.envelope)? != ledger.limits
@@ -575,6 +594,13 @@ async fn verify_task_binding(
         {
             return Err(denied());
         }
+    } else if lineage.team.is_some()
+        || lineage.nodes.first().is_none_or(|node| {
+            node.pin.task.uid != ledger.root.resource.uid
+                || node.pin.task.name != ledger.root.resource.name
+        })
+    {
+        return Err(denied());
     }
     Ok(())
 }
