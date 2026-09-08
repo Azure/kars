@@ -105,6 +105,9 @@ jobs:
         # transitive oci-client→reqwest) compiles natively with the
         # runner's gcc.
         run: cargo build --release --workspace
+      - name: Legacy Hermes HTTPS client test dependency
+        if: needs.changes.outputs.code == 'true'
+        run: python3 -m pip install 'httpx==0.28.1'
       - name: cargo nextest run (release)
         if: needs.changes.outputs.code == 'true'
         # Reuses the target/release/ artefacts the previous step just
@@ -393,6 +396,51 @@ jobs:
       - name: RBAC idempotency gate
         run: python3 ci/bicep-rbac-idempotency.py
 
+  sre-crd-schema:
+    name: SRE CRD API Schema
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      KUBECONFIG: ${{ github.workspace }}/.e2e-sre-schema-kubeconfig
+      PYTHONDONTWRITEBYTECODE: "1"
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      # Same pinned tools and unmodified node configuration as e2e-kind.
+      # Kind v0.24.0 defaults to the observed kindest/node:v1.31.0 image.
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          install_only: true
+          version: v0.24.0
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v4
+        with:
+          version: v1.30.5
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Check public-schema diagnostic privacy
+        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test
+      - name: Create the same disposable API server as the real harness
+        run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
+      - name: Validate the SRE CRD against the actual API server
+        run: python3 tests/e2e/sre_authority/registration_schema.py --exercise
+      - name: Collect namespace-accessor candidate evidence without relaxing the failing production gate
+        if: failure()
+        run: python3 tests/e2e/sre_authority/registration_schema.py --namespace-accessor-candidate --exercise
+      - name: Upload only public CRD schema evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: sre-crd-schema-${{ github.run_id }}
+          path: |
+            e2e-sre-schema-diag/versions.json
+            e2e-sre-schema-diag/validation.json
+            e2e-sre-schema-diag/validation-instances.json
+            e2e-sre-schema-diag/namespace-accessor-candidate.json
+            e2e-sre-schema-diag/namespace-accessor-candidate-instances.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Remove disposable schema cluster
+        if: always()
+        run: kind delete cluster --name kars-e2e
+
   helm-lint:
     name: Helm Lint
     runs-on: ubuntu-latest
@@ -603,7 +651,7 @@ jobs:
           # Fetch enough history to diff.
           git fetch --no-tags --depth=50 origin "$base" "$head" 2>/dev/null || true
           if git diff --name-only "$base" "$head" 2>/dev/null \
-             | grep -E '^(controller/|inference-router/|shared/|a2a-gateway/|kars-a2a-core/|deploy/helm/|sandbox-images/|tests/e2e/|Cargo\.toml|Cargo\.lock|Makefile)' >/dev/null; then
+             | grep -E '^(controller/|inference-router/|a2a-gateway/|kars-a2a-core/|deploy/helm/|sandbox-images/|tests/e2e/|shared/|runtimes/hermes/src/kars_runtime_hermes/plugin/sre|cli/src/(commands/(sre|budget)|lib/sre|lib/namespace-ownership)|Cargo\.toml|Cargo\.lock|Makefile)' >/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -646,6 +694,21 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
           docker system prune -af --volumes >/dev/null 2>&1 || true
           df -h
+
+      - name: Set up Node for real SRE authority CLI acceptance
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - name: Build locked CLI for Kind acceptance
+        if: steps.paths.outputs.run == 'true'
+        working-directory: cli
+        run: npm ci && npm run build
+      - name: SRE Kind unchanged Hermes HTTPS client dependency
+        if: steps.paths.outputs.run == 'true'
+        run: python3 -m pip install 'httpx==0.28.1'
 
       # Pre-built binaries from build-rust are COPY'd into the
       # distroless runtime images; no `cargo build` runs inside Docker.
@@ -721,7 +784,11 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: e2e-diagnostics-${{ github.run_id }}
-          path: e2e-diag/
+          path: |
+            e2e-diag/
+            e2e-sre-schema-diag/versions.json
+            e2e-sre-schema-diag/validation.json
+            e2e-sre-schema-diag/registration-create.json
           retention-days: 7
 
   bench-regression:

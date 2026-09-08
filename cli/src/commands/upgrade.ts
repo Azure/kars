@@ -31,6 +31,7 @@ import { RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
 import { connectDeploymentTarget } from "../lib/deployment-target.js";
 import { restartController, restartSandboxes } from "../lib/deployment-rollout.js";
 import { inspectNamespaceOwnership } from "../lib/namespace-ownership.js";
+import { assertRollbackSafe, assertSafeMutation } from "../lib/sre-authority.js";
 import {
   assertMeshReleaseConsistency, inspectMeshInstallation, meshImageValueArgs,
   readReleaseValues, recheckMeshOwnership, releaseMeshImages, restartMesh, updateLegacyMeshImages,
@@ -436,6 +437,7 @@ Examples:
         // roll back. Read-only; only hard-blocks when NO node is Ready. The
         // existing post-upgrade health gate still guards correctness.
         if (!options.rollback) {
+          await assertSafeMutation(execa);
           for (const result of await inspectNamespaceOwnership(execa)) stepper.detail("info", result);
           const pre = await assertClusterUpgradeable(execa);
           if (!pre.ok) {
@@ -451,6 +453,7 @@ Examples:
 
         // ── Rollback path ─────────────────────────────────────────────
         if (options.rollback) {
+          await assertRollbackSafe(execa);
           stepper.step("Rolling back to the previous Helm revision...");
           await execa("helm", ["rollback", "kars", "-n", NS, "--wait", "--timeout", "8m"], { stdio: "pipe" });
           stepper.done("Helm release rolled back");

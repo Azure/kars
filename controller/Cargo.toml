@@ -58,8 +58,8 @@ jsonwebtoken.workspace = true
 axum = "0.8"
 # Existing locked TLS transport/parser packages; broker identity stays behind
 # the signing wrapper and the combined privacy-issuance gate.
-tokio-rustls = "0.26"
-rustls-pemfile = "2"
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
 
 # Sigstore cosign verification + OCI fetch (S12.b: signed egress allowlist artifacts).
 # Status-only fetcher; actual NetworkPolicy still derives from inline allowedEndpoints.
@@ -72,6 +72,8 @@ oci-client = { version = "=0.16.1", default-features = false, features = ["rustl
 # refuse to auto-detect and panic on first TLS handshake. Pin to
 # `aws-lc-rs` to align with the rest of the workspace.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rcgen.workspace = true
+time.workspace = true
 regex = "1.12.3"
 
 [dev-dependencies]
