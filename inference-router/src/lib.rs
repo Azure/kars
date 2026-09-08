@@ -54,6 +54,9 @@ pub mod routes;
 pub mod safety;
 pub mod sidecar_client;
 pub mod spawn;
+#[path = "../../shared/sre_privacy.rs"]
+mod sre_privacy;
+pub mod sre_proxy;
 pub mod task_telemetry;
 pub mod telemetry;
 

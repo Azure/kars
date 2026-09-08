@@ -80,6 +80,11 @@ async fn main() -> Result<()> {
     // that broke when the runtime image went distroless (#383).
     {
         let args: Vec<String> = std::env::args().collect();
+        if args.get(1).map(String::as_str) == Some("sre-ready") {
+            std::process::exit(i32::from(
+                !kars_inference_router::sre_proxy::readiness_probe().await,
+            ));
+        }
         if args.get(1).map(String::as_str) == Some("probe") {
             // Forms: `probe <path>` (GET) | `probe GET|POST <path> [json-body]`.
             let (method, raw_path, body) = match (args.get(2), args.get(3)) {
@@ -192,6 +197,9 @@ async fn main() -> Result<()> {
     }
 
     let state = routes::AppState::new(&config).await?;
+    let _sre_proxy = kars_inference_router::sre_proxy::start()
+        .await
+        .map_err(anyhow::Error::msg)?;
 
     // Start policy hot-reload watcher (polls AGT_POLICY_DIR for mtime changes).
     governance::Governance::spawn_policy_watcher(state.governance.clone());

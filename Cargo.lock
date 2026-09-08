@@ -2501,9 +2501,11 @@ dependencies = [
  "oci-client 0.16.1",
  "prometheus",
  "rand 0.9.4",
+ "rcgen",
  "regex",
  "reqwest 0.12.28",
  "rustls",
+ "rustls-pemfile",
  "schemars 1.2.1",
  "serde",
  "serde_json",
@@ -2511,7 +2513,9 @@ dependencies = [
  "sha2 0.10.9",
  "sigstore",
  "thiserror 2.0.18",
+ "time",
  "tokio",
+ "tokio-rustls",
  "tokio-tungstenite 0.28.0",
  "tracing",
  "tracing-subscriber",
@@ -2552,8 +2556,10 @@ dependencies = [
  "prometheus",
  "proptest",
  "rand 0.9.4",
+ "rcgen",
  "reqwest 0.12.28",
  "rustls",
+ "rustls-pemfile",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -2562,6 +2568,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-rustls",
  "tokio-stream",
  "tokio-tungstenite 0.26.2",
  "tokio-util",
@@ -4032,6 +4039,19 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "513962919efc330f829edb2535844d1b912b0fbe2ca165d613e4e8788bb05a5a"
 dependencies = [
  "rand_core 0.9.5",
+]
+
+[[package]]
+name = "rcgen"
+version = "0.13.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "75e669e5202259b5314d1ea5397316ad400819437857b90861765f24c4cf80a2"
+dependencies = [
+ "aws-lc-rs",
+ "pem",
+ "rustls-pki-types",
+ "time",
+ "yasna",
 ]
 
 [[package]]
@@ -6341,6 +6361,15 @@ dependencies = [
  "signature",
  "spki",
  "tls_codec",
+]
+
+[[package]]
+name = "yasna"
+version = "0.5.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e17bb3549cc1321ae1296b9cdc2698e2b6cb1992adfa19a8c72e5b7a738f44cd"
+dependencies = [
+ "time",
 ]
 
 [[package]]
