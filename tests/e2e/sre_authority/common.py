@@ -4,9 +4,11 @@
 import base64
 import contextlib
 import hashlib
+import inspect
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import signal
 import ssl
@@ -42,6 +44,38 @@ POLICIES = (
 def require(condition, message):
     if not condition:
         raise AssertionError(message)
+
+
+def command_site():
+    # Only source coordinates from our harness, never argv, frame locals,
+    # absolute filesystem paths or a traceback containing API response data.
+    frame = inspect.currentframe()
+    try:
+        while frame:
+            source = Path(frame.f_code.co_filename)
+            if source.parent == Path(__file__).parent and source.name != "common.py":
+                return f"{source.name}:{frame.f_code.co_name}:{frame.f_lineno}"
+            frame = frame.f_back
+        return "harness"
+    finally:
+        del frame
+
+
+def command_error_category(stderr):
+    status = re.search(r"Error from server \((Forbidden|Unauthorized|Invalid|NotFound|"
+                       r"AlreadyExists|Conflict|BadRequest|InternalError|ServiceUnavailable)\)", stderr)
+    if status:
+        return status.group(1)
+    text = stderr.lower()
+    for needle, category in (("error validating", "schema-validation"),
+                             ("unknown flag", "cli-argument"),
+                             ("required value", "required-field"),
+                             ("no matches for kind", "api-discovery"),
+                             ("the server doesn't have a resource type", "api-discovery"),
+                             ("timed out waiting", "wait-timeout")):
+        if needle in text:
+            return category
+    return "unclassified"
 
 
 def printed_object(output):
@@ -173,11 +207,13 @@ class Harness:
             except subprocess.TimeoutExpired:
                 os.killpg(process.pid, signal.SIGKILL)
                 process.communicate(timeout=5)
-            raise AssertionError(f"Command {Path(args[0]).name} exceeded its bounded timeout") from None
+            raise AssertionError(f"Command exceeded its bounded timeout at {command_site()}") from None
         result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
         if expected is not None:
             # Never echo command output or argv: token/Secret reads are captured.
-            require(result.returncode == expected, f"Command {Path(args[0]).name} failed during {self.phase}")
+            require(result.returncode == expected,
+                    f"Command failed during {self.phase} at {command_site()}; "
+                    f"exit={result.returncode}; category={command_error_category(stderr)}")
         return result if expected is None else result.stdout
 
     def k(self, *args, data=None, user="admin", timeout=35, expected=0):
