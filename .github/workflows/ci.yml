@@ -416,13 +416,16 @@ jobs:
           version: v1.30.5
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Check public-schema diagnostic privacy
-        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test
+        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
       - name: Validate the SRE CRD against the actual API server
+        id: sre_schema
         run: python3 tests/e2e/sre_authority/registration_schema.py --exercise
+      - name: Prove controller Pod admission with all chart policies and no image execution
+        run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe
       - name: Collect namespace-accessor candidate evidence without relaxing the failing production gate
-        if: failure()
+        if: failure() && steps.sre_schema.outcome == 'failure'
         run: python3 tests/e2e/sre_authority/registration_schema.py --namespace-accessor-candidate --exercise
       - name: Upload only public CRD schema evidence
         if: always()
@@ -435,6 +438,7 @@ jobs:
             e2e-sre-schema-diag/validation-instances.json
             e2e-sre-schema-diag/namespace-accessor-candidate.json
             e2e-sre-schema-diag/namespace-accessor-candidate-instances.json
+            e2e-sre-schema-diag/bootstrap-*.json
           if-no-files-found: warn
           retention-days: 7
       - name: Remove disposable schema cluster
@@ -758,6 +762,7 @@ jobs:
             e2e-sre-schema-diag/versions.json
             e2e-sre-schema-diag/validation.json
             e2e-sre-schema-diag/registration-create.json
+            e2e-sre-schema-diag/bootstrap-*.json
           retention-days: 7
 
   bench-regression:
