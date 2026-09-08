@@ -30,6 +30,8 @@ const REQUIRED_RELEASE_ASSETS = [
   // local-k8s (kars dev --release --target local-k8s)
   "deploy/helm/kars",
   "deploy/helm/kars/values-local-dev.yaml",
+  "deploy/helm/kars/values-generic.yaml",
+  "deploy/helm/kars/values-existing-aks.yaml",
   "deploy/agentmesh-agt.yaml",
   // aks (kars up --release)
   "deploy/bicep/main.bicep",

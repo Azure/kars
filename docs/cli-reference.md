@@ -1124,7 +1124,11 @@ kars credentials update my-agent --brave-api-key $KEY --no-restart
 
 ### `kars config`
 
-Inspects and edits the local CLI configuration at `~/.kars/config.json`. This is the file `kars dev` and `kars credentials` write to, holding your provider choice, endpoint, and default model. The command is a thin viewer + per-provider model picker — it doesn't touch secrets (use `kars credentials` for those) and it doesn't talk to your cluster (it's purely local).
+Inspects and edits local CLI state under `~/.kars/`. Provider/model
+subcommands remain local-only. `adopt-aks` is the explicit exception: it
+read-verifies an existing Kars Helm release and writes deployment metadata to
+`~/.kars/context.json` so Azure lifecycle commands can operate on a cluster
+that was not provisioned by `kars up`.
 
 **Usage:**
 ```
@@ -1136,6 +1140,7 @@ kars config <subcommand> [arguments]
 |---|---|
 | `show` | Print the effective local configuration (provider, endpoint, model). For `github-models`, also validates the saved model against the live catalog. |
 | `model [model-id]` | Pick or set the local default inference model. Provider-aware: presents the curated Copilot catalog for `github-copilot`, the live tool-capable catalog for `github-models`, or accepts a free-form deployment name for `foundry`. Omit the argument for an interactive picker. |
+| `adopt-aks` | Register an existing Helm-installed AKS cluster with the CLI. Verifies the Helm release and `KarsSandbox` CRD, then writes explicit subscription, region, resource-group, cluster, and ACR metadata without modifying infrastructure. |
 | `reset` | Clear the local configuration file (does not touch saved secrets). |
 
 **Examples:**
@@ -1151,9 +1156,22 @@ kars config model claude-opus-4.7
 
 # Set it directly (Foundry deployment name)
 kars config model gpt-4.1
+
+# Register a Kars Helm installation on existing AKS infrastructure
+kars config adopt-aks \
+  --subscription <subscription-id> \
+  --region eastus2 \
+  --resource-group <resource-group> \
+  --cluster <aks-name> \
+  --acr-login-server <registry>.azurecr.io \
+  --context <kube-context>
 ```
 
-**See also:** [`kars credentials`](#kars-credentials), [`kars model`](#kars-model) (per-sandbox).
+Kubernetes-facing commands such as `operator`, `list`, `connect`, and policy
+commands work directly from the selected kube context and do not require an
+adopted Azure context.
+
+**See also:** [`kars credentials`](#kars-credentials), [`kars model`](#kars-model) (per-sandbox), [Install with Helm](how-to/helm-installation.md).
 
 ---
 

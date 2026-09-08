@@ -1,0 +1,170 @@
+{{- $mesh := .Values.agentMesh | default dict }}
+{{- if $mesh.enabled }}
+{{- $namespace := $mesh.namespace | default "agentmesh" }}
+{{- if ne $namespace "agentmesh" }}
+{{- fail "agentMesh.namespace must be agentmesh: current Kars endpoints and NetworkPolicies use this fixed namespace" }}
+{{- end }}
+{{- $registry := $mesh.registry | default dict }}
+{{- $relay := $mesh.relay | default dict }}
+{{- $registryImage := $registry.image | default dict }}
+{{- $relayImage := $relay.image | default dict }}
+{{- $registryReplicas := dig "replicas" 1 $registry }}
+{{- $relayReplicas := dig "replicas" 1 $relay }}
+{{- range $replicas := list $registryReplicas $relayReplicas }}
+{{- if not (has (toString $replicas) (list "0" "1")) }}
+{{- fail "AgentMesh replica counts must be 0 or 1: the shipped relay and registry do not share state across replicas" }}
+{{- end }}
+{{- end }}
+{{- $createNamespace := dig "createNamespace" true $mesh }}
+{{- if not (kindIs "bool" $createNamespace) }}
+{{- fail "agentMesh.createNamespace must be a boolean" }}
+{{- end }}
+{{- if $createNamespace }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: agentmesh
+    app.kubernetes.io/part-of: kars
+    kars.azure.com/mesh-provider: agt
+    kars.azure.com/managed: "true"
+---
+{{- end }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: registry
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: agentmesh-registry
+    app.kubernetes.io/part-of: kars
+spec:
+  replicas: {{ $registryReplicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agentmesh-registry
+  template:
+    metadata:
+      labels:
+        app: agentmesh-registry
+        app.kubernetes.io/name: agentmesh-registry
+        app.kubernetes.io/part-of: kars
+        kars.azure.com/mesh-provider: agt
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: registry
+          image: {{ printf "%s:%s" ($registryImage.repository | default "ghcr.io/azure/kars-agentmesh-registry") ($registryImage.tag | default "latest") | quote }}
+          imagePullPolicy: {{ $registryImage.pullPolicy | default "Always" }}
+          ports:
+            - name: http
+              containerPort: 8082
+          env:
+            - { name: HOST, value: "0.0.0.0" }
+            - { name: PORT, value: "8082" }
+            - { name: LOG_LEVEL, value: "info" }
+          readinessProbe:
+            httpGet: { path: /health, port: http }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 100m, memory: 128Mi }
+            limits: { cpu: 500m, memory: 256Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentmesh-registry
+  namespace: {{ $namespace }}
+spec:
+  selector:
+    app: agentmesh-registry
+  ports:
+    - name: http
+      port: 8080
+      targetPort: http
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: relay
+  namespace: {{ $namespace }}
+  labels:
+    app.kubernetes.io/name: agentmesh-relay
+    app.kubernetes.io/part-of: kars
+spec:
+  replicas: {{ $relayReplicas }}
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app: agentmesh-relay
+  template:
+    metadata:
+      labels:
+        app: agentmesh-relay
+        app.kubernetes.io/name: agentmesh-relay
+        app.kubernetes.io/part-of: kars
+        kars.azure.com/mesh-provider: agt
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: relay
+          image: {{ printf "%s:%s" ($relayImage.repository | default "ghcr.io/azure/kars-agentmesh-relay") ($relayImage.tag | default "latest") | quote }}
+          imagePullPolicy: {{ $relayImage.pullPolicy | default "Always" }}
+          ports:
+            - name: websocket
+              containerPort: 8083
+          env:
+            - { name: HOST, value: "0.0.0.0" }
+            - { name: PORT, value: "8083" }
+            - { name: LOG_LEVEL, value: "info" }
+            - name: REGISTRY_URL
+              value: "http://agentmesh-registry.{{ $namespace }}.svc.cluster.local:8080"
+            - { name: REQUIRE_REGISTRATION, value: "true" }
+          readinessProbe:
+            httpGet: { path: /health, port: websocket }
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /health, port: websocket }
+            initialDelaySeconds: 5
+            periodSeconds: 30
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          resources:
+            requests: { cpu: 100m, memory: 64Mi }
+            limits: { cpu: 500m, memory: 128Mi }
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: agentmesh-relay
+  namespace: {{ $namespace }}
+spec:
+  selector:
+    app: agentmesh-relay
+  ports:
+    - name: websocket
+      port: 8765
+      targetPort: websocket
+{{- end }}

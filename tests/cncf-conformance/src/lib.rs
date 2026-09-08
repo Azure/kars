@@ -712,7 +712,7 @@ pub fn check_supply_chain_rows() -> Outcome {
     let required = [
         ("cargo-deny", "cargo deny check"),
         ("trivy", "aquasecurity/trivy-action"),
-        ("npm-audit", "npm audit --audit-level=high"),
+        ("npm-audit", "npm-audit-bulk.mjs"),
         ("cosign-verify", "cosign-verify"),
     ];
     let mut missing = Vec::new();
