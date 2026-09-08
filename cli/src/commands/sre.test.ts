@@ -23,6 +23,7 @@ function authority(args: readonly string[]): { stdout: string } {
   const name = getIndex < 0 ? undefined : args[getIndex + 2];
   let value: unknown;
   if (args.includes("can-i")) return { stdout: "yes" };
+  if (resource === "deployment" && name === "kars-controller") value = JSON.parse(controller);
   if (resource === "crd") value = { metadata: metadata("karssreregistrations.kars.azure.com") };
   if (resource === "karssreregistrations.kars.azure.com") value = {
     metadata: metadata("canonical"),
@@ -61,6 +62,27 @@ beforeEach(() => {
 afterEach(() => vi.restoreAllMocks());
 
 describe("SRE controller upgrade namespace preflight", () => {
+  it("retains the existing release when Helm 4 removes the all-status flag", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    execute.mockImplementation(async (file, args) => {
+      if (file === "helm" && args[0] === "list") {
+        if (args.includes("--all")) {
+          throw Object.assign(new Error("Unsupported flag"), {
+            exitCode: 1, stderr: "Error: unknown flag: --all\n",
+          });
+        }
+        expect(args).toContain("--kube-context");
+        return { stdout: releases };
+      }
+      if (file === "helm" && args[0] === "version") return { stdout: "v4.2.4" };
+      if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
+      return authority(args);
+    });
+    await sreCommand().parseAsync(["node", "sre", "install", "--no-wait", "--context", "test-context"]);
+    expect(execute.mock.calls.some(([file, args]) => file === "helm" && args[0] === "upgrade")).toBe(true);
+    expect(execute.mock.calls.some(([file, args]) => file === "helm" && args[0] === "install")).toBe(false);
+  });
+
   it.each(["upgrade", "template"])("preflights %s mode in the selected context before mutations", async mode => {
     execute.mockImplementation(async (file, args) => {
       if (file === "helm" && args[0] === "list") return { stdout: mode === "upgrade" ? releases : "[]" };
