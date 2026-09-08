@@ -3013,7 +3013,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         degrade!(
             "ControlCredentialRolloutPending",
             "Waiting for startup-cached governed control credential consumers to terminate"
-                .to_string()
         );
     }
 
