@@ -119,6 +119,11 @@ def authorization_category(code, body):
         return "other-forbidden"
     if code == 409 and body.get("kind") == "Status" and body.get("reason") == "Conflict":
         return "cas-conflict"
+    if code == 422 and body.get("kind") == "Status" and body.get("reason") == "Invalid":
+        causes = body.get("details", {}).get("causes", [])
+        if any(cause.get("field") == "metadata.uid" and cause.get("reason") == "FieldValueInvalid"
+               and "field is immutable" in cause.get("message", "") for cause in causes):
+            return "immutable-uid"
     if code == 200 and body.get("kind") == "ClusterRoleBinding":
         return "accepted"
     return "unexpected-response"
@@ -277,7 +282,8 @@ def prove(root, port, state, objects, report):
         facts["cases"].append(result)
         report(facts)
         require(code == expected and category == {200: "accepted", 403: "rbac-permissions-not-held",
-                409: "cas-conflict"}[expected], "Retirement dry-run did not prove the intended API outcome")
+                409: "cas-conflict", 422: "immutable-uid"}[expected],
+                "Retirement dry-run did not prove the intended API outcome")
         if expected == 200:
             require(response["metadata"]["uid"] == binding["metadata"]["uid"]
                     and response["metadata"].get("annotations", {}).get(RETIRED) == registration["metadata"]["uid"]
@@ -305,7 +311,7 @@ def prove(root, port, state, objects, report):
                 and not api.allowed("", "limitranges", "get"), "Named reader bind widened custom-role authority")
         probe(reader, "exact-reader-bind-only", 200)
         probe(custom, "exact-reader-bind-only-custom", 403)
-        probe(reader, "wrong-uid", 409, "uid")
+        probe(reader, "wrong-uid", 422, "uid")
         probe(reader, "stale-resource-version", 409, "resourceVersion")
         facts["allReviewedDryRunsAuthorized"] = False
         facts["noRetirementsApplied"] = True
