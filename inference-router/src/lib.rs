@@ -34,6 +34,10 @@ pub mod failover;
 pub mod forward_proxy;
 pub mod governance;
 pub mod governed_services;
+#[path="../../shared/service_observer.rs"]
+pub mod service_observer;
+pub mod service_observation;
+pub mod service_observation_tls;
 pub mod guardrails;
 pub mod handoff;
 pub mod inference_policy_loader;

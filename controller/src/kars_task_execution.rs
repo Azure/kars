@@ -160,6 +160,7 @@ pub async fn materialize(
         "sandbox": { "isolation": blueprint.isolation },
         "networkPolicy": network_policy(&blueprint),
         "credentialBindings": blueprint.credential_bindings,
+        "githubBinding": blueprint.github_binding,
     });
 
     // Agent instructions (the system prompt) — combine the objective with any

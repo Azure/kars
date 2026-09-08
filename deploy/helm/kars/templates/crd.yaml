@@ -72,6 +72,8 @@ spec:
                       type: boolean
                 credentialBindings:
                   {{- include "kars.credentialBindingsSchema" . | nindent 18 }}
+                githubBinding:
+                  {{- include "kars.githubBindingSchema" . | nindent 18 }}
                 credentialsRef:
                   type: object
                   description: "Explicit agent credential collection in this Sandbox's workspace; replaces legacy credentials while set. Missing/replaced sources fail closed."
@@ -747,6 +749,22 @@ spec:
             status:
               type: object
               properties:
+                serviceObservation:
+                  type: object
+                  required: [capability, phase, reason, version, grant, secret, namespaceUid, privacyRevision]
+                  properties:
+                    capability: {type: string}
+                    phase: {type: string}
+                    reason: {type: string}
+                    version: {type: string}
+                    namespaceUid: {type: string}
+                    privacyRevision: {type: string}
+                    privacyEpoch: {type: string, nullable: true}
+                    deploymentUid: {type: string}
+                    grant:
+                      {{- include "kars.credentialIdentitySchema" . | nindent 22 }}
+                    secret:
+                      {{- include "kars.credentialIdentitySchema" . | nindent 22 }}
                 phase:
                   type: string
                   enum: ["Pending", "Creating", "Running", "Failed", "Terminating", "Degraded"]

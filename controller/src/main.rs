@@ -29,6 +29,8 @@ mod crd;
 mod crd_validations;
 mod credential_grant;
 mod credential_grants;
+#[path="../../shared/service_observer.rs"]
+mod service_observer;
 mod credential_source;
 mod egress_allowlist_compile;
 mod egress_approval;

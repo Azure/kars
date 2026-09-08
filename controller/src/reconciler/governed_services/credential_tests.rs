@@ -19,6 +19,9 @@ const SECRETS: &str = "/api/v1/namespaces/kars-normal/secrets";
 const REG: &str = "/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical";
 const DEPLOY: &str = "/apis/apps/v1/namespaces/kars-normal/deployments/normal";
 
+#[path = "private_purpose_tests.rs"]
+mod private_purpose_tests;
+
 fn source() -> KarsSandbox {
     serde_json::from_value(json!({
         "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsSandbox",
@@ -172,12 +175,14 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
             }
         }
         if (method == "POST" && path == SECRETS)
-            || (method == "PATCH" && path == format!("{SECRETS}/{SECRET}"))
+            || (method == "PATCH" && path.starts_with(&format!("{SECRETS}/")))
         {
             if state.conflict {
                 return failure(409);
             }
-            let key = format!("{SECRETS}/{SECRET}");
+            let key = if method == "POST" {
+                format!("{SECRETS}/{}",body["metadata"]["name"].as_str().unwrap())
+            } else { path.to_string() };
             let mut value = if method == "PATCH" {
                 let existing = state.objects.get(&key).unwrap().clone();
                 assert_eq!(body["metadata"]["uid"], existing["metadata"]["uid"]);
@@ -191,8 +196,8 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
             };
             merge(&mut value, &body);
             value["metadata"]["resourceVersion"] = version.to_string().into();
-            if let Some(material) = body["stringData"]["control-token"].as_str() {
-                value["data"]["control-token"] = STANDARD.encode(material).into();
+            for (key,material) in body["stringData"].as_object().into_iter().flatten() {
+                value["data"][key] = STANDARD.encode(material.as_str().unwrap()).into();
             }
             value.as_object_mut().unwrap().remove("stringData");
             if state.wrong_write_stamp {

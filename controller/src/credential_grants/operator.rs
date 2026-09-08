@@ -1,192 +1,342 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Separate, exact-name egress-operator access; never an agent source.
+//! Private read-only observation issuance, distinct from agent/admin credentials.
 
 use super::*;
-use k8s_openapi::api::rbac::v1::{Role, RoleBinding};
-use kube::api::{DeleteParams, PostParams, Preconditions};
-
-const LABEL: &str = "kars.azure.com/credential-operator-grant";
-
-fn owned(meta: &kube::api::ObjectMeta, grant: &KarsCredentialGrant) -> bool {
-    meta.labels.as_ref().and_then(|labels| labels.get(LABEL)) == grant.metadata.uid.as_ref()
-        && meta.annotations.as_ref().and_then(|a| a.get(GRANT_OWNER)) == grant.metadata.uid.as_ref()
-        && identity(meta).is_ok()
-}
+use crate::{crd::KarsSandbox, reconciler::governed_services, service_observer};
+use k8s_openapi::api::apps::v1::Deployment;
 
 pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> Result<(), String> {
-    if !grant.spec.router_operator_access {
-        return revoke(client, grant).await;
+    let workspace = grant.namespace().ok_or("Observation workspace missing")?;
+    let sandboxes: Api<KarsSandbox> = Api::namespaced(client.clone(), &workspace);
+    for target in &grant.spec.observation_targets {
+        if target.kind != "KarsSandbox" || target.namespace != workspace || target.uid.is_empty() {
+            return Err(
+                "Observation authority requires an explicit same-workspace Sandbox UID".into(),
+            );
+        }
+        let sandbox = sandboxes
+            .get(&target.name)
+            .await
+            .map_err(|e| api_error("Read observation target", e))?;
+        if sandbox.uid().as_deref() != Some(target.uid.as_str())
+            || sandbox.metadata.deletion_timestamp.is_some()
+        {
+            return Err("Observation target was replaced or is terminating".into());
+        }
+        let namespace = Api::<Namespace>::all(client.clone())
+            .get(&format!("kars-{}", target.name))
+            .await
+            .map_err(|e| api_error("Read observation runtime namespace", e))?;
+        crate::reconciler::namespace_ownership::recheck(client, &sandbox, &namespace)
+            .await
+            .map_err(|_| "Observation target namespace ownership changed")?;
+        match crate::sre_authority::privacy_readiness(client, &namespace.name_any()).await {
+            Ok(crate::sre_authority::PrivacyReadiness::Pending) => {
+                publish(client, &sandbox, None).await?;
+                continue;
+            }
+            Err(error) => {
+                publish(client, &sandbox, None).await?;
+                retire(client, &sandbox, &namespace).await?;
+                return Err(error);
+            }
+            Ok(crate::sre_authority::PrivacyReadiness::Qualified(_)) => {}
+        }
+        let epoch = crate::sre_authority::privacy_epoch(client, &namespace.name_any()).await?;
+        let identity = governed_services::identity(client, &sandbox, &namespace).await?;
+        let server_name = format!(
+            "observer-{}.kars.internal",
+            sandbox.uid().ok_or("Sandbox UID missing")?
+        );
+        let existing_tls = governed_services::credentials::existing_configuration(
+            client,
+            &sandbox,
+            &namespace,
+            governed_services::credentials::OBSERVER_TLS,
+        )
+        .await?;
+        let tls = if let Some(existing) = existing_tls.filter(|value| {
+            value["identity"] == identity
+                && value["serverName"] == server_name
+                && value["expiresAt"]
+                    .as_i64()
+                    .is_some_and(|expiry| expiry > chrono::Utc::now().timestamp() + 172800)
+        }) {
+            existing
+        } else {
+            let issued = crate::providers::sre_tls::issue_for(vec![server_name.clone()])?;
+            json!({"identity":identity,"serverName":server_name,"caPem":issued.ca,
+                "certificatePem":issued.certificate,"privateKeyPem":issued.private_key,"expiresAt":issued.expires_at})
+        };
+        let tls_configuration =
+            serde_json::to_string(&tls).map_err(|_| "Observation TLS serialization failed")?;
+        governed_services::credentials::ensure_for(
+            client,
+            &sandbox,
+            &namespace,
+            governed_services::credentials::OBSERVER_TLS,
+            Some(&tls_configuration),
+        )
+        .await?;
+        let mut recipients = Vec::new();
+        for writer in &grant.spec.writers {
+            let ns = Api::<Namespace>::all(client.clone())
+                .get(&writer.namespace)
+                .await
+                .map_err(|e| api_error("Read observation recipient namespace", e))?;
+            let sa = Api::<ServiceAccount>::namespaced(client.clone(), &writer.namespace)
+                .get(&writer.name)
+                .await
+                .map_err(|e| api_error("Read observation recipient identity", e))?;
+            if identity_of(&sa.metadata)?.0 != writer.uid {
+                return Err("Observation recipient ServiceAccount UID changed".into());
+            }
+            recipients.push(service_observer::Recipient {
+                namespace: writer.namespace.clone(),
+                namespace_uid: identity_of(&ns.metadata)?.0.into(),
+                name: writer.name.clone(),
+                uid: writer.uid.clone(),
+            });
+        }
+        let binding = service_observer::Binding {
+            capability: service_observer::CAPABILITY.into(),
+            identity,
+            grant: service_observer::Grant {
+                namespace: workspace.clone(),
+                name: NAME.into(),
+                uid: grant.uid().ok_or("Observation grant UID missing")?,
+                generation: grant.metadata.generation.unwrap_or_default(),
+            },
+            recipients,
+            privacy_revision: crate::sre_privacy::REVISION.into(),
+            privacy_epoch: epoch.clone(),
+            server_name,
+            ca_pem: tls["caPem"]
+                .as_str()
+                .ok_or("Observation CA missing")?
+                .into(),
+        };
+        if !binding.valid() {
+            return Err("Observation binding is invalid".into());
+        }
+        let configuration = serde_json::to_string(&binding)
+            .map_err(|_| "Observation binding serialization failed")?;
+        let credential = governed_services::credentials::ensure_for(
+            client,
+            &sandbox,
+            &namespace,
+            governed_services::credentials::OBSERVER,
+            Some(&configuration),
+        )
+        .await?;
+        if credential.epoch != epoch {
+            return Err("Observation privacy changed during issuance".into());
+        }
+        super::observer_metadata::ensure(client, grant, &sandbox, &namespace, &binding.recipients)
+            .await?;
+        let deployed = governed_services::credentials::review_consumer(
+            client,
+            &namespace.name_any(),
+            &sandbox.name_any(),
+        )
+        .await?;
+        let current = deployed.as_ref().is_some_and(|deployment| {
+            deployment
+                .spec
+                .as_ref()
+                .and_then(|spec| spec.template.metadata.as_ref())
+                .and_then(|meta| meta.annotations.as_ref())
+                .and_then(|annotations| {
+                    annotations.get(governed_services::credentials::OBSERVER.version_annotation)
+                })
+                == Some(&credential.version)
+        }) && credential
+            .consumers_current(client, &namespace.name_any(), &sandbox.name_any())
+            .await?;
+        let secret_uid = credential
+            .version
+            .split(':')
+            .next()
+            .ok_or("Observation version missing")?
+            .to_string();
+        publish(
+            client,
+            &sandbox,
+            Some(ObservationStatus {
+                capability: service_observer::CAPABILITY.into(),
+                phase: if current { "Ready" } else { "Prepared" }.into(),
+                reason: if current {
+                    "Qualified"
+                } else {
+                    "AwaitingCredentialRollout"
+                }
+                .into(),
+                version: credential.version,
+                grant: ObjectIdentity {
+                    name: NAME.into(),
+                    uid: grant.uid().ok_or("Grant UID missing")?,
+                },
+                secret: ObjectIdentity {
+                    name: service_observer::SECRET.into(),
+                    uid: secret_uid,
+                },
+                namespace_uid: namespace.uid().ok_or("Namespace UID missing")?,
+                privacy_revision: crate::sre_privacy::REVISION.into(),
+                privacy_epoch: epoch,
+                deployment_uid: deployed.as_ref().and_then(ResourceExt::uid),
+            }),
+        )
+        .await?;
     }
-    let workspace = grant
-        .namespace()
-        .ok_or("Operator grant workspace missing")?;
-    let sandboxes = Api::<crate::crd::KarsSandbox>::namespaced(client.clone(), &workspace)
+    for sandbox in sandboxes
         .list(&ListParams::default())
         .await
-        .map_err(|e| api_error("Read operator grant targets", e))?;
-    let mut expected = std::collections::BTreeSet::new();
-    for sandbox in sandboxes {
-        if sandbox.metadata.deletion_timestamp.is_some() {
-            continue;
-        }
-        let namespace = format!("kars-{}", sandbox.name_any());
-        let Some(ns) = Api::<Namespace>::all(client.clone())
-            .get_opt(&namespace)
-            .await
-            .map_err(|e| api_error("Read operator target namespace", e))?
-        else {
-            continue;
-        };
-        if !crate::reconciler::namespace_ownership::claimed(&ns, &sandbox)
-            .map_err(|_| "Operator namespace claim is invalid")?
-        {
-            continue;
-        }
-        crate::reconciler::namespace_ownership::recheck(client, &sandbox, &ns)
-            .await
-            .map_err(|_| "Operator target ownership changed")?;
-        expected.insert(namespace.clone());
-        let name = format!("kars-credential-operator-{}", identity(&grant.metadata)?.0);
-        let metadata = json!({"name":name,"namespace":namespace,"labels":{LABEL:grant.metadata.uid},
-            "annotations":{GRANT_OWNER:grant.metadata.uid,"kars.azure.com/sandbox-uid":sandbox.metadata.uid,
-                "kars.azure.com/namespace-uid":ns.metadata.uid},
-            "ownerReferences":[{"apiVersion":"v1","kind":"Namespace","name":namespace,"uid":ns.metadata.uid,
-                "controller":true,"blockOwnerDeletion":false}]});
-        let role:Role=serde_json::from_value(json!({"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role",
-            "metadata":metadata,"rules":[{"apiGroups":[""],"resources":["secrets"],"resourceNames":["router-admin-token"],"verbs":["get"]}]}))
-            .map_err(|_|"Operator role serialization failed")?;
-        let binding:RoleBinding=serde_json::from_value(json!({"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding",
-            "metadata":metadata,"roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":name},
-            "subjects":grant.spec.writers.iter().map(|writer|json!({"kind":"ServiceAccount","namespace":writer.namespace,"name":writer.name})).collect::<Vec<_>>()}))
-            .map_err(|_|"Operator binding serialization failed")?;
-        let roles: Api<Role> = Api::namespaced(client.clone(), &namespace);
-        if let Some(old) = roles
-            .get_opt(&name)
-            .await
-            .map_err(|e| api_error("Read operator role", e))?
-        {
-            if !owned(&old.metadata, grant)
-                || old.rules != role.rules
-                || old
-                    .metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|a| a.get("kars.azure.com/sandbox-uid"))
-                    != sandbox.metadata.uid.as_ref()
-                || old
-                    .metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|a| a.get("kars.azure.com/namespace-uid"))
-                    != ns.metadata.uid.as_ref()
-            {
-                return Err("Operator role target identity changed".into());
-            }
-        } else {
-            roles
-                .create(&PostParams::default(), &role)
+        .map_err(|e| api_error("Read retired observation targets", e))?
+    {
+        let ours = sandbox
+            .status
+            .as_ref()
+            .and_then(|s| s.service_observation.as_ref())
+            .is_some_and(|status| Some(status.grant.uid.as_str()) == grant.metadata.uid.as_deref());
+        let selected = grant.spec.observation_targets.iter().any(|target| {
+            target.name == sandbox.name_any()
+                && Some(target.uid.as_str()) == sandbox.metadata.uid.as_deref()
+        });
+        if ours && !selected {
+            publish(client, &sandbox, None).await?;
+            let namespace = Api::<Namespace>::all(client.clone())
+                .get(&format!("kars-{}", sandbox.name_any()))
                 .await
-                .map_err(|e| api_error("Create exact-name operator role", e))?;
-        }
-        super::verify(client, grant).await?;
-        let bindings: Api<RoleBinding> = Api::namespaced(client.clone(), &namespace);
-        if let Some(old) = bindings
-            .get_opt(&name)
-            .await
-            .map_err(|e| api_error("Read operator binding", e))?
-        {
-            if !owned(&old.metadata, grant) || old.role_ref != binding.role_ref {
-                return Err("Foreign operator binding preserved".into());
-            }
-            if old.subjects != binding.subjects {
-                bindings.patch(&name,&PatchParams::default(),&Patch::Merge(json!({
-                    "metadata":{"uid":old.metadata.uid,"resourceVersion":old.metadata.resource_version},"subjects":binding.subjects
-                }))).await.map_err(|e|api_error("Update owned operator identities",e))?;
-            }
-        } else {
-            bindings
-                .create(&PostParams::default(), &binding)
-                .await
-                .map_err(|e| api_error("Create owned operator binding", e))?;
+                .map_err(|e| api_error("Read retired observation namespace", e))?;
+            retire(client, &sandbox, &namespace).await?;
         }
     }
-    revoke_except(client, grant, &expected).await
+    super::observer_rbac::reconcile(client, grant).await?;
+    super::observer_metadata::revoke_stale(client, grant).await
+}
+
+fn identity_of(meta: &kube::api::ObjectMeta) -> Result<(&str, &str), String> {
+    super::identity(meta)
+}
+
+async fn publish(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    status: Option<ObservationStatus>,
+) -> Result<(), String> {
+    let namespace = sandbox.namespace().ok_or("Observation workspace missing")?;
+    let api: Api<KarsSandbox> = Api::namespaced(client.clone(), &namespace);
+    let current = api
+        .get(&sandbox.name_any())
+        .await
+        .map_err(|e| api_error("Refresh observation status target", e))?;
+    if current.uid() != sandbox.uid() {
+        return Err("Observation status target was replaced".into());
+    }
+    if serde_json::to_value(
+        current
+            .status
+            .as_ref()
+            .and_then(|s| s.service_observation.as_ref()),
+    )
+    .ok()
+        == serde_json::to_value(&status).ok()
+    {
+        return Ok(());
+    }
+    api.patch_status(&sandbox.name_any(),&PatchParams::default(),&Patch::Merge(json!({
+        "metadata":{"uid":current.metadata.uid,"resourceVersion":current.metadata.resource_version},
+        "status":{"serviceObservation":status}
+    }))).await.map_err(|e|api_error("Publish private observation capability",e))?;
+    Ok(())
 }
 
 pub(super) async fn revoke(client: &Client, grant: &KarsCredentialGrant) -> Result<(), String> {
-    revoke_except(client, grant, &std::collections::BTreeSet::new()).await
-}
-
-async fn revoke_except(
-    client: &Client,
-    grant: &KarsCredentialGrant,
-    keep: &std::collections::BTreeSet<String>,
-) -> Result<(), String> {
-    let selector = format!(
-        "{LABEL}={}",
-        grant.uid().ok_or("Operator grant UID missing")?
-    );
-    let bindings = Api::<RoleBinding>::all(client.clone())
-        .list(&ListParams::default().labels(&selector))
+    super::observer_rbac::revoke(client, grant).await?;
+    super::observer_metadata::revoke(client, grant).await?;
+    let workspace = grant.namespace().ok_or("Observation workspace missing")?;
+    for sandbox in Api::<KarsSandbox>::namespaced(client.clone(), &workspace)
+        .list(&ListParams::default())
         .await
-        .map_err(|e| api_error("Read owned operator bindings for revocation", e))?;
-    for binding in bindings {
-        if binding
-            .namespace()
-            .is_some_and(|namespace| keep.contains(&namespace))
+        .map_err(|e| api_error("Read observation consumers for revocation", e))?
+    {
+        if sandbox
+            .status
+            .as_ref()
+            .and_then(|s| s.service_observation.as_ref())
+            .is_some_and(|status| Some(status.grant.uid.as_str()) == grant.metadata.uid.as_deref())
         {
-            continue;
+            publish(client, &sandbox, None).await?;
+            let namespace = Api::<Namespace>::all(client.clone())
+                .get(&format!("kars-{}", sandbox.name_any()))
+                .await
+                .map_err(|e| api_error("Read observation namespace for revocation", e))?;
+            retire(client, &sandbox, &namespace).await?;
         }
-        if !owned(&binding.metadata, grant) {
-            return Err("Foreign operator binding preserved".into());
-        }
-        let namespace = binding
-            .namespace()
-            .ok_or("Operator binding namespace missing")?;
-        Api::<RoleBinding>::namespaced(client.clone(), &namespace)
-            .delete(
-                &binding.name_any(),
-                &DeleteParams {
-                    preconditions: Some(Preconditions {
-                        uid: binding.metadata.uid,
-                        resource_version: binding.metadata.resource_version,
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|e| api_error("Revoke exact-name operator binding", e))?;
-    }
-    let roles = Api::<Role>::all(client.clone())
-        .list(&ListParams::default().labels(&selector))
-        .await
-        .map_err(|e| api_error("Read owned operator roles for revocation", e))?;
-    for role in roles {
-        if role
-            .namespace()
-            .is_some_and(|namespace| keep.contains(&namespace))
-        {
-            continue;
-        }
-        if !owned(&role.metadata, grant) {
-            return Err("Foreign operator role preserved".into());
-        }
-        let namespace = role.namespace().ok_or("Operator role namespace missing")?;
-        Api::<Role>::namespaced(client.clone(), &namespace)
-            .delete(
-                &role.name_any(),
-                &DeleteParams {
-                    preconditions: Some(Preconditions {
-                        uid: role.metadata.uid,
-                        resource_version: role.metadata.resource_version,
-                    }),
-                    ..Default::default()
-                },
-            )
-            .await
-            .map_err(|e| api_error("Revoke exact-name operator role", e))?;
     }
     Ok(())
+}
+
+async fn retire(client: &Client, sandbox: &KarsSandbox, namespace: &Namespace) -> Result<(), String> {
+    for purpose in [governed_services::credentials::OBSERVER, governed_services::credentials::OBSERVER_TLS] {
+        governed_services::credentials::retire_for(client, sandbox, namespace, purpose).await?;
+    }
+    Ok(())
+}
+
+pub(crate) fn mount(pod: &mut serde_json::Value, sandbox: &KarsSandbox) -> Option<String> {
+    let status = sandbox.status.as_ref()?.service_observation.as_ref()?;
+    if !["Ready", "Prepared"].contains(&status.phase.as_str())
+        || status.capability != service_observer::CAPABILITY
+    {
+        return None;
+    }
+    pod["volumes"].as_array_mut()?.push(json!({"name":"service-observations","secret":{
+        "secretName":service_observer::SECRET,"items":[{"key":"observation-token","path":"observation-token"},
+            {"key":"config.json","path":"config.json"}]}}));
+    pod["volumes"].as_array_mut()?.push(json!({"name":"service-observation-identity","secret":{
+        "secretName":service_observer::TLS_SECRET,"items":[{"key":"config.json","path":"config.json"}]}}));
+    for container in pod["containers"].as_array_mut()? {
+        if container["name"] == "inference-router" {
+            container["volumeMounts"]
+                .as_array_mut()?
+                .push(json!({"name":"service-observations",
+                "mountPath":service_observer::DIRECTORY,"readOnly":true}));
+            container["env"]
+                .as_array_mut()?
+                .push(json!({"name":service_observer::VERSION_ENV,"value":status.version}));
+            container["volumeMounts"]
+                .as_array_mut()?
+                .push(json!({"name":"service-observation-identity",
+                "mountPath":service_observer::TLS_DIRECTORY,"readOnly":true}));
+        }
+    }
+    Some(status.version.clone())
+}
+
+pub(crate) fn decorate(deployment: &mut Deployment, sandbox: &KarsSandbox) {
+    if let Some(status) = sandbox
+        .status
+        .as_ref()
+        .and_then(|status| status.service_observation.as_ref())
+        && ["Ready", "Prepared"].contains(&status.phase.as_str())
+    {
+        deployment
+            .spec
+            .as_mut()
+            .expect("Deployment spec")
+            .template
+            .metadata
+            .get_or_insert_default()
+            .annotations
+            .get_or_insert_default()
+            .insert(
+                governed_services::credentials::OBSERVER
+                    .version_annotation
+                    .into(),
+                status.version.clone(),
+            );
+    }
 }

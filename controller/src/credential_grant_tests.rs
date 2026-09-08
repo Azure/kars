@@ -61,7 +61,8 @@ fn governed_credentials_keep_legacy_defaults_and_require_explicit_custom_key_gra
             legacy_imports: vec![],
             controller: None,
             bridge_consumers: None,
-            router_operator_access: false,
+            observation_targets: Vec::new(),
+            github_connections:Vec::new(),
             enabled: true,
         },
     );

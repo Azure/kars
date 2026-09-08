@@ -190,6 +190,8 @@ pub struct TaskBlueprint {
     /// Explicit governed credential sources and key grants; included in task authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_bindings: Option<crate::credential_grant::CredentialBindings>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    pub github_binding: Option<crate::credential_grant::GitHubBinding>,
 
     /// System prompt / standing instructions for the agent, in addition to the
     /// objective. Drives `KarsSandbox.spec.agent.instructions`.
@@ -442,106 +444,9 @@ pub enum PolicyAxis {
     EgressAllowlist,
 }
 
-/// A single way in which a child envelope failed to attenuate its parent.
-/// Carries enough detail to render an actionable `Degraded` message.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum EnvelopeViolation {
-    CredentialGrantNotSubset,
-    TierExceedsParentCeiling {
-        child_tier: i32,
-        parent_ceiling: i32,
-    },
-    CeilingExceedsParentCeiling {
-        child_ceiling: i32,
-        parent_ceiling: i32,
-    },
-    DelegationDepthExceeded {
-        child_depth: i32,
-        parent_depth: i32,
-    },
-    BudgetExceeded {
-        axis: BudgetAxis,
-        child: i64,
-        parent: i64,
-    },
-    BudgetUnbounded {
-        axis: BudgetAxis,
-        parent: i64,
-    },
-    PolicyMismatch {
-        axis: PolicyAxis,
-        child: Option<String>,
-        parent: String,
-    },
-    /// A child's blueprint egress reaches a destination the parent does not
-    /// allow — egress must be a subset of the parent's (capability attenuation
-    /// applied to the *effective* network surface the sandbox enforces, not a
-    /// vestigial ref).
-    EgressNotSubset {
-        host: String,
-        port: Option<u16>,
-    },
-}
-
-impl std::fmt::Display for EnvelopeViolation {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            EnvelopeViolation::CredentialGrantNotSubset => {
-                write!(f, "credential sources and key grants exceed the parent")
-            }
-            EnvelopeViolation::TierExceedsParentCeiling {
-                child_tier,
-                parent_ceiling,
-            } => write!(
-                f,
-                "tier {child_tier} exceeds parent authority ceiling {parent_ceiling}"
-            ),
-            EnvelopeViolation::CeilingExceedsParentCeiling {
-                child_ceiling,
-                parent_ceiling,
-            } => write!(
-                f,
-                "authorityCeiling {child_ceiling} exceeds parent authority ceiling {parent_ceiling}"
-            ),
-            EnvelopeViolation::DelegationDepthExceeded {
-                child_depth,
-                parent_depth,
-            } => write!(
-                f,
-                "delegationDepth {child_depth} exceeds parent budget (parent depth {parent_depth}, child must be <= {})",
-                parent_depth - 1
-            ),
-            EnvelopeViolation::BudgetExceeded {
-                axis,
-                child,
-                parent,
-            } => write!(f, "budget {axis:?} {child} exceeds parent cap {parent}"),
-            EnvelopeViolation::BudgetUnbounded { axis, parent } => write!(
-                f,
-                "budget {axis:?} is unbounded but parent caps it at {parent}"
-            ),
-            EnvelopeViolation::PolicyMismatch {
-                axis,
-                child,
-                parent,
-            } => write!(
-                f,
-                "{axis:?} ref {} must match parent's bound `{parent}`",
-                child.as_deref().unwrap_or("<none>")
-            ),
-            EnvelopeViolation::EgressNotSubset { host, port } => match port {
-                Some(p) => write!(
-                    f,
-                    "egress to {host}:{p} is not permitted by the parent (egress must be a subset of the parent's)"
-                ),
-                None => write!(
-                    f,
-                    "egress to {host} is not permitted by the parent (egress must be a subset of the parent's)"
-                ),
-            },
-        }
-    }
-}
+#[path="kars_task_violations.rs"]
+mod violations;
+pub use violations::EnvelopeViolation;
 
 /// Compare one numeric budget axis. A parent cap binds the whole subtree.
 fn attenuate_budget_axis(
@@ -640,6 +545,15 @@ pub fn task_runtime(spec: &KarsTaskSpec) -> Result<crate::crd::RuntimeKind, Stri
 /// envelope or promise a ceiling this foundation cannot enforce.
 pub fn validate_execution_contract(spec: &KarsTaskSpec) -> Result<(), String> {
     task_runtime(spec)?;
+    if let Some(blueprint) = &spec.blueprint
+        && let Some(binding) = &blueprint.github_binding
+    {
+        crate::credential_grant::github::validate(binding)?;
+        crate::credential_grant::github::agent_sources(blueprint.credential_bindings.as_ref())?;
+        if blueprint.egress.iter().any(|entry| crate::credential_grant::github::opaque_github_egress(&entry.host)) {
+            return Err("Keyless GitHub requires repository-enforced routes, not opaque GitHub egress".into());
+        }
+    }
     if let Some(bindings) = spec
         .blueprint
         .as_ref()
@@ -689,6 +603,12 @@ pub fn spec_attenuation_violations(
     parent: &KarsTaskSpec,
 ) -> Vec<EnvelopeViolation> {
     let mut v = child.envelope.attenuation_violations(&parent.envelope);
+    if !crate::credential_grant::github::attenuates(
+        child.blueprint.as_ref().and_then(|b|b.github_binding.as_ref()),
+        parent.blueprint.as_ref().and_then(|b|b.github_binding.as_ref()),
+    ) {
+        v.push(EnvelopeViolation::GitHubGrantNotSubset);
+    }
     if !crate::credential_grant::attenuates(
         child
             .blueprint

@@ -54,3 +54,19 @@ properties:
         owner:
           {{- include "kars.credentialTargetSchema" . | nindent 10 }}
 {{- end -}}
+{{- define "kars.githubBindingSchema" -}}
+type: object
+required: [grant, connection, repositories]
+properties:
+  grant:
+    {{- include "kars.credentialIdentitySchema" . | nindent 4 }}
+  connection:
+    {{- include "kars.credentialIdentitySchema" . | nindent 4 }}
+  repositories:
+    type: array
+    minItems: 1
+    maxItems: 32
+    x-kubernetes-list-type: set
+    items: {type: string, maxLength: 140, pattern: '^[a-z0-9._-]{1,39}/[a-z0-9._-]{1,100}$'}
+  write: {type: boolean, default: false}
+{{- end -}}

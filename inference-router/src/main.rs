@@ -197,6 +197,8 @@ async fn main() -> Result<()> {
     }
 
     let state = routes::AppState::new(&config).await?;
+    let _observation_tls=kars_inference_router::service_observation_tls::start(state.clone())
+        .await.map_err(anyhow::Error::msg)?;
     let _sre_proxy = kars_inference_router::sre_proxy::start()
         .await
         .map_err(anyhow::Error::msg)?;
@@ -460,6 +462,7 @@ async fn main() -> Result<()> {
         let policy_status_for_platform = state.policy_status.clone();
         let telemetry = state.services.telemetry.clone();
         let services = routes::governed_service_routes(state.clone()).with_state(state.clone());
+        let observation_state=state.clone();
         let merged = public
             .merge(protected)
             .merge(handoff_init)
@@ -490,6 +493,7 @@ async fn main() -> Result<()> {
             // Operator controls must remain reachable while inference requests
             // or bounded approval waits occupy their own concurrency limits.
             .merge(services)
+            .layer(axum::middleware::from_fn_with_state(observation_state,routes::observation_purpose_boundary))
             // r6 — trace-id middleware is outermost so every request gets a
             // trace span before any other layer runs (concurrency limit,
             // connection_close, auth gates all log inside the span).

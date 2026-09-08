@@ -3,8 +3,13 @@
 
 mod admission;
 mod control;
+pub(crate) mod github;
 mod legacy;
 mod operator;
+pub(crate) use operator::decorate as decorate_observations;
+pub(crate) use operator::mount as mount_observations;
+mod observer_metadata;
+mod observer_rbac;
 mod rbac;
 pub(crate) mod sources;
 
@@ -54,6 +59,7 @@ pub(crate) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
         || grant.spec.writers.is_empty()
         || grant.spec.writers.len() > 16
         || grant.spec.integration_stores.len() > 32
+        || grant.spec.github_connections.len() > 32
     {
         return Err("Credential grant is disabled or has invalid bounds".into());
     }
@@ -221,6 +227,7 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
     let namespace = grant.namespace().ok_or("Grant namespace missing")?;
     let api: Api<KarsCredentialGrant> = Api::namespaced(client.clone(), &namespace);
     if grant.metadata.deletion_timestamp.is_some() {
+        github::revoke(client, grant).await?;
         operator::revoke(client, grant).await?;
         rbac::revoke(client, grant).await?;
         let finalizers = grant
@@ -277,9 +284,11 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         Err(reason) => {
             let revoked = rbac::revoke(client, grant).await;
             let operators = operator::revoke(client, grant).await;
+            let github = github::revoke(client, grant).await;
             let reason = revoked
                 .err()
                 .or_else(|| operators.err())
+                .or_else(|| github.err())
                 .map(|e| format!("{reason}; owned writer revocation failed: {e}"))
                 .unwrap_or(reason);
             publish(

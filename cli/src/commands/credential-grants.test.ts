@@ -3,6 +3,7 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { agentCredentialKey, validateGrantDocument } from "./credential-grants.js";
+import { createHash } from "node:crypto";
 
 function fixture() {
   const objects:Record<string,any>={
@@ -54,5 +55,22 @@ describe("operator credential grant preflight",()=>{
     }
     expect(agentCredentialKey("GITHUB_TOKEN")).toBe(true);
     expect(agentCredentialKey("INTERNAL_SERVICE_SECRET")).toBe(true);
+  });
+  it("preflights immutable GitHub source identities and canonical reviewed scope without writes",async()=>{
+    const f=fixture();
+    const name=`kars-github-connection-${createHash("sha256").update("owner").digest("hex").slice(0,16)}`;
+    f.objects[`configmap/work/${name}`]={metadata:{name,uid:"connection",resourceVersion:"1"},
+      data:{installation_id:"456",repos:'["owner/repo"]'}};
+    f.objects["secret/work/kars-github-app"]={type:"Opaque",metadata:{name:"kars-github-app",uid:"app",resourceVersion:"1"},
+      data:{GITHUB_APP_ID:Buffer.from("123").toString("base64"),GITHUB_APP_PRIVATE_KEY:"PRIVATE_VALUE_SENTINEL"}};
+    f.document.spec.integrationStores.push({secret:{name:"kars-github-app",uid:"app"},purpose:"github-app"});
+    const connection={connection:{name,uid:"connection"},appSecret:{name:"kars-github-app",uid:"app"},
+      appId:"123",ownerSubject:"owner",installationId:456,repositories:["owner/repo"],write:false};
+    const document={...f.document,spec:{...f.document.spec,githubConnections:[connection]}};
+    await validateGrantDocument(f.execute,document);
+    connection.connection.uid="replacement";
+    await expect(validateGrantDocument(f.execute,document)).rejects.toThrow("review changed");
+    expect(f.execute.mock.calls.every(([args])=>["get","auth"].includes(args[0]!))).toBe(true);
+    expect(JSON.stringify(document)).not.toContain("PRIVATE_VALUE_SENTINEL");
   });
 });

@@ -361,7 +361,7 @@ pub(crate) async fn prepare(
         states.push(json!({"name":source.name_any(),"uid":source.metadata.uid,"resourceVersion":source.metadata.resource_version,
             "keys":selection.keys,"scope":selection.scope}));
     }
-    let input_state = json!({"grantUid":grant.metadata.uid,"grantVersion":grant.metadata.resource_version,
+    let input_state = json!({"grantUid":grant.metadata.uid,"grantGeneration":grant.metadata.generation,
         "target":target,"sources":states,"bindings":bindings});
     let serialized = serde_json::to_string(&input_state)
         .map_err(|_| "Credential binding metadata serialization failed")?;
