@@ -177,6 +177,13 @@ pub fn content_digest(bytes: &[u8]) -> String {
     format!("sha256:{}", &sha256_hex(bytes)[..32])
 }
 
+/// Opaque service credentials; callers must keep them out of agent authority
+/// except where the credential deliberately grants only a filtered interface.
+pub fn generate_service_token() -> String {
+    use rand::distr::{Alphanumeric, SampleString};
+    Alphanumeric.sample_string(&mut rand::rng(), 64)
+}
+
 /// DSSE Pre-Authentication Encoding:
 /// `"DSSEv1" SP len(type) SP type SP len(body) SP body`.
 ///

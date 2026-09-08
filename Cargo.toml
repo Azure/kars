@@ -47,6 +47,10 @@ reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"
 # with "Could not automatically determine the process-level
 # CryptoProvider" when multiple feature flags resolve.
 rustls = { version = "0.23", default-features = false, features = ["aws-lc-rs"] }
+rcgen = { version = "0.13.2", default-features = false, features = ["aws_lc_rs", "pem"] }
+tokio-rustls = { version = "0.26", default-features = false, features = ["aws_lc_rs"] }
+rustls-pemfile = "2"
+time = "0.3"
 tower = { version = "0.5", features = ["limit"] }
 tower-http = { version = "0.6", features = ["trace", "cors"] }
 hyper = "1"

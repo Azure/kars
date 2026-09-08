@@ -67,6 +67,7 @@ ALLOW_PATHS=(
 
 # Production paths to scan.
 PROD_PATHS=(
+  'shared/'
   'controller/src/'
   'inference-router/src/'
   'cli/src/'

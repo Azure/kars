@@ -199,22 +199,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     };
 
-    // Detect SRE-mode sandbox via the kars.azure.com/role=sre label.
-    // Computed once at the top of reconcile and threaded through the
-    // NetworkPolicy + egress-guard generation below.
-    //
-    // SRE sandboxes are the deliberate exception to the egress-guard's
-    // total-mediation rule:  their UID 1000 (the agent) needs DIRECT
-    // apiserver access (bypassing the :8444 transparent proxy) so the
-    // SRE plugin's K8s API client can read CRs / pods / events with
-    // its bound SA token. Every other sandbox kind goes through the
-    // router unchanged.
-    //
-    // The label is set exclusively by deploy/helm/kars/templates/sre.yaml
-    // on the chart-created `sre` KarsSandbox; a future ValidatingAdmission
-    // Policy (proposal §7.8.2 / §7.8.10) will enforce at-most-one-per-cluster
-    // + only-chart-installer-can-create so the apiserver-bypass capability
-    // stays uniquely held.
+    // The label selects SRE behavior, but never grants it. The cluster-scoped
+    // registration and live UID/namespace checks below authorize that behavior.
     let is_sre_sandbox = sandbox
         .metadata
         .labels
@@ -223,14 +209,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         .map(|v| v == "sre")
         .unwrap_or(false);
 
-    // Resolve the apiserver Service ClusterIP from the controller's own
-    // env (kubelet auto-injects KUBERNETES_SERVICE_HOST on every pod
-    // pointing at the cluster's default Service/kubernetes ClusterIP).
-    //
-    // Cluster-portable: kind defaults to 10.96.0.1, AKS defaults to
-    // 10.0.0.1, EKS defaults to 172.20.0.1, and custom service-CIDR
-    // operators get whatever they configured.  Reading the env at
-    // reconcile time gives the right value on every cluster.
+    // The router's apiserver egress uses the cluster's own Service address.
     let apiserver_ip =
         std::env::var("KUBERNETES_SERVICE_HOST").unwrap_or_else(|_| "10.96.0.1".to_string());
     let apiserver_port = std::env::var("KUBERNETES_SERVICE_PORT_HTTPS")
@@ -319,6 +298,22 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         return Ok(Action::await_change());
     }
 
+    let sre_projection = match crate::sre_authority::pod::authorize(
+        client,
+        &sandbox,
+        owned_namespace
+            .as_ref()
+            .ok_or_else(|| ReconcileError::Configuration("Sandbox namespace is absent".into()))?,
+    )
+    .await
+    {
+        Ok(projection) => projection,
+        Err(detail) => {
+            crate::status::stamp_degraded(client, &sandbox, &name, "SREAuthorityNotReady", &detail)
+                .await;
+            return Ok(Action::requeue(Duration::from_secs(20)));
+        }
+    };
     let credentials = credential_sources::reconcile(
         client,
         &sandbox,
@@ -942,20 +937,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     egress_rules
         .extend(inference::configured_local_egress_rules().map_err(ReconcileError::Configuration)?);
 
-    // SRE-mode-only egress allow: apiserver Service ClusterIP.
-    // Same gate as the egress-guard apiserver bypass — only sandboxes
-    // labeled `kars.azure.com/role=sre` get a NetworkPolicy egress rule
-    // allowing :443 to the cluster's apiserver ClusterIP. Required
-    // because the blanket :443 rule above explicitly EXCLUDES the
-    // 10/8 + 172.16/12 + 192.168/16 RFC1918 blocks to prevent
-    // lateral movement to other in-cluster services, and the apiserver
-    // ClusterIP is always in one of those ranges (kind: 10.96.0.1,
-    // AKS: 10.0.0.1, etc.).
-    //
-    // Cluster-portable: apiserver_ip + apiserver_port read at top of
-    // reconcile() from the controller's own KUBERNETES_SERVICE_HOST /
-    // KUBERNETES_SERVICE_PORT_HTTPS env vars (kubelet-injected on
-    // every pod).
+    // Registered SRE routers need apiserver egress; UID 1000 still cannot use
+    // it directly. The generic HTTPS rule excludes private Service ranges.
     if is_sre_sandbox {
         egress_rules.push(json!({
             "to": [{"ipBlock": {"cidr": format!("{}/32", apiserver_ip)}}],
@@ -1916,9 +1899,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             agent_container["args"] = json!(args);
         }
 
-        // (is_sre_sandbox computed at the top of reconcile() and
-        // threaded through both NP egress + egress-guard generation —
-        // see top-of-fn comment block for the design.)
+        // Registered SRE agents use loopback TLS, never an apiserver bypass.
         let egress_guard_cmd = build_egress_guard_command(is_sre_sandbox);
 
         // Build the pod spec — runtimeClassName only set for Kata (confidential)
@@ -1941,27 +1922,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             //   - Enforces blocklist/allowlist per domain
             //   - Tunnels allowed traffic to the real destination
             //
-            // SRE-mode (kars.azure.com/role=sre label) inserts ONE extra
-            // RETURN rule before the REDIRECTs:  apiserver traffic skips
-            // the router and reaches the apiserver directly. See
-            // `build_egress_guard_command` and the proposal §7.8 design.
-            //
-            // This blocks (in standard mode):
-            //  - IMDS credential theft (169.254.169.254)
-            //  - Data exfiltration to any external host
-            //  - Lateral movement to other pods
-            //  - Apiserver enumeration (the SRE-mode exception is the
-            //    deliberate carve-out, gated by the role=sre label)
-            //
-            // The agent can only reach the inference-router on localhost:8443.
-            // HTTP/HTTPS goes through the transparent proxy for policy enforcement.
-            //
-            // Agent-id mode reuses the same baseline: cross-pod access to the
-            // shared `entra-auth-sidecar` Service in `kars-system` is gated
-            // by NetworkPolicy on the sidecar's namespace (ingress-only-from-
-            // inference-router-labeled-pods), so no extra in-pod iptables
-            // rule is needed to keep the agent code from reaching the
-            // sidecar.
+            // SRE uses the same UID lockdown and a registered loopback TLS
+            // facade, never an apiserver bypass or an agent-held Kubernetes JWT.
             "initContainers": [{
                 "name": "egress-guard",
                 // The egress-guard runs `sh -c "iptables ..."`, so it needs an
@@ -2648,6 +2610,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         let provider_version =
             inference::mirror_providers(client, &sandbox_self_ns, &sandbox_ns, &name).await?;
+        if sre_projection.is_some() {
+            crate::sre_authority::pod::project(&mut pod_spec);
+        }
         let mut deployment: Deployment = serde_json::from_value(json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -2679,6 +2644,23 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 }
             }
         }))?;
+        if let Some(projection) = sre_projection.as_ref() {
+            let annotations =
+                crate::sre_authority::pod::annotations(projection, agent_container_name);
+            deployment
+                .spec
+                .as_mut()
+                .unwrap()
+                .template
+                .metadata
+                .as_mut()
+                .unwrap()
+                .annotations
+                .get_or_insert_with(Default::default)
+                .extend(serde_json::from_value::<
+                    std::collections::BTreeMap<String, String>,
+                >(annotations)?);
+        }
         if let Some(namespace) = owned_namespace.as_ref() {
             credentials.decorate(&mut deployment, &sandbox, namespace);
         }
@@ -3347,6 +3329,16 @@ pub async fn run(client: Client) -> Result<()> {
             Api::<Deployment>::all(ctx.client.clone()),
             crate::watch_config::bounded(),
             deployment_to_sandbox_ref,
+        )
+        .watches(
+            Api::<crate::sre_registration::KarsSRERegistration>::all(ctx.client.clone()),
+            crate::watch_config::bounded(),
+            |registration| {
+                Some(
+                    kube::runtime::reflector::ObjectRef::new(&registration.spec.sandbox.name)
+                        .within(&registration.spec.sandbox.namespace),
+                )
+            },
         )
         .run(
             |x, ctx| async move {

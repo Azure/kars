@@ -105,6 +105,9 @@ jobs:
         # transitive oci-client→reqwest) compiles natively with the
         # runner's gcc.
         run: cargo build --release --workspace
+      - name: Legacy Hermes HTTPS client test dependency
+        if: needs.changes.outputs.code == 'true'
+        run: python3 -m pip install 'httpx==0.28.1'
       - name: cargo nextest run (release)
         if: needs.changes.outputs.code == 'true'
         # Reuses the target/release/ artefacts the previous step just
@@ -572,7 +575,7 @@ jobs:
           # Fetch enough history to diff.
           git fetch --no-tags --depth=50 origin "$base" "$head" 2>/dev/null || true
           if git diff --name-only "$base" "$head" 2>/dev/null \
-             | grep -E '^(controller/|inference-router/|a2a-gateway/|kars-a2a-core/|deploy/helm/|sandbox-images/|tests/e2e/|Cargo\.toml|Cargo\.lock|Makefile)' >/dev/null; then
+             | grep -E '^(controller/|inference-router/|a2a-gateway/|kars-a2a-core/|deploy/helm/|sandbox-images/|tests/e2e/|shared/|runtimes/hermes/src/kars_runtime_hermes/plugin/sre|cli/src/(commands/sre|lib/sre|lib/namespace-ownership)|Cargo\.toml|Cargo\.lock|Makefile)' >/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"
@@ -615,6 +618,21 @@ jobs:
           sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /opt/hostedtoolcache/CodeQL || true
           docker system prune -af --volumes >/dev/null 2>&1 || true
           df -h
+
+      - name: Set up Node for real SRE authority CLI acceptance
+        if: steps.paths.outputs.run == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+      - name: Build locked CLI for Kind acceptance
+        if: steps.paths.outputs.run == 'true'
+        working-directory: cli
+        run: npm ci && npm run build
+      - name: SRE Kind unchanged Hermes HTTPS client dependency
+        if: steps.paths.outputs.run == 'true'
+        run: python3 -m pip install 'httpx==0.28.1'
 
       # Pre-built binaries from build-rust are COPY'd into the
       # distroless runtime images; no `cargo build` runs inside Docker.

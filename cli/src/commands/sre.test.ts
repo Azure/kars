@@ -13,10 +13,45 @@ vi.mock("../lib/repo-assets.js", () => ({ requireBundledAsset: () => "/test/char
 const releases = JSON.stringify([{ name: "kars", namespace: "kars-system" }]);
 const controller = JSON.stringify({
   apiVersion: "apps/v1", kind: "Deployment",
-  metadata: { name: "kars-controller", namespace: "kars-system", uid: "controller-uid" },
+  metadata: { name: "kars-controller", namespace: "kars-system", uid: "controller-uid", resourceVersion: "1" },
 });
 
+function authority(args: readonly string[]): { stdout: string } {
+  const metadata = (name: string, uid = name) => ({ name, uid, resourceVersion: "1", generation: 1 });
+  let value: unknown;
+  if (args.includes("can-i")) return { stdout: "yes" };
+  if (args.includes("crd")) value = { metadata: metadata("karssreregistrations.kars.azure.com") };
+  if (args.includes("karssreregistrations.kars.azure.com")) value = {
+    metadata: metadata("canonical"),
+    spec: {
+      enabled: true,
+      controller: { namespace: { name: "kars-system", uid: "kars-system" },
+        deployment: { name: "kars-controller", uid: "controller-uid" }, release: currentRelease },
+      sandbox: { namespace: "kars-system", name: "sre", uid: "source" },
+      runtimeNamespace: { name: "kars-sre", uid: "kars-sre" },
+    },
+    status: { phase: "Ready", observedGeneration: 1, privacyRevision: "kars.azure.com/sre-privacy/v2" },
+  };
+  if (args.includes("namespace")) value = args.includes("kars-sre")
+    ? { metadata: { ...metadata("kars-sre"), annotations: {
+      "kars.azure.com/namespace-claim-version": "v1",
+      "kars.azure.com/sandbox-namespace": "kars-system",
+      "kars.azure.com/sandbox-name": "sre",
+      "kars.azure.com/sandbox-uid": "source",
+    } } }
+    : { metadata: metadata("kars-system") };
+  if (args.includes("karssandbox")) value = {
+    metadata: { ...metadata("sre", "source"), namespace: "kars-system",
+      annotations: { "kars.azure.com/namespace-uid": "kars-sre" } },
+  };
+  if (args.includes("clusterrolebindings") || args.includes("rolebindings")) value = { items: [] };
+  return { stdout: value ? JSON.stringify(value) : "" };
+}
+
+let currentRelease = "kars";
+
 beforeEach(() => {
+  currentRelease = "kars";
   execute.mockReset();
   vi.spyOn(console, "log").mockImplementation(() => {});
 });
@@ -34,7 +69,7 @@ describe("SRE controller upgrade namespace preflight", () => {
         expect(args.slice(0, 2)).toEqual(["--context", "test-context"]);
         return { stdout: '{"items":[]}' };
       }
-      return { stdout: "" };
+      return authority(args);
     });
     await sreCommand().parseAsync(["node", "sre", "install", "--no-wait", "--context", "test-context"]);
     const calls = execute.mock.calls;
@@ -89,14 +124,22 @@ describe("SRE controller upgrade namespace preflight", () => {
   });
 
   it("permits fresh installation only after successful inventory and explicit controller absence", async () => {
-    execute.mockImplementation(async (file, args) => ({
-      stdout: file === "helm" && args[0] === "list" ? "[]" : "",
-    }));
+    execute.mockImplementation(async (file, args) => {
+      if (file === "helm" && args[0] === "list") return { stdout: "[]" };
+      if (args[0] === "-n") return { stdout: "" };
+      if (args.includes("deployment") && args.includes("kars-controller")) return { stdout: controller };
+      return authority(args);
+    });
     await sreCommand().parseAsync(["node", "sre", "install", "--no-wait"]);
-    expect(execute.mock.calls.map(([file, args]) => [file, args[0]])).toEqual([
-      ["helm", "list"], ["kubectl", "-n"], ["helm", "install"],
+    expect(execute.mock.calls.slice(0, 2).map(([file, args]) => [file, args[0]])).toEqual([
+      ["helm", "list"], ["kubectl", "-n"],
     ]);
     expect(execute.mock.calls[1][1]).toContain("--ignore-not-found");
+    const installs = execute.mock.calls.filter(([file, args]) => file === "helm" && args[0] === "install");
+    expect(installs).toHaveLength(1);
+    expect(installs[0][1]).toContain("sre.enabled=false");
+    expect(execute.mock.calls.some(([, args]) => args.includes("--take-ownership") || args.includes("--force-conflicts"))).toBe(false);
+    expect(execute.mock.calls.some(([file, args]) => file === "helm" && args[0] === "upgrade" && args.includes("sre.enabled=true"))).toBe(true);
   });
 
   it.each([
@@ -105,13 +148,14 @@ describe("SRE controller upgrade namespace preflight", () => {
     { target: "kars", names: ["other.release"] },
     { target: "a".repeat(53), names: ["a".repeat(53)] },
   ])("accepts Helm-compatible release inventory for $target", async ({ target, names }) => {
+    currentRelease = target;
     execute.mockImplementation(async (file, args) => {
       if (file === "helm" && args[0] === "list") {
         return { stdout: JSON.stringify(names.map(name => ({ name, namespace: "kars-system" }))) };
       }
-      if (file === "kubectl" && args.includes("deployment")) return { stdout: controller };
+      if (file === "kubectl" && args.includes("deployment") && args.includes("kars-controller")) return { stdout: controller };
       if (file === "kubectl" && args.includes("karssandboxes")) return { stdout: '{"items":[]}' };
-      return { stdout: "" };
+      return authority(args);
     });
     await sreCommand().parseAsync(["node", "sre", "install", "--no-wait", "--release", target]);
     const mode = names.includes(target) ? "upgrade" : "template";
