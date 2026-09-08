@@ -11,6 +11,7 @@ from .common import (
     enrollment_json, fingerprint, require,
 )
 from .credential_paths import seed_privacy_gaps
+from .registration_schema import create_registration_crd
 
 LEGACY_COMMIT = "8b206065608593667a40665b3f48225ef9ce278d"
 CONTROL = "e2e-control-rotation"
@@ -128,7 +129,7 @@ def prepare_legacy(h):
     obj["metadata"].setdefault("labels", {})["app.kubernetes.io/managed-by"] = "Helm"
     obj["metadata"].setdefault("annotations", {}).update({
         "meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": SYSTEM})
-    h.create(obj)
+    create_registration_crd(h, obj)
     h.k("wait", "--for=condition=Established", "crd/karssreregistrations.kars.azure.com", "--timeout=60s", timeout=70)
     before = h.get("clusterrolebinding", "kars-sre-reader")
     h.cli("authority", "stage", "--controller-image", "kars-controller:e2e",

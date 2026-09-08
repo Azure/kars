@@ -3049,6 +3049,8 @@ main() {
     trap teardown EXIT
 
     setup_cluster
+    # Validate the public cluster API before any Rust images or private fixtures.
+    PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/sre_authority/registration_schema.py"
     build_images
     prepare_sre_authority_legacy
     install_crds
