@@ -64,6 +64,9 @@ Any author waiver on earlier publication PRs does not apply to this change.
   The combined issuer/consumer candidate still requires Rust qualification;
   the parent's separate 33 Rust tests/strict Clippy and seven Node tests do
   not qualify the additional issuer or observation code.
+  Added, still-unrun regressions cover identical JSON under a changed source
+  revision, retirement of old cached consumers, typed Pending-privacy
+  non-issuance, and canonical App IDs without changing customer store values.
 - The issuer consumes the full strict `privacy_epoch` helper from `7dc72810`.
   The observation RPC currently rechecks registration status and real legacy
   GET/LIST/WATCH denials, but not the full admission/private-token-alias scan.
