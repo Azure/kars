@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 
 from .bootstrap_diagnostics import api_result, collect, failure_facts, object_status, policy_status
-from .bootstrap_probe import builtin_documents, safe_controller
+from .bootstrap_probe import builtin_documents, converted_objects, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
     {"message": "Private SRE material requires authority"}]}}}
@@ -72,6 +72,14 @@ class BootstrapProofTests(unittest.TestCase):
         self.assertNotIn("do-not-publish", result)
         self.assertNotIn("kind: Job", result)
         self.assertIn("kind: ValidatingAdmissionPolicy", result)
+
+    def test_kubectl_multiple_json_objects_and_list_are_both_parsed(self):
+        first = {"kind": "ServiceAccount", "metadata": {"name": "kars-controller"}}
+        second = {"kind": "ValidatingAdmissionPolicy", "metadata": {"name": "public"}}
+        self.assertEqual(converted_objects(json.dumps(first) + "\n" + json.dumps(second)), [first, second])
+        self.assertEqual(converted_objects(json.dumps({"kind": "List", "items": [first, second]})), [first, second])
+        with self.assertRaises(RuntimeError):
+            converted_objects(json.dumps({"kind": "Secret", "data": "do-not-publish"}))
 
     def test_collection_tracks_real_uid_chain_without_logging_other_pods(self):
         def request(_port, _method, path):

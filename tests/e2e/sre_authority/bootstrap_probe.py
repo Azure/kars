@@ -36,7 +36,21 @@ def builtin_documents(rendered):
     return "\n---\n".join(documents)
 
 
+def converted_objects(raw):
+    # kubectl create -o json emits adjacent JSON objects for a multi-document
+    # input, rather than the List returned by kubectl get.
+    decoder, objects = json.JSONDecoder(), []
+    while raw.strip():
+        obj, end = decoder.raw_decode(raw.lstrip())
+        raw = raw.lstrip()[end:]
+        objects.extend(obj.get("items", []) if obj.get("kind") == "List" else [obj])
+    if not objects or any(obj.get("kind") not in PATHS for obj in objects):
+        raise RuntimeError("Public bootstrap chart contained unexpected converted objects")
+    return objects
+
+
 def chart(root):
+    write_report(root, "bootstrap-stage.json", {"stage": "render-disabled-core"})
     rendered = command("bootstrap-render", [
         "helm", "template", "kars", str(root / "deploy/helm/kars"), "--namespace", "kars-system",
         # Offline rendering cannot satisfy the deliberate live-source Helm lookup.
@@ -48,14 +62,13 @@ def chart(root):
         "--set-string", "foundry.endpoint=https://e2e-fake.invalid/",
         "--set-string", "foundry.projectEndpoint=https://e2e-fake.invalid/",
     ], root=root)
-    converted = json.loads(command("bootstrap-conversion", [
+    write_report(root, "bootstrap-stage.json", {"stage": "convert-public-builtins"})
+    converted = command("bootstrap-conversion", [
         "kubectl", "--context", CONTEXT, "--request-timeout=15s", "create",
         "--dry-run=client", "--validate=strict", "-f", "-", "-o", "json",
-    ], root=root, data=builtin_documents(rendered)))
-    objects = converted.get("items", []) if converted.get("kind") == "List" else [converted]
-    if not objects or any(obj.get("kind") not in PATHS for obj in objects):
-        raise RuntimeError("Public bootstrap chart contained unexpected converted objects")
-    return objects
+    ], root=root, data=builtin_documents(rendered))
+    write_report(root, "bootstrap-stage.json", {"stage": "parse-public-objects"})
+    return converted_objects(converted)
 
 
 def safe_controller(obj):
@@ -148,12 +161,12 @@ def exercise(root, port, objects, policies):
 
 def main(root, diagnostics_only):
     with kind_proxy(root) as (port, version):
+        write_report(root, "bootstrap-versions.json", {"apiServer": version, "context": CONTEXT})
         objects = chart(root)
         policies = {obj["metadata"]["name"]: obj for obj in objects
                     if obj["kind"] == "ValidatingAdmissionPolicy"}
         if not policies:
             raise RuntimeError("Public admission policies were not rendered")
-        write_report(root, "bootstrap-versions.json", {"apiServer": version, "context": CONTEXT})
         if diagnostics_only:
             write_report(root, "bootstrap-install-failure.json", collect(port, policies, request))
         else:
