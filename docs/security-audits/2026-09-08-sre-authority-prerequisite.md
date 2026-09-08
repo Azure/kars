@@ -158,13 +158,12 @@ the VAP runs. Schema-valid CREATE and annotation updates still require the
 intended policy-specific 403. Neither arbitrary errors nor HTTP 200 watches
 count as denial.
 
-Four Rust CodeQL alerts are being investigated without suppression or product
+Four Rust CodeQL alerts were investigated without suppression or product
 rewriting. Their reported flows start at the readiness handler's injected Axum
 State. Current evidence identifies fixed credential filenames under the
 production mount and a controller-configured Kubernetes origin, rather than an
-HTTP-selected location. Independent boundary review and hostile-input
-regressions are pending; no false-positive classification or alert dismissal
-has been approved.
+HTTP-selected location. The independent assessment and the approved
+per-alert dispositions are recorded below.
 
 ### Confirm-boundary-first evidence
 
@@ -186,6 +185,15 @@ also checked. The flagged production files and lockfile remain unchanged.
 All 50 focused SRE tests and strict combined controller/router Clippy pass,
 including the now correctly registered condition tests. This evidence assumes
 trusted controller/kubelet configuration and private-volume integrity; it does
-not excuse privileged configuration tampering. Approval for the four specific
-false-positive dispositions is still pending. No query, source path, or alert
-has been suppressed or dismissed.
+not excuse privileged configuration tampering. The user explicitly approved
+false-positive dispositions for only alerts 780, 781, 782 and 783; each GitHub
+alert now carries its specific evidence comment. No query or source path was
+excluded, and no other alert was dismissed. This is not author/reviewer audit
+sign-off, PR approval, or permission to deploy.
+
+The first full CI execution ran the new boundary case in an isolated process
+and exposed missing test-local Rustls provider initialization. Other tests had
+initialized it during the earlier grouped run. The case now explicitly selects
+the existing AWS-LC provider before any TLS setup and passes when executed
+alone. Production proxy code and the reported input boundaries remain unchanged;
+hosted Kubernetes migration qualification is still required.
