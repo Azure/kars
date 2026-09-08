@@ -11,7 +11,7 @@ from pathlib import Path
 import re
 import time
 
-from sre_authority.bootstrap_diagnostics import api_result, collect
+from sre_authority.bootstrap_diagnostics import api_result, collect, controller_stack
 from sre_authority.registration_schema import CONTEXT, command, kind_proxy, request, write_report
 
 PATHS = {
@@ -176,11 +176,15 @@ def main(root, diagnostics_only):
             raise RuntimeError("Public admission policies were not rendered")
         if diagnostics_only:
             write_report(root, "bootstrap-install-failure.json", collect(port, policies, request))
+            write_report(root, "bootstrap-controller-stack.json", controller_stack(
+                CONTEXT, "kube-controller-manager-kars-e2e-control-plane"))
         else:
             try:
                 exercise(root, port, objects, policies)
             finally:
                 write_report(root, "bootstrap-final.json", collect(port, policies, request))
+                write_report(root, "bootstrap-controller-stack.json", controller_stack(
+                    CONTEXT, "kube-controller-manager-kars-e2e-control-plane"))
 
 
 if __name__ == "__main__":

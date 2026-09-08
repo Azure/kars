@@ -4,6 +4,7 @@
 """Allowlisted public admission evidence; never dump Pod specs, argv or bodies."""
 
 import re
+import subprocess
 
 REASONS = {
     "Forbidden", "Invalid", "InternalError", "BadRequest", "NotFound", "AlreadyExists",
@@ -94,6 +95,59 @@ def policy_status(obj, expected):
             "typeChecked": "typeChecking" in status, "warnings": warnings}
 
 
+def control_plane_status(obj):
+    containers = []
+    for container in obj.get("status", {}).get("containerStatuses", [])[:4]:
+        state = container.get("state", {})
+        previous = container.get("lastState", {}).get("terminated", {})
+        containers.append({"name": identifier(container.get("name")),
+            "ready": container.get("ready") is True, "restartCount": container.get("restartCount"),
+            "state": next((name for name in ("running", "waiting", "terminated") if name in state), "unknown"),
+            "previousExitCode": previous.get("exitCode"),
+            "previousReason": previous.get("reason") if previous.get("reason") in ("Error", "Completed", "OOMKilled") else None})
+    return {"name": identifier(obj.get("metadata", {}).get("name")), "containers": containers}
+
+
+def public_stack_facts(text):
+    """Only fixed panic classifications and public Go frame names, never log text/args."""
+    facts = {"panicCategories": [], "publicFrames": []}
+    for line in text.splitlines()[-240:]:
+        line = line.strip()
+        if line.startswith("panic:") or line.startswith("fatal error:"):
+            category = next((name for name, phrase in [
+                ("nil-pointer", "nil pointer dereference"),
+                ("index-out-of-range", "index out of range"),
+                ("interface-conversion", "interface conversion"),
+                ("concurrent-map-write", "concurrent map writes"),
+            ] if phrase in line), "panic-redacted")
+            facts["panicCategories"].append(category)
+        frame = re.match(r"^((?:k8s\.io/(?:kubernetes|apiserver|apiextensions-apiserver)|github\.com/google/cel-go)/[A-Za-z0-9_./@*()+-]+)\(", line)
+        if frame and frame[1] not in facts["publicFrames"]:
+            facts["publicFrames"].append(frame[1][:512])
+    facts["panicCategories"] = sorted(set(facts["panicCategories"]))
+    facts["publicFrames"] = facts["publicFrames"][:40]
+    return facts
+
+
+def controller_stack(context, name):
+    if name != "kube-controller-manager-kars-e2e-control-plane" or context != "kind-kars-e2e":
+        return {"available": False}
+    result = {"available": False, "current": {}, "previous": {}}
+    for previous in (False, True):
+        try:
+            command = ["kubectl", "--context", context, "--request-timeout=10s", "logs",
+                       "-n", "kube-system", name, "--tail=240"]
+            if previous:
+                command.append("--previous")
+            output = subprocess.run(command, capture_output=True, text=True, timeout=15, check=False)
+            if output.returncode == 0:
+                result["available"] = True
+                result["previous" if previous else "current"] = public_stack_facts(output.stdout)
+        except (OSError, subprocess.TimeoutExpired):
+            pass
+    return result
+
+
 def collect(port, policies, request):
     report = {"scope": "controller-Pod-creation-only", "policies": [], "workloads": [], "events": []}
     for name in sorted(policies):
@@ -126,4 +180,8 @@ def collect(port, policies, request):
                      "reason": event.get("reason"), "count": event.get("count")}
             entry.update(failure_facts(event.get("message"), policies))
             report["events"].append(entry)
+    code, body = request(port, "GET", "/api/v1/namespaces/kube-system/pods?labelSelector=component%3Dkube-controller-manager")
+    if code == 200 and isinstance(body, dict):
+        report["controlPlane"] = [control_plane_status(obj) for obj in body.get("items", [])[:4]
+                                  if obj.get("metadata", {}).get("name") == "kube-controller-manager-kars-e2e-control-plane"]
     return report
