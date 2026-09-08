@@ -32,6 +32,8 @@ pub mod egress_blocked;
 pub mod errors;
 pub mod failover;
 pub mod forward_proxy;
+mod github_app;
+mod github_services;
 pub mod governance;
 pub mod governed_services;
 pub mod guardrails;

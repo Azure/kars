@@ -37,6 +37,7 @@ mod agent_env;
 pub(crate) mod byo_contract;
 mod credential_sources;
 mod dev_env;
+mod github_services;
 pub(crate) mod governance_mounts;
 mod governed_services;
 mod inference;
@@ -2062,6 +2063,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         });
 
         governed_services::mount(&mut pod_spec);
+        github_services::mount(&mut pod_spec);
 
         // Set runtimeClassName for Kata (confidential) isolation
         if let Some(rc) = runtime_class {

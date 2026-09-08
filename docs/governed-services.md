@@ -1,5 +1,9 @@
 # Router governed services
 
+The separate [optional keyless GitHub service](github-services.md) supplies
+repository-scoped API/git access and real Actions job logs. Its operator-owned
+App enrollment does not widen this request queue or grant decisions.
+
 These APIs provide an in-process capability-request queue and bounded router
 telemetry. They do **not** deliver assignments, run agents, create approvals,
 grant capabilities, install resources, or provide a durable execution ledger.
