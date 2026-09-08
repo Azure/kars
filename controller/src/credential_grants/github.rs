@@ -169,17 +169,3 @@ async fn issue(
     {return Err("GitHub source UID/resourceVersion changed before issuance".into())}
     credentials::ensure_for(client,sandbox,namespace,GITHUB,Some(&configuration)).await
 }
-
-pub(crate) fn mount(pod:&mut Value,projection:Option<&Projection>) {
-    if projection.is_none() {return}
-    pod["volumes"].as_array_mut().expect("pod volumes").push(json!({
-        "name":"github-service","secret":{"secretName":GITHUB.secret,"items":[{"key":"config.json","path":"config.json"}]}
-    }));
-    for container in pod["containers"].as_array_mut().expect("pod containers") {
-        if container["name"]=="inference-router" {
-            container["volumeMounts"].as_array_mut().expect("router mounts").push(json!({
-                "name":"github-service","mountPath":"/etc/kars/github","readOnly":true
-            }));
-        }
-    }
-}

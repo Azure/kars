@@ -37,6 +37,7 @@ mod agent_env;
 pub(crate) mod byo_contract;
 mod credential_sources;
 mod dev_env;
+mod github_services;
 pub(crate) mod governance_mounts;
 pub(crate) mod governed_services;
 mod inference;
