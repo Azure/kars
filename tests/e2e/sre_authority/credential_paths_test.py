@@ -178,7 +178,7 @@ class CredentialFixtureTests(unittest.TestCase):
         with patch.object(h, "api", return_value=Response(404, {})), self.assertRaises(AssertionError):
             delete_owned(h, path, obj)
 
-    def test_cleanup_conflict_cannot_mask_primary_error_and_all_fixtures_are_attempted(self):
+    def test_cleanup_conflict_preserves_primary_error_and_attempts_independent_fixtures(self):
         h = self.seeded()
         output = io.StringIO()
         with patch("sre_authority.credential_paths.delete_owned", side_effect=AssertionError("private-body")) as cleanup:
@@ -191,6 +191,19 @@ class CredentialFixtureTests(unittest.TestCase):
             with self.assertRaisesRegex(AssertionError, "Fixture cleanup failed"):
                 with owned_fixtures(h) as fixtures:
                     fixtures.append(("first", {}))
+
+    def test_secret_conflict_preserves_account_to_prevent_gc_of_foreign_replacement(self):
+        h = self.seeded()
+        original = h.state["prestaged_alias"]
+        replacement = h.create(original)
+        account = h.state["prestaged_account"]
+        with self.assertRaisesRegex(AssertionError, "Fixture cleanup failed"):
+            with owned_fixtures(h) as fixtures:
+                fixtures.append((f"/api/v1/namespaces/{RUNTIME}/serviceaccounts/sre-api-router", account))
+                fixtures.append((SECRET_PATH + "/" + TOKEN_ALIAS, original))
+        self.assertEqual(h.get("secret", TOKEN_ALIAS), replacement)
+        self.assertEqual(h.get("serviceaccount", "sre-api-router"), account)
+        self.assertEqual(len(h.requests), 1)
 
     def test_disappeared_fixture_patch_404_is_fatal_even_when_cleanup_is_404(self):
         h = self.seeded()
