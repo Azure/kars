@@ -123,6 +123,9 @@ class BindingProbeTests(unittest.TestCase):
         self.assertIn('"resourceNames": [READER], "verbs": ["bind"]', probe)
         self.assertNotIn('"verbs": ["escalate"]', probe)
         self.assertNotIn('"resourceNames": ["*"]', probe)
+        self.assertIn('require(baseline_bind, "Shipped controller lacks', probe)
+        self.assertIn('"temporary-bind-removed-shipped-bind-remains", 200', probe)
+        self.assertIn('"redundant-with-shipped-permission"', probe)
 
 
 if __name__ == "__main__":
