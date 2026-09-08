@@ -56,7 +56,6 @@ spec:
                   free-form params (validated per-type at reconcile time).
                 properties:
                   params:
-                    additionalProperties: true
                     description: |-
                       Per-type params. Stored as a string-keyed map so the CRD schema
                       emits a concrete `type: object` (apiserver rejects fields with
@@ -70,6 +69,7 @@ spec:
                         - RolloutRestart: {namespace, kind, name}
                         - DeletePod: {namespace, name}
                     type: object
+                    x-kubernetes-preserve-unknown-fields: true
                   type:
                     description: |-
                       Action type from the closed set (`DeleteResourceQuota`,

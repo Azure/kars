@@ -206,9 +206,9 @@ install_crds() {
         "${extra_set_args[@]}" \
         "$helm_wait_arg" --timeout 5m; then
         warn "Helm install did not converge within 5m — dumping diagnostics"
+        PYTHONPATH="$ROOT_DIR/tests/e2e" python3 -m sre_authority.bootstrap_probe --diagnostics-only \
+            || warn "Bounded controller admission diagnostics were incomplete"
         kubectl get all -n kars-system || true
-        kubectl describe pod -n kars-system -l app.kubernetes.io/component=controller || true
-        kubectl logs -n kars-system -l app.kubernetes.io/component=controller --tail=200 || true
         return 1
     fi
 }
