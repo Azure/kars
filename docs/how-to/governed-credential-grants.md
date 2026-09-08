@@ -23,10 +23,27 @@ updates and UID-bound Teams Deployment rollouts. Bridge has no Deployment patch
 permission. The controller-settings payload cannot change images, commands,
 ServiceAccounts or arbitrary environment variables.
 
-Router egress-operator access is a separate optional delegation of GET on the
-existing `router-admin-token` in verified runtime namespaces. It is not an
-agent source, does not grant a Secret list, and never falls back to unauthenticated
-operator calls.
+Private egress observation is a separate opt-in capability,
+`kars.azure.com/egress-observation/v1`. `--observe <sandbox>` captures the
+actual Sandbox UID. It delegates only GET on `router-services-observer`,
+not `router-services-admin`, `router-admin-token`, or the observer TLS private
+key. Native Kubernetes GET and ServiceAccount RoleBinding subjects remain
+name-bound, not UID-bound; the observation endpoint additionally verifies
+current grant, Sandbox, runtime namespace and recipient identities.
+
+The read-only TLS listener on 9447 exposes `GET /internal/observations/scope`
+and `GET /internal/observations/egress/learned`. Both require exact Bearer
+authentication; learned observations also require the current
+`x-kars-service-scope`. The observer token cannot authorize mutations, resets,
+or legacy routes, even through the legacy loopback exception. Bridge pins the
+controller-issued CA and Sandbox-UID hostname, resolves only the verified
+Pod/ReplicaSet/Deployment lineage, and disables redirects, ambient trust roots
+and proxy discovery. Missing capability is an error, never a legacy fallback.
+Core adds only the receiver-scoped runtime ingress policy. Existing BFF egress
+isolation must explicitly permit that verified runtime's TCP 9447 before
+observation enrollment is usable. Core must not create an egress-only policy
+that accidentally isolates a previously unrestricted BFF and blocks its
+Kubernetes, provider, GitHub or OIDC calls.
 
 ## Operator workflow
 
@@ -103,6 +120,35 @@ not an empty configuration.
 
 ## Lifecycle and qualification
 
+### Keyless GitHub enrollment
+
+`--github-review <file>` accepts a metadata-only array of reviewed connections:
+`connection:{name,uid}`, `appSecret:{name,uid}`, `appId`, `ownerSubject`,
+`installationId`, canonical `repositories`, and `write`. The App store must
+also be explicitly enrolled with purpose `github-app`. Preview/apply recheck
+the existing Secret and connection ConfigMap UIDs, installation and repository
+inventory without printing values. They never adopt another store or grant
+Bridge the ability to enlarge that operator review.
+
+The effective Task/Team/Sandbox `githubBinding` carries exact grant/connection
+UIDs and a repository/write subset. Core verifies the current effective Task
+authorization, reads the enrolled App store, then materializes the consumer's
+exact `router-github-app/config.json` schema through the same strict
+`privacy_epoch`-gated private issuer. Configuration changes rotate the private
+version and require retirement of old consumers. Source stores retain their
+UIDs and values; neither tokens nor App keys enter agent source bundles.
+
+Keyless mode requires explicit governed agent sources, rejects opaque GitHub
+egress, and currently rejects raw GitHub/custom agent credential combinations
+without a separate purpose review. This is not a migration of legacy bare
+Sandbox credentials. Operator-approved custom credentials remain usable in
+the existing explicitly unbounded standalone mode; that mode is **not**
+repository-enforced by the GitHub gateway.
+
+The GitHub runtime consumer checkpoint must be forward-integrated and jointly
+qualified before this candidate can be used. A mount is not evidence that a
+particular router image contains that consumer.
+
 Grant finalization revokes its owned writer/operator bindings. Namespace and
 source UID checks prevent adopting a replacement. Source cleanup follows its
 actual target UID; workspace sources and operator stores are not Helm-owned and
@@ -115,3 +161,11 @@ its external provider or erase values an agent already observed.
 This candidate still requires coordinated Rust and real API/admission lifecycle
 qualification before release. The Bridge app remains private; this core
 contract is not permission to publish that application or its images.
+
+Outstanding qualification boundaries include ServiceAccount recreation while
+native Secret-read Roles exist, and live observation RPC privacy checks beyond
+registration status plus GET/LIST/WATCH denials. The issuer calls the full
+strict helper; the RPC currently does not repeat the controller's admission
+and private-SA token-alias inventory. TLS, CA integrity, projected private
+volumes, Kubernetes admission and control-plane integrity remain trust
+dependencies. Do not claim complete end-to-end UID/privacy qualification yet.

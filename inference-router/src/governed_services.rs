@@ -18,6 +18,7 @@ pub struct GovernedServices {
     pub requests: AccessRequestBuffer,
     pub telemetry: Arc<TaskTelemetry>,
     control_token: Option<String>,
+    pub observer: Option<Arc<crate::service_observation::Observer>>,
     pub allow_ips: Option<Vec<IpAddr>>,
     pub identity_valid: bool,
     pub shutdown: CancellationToken,
@@ -46,6 +47,7 @@ impl GovernedServices {
             requests,
             telemetry: Arc::new(TaskTelemetry::new(scope.id)),
             control_token,
+            observer: None,
             allow_ips: None,
             identity_valid: true,
             shutdown: CancellationToken::new(),
@@ -71,6 +73,12 @@ impl GovernedServices {
             .map(|value| value.trim().to_string())
             .filter(|value| !value.is_empty());
         let mut services = Self::new(identity, token);
+        match crate::service_observation::Observer::load() {
+            Ok(observer) => services.observer = observer,
+            Err(_) => tracing::warn!(
+                "Private observation configuration is unavailable; observation routes fail closed"
+            ),
+        }
         services.identity_valid = valid;
         services.allow_ips = std::env::var("ROUTER_ADMIN_ALLOW_IPS")
             .ok()

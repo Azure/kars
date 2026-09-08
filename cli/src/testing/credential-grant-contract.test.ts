@@ -57,6 +57,31 @@ describe("governed credential public contract",()=>{
     expect(resource("ValidatingAdmissionPolicyBinding",policy.metadata.name).spec.validationActions).toContain("Deny");
   });
 
+  it("binds GitHub authority identically across effective launch schemas",()=>{
+    const sandbox=specSchema("karssandboxes").properties.githubBinding;
+    const team=specSchema("karsteams").properties;
+    expect(specSchema("karstasks").properties.blueprint.properties.githubBinding).toEqual(sandbox);
+    expect(team.blueprint.properties.githubBinding).toEqual(sandbox);
+    expect(team.roster.items.properties.blueprint.properties.githubBinding).toEqual(sandbox);
+    expect(sandbox.properties.connection.required).toEqual(["name","uid"]);
+    expect(specSchema("karscredentialgrants").properties.githubConnections.items.required)
+      .toEqual(["connection","appSecret","appId","ownerSubject","installationId","repositories"]);
+    expect(source("controller/src/kars_task_execution.rs")).toContain('"githubBinding": blueprint.github_binding');
+  });
+
+  it("delegates only the separate observation purpose and preserves private TLS material",()=>{
+    const rbac=source("controller/src/credential_grants/observer_rbac.rs");
+    expect(rbac).toContain('"resourceNames":["router-services-observer"]');
+    expect(rbac).not.toContain("router-admin-token");
+    expect(rbac).not.toContain("router-services-admin");
+    expect(rbac).not.toContain("router-services-observer-identity");
+    const route=source("inference-router/src/routes/observations.rs");
+    expect(route).toContain("observation_token_is_read_only");
+    expect(route).toContain("stale_scope");
+    expect(source("inference-router/src/service_observation_tls.rs")).toContain("tls_from_pem");
+    expect(source("controller/src/credential_grants/operator.rs")).toContain("privacy_epoch");
+  });
+
   it("allows controller metadata finalization but not grant spec authorship",()=>{
     const controller=resource("ClusterRole","kars-credential-grant-controller");
     const verbs=controller.rules.filter((rule:any)=>rule.resources.includes("karscredentialgrants"))

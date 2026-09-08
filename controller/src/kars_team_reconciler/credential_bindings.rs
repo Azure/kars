@@ -16,8 +16,10 @@ pub(super) async fn reconcile(api: &Api<KarsTask>, team: &KarsTeam) -> Result<()
     else {
         return Ok(());
     };
-    let desired = serde_json::to_value(desired)
-        .map_err(|_| ReconcileError::Invalid("Credential binding serialization failed".into()))?;
+    let desired = json!({
+        "credentialBindings":desired,
+        "githubBinding":team.spec.blueprint.as_ref().and_then(|blueprint|blueprint.github_binding.as_ref()),
+    });
     for task in api.list(&ListParams::default()).await? {
         if !tasks::owned(&task.metadata, team)
             || task.metadata.deletion_timestamp.is_some()
@@ -37,13 +39,13 @@ pub(super) async fn reconcile(api: &Api<KarsTask>, team: &KarsTeam) -> Result<()
         if !active && !pending {
             continue;
         }
-        let current = serde_json::to_value(
-            task.spec
+        let current = json!({
+            "credentialBindings":task.spec
                 .blueprint
                 .as_ref()
                 .and_then(|blueprint| blueprint.credential_bindings.as_ref()),
-        )
-        .map_err(|_| ReconcileError::Invalid("Credential binding serialization failed".into()))?;
+            "githubBinding":task.spec.blueprint.as_ref().and_then(|blueprint|blueprint.github_binding.as_ref()),
+        });
         if current == desired && !pending {
             continue;
         }
@@ -74,7 +76,7 @@ pub(super) async fn reconcile(api: &Api<KarsTask>, team: &KarsTeam) -> Result<()
         }
         api.patch(&task.name_any(),&PatchParams::default(),&Patch::Merge(json!({
             "metadata":{"uid":uid,"resourceVersion":version,"annotations":{PENDING:null}},
-            "spec":{"blueprint":{"credentialBindings":desired},"execution":{"launch":!team.spec.paused}}
+            "spec":{"blueprint":desired,"execution":{"launch":!team.spec.paused}}
         }))).await?;
     }
     Ok(())

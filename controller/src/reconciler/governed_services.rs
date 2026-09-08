@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 mod continuity_tests;
 #[cfg(test)]
 mod credential_tests;
-mod credentials;
+pub(crate) mod credentials;
 
 const SECRET: &str = "router-services-admin";
 const SOURCE_UID: &str = "kars.azure.com/sandbox-uid";
@@ -22,11 +22,18 @@ pub(super) use credentials::quarantine_on_privacy_loss;
 pub struct Projection {
     pub identity: Value,
     credential: credentials::Projection,
+    github: Option<credentials::Projection>,
 }
 
 impl Projection {
     pub fn decorate(&self, deployment: &mut Deployment) {
         self.credential.decorate(deployment);
+        if let Some(github)=&self.github { github.decorate(deployment); }
+    }
+
+    pub fn mount(&self,pod:&mut Value) {
+        mount(pod);
+        crate::credential_grants::github::mount(pod,self.github.as_ref());
     }
 
     pub async fn consumers_current(
@@ -35,6 +42,9 @@ impl Projection {
         namespace: &str,
         name: &str,
     ) -> Result<bool, String> {
+        if let Some(github)=&self.github
+            && !github.consumers_current(client,namespace,name).await?
+        { return Ok(false) }
         self.credential
             .consumers_current(client, namespace, name)
             .await
@@ -89,11 +99,11 @@ fn authorized_task(
     .then_some(authorization)
 }
 
-pub async fn ensure(
+pub(crate) async fn identity(
     client: &Client,
     sandbox: &KarsSandbox,
     namespace: &Namespace,
-) -> Result<Projection, String> {
+) -> Result<Value, String> {
     // Reuse the authoritative namespace claim path, not labels or a caller's
     // requested namespace. Recreated CRs/namespaces cannot inherit this token.
     let (live, owned) = super::namespace_ownership::ensure(client, sandbox)
@@ -135,12 +145,25 @@ pub async fn ensure(
         task_authorization = Some(authorization);
         task_generation = task.metadata.generation;
     }
-    let credential = credentials::ensure(client, &live, &owned).await?;
-    Ok(Projection {
-        identity: json!({"sandbox":{"namespace":workspace,"name":name,"uid":sandbox_uid},
+    Ok(
+        json!({"sandbox":{"namespace":workspace,"name":name,"uid":sandbox_uid},
         "namespace_uid":namespace_uid,"task":task_identity,"task_authorization":task_authorization,
         "task_generation":task_generation,"managed":true}),
+    )
+}
+
+pub async fn ensure(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+) -> Result<Projection, String> {
+    let identity = identity(client, sandbox, namespace).await?;
+    let credential = credentials::ensure(client, sandbox, namespace).await?;
+    let github = crate::credential_grants::github::ensure(client,sandbox,namespace,&identity).await?;
+    Ok(Projection {
+        identity,
         credential,
+        github,
     })
 }
 

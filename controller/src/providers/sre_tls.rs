@@ -15,6 +15,10 @@ pub struct Identity {
 }
 
 pub fn issue() -> Result<Identity, String> {
+    issue_for(vec!["localhost".into(), "127.0.0.1".into()])
+}
+
+pub fn issue_for(names: Vec<String>) -> Result<Identity, String> {
     let now = time::OffsetDateTime::now_utc();
     let not_before = now - time::Duration::hours(1);
     let expiry = now + time::Duration::days(30);
@@ -30,8 +34,7 @@ pub fn issue() -> Result<Identity, String> {
     let ca = root
         .self_signed(&root_key)
         .map_err(|_| "SRE CA issuance failed")?;
-    let mut leaf = CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()])
-        .map_err(|_| "SRE TLS parameters are invalid")?;
+    let mut leaf = CertificateParams::new(names).map_err(|_| "SRE TLS parameters are invalid")?;
     leaf.not_before = not_before;
     leaf.distinguished_name
         .push(rcgen::DnType::CommonName, "Kars SRE loopback API");

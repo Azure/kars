@@ -38,7 +38,7 @@ pub(crate) mod byo_contract;
 mod credential_sources;
 mod dev_env;
 pub(crate) mod governance_mounts;
-mod governed_services;
+pub(crate) mod governed_services;
 mod inference;
 mod mcp_egress;
 pub(crate) mod namespace_ownership;
@@ -2039,7 +2039,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         "nodeSelector": node_selector
         });
 
-        governed_services::mount(&mut pod_spec);
+        service_identity.mount(&mut pod_spec);
+        crate::credential_grants::mount_observations(&mut pod_spec,&sandbox);
 
         // Set runtimeClassName for Kata (confidential) isolation
         if let Some(rc) = runtime_class {
@@ -2694,6 +2695,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             credentials.decorate(&mut deployment, &sandbox, namespace);
         }
         service_identity.decorate(&mut deployment);
+        crate::credential_grants::decorate_observations(&mut deployment,&sandbox);
         deploy_api
             .patch(
                 &name,

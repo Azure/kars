@@ -127,6 +127,8 @@ spec:
                     type: object
                   credentialBindings:
                     {{- include "kars.credentialBindingsSchema" . | nindent 20 }}
+                  githubBinding:
+                    {{- include "kars.githubBindingSchema" . | nindent 20 }}
                   modelFallbacks:
                     description: Ordered alternative inference routes; absent preserves the default route.
                     type: array

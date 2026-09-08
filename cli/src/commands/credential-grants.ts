@@ -3,6 +3,7 @@
 
 import { Command } from "commander";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { execa } from "execa";
 
 type Execute=(args:string[],input?:string)=>Promise<string>;
@@ -21,6 +22,7 @@ async function get(execute:Execute,kind:string,name:string,namespace?:string):Pr
   const text=await execute(["get",kind,name,...(namespace?["-n",namespace]:[]),"--ignore-not-found","-o","json"]);
   if(!text.trim())return undefined;
   const object=JSON.parse(text);
+  if(object===null)return undefined;
   if(!object.metadata?.uid||!object.metadata.resourceVersion||object.metadata.deletionTimestamp)
     throw new Error("Credential preflight requires an exact live API UID/resourceVersion");
   return object;
@@ -42,7 +44,7 @@ function storeKey(purpose:string,name:string,key:string):boolean {
 export async function validateGrantDocument(execute:Execute,document:any):Promise<void>{
   if(document.apiVersion!=="kars.azure.com/v1alpha1"||document.kind!=="KarsCredentialGrant"
     ||document.metadata?.name!=="workspace"||!document.metadata.namespace||!document.spec
-    ||Object.keys(document.spec).some(key=>!["workspaceUid","writers","agentKeys","integrationStores","legacyImports","controller","bridgeConsumers","routerOperatorAccess","enabled"].includes(key)))
+    ||Object.keys(document.spec).some(key=>!["workspaceUid","writers","agentKeys","integrationStores","legacyImports","controller","bridgeConsumers","observationTargets","githubConnections","enabled"].includes(key)))
     throw new Error("Only a metadata-only workspace credential grant is accepted");
   const ns=document.metadata.namespace;
   if((await execute(["auth","can-i","manage",`${resource}/workspace`,"-n",ns])).trim()!=="yes")
@@ -62,6 +64,34 @@ export async function validateGrantDocument(execute:Execute,document:any):Promis
       throw new Error("Reviewed integration store UID/type changed");
     if(Object.keys(actual.data??{}).some(key=>!storeKey(store.purpose,store.secret.name,key)))
       throw new Error("Existing integration keys do not match the reviewed purpose; nothing was mutated");
+  }
+  for(const target of document.spec.observationTargets??[]){
+    if(target.kind!=="KarsSandbox"||target.namespace!==ns
+      ||(await get(execute,"karssandbox",target.name,ns))?.metadata.uid!==target.uid)
+      throw new Error("Reviewed observation Sandbox UID changed");
+  }
+  if((document.spec.githubConnections??[]).length>32)throw new Error("At most 32 GitHub connections may be enrolled");
+  for(const approved of document.spec.githubConnections??[]){
+    if(Object.keys(approved).some(key=>!["connection","appSecret","appId","ownerSubject","installationId","repositories","write"].includes(key))
+      ||typeof approved.ownerSubject!=="string"||!approved.ownerSubject
+      ||!Number.isSafeInteger(approved.installationId)||approved.installationId<=0
+      ||typeof approved.appId!=="string"||!/^[0-9]{1,20}$/.test(approved.appId)||BigInt(approved.appId)===0n
+      ||!Array.isArray(approved.repositories)||!approved.repositories.length||approved.repositories.length>32
+      ||approved.repositories.some((repo:unknown)=>typeof repo!=="string"||!/^[a-z0-9._-]{1,39}\/[a-z0-9._-]{1,100}$/.test(repo)
+        ||repo.split("/").some(part=>[".",".."].includes(part))))
+      throw new Error("GitHub enrollment must contain only canonical reviewed metadata");
+    const expected=`kars-github-connection-${createHash("sha256").update(approved.ownerSubject).digest("hex").slice(0,16)}`;
+    const source=await get(execute,"configmap",approved.connection.name,ns);
+    const store=await get(execute,"secret",approved.appSecret.name,ns);
+    const repos=JSON.parse(source?.data?.repos??"[]");
+    if(approved.connection.name!==expected||source?.metadata.uid!==approved.connection.uid
+      ||store?.metadata.uid!==approved.appSecret.uid||store?.type!=="Opaque"
+      ||Buffer.from(store?.data?.GITHUB_APP_ID??"","base64").toString("utf8")!==approved.appId
+      ||String(approved.installationId)!==source?.data?.installation_id
+      ||!document.spec.integrationStores?.some((entry:any)=>entry.purpose==="github-app"
+        &&entry.secret.name===approved.appSecret.name&&entry.secret.uid===approved.appSecret.uid)
+      ||!Array.isArray(repos)||approved.repositories.some((repo:string)=>!repos.some((value:unknown)=>typeof value==="string"&&value.toLowerCase()===repo)))
+      throw new Error("GitHub App/connection UID, installation or repository review changed; nothing was mutated");
   }
   const deployments=[document.spec.controller,document.spec.bridgeConsumers?.bff,document.spec.bridgeConsumers?.gateway].filter(Boolean);
   for(const deployment of deployments)if((await get(execute,"deployment",deployment.name,ns))?.metadata.uid!==deployment.uid)
@@ -91,7 +121,8 @@ export function credentialGrantsCommand():Command {
     .option("--store <name=purpose>","Existing operator store",repeat,[])
     .option("--controller","Enroll this workspace's controller Deployment")
     .option("--bridge-consumers","Enroll the existing BFF and Teams gateway Deployments")
-    .option("--router-operator-access","Delegate exact-name operator-token reads for verified sandboxes")
+    .option("--observe <sandbox>","Explicit Sandbox target for private read-only observations",repeat,[])
+    .option("--github-review <file>","Reviewed metadata-only GitHub connection/App/repository enrollments")
     .option("--legacy-review <file>","Reviewed legacySources metadata from the grant status")
     .option("--context <context>")
     .action(async options=>{
@@ -124,11 +155,18 @@ export function credentialGrantsCommand():Command {
         metadata:{name:"workspace",namespace:options.namespace,...(existing?{uid:existing.metadata.uid,resourceVersion:existing.metadata.resourceVersion}:{})},
         spec:{workspaceUid:namespace.metadata.uid,writers,agentKeys:options.agentKey,integrationStores:stores,
           legacyImports:options.legacyReview?JSON.parse(readFileSync(options.legacyReview,"utf8")):[],
-          enabled:true,routerOperatorAccess:!!options.routerOperatorAccess,
+          enabled:true,observationTargets:[],
+          githubConnections:options.githubReview?JSON.parse(readFileSync(options.githubReview,"utf8")):[],
           ...(options.controller?{controller:await identity("kars-controller")}:{ }),
           ...(options.bridgeConsumers?{bridgeConsumers:{bff:await identity("kars-bridge-bff"),
             gateway:await identity("kars-bridge-teams-gateway"),gatewayReplicas:1}}:{ }),
         }};
+      for(const name of options.observe){
+        const target=await get(run,"karssandbox",name,options.namespace);
+        if(!target)throw new Error("Observation target must already exist");
+        (document.spec.observationTargets as Array<{kind:string;namespace:string;name:string;uid:string}>).push({
+          kind:"KarsSandbox",namespace:options.namespace,name,uid:target.metadata.uid});
+      }
       await validateGrantDocument(run,document);
       console.log(JSON.stringify(document,null,2));
     });

@@ -69,12 +69,54 @@ pub struct CredentialBindings {
     pub sources: Vec<CredentialSelection>,
 }
 
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationStatus {
+    pub capability: String,
+    pub phase: String,
+    pub reason: String,
+    pub version: String,
+    pub grant: ObjectIdentity,
+    pub secret: ObjectIdentity,
+    pub namespace_uid: String,
+    pub privacy_revision: String,
+    pub privacy_epoch: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub deployment_uid: Option<String>,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct IntegrationStore {
     pub secret: ObjectIdentity,
     pub purpose: String,
 }
+
+#[derive(Clone,Debug,Serialize,Deserialize,JsonSchema,PartialEq,Eq)]
+#[serde(rename_all="camelCase")]
+pub struct GitHubBinding {
+    pub grant:ObjectIdentity,
+    pub connection:ObjectIdentity,
+    pub repositories:Vec<String>,
+    #[serde(default)]
+    pub write:bool,
+}
+
+#[derive(Clone,Debug,Serialize,Deserialize,JsonSchema)]
+#[serde(rename_all="camelCase")]
+pub struct GitHubConnectionGrant {
+    pub connection:ObjectIdentity,
+    pub app_secret:ObjectIdentity,
+    pub app_id:String,
+    pub owner_subject:String,
+    pub installation_id:u64,
+    pub repositories:Vec<String>,
+    #[serde(default)]
+    pub write:bool,
+}
+
+#[path = "credential_grant_github.rs"]
+pub mod github;
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
@@ -125,7 +167,9 @@ pub struct KarsCredentialGrantSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bridge_consumers: Option<BridgeConsumers>,
     #[serde(default)]
-    pub router_operator_access: bool,
+    pub observation_targets: Vec<CredentialTarget>,
+    #[serde(default)]
+    pub github_connections: Vec<GitHubConnectionGrant>,
     #[serde(default = "enabled")]
     pub enabled: bool,
 }

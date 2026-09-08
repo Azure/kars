@@ -217,9 +217,9 @@ fn app(proxy: Proxy) -> Router {
         .with_state(proxy)
 }
 
-struct Listener {
-    tcp: TcpListener,
-    tls: TlsAcceptor,
+pub(crate) struct Listener {
+    pub(crate) tcp: TcpListener,
+    pub(crate) tls: TlsAcceptor,
 }
 
 impl axum::serve::Listener for Listener {
@@ -248,13 +248,17 @@ impl axum::serve::Listener for Listener {
 }
 
 fn tls(directory: &Path) -> Result<TlsAcceptor, String> {
-    let certificates = std::fs::File::open(directory.join("server-cert.pem"))
+    let certificates = std::fs::read(directory.join("server-cert.pem"))
         .map_err(|_| "SRE TLS certificate unavailable")?;
+    let key = std::fs::read(directory.join("server-key.pem"))
+        .map_err(|_| "SRE TLS key unavailable")?;
+    tls_from_pem(&certificates,&key)
+}
+
+pub(crate) fn tls_from_pem(certificates:&[u8],key:&[u8])->Result<TlsAcceptor,String>{
     let certificates = rustls_pemfile::certs(&mut BufReader::new(certificates))
         .collect::<Result<Vec<_>, _>>()
         .map_err(|_| "SRE TLS certificate invalid")?;
-    let key = std::fs::File::open(directory.join("server-key.pem"))
-        .map_err(|_| "SRE TLS key unavailable")?;
     let key = rustls_pemfile::private_key(&mut BufReader::new(key))
         .map_err(|_| "SRE TLS key invalid")?
         .ok_or("SRE TLS private key missing")?;
