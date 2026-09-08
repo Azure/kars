@@ -11,6 +11,7 @@ import {
 import { coreImageValues, imageValueArgs, PUSH_COMPONENTS, resolvePushedArtifacts, type PushedImage } from "../lib/image-targets.js";
 import { inspectCoreInstallation, recheckCoreOwnership, requireHealthyDeployment, updateLegacyCore, verifyCoreConfiguration } from "../lib/core-image-apply.js";
 import { inspectSandboxPlans, refreshSandboxImages } from "../lib/sandbox-image-apply.js";
+import { assertSafeMutation } from "../lib/sre-authority.js";
 
 export interface PushApplyResult {
   applied: string[];
@@ -31,6 +32,7 @@ export async function applyPushedImages(
   const buildOnly = images.filter(item => item.name === "sandbox-base").map(item => item.name);
   const deployable = images.filter(item => item.name !== "sandbox-base");
   if (!deployable.length) throw new Error("sandbox-base is build-only; no deployment was applied");
+  await assertSafeMutation(execute);
   const isMesh = (item: PushedImage) => item.name === "relay" || item.name === "registry";
   const selectedCore = deployable.filter(item => !isMesh(item));
   const selectedMesh = deployable.some(isMesh);
