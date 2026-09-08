@@ -140,7 +140,17 @@ pub struct ActionSpec {
     ///   - ScaleDeployment: {namespace, name, replicas}
     ///   - RolloutRestart: {namespace, kind, name}
     ///   - DeletePod: {namespace, name}
+    #[schemars(schema_with = "action_params_schema")]
     pub params: std::collections::BTreeMap<String, serde_json::Value>,
+}
+
+fn action_params_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    // Boolean additionalProperties exposes a nil-schema adapter in Kubernetes
+    // 1.31's VAP type checker. Preserve arbitrary JSON without that adapter.
+    schemars::json_schema!({
+        "type": "object",
+        "x-kubernetes-preserve-unknown-fields": true
+    })
 }
 
 /// Operator decision payload.
@@ -191,4 +201,35 @@ pub struct KarsSREActionStatus {
     ///   - `Degraded` (True with reason if anything went wrong)
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub conditions: Vec<Condition>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sre_action_params_schema_preserves_json_without_boolean_additional_properties() {
+        let crd = serde_json::to_value(crate::crd_validations::kars_sre_action_crd()).unwrap();
+        let spec = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"];
+        let params = &spec["properties"]["action"]["properties"]["params"];
+        assert_eq!(params["type"], "object");
+        assert_eq!(params["x-kubernetes-preserve-unknown-fields"], true);
+        assert!(params.get("additionalProperties").is_none());
+        assert!(spec.get("x-kubernetes-preserve-unknown-fields").is_none());
+        assert_eq!(
+            spec["properties"]["approval"]["properties"]["state"]["type"],
+            "string"
+        );
+    }
+
+    #[test]
+    fn sre_action_params_schema_does_not_change_json_wire_values() {
+        let wire = serde_json::json!({
+            "type": "ScaleDeployment",
+            "params": {"namespace": "example", "name": "demo", "replicas": 1,
+                "nested": {"array": [true, null, 1, "text"], "object": {"key": "value"}}}
+        });
+        let action: ActionSpec = serde_json::from_value(wire.clone()).unwrap();
+        assert_eq!(serde_json::to_value(action).unwrap(), wire);
+    }
 }
