@@ -111,6 +111,10 @@ def owned_fixtures(h):
     finally:
         failed = False
         for path, obj in reversed(fixtures):
+            # Deleting the SA after a Secret CAS conflict could let native
+            # TokenController garbage-collect the foreign replacement.
+            if failed and obj.get("kind") == "ServiceAccount":
+                continue
             try:
                 delete_owned(h, path, obj)
             except Exception:
