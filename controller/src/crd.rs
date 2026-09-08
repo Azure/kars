@@ -77,6 +77,10 @@ pub struct KarsSandboxSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_ref: Option<crate::credential_source::CredentialSourceRef>,
 
+    /// Explicit operator-granted sources for a directly authored Sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_bindings: Option<crate::credential_grant::CredentialBindings>,
+
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
 

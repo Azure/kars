@@ -27,6 +27,8 @@ mod crd;
 #[allow(dead_code)]
 // CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
 mod crd_validations;
+mod credential_grant;
+mod credential_grants;
 mod credential_source;
 mod egress_allowlist_compile;
 mod egress_approval;
@@ -262,6 +264,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { kars_eval_reconciler::run(client).await })
     };
+    let credential_grants_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { credential_grants::run(client).await })
+    };
     let kars_task_handle = {
         let client = client.clone();
         tokio::spawn(async move { kars_task_reconciler::run(client).await })
@@ -404,6 +410,9 @@ async fn main() -> Result<()> {
     let _ = metrics_handle;
 
     tokio::select! {
+        res = credential_grants_handle => {
+            tracing::error!(?res, "Credential grant controller stopped");
+        }
         res = &mut leader_future => {
             // Lost leadership (renewal failed) -> propagate so the pod
             // restarts and re-enters the election. Standard fail-stop

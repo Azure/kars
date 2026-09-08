@@ -70,6 +70,8 @@ spec:
                           maxLength: 253
                     aiConformanceReference:
                       type: boolean
+                credentialBindings:
+                  {{- include "kars.credentialBindingsSchema" . | nindent 18 }}
                 credentialsRef:
                   type: object
                   description: "Explicit agent credential collection in this Sandbox's workspace; replaces legacy credentials while set. Missing/replaced sources fail closed."
@@ -79,7 +81,7 @@ spec:
                       type: string
                       minLength: 1
                       maxLength: 253
-                      pattern: "^kars-credential-source-[a-z0-9][a-z0-9-]*$"
+                      pattern: "^kars-credential-(source|bundle)-[a-z0-9][a-z0-9-]*$"
                     uid:
                       type: string
                       minLength: 1

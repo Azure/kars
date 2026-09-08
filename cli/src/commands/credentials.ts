@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { Command } from "commander";
+import { credentialGrantsCommand } from "./credential-grants.js";
 import chalk from "chalk";
 import { removedKeys, updateCredentialSource, updateDirectCredentials } from "../lib/credential-source.js";
 import { banner, section } from "../stepper.js";
@@ -12,6 +13,7 @@ import {
 
 export function credentialsCommand(): Command {
   const cmd = new Command("credentials");
+  cmd.addCommand(credentialGrantsCommand());
 
   cmd
     .description(

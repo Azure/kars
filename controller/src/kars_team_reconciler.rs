@@ -6,6 +6,7 @@
 //! separate modules. Teams remain additive; Bridge is an optional consumer.
 
 mod capabilities;
+mod credential_bindings;
 #[cfg(test)]
 mod persistence_tests;
 mod promotion;
@@ -206,6 +207,7 @@ async fn reconcile_valid(
     }
 
     let prior = team.status.clone().unwrap_or_default();
+    credential_bindings::reconcile(tasks_api, team).await?;
     let now = Utc::now();
     let every = team
         .spec
