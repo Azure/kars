@@ -5,6 +5,7 @@
 //! Namespace ownership identifies an occupant; only this resource delegates
 //! privileged SRE authority to that exact occupant.
 
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::CustomResource;
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -69,7 +70,8 @@ pub struct ConsumerReview {
     kind = "KarsSRERegistration",
     plural = "karssreregistrations",
     status = "RegistrationStatus",
-    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#
+    printcolumn = r#"{"name":"Phase","type":"string","jsonPath":".status.phase"}"#,
+    printcolumn = r#"{"name":"Age","type":"date","jsonPath":".metadata.creationTimestamp"}"#
 )]
 #[serde(rename_all = "camelCase")]
 pub struct KarsSRERegistrationSpec {
@@ -93,6 +95,8 @@ fn enabled() -> bool {
 pub struct RegistrationStatus {
     pub phase: String,
     pub observed_generation: i64,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub conditions: Vec<Condition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub privacy_epoch: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

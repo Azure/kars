@@ -16,12 +16,61 @@ mod privacy_tests;
 mod tests;
 
 use crate::sre_registration::{KarsSRERegistration, NAME, RegistrationStatus};
+use crate::status::conditions;
+use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{
     Api, Client, ResourceExt,
     api::{Patch, PatchParams},
 };
 
 pub(crate) use live::{api_error, check_secret_denial, privacy_epoch};
+
+fn registration_conditions(
+    prior: &[Condition],
+    generation: Option<i64>,
+    phase: &str,
+    detail: Option<&str>,
+) -> Vec<Condition> {
+    let (reason, message) = match phase {
+        "Ready" => ("AuthorityReady", "Reviewed SRE authority is ready"),
+        "Retired" => ("AuthorityRetired", "Private SRE authority has been retired"),
+        "Provisioning" => ("Provisioning", "Private SRE identity is being provisioned"),
+        "Migrating" => (
+            "Migrating",
+            "Reviewed SRE grants and consumers are migrating",
+        ),
+        _ => ("AuthorityBlocked", "SRE authority cannot be established"),
+    };
+    let mut result = prior.to_vec();
+    for (kind, active) in [
+        (conditions::TYPE_READY, phase == "Ready"),
+        (
+            conditions::TYPE_PROGRESSING,
+            matches!(phase, "Migrating" | "Provisioning"),
+        ),
+        (
+            conditions::TYPE_DEGRADED,
+            !matches!(phase, "Ready" | "Retired" | "Migrating" | "Provisioning"),
+        ),
+    ] {
+        conditions::set(
+            &mut result,
+            conditions::preserve_transition_time(
+                conditions::find(prior, kind),
+                kind,
+                if active {
+                    conditions::status::TRUE
+                } else {
+                    conditions::status::FALSE
+                },
+                reason,
+                detail.unwrap_or(message),
+                generation,
+            ),
+        );
+    }
+    result
+}
 
 async fn status(
     client: &Client,
@@ -34,6 +83,15 @@ async fn status(
     let status = RegistrationStatus {
         phase: phase.into(),
         observed_generation: reg.metadata.generation.unwrap_or_default(),
+        conditions: registration_conditions(
+            reg.status
+                .as_ref()
+                .map(|status| status.conditions.as_slice())
+                .unwrap_or_default(),
+            reg.metadata.generation,
+            phase,
+            detail.as_deref(),
+        ),
         privacy_epoch: (phase == "Ready").then(|| reg.epoch()),
         router_service_account_uid: if phase == "Retired" {
             None
@@ -185,5 +243,57 @@ pub async fn run(client: Client) {
             }
         }
         tokio::time::sleep(std::time::Duration::from_secs(20)).await;
+    }
+}
+
+#[cfg(test)]
+mod status_tests {
+    use super::*;
+
+    #[test]
+    fn registration_phases_publish_truthful_standard_conditions() {
+        for (phase, expected) in [
+            ("Ready", ["True", "False", "False"]),
+            ("Retired", ["False", "False", "False"]),
+            ("Migrating", ["False", "True", "False"]),
+            ("Provisioning", ["False", "True", "False"]),
+            ("Blocked", ["False", "False", "True"]),
+            ("UnknownPhase", ["False", "False", "True"]),
+        ] {
+            let result = registration_conditions(&[], Some(3), phase, None);
+            assert_eq!(result.len(), 3);
+            for (kind, expected) in ["Ready", "Progressing", "Degraded"]
+                .into_iter()
+                .zip(expected)
+            {
+                let condition = conditions::find(&result, kind).unwrap();
+                assert_eq!(condition.status, expected, "{phase}/{kind}");
+                assert_eq!(condition.observed_generation, Some(3));
+                assert!(!condition.reason.is_empty());
+                assert!(!condition.message.is_empty());
+            }
+        }
+    }
+
+    #[test]
+    fn repeated_status_preserves_transition_time_and_unrelated_conditions() {
+        let mut prior = registration_conditions(&[], Some(1), "Migrating", None);
+        conditions::set(
+            &mut prior,
+            conditions::new_condition("CustomEvidence", "True", "Observed", "preserve", Some(1)),
+        );
+        let next = registration_conditions(&prior, Some(2), "Migrating", Some("Still draining"));
+        assert_eq!(next.len(), 4);
+        assert_eq!(
+            conditions::find(&next, "CustomEvidence"),
+            conditions::find(&prior, "CustomEvidence")
+        );
+        for kind in ["Ready", "Progressing", "Degraded"] {
+            let before = conditions::find(&prior, kind).unwrap();
+            let after = conditions::find(&next, kind).unwrap();
+            assert_eq!(before.last_transition_time, after.last_transition_time);
+            assert_eq!(after.observed_generation, Some(2));
+            assert_eq!(after.message, "Still draining");
+        }
     }
 }

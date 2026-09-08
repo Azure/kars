@@ -2,6 +2,9 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: karssreregistrations.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
   annotations:
     helm.sh/resource-policy: keep
 spec:
@@ -15,6 +18,13 @@ spec:
     - name: v1alpha1
       served: true
       storage: true
+      additionalPrinterColumns:
+        - name: Phase
+          type: string
+          jsonPath: .status.phase
+        - name: Age
+          type: date
+          jsonPath: .metadata.creationTimestamp
       subresources:
         status: {}
       schema:
@@ -106,6 +116,20 @@ spec:
             status:
               type: object
               properties:
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [type, status, reason, message, lastTransitionTime]
+                    properties:
+                      type: {type: string}
+                      status: {type: string, enum: ["True", "False", "Unknown"]}
+                      reason: {type: string}
+                      message: {type: string}
+                      observedGeneration: {type: integer, format: int64, minimum: 0}
+                      lastTransitionTime: {type: string, format: date-time}
                 phase: {type: string}
                 observedGeneration: {type: integer, format: int64}
                 privacyEpoch: {type: string}

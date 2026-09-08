@@ -143,3 +143,49 @@ remains strict.
 The shared Rust privacy helper is included in capability-audit, no-stub,
 no-custom-crypto and runtime-affecting Kind path classification. Its location
 outside the individual crates is not a security-gate exception.
+
+## Full-CI follow-up
+
+The initial full run exposed omitted registration labels, printer columns and
+standard conditions. The repair adds real Ready/Progressing/Degraded condition
+updates using the existing transition-time helpers, along with the schema and
+display metadata; it does not exempt this CRD from conformance. The existing
+17-criterion conformance suite passes against the corrected schema.
+
+Secret-type mutations are tested separately from validating admission:
+Kubernetes rejects immutable `type` changes with a specific 422 cause before
+the VAP runs. Schema-valid CREATE and annotation updates still require the
+intended policy-specific 403. Neither arbitrary errors nor HTTP 200 watches
+count as denial.
+
+Four Rust CodeQL alerts are being investigated without suppression or product
+rewriting. Their reported flows start at the readiness handler's injected Axum
+State. Current evidence identifies fixed credential filenames under the
+production mount and a controller-configured Kubernetes origin, rather than an
+HTTP-selected location. Independent boundary review and hostile-input
+regressions are pending; no false-positive classification or alert dismissal
+has been approved.
+
+### Confirm-boundary-first evidence
+
+Independent source review of SARIF analysis `1739818791` recommends classifying
+alerts 780/781 (path injection) and 782/783 (request forgery) as false positives
+for the reported HTTP-input flows. Each flow starts at `get(ready)` and treats
+Axum `State<Proxy>` as request data. Pinned Axum 0.8.9 instead clones the supplied
+server state and ignores request parts. The sole production constructor uses
+`/etc/kars/sre-api`; filenames are literals, and Kubernetes origin/namespace
+come from the controller-generated private configuration.
+
+Regression-only coverage now sends eight hostile header/query/body scenarios
+through the actual readiness handler. It forces projected-file rereads, token
+renewal and metadata inventory: each scenario records 24 calls to the selected
+Kubernetes endpoint, while alternate HTTP/HTTPS servers receive none. The
+alternate credential files are not selected. Startup-constant provenance is
+also checked. The flagged production files and lockfile remain unchanged.
+
+All 50 focused SRE tests and strict combined controller/router Clippy pass,
+including the now correctly registered condition tests. This evidence assumes
+trusted controller/kubelet configuration and private-volume integrity; it does
+not excuse privileged configuration tampering. Approval for the four specific
+false-positive dispositions is still pending. No query, source path, or alert
+has been suppressed or dismissed.
