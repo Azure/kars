@@ -260,6 +260,19 @@ async fn mirror_public_ca(
     Ok(())
 }
 
+pub async fn decorate(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+    pod: &mut Value,
+) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
+    let mut annotations = std::collections::BTreeMap::new();
+    if let Some(plan) = prepare(client, sandbox, namespace).await? {
+        plan.apply(pod, &mut annotations)?;
+    }
+    Ok(annotations)
+}
+
 impl Plan {
     pub fn apply(
         &self,
@@ -279,18 +292,6 @@ impl Plan {
             return Err(BudgetError::Corrupt.into());
         }
 
-        pub async fn decorate(
-            client: &Client,
-            sandbox: &KarsSandbox,
-            namespace: &Namespace,
-            pod: &mut Value,
-        ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
-            let mut annotations = std::collections::BTreeMap::new();
-            if let Some(plan) = prepare(client, sandbox, namespace).await? {
-                plan.apply(pod, &mut annotations)?;
-            }
-            Ok(annotations)
-        }
         volumes.push(json!({
             "name": TOKEN_VOLUME,
             "projected": {"sources": [{"serviceAccountToken": {"audience": AUDIENCE, "expirationSeconds": 600, "path": "token"}}]}

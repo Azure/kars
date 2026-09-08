@@ -7,6 +7,15 @@ use crate::inference_budget_contract::tariffs::{
 };
 use serde_json::json;
 
+#[test]
+fn integer_range_validation_applies_even_when_attempt_map_is_empty() {
+    let mut ledger = ledger(100);
+    assert!(ledger.attempts.is_empty());
+    ledger.validate().unwrap();
+    ledger.limits.tokens = Some(MAX_LEDGER_INTEGER + 1);
+    assert!(matches!(ledger.validate(), Err(BudgetError::Overflow)));
+}
+
 fn resource(name: &str, uid: &str) -> ResourceIdentity {
     ResourceIdentity {
         namespace: "workspace".into(),

@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+#[cfg(test)]
+mod anthropic_cases;
 pub mod client;
 pub mod dispatch;
 pub mod egress;

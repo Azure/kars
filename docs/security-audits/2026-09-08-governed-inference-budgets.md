@@ -98,6 +98,27 @@ That failure is intentional until human review, not a waived or fabricated pass.
    accessibility, and conservative uncertainty/capacity behavior.
 5. Obtain genuine required human audit signoffs before protected publication.
 
+## Bounded reviewer repair candidate
+
+The source-only independent review identified five blockers. This repair:
+
+1. Moves integer validation and Pod decoration to their intended module scopes.
+2. Restricts legacy launch suppression to unsupported budget scopes.
+3. Separates new-work admission from actual revocation; pending/exhausted/API
+   failures retain Task UIDs and already funded work. Explicit pause, removed
+   policy/owner authority and UID changes still revoke normally.
+4. Requires authoritative final Anthropic stream usage before any refund.
+5. Preserves unscoped legacy planning readiness without allowing a pinned account
+   to escape enforcement.
+
+New Rust regressions cover full Team reconcile interleavings with real ledger
+reserve/begin/settle transitions, UID stability, supported launch intent,
+pause/revocation, Task-controller budget waits and legacy parent readiness, plus
+16 malformed/incomplete Anthropic protocol variants through the actual stream
+and settlement path. **These Rust tests have not run**: the shared Cargo lease
+remains with the credential integration owner until the parent directly grants it.
+Formatting/source checks do not establish compilation or technical closure.
+
 ## Signoffs
 
 - Implementation author: changes under active development; not a signoff.

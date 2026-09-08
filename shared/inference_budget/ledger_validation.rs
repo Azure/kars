@@ -3,6 +3,17 @@
 
 use super::*;
 
+fn signed_integer_range(value: &serde_json::Value) -> bool {
+    match value {
+        serde_json::Value::Number(number) => number
+            .as_u64()
+            .is_none_or(|number| number <= MAX_LEDGER_INTEGER),
+        serde_json::Value::Array(values) => values.iter().all(signed_integer_range),
+        serde_json::Value::Object(values) => values.values().all(signed_integer_range),
+        _ => true,
+    }
+}
+
 impl Ledger {
     pub fn validate(&self) -> Result<(), BudgetError> {
         self.root.validate()?;
@@ -117,16 +128,6 @@ impl Ledger {
                 return Err(BudgetError::Corrupt);
             }
 
-            fn signed_integer_range(value: &serde_json::Value) -> bool {
-                match value {
-                    serde_json::Value::Number(number) => number
-                        .as_u64()
-                        .is_none_or(|number| number <= MAX_LEDGER_INTEGER),
-                    serde_json::Value::Array(values) => values.iter().all(signed_integer_range),
-                    serde_json::Value::Object(values) => values.values().all(signed_integer_range),
-                    _ => true,
-                }
-            }
             // Expired contracts remain accounting evidence; validate their
             // shape and arithmetic without making old charges disappear.
             attempt
