@@ -35,6 +35,7 @@ mod authentication_tests;
 #[derive(Clone)]
 pub struct UpstreamConfig {
     pub telemetry: Option<Arc<crate::task_telemetry::TaskTelemetry>>,
+    pub inference_budget: Option<Arc<crate::inference_budget::Client>>,
     pub endpoint: String,
     pub deployment: String,
     pub sandbox_name: String,
@@ -52,7 +53,7 @@ pub struct UpstreamConfig {
 }
 
 impl UpstreamConfig {
-    fn telemetry_provider(&self) -> &str {
+    pub(crate) fn telemetry_provider(&self) -> &str {
         match &self.authentication {
             AuthenticationProvenance::Named { provider_id } => provider_id,
             AuthenticationProvenance::LegacyDefault => self.provider.as_tag(),
@@ -64,6 +65,7 @@ impl UpstreamConfig {
     pub fn azure(endpoint: String, deployment: String, sandbox_name: String) -> Self {
         Self {
             telemetry: None,
+            inference_budget: None,
             endpoint,
             deployment,
             sandbox_name,
@@ -314,15 +316,14 @@ pub async fn forward(
 
     tracing::info!(sandbox = %upstream.sandbox_name, body_len = body.len(), "Sending upstream request");
 
-    let retryable = is_idempotent(&method, path);
-    let response = send_with_retry(
+    let (response, budget_attempt) = send_with_retry(
         client,
         &method,
         &upstream_url,
         &headers,
         body,
-        retryable,
-        &upstream.sandbox_name,
+        upstream,
+        path,
     )
     .await
     .inspect_err(|_| {
@@ -358,6 +359,7 @@ pub async fn forward(
         ForwardFailure::response_body(status, error)
     })?;
     let latency = start.elapsed();
+    crate::inference_budget::dispatch::finish(budget_attempt, status, &response_body).await?;
 
     record_metrics(upstream, status, latency, &response_body);
     if let Some(observation) = observation.as_mut() {
@@ -438,22 +440,29 @@ async fn send_with_retry(
     url: &str,
     headers: &HeaderMap,
     body: Bytes,
-    retryable: bool,
-    sandbox_name: &str,
-) -> Result<reqwest::Response> {
+    upstream: &UpstreamConfig,
+    path: &str,
+) -> Result<(
+    reqwest::Response,
+    Option<crate::inference_budget::client::AttemptGuard>,
+)> {
     const MAX_ATTEMPTS: u32 = 3;
     const BACKOFF_MS: [u64; 2] = [250, 750]; // after attempts 1 and 2
 
+    let retryable = is_idempotent(method, path);
     let attempts = if retryable { MAX_ATTEMPTS } else { 1 };
     let mut last_err: Option<anyhow::Error> = None;
+    let sandbox_name = &upstream.sandbox_name;
 
     for attempt in 1..=attempts {
+        let (wire, budget_attempt) =
+            crate::inference_budget::dispatch::begin(upstream, method, path, body.clone()).await?;
         // RequestBuilder is not Clone, so rebuild per attempt. Body is a
         // Bytes (cheap ref-counted clone) — no real cost.
         let response = client
             .request(method.clone(), url)
             .headers(headers.clone())
-            .body(body.clone())
+            .body(wire)
             .timeout(INFERENCE_REQUEST_TIMEOUT)
             .send()
             .await;
@@ -477,7 +486,7 @@ async fn send_with_retry(
                     .await;
                     continue;
                 }
-                return Ok(resp);
+                return Ok((resp, budget_attempt));
             }
             Err(err) => {
                 if retryable && is_retryable_error(&err) && attempt < attempts {
@@ -579,6 +588,8 @@ pub async fn forward_stream(
         })?;
 
     let start = Instant::now();
+    let (body, budget_attempt) =
+        crate::inference_budget::dispatch::begin(&upstream, &Method::POST, path, body).await?;
 
     let response = client
         .post(&upstream_url)
@@ -644,6 +655,7 @@ pub async fn forward_stream(
         if let Some(observation) = observation.as_mut() {
             observation.buffered(status.as_u16(), &body_bytes);
         }
+        crate::inference_budget::dispatch::finish(budget_attempt, status, &body_bytes).await?;
         tracing::warn!(
             sandbox = %upstream.sandbox_name,
             status = %status.as_u16(),
@@ -716,7 +728,11 @@ pub async fn forward_stream(
     Ok((
         status,
         response_headers,
-        crate::task_telemetry::observe::wrap_stream(metered.boxed(), observation, is_sse),
+        crate::task_telemetry::observe::wrap_stream(
+            crate::inference_budget::dispatch::stream(metered.boxed(), budget_attempt, is_sse),
+            observation,
+            is_sse,
+        ),
     ))
 }
 

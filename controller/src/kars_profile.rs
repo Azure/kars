@@ -216,6 +216,7 @@ mod tests {
         p.spec.default_envelope.budget = Some(crate::kars_task::TaskBudget {
             tokens: Some(1000),
             usd_micros: Some(2000),
+            ..Default::default()
         });
         p.spec.default_envelope.tool_policy_ref = Some(crate::mcp_server::LocalObjectRef {
             name: "bounded-tools".into(),

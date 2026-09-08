@@ -1,0 +1,115 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: karsbudgetaccounts.kars.azure.com
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: crd
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  group: kars.azure.com
+  scope: Namespaced
+  names:
+    kind: KarsBudgetAccount
+    plural: karsbudgetaccounts
+    singular: karsbudgetaccount
+    shortNames: [kbudget]
+  versions:
+    - name: v1alpha1
+      served: true
+      storage: true
+      subresources:
+        status: {}
+      additionalPrinterColumns:
+        - name: Scope
+          type: string
+          jsonPath: .spec.scope
+        - name: Phase
+          type: string
+          jsonPath: .status.ledger.phase
+      schema:
+        openAPIV3Schema:
+          type: object
+          required: [spec]
+          properties:
+            apiVersion: {type: string}
+            kind: {type: string}
+            metadata: {type: object}
+            spec:
+              type: object
+              required: [scope, root, limits]
+              x-kubernetes-validations:
+                - rule: "self == oldSelf"
+                  message: "Budget account grant/root identity is immutable; narrowing is an authoritative ledger transition"
+              properties:
+                scope:
+                  type: string
+                  enum: [GovernedInference]
+                  description: "Tokens and configured maximum prices for governed inference only, not all-in task, compute, tool, or invoice costs"
+                root:
+                  type: object
+                  required: [kind, resource, workspaceUid, clusterUid]
+                  properties:
+                    kind: {type: string, enum: [KarsTask, KarsTeam]}
+                    workspaceUid: {type: string, minLength: 1, maxLength: 128}
+                    clusterUid: {type: string, minLength: 1, maxLength: 128}
+                    resource:
+                      type: object
+                      required: [namespace, name, uid]
+                      properties:
+                        namespace: {type: string, minLength: 1, maxLength: 63}
+                        name: {type: string, minLength: 1, maxLength: 253}
+                        uid: {type: string, minLength: 1, maxLength: 128}
+                limits:
+                  type: object
+                  properties:
+                    tokens: {type: integer, format: int64, minimum: 0}
+                    usdMicros:
+                      type: integer
+                      format: int64
+                      minimum: 0
+                      description: "Configured maximum governed-inference price units; zero/absent is unbounded"
+            status:
+              type: object
+              properties:
+                ledger:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  required: [version, scope, accountUid, root, limits, phase, meters, nodes, sessions, attempts]
+                  properties:
+                    version: {type: string, enum: [governed-inference/v1]}
+                    scope: {type: string, enum: [GovernedInference]}
+                    accountUid: {type: string, minLength: 1, maxLength: 128}
+                    phase: {type: string, enum: [Active, Closing, Closed, Frozen]}
+                    root:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    limits:
+                      type: object
+                      properties:
+                        tokens: {type: integer, format: int64, minimum: 0}
+                        usdMicros: {type: integer, format: int64, minimum: 0}
+                    meters:
+                      type: object
+                      x-kubernetes-preserve-unknown-fields: true
+                    nodes:
+                      type: object
+                      maxProperties: 128
+                      additionalProperties:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    sessions:
+                      type: object
+                      maxProperties: 256
+                      additionalProperties:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true
+                    attempts:
+                      type: object
+                      maxProperties: 256
+                      additionalProperties:
+                        type: object
+                        x-kubernetes-preserve-unknown-fields: true

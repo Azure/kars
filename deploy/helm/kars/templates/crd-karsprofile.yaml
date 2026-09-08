@@ -57,6 +57,10 @@ spec:
                     description: Optional resource budget for the whole task subtree.
                     nullable: true
                     properties:
+                      scope:
+                        type: string
+                        enum: [GovernedInference]
+                        description: "Governed inference only; no all-in task cost claim"
                       tokens:
                         description: |-
                           Maximum total tokens the task subtree may consume. `0`/absent means

@@ -24,6 +24,12 @@ pub async fn check_sandbox_spawn(
     parent: &str,
     child: &str,
 ) -> Result<(), Box<Response>> {
+    if state.inference_budget.is_some() {
+        return Err(Box::new(errors::flat(
+            StatusCode::FORBIDDEN,
+            "Finite governed inference requires controller-enrolled Task UID delegation; plain Sandbox spawn is unsupported",
+        ).into_response()));
+    }
     let request = PolicyRequest {
         principal: parent.to_string(),
         tool: format!("spawn:create:{child}"),

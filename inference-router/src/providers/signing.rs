@@ -33,6 +33,12 @@ pub struct KeyRef(pub String);
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Signature(pub Vec<u8>);
 
+/// Standard content digest for immutable wire-request authorization bindings.
+pub fn sha256_hex(payload: &[u8]) -> String {
+    use sha2::{Digest, Sha256};
+    hex::encode(Sha256::digest(payload))
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum SigningError {
     #[error("unknown key ref: {0:?}")]

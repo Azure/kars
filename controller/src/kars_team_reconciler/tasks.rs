@@ -151,7 +151,7 @@ pub(super) async fn reconcile_revocations(
         if !authorized {
             retire(tasks, task).await?;
         } else if team.spec.paused
-            || specs::has_positive_budget(&task.spec.envelope)
+            || specs::unsupported_budget(&task.spec.envelope)
             || (role == Some("principal") && !within_seat(&task.spec, &principal))
         {
             idle(tasks, task).await?;
@@ -179,7 +179,7 @@ pub(super) async fn apply_task(
     mut spec: KarsTaskSpec,
     role: &str,
 ) -> Result<KarsTask, ReconcileError> {
-    if role == "taskforce" && specs::has_positive_budget(&spec.envelope) {
+    if role == "taskforce" && specs::unsupported_budget(&spec.envelope) {
         return Err(ReconcileError::Invalid(
             "UnsupportedLaunchBudget: finite total/subtree and monetary budgets are planning-only until durable enforcement is available".into(),
         ));
