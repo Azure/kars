@@ -16,7 +16,7 @@ from unittest.mock import patch
 
 from sre_authority.common import (
     CLAIM_VERSION, NAMESPACE_UID, RUNTIME, SOURCE_NAME, SOURCE_NS, SOURCE_UID, SYSTEM,
-    Harness, assert_claim, assert_denial, enrollment_json, printed_object, review_args,
+    Harness, assert_claim, assert_denial, authority_failure_site, enrollment_json, printed_object, review_args,
 )
 from sre_authority.fixtures import seed_control_consumer
 from sre_authority.admission import reserved_source_probe
@@ -34,6 +34,29 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_blocked_authority_diagnostics_report_source_coordinates_not_status_detail(self):
+        root = Path(__file__).resolve().parents[3]
+        cases = [
+            ("Reviewed SRE consumer was changed or replaced", "migration.rs", "controller-rejection", None),
+            ("Private SRE role definition has excessive or unsupported authority", "bindings.rs", "controller-rejection", None),
+            ("Retire reviewed SRE ClusterRoleBinding: Kubernetes status 403", "bindings.rs", "kubernetes-status", 403),
+            ("Inspect reserved SRE token identity: Kubernetes transport/serialization failure",
+             "credential_guard.rs", "kubernetes-transport", None),
+        ]
+        for detail, source, category, code in cases:
+            with self.subTest(source=source):
+                result = authority_failure_site(root, detail)
+                self.assertTrue(result["source"].endswith(source))
+                self.assertGreater(result["line"], 0)
+                self.assertEqual(result["category"], category)
+                self.assertEqual(result.get("httpStatus"), code)
+                self.assertNotIn(detail, json.dumps(result))
+                for unsafe in (detail + MARKER, MARKER + detail, detail + "\n" + MARKER):
+                    self.assertEqual(authority_failure_site(root, unsafe), {"category": "unclassified"})
+        for unsafe in (None, {}, "", MARKER, "private body: Kubernetes status 403",
+                       "Retire reviewed SRE ClusterRoleBinding: Kubernetes status 403 " + MARKER):
+            self.assertEqual(authority_failure_site(root, unsafe), {"category": "unclassified"})
+
     def test_control_consumer_fixture_satisfies_required_sandbox_fields(self):
         captured = []
         class Captured(Exception):
