@@ -15,6 +15,7 @@
 
 pub mod a2a;
 pub mod a2a_mtls;
+pub mod access_request;
 pub mod audit;
 pub mod audit_jsonl;
 pub mod audit_sink;
@@ -32,6 +33,7 @@ pub mod errors;
 pub mod failover;
 pub mod forward_proxy;
 pub mod governance;
+pub mod governed_services;
 pub mod guardrails;
 pub mod handoff;
 pub mod inference_policy_loader;
@@ -49,6 +51,7 @@ pub mod routes;
 pub mod safety;
 pub mod sidecar_client;
 pub mod spawn;
+pub mod task_telemetry;
 pub mod telemetry;
 
 /// Select RustCrypto for JWT signing and verification. Workspace builds also

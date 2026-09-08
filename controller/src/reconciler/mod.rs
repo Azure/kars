@@ -38,6 +38,7 @@ pub(crate) mod byo_contract;
 mod credential_sources;
 mod dev_env;
 pub(crate) mod governance_mounts;
+mod governed_services;
 mod inference;
 mod mcp_egress;
 pub(crate) mod namespace_ownership;
@@ -1614,6 +1615,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         agent_env::merge(&mut openclaw_env, &runtime_plan);
 
         // Build the inference-router env array
+        let service_identity = governed_services::ensure(
+            client,
+            &sandbox,
+            owned_namespace.as_ref().ok_or_else(|| {
+                ReconcileError::Configuration("Governed service namespace is absent".into())
+            })?,
+        )
+        .await
+        .map_err(ReconcileError::Configuration)?;
         let mut router_env = vec![
             json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
             json!({"name": "FOUNDRY_ENDPOINT", "value": &ctx.foundry_endpoint}),
@@ -1627,6 +1637,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "TOKEN_BUDGET_DAILY", "value": token_budget_daily.to_string()}),
             json!({"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()}),
             json!({"name": "SANDBOX_NAME", "value": &name}),
+            json!({"name": "KARS_SERVICE_IDENTITY_JSON", "value": service_identity.to_string()}),
             json!({"name": "SANDBOX_ISOLATION", "value": &sandbox_config.isolation}),
             json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
         ];
@@ -2049,6 +2060,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         }],
                         "nodeSelector": node_selector
         });
+
+        governed_services::mount(&mut pod_spec);
 
         // Set runtimeClassName for Kata (confidential) isolation
         if let Some(rc) = runtime_class {

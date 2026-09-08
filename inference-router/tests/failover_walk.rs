@@ -131,6 +131,7 @@ async fn primary_503_falls_through_to_fallback_200() {
     let health = Arc::new(DeploymentHealthRegistry::new());
 
     let upstream = UpstreamConfig {
+        telemetry: None,
         endpoint: base,
         deployment: "fallback-up".into(),
         sandbox_name: "sbx".into(),
@@ -198,6 +199,7 @@ async fn unhealthy_primary_is_skipped_in_second_pass() {
     assert!(!health.is_healthy("Foundry::primary-down"));
 
     let upstream = UpstreamConfig {
+        telemetry: None,
         endpoint: base,
         deployment: "fallback-up".into(),
         sandbox_name: "sbx".into(),
@@ -257,6 +259,7 @@ async fn all_unhealthy_still_punches_primary_for_last_resort() {
     assert!(!health.is_healthy("Foundry::fallback-up"));
 
     let upstream = UpstreamConfig {
+        telemetry: None,
         endpoint: base,
         deployment: "primary-down".into(),
         sandbox_name: "sbx".into(),

@@ -21,6 +21,10 @@ use tokio_util::sync::CancellationToken;
 use crate::blocklist::Blocklist;
 use crate::egress_blocked::BlockedBuffer;
 
+#[cfg(test)]
+#[path = "forward_proxy/governed_tests.rs"]
+mod governed_tests;
+
 /// Maximum concurrent tunnel connections (prevents resource exhaustion).
 const MAX_CONCURRENT_TUNNELS: usize = 256;
 
@@ -324,6 +328,8 @@ async fn handle_connect(
         return Ok(());
     }
 
+    blocked_egress.observe_allowed(sandbox);
+
     // Resolve DNS immediately after policy check and validate against private IPs
     let resolved = match resolve_and_validate(&domain, port, sandbox, blocked_egress).await {
         Ok(addr) => addr,
@@ -416,6 +422,8 @@ async fn handle_http(
         return Ok(());
     }
 
+    blocked_egress.observe_allowed(sandbox);
+
     // Resolve + validate (prevents DNS rebinding to private IPs)
     let (host, port) = parse_host_port(&domain, 80);
     let resolved = match resolve_and_validate(&host, port, sandbox, blocked_egress).await {
@@ -494,6 +502,8 @@ async fn handle_tls_redirect(
         blocked_egress.record(sandbox, &domain, 443);
         return Ok(());
     }
+
+    blocked_egress.observe_allowed(sandbox);
 
     // Resolve + validate (prevents DNS rebinding to private IPs)
     let resolved = match resolve_and_validate(&domain, 443, sandbox, blocked_egress).await {

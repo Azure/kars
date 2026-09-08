@@ -323,6 +323,7 @@ async fn main() -> Result<()> {
             .unwrap_or_default(),
     );
 
+    let services_shutdown = state.services.shutdown.clone();
     let app = {
         // Public routes — no admin token required (health, metrics, inference, Foundry proxies, mesh)
         let public = Router::new()
@@ -449,16 +450,19 @@ async fn main() -> Result<()> {
 
         let memory_binding_for_platform = state.memory_binding.clone();
         let policy_status_for_platform = state.policy_status.clone();
+        let telemetry = state.services.telemetry.clone();
+        let services = routes::governed_service_routes(state.clone()).with_state(state.clone());
         let merged = public
             .merge(protected)
             .merge(handoff_init)
             .merge(handoff_mutations)
             .merge(handoff_status)
             .with_state(state)
-            .merge(build_mcp_router().await)
+            .merge(build_mcp_router(Some(telemetry.clone())).await)
             .merge(build_platform_mcp_router(
                 Some(memory_binding_for_platform),
                 Some(policy_status_for_platform),
+                Some(telemetry),
             ));
 
         let merged = if let Some(a2a) = a2a_router_opt {
@@ -475,6 +479,9 @@ async fn main() -> Result<()> {
                     .and_then(|s| s.parse::<usize>().ok())
                     .unwrap_or(256),
             ))
+            // Operator controls must remain reachable while inference requests
+            // or bounded approval waits occupy their own concurrency limits.
+            .merge(services)
             // r6 — trace-id middleware is outermost so every request gets a
             // trace span before any other layer runs (concurrency limit,
             // connection_close, auth gates all log inside the span).
@@ -561,6 +568,7 @@ async fn main() -> Result<()> {
     let (signal_fired_tx, signal_fired_rx) = tokio::sync::oneshot::channel::<()>();
     let shutdown_fut = async move {
         shutdown_signal().await;
+        services_shutdown.cancel();
         let _ = signal_fired_tx.send(());
     };
 
@@ -623,7 +631,9 @@ async fn main() -> Result<()> {
 /// falling back to the unauthenticated dev route. Operators see a clear
 /// startup-time error instead of a route that quietly serves
 /// unauthenticated MCP traffic.
-async fn build_mcp_router() -> Router {
+async fn build_mcp_router(
+    telemetry: Option<Arc<kars_inference_router::task_telemetry::TaskTelemetry>>,
+) -> Router {
     use kars_inference_router::mcp::forwarder::RouterToolDispatcher;
     use kars_inference_router::mcp::oauth::OAuthVerifierConfig;
     use kars_inference_router::mcp::registry;
@@ -675,6 +685,7 @@ async fn build_mcp_router() -> Router {
         };
 
     let mut state = routes::McpRouteState::standard();
+    state.task_telemetry = telemetry;
     if let Some(d) = dispatcher_arc {
         state = state.with_tools(d);
     }
@@ -778,8 +789,10 @@ fn build_platform_mcp_router(
     policy_status: Option<
         std::sync::Arc<kars_inference_router::policy_status::PolicyStatusRegistry>,
     >,
+    telemetry: Option<Arc<kars_inference_router::task_telemetry::TaskTelemetry>>,
 ) -> Router {
-    let state = routes::McpRouteState::platform(memory_binding, policy_status);
+    let mut state = routes::McpRouteState::platform(memory_binding, policy_status);
+    state.task_telemetry = telemetry;
     tracing::info!(
         "Mounting /platform/mcp (Foundry-shim discovery surface, loopback-only, no OAuth)"
     );

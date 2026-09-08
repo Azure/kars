@@ -47,6 +47,7 @@ fn test_state() -> (AppState, Arc<PolicyStatusRegistry>) {
         policy_status.clone(),
     ));
     let state = AppState {
+        services: Default::default(),
         auth: Arc::new(WorkloadIdentityAuth::new()),
         copilot: Arc::new(kars_inference_router::copilot_auth::CopilotTokenCache::from_env()),
         client: reqwest::Client::new(),

@@ -38,6 +38,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
     let policy_status = Arc::new(kars_inference_router::policy_status::PolicyStatusRegistry::new());
     let governance = Arc::new(Governance::new_with_status(sandbox, policy_status.clone()));
     AppState {
+        services: Default::default(),
         auth: Arc::new(WorkloadIdentityAuth::new()),
         copilot: Arc::new(kars_inference_router::copilot_auth::CopilotTokenCache::from_env()),
         client: reqwest::Client::new(),
