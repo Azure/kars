@@ -1,15 +1,53 @@
-# Governed inference budget capability audit
+# Security Audit — Governed inference budgets (v1)
 
 Date: **2026-09-08 UTC**
 Status: **Implementation/integration candidate — publication not approved**
 
-## Claim being evaluated
+Scope: `shared/inference_budget/`, `controller/src/inference_budget/`,
+`controller/src/task_identity.rs`, `inference-router/src/inference_budget/`,
+controller Task/Team/runtime wiring, router dispatch/route wiring, CLI and Helm.
+
+Gated paths: controller CRDs, router providers/routes, CLI commands,
+`deploy/helm/kars/files/`, `shared/inference_budget/`.
+
+## Summary
 
 Durable token ceilings and operator-configured maximum-price caps for governed
 inference only. No claim covers compute, GPU/VM, tool/MCP, storage, networking,
 all-in task spend, invoice accuracy, taxes, or exchange rates.
 
-## Current evidence
+## T1: New capability / attack surface? (YES)
+
+- A private HTTPS budget broker and durable Kubernetes accounting CRD are new
+  control-plane surfaces. Router identities, all Task ancestors and complete
+  effective authorization must be checked before any dispatch grant.
+- Budget-account UIDs, signed bootstrap ownership and replay fences prevent
+  name reuse, arbitrary-object adoption, concurrent overspend and reset-to-zero
+  recovery. Accounting stays separate from credential grants and tool costs.
+- The shared Task identity helper captures live UID/RV evidence; it is not an
+  immutable registry until a consumer verifies and persists authoritative pins.
+
+## T2: Security-control change? (YES)
+
+- Finite inference requires router-only projected Pod/audience tokens,
+  exact TokenReview and live identity checks, current privacy proof, dedicated
+  admission, a qualified immutable router image, and versioned model contracts.
+- Legacy/operator opaque control tokens and the SRE API token are not broker
+  authorization. Pending privacy qualification never authorizes RPCs or issuance.
+- Unsupported generation, opaque tunnels, and unbounded mandatory moderation
+  fail closed rather than bypass accounting or disable existing guardrails.
+
+## T3: Availability / fail-open risk? (INCREASED for opted-in finite accounts)
+
+- Store/API/CAS, privacy/admission, TLS, image, contract, expiry, capacity or
+  lineage failures intentionally deny finite sends. Uncertain accepted work
+  remains fully funded; conservative full-context reservations may strand
+  otherwise unused quota. These are explicit limitations, not zero-cost claims.
+- Unbounded standalone defaults remain unchanged. Missing accounting must never
+  be treated as empty accounting. Pending-state rollout behavior and accepted
+  cancellation/retry require the planned real Kubernetes qualification.
+
+## Verification
 
 | Area | Evidence | Status |
 |---|---|---|
@@ -32,6 +70,12 @@ was performed for this evidence. Authorized local checkpoint `eb26efd9` and
 forward merge `0701baed` preserve the candidate and exact privacy parent
 `7dc72810a2e3c87aa751cfa95d9152f8dcd10194`. Existing authorized cached CLI
 dependencies were used after the local runner was found missing.
+
+The subsequent parent-coordinated forward merge uses exact fixed privacy/SRE
+ancestry `068ae16041ecf7bd2b8321dfeb22e381ebbd587b`, including `9d0f8e23` epoch
+transition repairs and the shipped-schema Kubernetes compatibility repair.
+Parent-reported prerequisite tests/Clippy and schema API successes do not
+qualify this budget implementation. Full SRE Kind remains a separate open gate.
 
 ## Remaining release decisions/gates
 
@@ -58,3 +102,11 @@ dependencies were used after the local runner was found missing.
 
 No reviewer identity, email, approval, waiver, or signature is inferred or
 fabricated. Prior feature waivers do not apply to this capability.
+
+## Verdict
+
+**Pending — not approved for publication or Ready.** Budget Rust/Clippy, actual
+Kind enforcement, independent review and two genuine human signoffs remain
+required. No `Signed-off-by` identity is supplied until those people actually
+review and approve; the existing security-audit gate is expected to remain red
+for missing signatures, without a waiver or altered rule.
