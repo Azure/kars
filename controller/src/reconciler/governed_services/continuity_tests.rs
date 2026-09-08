@@ -398,14 +398,22 @@ async fn interleaved_full_sre_and_sandbox_credential_reconcile_keep_qualified_ep
 }
 
 #[tokio::test]
-async fn unfinished_old_token_retirement_blocks_issuance_without_stopping_current_rollout() {
+async fn credential_transition_qualifies_before_authority_dependent_sre_availability() {
     let (_server, client, state) = fixture().await;
     {
         let mut state = state.lock().unwrap();
+        let mut old = state.objects["/api/v1/namespaces/kars-normal/pods"]["items"][0].clone();
+        old["metadata"]["name"] = "old-cached-router".into();
+        old["metadata"]["uid"] = "old-cached-router".into();
+        old["metadata"]["deletionTimestamp"] = "2026-09-08T00:00:00Z".into();
+        old["metadata"]["annotations"][CONTROL_VERSION] = "old-token".into();
         state
             .objects
             .get_mut("/api/v1/namespaces/kars-normal/pods")
-            .unwrap()["items"][0]["metadata"]["annotations"][CONTROL_VERSION] = "old-token".into();
+            .unwrap()["items"]
+            .as_array_mut()
+            .unwrap()
+            .push(old);
     }
     let reg: KarsSRERegistration = object(&state, REG);
     assert!(
@@ -415,7 +423,14 @@ async fn unfinished_old_token_retirement_blocks_issuance_without_stopping_curren
     );
     let sandbox: KarsSandbox = object(&state, NORMAL);
     let namespace: Namespace = object(&state, "/api/v1/namespaces/kars-normal");
+    let sre: KarsSandbox = object(&state, SRE);
+    let sre_namespace: Namespace = object(&state, "/api/v1/namespaces/kars-sre");
     assert!(super::ensure(&client, &sandbox, &namespace).await.is_err());
+    assert!(
+        crate::sre_authority::pod::authorize(&client, &sre, &sre_namespace)
+            .await
+            .is_err()
+    );
     {
         let mut state = state.lock().unwrap();
         assert_eq!(state.objects[REG]["status"]["phase"], "Migrating");
@@ -432,15 +447,16 @@ async fn unfinished_old_token_retirement_blocks_issuance_without_stopping_curren
         state
             .objects
             .get_mut("/api/v1/namespaces/kars-normal/pods")
-            .unwrap()["items"][0]["metadata"]["annotations"][CONTROL_VERSION] =
-            "control-normal:1".into();
+            .unwrap()["items"]
+            .as_array_mut()
+            .unwrap()
+            .retain(|pod| pod["metadata"]["uid"] != "old-cached-router");
         for name in ["sre", "normal"] {
-            state
-                .objects
-                .get_mut(&format!(
-                    "/apis/apps/v1/namespaces/kars-{name}/deployments/{name}"
-                ))
-                .unwrap()["status"]["availableReplicas"] = 1.into();
+            assert_eq!(
+                state.objects[&format!("/apis/apps/v1/namespaces/kars-{name}/deployments/{name}")]
+                    ["status"]["availableReplicas"],
+                0
+            );
         }
     }
     let reg: KarsSRERegistration = object(&state, REG);
@@ -448,4 +464,26 @@ async fn unfinished_old_token_retirement_blocks_issuance_without_stopping_curren
         .await
         .unwrap();
     super::ensure(&client, &sandbox, &namespace).await.unwrap();
+    assert!(
+        crate::sre_authority::pod::authorize(&client, &sre, &sre_namespace)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let state = state.lock().unwrap();
+    assert_eq!(state.objects[REG]["status"]["phase"], "Ready");
+    assert_eq!(
+        state.objects["/apis/apps/v1/namespaces/kars-sre/deployments/sre"]["status"]["availableReplicas"],
+        0
+    );
+    assert_eq!(
+        state.objects["/apis/apps/v1/namespaces/kars-normal/deployments/normal"]["status"]["availableReplicas"],
+        0
+    );
+    assert!(
+        state
+            .calls
+            .iter()
+            .all(|(_, _, body)| body.get("stringData").is_none())
+    );
 }
