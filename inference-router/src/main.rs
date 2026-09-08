@@ -333,7 +333,8 @@ async fn main() -> Result<()> {
             .merge(routes::health_routes())
             .merge(routes::metrics_routes())
             .merge(routes::mesh_routes())
-            .merge(routes::mesh_token_routes());
+            .merge(routes::mesh_token_routes())
+            .merge(routes::github_proxy_routes(state.clone()));
 
         // Protected routes — require admin token when configured
         let protected = Router::new()
