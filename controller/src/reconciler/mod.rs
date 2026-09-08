@@ -33,7 +33,9 @@ use tokio::time::Duration;
 use crate::crd::KarsSandbox;
 use crate::fedcred::{FedCredConfig, FedCredManager};
 
+mod agent_env;
 pub(crate) mod byo_contract;
+mod credential_sources;
 mod dev_env;
 pub(crate) mod governance_mounts;
 mod inference;
@@ -60,6 +62,8 @@ fn sandbox_node_selector(default_pool: &str) -> Result<serde_json::Value, Reconc
 
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
+    #[error(transparent)]
+    Credentials(#[from] credential_sources::Error),
     #[error(transparent)]
     NamespaceOwnership(#[from] namespace_ownership::Error),
     #[error("Kubernetes API error: {0}")]
@@ -315,6 +319,13 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         return Ok(Action::await_change());
     }
 
+    let credentials = credential_sources::reconcile(
+        client,
+        &sandbox,
+        owned_namespace.as_ref(),
+        &ctx.sandbox_image,
+    )
+    .await?;
     let spec = sandbox.spec.clone();
     let sandbox_config = spec.sandbox.unwrap_or_default();
     let sandbox_self_ns = sandbox.namespace().unwrap_or_default();
@@ -1600,75 +1611,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // map is sourced from the matching variant struct via
         // `runtime::build_runtime_plan`. Keys are validated against
         // reserved prefixes regardless of source.
-        if !runtime_plan.runtime_extra_env.is_empty() {
-            // Reserved prefixes that must come from the reconciler itself, not user input.
-            const RESERVED_PREFIXES: &[&str] =
-                &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "KARS_"];
-            // Names already set above — skip silently if caller provided a duplicate.
-            let mut existing: std::collections::HashSet<String> = openclaw_env
-                .iter()
-                .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect();
-            for (k, v) in &runtime_plan.runtime_extra_env {
-                if k.is_empty()
-                    || !k.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    || k.chars().next().is_some_and(|c| c.is_ascii_digit())
-                {
-                    tracing::warn!(key = %k, "extraEnv: invalid env var name, skipping");
-                    continue;
-                }
-                if RESERVED_PREFIXES.iter().any(|p| k.starts_with(p)) {
-                    tracing::warn!(key = %k, "extraEnv: key uses reserved prefix, skipping");
-                    continue;
-                }
-                if v.contains('\0') {
-                    tracing::warn!(key = %k, "extraEnv: value contains NUL byte, skipping");
-                    continue;
-                }
-                if existing.contains(k) {
-                    tracing::debug!(key = %k, "extraEnv: overridden by reconciler, skipping");
-                    continue;
-                }
-                openclaw_env.push(json!({"name": k, "value": v}));
-                existing.insert(k.clone());
-            }
-        }
-
-        // S10.A2.b: append `plan.raw_env` entries (BYO `valueFrom` etc.).
-        // The producer guarantees these have a `name` field; we apply the
-        // same reserved-prefix / NUL / dup filter to the `name` only —
-        // the `valueFrom` payload itself is rendered verbatim.
-        if !runtime_plan.raw_env.is_empty() {
-            const RESERVED_PREFIXES: &[&str] =
-                &["AGT_", "FOUNDRY_AGENT_", "AZURE_", "IMDS_", "KARS_"];
-            let mut existing: std::collections::HashSet<String> = openclaw_env
-                .iter()
-                .filter_map(|v| v.get("name").and_then(|n| n.as_str()).map(String::from))
-                .collect();
-            for entry in &runtime_plan.raw_env {
-                let Some(name) = entry.get("name").and_then(|n| n.as_str()) else {
-                    tracing::warn!("rawEnv: entry missing `name`, skipping");
-                    continue;
-                };
-                if name.is_empty()
-                    || !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
-                    || name.chars().next().is_some_and(|c| c.is_ascii_digit())
-                {
-                    tracing::warn!(key = %name, "rawEnv: invalid env var name, skipping");
-                    continue;
-                }
-                if RESERVED_PREFIXES.iter().any(|p| name.starts_with(p)) {
-                    tracing::warn!(key = %name, "rawEnv: key uses reserved prefix, skipping");
-                    continue;
-                }
-                if existing.contains(name) {
-                    tracing::debug!(key = %name, "rawEnv: overridden by reconciler, skipping");
-                    continue;
-                }
-                openclaw_env.push(entry.clone());
-                existing.insert(name.to_string());
-            }
-        }
+        agent_env::merge(&mut openclaw_env, &runtime_plan);
 
         // Build the inference-router env array
         let mut router_env = vec![
@@ -1929,9 +1872,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             "image": image,
             "imagePullPolicy": pull_policy,
             "env": openclaw_env,
-            "envFrom": [
-                {"secretRef": {"name": format!("{}-credentials", name), "optional": true}}
-            ],
+            "envFrom": credentials.env_from(&name),
             "securityContext": {
                 "runAsUser": 1000,
                 "allowPrivilegeEscalation": sandbox_config.allow_privilege_escalation,
@@ -2707,7 +2648,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         let provider_version =
             inference::mirror_providers(client, &sandbox_self_ns, &sandbox_ns, &name).await?;
-        let deployment: Deployment = serde_json::from_value(json!({
+        let mut deployment: Deployment = serde_json::from_value(json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
             "metadata": {
@@ -2738,6 +2679,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 }
             }
         }))?;
+        if let Some(namespace) = owned_namespace.as_ref() {
+            credentials.decorate(&mut deployment, &sandbox, namespace);
+        }
         deploy_api
             .patch(
                 &name,
@@ -3085,6 +3029,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // empty list when `networkPolicy` itself is unset). The
         // fetcher itself short-circuits before any network IO.
         let mut extras: Vec<_> = allowlist_resolution.conditions.clone();
+        if let Some(condition) = credentials.condition(&sandbox) {
+            extras.push(condition);
+        }
 
         // Phase G P1 #4: stamp Suspended condition when spec.suspended
         // is true, or surface Suspended=False/Active when there is a
@@ -3140,7 +3087,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             &sandbox_ns,
             runtime_kind_str,
             &extras,
-        ) {
+        ) || credentials.needs_status_update(&sandbox)
+        {
             let sandbox_api: Api<KarsSandbox> =
                 Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
             let status_obj = crate::status::build_running_status_patch_with_extras(
@@ -3173,7 +3121,13 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
-    Ok(Action::requeue(Duration::from_secs(300)))
+    Ok(Action::requeue(Duration::from_secs(
+        if sandbox.spec.credentials_ref.is_some() {
+            30
+        } else {
+            300
+        },
+    )))
 }
 
 /// How long to wait before requeuing a failed reconcile, by error kind.
@@ -3184,7 +3138,9 @@ fn error_requeue_duration(error: &ReconcileError) -> Duration {
     let base = match error {
         // Transient kube API errors (throttling, connection reset, 5xx):
         // retry soon so we don't starve legitimate work.
-        ReconcileError::Kube(_) | ReconcileError::NamespaceOwnership(_) => 30,
+        ReconcileError::Kube(_)
+        | ReconcileError::NamespaceOwnership(_)
+        | ReconcileError::Credentials(_) => 30,
         // Serde errors are deterministic — the same body will fail again.
         // Back off longer so we don't spam logs while a human fixes the
         // bad CR.
@@ -3200,6 +3156,7 @@ fn error_policy(sandbox: Arc<KarsSandbox>, error: &ReconcileError, _ctx: Arc<Con
         ReconcileError::SerdeJson(_) => "serde",
         ReconcileError::Configuration(_) => "configuration",
         ReconcileError::NamespaceOwnership(_) => "namespace_ownership",
+        ReconcileError::Credentials(_) => "credentials",
     };
     crate::metrics::record_reconcile_error("KarsSandbox", class);
     tracing::error!(
@@ -3377,6 +3334,10 @@ pub async fn run(client: Client) -> Result<()> {
     });
 
     Controller::new(sandboxes, crate::watch_config::bounded())
+        .owns(
+            Api::<Secret>::all(ctx.client.clone()),
+            crate::watch_config::bounded(),
+        )
         .watches(
             Api::<Namespace>::all(ctx.client.clone()),
             crate::watch_config::bounded(),

@@ -7,6 +7,8 @@ import ora from "ora";
 import { loadContext, resolveSecret } from "../config.js";
 import { assertRuntimeWired, buildRuntimeBlock, flagToKind } from "../runtime.js";
 import { CLAIM, prepareCredentialNamespace } from "../lib/namespace-ownership.js";
+import { applySourceSandbox, prepareCredentialSource, updatesFromFlags, waitForCredentialSource, type SourceRef } from "../lib/credential-source.js";
+import { FLAG_ENV, SOURCE_KEYS, targetName } from "../lib/credential-source-io.js";
 import {
   buildInferencePolicy,
   buildToolPolicy,
@@ -20,6 +22,8 @@ export function addCommand(): Command {
   cmd
     .description("Add a new sandboxed agent to an existing kars cluster")
     .argument("<name>", "Name for the new sandbox agent")
+    .option("--namespace <workspace>", "Workspace for the Sandbox and policy CRs", "kars-system")
+    .option("--credential-source", "Use a pinned workspace credential source instead of runtime-namespace credentials")
 
     // ── Core (all runtimes) ────────────────────────────────────────────
     .option("--runtime <kind>", "Runtime kind: openclaw | openai-agents | microsoft-agent-framework | langgraph | anthropic | pydantic-ai | hermes | byo", "openclaw")
@@ -87,6 +91,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
 `)
     .action(async (name: string, options) => {
       const { execa } = await import("execa");
+      targetName(name, options.namespace);
 
       const runtimeKind = flagToKind(options.runtime);
       assertRuntimeWired(runtimeKind);
@@ -110,7 +115,11 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         ["--image", options.image],
       ];
       if (runtimeKind !== "OpenClaw") {
-        const used = openClawOnlyFlags.filter(([, v]) => v !== undefined && v !== "" && v !== false).map(([f]) => f);
+        const sourceFlags = options.credentialSource ? new Set(Object.entries(FLAG_ENV)
+          .filter(([, env]) => (SOURCE_KEYS as readonly string[]).includes(env))
+          .map(([flag]) => `--${flag.replace(/[A-Z]/g, letter => `-${letter.toLowerCase()}`)}`)) : new Set<string>();
+        const used = openClawOnlyFlags.filter(([flag, value]) => !sourceFlags.has(flag)
+          && value !== undefined && value !== "" && value !== false).map(([flag]) => flag);
         if (used.length > 0) {
           console.error(chalk.red(`\n  Error: ${used.join(", ")} ${used.length === 1 ? "is" : "are"} only valid with --runtime openclaw.`));
           console.error(chalk.dim(`  Channels, skills, and plugin API keys are OpenClaw-specific entrypoint features.`));
@@ -146,7 +155,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         kind: "KarsSandbox",
         metadata: {
           name,
-          namespace: "kars-system",
+          namespace: options.namespace,
         },
         spec: {
           runtime: runtimeBlock,
@@ -292,7 +301,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
       // S13: build companion same-namespace policy CRs (sibling to KarsSandbox).
       const inferencePolicy = buildInferencePolicy({
         sandboxName: name,
-        namespace: "kars-system",
+        namespace: options.namespace,
         model: options.model,
         provider: "azure-ai-foundry",
         contentSafety: true,
@@ -305,7 +314,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
       const toolPolicy = options.governance
         ? buildToolPolicy({
             sandboxName: name,
-            namespace: "kars-system",
+            namespace: options.namespace,
             profile: options.policyProfile || "default",
           })
         : undefined;
@@ -316,6 +325,11 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
       const yaml = JSON.stringify(bundle, null, 2);
 
       if (options.dryRun) {
+        if (options.credentialSource) {
+          console.log(`Plan: create/update the opted-in source in ${options.namespace}, then bind its API-assigned UID when submitting ${name}.`);
+          console.log("No runnable source-bound manifest is emitted before a real UID exists. No credential values are printed.");
+          return;
+        }
         console.log(chalk.bold("\nKarsSandbox manifest (dry-run):\n"));
         console.log(yaml);
         console.log(chalk.dim("\nApply with: kubectl apply -f <file>"));
@@ -447,10 +461,21 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         const allSecrets = {
           ...channelEnvSecrets,
           ...pluginSecrets,
+          ...(options.credentialSource ? updatesFromFlags(options) : {}),
         };
-        if (Object.keys(allSecrets).length > 0) {
+        let sourceReference: SourceRef | undefined;
+        if (options.credentialSource) {
+          const prepared = await prepareCredentialSource(execa, name, options.namespace, allSecrets);
+          const policies = bundle.filter(item => item !== sandbox);
+          await execa("kubectl", ["apply", "-f", "-"], {
+            input: JSON.stringify({ apiVersion: "v1", kind: "List", items: policies }),
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+          await applySourceSandbox(execa, sandbox, prepared);
+          sourceReference = prepared.reference;
+        } else if (Object.keys(allSecrets).length > 0) {
           spinner.text = "Creating credential secret...";
-          const namespaceUid = await prepareCredentialNamespace(execa, name, "kars-system");
+          const namespaceUid = await prepareCredentialNamespace(execa, name, options.namespace);
           const metadata = sandbox.metadata as Record<string, unknown>;
           metadata.annotations = {
             ...(metadata.annotations as Record<string, string> | undefined),
@@ -479,10 +504,14 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
           kind: "List",
           items: bundle,
         };
-        await execa("kubectl", ["apply", "-f", "-"], {
-          input: JSON.stringify(bundleManifest),
-          stdio: ["pipe", "pipe", "pipe"],
-        });
+        if (sourceReference) {
+          await waitForCredentialSource(execa, name, options.namespace, sourceReference);
+        } else {
+          await execa("kubectl", ["apply", "-f", "-"], {
+            input: JSON.stringify(bundleManifest),
+            stdio: ["pipe", "pipe", "pipe"],
+          });
+        }
 
         // The controller auto-mounts <name>-credentials secret via envFrom (optional: true).
         // If the secret exists, env vars are injected into the sandbox container at startup.
@@ -602,7 +631,7 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
         if (options.skills) {
           console.log(chalk.dim(`  Skills:     ${options.skills}`));
         }
-        console.log(chalk.dim(`  Status:     kubectl get karssandbox ${name} -n kars-system`));
+        console.log(chalk.dim(`  Status:     kubectl get karssandbox ${name} -n ${options.namespace}`));
         console.log(chalk.dim(`  Connect:    kars connect ${name}`));
         console.log(chalk.dim(`  Remove:     kars destroy ${name}\n`));
 

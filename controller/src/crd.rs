@@ -72,6 +72,11 @@ pub struct KarsSandboxSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub memory_ref: Option<LocalObjectRef>,
 
+    /// Explicit agent credential source in this CR's workspace. Source mode
+    /// replaces the legacy credential collection; no cross-namespace refs.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credentials_ref: Option<crate::credential_source::CredentialSourceRef>,
+
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
 
