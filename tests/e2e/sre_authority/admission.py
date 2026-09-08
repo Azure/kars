@@ -37,6 +37,14 @@ def pod_spec(private=True):
     return spec
 
 
+def reserved_source_probe():
+    return {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSandbox",
+        "metadata": {"name": "sre", "namespace": TENANT},
+        "spec": {"runtime": {"kind": "BYO", "byo": {"image": STANDIN, "contractVersion": "v1"}},
+                 "inferenceRef": {"name": "sre-inference"},
+                 "sandbox": {"isolation": "standard"}}}
+
+
 def admission_cases(h, enrollment):
     registration = {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSRERegistration",
                     "metadata": {"name": "canonical"}, "spec": enrollment}
@@ -53,10 +61,7 @@ def admission_cases(h, enrollment):
     require(review["status"]["allowed"] is False, "Ordinary SA unexpectedly has registrar use")
     h.passed("Real RBAC and CEL independently deny ordinary/tenant registration and registrar use")
 
-    source = {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSandbox",
-        "metadata": {"name": "sre", "namespace": TENANT},
-        "spec": {"runtime": {"kind": "BYO", "byo": {"image": STANDIN, "contractVersion": "v1"}},
-                 "sandbox": {"isolation": "standard"}}}
+    source = reserved_source_probe()
     assert_denial(h.api("POST", f"/apis/kars.azure.com/v1alpha1/namespaces/{TENANT}/karssandboxes?dryRun=All",
                        body=source, user="tenant"), "reserved source", "kars-sre-source-authority")
     source["metadata"]["name"] = "not-canonical"

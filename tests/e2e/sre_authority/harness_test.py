@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 import re
 import tempfile
+import time
 import types
 import unittest
 from unittest.mock import patch
@@ -16,6 +17,8 @@ from sre_authority.common import (
     CLAIM_VERSION, NAMESPACE_UID, RUNTIME, SOURCE_NAME, SOURCE_NS, SOURCE_UID, SYSTEM,
     Harness, assert_claim, assert_denial, enrollment_json, printed_object, review_args,
 )
+from sre_authority.fixtures import seed_control_consumer
+from sre_authority.admission import reserved_source_probe
 from sre_authority.proxy import MARKER, assert_filtered
 from sre_authority.credential_paths import assert_token_type_immutable, assert_watch_result
 
@@ -30,6 +33,44 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_control_consumer_fixture_satisfies_required_sandbox_fields(self):
+        captured = []
+        class Captured(Exception):
+            pass
+        def capture(obj, **_kwargs):
+            captured.append(obj)
+            raise Captured
+        with self.assertRaises(Captured):
+            seed_control_consumer(types.SimpleNamespace(create=capture))
+        root = Path(__file__).resolve().parents[3]
+        schema = (root / "deploy/helm/kars/templates/crd.yaml").read_text()
+        spec = schema.split("            spec:\n", 1)[1]
+        required = json.loads(re.search(r"required: (\[[^\n]+\])", spec).group(1))
+        for source in (captured[0], reserved_source_probe()):
+            with self.subTest(name=source["metadata"]["name"]):
+                self.assertTrue(set(required).issubset(source["spec"]))
+                self.assertEqual(source["spec"]["inferenceRef"], {"name": "sre-inference"})
+                self.assertEqual(source["spec"]["runtime"]["kind"], "BYO")
+                self.assertNotIn("agent", source["spec"])
+
+    def test_failed_command_reports_only_source_exit_and_allowlisted_category(self):
+        root = Path(__file__).resolve().parent
+        with tempfile.TemporaryDirectory(prefix=".harness-unit-", dir=root) as folder:
+            harness = Harness.__new__(Harness)
+            harness.work = harness.root = Path(folder)
+            harness.deadline = time.monotonic() + 30
+            harness.phase = "prepare"
+            process = types.SimpleNamespace(returncode=1, communicate=lambda **_kwargs: (
+                MARKER, f"Error from server (Invalid): {MARKER} secret/header/kubeconfig body"))
+            with patch("sre_authority.common.subprocess.Popen", return_value=process):
+                with self.assertRaises(AssertionError) as failure:
+                    harness.run(["kubectl", "--token", MARKER], data=MARKER)
+            message = str(failure.exception)
+            self.assertIn("harness_test.py:test_failed_command_reports_only_source_exit_and_allowlisted_category:", message)
+            self.assertIn("exit=1; category=Invalid", message)
+            for forbidden in (MARKER, "--token", "secret/header/kubeconfig body", str(harness.root)):
+                self.assertNotIn(forbidden, message)
+
     def test_secret_type_rejection_is_specific_and_not_counted_as_vap_denial(self):
         cause = {"field": "type", "reason": "FieldValueInvalid",
                  "message": 'Invalid value: "Opaque": field is immutable'}

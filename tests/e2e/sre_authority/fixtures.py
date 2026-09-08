@@ -148,6 +148,7 @@ def seed_control_consumer(h):
         "metadata": {"name": CONTROL, "namespace": SYSTEM},
         "spec": {"runtime": {"kind": "BYO", "byo": {"image": STANDIN, "contractVersion": "v1",
                  "command": ["/bin/sh"], "args": ["-c", "sleep infinity"]}},
+                 "inferenceRef": {"name": "sre-inference"},
                  "sandbox": {"isolation": "standard"}}})
     namespace_uid = namespace_claim(h, source, CONTROL_NS)
     secret = h.create({"apiVersion": "v1", "kind": "Secret",
