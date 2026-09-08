@@ -47,6 +47,7 @@ fn test_state(ollama_endpoint: String, moderation_endpoint: String) -> AppState 
         policy_status.clone(),
     ));
     AppState {
+        services: Default::default(),
         auth: Arc::new(WorkloadIdentityAuth::new()),
         copilot: Arc::new(kars_inference_router::copilot_auth::CopilotTokenCache::from_env()),
         client: reqwest::Client::new(),
