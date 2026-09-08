@@ -4,6 +4,8 @@
 """Real API validation for one public CRD; never a generic error-body logger."""
 
 import contextlib
+import argparse
+import copy
 import json
 import os
 from pathlib import Path
@@ -20,6 +22,8 @@ CRD_NAME = "karssreregistrations.kars.azure.com"
 CRD_PATH = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions"
 TEMPLATE = "templates/crd-karssreregistration.yaml"
 REPORT_DIR = "e2e-sre-schema-diag"
+ORIGINAL_RULE = "self.sandbox.namespace == self.controller.namespace.name"
+ESCAPED_RULE = "self.sandbox.__namespace__ == self.controller.__namespace__.name"
 
 
 def require_public_crd(obj):
@@ -170,7 +174,69 @@ def kind_proxy(root):
             process.wait(timeout=5)
 
 
-def preflight(root):
+def escaped_namespace_candidate(obj):
+    """Diagnostic-only candidate: preserve the constraint and its wire schema."""
+    candidate = copy.deepcopy(obj)
+    rules = candidate["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["x-kubernetes-validations"]
+    matches = [rule for rule in rules if rule.get("rule") == ORIGINAL_RULE]
+    if len(matches) != 1:
+        raise RuntimeError("Expected public namespace equality rule is absent; candidate probe refused")
+    matches[0]["rule"] = ESCAPED_RULE
+    return candidate
+
+
+def exercise_instances(root, port, obj, method, path, accepted, prefix):
+    # This helper is used only in the isolated schema CI job. The full harness
+    # keeps its preflight dry-run-only so historical fixture setup is unchanged.
+    code, body = request(port, method, path, obj)
+    if code != accepted or public_status(code, body)["category"] != "accepted":
+        write_report(root, f"{prefix}-install.json", public_status(code, body))
+        raise RuntimeError("Public schema could not be installed in the disposable schema cluster")
+    deadline = time.monotonic() + 45
+    while time.monotonic() < deadline:
+        code, current = request(port, "GET", f"{CRD_PATH}/{CRD_NAME}")
+        if code == 200 and any(condition.get("type") == "Established" and condition.get("status") == "True"
+                               for condition in current.get("status", {}).get("conditions", [])):
+            break
+        time.sleep(0.5)
+    else:
+        raise RuntimeError("Public registration CRD did not become Established")
+    instance = {
+        "apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSRERegistration",
+        "metadata": {"name": "canonical"},
+        "spec": {
+            "controller": {"namespace": {"name": "kars-system", "uid": "fixture-system"},
+                           "deployment": {"name": "kars-controller", "uid": "fixture-controller"}, "release": "kars"},
+            "sandbox": {"namespace": "kars-system", "name": "sre", "uid": "fixture-source"},
+            "runtimeNamespace": {"name": "kars-sre", "uid": "fixture-runtime"},
+        },
+    }
+    results = []
+    for label, expected, message in [
+        ("canonical-matching-namespace", 201, None),
+        ("foreign-source-namespace", 422, "SRE must be registered in its controller/release namespace"),
+        ("noncanonical-name", 422, "The canonical SRE registration is the only supported instance"),
+    ]:
+        probe = copy.deepcopy(instance)
+        if label == "foreign-source-namespace":
+            probe["spec"]["sandbox"]["namespace"] = "other-system"
+        elif label == "noncanonical-name":
+            probe["metadata"]["name"] = "other"
+        code, response = request(port, "POST", "/apis/kars.azure.com/v1alpha1/karssreregistrations?dryRun=All", probe)
+        matched = code == expected
+        if message:
+            matched = matched and isinstance(response, dict) and response.get("reason") == "Invalid" and any(
+                message in cause.get("message", "") for cause in response.get("details", {}).get("causes", [])
+            )
+        else:
+            matched = matched and isinstance(response, dict) and response.get("kind") == "KarsSRERegistration"
+        results.append({"case": label, "httpStatus": code, "expectedStatus": expected, "matched": bool(matched)})
+        write_report(root, f"{prefix}-instances.json", {"cases": results})
+        if not matched:
+            raise RuntimeError("Public registration instance did not satisfy the exact expected schema invariant")
+
+
+def preflight(root, *, candidate=False, exercise=False):
     rendered = command("render", ["helm", "template", "kars", str(root / "deploy/helm/kars"),
                                  "--namespace", "kars-system", "--show-only", TEMPLATE], root=root)
     # Existing kubectl parses YAML; strict client validation remains enabled.
@@ -179,6 +245,9 @@ def preflight(root):
         "--dry-run=client", "--validate=strict", "-f", "-", "-o", "json",
     ], root=root, data=rendered))
     require_public_crd(obj)
+    if candidate:
+        obj = escaped_namespace_candidate(obj)
+    prefix = "namespace-accessor-candidate" if candidate else "validation"
     with kind_proxy(root) as (port, version):
         write_report(root, "versions.json", {"apiServer": version, "context": CONTEXT})
         code, existing = request(port, "GET", f"{CRD_PATH}/{CRD_NAME}")
@@ -192,15 +261,23 @@ def preflight(root):
             raise RuntimeError(f"Public schema preflight could not inspect CRD; HTTP {code}")
         code, body = request(port, method, path + "?dryRun=All", obj)
         report = public_status(code, body)
-        write_report(root, "validation.json", report)
+        write_report(root, f"{prefix}.json", report)
         if code != accepted or report["category"] != "accepted":
             raise RuntimeError(f"Public SRE registration schema rejected; HTTP {code}")
+        if exercise:
+            exercise_instances(root, port, obj, method, path, accepted, prefix)
 
 
 if __name__ == "__main__":
     os.umask(0o077)
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--namespace-accessor-candidate", action="store_true",
+                        help="Probe only the API-evidenced field-accessor candidate; does not edit production files")
+    parser.add_argument("--exercise", action="store_true", help="Exercise public instance invariants in the isolated schema job")
+    args = parser.parse_args()
     try:
-        preflight(Path(__file__).resolve().parents[3])
+        preflight(Path(__file__).resolve().parents[3],
+                  candidate=args.namespace_accessor_candidate, exercise=args.exercise)
     except Exception as error:
         # Deliberately do not expose arbitrary exception text, command output,
         # argv, config material, or an unrelated HTTP response.
