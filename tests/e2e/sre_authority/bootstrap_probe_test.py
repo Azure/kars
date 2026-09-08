@@ -7,8 +7,8 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from .bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, public_stack_facts
-from .bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
+from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, public_stack_facts
+from sre_authority.bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
     {"message": "Private SRE material requires authority"}]}}}
@@ -122,7 +122,7 @@ class BootstrapProofTests(unittest.TestCase):
             preserved_json_candidate(source)
 
     def test_arbitrary_failure_is_not_security_proof_in_candidate_cases(self):
-        from .bootstrap_cases import admission_cases
+        from sre_authority.bootstrap_cases import admission_cases
         with patch("sre_authority.bootstrap_cases.request", return_value=(201, {})), \
                 patch("sre_authority.bootstrap_cases.upsert", return_value={"accepted": True}), \
                 patch("sre_authority.bootstrap_cases.as_tenant", return_value=(
