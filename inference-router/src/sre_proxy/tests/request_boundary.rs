@@ -350,6 +350,7 @@ async fn exercise_readiness_inputs(channel: &str, use_https_attacker: bool) {
 
 #[tokio::test]
 async fn ready_hostile_inputs_cannot_select_files_origin_or_namespace() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     for channel in ["query", "headers", "body", "all"] {
         for https in [false, true] {
             exercise_readiness_inputs(channel, https).await;
