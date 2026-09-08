@@ -7,6 +7,7 @@ import copy
 import json
 from pathlib import Path
 import re
+import subprocess
 import tempfile
 import time
 import types
@@ -236,6 +237,37 @@ class HarnessTests(unittest.TestCase):
                         fixture.index('h.cli("authority", "stage"'))
         from sre_authority.common import POLICIES
         self.assertIn("no-legacy-tokens", POLICIES)
+
+    def test_staged_setup_waits_for_builtins_without_skipping_migration_readiness(self):
+        root = Path(__file__).resolve().parents[3]
+        helper = root / "tests/e2e/sre-authority.sh"
+        for version, expected in (("v3.16.4", "--wait"), ("v4.2.4", "--wait=legacy")):
+            with self.subTest(version=version):
+                result = subprocess.run(
+                    ["bash", "-c", 'source "$1"; sre_migration_helm_wait_arg "$2"',
+                     "sre-wait-test", str(helper), version],
+                    capture_output=True, text=True, check=True, timeout=5,
+                )
+                self.assertEqual(result.stdout.strip(), expected)
+        for version in ("v5.0.0", "unexpected"):
+            result = subprocess.run(
+                ["bash", "-c", 'source "$1"; sre_migration_helm_wait_arg "$2"',
+                 "sre-wait-test", str(helper), version],
+                capture_output=True, text=True, check=False, timeout=5,
+            )
+            self.assertNotEqual(result.returncode, 0)
+            self.assertEqual(result.stdout, "")
+        script = (root / "tests/e2e/run.sh").read_text()
+        install = script.split("install_crds() {", 1)[1].split("\nteardown()", 1)[0]
+        self.assertIn("local helm_wait_arg=--wait", install)
+        staged = install.split('if [ "$SRE_LEGACY_PREPARED" = "1" ]; then', 1)[1].split("\n    fi", 1)[0]
+        self.assertIn('sre_migration_helm_wait_arg "$helm_version"', staged)
+        self.assertIn('"$helm_wait_arg" --timeout 5m', install)
+        main = script.split("main() {", 1)[1]
+        self.assertIn("    install_crds\n", main)
+        self.assertIn("    test_sre_authority_migration\n", main)
+        self.assertLess(main.index("install_crds"), main.index("test_sre_authority_migration"))
+        self.assertLess(main.index("test_sre_authority_migration"), main.index("test_create_sandbox"))
 
     def test_kind_prerequisites_do_not_remove_the_rust_httpx_test_step(self):
         root = Path(__file__).resolve().parents[3]
