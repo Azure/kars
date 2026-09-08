@@ -16,7 +16,7 @@ What this template creates (when sre.enabled=true):
   - ClusterRole `kars-sre-reader` — kars-CR read scope (Slice 1)
   - ClusterRoleBinding `kars-sre-reader` — bound to the SA
     `sandbox` in namespace `kars-sre` (the controller-created default)
-  - ToolPolicy `sre-tools` (kars-sre) — gates the sre_* tool surface
+  - ToolPolicy `sre-tools` (Release.Namespace) — gates the sre_* tool surface
 
 Per design (docs/blueprints/07-kars-sre-proposal.md §7.8 — privilege
 containment):
@@ -31,27 +31,43 @@ containment):
     the deregistration were bypassed, there's no network path to
     the relay
 */}}
+{{- $legacyNamespace := dict }}
+{{- $retainNamespace := false }}
+{{- $legacyWriter := dict }}
+{{- $retainWriter := false }}
+{{- if .Release.IsUpgrade }}
+{{- $legacyNamespace = lookup "v1" "Namespace" "" "kars-sre" }}
+{{- if $legacyNamespace }}
+{{- $annotations := default dict $legacyNamespace.metadata.annotations }}
+{{- $retainNamespace = and
+      (eq (index $annotations "meta.helm.sh/release-name") .Release.Name)
+      (eq (index $annotations "meta.helm.sh/release-namespace") .Release.Namespace) }}
+{{- end }}
 {{- if (.Values.sre | default dict).enabled }}
+{{- $legacyWriter = lookup "v1" "ServiceAccount" "kars-sre" "sre-writer" }}
+{{- if $legacyWriter }}
+{{- $annotations := default dict $legacyWriter.metadata.annotations }}
+{{- $retainWriter = and
+      (eq (index $annotations "meta.helm.sh/release-name") .Release.Name)
+      (eq (index $annotations "meta.helm.sh/release-namespace") .Release.Namespace) }}
+{{- end }}
+{{- end }}
+{{- end }}
+{{- if $retainNamespace }}
 ---
-# kars-sre Namespace — created by the chart so the ToolPolicy below
-# (which lives in this ns by design — see proposal §7.6 + the
-# ToolPolicy "cross-namespace refs deliberately not supported" rule)
-# has a namespace to land in BEFORE the controller has reconciled
-# the KarsSandbox.
-#
-# The controller's own namespace reconcile path uses server-side
-# apply with field manager `kars-controller`, so it will harmlessly
-# co-own this namespace (adding its labels + annotations) once it
-# reaches step 1 of reconcile/mod.rs. No conflict.
+# Retain an earlier release's Namespace even when disabling SRE. Dropping it
+# from an upgrade would bypass the Sandbox controller's guarded cleanup.
+# Fresh installs let the controller create and claim the runtime namespace.
 apiVersion: v1
 kind: Namespace
 metadata:
   name: kars-sre
+  annotations:
+    {{- toYaml (mergeOverwrite (deepCopy (default dict $legacyNamespace.metadata.annotations)) (dict "helm.sh/resource-policy" "keep")) | nindent 4 }}
   labels:
-    kars.azure.com/role: sre
-    app.kubernetes.io/name: kars
-    app.kubernetes.io/component: sre
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
+    {{- toYaml (default dict $legacyNamespace.metadata.labels) | nindent 4 }}
+{{- end }}
+{{- if (.Values.sre | default dict).enabled }}
 ---
 # kars-sre InferencePolicy — the model the SRE agent uses for diagnosis.
 # Default model is configurable via .Values.sre.model; the policy applies
@@ -397,8 +413,9 @@ subjects:
 # executes via that token, and tears down the binding.
 #
 # The pieces below provide:
-#   1. SA `sre-writer` (kars-sre) — the identity the controller mints
-#      tokens for. No auto-mount; controller-only path.
+#   1. Legacy chart-owned SA `sre-writer` (kars-sre), retained on upgrades.
+#      Fresh accounts are created by the Sandbox controller after claiming
+#      the namespace. No auto-mount; controller-only path.
 #   2. Two narrow writer ClusterRoles — one for `resourcequotas`, one
 #      for the workload kinds the typed actions cover. The one-shot
 #      ClusterRoleBinding the controller mints binds the RIGHT one
@@ -408,24 +425,19 @@ subjects:
 #   4. ClusterRole `kars:sre-approver` — for human / group
 #      bindings (operator-facing). Cluster admin binds it manually.
 # ---------------------------------------------------------------------
+{{- if $retainWriter }}
 apiVersion: v1
 kind: ServiceAccount
 metadata:
   name: sre-writer
   namespace: kars-sre
   labels:
-    app.kubernetes.io/name: kars
-    app.kubernetes.io/component: sre
-    app.kubernetes.io/managed-by: {{ .Release.Service }}
-    kars.azure.com/role: sre-writer
+    {{- toYaml (default dict $legacyWriter.metadata.labels) | nindent 4 }}
   annotations:
-    # No auto-mount. The controller mints tokens via TokenRequest
-    # (in a future hardening pass — Slice 3 today uses the
-    # controller's own SA for the action execution; the writer SA
-    # structure lands the §7.8.4 architecture).
-    kars.azure.com/no-automount: "true"
+    {{- toYaml (mergeOverwrite (deepCopy (default dict $legacyWriter.metadata.annotations)) (dict "kars.azure.com/no-automount" "true")) | nindent 4 }}
 automountServiceAccountToken: false
 ---
+{{- end }}
 apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRole
 metadata:

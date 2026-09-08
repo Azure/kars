@@ -95,11 +95,18 @@ where
 /// awaiting-router condition rather than a hard failure (the
 /// sandbox reconciler may not yet have completed its first pass).
 /// An empty token string is folded into `Ok(None)` for the same
-/// reason.
+/// reason. The caller holds the namespace lifecycle lock across this
+/// read and the authenticated request, as poll_referencing_sandboxes does.
 pub async fn read_admin_token(
     client: &Client,
+    source_namespace: &str,
     sandbox: &str,
-) -> Result<Option<String>, kube::Error> {
+) -> Result<Option<String>, crate::reconciler::namespace_ownership::Error> {
+    if !crate::reconciler::namespace_ownership::verify_target(client, source_namespace, sandbox)
+        .await?
+    {
+        return Ok(None);
+    }
     let secret_ns = format!("kars-{sandbox}");
     let api: Api<Secret> = Api::namespaced(client.clone(), &secret_ns);
     let secret = match api.get_opt("router-admin-token").await? {
@@ -131,6 +138,7 @@ pub async fn read_admin_token(
 pub async fn poll_referencing_sandboxes(
     client: &Client,
     http: &reqwest::Client,
+    source_namespace: &str,
     sandboxes: &[String],
 ) -> Vec<(
     String,
@@ -138,7 +146,8 @@ pub async fn poll_referencing_sandboxes(
 )> {
     let mut out = Vec::with_capacity(sandboxes.len());
     for sandbox in sandboxes {
-        let token = match read_admin_token(client, sandbox).await {
+        let _namespace_lock = crate::reconciler::namespace_ownership::lock(sandbox).await;
+        let token = match read_admin_token(client, source_namespace, sandbox).await {
             Ok(Some(t)) => t,
             Ok(None) => {
                 out.push((sandbox.clone(), Err(ConfirmError::HttpStatus(0))));

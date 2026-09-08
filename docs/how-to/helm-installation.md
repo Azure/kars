@@ -4,6 +4,11 @@ Use the Helm chart when the Kubernetes cluster, image access, inference backend,
 and required identity configuration already exist. The chart can manage
 AgentMesh or use an existing external deployment.
 
+Before upgrading an existing controller, run `kars namespace preflight` with the
+updated CLI and resolve all ownership conflicts. See
+[namespace ownership migration and adoption](namespace-ownership.md). The check
+does not read Secrets or change namespaces, workloads, or Helm values.
+
 ## Local kind
 
 ```bash

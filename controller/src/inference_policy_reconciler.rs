@@ -229,7 +229,7 @@ async fn reconcile(policy: Arc<InferencePolicy>, ctx: Arc<Ctx>) -> Result<Action
                 Vec::new()
             }
         };
-        let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &referrers).await;
+        let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &ns, &referrers).await;
         decide_enforcement_state(&compiled_digest, "InferencePolicy", &results)
     };
 

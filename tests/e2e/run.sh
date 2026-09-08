@@ -3014,6 +3014,8 @@ EOF
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+source "$SCRIPT_DIR/namespace-ownership.sh"
+
 main() {
     echo ""
     echo "═══════════════════════════════════════════════════════"
@@ -3111,6 +3113,8 @@ main() {
             fail "Unknown KARS_E2E_RUNTIME: $RUNTIME"
             ;;
     esac
+
+    test_sre_namespace_ownership || fail "SRE namespace lifecycle gate failed"
 
     echo ""
     echo "═══════════════════════════════════════════════════════"

@@ -269,7 +269,7 @@ async fn reconcile(memory: Arc<KarsMemory>, ctx: Arc<Ctx>) -> Result<Action, Rec
                 Vec::new()
             }
         };
-        let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &referrers).await;
+        let results = poll_referencing_sandboxes(&ctx.client, &ctx.http, &ns, &referrers).await;
         if let Some(msg) = first_auth_misconfigured_message(&results) {
             degraded = Some((conditions::reason::AUTH_MISCONFIGURED, msg));
             RouterEnforcementState::NotApplicable

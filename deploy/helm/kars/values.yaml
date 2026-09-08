@@ -482,7 +482,7 @@ entraSidecar:
 # When enabled, deploy/helm/kars/templates/sre.yaml provisions:
 #   - InferencePolicy `sre-inference`        (Release.Namespace)
 #   - KarsSandbox    `sre`                   (Release.Namespace)
-#   - ToolPolicy     `sre-tools`             (kars-sre)
+#   - ToolPolicy     `sre-tools`             (Release.Namespace)
 #   - ClusterRole    `kars-sre-reader`       (cluster-scope)
 #   - ClusterRoleBinding `kars-sre-reader`   (cluster-scope → kars-sre/sandbox SA)
 #

@@ -1,0 +1,77 @@
+{
+  "sandbox": {
+    "apiVersion": "kars.azure.com/v1alpha1",
+    "kind": "KarsSandbox",
+    "metadata": {
+      "name": "demo",
+      "namespace": "workspace-a",
+      "uid": "sandbox-a",
+      "resourceVersion": "10",
+      "generation": 1,
+      "creationTimestamp": "2026-09-01T10:00:00Z",
+      "finalizers": ["kars.azure.com/namespace-cleanup"]
+    },
+    "spec": {"inferenceRef": {"name": "demo-inference"}},
+    "status": {"namespace": "kars-demo", "phase": "Running"}
+  },
+  "namespace": {
+    "apiVersion": "v1",
+    "kind": "Namespace",
+    "metadata": {
+      "name": "kars-demo",
+      "uid": "namespace-a",
+      "resourceVersion": "20",
+      "creationTimestamp": "2026-09-01T09:59:00Z",
+      "labels": {
+        "kars.azure.com/sandbox": "demo",
+        "kars.azure.com/role": "sandbox",
+        "customer-label": "keep"
+      },
+      "annotations": {"customer-annotation": "keep"},
+      "managedFields": [{
+        "manager": "kars-controller/karssandbox",
+        "operation": "Apply",
+        "apiVersion": "v1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {"f:metadata": {"f:labels": {"f:kars.azure.com/sandbox": {}}}}
+      }]
+    },
+    "spec": {"finalizers": ["kubernetes"]}
+  },
+  "deployment": {
+    "apiVersion": "apps/v1",
+    "kind": "Deployment",
+    "metadata": {
+      "name": "demo",
+      "namespace": "kars-demo",
+      "uid": "deployment-a",
+      "resourceVersion": "30",
+      "creationTimestamp": "2026-09-01T10:00:01Z",
+      "labels": {
+        "kars.azure.com/sandbox": "demo",
+        "kars.azure.com/parent-namespace": "workspace-a"
+      },
+      "managedFields": [{
+        "manager": "kars-controller/karssandbox",
+        "operation": "Apply",
+        "apiVersion": "apps/v1",
+        "fieldsType": "FieldsV1",
+        "fieldsV1": {"f:spec": {}}
+      }]
+    },
+    "spec": {
+      "replicas": 1,
+      "selector": {"matchLabels": {"kars.azure.com/sandbox": "demo"}},
+      "template": {
+        "metadata": {"labels": {"kars.azure.com/sandbox": "demo"}},
+        "spec": {
+          "containers": [{
+            "name": "openclaw",
+            "image": "customer.example/agent:latest",
+            "envFrom": [{"secretRef": {"name": "demo-credentials", "optional": true}}]
+          }]
+        }
+      }
+    }
+  }
+}
