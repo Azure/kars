@@ -420,7 +420,10 @@ jobs:
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
       - name: Validate the SRE CRD against the actual API server
-        run: python3 tests/e2e/sre_authority/registration_schema.py
+        run: python3 tests/e2e/sre_authority/registration_schema.py --exercise
+      - name: Collect namespace-accessor candidate evidence without relaxing the failing production gate
+        if: failure()
+        run: python3 tests/e2e/sre_authority/registration_schema.py --namespace-accessor-candidate --exercise
       - name: Upload only public CRD schema evidence
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
@@ -429,6 +432,9 @@ jobs:
           path: |
             e2e-sre-schema-diag/versions.json
             e2e-sre-schema-diag/validation.json
+            e2e-sre-schema-diag/validation-instances.json
+            e2e-sre-schema-diag/namespace-accessor-candidate.json
+            e2e-sre-schema-diag/namespace-accessor-candidate-instances.json
           if-no-files-found: warn
           retention-days: 7
       - name: Remove disposable schema cluster

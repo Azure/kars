@@ -128,6 +128,44 @@ class RegistrationSchemaTests(unittest.TestCase):
         self.assertEqual(seen[1][2]["metadata"]["uid"], "crd-uid")
         self.assertEqual(seen[1][2]["metadata"]["resourceVersion"], "42")
 
+    def test_candidate_changes_only_field_accessors_not_constraint_or_wire_properties(self):
+        original = crd()
+        original["spec"]["versions"] = [{"schema": {"openAPIV3Schema": {
+            "x-kubernetes-validations": [{"rule": "self.metadata.name == 'canonical'"}],
+            "properties": {"spec": {
+                "properties": {"sandbox": {"properties": {"namespace": {"type": "string"}}}},
+                "x-kubernetes-validations": [{"rule": schema.ORIGINAL_RULE, "message": "unchanged"}],
+            }},
+        }}}]
+        expected = copy.deepcopy(original)
+        expected["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"][
+            "x-kubernetes-validations"][0]["rule"] = schema.ESCAPED_RULE
+        candidate = schema.escaped_namespace_candidate(original)
+        self.assertEqual(candidate, expected)
+        self.assertIn(schema.ORIGINAL_RULE, json.dumps(original))
+
+    def test_candidate_instance_checks_require_both_original_invariants(self):
+        seen = []
+        def request(_port, method, path, body=None):
+            seen.append((method, path, body))
+            if path == schema.CRD_PATH:
+                return 201, crd()
+            if method == "GET":
+                return 200, {**crd(), "status": {"conditions": [{"type": "Established", "status": "True"}]}}
+            message = None
+            if body["metadata"]["name"] != "canonical":
+                message = "The canonical SRE registration is the only supported instance"
+            elif body["spec"]["sandbox"]["namespace"] != body["spec"]["controller"]["namespace"]["name"]:
+                message = "SRE must be registered in its controller/release namespace"
+            if message:
+                return 422, {"kind": "Status", "reason": "Invalid", "details": {"causes": [{"message": message}]}}
+            return 201, body
+        with patch.object(schema, "request", side_effect=request), patch.object(schema, "write_report") as write:
+            schema.exercise_instances(Path("."), 1, crd(), "POST", schema.CRD_PATH, 201, "candidate")
+        self.assertEqual(len(write.call_args.args[2]["cases"]), 3)
+        self.assertTrue(all(case["matched"] for case in write.call_args.args[2]["cases"]))
+        self.assertTrue(all("?dryRun=All" in path for method, path, _ in seen if "karssreregistrations?" in path))
+
     def test_fast_ci_gate_uses_the_harness_pins_without_waiting_for_rust_images(self):
         root = Path(__file__).resolve().parents[3]
         workflow = (root / ".github/workflows/ci.yml").read_text()
@@ -137,6 +175,8 @@ class RegistrationSchemaTests(unittest.TestCase):
             self.assertIn(required, job)
         for forbidden in ("needs:", "cargo ", "docker/build-push", "--validate=false", "continue-on-error"):
             self.assertNotIn(forbidden, job)
+        self.assertIn("--namespace-accessor-candidate --exercise", job)
+        self.assertIn("if: failure()", job)
         runner = (root / "tests/e2e/run.sh").read_text()
         self.assertLess(runner.index('python3 "$SCRIPT_DIR/sre_authority/registration_schema.py"'),
                         runner.index("\n    build_images\n"))
