@@ -259,6 +259,33 @@ pub async fn teardown(
     Ok(sandbox_gone && policy_gone)
 }
 
+pub(crate) async fn pause_credentials(
+    client: &Client,
+    task: &KarsTask,
+) -> Result<bool, String> {
+    let namespace = task.namespace().ok_or("Credential Task workspace missing")?;
+    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &namespace, &sandbox_api_resource());
+    let Some(object) = api.get_opt(&task.name_any()).await
+        .map_err(|error| crate::credential_grants::api_error("Read credential Task execution", error))?
+    else {
+        return Ok(false);
+    };
+    if !owned_by_task(&object, task) || object.metadata.deletion_timestamp.is_some() {
+        return Err("Credential Task cannot pause a foreign or terminating Sandbox".into());
+    }
+    let sandbox: crate::crd::KarsSandbox = serde_json::from_value(
+        serde_json::to_value(object).map_err(|_| "Credential Sandbox serialization failed")?,
+    ).map_err(|_| "Credential Sandbox is malformed")?;
+    if let Some(runtime) = Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone())
+        .get_opt(&format!("kars-{}", sandbox.name_any())).await
+        .map_err(|error| crate::credential_grants::api_error("Read credential runtime namespace", error))?
+    {
+        crate::reconciler::credential_sources::pause_owned(client, &sandbox, &runtime)
+            .await.map_err(|error| error.to_string())?;
+    }
+    Ok(true)
+}
+
 fn owned_by_task(object: &DynamicObject, task: &KarsTask) -> bool {
     task.metadata
         .uid

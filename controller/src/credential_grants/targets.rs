@@ -35,6 +35,7 @@ pub(super) async fn owner_allowed(
     client: &Client,
     target: &CredentialTarget,
     owner: &CredentialTarget,
+    candidate: Option<&crate::kars_task::KarsTask>,
 ) -> Result<(), String> {
     if owner.namespace != target.namespace {
         return Err("Credential owners cannot cross workspaces".into());
@@ -55,7 +56,16 @@ pub(super) async fn owner_allowed(
             .await
             .map_err(|e| api_error("Read credential delegation ancestor", e))?;
         let uid = identity(&task.metadata)?.0;
-        if !seen.insert(uid.to_string()) || !crate::kars_task_reconciler::task_is_ready(&task) {
+        let checking_target = candidate.is_some_and(|candidate| {
+            task.metadata.uid == candidate.metadata.uid
+                && task.metadata.generation == candidate.metadata.generation
+                && task.metadata.namespace == candidate.metadata.namespace
+                && task.metadata.name == candidate.metadata.name
+                && task.uid().as_deref() == Some(target.uid.as_str())
+        });
+        if !seen.insert(uid.to_string())
+            || (!checking_target && !crate::kars_task_reconciler::task_is_ready(&task))
+        {
             return Err("Credential delegation ancestry is stale or cyclic".into());
         }
         if owner.kind == "KarsTask" && task.name_any() == owner.name && uid == owner.uid {

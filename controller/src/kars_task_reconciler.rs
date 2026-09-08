@@ -223,6 +223,7 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         },
     };
 
+    crate::credential_grants::readiness::enforce(&ctx.client, &task, &mut new_status).await;
     if new_status.phase.as_deref() == Some(PHASE_READY) {
         tracing::debug!(
             karstask = %name,
@@ -263,7 +264,8 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     reconcile_receipt(&ctx.client, &ns, &task, &new_status, &ctx.signer).await;
 
     // A child still waiting on its parent requeues quickly to converge.
-    let requeue = if new_status.phase.as_deref() == Some(PHASE_PENDING)
+    let requeue = if crate::credential_grants::readiness::selected(&task)
+        || new_status.phase.as_deref() == Some(PHASE_PENDING)
         || matches!(
             new_status.execution_phase.as_deref(),
             Some("Stopping" | PHASE_DEGRADED)
@@ -484,6 +486,8 @@ async fn reconcile_execution(
                 status.sandbox_ref = task.status.as_ref().and_then(|s| s.sandbox_ref.clone());
             }
         }
+    } else if launched && crate::credential_grants::readiness::selected(task) {
+        crate::credential_grants::readiness::pause(client, task, status).await;
     } else {
         // Not launched (or not Ready): ensure no sandbox lingers from a prior
         // launch, and report Idle.

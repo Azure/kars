@@ -5,12 +5,41 @@
 
 use super::*;
 use crate::{crd::KarsSandbox, credential_grant::github as contract, reconciler::governed_services};
-use governed_services::credentials::{self, GITHUB, Projection};
+use governed_services::credentials::{self, GITHUB};
 use k8s_openapi::api::core::v1::ConfigMap;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 const ENROLLED: &str = "kars.azure.com/github-grant-uid";
+
+pub(crate) enum Projection {
+    Legacy,
+    Issued(credentials::Projection),
+    Retired(credentials::Projection),
+}
+
+impl Projection {
+    pub(crate) fn required_mount(&self) -> Option<bool> {
+        match self {
+            Self::Legacy => Some(false),
+            Self::Issued(_) => Some(true),
+            Self::Retired(_) => None,
+        }
+    }
+
+    pub(crate) fn decorate(&self, deployment: &mut k8s_openapi::api::apps::v1::Deployment) {
+        if let Self::Issued(projection) | Self::Retired(projection) = self {
+            projection.decorate(deployment);
+        }
+    }
+
+    pub(crate) async fn consumers_current(&self, client: &Client, namespace: &str, name: &str) -> Result<bool, String> {
+        match self {
+            Self::Legacy => Ok(true),
+            Self::Issued(projection) | Self::Retired(projection) => projection.consumers_current(client, namespace, name).await,
+        }
+    }
+}
 
 #[cfg(test)]
 mod tests;
@@ -21,13 +50,12 @@ fn string(secret:&Secret,key:&str)->Result<String,String> {
         .ok_or_else(||"Operator App store has missing or invalid material".into())
 }
 
-fn configuration(
+fn validated_material<'grant>(
     selection:&GitHubBinding,
-    grant:&KarsCredentialGrant,
+    grant:&'grant KarsCredentialGrant,
     connection:&ConfigMap,
     store:&Secret,
-    managed_identity:&Value,
-) -> Result<String,String> {
+) -> Result<(&'grant GitHubConnectionGrant,String,String),String> {
     contract::validate(selection)?;
     let approved=grant.spec.github_connections.iter().find(|candidate|candidate.connection==selection.connection)
         .ok_or("GitHub connection UID has no explicit operator grant")?;
@@ -36,14 +64,12 @@ fn configuration(
         || identity(&connection.metadata)?.0!=approved.connection.uid
         || identity(&store.metadata)?.0!=approved.app_secret.uid
         || connection.namespace()!=grant.namespace() || store.namespace()!=grant.namespace()
-        || managed_identity["sandbox"]["namespace"]!=json!(grant.namespace())
         || store.name_any()!=approved.app_secret.name || store.type_.as_deref()!=Some("Opaque")
         || !grant.spec.integration_stores.iter().any(|entry|entry.purpose=="github-app" && entry.secret==approved.app_secret)
         || approved.installation_id==0 || approved.repositories.is_empty() || approved.repositories.len()>32
         || approved.repositories.iter().any(|repo|!contract::repository(repo))
         || selection.repositories.iter().any(|repo|!approved.repositories.contains(repo))
         || (selection.write && !approved.write)
-        || managed_identity["managed"]!=true
     {
         return Err("GitHub App, connection, owner or repository authority differs from its operator enrollment".into());
     }
@@ -65,6 +91,22 @@ fn configuration(
         return Err("Operator App ID or RSA key is invalid or changed".into());
     }
     let app=app.parse::<u64>().map_err(|_|"Operator App ID is invalid")?.to_string();
+    Ok((approved,app,key))
+}
+
+fn configuration(
+    selection:&GitHubBinding,
+    grant:&KarsCredentialGrant,
+    connection:&ConfigMap,
+    store:&Secret,
+    managed_identity:&Value,
+) -> Result<String,String> {
+    if managed_identity["managed"]!=true
+        || managed_identity["sandbox"]["namespace"]!=json!(grant.namespace())
+    {
+        return Err("GitHub private projection requires the verified managed workspace identity".into());
+    }
+    let (approved,app,key)=validated_material(selection,grant,connection,store)?;
     let value=json!({"identity":managed_identity,"app_id":app,"installation_id":approved.installation_id,
         "private_key_pem":key,"repositories":selection.repositories,"write":selection.write});
     let serialized=serde_json::to_string(&value).map_err(|_|"GitHub private configuration serialization failed")?;
@@ -96,20 +138,35 @@ async fn prepare(
             return Err("GitHub selection differs from the live UID-bound Task authorization".into());
         }
     }
-    let grant=current(client,&workspace,&selection.grant).await?;
-    let approved=grant.spec.github_connections.iter().find(|candidate|candidate.connection==selection.connection)
-        .ok_or("GitHub connection requires explicit operator enrollment")?;
-    let connection=Api::<ConfigMap>::namespaced(client.clone(),&workspace).get(&approved.connection.name).await
-        .map_err(|e|api_error("Read reviewed GitHub connection",e))?;
-    let store=Api::<Secret>::namespaced(client.clone(),&workspace).get(&approved.app_secret.name).await
-        .map_err(|e|api_error("Read enrolled GitHub App store",e))?;
+    let (grant,connection,store)=read_connection(client,&workspace,selection).await?;
     let configuration=configuration(selection,&grant,&connection,&store,managed_identity)?;
     Ok((grant,connection,store,configuration))
 }
 
+async fn read_connection(
+    client:&Client,workspace:&str,selection:&GitHubBinding,
+) -> Result<(KarsCredentialGrant,ConfigMap,Secret),String> {
+    let grant=current(client,workspace,&selection.grant).await?;
+    let approved=grant.spec.github_connections.iter().find(|candidate|candidate.connection==selection.connection)
+        .ok_or("GitHub connection requires explicit operator enrollment")?;
+    let connection=Api::<ConfigMap>::namespaced(client.clone(),workspace).get(&approved.connection.name).await
+        .map_err(|e|api_error("Read reviewed GitHub connection",e))?;
+    let store=Api::<Secret>::namespaced(client.clone(),workspace).get(&approved.app_secret.name).await
+        .map_err(|e|api_error("Read enrolled GitHub App store",e))?;
+    Ok((grant,connection,store))
+}
+
+pub(super) async fn preflight_binding(
+    client:&Client,workspace:&str,selection:&GitHubBinding,
+) -> Result<(),String> {
+    let (grant,connection,store)=read_connection(client,workspace,selection).await?;
+    validated_material(selection,&grant,&connection,&store)?;
+    Ok(())
+}
+
 pub(crate) async fn ensure(
     client:&Client,sandbox:&KarsSandbox,namespace:&Namespace,managed_identity:&Value,
-) -> Result<Option<Projection>,String> {
+) -> Result<Projection,String> {
     let previous=sandbox.metadata.annotations.as_ref().and_then(|values|values.get(ENROLLED));
     let previously_enrolled=previous.is_some();
     if sandbox.spec.github_binding.is_none() {
@@ -121,13 +178,17 @@ pub(crate) async fn ensure(
                     "annotations":{ENROLLED:"retired"}}
             }))).await.map_err(|e|api_error("Record private GitHub revocation",e))?;
         }
-        return Ok(None);
+        return if previously_enrolled {
+            credentials::Projection::retired(GITHUB,sandbox).map(Projection::Retired)
+        } else {
+            Ok(Projection::Legacy)
+        };
     }
     let result=issue(client,sandbox,namespace,managed_identity).await;
     if matches!(&result, Err(credentials::IssuanceError::Rejected(_))) && previously_enrolled {
         credentials::retire_for(client,sandbox,namespace,GITHUB).await?;
     }
-    result.map(Some).map_err(|error|error.to_string())
+    result.map(Projection::Issued).map_err(|error|error.to_string())
 }
 
 pub(super) async fn revoke(client:&Client,grant:&KarsCredentialGrant)->Result<(),String> {
@@ -146,7 +207,7 @@ pub(super) async fn revoke(client:&Client,grant:&KarsCredentialGrant)->Result<()
 
 async fn issue(
     client:&Client,sandbox:&KarsSandbox,namespace:&Namespace,managed_identity:&Value,
-) -> Result<Projection,credentials::IssuanceError> {
+) -> Result<credentials::Projection,credentials::IssuanceError> {
     let (grant,connection,store,configuration)=prepare(client,sandbox,managed_identity).await?;
     let workspace=sandbox.namespace().ok_or("GitHub workspace missing")?;
     let sandboxes:Api<KarsSandbox>=Api::namespaced(client.clone(),&workspace);

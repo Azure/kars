@@ -4,6 +4,7 @@
 mod admission;
 mod control;
 pub(crate) mod github;
+pub(crate) mod readiness;
 mod legacy;
 mod operator;
 pub(crate) use operator::decorate as decorate_observations;
@@ -263,13 +264,27 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         let sources = sources::inventory(client, grant).await?;
         let legacy = legacy::inventory(client, grant).await?;
         rbac::apply(client, grant, &sources).await?;
-        operator::reconcile(client, grant).await?;
         Ok::<_, String>((sources, legacy))
     }
     .await;
     match validation {
         Ok((sources, legacy)) => {
-            let integration = control::reconcile(client, grant).await;
+            let observations = operator::reconcile(client, grant).await;
+            let controls = control::reconcile(client, grant).await;
+            let integration = match observations {
+                Ok(()) => controls,
+                Err(error) => {
+                    let revoked = operator::revoke(client, grant).await;
+                    let mut detail = match revoked {
+                        Ok(()) => format!("Private observations unavailable: {error}"),
+                        Err(revoke) => format!("Private observations unavailable: {error}; revocation failed: {revoke}"),
+                    };
+                    if let Err(control) = controls {
+                        detail.push_str(&format!("; integration control unavailable: {control}"));
+                    }
+                    Err(detail)
+                }
+            };
             publish(
                 client,
                 grant,

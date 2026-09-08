@@ -102,6 +102,14 @@ Team/target scopes, the owning target identity. References and key grants are
 part of the shared effective Task authorization snapshot. Child references
 and key sets may not exceed their parent's credential authority.
 
+Before publishing ordinary Task `Ready`, core performs a read-only live grant,
+source and GitHub-enrollment preflight. This does not prepare bundles or mint
+credentials, and does not require the candidate Task to already be Ready.
+Delegation ancestors still require normal readiness. Invalid authority clears
+the Task readiness proof used by other controllers, including governed
+inference; no alternate budget predicate or authorization digest is introduced.
+Selected Tasks recheck on the existing short reconciliation interval.
+
 Prelaunch sources remain unbound. Bridge stages Tasks/Teams without runnable
 execution, captures the actual CREATE UID, attaches the source selections, and
 only then requests activation. A CREATE conflict is never converted to adoption.
@@ -113,6 +121,12 @@ Missing selected keys mask lower-priority values. Removing a key does not remove
 the binding or restore direct credentials. Missing/replaced/revoked authority
 stops the credential consumer and clears only its owned projection. Previously
 governed consumers do not silently return to the old direct collection.
+
+While a still-launched governed Task is unready, core pauses its exact owned
+runtime rather than deleting the Sandbox, namespace or stored state. Explicit
+unlaunch/deletion retains the established cleanup behavior. Optional private
+observations report separate integration errors and cannot create a circular
+dependency between the source grant's readiness and the Task they observe.
 
 `CredentialsReady` and grant status expose key names, source/bundle/projection
 UIDs, observed versions and reasons—not values. Non-404 API errors are errors,
@@ -146,6 +160,11 @@ bytes are identical; no unsupported fields are added to the runtime parser.
 Grant status-only resourceVersion changes do not cause perpetual rollouts.
 Pending privacy qualification has a typed non-issuance outcome rather than
 being treated by the GitHub adapter as a source-authority failure.
+After explicit binding removal, a controller-protected retirement marker
+disables the legacy optional GitHub mount. A distinct retirement version waits
+for old cached consumers, including terminating Pods, before readiness can
+recover. Removing a binding must not make retained private material usable as
+legacy configuration.
 
 Keyless mode requires explicit governed agent sources, rejects opaque GitHub
 egress, and currently rejects raw GitHub/custom agent credential combinations

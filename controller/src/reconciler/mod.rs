@@ -35,7 +35,7 @@ use crate::fedcred::{FedCredConfig, FedCredManager};
 
 mod agent_env;
 pub(crate) mod byo_contract;
-mod credential_sources;
+pub(crate) mod credential_sources;
 mod dev_env;
 mod github_services;
 pub(crate) mod governance_mounts;

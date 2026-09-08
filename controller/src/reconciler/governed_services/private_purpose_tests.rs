@@ -121,3 +121,23 @@ async fn governed_github_pending_privacy_is_typed_and_does_not_retire_a_rollout(
     assert_eq!(data.objects[DEPLOY]["spec"]["replicas"], 1);
     assert!(data.calls.iter().all(|(method, _, _)| method != "PATCH"));
 }
+
+#[tokio::test]
+async fn governed_github_retirement_disables_legacy_mount_and_waits_for_old_consumers() {
+    let (_server, client, state) = fixture().await;
+    let retired = crate::credential_grants::github::Projection::Retired(
+        credentials::Projection::retired(GITHUB, &source()).unwrap(),
+    );
+    assert_eq!(retired.required_mount(), None);
+    assert_eq!(crate::credential_grants::github::Projection::Legacy.required_mount(), Some(false));
+    let mut deployment: Deployment = serde_json::from_value(deployment()).unwrap();
+    retired.decorate(&mut deployment);
+    let version = deployment.spec.as_ref().unwrap().template.metadata.as_ref().unwrap()
+        .annotations.as_ref().unwrap()[GITHUB.version_annotation].clone();
+    state.lock().unwrap().pods = vec![json!({"metadata":{"name":"old","uid":"old",
+        "deletionTimestamp":"2026-01-01T00:00:00Z",
+        "annotations":{GITHUB.version_annotation:"old-credential-version"}}})];
+    assert!(!retired.consumers_current(&client, NS, "normal").await.unwrap());
+    state.lock().unwrap().pods[0]["metadata"]["annotations"][GITHUB.version_annotation] = version.into();
+    assert!(retired.consumers_current(&client, NS, "normal").await.unwrap());
+}

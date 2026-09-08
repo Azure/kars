@@ -22,18 +22,20 @@ pub(super) use credentials::quarantine_on_privacy_loss;
 pub struct Projection {
     pub identity: Value,
     credential: credentials::Projection,
-    github: Option<credentials::Projection>,
+    github: crate::credential_grants::github::Projection,
 }
 
 impl Projection {
     pub fn decorate(&self, deployment: &mut Deployment) {
         self.credential.decorate(deployment);
-        if let Some(github)=&self.github { github.decorate(deployment); }
+        self.github.decorate(deployment);
     }
 
     pub fn mount(&self,pod:&mut Value) {
         mount(pod);
-        super::github_services::mount(pod,self.github.is_some());
+        if let Some(required)=self.github.required_mount() {
+            super::github_services::mount(pod,required);
+        }
     }
 
     pub async fn consumers_current(
@@ -42,8 +44,7 @@ impl Projection {
         namespace: &str,
         name: &str,
     ) -> Result<bool, String> {
-        if let Some(github)=&self.github
-            && !github.consumers_current(client,namespace,name).await?
+        if !self.github.consumers_current(client,namespace,name).await?
         { return Ok(false) }
         self.credential
             .consumers_current(client, namespace, name)
