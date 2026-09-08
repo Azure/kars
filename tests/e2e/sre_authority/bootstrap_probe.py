@@ -20,6 +20,18 @@ REPORT_PREFIX = ""
 def write_report(root, filename, report):
     schema_report(root, REPORT_PREFIX + filename, report)
 
+
+def failure_site(error):
+    result = {"category": type(error).__name__}
+    frame = error.__traceback__
+    while frame:
+        name = Path(frame.tb_frame.f_code.co_filename).name
+        if name in ("bootstrap_probe.py", "binding_probe.py"):
+            result.update(source=name, line=frame.tb_lineno)
+        frame = frame.tb_next
+    return result
+
+
 PATHS = {
     "CustomResourceDefinition": "/apis/apiextensions.k8s.io/v1/customresourcedefinitions",
     "ServiceAccount": "/api/v1/namespaces/{namespace}/serviceaccounts",
@@ -241,4 +253,5 @@ if __name__ == "__main__":
              args.retirement_bind_proof)
     except Exception as error:
         print(f"SRE-BOOTSTRAP-FAIL category={type(error).__name__}", flush=True)
+        write_report(Path(__file__).resolve().parents[3], "bootstrap-failure-site.json", failure_site(error))
         raise SystemExit(1) from None
