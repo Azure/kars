@@ -190,6 +190,7 @@ mod tests {
             openai_moderation_endpoint: "https://api.openai.com".into(),
             openai_moderation_api_key: None,
             openai_moderation_model: "omni-moderation-latest".into(),
+            providers: std::collections::HashMap::new(),
         }
     }
 

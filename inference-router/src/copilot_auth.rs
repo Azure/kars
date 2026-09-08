@@ -8,7 +8,7 @@
 //!
 //! 1. The **GitHub OAuth/PAT** that the user supplies is *not* sent to
 //!    the Copilot inference API. It's only sent to
-//!    `POST https://api.github.com/copilot_internal/v2/token`, which
+//!    `GET https://api.github.com/copilot_internal/v2/token`, which
 //!    returns a short-lived **Copilot JWT** (~30 min TTL).
 //! 2. The Copilot JWT is what gets attached as `Authorization: Bearer`
 //!    on every `api.githubcopilot.com` upstream request.
@@ -27,6 +27,7 @@
 
 use anyhow::{Context, Result, bail};
 use serde::Deserialize;
+use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use tokio::sync::RwLock;
@@ -35,6 +36,7 @@ const TOKEN_EXCHANGE_URL: &str = "https://api.github.com/copilot_internal/v2/tok
 
 /// Refresh window: ask for a new JWT this long before the cached one expires.
 const REFRESH_BUFFER: Duration = Duration::from_secs(60);
+const DIRECT_REFRESH_SECS: u64 = 1500;
 
 /// Static integration headers Copilot expects on every request.
 /// Without these, Copilot returns 400 "missing required header" or, worse,
@@ -74,6 +76,11 @@ struct CachedJwt {
     expires_at: Instant,
 }
 
+struct NamedCache {
+    github_token: String,
+    cached: Arc<RwLock<Option<CachedJwt>>>,
+}
+
 /// In-process cache + exchanger for Copilot JWTs.
 ///
 /// Cheap to clone; the underlying state is `Arc<RwLock<...>>`.
@@ -86,6 +93,11 @@ pub struct CopilotTokenCache {
     /// instead of panicking at startup.
     github_token: Option<String>,
     cached: Arc<RwLock<Option<CachedJwt>>>,
+    /// Provider IDs are the keys. Credentials live only in private values,
+    /// never in cache keys or diagnostic output.
+    named: Arc<RwLock<HashMap<String, NamedCache>>>,
+    #[cfg(test)]
+    exchange_override: Option<String>,
 }
 
 impl CopilotTokenCache {
@@ -121,6 +133,9 @@ impl CopilotTokenCache {
                 .expect("failed to build reqwest client"),
             github_token,
             cached: Arc::new(RwLock::new(None)),
+            named: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            exchange_override: None,
         }
     }
 
@@ -135,7 +150,25 @@ impl CopilotTokenCache {
                 .expect("failed to build reqwest client"),
             github_token: Some(github_token.into()),
             cached: Arc::new(RwLock::new(None)),
+            named: Arc::new(RwLock::new(HashMap::new())),
+            #[cfg(test)]
+            exchange_override: None,
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_test_exchange(token: &str, url: String) -> Self {
+        let mut cache = Self::with_token(token);
+        cache.exchange_override = Some(url);
+        cache
+    }
+
+    fn exchange_url(&self) -> &str {
+        #[cfg(test)]
+        if let Some(url) = self.exchange_override.as_deref() {
+            return url;
+        }
+        TOKEN_EXCHANGE_URL
     }
 
     /// True if a GitHub token is configured (i.e. Copilot path is usable).
@@ -146,19 +179,70 @@ impl CopilotTokenCache {
     /// Returns a valid Copilot JWT, exchanging if needed.
     /// The base URL allows tests to point at a mock server.
     pub async fn get_jwt(&self) -> Result<String> {
-        self.get_jwt_with_base(TOKEN_EXCHANGE_URL).await
+        self.get_jwt_with_base(self.exchange_url()).await
     }
 
     /// Same as [`get_jwt`] but allows overriding the exchange endpoint.
     /// Internal — exposed for tests; production code should call `get_jwt`.
     pub async fn get_jwt_with_base(&self, exchange_url: &str) -> Result<String> {
+        self.exchange_for_scope(self.github_token.as_deref(), &self.cached, exchange_url)
+            .await
+    }
+
+    /// Named Copilot credentials are GitHub OAuth/seat tokens, not Azure keys
+    /// or an already exchanged JWT. Each immutable provider identity owns a
+    /// separate exchange cache, independent of the legacy default account.
+    pub async fn get_jwt_for_provider(
+        &self,
+        provider_id: &str,
+        github_token: &str,
+    ) -> Result<String> {
+        self.provider_jwt_with_base(provider_id, github_token, self.exchange_url())
+            .await
+    }
+
+    pub(crate) async fn provider_jwt_with_base(
+        &self,
+        provider_id: &str,
+        github_token: &str,
+        exchange_url: &str,
+    ) -> Result<String> {
+        anyhow::ensure!(
+            !github_token.trim().is_empty(),
+            "named Copilot provider has no GitHub seat token"
+        );
+        let cached = {
+            let mut providers = self.named.write().await;
+            let entry = providers
+                .entry(provider_id.to_string())
+                .or_insert_with(|| NamedCache {
+                    github_token: github_token.to_string(),
+                    cached: Arc::new(RwLock::new(None)),
+                });
+            if entry.github_token != github_token {
+                // Defensive invalidation if a future config reload reuses an ID.
+                entry.github_token = github_token.to_string();
+                entry.cached = Arc::new(RwLock::new(None));
+            }
+            entry.cached.clone()
+        };
+        self.exchange_for_scope(Some(github_token), &cached, exchange_url)
+            .await
+    }
+
+    async fn exchange_for_scope(
+        &self,
+        github_token: Option<&str>,
+        cached: &Arc<RwLock<Option<CachedJwt>>>,
+        exchange_url: &str,
+    ) -> Result<String> {
         // Fast path: cached JWT still has runway. Serve only when BOTH
         // (a) GitHub's refresh window hasn't elapsed AND
         // (b) Copilot's hard expiry hasn't passed (minus a safety buffer).
         // The expires_at check is what fixes the "IDE token expired"
         // 401s a user hit after ~30 min on long-lived sandbox pods.
         {
-            let guard = self.cached.read().await;
+            let guard = cached.read().await;
             if let Some(c) = guard.as_ref() {
                 let now = Instant::now();
                 let expiry_safe = c.expires_at > now + REFRESH_BUFFER;
@@ -169,7 +253,7 @@ impl CopilotTokenCache {
         }
 
         // Slow path: exchange.
-        let gh = self.github_token.as_deref().context(
+        let gh = github_token.context(
             "no GitHub token configured for Copilot — set COPILOT_GITHUB_TOKEN or mount /run/secrets/copilot-github-token",
         )?;
 
@@ -187,6 +271,20 @@ impl CopilotTokenCache {
         let status = resp.status();
         if !status.is_success() {
             let body = resp.text().await.unwrap_or_default();
+            // Non-editor OAuth tokens can authenticate directly even when the
+            // editor-only exchange endpoint rejects their scope.
+            if status.is_client_error() {
+                tracing::warn!(%status, "Copilot token exchange rejected; trying configured direct token");
+                let now = Instant::now();
+                let direct = CachedJwt {
+                    token: gh.to_string(),
+                    refresh_at: now + Duration::from_secs(DIRECT_REFRESH_SECS),
+                    expires_at: now + Duration::from_secs(DIRECT_REFRESH_SECS + 300),
+                };
+                let token = direct.token.clone();
+                *cached.write().await = Some(direct);
+                return Ok(token);
+            }
             bail!("Copilot token exchange returned {status}: {body}");
         }
 
@@ -210,7 +308,7 @@ impl CopilotTokenCache {
         };
 
         let now_instant = Instant::now();
-        let cached = CachedJwt {
+        let refreshed = CachedJwt {
             token: parsed.token.clone(),
             refresh_at: now_instant + Duration::from_secs(refresh_secs as u64),
             // Track Copilot's hard expiry independently so the cache
@@ -225,7 +323,7 @@ impl CopilotTokenCache {
             refresh_secs
         );
 
-        *self.cached.write().await = Some(cached);
+        *cached.write().await = Some(refreshed);
         Ok(parsed.token)
     }
 }
@@ -233,6 +331,67 @@ impl CopilotTokenCache {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn named_cache_keys_are_provider_ids_and_rotated_credentials_invalidate_only_their_scope()
+    {
+        let server = MockServer::start().await;
+        let expiry = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            + 3600;
+        for (seat, jwt) in [("seat-first", "jwt-first"), ("seat-rotated", "jwt-rotated")] {
+            Mock::given(header("authorization", format!("token {seat}")))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "token": jwt, "expires_at": expiry, "refresh_in": 1500,
+                })))
+                .expect(1)
+                .mount(&server)
+                .await;
+        }
+        let cache = CopilotTokenCache::with_token("unrelated-default-seat");
+        assert_eq!(
+            cache
+                .provider_jwt_with_base("provider-a", "seat-first", &server.uri())
+                .await
+                .unwrap(),
+            "jwt-first"
+        );
+        assert_eq!(
+            cache
+                .provider_jwt_with_base("provider-a", "seat-first", &server.uri())
+                .await
+                .unwrap(),
+            "jwt-first"
+        );
+        assert_eq!(
+            cache
+                .provider_jwt_with_base("provider-a", "seat-rotated", &server.uri())
+                .await
+                .unwrap(),
+            "jwt-rotated"
+        );
+        let keys: Vec<_> = cache.named.read().await.keys().cloned().collect();
+        assert_eq!(keys, ["provider-a"]);
+        assert!(cache.cached.read().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn direct_token_fallback_preserves_non_editor_oauth_support() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/copilot_internal/v2/token"))
+            .respond_with(ResponseTemplate::new(404))
+            .mount(&server)
+            .await;
+        let cache = CopilotTokenCache::with_token("gho_direct");
+        let token = cache
+            .get_jwt_with_base(&format!("{}/copilot_internal/v2/token", server.uri()))
+            .await
+            .unwrap();
+        assert_eq!(token, "gho_direct");
+    }
     use serde_json::json;
     use std::time::{SystemTime, UNIX_EPOCH};
     use wiremock::matchers::{header, method, path};
@@ -251,6 +410,8 @@ mod tests {
             client: reqwest::Client::new(),
             github_token: None,
             cached: Arc::new(RwLock::new(None)),
+            named: Arc::new(RwLock::new(HashMap::new())),
+            exchange_override: None,
         };
         let err = c.get_jwt().await.unwrap_err();
         assert!(err.to_string().contains("no GitHub token"));
@@ -288,7 +449,7 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/copilot_internal/v2/token"))
-            .respond_with(ResponseTemplate::new(401).set_body_string("bad credentials"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("service unavailable"))
             .mount(&server)
             .await;
 
@@ -298,7 +459,7 @@ mod tests {
             .await
             .unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("401"), "expected 401 in error, got: {msg}");
+        assert!(msg.contains("503"), "expected 503 in error, got: {msg}");
     }
 
     /// Regression: when GitHub returns `refresh_in` LARGER than the actual

@@ -36,6 +36,7 @@ use crate::fedcred::{FedCredConfig, FedCredManager};
 pub(crate) mod byo_contract;
 mod dev_env;
 pub(crate) mod governance_mounts;
+mod inference;
 mod mcp_egress;
 pub(crate) mod trustgraph_mount;
 
@@ -976,6 +977,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }),
     ];
 
+    egress_rules
+        .extend(inference::configured_local_egress_rules().map_err(ReconcileError::Configuration)?);
+
     // SRE-mode-only egress allow: apiserver Service ClusterIP.
     // Same gate as the egress-guard apiserver bypass — only sandboxes
     // labeled `kars.azure.com/role=sre` get a NetworkPolicy egress rule
@@ -1733,6 +1737,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
         ];
         router_env.extend(router_agt_env);
+        if let Some(default_model) = pod_spec::cluster_default_model() {
+            router_env.push(json!({"name": "DEFAULT_MODEL", "value": default_model}));
+        }
 
         // Task attribution (kars Bridge metering). When this sandbox was
         // materialized by a launched KarsTask, the task reconciler stamps the
@@ -2111,6 +2118,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                                     {"containerPort": 9090, "name": "metrics"}
                                 ],
                                 "env": router_env,
+                                "envFrom": inference::provider_env_from(),
                                 "securityContext": {
                                     "runAsUser": 1001,
                                     "allowPrivilegeEscalation": false,
@@ -2746,6 +2754,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
         }
 
+        let provider_version =
+            inference::mirror_providers(client, &sandbox_self_ns, &sandbox_ns, &name).await?;
         let deployment: Deployment = serde_json::from_value(json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -2766,6 +2776,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 },
                 "template": {
                     "metadata": {
+                        "annotations": {"kars.azure.com/inference-providers-version": provider_version.unwrap_or_default()},
                         "labels": {
                             "kars.azure.com/sandbox": name,
                             "kars.azure.com/component": "sandbox",

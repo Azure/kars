@@ -243,6 +243,7 @@ pub(super) fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
 
     // Remove chat-specific fields that Responses API doesn't accept
     obj.remove("stream");
+    obj.remove("stream_options");
     obj.remove("stop");
     obj.remove("frequency_penalty");
     obj.remove("presence_penalty");

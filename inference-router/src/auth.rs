@@ -42,6 +42,19 @@ impl Default for WorkloadIdentityAuth {
 }
 
 impl WorkloadIdentityAuth {
+    #[cfg(test)]
+    pub(crate) fn for_test(
+        api_key: Option<&str>,
+        sidecar: Option<crate::sidecar_client::SidecarClient>,
+    ) -> Self {
+        Self {
+            client: reqwest::Client::new(),
+            token_cache: Arc::new(RwLock::new(HashMap::new())),
+            api_key: api_key.map(str::to_string),
+            sidecar: sidecar.map(Arc::new),
+        }
+    }
+
     pub fn new() -> Self {
         // Try to load API key from secret mount (dev mode), then env var (sub-agent)
         let api_key = std::fs::read_to_string("/run/secrets/azure-openai-key")

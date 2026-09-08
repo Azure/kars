@@ -41,6 +41,7 @@ fn config_with_moderation(endpoint: &str, api_key: Option<&str>) -> Config {
         openai_moderation_endpoint: endpoint.to_string(),
         openai_moderation_api_key: api_key.map(String::from),
         openai_moderation_model: "omni-moderation-latest".into(),
+        providers: Default::default(),
     }
 }
 
@@ -65,6 +66,8 @@ async fn ollama_provider_forwards_openai_compat_without_auth() {
         sandbox_name: "test-sandbox".into(),
         provider: ProviderKind::Ollama,
         api_key: None,
+        provider_api_key: None,
+        authentication: Default::default(),
     };
 
     let (status, _headers, resp) = forward(
@@ -120,6 +123,8 @@ async fn anthropic_provider_forwards_messages_with_router_held_key() {
         sandbox_name: "test-sandbox".into(),
         provider: ProviderKind::Anthropic,
         api_key: Some("sk-ant-router-held".into()),
+        provider_api_key: None,
+        authentication: Default::default(),
     };
 
     // The inbound request carries an agent-supplied x-api-key that

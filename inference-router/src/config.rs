@@ -4,6 +4,25 @@
 //! Configuration loaded from environment variables.
 
 use anyhow::{Context, Result};
+use std::collections::HashMap;
+
+/// An operator-configured OpenAI-compatible endpoint and its own credential.
+#[derive(Clone, PartialEq, Eq)]
+pub struct ProviderEndpoint {
+    pub tag: String,
+    pub endpoint: String,
+    pub api_key: Option<String>,
+}
+
+impl std::fmt::Debug for ProviderEndpoint {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("ProviderEndpoint")
+            .field("tag", &self.tag)
+            .field("endpoint", &self.endpoint)
+            .field("has_api_key", &self.api_key.is_some())
+            .finish()
+    }
+}
 
 /// Registry topology mode.
 ///
@@ -111,6 +130,7 @@ pub struct Config {
     /// Moderation model (`OPENAI_MODERATION_MODEL`, default
     /// `omni-moderation-latest`).
     pub openai_moderation_model: String,
+    pub providers: HashMap<String, ProviderEndpoint>,
 }
 
 /// Read a credential from an env var, falling back to the standard
@@ -220,6 +240,7 @@ impl Config {
                 .ok()
                 .filter(|s| !s.is_empty())
                 .unwrap_or_else(|| "omni-moderation-latest".into()),
+            providers: parse_providers_from_env(std::env::vars()),
         })
     }
 
@@ -234,10 +255,12 @@ impl Config {
             self.foundry_endpoint.as_deref(),
             self.foundry_project_endpoint.as_deref(),
         ];
-        candidates
-            .iter()
-            .flatten()
-            .any(|e| e.contains("models.github.ai") || e.contains("models.inference.ai.azure.com"))
+        candidates.iter().flatten().any(|endpoint| {
+            matches!(
+                crate::proxy::endpoint_host(endpoint).as_deref(),
+                Some("models.github.ai") | Some("models.inference.ai.azure.com")
+            )
+        })
     }
 
     /// Returns true when the configured endpoint points at the GitHub
@@ -264,13 +287,98 @@ impl Config {
         candidates
             .iter()
             .flatten()
-            .any(|e| e.contains("api.githubcopilot.com"))
+            .any(|e| crate::proxy::is_copilot_endpoint(e))
     }
+
+    pub fn resolve_provider(&self, tag: &str) -> Option<ProviderEndpoint> {
+        if let Some(provider) = self.providers.get(&tag.to_ascii_lowercase()) {
+            return Some(provider.clone());
+        }
+        if tag.eq_ignore_ascii_case("github-copilot")
+            && std::env::var("COPILOT_GITHUB_TOKEN")
+                .ok()
+                .is_some_and(|token| !token.trim().is_empty())
+        {
+            return Some(ProviderEndpoint {
+                tag: "github-copilot".into(),
+                endpoint: "https://api.githubcopilot.com".into(),
+                api_key: None,
+            });
+        }
+        None
+    }
+}
+
+fn parse_providers_from_env(
+    vars: impl Iterator<Item = (String, String)>,
+) -> HashMap<String, ProviderEndpoint> {
+    let mut endpoints = HashMap::new();
+    let mut keys = HashMap::new();
+    let mut tokens = HashMap::new();
+    for (name, value) in vars {
+        if value.trim().is_empty() {
+            continue;
+        }
+        let Some(rest) = name.strip_prefix("KARS_PROVIDER_") else {
+            continue;
+        };
+        for (suffix, values) in [
+            ("_ENDPOINT", &mut endpoints),
+            ("_API_KEY", &mut keys),
+            ("_TOKEN", &mut tokens),
+        ] {
+            if let Some(tag) = rest.strip_suffix(suffix)
+                && !tag.is_empty()
+            {
+                values.insert(tag.to_ascii_lowercase().replace('_', "-"), value.clone());
+                break;
+            }
+        }
+    }
+    endpoints
+        .into_iter()
+        .map(|(tag, endpoint)| {
+            let api_key = keys.remove(&tag).or_else(|| tokens.remove(&tag));
+            (
+                tag.clone(),
+                ProviderEndpoint {
+                    tag,
+                    endpoint,
+                    api_key,
+                },
+            )
+        })
+        .collect()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn named_providers_parse_and_prefer_explicit_keys_deterministically() {
+        let vars = [
+            (
+                "KARS_PROVIDER_GITHUB_MODELS_ENDPOINT",
+                "https://models.github.ai/inference",
+            ),
+            ("KARS_PROVIDER_GITHUB_MODELS_TOKEN", "token"),
+            ("KARS_PROVIDER_GITHUB_MODELS_API_KEY", "key"),
+            ("KARS_PROVIDER_EMPTY_ENDPOINT", " "),
+            ("UNRELATED", "ignored"),
+        ]
+        .map(|(key, value)| (key.to_string(), value.to_string()));
+        let parsed = parse_providers_from_env(vars.clone().into_iter());
+        let reversed = parse_providers_from_env(vars.into_iter().rev());
+        assert_eq!(parsed, reversed);
+        assert_eq!(parsed.len(), 1);
+        assert_eq!(parsed["github-models"].api_key.as_deref(), Some("key"));
+        assert!(!format!("{:?}", parsed["github-models"]).contains("\"key\""));
+        let mut config = cfg(None);
+        config.providers = parsed;
+        assert!(config.resolve_provider("GITHUB-MODELS").is_some());
+        assert!(config.resolve_provider("missing").is_none());
+    }
 
     fn cfg(endpoint: Option<&str>) -> Config {
         Config {
@@ -293,6 +401,7 @@ mod tests {
             openai_moderation_endpoint: "https://api.openai.com".into(),
             openai_moderation_api_key: None,
             openai_moderation_model: "omni-moderation-latest".into(),
+            providers: HashMap::new(),
         }
     }
 

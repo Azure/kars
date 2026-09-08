@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode};
 use bytes::Bytes;
 use reqwest::Client;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::auth::WorkloadIdentityAuth;
 use crate::copilot_auth::{
@@ -20,6 +20,16 @@ use crate::copilot_auth::{
 use crate::metrics;
 use crate::provider::ProviderKind;
 use std::sync::Arc;
+
+const INFERENCE_REQUEST_TIMEOUT: Duration = Duration::from_secs(600);
+
+mod authentication;
+pub mod failure;
+pub use authentication::{AuthenticationProvenance, credential_for_upstream, token_for_endpoint};
+use failure::ForwardFailure;
+
+#[cfg(test)]
+mod authentication_tests;
 
 /// Upstream configuration for a single request.
 #[derive(Clone)]
@@ -35,6 +45,9 @@ pub struct UpstreamConfig {
     /// Filled by `provider::resolve` from router-side config only —
     /// never from the inbound request.
     pub api_key: Option<String>,
+    /// Credential for this named provider only; never inherited across providers.
+    pub provider_api_key: Option<String>,
+    pub authentication: AuthenticationProvenance,
 }
 
 impl UpstreamConfig {
@@ -48,6 +61,8 @@ impl UpstreamConfig {
             sandbox_name,
             provider: ProviderKind::AzureOpenAI,
             api_key: None,
+            provider_api_key: None,
+            authentication: AuthenticationProvenance::LegacyDefault,
         }
     }
 }
@@ -156,65 +171,31 @@ fn build_upstream_headers(
 /// compatible *but* requires its own short-lived JWT (exchanged from the
 /// user's GitHub OAuth token) and three static integration headers.
 pub fn is_copilot_endpoint(endpoint: &str) -> bool {
-    endpoint.contains("api.githubcopilot.com")
+    endpoint_host(endpoint).as_deref() == Some("api.githubcopilot.com")
 }
 
-/// Acquire the right auth token for a given upstream endpoint.
-///
-/// - GitHub Copilot endpoints → exchanged Copilot JWT (cached, refreshed proactively).
-/// - Everything else → Azure auth (API key in dev mode, WI/IMDS in AKS mode).
-///
-/// Returning `Result<String>` lets the caller surface a clean 502 if the
-/// Copilot token cache is uninitialised or the GitHub token is missing —
-/// rather than panicking inside `forward()`.
-pub async fn token_for_endpoint(
-    auth: &WorkloadIdentityAuth,
-    copilot: Option<&CopilotTokenCache>,
-    endpoint: &str,
-) -> Result<String> {
-    if is_copilot_endpoint(endpoint) {
-        match copilot {
-            Some(cache) => cache.get_jwt().await,
-            None => anyhow::bail!(
-                "Copilot endpoint configured but no CopilotTokenCache available — \
-                 set COPILOT_GITHUB_TOKEN or mount /run/secrets/copilot-github-token"
-            ),
-        }
-    } else {
-        auth.get_token(token_audience(endpoint)).await
-    }
+pub(crate) fn endpoint_host(endpoint: &str) -> Option<String> {
+    reqwest::Url::parse(endpoint)
+        .ok()
+        .and_then(|url| url.host_str().map(str::to_ascii_lowercase))
 }
 
-/// Provider-aware credential resolution for a single upstream request.
-///
-/// - `AzureOpenAI` → the historic [`token_for_endpoint`] path (Azure
-///   WI/IMDS, API key, or Copilot JWT depending on endpoint).
-/// - `Anthropic` → the static API key `provider::resolve` copied from
-///   router-side config onto `UpstreamConfig.api_key`. Its absence
-///   here is a programmer error (resolution fails closed earlier),
-///   surfaced as a clean 502 rather than a panic.
-/// - `Ollama` → no credential.
-pub async fn credential_for_upstream(
-    auth: &WorkloadIdentityAuth,
-    copilot: Option<&CopilotTokenCache>,
-    upstream: &UpstreamConfig,
-) -> Result<UpstreamCredential> {
-    match upstream.provider {
-        ProviderKind::AzureOpenAI => token_for_endpoint(auth, copilot, &upstream.endpoint)
-            .await
-            .map(UpstreamCredential::Bearer),
-        ProviderKind::Anthropic => upstream
-            .api_key
-            .clone()
-            .map(UpstreamCredential::AnthropicApiKey)
-            .ok_or_else(|| {
-                anyhow::anyhow!(
-                    "Anthropic upstream selected but no API key on UpstreamConfig — \
-                     provider resolution must run before forward()"
-                )
-            }),
-        ProviderKind::Ollama => Ok(UpstreamCredential::None),
-    }
+pub(crate) fn is_azure_ai_host(host: &str) -> bool {
+    [
+        ".openai.azure.com",
+        ".cognitiveservices.azure.com",
+        ".services.ai.azure.com",
+        ".openai.azure.us",
+        ".cognitiveservices.azure.us",
+        ".openai.azure.cn",
+        ".cognitiveservices.azure.cn",
+    ]
+    .iter()
+    .any(|suffix| host.ends_with(suffix))
+}
+
+pub(crate) fn is_local_inference_host(host: &str) -> bool {
+    host.ends_with(".kars-local-inference.svc.cluster.local")
 }
 
 /// Record Prometheus metrics from a completed request.
@@ -275,7 +256,8 @@ pub async fn forward(
 ) -> Result<(StatusCode, HeaderMap, Bytes)> {
     let start = Instant::now();
 
-    let (upstream_url, body) = build_upstream_url(auth, upstream, path, request_body)?;
+    let (upstream_url, body) = build_upstream_url(auth, upstream, path, request_body)
+        .map_err(ForwardFailure::configuration)?;
 
     let mode = match upstream.provider {
         ProviderKind::Anthropic => "anthropic",
@@ -294,9 +276,10 @@ pub async fn forward(
 
     let credential = credential_for_upstream(auth, copilot, upstream)
         .await
-        .context("Failed to acquire auth token")?;
+        .map_err(ForwardFailure::authentication)?;
 
-    let headers = build_upstream_headers(request_headers, auth, &credential, &upstream.endpoint)?;
+    let headers = build_upstream_headers(request_headers, auth, &credential, &upstream.endpoint)
+        .map_err(ForwardFailure::configuration)?;
 
     tracing::info!(sandbox = %upstream.sandbox_name, url = %upstream_url, body_len = body.len(), "Sending upstream request");
 
@@ -332,7 +315,7 @@ pub async fn forward(
     let response_body = response
         .bytes()
         .await
-        .context("Failed to read Foundry response")?;
+        .map_err(|error| ForwardFailure::response_body(status, error))?;
     let latency = start.elapsed();
 
     record_metrics(upstream, status, latency, &response_body);
@@ -427,7 +410,7 @@ async fn send_with_retry(
             .request(method.clone(), url)
             .headers(headers.clone())
             .body(body.clone())
-            .timeout(std::time::Duration::from_secs(120))
+            .timeout(INFERENCE_REQUEST_TIMEOUT)
             .send()
             .await;
 
@@ -467,10 +450,12 @@ async fn send_with_retry(
                         BACKOFF_MS[(attempt - 1) as usize],
                     ))
                     .await;
-                    last_err = Some(anyhow::Error::from(err));
+                    last_err = Some(ForwardFailure::transport(err));
                     continue;
                 }
-                return Err(anyhow::Error::from(err).context("Foundry upstream request failed"));
+                return Err(
+                    ForwardFailure::transport(err).context("Foundry upstream request failed")
+                );
             }
         }
     }
@@ -515,14 +500,16 @@ pub async fn forward_stream(
     } else {
         inject_stream_usage(request_body)
     };
-    let (upstream_url, body) = build_upstream_url(&auth, &upstream, path, body_with_usage)?;
+    let (upstream_url, body) = build_upstream_url(&auth, &upstream, path, body_with_usage)
+        .map_err(ForwardFailure::configuration)?;
 
     tracing::info!(sandbox = %upstream.sandbox_name, model = %upstream.deployment, mode = "stream", "Forwarding SSE stream");
 
     let credential = credential_for_upstream(&auth, copilot.as_deref(), &upstream)
         .await
-        .context("Failed to acquire auth token")?;
-    let headers = build_upstream_headers(&request_headers, &auth, &credential, &upstream.endpoint)?;
+        .map_err(ForwardFailure::authentication)?;
+    let headers = build_upstream_headers(&request_headers, &auth, &credential, &upstream.endpoint)
+        .map_err(ForwardFailure::configuration)?;
 
     let start = Instant::now();
 
@@ -530,10 +517,10 @@ pub async fn forward_stream(
         .post(&upstream_url)
         .headers(headers)
         .body(body)
-        .timeout(std::time::Duration::from_secs(120))
+        .timeout(INFERENCE_REQUEST_TIMEOUT)
         .send()
         .await
-        .context("Streaming upstream request failed")?;
+        .map_err(ForwardFailure::transport)?;
 
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
@@ -573,7 +560,10 @@ pub async fn forward_stream(
     // see "status=413" and have to guess at causes (token cap? bytes cap?
     // schema break?). Cap at 4 KiB so a misbehaving upstream can't blow logs.
     if !status.is_success() {
-        let body_bytes = response.bytes().await.unwrap_or_default();
+        let body_bytes = response
+            .bytes()
+            .await
+            .map_err(|error| ForwardFailure::response_body(status, error))?;
         let preview = String::from_utf8_lossy(&body_bytes);
         let preview_trimmed: String = preview.chars().take(2048).collect();
         tracing::warn!(
@@ -664,16 +654,8 @@ fn inject_stream_usage(body: Bytes) -> Bytes {
     body
 }
 
-/// Returns true if the endpoint is a GitHub Models endpoint
-/// (https://models.github.ai/inference or the legacy
-/// https://models.inference.ai.azure.com URL). GitHub Models is OpenAI-API
-/// compatible but does NOT use the Azure `/openai/v1/` URL prefix.
-fn is_github_models_endpoint(endpoint: &str) -> bool {
-    endpoint.contains("models.github.ai") || endpoint.contains("models.inference.ai.azure.com")
-}
-
 /// Build the upstream URL and optionally inject model into request body.
-/// Uses the unified /openai/v1/ format — works with both API-key and Entra auth.
+/// Azure hosts use /openai/v1/; custom OpenAI-compatible endpoints retain their base path.
 ///
 /// Routing rules:
 ///  - Anthropic: no path rewrite — callers pass Messages-API paths
@@ -703,9 +685,7 @@ fn build_upstream_url(
             path.trim_start_matches('/').trim_start_matches("v1/"),
         ),
         ProviderKind::AzureOpenAI => {
-            if is_github_models_endpoint(&upstream.endpoint)
-                || is_copilot_endpoint(&upstream.endpoint)
-            {
+            if !endpoint_host(&upstream.endpoint).is_some_and(|host| is_azure_ai_host(&host)) {
                 format!(
                     "{}/{}",
                     upstream.endpoint.trim_end_matches('/'),
@@ -722,8 +702,10 @@ fn build_upstream_url(
     };
     let body = if let Ok(mut body_json) = serde_json::from_slice::<serde_json::Value>(&request_body)
     {
-        if body_json.get("model").is_none() {
-            body_json.as_object_mut().unwrap().insert(
+        if body_json.get("model").is_none()
+            && let Some(object) = body_json.as_object_mut()
+        {
+            object.insert(
                 "model".into(),
                 serde_json::Value::String(upstream.deployment.clone()),
             );
@@ -746,8 +728,7 @@ fn build_upstream_url(
         // for output and Azure rejects it on the input side anyway.
         if path.trim_start_matches('/').starts_with("responses")
             && upstream.provider == ProviderKind::AzureOpenAI
-            && !is_github_models_endpoint(&upstream.endpoint)
-            && !is_copilot_endpoint(&upstream.endpoint)
+            && endpoint_host(&upstream.endpoint).is_some_and(|host| is_azure_ai_host(&host))
             && let Some(obj) = body_json.as_object_mut()
         {
             if let Some(inputs) = obj.get_mut("input").and_then(|v| v.as_array_mut()) {
@@ -758,11 +739,42 @@ fn build_upstream_url(
                 include.retain(|s| s.as_str() != Some("reasoning.encrypted_content"));
             }
         }
+        rewrite_unsupported_thinking(&mut body_json);
         serde_json::to_vec(&body_json)?.into()
     } else {
         request_body
     };
     Ok((url, body))
+}
+
+pub(crate) fn model_requires_adaptive_thinking(model: &str) -> bool {
+    let model = model.to_ascii_lowercase().replace(['.', '_'], "-");
+    [
+        "opus-4-8",
+        "opus-4-7",
+        "sonnet-5",
+        "fable-5",
+        "mythos-5",
+        "mythos-preview",
+    ]
+    .iter()
+    .any(|family| model.contains(family))
+}
+
+pub(crate) fn rewrite_unsupported_thinking(body: &mut serde_json::Value) {
+    if !body
+        .get("model")
+        .and_then(|v| v.as_str())
+        .is_some_and(model_requires_adaptive_thinking)
+    {
+        return;
+    }
+    if let Some(thinking) = body.get_mut("thinking").and_then(|v| v.as_object_mut())
+        && thinking.get("type").and_then(|v| v.as_str()) == Some("enabled")
+    {
+        thinking.clear();
+        thinking.insert("type".into(), "adaptive".into());
+    }
 }
 
 // ── Retry-logic unit tests (R3) ──────────────────────────────────────────────
@@ -782,6 +794,96 @@ mod retry_tests {
     fn get_and_head_are_idempotent() {
         assert!(is_idempotent(&Method::GET, "/anything"));
         assert!(is_idempotent(&Method::HEAD, "/anything"));
+    }
+
+    #[cfg(test)]
+    mod provider_routing_tests {
+        use super::super::*;
+        use serde_json::json;
+
+        #[test]
+        fn host_classification_rejects_substring_spoofing() {
+            assert!(is_copilot_endpoint("https://api.githubcopilot.com"));
+            for endpoint in [
+                "https://api.githubcopilot.com.evil.example",
+                "https://evil.example/api.githubcopilot.com",
+                "https://evil.example?api.githubcopilot.com",
+            ] {
+                assert!(!is_copilot_endpoint(endpoint));
+            }
+            assert!(is_azure_ai_host("account.openai.azure.com"));
+            assert!(!is_azure_ai_host("account.openai.azure.com.evil.example"));
+            assert!(is_local_inference_host(
+                "model.kars-local-inference.svc.cluster.local"
+            ));
+            assert!(!is_local_inference_host(
+                "model.kars-local-inference.svc.cluster.local.evil.example"
+            ));
+        }
+
+        #[tokio::test]
+        async fn local_service_never_receives_credentials_even_when_configured() {
+            let mut upstream = UpstreamConfig::azure(
+                "http://model.kars-local-inference.svc.cluster.local/v1".into(),
+                "model".into(),
+                "sandbox".into(),
+            );
+            upstream.provider_api_key = Some("must-not-leak".into());
+            let credential = credential_for_upstream(&WorkloadIdentityAuth::new(), None, &upstream)
+                .await
+                .unwrap();
+            assert!(matches!(credential, UpstreamCredential::None));
+        }
+
+        #[test]
+        fn azure_and_custom_urls_keep_their_own_api_prefix() {
+            for (endpoint, expected) in [
+                (
+                    "https://account.openai.azure.com",
+                    "https://account.openai.azure.com/openai/v1/chat/completions",
+                ),
+                (
+                    "http://model.kars-local-inference.svc.cluster.local/v1",
+                    "http://model.kars-local-inference.svc.cluster.local/v1/chat/completions",
+                ),
+                (
+                    "https://custom.example/v1",
+                    "https://custom.example/v1/chat/completions",
+                ),
+                (
+                    "https://models.github.ai/inference",
+                    "https://models.github.ai/inference/chat/completions",
+                ),
+            ] {
+                let upstream =
+                    UpstreamConfig::azure(endpoint.into(), "model".into(), "sandbox".into());
+                let (url, _) = build_upstream_url(
+                    &WorkloadIdentityAuth::new(),
+                    &upstream,
+                    "chat/completions",
+                    Bytes::from("{}"),
+                )
+                .unwrap();
+                assert_eq!(url, expected);
+            }
+        }
+
+        #[test]
+        fn thinking_migration_preserves_legacy_models() {
+            for model in ["claude-opus-4.8", "claude-opus-4-7", "claude-sonnet-5"] {
+                let mut body =
+                    json!({"model":model,"thinking":{"type":"enabled","budget_tokens":12000}});
+                rewrite_unsupported_thinking(&mut body);
+                assert_eq!(body["thinking"], json!({"type":"adaptive"}));
+            }
+            for model in ["claude-opus-4.6", "claude-sonnet-4.5", "gpt-5.4"] {
+                let mut body =
+                    json!({"model":model,"thinking":{"type":"enabled","budget_tokens":12000}});
+                let original = body.clone();
+                rewrite_unsupported_thinking(&mut body);
+                assert_eq!(body, original);
+            }
+        }
     }
 
     #[test]

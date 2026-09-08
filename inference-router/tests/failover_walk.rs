@@ -136,15 +136,18 @@ async fn primary_503_falls_through_to_fallback_200() {
         sandbox_name: "sbx".into(),
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
+        provider_api_key: None,
+        authentication: Default::default(),
     };
     let snap = snapshot("primary-down", &["fallback-up"]);
 
-    let (status, _hdrs, body) = forward_with_failover(
+    let (status, _hdrs, body, _selected) = forward_with_failover(
         &auth,
         None,
         &client,
         &health,
         &upstream,
+        &kars_inference_router::config::Config::from_env().unwrap(),
         &snap,
         Method::POST,
         "chat/completions",
@@ -163,11 +166,11 @@ async fn primary_503_falls_through_to_fallback_200() {
     let snaps = health.snapshot();
     let primary = snaps
         .iter()
-        .find(|s| s.deployment == "primary-down")
+        .find(|s| s.deployment == "Foundry::primary-down")
         .expect("primary health entry missing");
     let fallback = snaps
         .iter()
-        .find(|s| s.deployment == "fallback-up")
+        .find(|s| s.deployment == "Foundry::fallback-up")
         .expect("fallback health entry missing");
     assert_eq!(primary.failure_streak, 1);
     assert!(primary.healthy, "single 503 under 3-strike threshold");
@@ -190,9 +193,9 @@ async fn unhealthy_primary_is_skipped_in_second_pass() {
 
     // Pre-mark primary unhealthy (3 failures = at threshold).
     for _ in 0..3 {
-        health.record_failure("primary-down");
+        health.record_failure("Foundry::primary-down");
     }
-    assert!(!health.is_healthy("primary-down"));
+    assert!(!health.is_healthy("Foundry::primary-down"));
 
     let upstream = UpstreamConfig {
         endpoint: base,
@@ -200,15 +203,18 @@ async fn unhealthy_primary_is_skipped_in_second_pass() {
         sandbox_name: "sbx".into(),
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
+        provider_api_key: None,
+        authentication: Default::default(),
     };
     let snap = snapshot("primary-down", &["fallback-up"]);
 
-    let (status, _hdrs, _body) = forward_with_failover(
+    let (status, _hdrs, _body, _selected) = forward_with_failover(
         &auth,
         None,
         &client,
         &health,
         &upstream,
+        &kars_inference_router::config::Config::from_env().unwrap(),
         &snap,
         Method::POST,
         "chat/completions",
@@ -223,7 +229,7 @@ async fn unhealthy_primary_is_skipped_in_second_pass() {
     let snaps = health.snapshot();
     let primary = snaps
         .iter()
-        .find(|s| s.deployment == "primary-down")
+        .find(|s| s.deployment == "Foundry::primary-down")
         .unwrap();
     assert_eq!(primary.failure_streak, 3, "no new failure recorded");
 }
@@ -243,11 +249,12 @@ async fn all_unhealthy_still_punches_primary_for_last_resort() {
 
     // Mark BOTH unhealthy.
     for _ in 0..3 {
+        health.record_failure("Foundry::primary-down");
+        health.record_failure("Foundry::fallback-up");
         health.record_failure("primary-down");
-        health.record_failure("fallback-up");
     }
-    assert!(!health.is_healthy("primary-down"));
-    assert!(!health.is_healthy("fallback-up"));
+    assert!(!health.is_healthy("Foundry::primary-down"));
+    assert!(!health.is_healthy("Foundry::fallback-up"));
 
     let upstream = UpstreamConfig {
         endpoint: base,
@@ -255,15 +262,18 @@ async fn all_unhealthy_still_punches_primary_for_last_resort() {
         sandbox_name: "sbx".into(),
         provider: ProviderKind::AzureOpenAI,
         api_key: None,
+        provider_api_key: None,
+        authentication: Default::default(),
     };
     let snap = snapshot("primary-down", &["fallback-up"]);
 
-    let (status, _hdrs, _body) = forward_with_failover(
+    let (status, _hdrs, _body, _selected) = forward_with_failover(
         &auth,
         None,
         &client,
         &health,
         &upstream,
+        &kars_inference_router::config::Config::from_env().unwrap(),
         &snap,
         Method::POST,
         "chat/completions",
@@ -279,7 +289,7 @@ async fn all_unhealthy_still_punches_primary_for_last_resort() {
     let snaps = health.snapshot();
     let primary = snaps
         .iter()
-        .find(|s| s.deployment == "primary-down")
+        .find(|s| s.deployment == "Foundry::primary-down")
         .unwrap();
     assert_eq!(primary.failure_streak, 4);
 }

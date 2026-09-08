@@ -382,18 +382,21 @@ async fn responses(
     // the byte stream to flow through unchanged.
     use axum::body::Body;
     use futures::TryStreamExt;
-    match proxy::forward_stream(
+    match crate::failover::forward_stream_with_failover(
         state.auth.clone(),
         Some(state.copilot.clone()),
         state.client.clone(),
-        upstream,
+        &state.deployment_health,
+        &upstream,
+        &state.config,
+        &policy,
         "responses",
         headers.clone(),
         body,
     )
     .await
     {
-        Ok((status, resp_headers, stream)) => {
+        Ok((status, resp_headers, stream, _selected_upstream)) => {
             // Surface usage tokens by buffering only the very last chunk
             // is impossible without breaking streaming. We accept that
             // the budget tracker won't see /v1/responses usage in

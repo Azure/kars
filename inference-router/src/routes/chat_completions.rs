@@ -19,10 +19,10 @@ use futures::stream::StreamExt;
 
 use super::AppState;
 use super::inference_translate::{chat_to_responses_body, responses_to_chat_body};
+use super::model_routing::{is_responses_only_error, model_capability_key, override_model_in_body};
 use crate::errors;
 use crate::guardrails::{self, Direction, GuardrailError, GuardrailPipeline, GuardrailViolation};
 use crate::provider::{ProviderError, ProviderKind};
-use crate::proxy;
 use crate::safety;
 use std::sync::Arc;
 
@@ -424,11 +424,14 @@ pub(super) async fn chat_completions(
 
     // Forward to Foundry
     let mut upstream = state.upstream_config(sandbox_name);
+    let true_default_upstream = upstream.clone();
     // Slice 2d.1: honour `InferencePolicy.modelPreference.primary.deployment`.
-    crate::routes::apply_model_preference_override(&mut upstream, &policy);
+    let provider_resolution =
+        crate::routes::apply_model_preference_override(&mut upstream, &policy, &state.config)
+            .and_then(|_| crate::routes::apply_provider_resolution(&state, &mut upstream, &policy));
 
     // Retarget at the policy-selected provider; fails closed.
-    if let Err(e) = crate::routes::apply_provider_resolution(&state, &mut upstream, &policy) {
+    if let Err(e) = provider_resolution {
         tracing::warn!(
             target: "inference.audit",
             sandbox = %sandbox_name,
@@ -538,11 +541,28 @@ pub(super) async fn chat_completions(
         .ok()
         .and_then(|v| v.get("model")?.as_str().map(String::from))
         .unwrap_or_else(|| upstream.deployment.clone());
+    upstream = match super::model_routing::effective_primary(
+        &state,
+        &true_default_upstream,
+        &policy,
+        &body,
+    ) {
+        Ok(upstream) => upstream,
+        Err(error) => {
+            tracing::warn!(%error, "Inference provider configuration is unavailable");
+            return errors::openai(
+                StatusCode::BAD_GATEWAY,
+                "Inference provider configuration is unavailable",
+                errors::PROXY_ERROR,
+            )
+            .into_response();
+        }
+    };
     let is_responses_only = state
         .responses_only_models
         .read()
         .ok()
-        .map(|set| set.contains(&model_name))
+        .map(|set| set.contains(&model_capability_key(&upstream)))
         .unwrap_or(false);
 
     if is_responses_only {
@@ -550,7 +570,8 @@ pub(super) async fn chat_completions(
         // Use a streaming response body with SSE keepalive comments to prevent
         // client timeouts while the Responses API processes (30-50s for reasoning models).
         tracing::info!(sandbox = %sandbox_name, model = %model_name, "Using cached Responses API path");
-        let responses_body = chat_to_responses_body(&body);
+        let responses_body =
+            chat_to_responses_body(&override_model_in_body(&body, &upstream.deployment));
 
         let is_stream = serde_json::from_slice::<serde_json::Value>(&body)
             .ok()
@@ -561,9 +582,9 @@ pub(super) async fn chat_completions(
             // Stream keepalive comments while the Responses API call is in progress,
             // then send the converted result as a single SSE data frame.
             let (tx, rx) = tokio::sync::mpsc::channel::<Result<bytes::Bytes, std::io::Error>>(16);
-            let auth = state.auth.clone();
-            let copilot = state.copilot.clone();
-            let client = state.client.clone();
+            let response_state = state.clone();
+            let response_base = true_default_upstream.clone();
+            let response_policy = policy.clone();
             let upstream = upstream.clone();
             let headers = headers.clone();
             let budget = state.budget.clone();
@@ -573,13 +594,11 @@ pub(super) async fn chat_completions(
 
             tokio::spawn(async move {
                 // Send keepalive comments every 5 seconds while waiting
-                let forward_fut = proxy::forward(
-                    &auth,
-                    Some(&copilot),
-                    &client,
+                let forward_fut = super::model_routing::forward_responses(
+                    &response_state,
+                    &response_base,
+                    &response_policy,
                     &upstream,
-                    axum::http::Method::POST,
-                    "responses",
                     &headers,
                     responses_body,
                 );
@@ -599,7 +618,7 @@ pub(super) async fn chat_completions(
                 };
 
                 match result {
-                    Ok((_resp_status, _, resp_body)) => {
+                    Ok((_resp_status, _, resp_body, _selected)) => {
                         let chat_body = responses_to_chat_body(&resp_body);
                         if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
                             && let Some(total) = bj
@@ -655,19 +674,17 @@ pub(super) async fn chat_completions(
         }
 
         // Non-streaming: buffered request/response (no timeout concern)
-        match proxy::forward(
-            &state.auth,
-            Some(&state.copilot),
-            &state.client,
+        match super::model_routing::forward_responses(
+            &state,
+            &true_default_upstream,
+            &policy,
             &upstream,
-            axum::http::Method::POST,
-            "responses",
             &headers,
             responses_body,
         )
         .await
         {
-            Ok((resp_status, resp_hdrs, resp_body)) => {
+            Ok((resp_status, resp_hdrs, resp_body, _selected)) => {
                 let chat_body = responses_to_chat_body(&resp_body);
                 if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
                     && let Some(total) = bj
@@ -726,18 +743,18 @@ pub(super) async fn chat_completions(
         // rarely vs. single-request lifetime.
         let stream_floor = policy.content_safety.clone();
         let stream_policy_digest = policy.digest.clone();
-        match proxy::forward_stream(
-            state.auth.clone(),
-            Some(state.copilot.clone()),
-            state.client.clone(),
-            upstream.clone(),
-            "chat/completions",
+        match super::model_routing::forward_stream_chat(
+            &state,
+            &true_default_upstream,
+            &policy,
             headers.clone(),
             body.clone(),
         )
         .await
         {
-            Ok((status, _resp_headers, stream)) if status == StatusCode::BAD_REQUEST => {
+            Ok((status, _resp_headers, stream, selected_upstream))
+                if status == StatusCode::BAD_REQUEST =>
+            {
                 // Might be a Responses-only model — buffer the error and check
                 use futures::TryStreamExt;
                 let err_bytes: Vec<u8> = stream
@@ -747,38 +764,31 @@ pub(super) async fn chat_completions(
                     })
                     .await
                     .unwrap_or_default();
-                let is_unsupported = serde_json::from_slice::<serde_json::Value>(&err_bytes)
-                    .ok()
-                    .and_then(|v| {
-                        v.get("error")?
-                            .get("message")?
-                            .as_str()
-                            .map(|s| s.contains("unsupported"))
-                    })
-                    .unwrap_or(false);
+                let is_unsupported = is_responses_only_error(&err_bytes);
 
                 if is_unsupported {
                     // Cache this model as Responses-only to skip future chat/completions attempts
                     if let Ok(mut set) = state.responses_only_models.write() {
-                        set.insert(model_name.clone());
+                        set.insert(model_capability_key(&selected_upstream));
                         tracing::info!(model = %model_name, "Cached as Responses-only model");
                     }
                     // Fallback: convert to Responses API, return result as single SSE frame
                     tracing::info!(sandbox = %sandbox_name, "Streaming chat/completions unsupported, falling back to Responses API");
-                    let responses_body = chat_to_responses_body(&body);
-                    match proxy::forward(
-                        &state.auth,
-                        Some(&state.copilot),
-                        &state.client,
-                        &upstream,
-                        axum::http::Method::POST,
-                        "responses",
+                    let responses_body = chat_to_responses_body(&override_model_in_body(
+                        &body,
+                        &selected_upstream.deployment,
+                    ));
+                    match super::model_routing::forward_responses(
+                        &state,
+                        &true_default_upstream,
+                        &policy,
+                        &selected_upstream,
                         &headers,
                         responses_body,
                     )
                     .await
                     {
-                        Ok((resp_status, _, resp_body)) => {
+                        Ok((resp_status, _, resp_body, _selected)) => {
                             let chat_body = responses_to_chat_body(&resp_body);
                             if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
                                 && let Some(total) = bj
@@ -825,7 +835,7 @@ pub(super) async fn chat_completions(
                     (StatusCode::BAD_REQUEST, Body::from(err_bytes)).into_response()
                 }
             }
-            Ok((status, resp_headers, stream)) => {
+            Ok((status, resp_headers, stream, _selected_upstream)) => {
                 tracing::info!(sandbox = %sandbox_owned, status = %status.as_u16(), "Stream response status");
                 // Wrap stream to intercept the first SSE chunk for guardrail
                 // annotations and the final chunk for token usage.
@@ -971,55 +981,42 @@ pub(super) async fn chat_completions(
         // retries against `fallback[N].deployment`. The 400-→-
         // Responses-API recovery further down still runs against the
         // *successful* upstream's deployment.
-        let result = crate::failover::forward_with_failover(
-            &state.auth,
-            Some(&state.copilot),
-            &state.client,
-            &state.deployment_health,
-            &upstream,
+        let result = super::model_routing::forward_chat(
+            &state,
+            &true_default_upstream,
             &policy,
-            axum::http::Method::POST,
-            "chat/completions",
             &headers,
             body.clone(),
         )
         .await;
 
         match result {
-            Ok((status, _resp_headers, resp_body))
-                if status == StatusCode::BAD_REQUEST
-                    && serde_json::from_slice::<serde_json::Value>(&resp_body)
-                        .ok()
-                        .and_then(|v| {
-                            v.get("error")?
-                                .get("message")?
-                                .as_str()
-                                .map(|s| s.contains("unsupported"))
-                        })
-                        .unwrap_or(false) =>
+            Ok((status, _resp_headers, resp_body, selected_upstream))
+                if status == StatusCode::BAD_REQUEST && is_responses_only_error(&resp_body) =>
             {
                 // Model doesn't support chat/completions — auto-fallback to Responses API.
                 // Cache this model to skip future chat/completions attempts.
                 if let Ok(mut set) = state.responses_only_models.write() {
-                    set.insert(model_name.clone());
+                    set.insert(model_capability_key(&selected_upstream));
                     tracing::info!(model = %model_name, "Cached as Responses-only model");
                 }
                 // Convert messages → input and proxy to /openai/v1/responses.
                 tracing::info!(sandbox = %sandbox_name, "chat/completions unsupported, falling back to Responses API");
-                let responses_body = chat_to_responses_body(&body);
-                match proxy::forward(
-                    &state.auth,
-                    Some(&state.copilot),
-                    &state.client,
-                    &upstream,
-                    axum::http::Method::POST,
-                    "responses",
+                let responses_body = chat_to_responses_body(&override_model_in_body(
+                    &body,
+                    &selected_upstream.deployment,
+                ));
+                match super::model_routing::forward_responses(
+                    &state,
+                    &true_default_upstream,
+                    &policy,
+                    &selected_upstream,
                     &headers,
                     responses_body,
                 )
                 .await
                 {
-                    Ok((resp_status, resp_hdrs, resp_body)) => {
+                    Ok((resp_status, resp_hdrs, resp_body, _selected)) => {
                         // Convert Responses API output back to chat/completions format
                         let chat_body = responses_to_chat_body(&resp_body);
                         if let Ok(body_json) =
@@ -1058,7 +1055,7 @@ pub(super) async fn chat_completions(
                     }
                 }
             }
-            Ok((status, resp_headers, mut resp_body)) => {
+            Ok((status, resp_headers, mut resp_body, _selected_upstream)) => {
                 // Record token usage from response for budget tracking
                 if let Ok(body_json) = serde_json::from_slice::<serde_json::Value>(&resp_body)
                     && let Some(total) = body_json
