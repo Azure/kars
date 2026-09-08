@@ -31,6 +31,7 @@ import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
 import { resolveBundledAsset, requireBundledAsset, findRepoRootOrNull } from "../../lib/repo-assets.js";
 import { buildCopilotFallbackChain } from "../../github-copilot.js";
 import { CLAIM, prepareCredentialNamespace } from "../../lib/namespace-ownership.js";
+import { assertSafeMutation } from "../../lib/sre-authority.js";
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -1337,6 +1338,10 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
 
   stepper.step(`Ensuring kind cluster '${opts.clusterName}' exists…`);
   await ensureCluster(tools.kind, opts.clusterName, tools.env);
+  await assertSafeMutation((file,args,commandOptions) => execa(
+    file === "kubectl" ? tools.kubectl : file,
+    ["--context", `kind-${opts.clusterName}`, ...args], commandOptions,
+  ));
   stepper.done(`kind cluster '${opts.clusterName}' is ready`);
 
   // Ensure the three local-dev images exist AND match the host arch.

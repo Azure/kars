@@ -1,0 +1,329 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-source-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kars.azure.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["karssandboxes", "karssandboxes/status"]
+  matchConditions:
+    - name: reserved-sre-source
+      expression: >-
+        (object != null && (object.metadata.name == 'sre' ||
+          (has(object.metadata.labels) && 'kars.azure.com/role' in object.metadata.labels &&
+            object.metadata.labels['kars.azure.com/role'] == 'sre'))) ||
+        (oldObject != null && (oldObject.metadata.name == 'sre' ||
+          (has(oldObject.metadata.labels) && 'kars.azure.com/role' in oldObject.metadata.labels &&
+            oldObject.metadata.labels['kars.azure.com/role'] == 'sre')))
+  validations:
+    - expression: >-
+        authorizer.group('kars.azure.com').resource('karssreregistrations')
+          .name('canonical').check('use').allowed()
+      message: "Canonical SRE source changes require explicit cluster-level registrar authority"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-source-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-source-authority
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-registration-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kars.azure.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["karssreregistrations", "karssreregistrations/status"]
+  validations:
+    - expression: >-
+        authorizer.group('kars.azure.com').resource('karssreregistrations')
+          .name('canonical').check('use').allowed()
+      message: "SRE enrollment requires explicit registrar use permission"
+      reason: Forbidden
+    - expression: >-
+        request.operation != 'DELETE' ||
+        (oldObject.spec.enabled == false && oldObject.?status.?phase.orValue('') == 'Retired')
+      message: "Disable and retire SRE authority before deleting its registration"
+      reason: Forbidden
+    - expression: >-
+        object == null || oldObject == null ||
+        !has(oldObject.status) || !has(oldObject.status.routerServiceAccountUid) ||
+        oldObject.status.phase == 'Retired' ||
+        (object.spec.controller == oldObject.spec.controller &&
+         object.spec.sandbox == oldObject.spec.sandbox &&
+         object.spec.runtimeNamespace == oldObject.spec.runtimeNamespace)
+      message: "Retire issued SRE authority before changing its bound identities"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-registration-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-registration-authority
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-private-identity
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["serviceaccounts", "serviceaccounts/token"]
+  matchConditions:
+    - name: reserved-router-identity
+      expression: >-
+        request.name == 'sre-api-router' ||
+        (object != null && object.metadata.name == 'sre-api-router') ||
+        (oldObject != null && oldObject.metadata.name == 'sre-api-router')
+  validations:
+    - expression: >-
+        authorizer.group('kars.azure.com').resource('karssreregistrations')
+          .name('canonical').check('use').allowed() ||
+        (request.subResource == 'token' &&
+          authorizer.group('kars.azure.com').resource('karssreregistrations')
+            .name('canonical').check('renew').allowed())
+      message: "Reserved SRE router identity requires registrar use; its TokenRequest renewal requires explicit renew authority"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-private-identity
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-private-identity
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-binding-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["clusterrolebindings", "rolebindings"]
+  variables:
+    - name: oldSubjects
+      expression: "oldObject == null ? [] : oldObject.?subjects.orValue([])"
+    - name: newSubjects
+      expression: "object == null ? [] : object.?subjects.orValue([])"
+  matchConditions:
+    - name: sre-binding
+      expression: >-
+        (object != null && object.?subjects.orValue([]).exists(s,
+          (s.kind == 'ServiceAccount' && s.?namespace.orValue('') == 'kars-sre' &&
+            s.name in ['sandbox', 'sre-api-router']) ||
+          (s.kind == 'User' && s.name in
+            ['system:serviceaccount:kars-sre:sandbox', 'system:serviceaccount:kars-sre:sre-api-router']) ||
+          (s.kind == 'Group' && s.name == 'system:serviceaccounts:kars-sre'))) ||
+        (oldObject != null && oldObject.?subjects.orValue([]).exists(s,
+          (s.kind == 'ServiceAccount' && s.?namespace.orValue('') == 'kars-sre' &&
+            s.name in ['sandbox', 'sre-api-router']) ||
+          (s.kind == 'User' && s.name in
+            ['system:serviceaccount:kars-sre:sandbox', 'system:serviceaccount:kars-sre:sre-api-router']) ||
+          (s.kind == 'Group' && s.name == 'system:serviceaccounts:kars-sre')))
+  validations:
+    - expression: >-
+        authorizer.group('kars.azure.com').resource('karssreregistrations')
+          .name('canonical').check('use').allowed()
+      message: "SRE identity bindings require registrar authority"
+      reason: Forbidden
+    - expression: >-
+        object == null ||
+        object.roleRef.name == 'kars-sandbox-spawner' ||
+        !variables.newSubjects.exists(s,
+          (s.kind == 'ServiceAccount' && s.?namespace.orValue('') == 'kars-sre' && s.name == 'sandbox') ||
+          (s.kind == 'User' && s.name == 'system:serviceaccount:kars-sre:sandbox') ||
+          (s.kind == 'Group' && s.name == 'system:serviceaccounts:kars-sre')) ||
+        (oldObject != null && object.roleRef == oldObject.roleRef &&
+          variables.newSubjects == variables.oldSubjects)
+      message: "Legacy SRE agent grants may be retained unchanged for reviewed migration, never created or restored"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-binding-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-binding-authority
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-private-material
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["secrets"]
+  matchConditions:
+    - name: protected-material
+      expression: >-
+        request.namespace == 'kars-sre' &&
+        ((object != null && object.metadata.name in ['sre-api-router-identity', 'sre-api-agent']) ||
+         (oldObject != null && oldObject.metadata.name in ['sre-api-router-identity', 'sre-api-agent']))
+  validations:
+    - expression: >-
+        authorizer.group('kars.azure.com').resource('karssreregistrations')
+          .name('canonical').check('use').allowed()
+      message: "SRE identity material requires cluster registrar authority"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-private-material
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-private-material
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-no-legacy-tokens
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["secrets"]
+  matchConditions:
+    - name: private-runtime
+      expression: "request.namespace == 'kars-sre'"
+  validations:
+    - expression: >-
+        !(object != null && object.?type.orValue('') == 'kubernetes.io/service-account-token' &&
+          has(object.metadata.annotations) &&
+          'kubernetes.io/service-account.name' in object.metadata.annotations &&
+          object.metadata.annotations['kubernetes.io/service-account.name'] == 'sre-api-router') &&
+        !(oldObject != null && oldObject.?type.orValue('') == 'kubernetes.io/service-account-token' &&
+          has(oldObject.metadata.annotations) &&
+          'kubernetes.io/service-account.name' in oldObject.metadata.annotations &&
+          oldObject.metadata.annotations['kubernetes.io/service-account.name'] == 'sre-api-router')
+      message: "The private SRE identity exclusively uses bound TokenRequests; legacy token Secrets are forbidden for every caller"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-no-legacy-tokens
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-no-legacy-tokens
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-source-retirement
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  paramKind:
+    apiVersion: kars.azure.com/v1alpha1
+    kind: KarsSRERegistration
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kars.azure.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["DELETE"]
+        resources: ["karssandboxes"]
+  validations:
+    - expression: >-
+        oldObject.metadata.uid != params.spec.sandbox.uid ||
+        (params.spec.enabled == false && params.?status.?phase.orValue('') == 'Retired')
+      message: "Retire registered SRE authority before deleting its source"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-source-retirement
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-source-retirement
+  paramRef:
+    name: canonical
+    parameterNotFoundAction: Allow
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-pending-proposals
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["kars.azure.com"]
+        apiVersions: ["v1alpha1"]
+        operations: ["CREATE"]
+        resources: ["karssreactions"]
+  validations:
+    - expression: "object.spec.approval.state == 'Pending'"
+      message: "SRE actions must be created Pending; approval is a separate operator action"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-pending-proposals
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-pending-proposals
+  validationActions: [Deny, Audit]

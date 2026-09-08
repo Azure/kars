@@ -73,6 +73,10 @@ mod policy_fetcher;
 mod providers;
 mod reconciler;
 mod signer_policy;
+mod sre_authority;
+#[path = "../../shared/sre_privacy.rs"]
+mod sre_privacy;
+mod sre_registration;
 mod status;
 mod task_models;
 mod team_commons;
@@ -299,6 +303,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { kars_sre_action_reconciler::run(client).await })
     };
+    let sre_authority_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { sre_authority::run(client).await })
+    };
     let auth_config_handle = {
         // KarsAuthConfig reconciler — materialises the sidecar env
         // ConfigMap when an operator installs the tenant trust anchor
@@ -457,6 +465,9 @@ async fn main() -> Result<()> {
         }
         res = kars_sre_action_handle => {
             res??;
+        }
+        res = sre_authority_handle => {
+            res?;
         }
         res = auth_config_handle => {
             // auth-config reconciler exiting is non-fatal (it sleeps

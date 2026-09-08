@@ -4,13 +4,42 @@
 //! Narrow router service identity/credential projection; no approvals or grants.
 
 use crate::{crd::KarsSandbox, kars_task::KarsTask};
-use k8s_openapi::api::core::v1::{Namespace, Secret};
-use kube::{Api, Client, ResourceExt, api::PostParams};
+use k8s_openapi::api::{apps::v1::Deployment, core::v1::Namespace};
+use kube::{Api, Client, ResourceExt};
 use serde_json::{Value, json};
+
+#[cfg(test)]
+mod continuity_tests;
+#[cfg(test)]
+mod credential_tests;
+mod credentials;
 
 const SECRET: &str = "router-services-admin";
 const SOURCE_UID: &str = "kars.azure.com/sandbox-uid";
 const NAMESPACE_UID: &str = "kars.azure.com/namespace-uid";
+pub(super) use credentials::quarantine_on_privacy_loss;
+
+pub struct Projection {
+    pub identity: Value,
+    credential: credentials::Projection,
+}
+
+impl Projection {
+    pub fn decorate(&self, deployment: &mut Deployment) {
+        self.credential.decorate(deployment);
+    }
+
+    pub async fn consumers_current(
+        &self,
+        client: &Client,
+        namespace: &str,
+        name: &str,
+    ) -> Result<bool, String> {
+        self.credential
+            .consumers_current(client, namespace, name)
+            .await
+    }
+}
 
 fn api_error(error: kube::Error) -> String {
     match error {
@@ -64,7 +93,7 @@ pub async fn ensure(
     client: &Client,
     sandbox: &KarsSandbox,
     namespace: &Namespace,
-) -> Result<Value, String> {
+) -> Result<Projection, String> {
     // Reuse the authoritative namespace claim path, not labels or a caller's
     // requested namespace. Recreated CRs/namespaces cannot inherit this token.
     let (live, owned) = super::namespace_ownership::ensure(client, sandbox)
@@ -106,61 +135,13 @@ pub async fn ensure(
         task_authorization = Some(authorization);
         task_generation = task.metadata.generation;
     }
-    let secrets: Api<Secret> = Api::namespaced(client.clone(), &owned.name_any());
-    if let Some(secret) = secrets.get_opt(SECRET).await.map_err(api_error)? {
-        let annotations = secret.metadata.annotations.as_ref();
-        if secret.metadata.deletion_timestamp.is_some()
-            || secret.metadata.uid.as_deref().is_none_or(str::is_empty)
-            || secret
-                .metadata
-                .resource_version
-                .as_deref()
-                .is_none_or(str::is_empty)
-            || secret.metadata.name.as_deref() != Some(SECRET)
-            || secret.metadata.namespace.as_deref() != Some(owned.name_any().as_str())
-            || secret
-                .metadata
-                .owner_references
-                .as_ref()
-                .is_some_and(|owners| !owners.is_empty())
-            || annotations
-                .and_then(|annotations| annotations.get(SOURCE_UID))
-                .map(String::as_str)
-                != Some(sandbox_uid)
-            || annotations
-                .and_then(|annotations| annotations.get(NAMESPACE_UID))
-                .map(String::as_str)
-                != Some(namespace_uid)
-            || secret
-                .data
-                .as_ref()
-                .and_then(|data| data.get("control-token"))
-                .is_none_or(|value| {
-                    value.0.len() != 64 || value.0.iter().any(|byte| !byte.is_ascii_graphic())
-                })
-        {
-            return Err(
-                "Existing governed service credential has conflicting ownership or invalid data"
-                    .into(),
-            );
-        }
-    } else {
-        let secret:Secret=serde_json::from_value(json!({
-            "apiVersion":"v1","kind":"Secret","metadata":{"name":SECRET,"namespace":owned.name_any(),
-                "labels":{"app.kubernetes.io/managed-by":"kars-controller"},
-                "annotations":{SOURCE_UID:sandbox_uid,NAMESPACE_UID:namespace_uid}},
-            "stringData":{"control-token":crate::providers::signing::generate_service_token()},
-        })).map_err(|_|"Governed service credential serialization failed")?;
-        secrets
-            .create(&PostParams::default(), &secret)
-            .await
-            .map_err(api_error)?;
-    }
-    Ok(
-        json!({"sandbox":{"namespace":workspace,"name":name,"uid":sandbox_uid},
+    let credential = credentials::ensure(client, &live, &owned).await?;
+    Ok(Projection {
+        identity: json!({"sandbox":{"namespace":workspace,"name":name,"uid":sandbox_uid},
         "namespace_uid":namespace_uid,"task":task_identity,"task_authorization":task_authorization,
         "task_generation":task_generation,"managed":true}),
-    )
+        credential,
+    })
 }
 
 pub fn mount(pod: &mut Value) {

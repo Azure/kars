@@ -4,6 +4,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
+import { assertDestroySafe } from "../lib/sre-authority.js";
 
 export function destroyCommand(): Command {
   const cmd = new Command("destroy");
@@ -22,6 +23,11 @@ export function destroyCommand(): Command {
       const rg = options.resourceGroup || `kars-${options.region}`;
       // Propagate --context to every kubectl invocation in this command.
       const kctlCtx = options.context ? ["--context", options.context] : [];
+      if ((!options.local || options.cloud) && (!name || name === "sre" || options.all)) {
+        const { execa } = await import("execa");
+        await assertDestroySafe((file,args,commandOptions) =>
+          execa(file,[...kctlCtx,...args],commandOptions));
+      }
 
       if (options.all) {
         // Full teardown — delete the entire resource group
