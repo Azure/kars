@@ -1,7 +1,7 @@
 # Security Audit — Inference routing and local failover
 
 Date: 2026-09-07
-Review status: Implementation evidence prepared; independent review and sign-off pending.
+Review status: Maintainer sign-off received; independent human review and sign-off pending.
 
 ## Scope
 
@@ -144,6 +144,13 @@ hardware, registry, subscription, or resource identifiers.
 
 ## Verdict
 
-Pending independent review. This document is not an approval. Required
-author/reviewer sign-offs must be supplied by the publication review process
-before the capability-audit gate can pass.
+The maintainer explicitly signed off and approved on 2026-09-08. This approval
+covers the technically qualified source at
+`45cfa009ce6b5242ddebc6dc74f0c2acba1668b1` in Azure/kars#547, not later functional
+changes, other unresolved slices, a customer deployment or promotion to `main`.
+
+An independent person's review and sign-off remain required. This single
+maintainer sign-off must not be counted twice or treated as a waiver of the
+two-person capability-audit gate.
+
+Signed-off-by: pallakatos <191481949+pallakatos@users.noreply.github.com>
