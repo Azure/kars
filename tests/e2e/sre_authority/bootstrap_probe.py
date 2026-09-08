@@ -12,7 +12,13 @@ import re
 import time
 
 from sre_authority.bootstrap_diagnostics import api_result, collect, controller_stack
-from sre_authority.registration_schema import CONTEXT, command, kind_proxy, request, write_report
+from sre_authority.registration_schema import CONTEXT, command, kind_proxy, request, write_report as schema_report
+
+REPORT_PREFIX = ""
+
+
+def write_report(root, filename, report):
+    schema_report(root, REPORT_PREFIX + filename, report)
 
 PATHS = {
     "CustomResourceDefinition": "/apis/apiextensions.k8s.io/v1/customresourcedefinitions",
@@ -86,6 +92,21 @@ def safe_controller(obj):
     return fixture
 
 
+def preserved_json_candidate(objects):
+    candidate = copy.deepcopy(objects)
+    matches = [obj for obj in candidate if obj["kind"] == "CustomResourceDefinition"
+               and obj["metadata"]["name"] == "karssreactions.kars.azure.com"]
+    if len(matches) != 1:
+        raise RuntimeError("Expected one public SRE action schema")
+    schema = matches[0]["spec"]["versions"][0]["schema"]["openAPIV3Schema"]
+    params = schema["properties"]["spec"]["properties"]["action"]["properties"]["params"]
+    if params.get("type") != "object" or params.get("additionalProperties") is not True:
+        raise RuntimeError("API-evidenced boolean additionalProperties candidate precondition failed")
+    del params["additionalProperties"]
+    params["x-kubernetes-preserve-unknown-fields"] = True
+    return candidate
+
+
 def upsert(port, obj, policies):
     metadata = obj.get("metadata", {})
     path = PATHS[obj["kind"]].format(namespace=metadata.get("namespace", "kars-system"))
@@ -104,7 +125,7 @@ def upsert(port, obj, policies):
     return result
 
 
-def exercise(root, port, objects, policies):
+def exercise(root, port, objects, policies, wait_seconds=90):
     results = []
     for name in ("kars-system", "kars-sre"):
         code, body = request(port, "POST", "/api/v1/namespaces", {
@@ -122,7 +143,7 @@ def exercise(root, port, objects, policies):
             if not result.get("accepted"):
                 write_report(root, "bootstrap-install.json", {"operations": results})
                 raise RuntimeError("Disposable public bootstrap admission install failed")
-    deadline = time.monotonic() + 90
+    deadline = time.monotonic() + wait_seconds
     while time.monotonic() < deadline:
         snapshot = collect(port, policies, request)
         if all(entry.get("typeChecked") and entry.get("generation") == entry.get("observedGeneration")
@@ -166,10 +187,14 @@ def exercise(root, port, objects, policies):
         raise RuntimeError("Public admission policy observation timed out; Pod evidence was still collected")
 
 
-def main(root, diagnostics_only):
+def main(root, diagnostics_only, candidate=False):
+    global REPORT_PREFIX
+    REPORT_PREFIX = "candidate-" if candidate else ""
     with kind_proxy(root) as (port, version):
         write_report(root, "bootstrap-versions.json", {"apiServer": version, "context": CONTEXT})
         objects = chart(root)
+        if candidate:
+            objects = preserved_json_candidate(objects)
         policies = {obj["metadata"]["name"]: obj for obj in objects
                     if obj["kind"] == "ValidatingAdmissionPolicy"}
         if not policies:
@@ -180,7 +205,13 @@ def main(root, diagnostics_only):
                 CONTEXT, "kube-controller-manager-kars-e2e-control-plane"))
         else:
             try:
-                exercise(root, port, objects, policies)
+                exercise(root, port, objects, policies, wait_seconds=180 if candidate else 90)
+                if candidate:
+                    from sre_authority.bootstrap_cases import admission_cases
+                    cases = admission_cases(port, policies)
+                    write_report(root, "bootstrap-admission-cases.json", {"cases": cases})
+                    if not all(case["matched"] for case in cases):
+                        raise RuntimeError("Schema candidate failed intended ordinary/private admission outcomes")
             finally:
                 write_report(root, "bootstrap-final.json", collect(port, policies, request))
                 write_report(root, "bootstrap-controller-stack.json", controller_stack(
@@ -191,9 +222,11 @@ if __name__ == "__main__":
     os.umask(0o077)
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--diagnostics-only", action="store_true")
+    parser.add_argument("--json-params-candidate", action="store_true",
+                        help="Diagnose only the API-evidenced nil-schema adapter candidate; never edit production")
     args = parser.parse_args()
     try:
-        main(Path(__file__).resolve().parents[3], args.diagnostics_only)
+        main(Path(__file__).resolve().parents[3], args.diagnostics_only, args.json_params_candidate)
     except Exception as error:
         print(f"SRE-BOOTSTRAP-FAIL category={type(error).__name__}", flush=True)
         raise SystemExit(1) from None

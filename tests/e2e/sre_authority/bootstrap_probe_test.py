@@ -8,7 +8,7 @@ import unittest
 from unittest.mock import patch
 
 from .bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, public_stack_facts
-from .bootstrap_probe import builtin_documents, converted_objects, exercise, safe_controller
+from .bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
     {"message": "Private SRE material requires authority"}]}}}
@@ -101,6 +101,36 @@ class BootstrapProofTests(unittest.TestCase):
         self.assertEqual(converted_objects(json.dumps({"kind": "List", "items": [first, second]})), [first, second])
         with self.assertRaises(RuntimeError):
             converted_objects(json.dumps({"kind": "Secret", "data": "do-not-publish"}))
+
+    def test_candidate_changes_only_known_public_json_params_representation(self):
+        params = {"type": "object", "additionalProperties": True, "description": "public"}
+        action = {"kind": "CustomResourceDefinition", "metadata": {"name": "karssreactions.kars.azure.com"},
+            "spec": {"versions": [{"schema": {"openAPIV3Schema": {"properties": {"spec": {"properties": {
+                "action": {"properties": {"params": params}}, "approval": {"type": "object"}
+            }}}}}}]}}
+        policy = {"kind": "ValidatingAdmissionPolicy", "metadata": {"name": "kars-sre-pending-proposals"},
+                  "spec": {"validations": [{"expression": "object.spec.approval.state == 'Pending'"}]}}
+        source = [action, policy]
+        before = copy.deepcopy(source)
+        changed = preserved_json_candidate(source)
+        self.assertEqual(source, before)
+        self.assertEqual(changed[1], policy)
+        actual = changed[0]["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]["action"]["properties"]["params"]
+        self.assertEqual(actual, {"type": "object", "x-kubernetes-preserve-unknown-fields": True, "description": "public"})
+        params["additionalProperties"] = {"type": "string"}
+        with self.assertRaises(RuntimeError):
+            preserved_json_candidate(source)
+
+    def test_arbitrary_failure_is_not_security_proof_in_candidate_cases(self):
+        from .bootstrap_cases import admission_cases
+        with patch("sre_authority.bootstrap_cases.request", return_value=(201, {})), \
+                patch("sre_authority.bootstrap_cases.upsert", return_value={"accepted": True}), \
+                patch("sre_authority.bootstrap_cases.as_tenant", return_value=(
+                    403, {"kind": "Status", "reason": "Forbidden", "message": "unrelated do-not-publish"})):
+            cases = admission_cases(1, POLICIES)
+        self.assertTrue(cases)
+        self.assertFalse(any(case["matched"] for case in cases))
+        self.assertNotIn("do-not-publish", json.dumps(cases))
 
     def test_collection_tracks_real_uid_chain_without_logging_other_pods(self):
         def request(_port, _method, path):

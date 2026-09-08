@@ -423,7 +423,11 @@ jobs:
         id: sre_schema
         run: python3 tests/e2e/sre_authority/registration_schema.py --exercise
       - name: Prove controller Pod admission with all chart policies and no image execution
+        id: sre_bootstrap
         run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe
+      - name: Collect nil-schema adapter candidate evidence without weakening production gates
+        if: failure() && steps.sre_bootstrap.outcome == 'failure'
+        run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe --json-params-candidate
       - name: Collect namespace-accessor candidate evidence without relaxing the failing production gate
         if: failure() && steps.sre_schema.outcome == 'failure'
         run: python3 tests/e2e/sre_authority/registration_schema.py --namespace-accessor-candidate --exercise
@@ -439,6 +443,7 @@ jobs:
             e2e-sre-schema-diag/namespace-accessor-candidate.json
             e2e-sre-schema-diag/namespace-accessor-candidate-instances.json
             e2e-sre-schema-diag/bootstrap-*.json
+            e2e-sre-schema-diag/candidate-bootstrap-*.json
           if-no-files-found: warn
           retention-days: 7
       - name: Remove disposable schema cluster
