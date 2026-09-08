@@ -211,12 +211,13 @@ fn owner_ref(target: &CredentialTarget) -> OwnerReference {
     }
 }
 
-async fn read_input(
+async fn read_selected(
     client: &Client,
     grant: &KarsCredentialGrant,
     target: &CredentialTarget,
     selection: &CredentialSelection,
-) -> Result<Secret, String> {
+    candidate: Option<&crate::kars_task::KarsTask>,
+) -> Result<(Secret, CredentialTarget), String> {
     let namespace = grant.namespace().ok_or("Grant workspace missing")?;
     let owner = match selection.scope {
         CredentialScope::Workspace => CredentialTarget {
@@ -231,7 +232,7 @@ async fn read_input(
             .ok_or("A non-workspace credential source must pin its actual target CREATE UID")?,
     };
     if selection.scope != CredentialScope::Workspace {
-        targets::owner_allowed(client, target, &owner).await?;
+        targets::owner_allowed(client, target, &owner, candidate).await?;
     }
     let api: Api<Secret> = Api::namespaced(client.clone(), &namespace);
     let meta = api
@@ -241,7 +242,7 @@ async fn read_input(
     if identity(&meta.metadata)?.0 != selection.source.uid {
         return Err("Selected credential source was replaced".into());
     }
-    let mut source = api
+    let source = api
         .get(&selection.source.name)
         .await
         .map_err(|e| api_error("Read selected agent credentials", e))?;
@@ -271,6 +272,19 @@ async fn read_input(
     {
         return Err("Credential source has a foreign owner; it is not adopted".into());
     }
+    Ok((source, owner))
+}
+
+async fn read_input(
+    client: &Client,
+    grant: &KarsCredentialGrant,
+    target: &CredentialTarget,
+    selection: &CredentialSelection,
+) -> Result<Secret, String> {
+    let (mut source, owner) = read_selected(client, grant, target, selection, None).await?;
+    let namespace = grant.namespace().ok_or("Grant workspace missing")?;
+    let api: Api<Secret> = Api::namespaced(client.clone(), &namespace);
+    let expected = owner_ref(&owner);
     let import_key = "kars.azure.com/credential-import-revision";
     let migration = if annotation(&source.metadata, import_key).is_none() {
         Some(
@@ -320,6 +334,37 @@ async fn read_input(
         source.data = Some(imported);
     }
     Ok(source)
+}
+
+pub(crate) async fn preflight_task(
+    client: &Client,
+    task: &crate::kars_task::KarsTask,
+    bindings: &CredentialBindings,
+) -> Result<(), String> {
+    validate_bindings(bindings)?;
+    let target = CredentialTarget {
+        kind: "KarsTask".into(),
+        namespace: task.namespace().ok_or("Credential Task workspace missing")?,
+        name: task.name_any(),
+        uid: identity(&task.metadata)?.0.into(),
+    };
+    let live = targets::read(client, &target).await?;
+    if live.metadata.generation != task.metadata.generation {
+        return Err("Credential Task changed before readiness validation".into());
+    }
+    let grant = current(client, &target.namespace, &bindings.grant).await?;
+    for selection in &bindings.sources {
+        let (source, owner) = read_selected(client, &grant, &target, selection, Some(task)).await?;
+        if annotation(&source.metadata, "kars.azure.com/credential-import-revision").is_none() {
+            super::legacy::import_values(
+                client,
+                &grant,
+                &source.name_any(),
+                if owner.kind == "Workspace" { None } else { Some(&owner) },
+            ).await?;
+        }
+    }
+    Ok(())
 }
 
 fn bundle_name(target: &CredentialTarget) -> String {

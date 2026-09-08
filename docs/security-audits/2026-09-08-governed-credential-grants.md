@@ -22,6 +22,11 @@ this repository.
   provider, identity and process-bootstrap exclusions.
 - Full effective Task snapshot/digest includes credential references and key
   grants; credential delegation checks parent attenuation.
+- Read-only live credential/GitHub enrollment preflight feeds ordinary Task
+  Ready before execution and receipt issuance. Candidate Tasks can bootstrap
+  without first requiring their own Ready status; ancestors still require it.
+- Unready, still-launched governed execution is paused without deleting its
+  namespace/state. Explicit unlaunch/deletion retains normal cleanup.
 - Core-owned namespace/projection writes and typed provider/Teams reconciliation.
 - Namespace admission limits the private adapter's remaining namespace create
   permission to its dedicated local-inference namespace.
@@ -45,6 +50,12 @@ configuration tests have **not run**. Full formatting and Rust type/Clippy
 qualification are pending. No dependency
 installation, Docker build, live cluster call, H100/cloud action or image push
 was performed.
+
+After wiring live Task readiness, state-preserving pause and GitHub retirement,
+the strengthened fast suite passes 20 tests and CLI typecheck. All changed Rust
+files pass syntax parsing and their functional modules remain below the
+existing caps. The new Rust behavior tests are still unrun; no Cargo lease was
+implicitly reacquired.
 
 Rust test and strict Clippy qualification require the separately coordinated
 existing target lease. Real Kubernetes tests must demonstrate admission
@@ -72,6 +83,9 @@ Any author waiver on earlier publication PRs does not apply to this change.
   Added, still-unrun regressions cover identical JSON under a changed source
   revision, retirement of old cached consumers, typed Pending-privacy
   non-issuance, and canonical App IDs without changing customer store values.
+  Further unrun regressions cover pre-Ready source checks, ordinary Ready
+  revocation, self-bootstrap versus ancestor readiness, UID-owned pause without
+  data deletion, and retirement that cannot re-enable the legacy GitHub mount.
 - The issuer consumes the full strict `privacy_epoch` helper from `7dc72810`.
   The observation RPC currently rechecks registration status and real legacy
   GET/LIST/WATCH denials, but not the full admission/private-token-alias scan.

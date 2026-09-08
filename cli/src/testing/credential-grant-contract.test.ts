@@ -82,6 +82,21 @@ describe("governed credential public contract",()=>{
     expect(source("controller/src/credential_grants/operator.rs")).toContain("privacy_epoch");
   });
 
+  it("gates ordinary Task readiness before execution and preserves state during credential failure",()=>{
+    const task=source("controller/src/kars_task_reconciler.rs");
+    expect(task.indexOf("readiness::enforce(")).toBeLessThan(task.indexOf("reconcile_execution(&ctx.client"));
+    expect(task).toContain("readiness::selected(task)");
+    expect(source("controller/src/credential_grants/readiness.rs")).toContain("CredentialAuthorityUnavailable");
+    expect(source("controller/src/credential_grants/sources.rs")).toContain("Some(task)");
+    expect(source("controller/src/kars_task_execution.rs")).toContain("credential_sources::pause_owned");
+    const github=source("controller/src/credential_grants/github.rs");
+    expect(github).toContain("Self::Retired(_) => None");
+    for(const kind of ["karssandboxes","karstasks","karsteams"]){
+      const policy=resource("ValidatingAdmissionPolicy",`kars-credential-consumer-${kind}`);
+      expect(JSON.stringify(policy.spec)).toContain("kars.azure.com/github-grant-uid");
+    }
+  });
+
   it("allows controller metadata finalization but not grant spec authorship",()=>{
     const controller=resource("ClusterRole","kars-credential-grant-controller");
     const verbs=controller.rules.filter((rule:any)=>rule.resources.includes("karscredentialgrants"))

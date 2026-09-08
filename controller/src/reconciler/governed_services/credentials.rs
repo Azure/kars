@@ -73,6 +73,15 @@ pub(crate) struct Projection {
 }
 
 impl Projection {
+    pub(crate) fn retired(purpose: Purpose, sandbox: &KarsSandbox) -> Result<Self, String> {
+        Ok(Self {
+            version: format!("retired:{}:{}", sandbox.uid().ok_or("Retired credential Sandbox UID missing")?,
+                sandbox.metadata.generation.unwrap_or_default()),
+            epoch: None,
+            purpose,
+        })
+    }
+
     pub(crate) fn decorate(&self, deployment: &mut Deployment) {
         deployment
             .spec

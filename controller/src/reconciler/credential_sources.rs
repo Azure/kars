@@ -26,6 +26,15 @@ mod projection;
 #[path = "credential_source_workloads.rs"]
 mod workloads;
 
+pub(crate) async fn pause_owned(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+) -> Result<(), Error> {
+    namespace_current(client, sandbox, namespace).await?;
+    workloads::pause(client, sandbox, namespace, false).await
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("CredentialSourceUnavailable: {0}")]
