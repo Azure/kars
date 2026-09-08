@@ -4,6 +4,12 @@ These APIs provide an in-process capability-request queue and bounded router
 telemetry. They do **not** deliver assignments, run agents, create approvals,
 grant capabilities, install resources, or provide a durable execution ledger.
 
+**Publication blocker:** the legacy SRE agent's Kubernetes permissions can read
+the new control Secret despite its router-only mount. This candidate is not
+ready for deployment. A separate operator-authorized SRE identity/migration
+prerequisite must close that API credential-access path; changing mounts alone
+does not establish operator-only authority.
+
 ## Identity and operator authentication
 
 Each router has a unique process-instance scope. On Kubernetes the controller
@@ -60,7 +66,8 @@ operator decision separately; cancelling a wait does not revoke policy.
 Reset requires the current `scope_id` as a compare-and-swap condition and can
 include an `assignment_id` correlation label. It returns a fresh scope with
 the same trusted identity, clears request/telemetry state, and cancels old
-waiters. An assignment label is not evidence that a runtime executed anything.
+waiters. Reset returns conflict while an approved dispatch is already claimed.
+An assignment label is not evidence that a runtime executed anything.
 Reset neither changes policy nor resets existing token-budget counters.
 
 ## Policy-gated egress waits
@@ -76,6 +83,13 @@ after the ordinary egress policy also allows that exact operation. The
 existing signed-allowlist/controller path remains responsible for enforcement;
 private-address checks, normal egress filters, and redirect behavior still
 apply. Denial, cancellation, expiry, and reset never bypass those filters.
+
+After the asynchronous policy check, the waiter revalidates the request. An
+atomic dispatch claim then coordinates with cancellation and reset immediately
+before sending. Cancellation acknowledged before that claim prevents dispatch;
+after the claim it returns conflict rather than promising prevention. The claim
+stays active through response handling and releases on completion or caller
+cancellation. It does not assert that the upstream accepted the request.
 
 Transparent proxy traffic records bounded denied requests and policy
 observations, but keeps its existing immediate-denial/retry behavior. It does
@@ -100,6 +114,11 @@ Missing usage remains null; incomplete/cancelled streams and transport errors
 are not successes. Metadata parsing is bounded, and `partial_observation`
 identifies incomplete observations. Streams are forwarded unchanged and are
 never replayed by telemetry after acceptance.
+
+HTTP acceptance is distinct from semantic completion: buffered Responses with
+`failed` or `incomplete` status and OpenAI error frames followed by `[DONE]` do
+not become completed generations. Their accepted status, original response
+bytes and available usage remain intact, without retaining provider error text.
 
 Only model identifiers, tool names/IDs, status, timing, and reported usage are
 retained. Prompts, assistant text, URLs, headers, arguments, and result bodies

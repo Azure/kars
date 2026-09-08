@@ -40,6 +40,35 @@ pub struct Parsed {
     pub finish: Option<String>,
     pub tools: Vec<(String, String)>,
     pub partial: bool,
+    pub semantic: Option<SemanticOutcome>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum SemanticOutcome {
+    Failed,
+    Incomplete,
+}
+
+impl SemanticOutcome {
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Failed => "upstream_error",
+            Self::Incomplete => "incomplete",
+        }
+    }
+}
+
+pub fn semantic_outcome(value: &Value, shape: Shape) -> Option<SemanticOutcome> {
+    if matches!(shape, Shape::Responses) {
+        match value.get("status").and_then(Value::as_str) {
+            Some("failed") => return Some(SemanticOutcome::Failed),
+            Some("incomplete") => return Some(SemanticOutcome::Incomplete),
+            _ => {}
+        }
+    }
+    (value.get("error").is_some_and(|error| !error.is_null())
+        || value.get("type").and_then(Value::as_str) == Some("error"))
+    .then_some(SemanticOutcome::Failed)
 }
 
 pub fn merge_usage(target: &mut Usage, usage: &Value) {
@@ -81,7 +110,10 @@ pub fn add_tool(parsed: &mut Parsed, id: &Value, name: &Value) {
 }
 
 pub fn response(value: &Value, shape: Shape) -> Parsed {
-    let mut parsed = Parsed::default();
+    let mut parsed = Parsed {
+        semantic: semantic_outcome(value, shape),
+        ..Default::default()
+    };
     if let Some(usage) = value.get("usage") {
         merge_usage(&mut parsed.usage, usage);
     }

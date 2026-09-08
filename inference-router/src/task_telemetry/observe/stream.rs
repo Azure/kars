@@ -15,6 +15,7 @@ pub(super) struct Accumulator {
     parsed: Parsed,
     terminal: bool,
     pub failed: bool,
+    incomplete: bool,
     tools: BTreeMap<(u64, u64), (String, String)>,
 }
 impl Accumulator {
@@ -28,6 +29,7 @@ impl Accumulator {
             parsed: Parsed::default(),
             terminal: false,
             failed: false,
+            incomplete: false,
             tools: BTreeMap::new(),
         }
     }
@@ -68,6 +70,14 @@ impl Accumulator {
             self.parsed.partial = true;
             return;
         };
+        if frame.lines().any(|line| {
+            line.strip_prefix("event:")
+                .is_some_and(|name| name.trim() == "error")
+        }) {
+            self.failed = true;
+            self.terminal = true;
+            self.parsed.semantic = Some(parse::SemanticOutcome::Failed);
+        }
         let data = frame
             .lines()
             .filter_map(|line| line.strip_prefix("data:").map(str::trim))
@@ -89,6 +99,12 @@ impl Accumulator {
         }
         match self.shape {
             Shape::OpenAi => {
+                if parse::semantic_outcome(&value, self.shape).is_some() {
+                    self.failed = true;
+                    self.terminal = true;
+                    self.parsed.semantic = Some(parse::SemanticOutcome::Failed);
+                    return;
+                }
                 if let Some(choices) = value["choices"].as_array() {
                     for choice in choices.iter().take(parse::MAX_TOOLS) {
                         if let Some(reason) = choice["finish_reason"]
@@ -158,12 +174,16 @@ impl Accumulator {
             Shape::Responses => match value["type"].as_str() {
                 Some("response.completed" | "response.failed" | "response.incomplete") => {
                     self.terminal = true;
-                    self.failed = value["type"] != "response.completed";
+                    self.failed |= value["type"] == "response.failed";
+                    self.incomplete |= value["type"] == "response.incomplete";
                     let parsed = parse::response(&value["response"], Shape::Responses);
+                    self.failed |= parsed.semantic == Some(parse::SemanticOutcome::Failed);
+                    self.incomplete |= parsed.semantic == Some(parse::SemanticOutcome::Incomplete);
                     self.parsed.usage = parsed.usage;
                     self.parsed.finish = parsed.finish;
                     self.parsed.tools = parsed.tools;
-                    self.parsed.partial |= parsed.partial || self.failed;
+                    self.parsed.semantic = parsed.semantic;
+                    self.parsed.partial |= parsed.partial;
                 }
                 Some("error") => {
                     self.terminal = true;
@@ -174,7 +194,7 @@ impl Accumulator {
         }
     }
     pub(super) fn complete(&self) -> bool {
-        self.terminal && !self.failed
+        self.terminal && !self.failed && !self.incomplete
     }
     pub(super) fn finish(&mut self) -> Parsed {
         if !self.sse && !self.discarding {
@@ -188,6 +208,11 @@ impl Accumulator {
         }
         if !self.terminal {
             self.parsed.partial = true;
+        }
+        if self.failed {
+            self.parsed.semantic = Some(parse::SemanticOutcome::Failed);
+        } else if self.incomplete {
+            self.parsed.semantic = Some(parse::SemanticOutcome::Incomplete);
         }
         for (_, (id, name)) in std::mem::take(&mut self.tools) {
             add_tool(&mut self.parsed, &Value::String(id), &Value::String(name));

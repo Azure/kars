@@ -220,6 +220,161 @@ async fn ordinary_denied_fetch_is_still_immediate_and_private_targets_never_ente
 }
 
 #[tokio::test]
+async fn cancel_after_readiness_but_before_dispatch_claim_prevents_a_post() {
+    let (state, app, upstream, scope, url) = setup().await;
+    let port = reqwest::Url::parse(&url)
+        .unwrap()
+        .port_or_known_default()
+        .unwrap();
+    let entry = queue(&app, &scope, "egress", "approved.example", Some(port)).await;
+    let id = entry["request_id"].as_str().unwrap();
+    assert_eq!(
+        decision(&app, &scope, id, "approved").await.0,
+        StatusCode::OK
+    );
+    state
+        .blocklist
+        .replace_allowlist(vec!["approved.example".into()])
+        .await;
+    state
+        .services
+        .wait_for_egress(
+            &state.blocklist,
+            &scope,
+            id,
+            &url,
+            "test",
+            Duration::from_secs(1),
+        )
+        .await
+        .unwrap();
+    let cancelled = send(
+        &app,
+        request(
+            "POST",
+            &format!("/v1/access-requests/{id}/cancel"),
+            json!({"scope_id":scope}),
+            None,
+            None,
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(cancelled.0, StatusCode::OK);
+    assert_eq!(cancelled.1["status"], "cancelled");
+    assert!(matches!(
+        state.services.claim_egress_dispatch(&scope, Some(id)),
+        Err(kars_inference_router::access_request::Error::Terminal)
+    ));
+    assert!(upstream.received_requests().await.unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn cancel_and_reset_do_not_acknowledge_prevention_after_dispatch_has_started() {
+    let (state, app, upstream, scope, url) = setup().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("accepted")
+                .set_delay(Duration::from_millis(300)),
+        )
+        .expect(1)
+        .mount(&upstream)
+        .await;
+    let waiting=tokio::spawn(app.clone().oneshot(request("POST","/egress/fetch",
+        json!({"url":url,"method":"POST","body":"side-effect","scope_id":scope,"wait_for_approval_ms":2000}),
+        None,None,true)));
+    let entry = pending(&app).await;
+    let id = entry["request_id"].as_str().unwrap();
+    assert_eq!(
+        decision(&app, &scope, id, "approved").await.0,
+        StatusCode::OK
+    );
+    state
+        .blocklist
+        .replace_allowlist(vec!["approved.example".into()])
+        .await;
+    for _ in 0..100 {
+        if !upstream.received_requests().await.unwrap().is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(2)).await;
+    }
+    assert_eq!(upstream.received_requests().await.unwrap().len(), 1);
+    assert_eq!(
+        send(
+            &app,
+            request(
+                "POST",
+                &format!("/v1/access-requests/{id}/cancel"),
+                json!({"scope_id":scope}),
+                None,
+                None,
+                true
+            )
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        send(
+            &app,
+            request(
+                "POST",
+                "/internal/access-requests/reset",
+                json!({"scope_id":scope,"assignment_id":"next"}),
+                Some(CONTROL),
+                None,
+                true
+            )
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(waiting.await.unwrap().unwrap().status(), StatusCode::OK);
+    let completed = state.services.requests.entry(&scope, id).unwrap();
+    assert_eq!(
+        completed.status,
+        kars_inference_router::access_request::Status::DispatchClaimed
+    );
+    assert!(!completed.dispatch_active);
+    assert_eq!(
+        send(
+            &app,
+            request(
+                "POST",
+                &format!("/v1/access-requests/{id}/cancel"),
+                json!({"scope_id":scope}),
+                None,
+                None,
+                true
+            )
+        )
+        .await
+        .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(
+        send(
+            &app,
+            request(
+                "POST",
+                "/internal/access-requests/reset",
+                json!({"scope_id":scope,"assignment_id":"next"}),
+                Some(CONTROL),
+                None,
+                true
+            )
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+}
+
+#[tokio::test]
 async fn wait_rejects_wrong_port_request_and_shutdown_cancels_waiters() {
     let (state, app, _upstream, scope, url) = setup().await;
     let entry = queue(&app, &scope, "egress", "approved.example", Some(443)).await;

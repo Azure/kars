@@ -87,6 +87,16 @@ impl Observation {
             return;
         }
         self.finished = true;
+        // HTTP acceptance and a complete body do not imply a successful model
+        // outcome (Responses may return failed/incomplete at HTTP 200).
+        let outcome = if outcome == "complete" {
+            match parsed.semantic {
+                Some(semantic) => semantic.label(),
+                None => outcome,
+            }
+        } else {
+            outcome
+        };
         let usage_state = match (parsed.usage.prompt_tokens, parsed.usage.completion_tokens) {
             (Some(_), Some(_)) => "present",
             (None, None) => "missing",
