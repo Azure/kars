@@ -48,9 +48,11 @@ to zero. Restoring authority requires a new token, not reuse of the potentially
 exposed cache. Foreign consumers remain untouched and block automatic recovery.
 Initial qualification still pending is not permission to issue or reuse a
 credential, but it is not itself evidence of privacy loss and does not stop the
-rollout being qualified. An already-qualified current v2 epoch survives ordinary
-availability failures only while fresh privacy checks pass and no old-epoch or
-old-control-version Pods remain. Canonical SRE's early authorization failure
+rollout being qualified. Privacy qualification completes only after fresh
+denial/v2/UID/epoch/template checks and termination of old-epoch or
+old-control-version Pods. Workload availability is separate: the SRE readiness
+endpoint itself depends on qualified authority, so it cannot be an input to
+that qualification. Canonical SRE's early authorization failure
 also performs the ownership-fenced, no-issuance privacy-loss quarantine.
 These checks occur during reconciliation; they are not a claim of instantaneous
 cluster-wide revocation or cancellation of already accepted upstream work.

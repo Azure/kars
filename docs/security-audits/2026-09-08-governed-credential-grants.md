@@ -38,7 +38,9 @@ cache; CLI typecheck passes. Eighteen private add-on/packaging tests and the
 gateway lint pass. After the exact GitHub forward merge, the 19 core fast
 tests and CLI typecheck pass again, along with all seven GitHub client
 regressions. Merged Rust files pass syntax parsing and Helm lint remains
-successful. Newly added Rust observer-route, purpose-issuer and GitHub
+successful. Forwarding `068ae160` also passes all 11 existing read-only Python
+bootstrap fixtures and the 19 credential CLI/schema regressions. Newly added
+Rust observer-route, purpose-issuer and GitHub
 configuration tests have **not run**. Full formatting and Rust type/Clippy
 qualification are pending. No dependency
 installation, Docker build, live cluster call, H100/cloud action or image push
@@ -55,8 +57,11 @@ Any author waiver on earlier publication PRs does not apply to this change.
 
 ## Explicit open blockers
 
-- No Cargo lease was assigned to this candidate; neither core nor private BFF
-  has been compiled or Rust-tested.
+- The first direct Cargo lease was released unused because the newly required
+  privacy closure had not yet been forwarded. The exact
+  `068ae16041ecf7bd2b8321dfeb22e381ebbd587b` closure is now integrated without
+  dependency changes. Neither this combined core candidate nor private BFF has
+  been compiled or Rust-tested; a fresh lease is required.
 - The exact GitHub consumer `d3dc3ce85b72869497a8f0a32815609e48a26c62`
   is forward-integrated after the local `b3f6ca83` issuer checkpoint. Its
   reviewed projection helper is reused once: optional for legacy standalone
@@ -95,9 +100,11 @@ Only after a direct parent lease, using the existing shared target,
 8.5 GiB stop guard:
 
 ```sh
+cargo check --offline --locked -p kars-controller -p kars-inference-router --tests
 cargo test --offline --locked -p kars-controller -p kars-inference-router credential
 cargo test --offline --locked -p kars-controller -p kars-inference-router observation
 cargo test --offline --locked -p kars-controller -p kars-inference-router github
+cargo test --offline --locked -p kars-controller -p kars-inference-router governed_services::continuity_tests
 cargo clippy --offline --locked -p kars-controller -p kars-inference-router --all-targets -- -D warnings
 ```
 
@@ -109,5 +116,6 @@ cargo test --offline --locked --manifest-path bff/Cargo.toml credential
 cargo clippy --offline --locked --manifest-path bff/Cargo.toml --all-targets -- -D warnings
 ```
 
-Last read-only disk observation: 9.8 GiB available; no cargo/rustc processes
-observed. No lease was acquired or implicitly transferred.
+Last read-only disk observation: 9.9 GiB available; no cargo/rustc processes
+observed. The direct lease was released unused before forwarding `068ae160`;
+it is not implicitly reacquired when the merge completes.
