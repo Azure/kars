@@ -53,6 +53,10 @@ pub const CLAW_MEMORY: &str = "kars-controller/karsmemory";
 /// `KarsEval` reconciler — eval bundle ConfigMap + Job emission.
 pub const CLAW_EVAL: &str = "kars-controller/karseval";
 
+/// `KarsTask` reconciler — validates the trust envelope and stamps the
+/// envelope digest + lifecycle phase on status.
+pub const CLAW_TASK: &str = "kars-controller/karstask";
+
 /// `TrustGraph` reconciler (Phase F1) — verifies signed trust edges
 /// and publishes a `ConfigMap` projection to `kars-system`.
 pub const TRUST_GRAPH: &str = "kars-controller/trustgraph";
@@ -102,6 +106,7 @@ pub const ALL_FIELD_MANAGERS: &[&str] = &[
     INFERENCE_POLICY,
     CLAW_MEMORY,
     CLAW_EVAL,
+    CLAW_TASK,
     TRUST_GRAPH,
     TRUSTGRAPH_MOUNT,
     ROUTER_RECONCILER,

@@ -26,6 +26,10 @@
 // lints are silenced at the module level until call-sites land.
 #![allow(dead_code)]
 
+/// Governance Receipt signing (kars Bridge Inc 3). Allowlisted crypto
+/// wrapper: Ed25519 over DSSE. See the module docs for the V0 trust model.
+pub mod signing;
+
 #[allow(unused_imports)]
 pub mod field_managers {
     //! Stable Server-Side Apply field managers per plan §6 #4.
