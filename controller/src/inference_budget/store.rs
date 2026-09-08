@@ -33,6 +33,16 @@ pub enum StoreError {
     Contention,
 }
 
+impl From<crate::task_identity::Error> for StoreError {
+    fn from(error: crate::task_identity::Error) -> Self {
+        match error {
+            crate::task_identity::Error::Api { stage, code } => Self::Api { stage, code },
+            crate::task_identity::Error::Changed => Self::Contention,
+            _ => Self::Ledger(BudgetError::Authorization),
+        }
+    }
+}
+
 fn api_error(stage: &'static str, error: kube::Error) -> StoreError {
     StoreError::Api {
         stage,

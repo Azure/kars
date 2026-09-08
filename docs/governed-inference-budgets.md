@@ -60,6 +60,14 @@ Workspace producers create Tasks/Teams; they do not create accounts, write
 balances, manufacture status, or inject this Sandbox field. Root UID recreation
 is a new grant identity, not continuation of an old account.
 
+The shared controller `task_identity::resolve` helper captures a stable live
+same-workspace UID chain, with canonical readiness, attenuation and effective
+authorization, and a verified optional Team owner. It rechecks UID/resourceVersion
+after collection. `VerifiedTaskLineage::verify_pins` compares a consumer's
+authoritative persisted references; traversal alone does not create immutable
+continuity. Budget enrollment owns persistence and financial state. Credential
+consumers can reuse identity checks without depending on the budget ledger.
+
 ## Reserve, authorize one send, settle
 
 All ancestor meters and the root meter are updated in **one Kubernetes object
