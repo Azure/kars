@@ -13,6 +13,8 @@ pub(crate) mod pod;
 #[cfg(test)]
 mod privacy_tests;
 #[cfg(test)]
+mod retirement_tests;
+#[cfg(test)]
 mod tests;
 
 use crate::sre_registration::{KarsSRERegistration, NAME, RegistrationStatus};

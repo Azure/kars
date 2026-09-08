@@ -250,6 +250,12 @@ def prove(root, port, state, objects, report):
         "bindCustom": api.allowed("rbac.authorization.k8s.io", "clusterroles", "bind", CUSTOM),
         "getCustomLimitRanges": api.allowed("", "limitranges", "get"),
         "getReaderNodeMetrics": api.allowed("metrics.k8s.io", "nodes", "get")}
+    require(baseline_bind, "Shipped controller lacks the exact named legacy reader bind permission")
+    facts["shippedReaderBindVerified"] = True
+    # The historical 403/200/403 experiment is retained in its immutable CI
+    # artifact. With the repaired chart, this extra grant is deliberately
+    # redundant: removing it must leave the shipped reader bind authorized.
+    facts["temporaryReaderBindGrant"] = "redundant-with-shipped-permission"
     require(not facts["authorization"]["bindCustom"] and not facts["authorization"]["getCustomLimitRanges"],
             "Custom fixture is not outside the controller's current authority")
 
@@ -292,7 +298,7 @@ def prove(root, port, state, objects, report):
         unchanged()
 
     reader, custom = state["bindings"]
-    probe(reader, "baseline", 200 if baseline_bind else 403)
+    probe(reader, "shipped-baseline", 200)
     probe(custom, "baseline-custom", 403)
     extra = []
     try:
@@ -322,7 +328,7 @@ def prove(root, port, state, objects, report):
                 "preconditions": {k: obj["metadata"][k] for k in ("uid", "resourceVersion")}})
             require(code in (200, 202), "Exact named bind fixture cleanup failed")
     observe_bind(api, baseline_bind)
-    probe(reader, "named-bind-removed", 200 if baseline_bind else 403)
+    probe(reader, "temporary-bind-removed-shipped-bind-remains", 200)
     facts["unchangedPoliciesRolesBindingsConsumer"] = True
     facts["testBindGrantRemoved"] = True
     report(facts)

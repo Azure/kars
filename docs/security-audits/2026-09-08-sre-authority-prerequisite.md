@@ -1,7 +1,8 @@
 # Security audit — registered SRE credential authority
 
-Status: candidate under qualification; the latest schema repair still requires
-Rust and full controller/migration execution. **Not a sign-off.**
+Status: candidate under qualification; the local named-reader-bind and
+retirement-preflight repair requires Rust and full controller/migration
+execution. **Not a sign-off.**
 
 ## Scope and trust root
 
@@ -37,12 +38,74 @@ the actual full-harness discovery command. The new Rust schema/wire regressions,
 existing Helm/Rust drift test and full fatal SRE migration remain required before
 readiness. A CI run, not the unbuilt local repair, supplies that next evidence.
 
+## Subtractive binding authorization: real API evidence and local repair
+
+The image-free hosted Kind experiment at
+https://github.com/Azure/kars/actions/runs/34280933428/job/102245425114
+ran against immutable head `c1d14fad4bbaeeda6832d278943ba9bba4e9130e`.
+Artifact `sre-crd-schema-34280933428` contains
+`bootstrap-binding-retirement.json`; no bearer tokens or response bodies are
+included. SelfSubjectReview verified the short-lived controller ServiceAccount
+bearer's actual UID, with no admin client certificate or impersonation fallback.
+
+The controller already had ordinary ClusterRoleBinding PATCH and canonical
+registrar `use`, but lacked named `bind` on the historical `kars-sre-reader`.
+The exact reviewed UID/resourceVersion-fenced subtractive PATCH returned an
+explicit Kubernetes RBAC permissions-not-held **403**. Adding only a disposable
+`bind` grant for that one ClusterRole changed the identical dry-run to **200**;
+removing the test grant restored **403**. A separately reviewed custom role
+remained **403** throughout. Wrong UID produced the specific immutable-UID
+**422** validation error, and stale resourceVersion produced **409 Conflict**.
+Every persistent binding, unrelated subject, role and consumer remained
+unchanged; the temporary permission was removed. All fourteen SRE policies
+remained observed, warning-free and Deny-bound, and all nine existing
+ordinary/private/Pending-only admission cases passed. No workload image was
+executed and no full migration readiness was claimed.
+
+The local production candidate adds only `kars-sre-reader` to the controller's
+existing three-name ClusterRole `bind` allowlist, yielding four exact names.
+It introduces no wildcard, `escalate`, cluster-admin, default agent grant, or automatic custom
+role permission. Retirement prepares immutable patches, dry-runs **all** of them
+through the API server, then applies those same patches only if every preflight
+succeeds. An initial permission, admission or validation failure is reported
+with safe `Preflight` context before any binding retirement or consumer stop.
+Custom-role failures require explicit operator remediation and fresh reviews
+where needed; the controller never self-grants the missing permission.
+
+This is not a multi-resource transaction. A later real write can fail if
+permissions or versions change after preflight. Prior completed retirements can
+remain, errors stop further progress, and retries recognize retired bindings
+without restoring old grants. Rust HTTP fixtures now distinguish `dryRun=All`
+from real PATCHes and do not mutate persistent fixture state on dry-run.
+New regressions cover both binding kinds, a forbidden second preflight,
+preserved consumers/custom roles, UID/RV fences, ordering, idempotence and
+post-preflight failures. The updated fast API probe requires the shipped reader
+bind to work before and after its now-redundant test grant; it does not describe
+that new baseline as another 403/200/403 experiment.
+
+The new Rust changes have not been compiled or executed by this task because
+the shared Cargo lease belongs to another qualification run. Source review and
+parent approval remain required before public production push; Rust
+qualification and the complete fatal migration remain required before claiming
+readiness. This section is evidence and candidate documentation, not audit
+sign-off or permission to deploy.
+
+Local checks for this candidate passed all 53 Python harness tests, all five
+targeted CLI/Helm authority tests (including the exact four-name bind list and
+unchanged default private-grant assertions), standalone scoped rustfmt, shell
+syntax and whitespace checks. The six new Rust regression functions are in
+`sre_authority::retirement_tests`; parent qualification should also run the
+existing `sre_authority::tests` and `sre_authority::privacy_tests` because they
+share the corrected HTTP fixture. No Cargo invocation, dependency change,
+public production push or new audit signature was performed.
+
 ## Boundaries implemented
 
 - Exact source, controller/release, and runtime namespace UIDs are checked live.
-- Reviewed legacy grants retire with UID/resourceVersion preconditions.
-  Unrelated subjects/resources are preserved; custom/group ambiguity blocks
-  before migration mutations.
+- Reviewed legacy grants retire with UID/resourceVersion preconditions after
+  all exact server-side retirement dry-runs pass. Unrelated subjects/resources
+  are preserved; group/unreviewed ambiguity or custom-role preflight denial
+  blocks before initial migration mutations.
 - Shared live authorization reviews require Secret get/list/watch denial in
   namespace and cluster scope, including protected name-restricted grants,
   before issuance and proxy forwarding. Old status booleans are insufficient.
