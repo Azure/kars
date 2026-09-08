@@ -3,6 +3,16 @@
 Date: 2026-09-08
 Status: Implementation candidate; independent review and sign-offs pending.
 
+## Known blocking finding
+
+The supported legacy SRE installation grants its agent-held Kubernetes
+credential cluster-wide Secret reads. It can therefore obtain the purportedly
+operator-only service token through the API. Router-only mounts do not close
+that path. The HIGH remains unresolved in this candidate; a separately reviewed
+operator-controlled UID registration/migration and SRE credential boundary is
+required before deployment or merge. Legacy grants cannot be retired merely by
+trusting names, labels or ownership-looking annotations.
+
 ## Scope
 
 Bounded access-request services, operator-only reset/inspection/decisions,
@@ -59,6 +69,20 @@ Local qualification completed before independent review:
 - Strict affected-crate Clippy and formatting checks passed.
 - Static A2A-isolation, null-provider, and tracked-source copyright checks
   passed; new candidate files are also checked for headers and module limits.
+
+Two MEDIUM review findings have been repaired and source-reviewed separately:
+the cancellation/expiry race across an asynchronous policy check, and semantic
+model errors reported as completed generations. Dispatch now has a mutex-
+coordinated claim boundary; cancellation/reset cannot acknowledge prevention
+after that claim. HTTP acceptance remains distinct from semantic failure or
+incompleteness, with no response rewriting or replay.
+
+Repair qualification passed 1,071 router unit tests and 29 governed-service
+integration tests, including deterministic cancellation/reset/expiry/shutdown
+interleavings and accepted failed/incomplete/error-plus-DONE responses. Strict
+router all-target Clippy passed; the focused 12 telemetry integrations passed
+again after a type-safe initializer adjustment. These results do not resolve
+the separate HIGH SRE credential-access issue.
 
 The existing disposable Kind harness now includes the actual deployed router:
 it checks that the control Secret is mounted only in the router, rejects the

@@ -3048,7 +3048,7 @@ main() {
     test_sandbox_deployment_exists || true
     test_sandbox_pod_starts || true
     if test_governed_services; then
-        pass "Governed services isolate operator credentials, bind live identity, and reject stale scopes"
+        pass "Service API smoke: router-only token mount, credential checks, and scope reset"
     else
         fail "Governed service authentication and scope lifecycle gate failed"
     fi

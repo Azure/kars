@@ -176,6 +176,7 @@ async fn egress_fetch(
     }
 
     let sandbox: &str = &state.sandbox_name;
+    let mut dispatch_request = None;
 
     // Check egress access: blocklist → allowlist (Strict denies the rest).
     if let Err(reason) = state.blocklist.check_egress(url, sandbox).await {
@@ -228,6 +229,7 @@ async fn egress_fetch(
                 );
                 return super::access_request::error(error);
             }
+            dispatch_request = Some(entry.request_id);
         } else {
             state.services.telemetry.record_router_tool(
                 &telemetry_scope,
@@ -301,6 +303,27 @@ async fn egress_fetch(
     }
 
     const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024; // 2 MB
+
+    // No await separates this atomic claim from starting the send. A successful
+    // cancel/reset before the claim wins; afterwards prevention is not promised.
+    let _dispatch_claim = if wait_ms > 0 {
+        if state.blocklist.check_egress(url, sandbox).await.is_err() {
+            return errors::flat(
+                StatusCode::FORBIDDEN,
+                "Egress policy no longer permits this operation",
+            )
+            .into_response();
+        }
+        match state
+            .services
+            .claim_egress_dispatch(&telemetry_scope, dispatch_request.as_deref())
+        {
+            Ok(claim) => Some(claim),
+            Err(error) => return super::access_request::error(error),
+        }
+    } else {
+        None
+    };
 
     match request
         .timeout(std::time::Duration::from_secs(30))

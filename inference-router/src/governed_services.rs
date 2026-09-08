@@ -170,6 +170,25 @@ impl GovernedServices {
         sandbox: &str,
         timeout: Duration,
     ) -> Result<(), Error> {
+        self.wait_for_egress_check(scope, id, target, sandbox, timeout, || {
+            blocklist.check_egress(target, sandbox)
+        })
+        .await
+    }
+
+    pub(crate) async fn wait_for_egress_check<F, Fut>(
+        &self,
+        scope: &str,
+        id: &str,
+        target: &str,
+        sandbox: &str,
+        timeout: Duration,
+        mut check_policy: F,
+    ) -> Result<(), Error>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<(), String>>,
+    {
         let url = reqwest::Url::parse(target).map_err(|_| Error::Invalid)?;
         let host = url.host_str().ok_or(Error::Invalid)?;
         let port = url.port_or_known_default().ok_or(Error::Invalid)?;
@@ -194,12 +213,21 @@ impl GovernedServices {
                     return Err(Error::Invalid);
                 }
                 match entry.status {
-                    Status::Denied | Status::Cancelled => return Err(Error::Terminal),
+                    Status::Denied | Status::Cancelled | Status::DispatchClaimed => {
+                        return Err(Error::Terminal);
+                    }
                     Status::Expired => return Err(Error::Expired),
                     Status::Approved => {
                         // The decision API never changes enforcement. Only the
                         // normal signed-policy path can make this check pass.
-                        if blocklist.check_egress(target, sandbox).await.is_ok() {
+                        let allowed = tokio::select! {
+                            result = check_policy() => result.is_ok(),
+                            _ = cancellation.cancelled() => return Err(Error::StaleScope),
+                            _ = self.shutdown.cancelled() => return Err(Error::Unavailable),
+                            _ = changed.changed() => continue,
+                        };
+                        if allowed {
+                            self.requests.validate_dispatch(scope, id, &self.shutdown)?;
                             return Ok(());
                         }
                     }
@@ -216,5 +244,16 @@ impl GovernedServices {
         tokio::time::timeout(timeout.min(MAX_WAIT), future)
             .await
             .map_err(|_| Error::WaitTimeout)?
+    }
+
+    /// Claim immediately before creating/polling the outgoing send future.
+    /// This shares the request mutex with cancellation and scope reset.
+    pub fn claim_egress_dispatch(
+        &self,
+        scope: &str,
+        request_id: Option<&str>,
+    ) -> Result<crate::access_request::DispatchClaim<'_>, Error> {
+        self.requests
+            .claim_dispatch(scope, request_id, &self.shutdown)
     }
 }

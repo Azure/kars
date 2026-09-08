@@ -87,6 +87,123 @@ async fn buffered_http_producer_observes_usage_but_never_api_bodies_or_tool_argu
 }
 
 #[tokio::test]
+async fn buffered_http_200_responses_distinguish_failed_and_incomplete_model_outcomes() {
+    for (status, outcome) in [("failed", "upstream_error"), ("incomplete", "incomplete")] {
+        let server = MockServer::start().await;
+        let body = json!({
+            "status":status,"error":{"message":"credential-secret-marker"},
+            "incomplete_details":{"reason":"private-details-marker"},
+            "usage":if status=="failed"{json!({"input_tokens":7})}else{Value::Null},
+            "output":[],
+        });
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(body.clone()))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let telemetry = telemetry();
+        let target = upstream(server.uri(), telemetry.clone());
+        let (http, _, bytes) = proxy::forward(
+            &WorkloadIdentityAuth::new(),
+            None,
+            &reqwest::Client::builder().no_proxy().build().unwrap(),
+            &target,
+            Method::POST,
+            "responses",
+            &HeaderMap::new(),
+            Bytes::from("{}"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(http, StatusCode::OK);
+        assert_eq!(serde_json::from_slice::<Value>(&bytes).unwrap(), body);
+        let trace = events(&telemetry);
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0]["accepted"], true);
+        assert_eq!(trace[0]["outcome"], outcome);
+        assert_eq!(trace[0]["finish_reason"], status);
+        assert_eq!(
+            trace[0]["usage_state"],
+            if status == "failed" {
+                "partial"
+            } else {
+                "missing"
+            }
+        );
+        assert!(trace[0]["usage"]["completion_tokens"].is_null());
+        assert!(trace[0]["usage"]["total_tokens"].is_null());
+        assert!(!trace[0].to_string().contains("secret-marker"));
+        assert!(!trace[0].to_string().contains("private-details-marker"));
+    }
+}
+
+#[tokio::test]
+async fn fragmented_openai_error_frames_cannot_be_overwritten_by_done() {
+    for error in [
+        "data: {\"error\":{\"message\":\"credential-secret-marker🚫\"}}\n\n",
+        "event: error\ndata: {\"message\":\"credential-secret-marker🚫\"}\n\n",
+    ] {
+        let body = format!(
+            "data: {{\"choices\":[],\"usage\":{{\"prompt_tokens\":3}}}}\n\n{error}data: [DONE]\n\n"
+        );
+        let telemetry = telemetry();
+        let mut observation = telemetry
+            .begin("chat/completions", "provider", "model", b"{}")
+            .unwrap();
+        observation.headers(200);
+        let chunks = body
+            .as_bytes()
+            .iter()
+            .map(|byte| Ok::<_, reqwest::Error>(Bytes::from(vec![*byte])))
+            .collect::<Vec<_>>();
+        let returned = wrap_stream(
+            futures::stream::iter(chunks).boxed(),
+            Some(observation),
+            true,
+        )
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+        assert_eq!(returned.concat(), body.as_bytes());
+        let trace = events(&telemetry);
+        assert_eq!(trace.len(), 1);
+        assert_eq!(trace[0]["accepted"], true);
+        assert_eq!(trace[0]["outcome"], "upstream_error");
+        assert_eq!(trace[0]["usage"]["prompt_tokens"], 3);
+        assert!(trace[0]["usage"]["completion_tokens"].is_null());
+        assert!(trace[0]["usage"]["total_tokens"].is_null());
+        assert!(!trace[0].to_string().contains("credential-secret-marker"));
+    }
+}
+
+#[tokio::test]
+async fn responses_incomplete_stream_is_not_reported_as_a_complete_model_response() {
+    let telemetry = telemetry();
+    let mut observation = telemetry
+        .begin("responses", "provider", "model", b"{}")
+        .unwrap();
+    observation.headers(200);
+    let body = "data: {\"type\":\"response.incomplete\",\"response\":{\"status\":\"incomplete\",\"usage\":{\"input_tokens\":4,\"output_tokens\":2},\"output\":[]}}\n\n";
+    let returned = wrap_stream(
+        futures::stream::once(async move {
+            Ok::<_, reqwest::Error>(Bytes::from_static(body.as_bytes()))
+        })
+        .boxed(),
+        Some(observation),
+        true,
+    )
+    .try_collect::<Vec<_>>()
+    .await
+    .unwrap();
+    assert_eq!(returned.concat(), body.as_bytes());
+    let trace = events(&telemetry);
+    assert_eq!(trace[0]["accepted"], true);
+    assert_eq!(trace[0]["outcome"], "incomplete");
+    assert_eq!(trace[0]["usage_state"], "present");
+    assert!(trace[0]["usage"]["total_tokens"].is_null());
+}
+
+#[tokio::test]
 async fn fragmented_streams_preserve_bytes_and_report_each_supported_usage_shape_once() {
     let cases = [
         (

@@ -15,6 +15,10 @@ use tokio_util::sync::CancellationToken;
 pub mod scope;
 pub use scope::{Identity, Scope};
 
+#[cfg(test)]
+#[path = "access_request/dispatch_tests.rs"]
+mod dispatch_tests;
+
 const CAPACITY: usize = 64;
 const REQUESTS_PER_MINUTE: u32 = 32;
 const TTL: Duration = Duration::from_secs(15 * 60);
@@ -27,6 +31,7 @@ pub enum Status {
     Denied,
     Cancelled,
     Expired,
+    DispatchClaimed,
 }
 
 #[derive(Clone, Deserialize)]
@@ -56,6 +61,7 @@ pub struct Entry {
     pub count: u32,
     pub first_seen_unix: u64,
     pub expires_at_unix: u64,
+    pub dispatch_active: bool,
     #[serde(skip)]
     expires: Instant,
 }
@@ -81,6 +87,7 @@ struct Inner {
     window: Instant,
     rate: u32,
     cancellation: CancellationToken,
+    active_dispatches: usize,
 }
 
 pub struct AccessRequestBuffer {
@@ -89,6 +96,31 @@ pub struct AccessRequestBuffer {
     capacity: usize,
     rate_limit: u32,
     ttl: Duration,
+}
+
+/// The linearization boundary for an outgoing operation, not evidence that an
+/// upstream accepted it. Cancel/reset cannot acknowledge prevention while held.
+#[must_use]
+pub struct DispatchClaim<'a> {
+    buffer: &'a AccessRequestBuffer,
+    request_id: Option<String>,
+}
+
+impl Drop for DispatchClaim<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut inner) = self.buffer.inner.lock() {
+            inner.active_dispatches = inner.active_dispatches.saturating_sub(1);
+            if let Some(id) = &self.request_id
+                && let Some(entry) = inner
+                    .requests
+                    .iter_mut()
+                    .find(|entry| &entry.request_id == id)
+            {
+                entry.dispatch_active = false;
+            }
+        }
+        self.buffer.notify();
+    }
 }
 
 impl AccessRequestBuffer {
@@ -116,6 +148,7 @@ impl AccessRequestBuffer {
                 window: Instant::now(),
                 rate: 0,
                 cancellation: CancellationToken::new(),
+                active_dispatches: 0,
             }),
             changed: watch::channel(0).0,
             capacity: capacity.clamp(1, 256),
@@ -185,7 +218,7 @@ impl AccessRequestBuffer {
             if let Some(index) = inner
                 .requests
                 .iter()
-                .position(|entry| entry.status != Status::Pending)
+                .position(|entry| entry.status != Status::Pending && !entry.dispatch_active)
             {
                 inner.requests.remove(index);
             } else {
@@ -210,6 +243,7 @@ impl AccessRequestBuffer {
             count: 1,
             first_seen_unix: now,
             expires_at_unix: now.saturating_add(self.ttl.as_secs()),
+            dispatch_active: false,
             expires: Instant::now() + self.ttl,
         };
         inner.requests.push_back(entry.clone());
@@ -240,6 +274,9 @@ impl AccessRequestBuffer {
             .iter_mut()
             .find(|entry| entry.request_id == id)
             .ok_or(Error::Missing)?;
+        if entry.status == Status::DispatchClaimed {
+            return Err(Error::Terminal);
+        }
         if entry.expires <= Instant::now() {
             return Err(Error::Expired);
         }
@@ -271,6 +308,9 @@ impl AccessRequestBuffer {
         }
         let mut inner = self.inner.lock().map_err(|_| Error::Unavailable)?;
         Self::check(&inner, expected_scope)?;
+        if inner.active_dispatches > 0 {
+            return Err(Error::Terminal);
+        }
         inner.generation = inner.generation.checked_add(1).ok_or(Error::Unavailable)?;
         let instance = inner.scope.id.split(':').next().ok_or(Error::Unavailable)?;
         inner.scope.id = format!("{instance}:{}", inner.generation);
@@ -296,6 +336,72 @@ impl AccessRequestBuffer {
             .into_iter()
             .find(|entry| entry.request_id == id)
             .ok_or(Error::Missing)
+    }
+
+    fn dispatch_ready(
+        inner: &mut Inner,
+        scope: &str,
+        id: Option<&str>,
+        shutdown: &CancellationToken,
+    ) -> Result<(), Error> {
+        Self::check(inner, scope)?;
+        if shutdown.is_cancelled() {
+            return Err(Error::Unavailable);
+        }
+        Self::expire(inner);
+        if let Some(id) = id {
+            let entry = inner
+                .requests
+                .iter()
+                .find(|entry| entry.request_id == id)
+                .ok_or(Error::Missing)?;
+            if entry.status == Status::Expired {
+                return Err(Error::Expired);
+            }
+            if entry.status != Status::Approved {
+                return Err(Error::Terminal);
+            }
+        }
+        Ok(())
+    }
+
+    /// Recheck after an asynchronous policy lookup. This is deliberately not a
+    /// dispatch permit: callers must still claim at the actual send boundary.
+    pub fn validate_dispatch(
+        &self,
+        scope: &str,
+        id: &str,
+        shutdown: &CancellationToken,
+    ) -> Result<(), Error> {
+        let mut inner = self.inner.lock().map_err(|_| Error::Unavailable)?;
+        Self::dispatch_ready(&mut inner, scope, Some(id), shutdown)
+    }
+
+    pub fn claim_dispatch(
+        &self,
+        scope: &str,
+        id: Option<&str>,
+        shutdown: &CancellationToken,
+    ) -> Result<DispatchClaim<'_>, Error> {
+        let mut inner = self.inner.lock().map_err(|_| Error::Unavailable)?;
+        Self::dispatch_ready(&mut inner, scope, id, shutdown)?;
+        let active = inner.active_dispatches.checked_add(1).ok_or(Error::Full)?;
+        if let Some(id) = id {
+            let entry = inner
+                .requests
+                .iter_mut()
+                .find(|entry| entry.request_id == id)
+                .ok_or(Error::Missing)?;
+            entry.status = Status::DispatchClaimed;
+            entry.dispatch_active = true;
+        }
+        inner.active_dispatches = active;
+        drop(inner);
+        self.notify();
+        Ok(DispatchClaim {
+            buffer: self,
+            request_id: id.map(str::to_string),
+        })
     }
 }
 
