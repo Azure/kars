@@ -48,6 +48,11 @@ use crate::kars_task::{KarsTask, KarsTaskStatus};
 use crate::mcp_server::LocalObjectRef;
 use crate::providers::signing::{DsseEnvelope, SIGNING_SCHEME};
 
+#[path = "kars_receipt_launch.rs"]
+mod launch_package;
+use launch_package::build_launch_package;
+pub use launch_package::{PredicateEnvelope, PredicateExecution, PredicateLaunchPackage};
+
 /// in-toto Statement type URI.
 pub const STATEMENT_TYPE: &str = "https://in-toto.io/Statement/v1";
 /// kars Governance Receipt predicate type URI (V0).
@@ -174,11 +179,11 @@ pub struct Subject {
     pub digest: SubjectDigest,
 }
 
-/// Subject digest of the current task authorization; historical receipts may
-/// carry the former truncated envelope-only identifier.
+/// Newly issued subjects carry the full task-authorization SHA-256.
+/// Historical signed subjects may contain the earlier truncated envelope hash.
 #[derive(Debug, Serialize, Clone)]
 pub struct SubjectDigest {
-    /// Full 64-hex-character SHA-256 for newly emitted task authorization.
+    /// 64-hex-char SHA-256 of the authorized task configuration.
     pub sha256: String,
 }
 
@@ -187,6 +192,13 @@ pub struct SubjectDigest {
 #[serde(rename_all = "camelCase")]
 pub struct Predicate {
     pub task: PredicateTask,
+    /// Complete declared and effective configuration, including resolved model
+    /// defaults, pinned by a deterministic digest. This does not establish
+    /// human approval; approval facts and their binding need separate checks.
+    /// Contents of mutable policy references and observed runtime behavior are
+    /// not attested. Absent when neither blueprint nor execution settings exist.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub launch_package: Option<PredicateLaunchPackage>,
     pub envelope: PredicateEnvelope,
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub lineage: Vec<String>,
@@ -260,34 +272,11 @@ pub struct PredicateTask {
 
 #[derive(Debug, Serialize, Clone)]
 #[serde(rename_all = "camelCase")]
-pub struct PredicateEnvelope {
-    pub tier: i32,
-    pub authority_ceiling: i32,
-    pub delegation_depth: i32,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub tool_policy_ref: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub egress_allowlist_ref: Option<String>,
-    pub digest: String,
-}
-
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
 pub struct PredicateDelegation {
     pub is_child: bool,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub parent_ref: Option<String>,
     pub depth_from_root: usize,
-}
-
-#[derive(Debug, Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-pub struct PredicateExecution {
-    pub launched: bool,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub phase: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub sandbox_ref: Option<String>,
 }
 
 #[derive(Debug, Serialize, Clone)]
@@ -315,8 +304,8 @@ pub struct PredicateIssuer {
 /// verifier.
 ///
 /// `key_id` is the controller's signing fingerprint (bound into the issuer).
-/// Returns `None` when the task is not governance-`Ready` (no envelope digest),
-/// because a receipt must never bind to authority that did not validate.
+/// Returns `None` without a current authorization digest, because a receipt
+/// must never bind to stale or unvalidated effective task authority.
 pub fn build_statement(
     task: &KarsTask,
     status: &KarsTaskStatus,
@@ -381,6 +370,7 @@ pub fn build_statement(
             name: name.clone(),
             objective: task.spec.objective.clone(),
         },
+        launch_package: build_launch_package(task),
         envelope: PredicateEnvelope {
             tier: env.tier,
             authority_ceiling: env.authority_ceiling,
@@ -419,7 +409,8 @@ pub fn build_statement(
         typ: STATEMENT_TYPE.to_string(),
         subject: vec![Subject {
             name: format!("{namespace}/{name}"),
-            // Strip the algorithm prefix from the current authorization digest.
+            // Preserve the complete authorization hash while stripping its
+            // algorithm prefix for the in-toto subject field.
             digest: SubjectDigest {
                 sha256: digest
                     .strip_prefix("sha256:")

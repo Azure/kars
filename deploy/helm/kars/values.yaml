@@ -213,6 +213,15 @@ monitoring:
 
 # Admission policies shipped with the chart.
 admission:
+  envelopeWriteLock:
+    # Deploy the ValidatingAdmissionPolicy that makes a KarsTask/KarsTeam's
+    # governance fields controller-writable-only: no non-controller principal
+    # may write .status or RAISE spec.envelope.tier/authorityCeiling/
+    # delegationDepth (self-escalation). Voluntary attenuation (lowering) and
+    # non-authority spec edits (objective, paused, launch, annotations) stay
+    # allowed so the Bridge BFF + operators keep working. UPDATE-only; CREATE
+    # bounds are enforced by the CRD's own CEL. Requires Kubernetes >= 1.30.
+    enabled: true
   nullProviderBlock:
     # Deploy the ValidatingAdmissionPolicy that rejects
     # spec.*.provider=(null|noop|disabled|none) on non-dev tenants.
