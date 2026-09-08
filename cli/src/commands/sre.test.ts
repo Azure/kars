@@ -18,10 +18,13 @@ const controller = JSON.stringify({
 
 function authority(args: readonly string[]): { stdout: string } {
   const metadata = (name: string, uid = name) => ({ name, uid, resourceVersion: "1", generation: 1 });
+  const getIndex = args.indexOf("get");
+  const resource = getIndex < 0 ? undefined : args[getIndex + 1];
+  const name = getIndex < 0 ? undefined : args[getIndex + 2];
   let value: unknown;
   if (args.includes("can-i")) return { stdout: "yes" };
-  if (args.includes("crd")) value = { metadata: metadata("karssreregistrations.kars.azure.com") };
-  if (args.includes("karssreregistrations.kars.azure.com")) value = {
+  if (resource === "crd") value = { metadata: metadata("karssreregistrations.kars.azure.com") };
+  if (resource === "karssreregistrations.kars.azure.com") value = {
     metadata: metadata("canonical"),
     spec: {
       enabled: true,
@@ -32,7 +35,7 @@ function authority(args: readonly string[]): { stdout: string } {
     },
     status: { phase: "Ready", observedGeneration: 1, privacyRevision: "kars.azure.com/sre-privacy/v2" },
   };
-  if (args.includes("namespace")) value = args.includes("kars-sre")
+  if (resource === "namespace") value = name === "kars-sre"
     ? { metadata: { ...metadata("kars-sre"), annotations: {
       "kars.azure.com/namespace-claim-version": "v1",
       "kars.azure.com/sandbox-namespace": "kars-system",
@@ -40,11 +43,11 @@ function authority(args: readonly string[]): { stdout: string } {
       "kars.azure.com/sandbox-uid": "source",
     } } }
     : { metadata: metadata("kars-system") };
-  if (args.includes("karssandbox")) value = {
+  if (resource === "karssandbox") value = {
     metadata: { ...metadata("sre", "source"), namespace: "kars-system",
       annotations: { "kars.azure.com/namespace-uid": "kars-sre" } },
   };
-  if (args.includes("clusterrolebindings") || args.includes("rolebindings")) value = { items: [] };
+  if (resource === "clusterrolebindings" || resource === "rolebindings") value = { items: [] };
   return { stdout: value ? JSON.stringify(value) : "" };
 }
 

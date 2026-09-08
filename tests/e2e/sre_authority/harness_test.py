@@ -17,7 +17,7 @@ from sre_authority.common import (
     Harness, assert_claim, assert_denial, enrollment_json, printed_object, review_args,
 )
 from sre_authority.proxy import MARKER, assert_filtered
-from sre_authority.credential_paths import assert_watch_result
+from sre_authority.credential_paths import assert_token_type_immutable, assert_watch_result
 
 
 class Response:
@@ -30,6 +30,25 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_secret_type_rejection_is_specific_and_not_counted_as_vap_denial(self):
+        cause = {"field": "type", "reason": "FieldValueInvalid",
+                 "message": 'Invalid value: "Opaque": field is immutable'}
+        body = {"kind": "Status", "reason": "Invalid", "details": {"causes": [cause]}}
+        assert_token_type_immutable(Response(422, body), "type update")
+        with self.assertRaises(AssertionError):
+            assert_denial(Response(422, body), "type update", "kars-sre-no-legacy-tokens")
+        for code in (200, 400, 403, 404, 409, 500):
+            with self.subTest(code=code), self.assertRaises(AssertionError):
+                assert_token_type_immutable(Response(code, body), "type update")
+        for invalid in (
+            {**body, "reason": "Forbidden"},
+            {**body, "details": {"causes": []}},
+            {**body, "details": {"causes": [{**cause, "field": "metadata.annotations"}]}},
+            {**body, "details": {"causes": [{**cause, "message": "different validation failure"}]}},
+        ):
+            with self.subTest(body=invalid), self.assertRaises(AssertionError):
+                assert_token_type_immutable(Response(422, invalid), "type update")
+
     def test_denials_require_real_forbidden_and_the_intended_policy(self):
         valid = {"kind": "Status", "reason": "Forbidden", "message": "kars-sre-private-mounts denied"}
         assert_denial(Response(403, valid), "probe", "kars-sre-private-mounts")

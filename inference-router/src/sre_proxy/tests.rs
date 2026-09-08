@@ -8,6 +8,8 @@ use serde_json::json;
 use std::sync::Mutex;
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+mod request_boundary;
+
 const PRIVATE_VALUE: &str = "PRIVATE_OPERATOR_CONTROL_VALUE";
 
 struct Fixture {

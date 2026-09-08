@@ -16,6 +16,18 @@ TOKEN_TYPE = "kubernetes.io/service-account-token"
 SA_NAME = "kubernetes.io/service-account.name"
 WATCH_MARKER = "kind-dummy-secret-watch-proof"
 
+def assert_token_type_immutable(response, label):
+    """Secret type validation precedes VAP; this is not admission-policy proof."""
+    require(response.status_code == 422,
+            f"{label}: expected immutable Secret type rejection, got HTTP {response.status_code}")
+    body = response.json()
+    require(body.get("kind") == "Status" and body.get("reason") == "Invalid"
+            and any(cause.get("field") == "type"
+                    and cause.get("reason") == "FieldValueInvalid"
+                    and "field is immutable" in cause.get("message", "")
+                    for cause in body.get("details", {}).get("causes", [])),
+            f"{label}: missing the specific immutable type validation cause")
+
 
 def seed_privacy_gaps(h):
     require(h.get("serviceaccount", "sre-api-router", RUNTIME) is None,
@@ -75,21 +87,32 @@ def token_secret_denials(h, before_enrollment=False):
                 "metadata": {"name": f"{prefix}-{suffix}", "namespace": RUNTIME,
                              "annotations": annotations}}, user="tenant", status=201).json()
             fixtures.append(obj)
-            assert_denial(h.api("PATCH", path + "/" + obj["metadata"]["name"], body={
+            response = h.api("PATCH", path + "/" + obj["metadata"]["name"], body={
                 **patch, "metadata": {**patch.get("metadata", {}),
                     "uid": obj["metadata"]["uid"], "resourceVersion": obj["metadata"]["resourceVersion"]}},
-                user="tenant"), f"token Secret {suffix} PATCH", policy)
+                user="tenant")
+            if "type" in patch:
+                assert_token_type_immutable(response, f"token Secret {suffix} PATCH")
+            else:
+                assert_denial(response, f"token Secret {suffix} PATCH", policy)
             current = h.get("secret", obj["metadata"]["name"], RUNTIME)
             require(current["metadata"]["resourceVersion"] == obj["metadata"]["resourceVersion"]
                     and not current.get("data"), "Denied token Secret update mutated or populated its fixture")
         if before_enrollment:
             for patch in ({"type": "Opaque"}, {"metadata": {"annotations": {SA_NAME: "e2e-other"}}}):
-                assert_denial(h.api("PATCH", path + "/" + TOKEN_ALIAS, body=patch, user="tenant"),
-                              "prestaged oldObject type/annotation escape", policy)
+                before = h.get("secret", TOKEN_ALIAS, RUNTIME)
+                response = h.api("PATCH", path + "/" + TOKEN_ALIAS, body=patch, user="tenant")
+                if "type" in patch:
+                    assert_token_type_immutable(response, "prestaged oldObject type escape")
+                else:
+                    assert_denial(response, "prestaged oldObject annotation escape", policy)
+                require(h.get("secret", TOKEN_ALIAS, RUNTIME) == before,
+                        "Rejected oldObject token escape changed its prestaged fixture")
     finally:
         for obj in fixtures:
             delete_owned(h, path + "/" + obj["metadata"]["name"], obj)
-    h.passed("Tenant and registrar arbitrary token Secret CREATE, plus type/annotation PATCH escapes, receive exact admission denials")
+    h.passed("Tenant and registrar token Secret CREATE and schema-valid annotation updates receive exact admission denials")
+    h.passed("Token-type mutations receive specific Kubernetes immutable-field errors without changing fixtures")
 
 
 def fixture_review(h):
