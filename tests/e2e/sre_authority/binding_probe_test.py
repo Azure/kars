@@ -53,6 +53,15 @@ class BindingProbeTests(unittest.TestCase):
         self.assertEqual(authorization_category(403, None), "unexpected-response")
         self.assertNotIn("private-not-for-logs", authorization_category(403, denied))
 
+    def test_uid_rejection_is_specific_builtin_validation_not_arbitrary_422(self):
+        cause = {"field": "metadata.uid", "reason": "FieldValueInvalid", "message": "field is immutable"}
+        response = {"kind": "Status", "reason": "Invalid", "details": {"causes": [cause]}}
+        self.assertEqual(authorization_category(422, response), "immutable-uid")
+        for changed in ({"field": "subjects"}, {"reason": "Unexpected"}, {"message": "different error"}):
+            bad = {**response, "details": {"causes": [{**cause, **changed}]}}
+            self.assertEqual(authorization_category(422, bad), "unexpected-response")
+        self.assertEqual(authorization_category(403, response), "unexpected-response")
+
     def test_controller_token_is_memory_only_no_admin_certificate_and_real_uid_is_required(self):
         account = {"metadata": {"uid": "actual-controller-uid"}}
         captured = []
