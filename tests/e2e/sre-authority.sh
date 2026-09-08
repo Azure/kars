@@ -3,6 +3,14 @@
 # Licensed under the MIT License.
 
 # Called only by the explicit disposable Kind harness. No live/default context.
+sre_migration_helm_wait_arg() {
+    case "$1" in
+        v3.*) printf '%s\n' --wait ;;
+        v4.*) printf '%s\n' --wait=legacy ;;
+        *) printf '%s\n' "Unsupported Helm version for staged SRE acceptance" >&2; return 1 ;;
+    esac
+}
+
 sre_authority_phase() {
     local phase="$1" output result=0 line
     info "SRE authority acceptance: ${phase}"

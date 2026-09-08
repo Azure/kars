@@ -159,6 +159,7 @@ install_crds() {
     # KARS_E2E_* env vars; the defaults here cover local runs.
     local replicas="${KARS_E2E_CONTROLLER_REPLICAS:-1}"
     local disable_le="${KARS_E2E_DISABLE_LEADER_ELECTION:-1}"
+    local helm_wait_arg=--wait
     local extra_set_args=(
         --set "controller.replicas=${replicas}"
         --set "inferenceRouter.replicas=${replicas}"
@@ -185,6 +186,11 @@ install_crds() {
         # start the qualified controller while retaining the reviewed shapes.
         extra_set_args+=(--set sre.enabled=true --set sre.authorityStage=true
             --set-string runtimes.hermes.image=kars-sandbox-e2e:dev)
+        # Consumer policy acknowledgements cannot become Ready before explicit
+        # enrollment below. Wait for built-ins here; migration remains fatal.
+        local helm_version
+        helm_version=$(helm version --template '{{.Version}}') || return 1
+        helm_wait_arg=$(sre_migration_helm_wait_arg "$helm_version") || return 1
     fi
     if ! helm upgrade --install kars "$ROOT_DIR/deploy/helm/kars" \
         --namespace kars-system \
@@ -198,7 +204,7 @@ install_crds() {
         --set sandbox.image.repository=kars-sandbox-e2e \
         --set sandbox.image.tag=dev \
         "${extra_set_args[@]}" \
-        --wait --timeout 5m; then
+        "$helm_wait_arg" --timeout 5m; then
         warn "Helm install did not converge within 5m — dumping diagnostics"
         kubectl get all -n kars-system || true
         kubectl describe pod -n kars-system -l app.kubernetes.io/component=controller || true
