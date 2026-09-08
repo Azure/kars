@@ -3,6 +3,7 @@
 
 import { parseAllDocuments } from "yaml";
 import { get, requireRegistrar, type ApiObject, type Execute } from "./sre-authority.js";
+import { listSreHelmReleases } from "./sre-helm.js";
 
 function parts(image: string): [string,string] {
   const index=image.lastIndexOf(":");
@@ -26,7 +27,7 @@ export async function stageAuthority(
   if(controller.spec?.template?.spec?.serviceAccountName!=="kars-controller") {
     throw new Error("Controller uses a custom ServiceAccount; review and stage its minimal authority role explicitly");
   }
-  const {stdout}=await execute("helm",["list","-n",namespace,"--all","-o","json"],{stdio:"pipe"});
+  const stdout=await listSreHelmReleases(execute,namespace);
   const releases=JSON.parse(stdout) as unknown;
   if(!Array.isArray(releases)||releases.some(item=>!item||typeof item.name!=="string"||item.namespace!==namespace)) {
     throw new Error("Helm ownership inventory is invalid");

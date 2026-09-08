@@ -196,6 +196,38 @@ describe("SRE cluster registrar boundary",()=>{
     } finally { vi.useRealTimers(); }
   });
 
+  it.each([
+    {version:"v3.16.4",dryRun:true}, {version:"v3.16.4",dryRun:false},
+    {version:"v4.2.4",dryRun:true}, {version:"v4.2.4",dryRun:false},
+  ])("stages an existing release with $version (dry-run: $dryRun)",async({version,dryRun})=>{
+    const warn=vi.spyOn(console,"warn").mockImplementation(()=>{});
+    try {
+      const f=fixture();
+      f.objects["deployment/kars-system/kars-controller"].spec={
+        template:{spec:{serviceAccountName:"kars-controller"}},
+      };
+      const execute=vi.fn<Execute>(async(file,args,options)=>{
+        if(file==="helm"&&args[0]==="list") {
+          if(version.startsWith("v4.")&&args.includes("--all")) {
+            throw Object.assign(new Error("Unsupported flag"),{
+              exitCode:1,stderr:"Error: unknown flag: --all\n",
+            });
+          }
+          return {stdout:'[{"name":"kars","namespace":"kars-system","status":"pending-upgrade"}]'};
+        }
+        if(file==="helm"&&args[0]==="version")return {stdout:version};
+        if(file==="helm"&&args[0]==="upgrade")return {stdout:""};
+        return f.execute(file,args,options);
+      });
+      await stageAuthority(execute,"chart","kars-system","kars","new/controller:latest","new/router:latest",dryRun);
+      const upgrade=execute.mock.calls.find(([file,args])=>file==="helm"&&args[0]==="upgrade");
+      expect(upgrade?.[1]).toContain("--reset-then-reuse-values");
+      expect(upgrade?.[1]).toContain("sre.authorityStage=true");
+      expect(upgrade?.[1]).toContain(dryRun?"--dry-run=server":"--wait");
+      expect(execute.mock.calls.some(([,args])=>["install","template","create","patch"].includes(args[0]))).toBe(false);
+    } finally { warn.mockRestore(); }
+  });
+
   it("stages legacy template installations using owned resources and controller CAS without overwriting other env",async()=>{
     const f=fixture();
     const controller=f.objects["deployment/kars-system/kars-controller"];
