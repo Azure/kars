@@ -11,6 +11,20 @@ const root=fileURLToPath(new URL("../../../",import.meta.url));
 const chart=fileURLToPath(new URL("../../../deploy/helm/kars",import.meta.url));
 
 describe("SRE authority chart and mutation integration",()=>{
+  it("escapes custom namespace fields in CEL without renaming the wire fields or weakening equality",()=>{
+    const output=execFileSync("helm",["template","kars",chart,"--show-only","templates/crd-karssreregistration.yaml"],{encoding:"utf8"});
+    const registration=parseAllDocuments(output).map(doc=>doc.toJSON()).find(Boolean);
+    const schema=registration.spec.versions[0].schema.openAPIV3Schema;
+    const spec=schema.properties.spec;
+    expect(spec.properties.sandbox.properties.namespace.type).toBe("string");
+    expect(spec.properties.controller.properties.namespace.properties.name.type).toBe("string");
+    expect(spec["x-kubernetes-validations"]).toEqual([{
+      rule:"self.sandbox.__namespace__ == self.controller.__namespace__.name",
+      message:"SRE must be registered in its controller/release namespace",
+    }]);
+    expect(schema["x-kubernetes-validations"][0].rule).toBe("self.metadata.name == 'canonical'");
+  });
+
   it("creates a cluster registration and no default registrar or runtime privilege bindings",()=>{
     for(const enabled of [false,true]){
       const output=execFileSync("helm",["template","kars",chart,"--namespace","kars-system","--set",`sre.enabled=${enabled}`],{encoding:"utf8"});
