@@ -100,7 +100,8 @@ async fn fixture() -> (
     let mut parent = task.clone();
     parent.metadata.name = Some("team-principal".into());
     parent.metadata.uid = Some("principal".into());
-    parent.metadata.owner_references = None;
+    // Real Team principals and their runs share the same immutable Team owner.
+    parent.metadata.owner_references = task.metadata.owner_references.clone();
     parent.metadata.annotations = None;
     parent.spec.parent_ref = None;
     parent.spec.envelope = team.spec.envelope.clone();
