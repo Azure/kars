@@ -42,7 +42,7 @@ def admission_cases(port, policies):
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
          "metadata": {"name": "e2e-bootstrap-probe", "namespace": "kars-sre"},
          "rules": [{"apiGroups": [""], "resources": ["pods"], "verbs": ["create"]},
-                   {"apiGroups": ["apps"], "resources": ["deployments", "replicasets"], "verbs": ["create"]},
+                   {"apiGroups": ["apps"], "resources": ["deployments", "replicasets"], "verbs": ["create", "update"]},
                    {"apiGroups": ["kars.azure.com"], "resources": ["karssreactions"], "verbs": ["create"]}]},
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
          "metadata": {"name": "e2e-bootstrap-probe", "namespace": "kars-sre"},
@@ -203,7 +203,7 @@ def private_controller_chain(port, policies, report):
             report(snapshot)
             if not snapshot["privateMountPreserved"] or not snapshot["noWorkloadExecution"]:
                 raise RuntimeError("Private controller-chain proof changed its protected template or executed a workload")
-            return
+            return created
         time.sleep(0.5)
     report(snapshot)
     raise RuntimeError("Actual private Deployment/ReplicaSet controllers did not create the admission-only Pod")
@@ -243,8 +243,8 @@ def namespace_cleanup_cases(port, policies, owned_consumer=None):
             code, current = request(port, "GET", path)
             if code != 200 or current.get("metadata", {}).get("uid") != uid:
                 raise RuntimeError("Cleanup proof Deployment was replaced before its dry-run")
-            code, response = as_tenant(port, path + "?dryRun=All", {
-                "apiVersion": "v1", "kind": "DeleteOptions",
+            code, response = as_tenant(port, path, {
+                "apiVersion": "v1", "kind": "DeleteOptions", "dryRun": ["All"],
                 "preconditions": {"uid": uid, "resourceVersion": current["metadata"]["resourceVersion"]}},
                 user=principal, method="DELETE")
             result = api_result(code, response, policies)

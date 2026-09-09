@@ -26,7 +26,7 @@ def failure_site(error):
     frame = error.__traceback__
     while frame:
         name = Path(frame.tb_frame.f_code.co_filename).name
-        if name in ("bootstrap_probe.py", "binding_probe.py", "bootstrap_cases.py"):
+        if name in ("bootstrap_probe.py", "binding_probe.py", "bootstrap_cases.py", "controller_update_probe.py"):
             result.update(source=name, line=frame.tb_lineno)
         frame = frame.tb_next
     return result
@@ -247,8 +247,13 @@ def main(root, diagnostics_only, candidate=False, retirement=False):
                 write_report(root, "bootstrap-workload-controller.json", {"cases": controller_cases})
                 if not all(case["matched"] for case in controller_cases):
                     raise RuntimeError("Built-in Deployment controller cannot create the private SRE ReplicaSet")
-                private_controller_chain(port, policies,
+                parent = private_controller_chain(port, policies,
                     lambda facts: write_report(root, "bootstrap-private-controller-chain.json", facts))
+                from sre_authority.controller_update_probe import cases as update_cases
+                updates = update_cases(port, policies, parent)
+                write_report(root, "bootstrap-controller-update-ownerrefs.json", {"cases": updates})
+                if not all(case["matched"] for case in updates):
+                    raise RuntimeError("Private workload UPDATE/owner-reference boundary failed")
                 cleanup_cases = namespace_cleanup_cases(port, policies, state["consumer"] if state else None)
                 write_report(root, "bootstrap-namespace-cleanup.json", {"cases": cleanup_cases})
                 if not all(case["matched"] for case in cleanup_cases):
