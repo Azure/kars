@@ -256,6 +256,9 @@ fences deletion of its owned SRE Deployment; it does not leave that protected
 object for the unprivileged namespace controller. Foreign/replaced consumers
 and external finalizers are preserved, not adopted or forced. Retained Retired
 records can finish this owned cleanup without reissuing authority.
+Name-sensitive admission also inspects the actual object/oldObject name when
+collection DELETE omits `request.name`: ordinary collection cleanup remains
+valid, while protected items still require registrar authority.
 Uninstall/destroy refuse an active enrollment or unretired legacy grants.
 Retired registrations remain audit records; recreating the source requires
 explicit enrollment of the new UIDs (`authority stage-source` can atomically

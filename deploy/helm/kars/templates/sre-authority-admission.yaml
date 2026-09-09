@@ -100,9 +100,10 @@ spec:
   matchConditions:
     - name: reserved-router-identity
       expression: >-
-        request.name == 'sre-api-router' ||
-        (object != null && object.metadata.name == 'sre-api-router') ||
-        (oldObject != null && oldObject.metadata.name == 'sre-api-router')
+        [request.?name.orValue(''),
+         object == null ? '' : object.?metadata.?name.orValue(''),
+         oldObject == null ? '' : oldObject.?metadata.?name.orValue('')]
+          .exists(n, n == 'sre-api-router')
   validations:
     - expression: >-
         authorizer.group('kars.azure.com').resource('karssreregistrations')
