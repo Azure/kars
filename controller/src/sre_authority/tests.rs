@@ -47,7 +47,32 @@ fn binding() -> Value {
 
 fn api_error(code: u16) -> ResponseTemplate {
     ResponseTemplate::new(code).set_body_json(json!({"apiVersion":"v1","kind":"Status","status":"Failure",
-        "code":code,"reason":if code==404 {"NotFound"} else {"Forbidden"},"message":"PRIVATE_SENTINEL"}))
+        "code":code,"reason":match code {404=>"NotFound",409=>"Conflict",422=>"Invalid",_=>"Forbidden"},
+        "message":"PRIVATE_SENTINEL"}))
+}
+
+fn patched_binding(existing: &Value, patch: &Value, dry_run: bool) -> Value {
+    let mut value = existing.clone();
+    value["subjects"] = patch["subjects"].clone();
+    if let Some(annotations) = patch["metadata"]["annotations"].as_object() {
+        if !value["metadata"]["annotations"].is_object() {
+            value["metadata"]["annotations"] = json!({});
+        }
+        for (key, annotation) in annotations {
+            value["metadata"]["annotations"][key] = annotation.clone();
+        }
+    }
+    if !dry_run {
+        value["metadata"]["resourceVersion"] = (existing["metadata"]["resourceVersion"]
+            .as_str()
+            .unwrap()
+            .parse::<u32>()
+            .unwrap()
+            + 1)
+        .to_string()
+        .into();
+    }
+    value
 }
 
 pub(super) struct State {
@@ -60,6 +85,8 @@ pub(super) struct State {
     pub(super) objects: BTreeMap<String, Value>,
     pub(super) watch_allowed: Option<(Option<String>, Option<String>)>,
     pub(super) metadata_requests: Vec<String>,
+    pub(super) binding_patches: Vec<(String, bool, Value)>,
+    pub(super) binding_patch_errors: BTreeMap<(String, bool), u16>,
 }
 
 pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
@@ -73,6 +100,8 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
         objects: BTreeMap::new(),
         watch_allowed: None,
         metadata_requests: Vec::new(),
+        binding_patches: Vec::new(),
+        binding_patch_errors: BTreeMap::new(),
     }));
     let server = MockServer::start().await;
     let handler = state.clone();
@@ -80,7 +109,14 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
         let mut state=handler.lock().unwrap();
         let path=request.url.path();
         let body:Value=request.body_json().unwrap_or(Value::Null);
+        let dry_run=request.url.query_pairs().any(|(key,value)|key=="dryRun" && value=="All");
         state.calls.push((request.method.to_string(),path.into(),body.clone()));
+        if request.method == "PATCH" && body["subjects"].is_array() {
+            state.binding_patches.push((path.into(),dry_run,body.clone()));
+            if let Some(code)=state.binding_patch_errors.get(&(path.into(),dry_run)) {
+                return api_error(*code);
+            }
+        }
         if request.method == "GET" && path=="/api/v1/namespaces/kars-sre/secrets" {
             state.metadata_requests.push(request.headers.get("accept").unwrap().to_str().unwrap().into());
         }
@@ -116,11 +152,12 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
             return ResponseTemplate::new(200).set_body_json(value.clone());
         }
         if request.method == "PATCH" && body["subjects"].is_array() && state.objects.contains_key(path) {
-            let value=state.objects.get_mut(path).unwrap();
-            if body["metadata"]["uid"]!=value["metadata"]["uid"] ||
-                body["metadata"]["resourceVersion"]!=value["metadata"]["resourceVersion"] {return api_error(409);}
-            value["subjects"]=body["subjects"].clone();
-            return ResponseTemplate::new(200).set_body_json(value.clone());
+            let value=&state.objects[path];
+            if body["metadata"]["uid"]!=value["metadata"]["uid"] {return api_error(422);}
+            if body["metadata"]["resourceVersion"]!=value["metadata"]["resourceVersion"] {return api_error(409);}
+            let value=patched_binding(value,&body,dry_run);
+            if !dry_run {state.objects.insert(path.into(),value.clone());}
+            return ResponseTemplate::new(200).set_body_json(value);
         }
         let value=match (request.method.as_str(),path) {
             ("GET","/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical")=>serde_json::to_value(registration()).unwrap(),
@@ -136,15 +173,18 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
                     .map(|(_,object)|json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadata","metadata":object["metadata"]}))
                     .collect::<Vec<_>>()}),
             ("GET","/apis/rbac.authorization.k8s.io/v1/clusterrolebindings")=>json!({
-                "apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBindingList","metadata":{},"items":[state.binding]}),
+                "apiVersion":"rbac.authorization.k8s.io/v1","kind":"ClusterRoleBindingList","metadata":{},
+                "items":std::iter::once(state.binding.clone()).chain(state.objects.values()
+                    .filter(|object|object["kind"]=="ClusterRoleBinding").cloned()).collect::<Vec<_>>()}),
             ("GET","/apis/rbac.authorization.k8s.io/v1/rolebindings")=>json!({
-                "apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBindingList","metadata":{},"items":[]}),
+                "apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBindingList","metadata":{},
+                "items":state.objects.values().filter(|object|object["kind"]=="RoleBinding").cloned().collect::<Vec<_>>()}),
             ("PATCH","/apis/rbac.authorization.k8s.io/v1/clusterrolebindings/legacy")=>{
-                if body["metadata"]["uid"]!=state.binding["metadata"]["uid"]
-                    || body["metadata"]["resourceVersion"]!=state.binding["metadata"]["resourceVersion"] {return api_error(409)}
-                state.binding["subjects"]=body["subjects"].clone();
-                state.binding["metadata"]["annotations"]=body["metadata"]["annotations"].clone();
-                state.binding.clone()
+                if body["metadata"]["uid"]!=state.binding["metadata"]["uid"] {return api_error(422)}
+                if body["metadata"]["resourceVersion"]!=state.binding["metadata"]["resourceVersion"] {return api_error(409)}
+                let value=patched_binding(&state.binding,&body,dry_run);
+                if !dry_run {state.binding=value.clone();}
+                value
             }
             ("POST","/apis/authorization.k8s.io/v1/subjectaccessreviews")=>json!({
                 "apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview",

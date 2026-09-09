@@ -73,11 +73,41 @@ def command_error_category(stderr):
                              ("unknown flag", "cli-argument"),
                              ("required value", "required-field"),
                              ("no matches for kind", "api-discovery"),
+                             ("conflict occurred while applying object", "server-side-apply-conflict"),
                              ("the server doesn't have a resource type", "api-discovery"),
                              ("timed out waiting", "wait-timeout")):
         if needle in text:
             return category
     return "unclassified"
+
+
+def authority_failure_site(root, detail):
+    """Report checked-in rejection coordinates, never the status detail itself."""
+    if not isinstance(detail, str) or not detail:
+        return {"category": "unclassified"}
+    result = {"category": "controller-rejection"}
+    message = detail
+    status = re.fullmatch(r"(.+): Kubernetes status ([1-5][0-9]{2})", detail)
+    if status:
+        message = status.group(1)
+        result = {"category": "kubernetes-status", "httpStatus": int(status.group(2))}
+    elif detail.endswith(": Kubernetes transport/serialization failure"):
+        message = detail.removesuffix(": Kubernetes transport/serialization failure")
+        result = {"category": "kubernetes-transport"}
+    # Only an exact literal in our own production source can identify a site.
+    # Untrusted API messages, names, credentials and interpolated suffixes are
+    # not echoed, even if they contain a familiar rejection substring.
+    literal = json.dumps(message, ensure_ascii=False)
+    paths = [root / "controller/src/sre_authority.rs", root / "controller/src/sre_registration.rs",
+             root / "shared/sre_privacy.rs"]
+    paths += sorted((root / "controller/src/sre_authority").glob("*.rs"))
+    for path in paths:
+        if path.name.endswith("tests.rs"):
+            continue
+        for number, line in enumerate(path.read_text().splitlines(), 1):
+            if literal in line:
+                return {**result, "source": str(path.relative_to(root)), "line": number}
+    return {"category": "unclassified"}
 
 
 def printed_object(output):
@@ -356,6 +386,8 @@ class Harness:
                         "observedGeneration": status.get("observedGeneration"),
                         "generation": obj["metadata"].get("generation"),
                         "availableReplicas": status.get("availableReplicas"),
+                        **({"authorityFailure": authority_failure_site(self.root, status.get("detail"))}
+                           if kind == "karssreregistrations.kars.azure.com" and status.get("phase") == "Blocked" else {}),
                         "conditions": [{"type": condition.get("type"), "status": condition.get("status"),
                                         "reason": condition.get("reason")}
                                        for condition in status.get("conditions", [])]}), flush=True)
