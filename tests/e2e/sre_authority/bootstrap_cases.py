@@ -209,10 +209,15 @@ def private_controller_chain(port, policies, report):
     raise RuntimeError("Actual private Deployment/ReplicaSet controllers did not create the admission-only Pod")
 
 
-def namespace_cleanup_cases(port, policies):
+def namespace_cleanup_cases(port, policies, owned_consumer=None):
     path = "/apis/apps/v1/namespaces/kars-sre/deployments/sre"
-    code, _ = request(port, "GET", path)
-    if code != 404:
+    code, current = request(port, "GET", path)
+    if owned_consumer is not None:
+        if (code != 200 or current.get("metadata", {}).get("uid") != owned_consumer["metadata"]["uid"]
+                or current.get("spec") != owned_consumer.get("spec")):
+            raise RuntimeError("Earlier owned cleanup fixture changed; no adoption permitted")
+        created = current
+    elif code != 404:
         raise RuntimeError("Namespace cleanup proof refuses an existing canonical Deployment")
     obj = {"apiVersion": "apps/v1", "kind": "Deployment",
            "metadata": {"name": "sre", "namespace": "kars-sre"},
@@ -221,9 +226,10 @@ def namespace_cleanup_cases(port, policies):
                         "automountServiceAccountToken": False, "schedulerName": "kars-e2e-admission-never-schedule",
                         "containers": [{"name": "probe", "image": "registry.invalid/kars-admission-proof:never",
                                         "imagePullPolicy": "Never"}]}}}}
-    code, created = request(port, "POST", path.rsplit("/", 1)[0], obj)
-    if code != 201 or not created.get("metadata", {}).get("uid"):
-        raise RuntimeError("Canonical no-execution cleanup fixture CREATE failed")
+    if owned_consumer is None:
+        code, created = request(port, "POST", path.rsplit("/", 1)[0], obj)
+        if code != 201 or not created.get("metadata", {}).get("uid"):
+            raise RuntimeError("Canonical no-execution cleanup fixture CREATE failed")
     uid = created["metadata"]["uid"]
     reports = []
     primary_failure = False
