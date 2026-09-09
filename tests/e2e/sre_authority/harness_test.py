@@ -69,7 +69,8 @@ class HarnessTests(unittest.TestCase):
         h.control_connectivity_diagnostics = lambda *_args: {"available": False}
         self.assertEqual(h.connectivity_diagnostics(pod), {
             "available": True, "uidMatches1001": True, "serviceExit": 0, "endpointExit": 0,
-            "sameNodeControl": {"available": False}})
+            "sameNodeControl": {"available": False},
+            "guardControls": {variant: {"available": False} for variant in ("full", "filter-only", "legacy-full")}})
         self.assertEqual(len(writes), 1)
         method, path, args = writes[0]
         self.assertEqual(method, "PATCH")
