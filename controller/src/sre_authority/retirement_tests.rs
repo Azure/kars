@@ -3,9 +3,10 @@
 
 use super::privacy_tests::admission_ready;
 use super::tests::{State, fixture, registration};
-use super::{bindings, reconcile};
+use super::{bindings, migration, reconcile};
 use crate::sre_registration::{
-    BindingReview, ConsumerReview, KarsSRERegistration, RUNTIME_NAMESPACE,
+    BindingReview, ConsumerReview, EPOCH, KarsSRERegistration, OWNER, RUNTIME_NAMESPACE,
+    RegistrationStatus,
 };
 use k8s_openapi::api::rbac::v1::{ClusterRoleBinding, RoleBinding};
 use kube::{
@@ -19,6 +20,201 @@ const REG: &str = "/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical"
 const CRBS: &str = "/apis/rbac.authorization.k8s.io/v1/clusterrolebindings";
 const CONSUMER: &str = "/apis/apps/v1/namespaces/kars-sre/deployments/sre";
 const RETIRED: &str = "kars.azure.com/sre-legacy-retired";
+
+fn stopped_owned_consumer(reg: &KarsSRERegistration) -> Value {
+    json!({"apiVersion":"apps/v1","kind":"Deployment",
+        "metadata":{"name":"sre","namespace":RUNTIME_NAMESPACE,"uid":"owned-consumer","resourceVersion":"5"},
+        "spec":{"replicas":0,"selector":{"matchLabels":{"app":"sre"}},
+            "template":{"metadata":{"annotations":{OWNER:reg.metadata.uid,EPOCH:reg.epoch()}},
+                        "spec":{"containers":[],"serviceAccountName":"sandbox"}}}})
+}
+
+fn seed_stopped_consumer(state: &Arc<Mutex<State>>, reg: &KarsSRERegistration) {
+    let mut locked = state.lock().unwrap();
+    locked
+        .objects
+        .insert(CONSUMER.into(), stopped_owned_consumer(reg));
+    locked.objects.insert(
+        "/api/v1/namespaces/kars-sre/pods".into(),
+        json!({"apiVersion":"v1","kind":"PodList","metadata":{},"items":[]}),
+    );
+}
+
+#[tokio::test]
+async fn disabled_retirement_removes_only_quiesced_owned_deployment_with_uid_rv_fences() {
+    let (_server, client, state) = fixture().await;
+    let mut reg = registration();
+    reg.spec.enabled = false;
+    seed_stopped_consumer(&state, &reg);
+    migration::stop_registered_consumer_for_retirement(&client, &reg)
+        .await
+        .unwrap();
+    migration::stop_registered_consumer_for_retirement(&client, &reg)
+        .await
+        .unwrap();
+    let locked = state.lock().unwrap();
+    assert!(!locked.objects.contains_key(CONSUMER));
+    let deletes: Vec<_> = locked
+        .calls
+        .iter()
+        .filter(|(method, _, _)| method == "DELETE")
+        .collect();
+    assert_eq!(deletes.len(), 1);
+    assert_eq!(deletes[0].1, CONSUMER);
+    assert_eq!(
+        deletes[0].2["preconditions"],
+        json!({"uid":"owned-consumer","resourceVersion":"5"})
+    );
+}
+
+#[tokio::test]
+async fn retired_audit_record_repairs_its_leftover_owned_consumer_without_reissuing_authority() {
+    let (_server, client, state) = fixture().await;
+    let mut reg = registration();
+    reg.spec.enabled = false;
+    reg.status = Some(RegistrationStatus {
+        phase: "Retired".into(),
+        observed_generation: reg.metadata.generation.unwrap_or_default(),
+        privacy_revision: Some(crate::sre_privacy::REVISION.into()),
+        ..Default::default()
+    });
+    seed_stopped_consumer(&state, &reg);
+    reconcile(&client, &reg).await.unwrap();
+    let locked = state.lock().unwrap();
+    assert!(!locked.objects.contains_key(CONSUMER));
+    assert!(locked.calls.iter().all(|(method, path, _)| method == "GET"
+        || method == "DELETE"
+        || method == "POST" && path.ends_with("/subjectaccessreviews")));
+}
+
+#[tokio::test]
+async fn retirement_preserves_foreign_namespace_or_unowned_consumer() {
+    for foreign_namespace in [true, false] {
+        let (_server, client, state) = fixture().await;
+        let mut reg = registration();
+        reg.spec.enabled = false;
+        seed_stopped_consumer(&state, &reg);
+        {
+            let mut locked = state.lock().unwrap();
+            if foreign_namespace {
+                locked.namespace["metadata"]["uid"] = "foreign-namespace".into();
+            } else {
+                locked.objects.get_mut(CONSUMER).unwrap()["spec"]["template"]["metadata"]["annotations"]
+                    [OWNER] = "foreign-registration".into();
+            }
+        }
+        let before = state.lock().unwrap().objects[CONSUMER].clone();
+        migration::stop_registered_consumer_for_retirement(&client, &reg)
+            .await
+            .unwrap();
+        let locked = state.lock().unwrap();
+        assert_eq!(locked.objects[CONSUMER], before);
+        assert!(locked.calls.iter().all(|(method, _, _)| method == "GET"));
+    }
+}
+
+#[tokio::test]
+async fn retirement_rechecks_uid_ownership_and_quiescence_before_deleting() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    for field in ["uid", "owner", "replicas"] {
+        let (server, client, state) = fixture().await;
+        let mut reg = registration();
+        reg.spec.enabled = false;
+        seed_stopped_consumer(&state, &reg);
+        let value = stopped_owned_consumer(&reg);
+        let reads = AtomicUsize::new(0);
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path(CONSUMER))
+            .respond_with(move |_: &wiremock::Request| {
+                let mut current = value.clone();
+                if reads.fetch_add(1, Ordering::SeqCst) >= 3 {
+                    match field {
+                        "uid" => current["metadata"]["uid"] = "replacement".into(),
+                        "owner" => {
+                            current["spec"]["template"]["metadata"]["annotations"][OWNER] =
+                                "foreign".into()
+                        }
+                        _ => current["spec"]["replicas"] = 1.into(),
+                    }
+                }
+                wiremock::ResponseTemplate::new(200).set_body_json(current)
+            })
+            .with_priority(1)
+            .mount(&server)
+            .await;
+        let error = migration::stop_registered_consumer_for_retirement(&client, &reg)
+            .await
+            .unwrap_err();
+        assert!(error.contains("changed after quiescence"));
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .all(|(method, _, _)| method != "DELETE")
+        );
+    }
+}
+
+#[tokio::test]
+async fn retirement_delete_conflict_is_not_retried_or_forced() {
+    for code in [403, 409] {
+        let (server, client, state) = fixture().await;
+        let mut reg = registration();
+        reg.spec.enabled = false;
+        seed_stopped_consumer(&state, &reg);
+        wiremock::Mock::given(wiremock::matchers::method("DELETE"))
+            .and(wiremock::matchers::path(CONSUMER))
+            .respond_with(wiremock::ResponseTemplate::new(code).set_body_json(json!({
+                "apiVersion":"v1","kind":"Status","status":"Failure",
+                "reason":if code == 409 {"Conflict"} else {"Forbidden"},"code":code,
+                "message":"PRIVATE_SENTINEL"})))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = migration::stop_registered_consumer_for_retirement(&client, &reg)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error,
+            format!("Remove stopped owned SRE consumer: Kubernetes status {code}")
+        );
+        assert!(!error.contains("PRIVATE_SENTINEL"));
+        assert!(state.lock().unwrap().objects.contains_key(CONSUMER));
+    }
+}
+
+#[tokio::test]
+async fn retirement_waits_for_deletion_without_removing_foreign_finalizers() {
+    let (_server, client, state) = fixture().await;
+    let mut reg = registration();
+    reg.spec.enabled = false;
+    seed_stopped_consumer(&state, &reg);
+    {
+        let mut locked = state.lock().unwrap();
+        let deployment = locked.objects.get_mut(CONSUMER).unwrap();
+        deployment["metadata"]["deletionTimestamp"] = "2026-09-09T00:00:00Z".into();
+        deployment["metadata"]["finalizers"] = json!(["e2e.example/foreign"]);
+    }
+    let error = migration::stop_registered_consumer_for_retirement(&client, &reg)
+        .await
+        .unwrap_err();
+    assert!(migration::is_waiting(&error));
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .all(|(method, _, _)| method == "GET")
+    );
+    assert_eq!(
+        state.lock().unwrap().objects[CONSUMER]["metadata"]["finalizers"],
+        json!(["e2e.example/foreign"])
+    );
+}
 
 fn reviews(state: &Arc<Mutex<State>>, kind: &str) -> (KarsSRERegistration, String) {
     admission_ready(state);

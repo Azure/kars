@@ -12,7 +12,7 @@ use k8s_openapi::api::{
 };
 use kube::{
     Api, Client, ResourceExt,
-    api::{ListParams, Patch, PatchParams},
+    api::{DeleteParams, ListParams, Patch, PatchParams, Preconditions},
 };
 use serde_json::json;
 
@@ -23,11 +23,16 @@ const WAITING_FOR_ROTATION: &str =
     "Waiting for owned control credential consumers to restart on the new privacy epoch";
 const WAITING_FOR_ROLLOUT: &str =
     "Owned control credential consumer has not completed its privacy-epoch rollout";
+const WAITING_FOR_CONSUMER_REMOVAL: &str =
+    "Waiting for the owned SRE consumer Deployment to be removed";
 
 pub(super) fn is_waiting(detail: &str) -> bool {
     matches!(
         detail,
-        WAITING_FOR_CONSUMERS | WAITING_FOR_ROTATION | WAITING_FOR_ROLLOUT
+        WAITING_FOR_CONSUMERS
+            | WAITING_FOR_ROTATION
+            | WAITING_FOR_ROLLOUT
+            | WAITING_FOR_CONSUMER_REMOVAL
     )
 }
 
@@ -46,6 +51,12 @@ pub(super) async fn stop_registered_consumer_for_retirement(
     if namespace.metadata.uid.as_deref() != Some(reg.spec.runtime_namespace.uid.as_str()) {
         return Ok(());
     }
+    let registration_uid = reg
+        .metadata
+        .uid
+        .as_deref()
+        .filter(|uid| !uid.is_empty())
+        .ok_or("SRE retirement requires the actual registration UID")?;
     let api: Api<Deployment> = Api::namespaced(client.clone(), RUNTIME_NAMESPACE);
     let Some(deployment) = api
         .get_opt("sre")
@@ -60,7 +71,8 @@ pub(super) async fn stop_registered_consumer_for_retirement(
         .and_then(|s| s.template.metadata.as_ref())
         .and_then(|m| m.annotations.as_ref())
         .and_then(|a| a.get(OWNER))
-        == reg.metadata.uid.as_ref();
+        .map(String::as_str)
+        == Some(registration_uid);
     if !ours
         && reg
             .status
@@ -70,7 +82,73 @@ pub(super) async fn stop_registered_consumer_for_retirement(
     {
         return Ok(());
     }
-    stop_legacy_consumer(client, reg).await
+    stop_legacy_consumer(client, reg).await?;
+    if !ours {
+        return Ok(());
+    }
+    // Namespace-controller intentionally lacks registrar power. Remove only
+    // our stopped Deployment here instead of leaving protected content to GC.
+    let Some(current) = api
+        .get_opt("sre")
+        .await
+        .map_err(|error| api_error("Read stopped SRE consumer", error))?
+    else {
+        return Ok(());
+    };
+    let uid = deployment
+        .metadata
+        .uid
+        .as_deref()
+        .filter(|uid| !uid.is_empty())
+        .ok_or("Retiring SRE consumer UID is missing")?;
+    let still_owned = current
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.metadata.as_ref())
+        .and_then(|metadata| metadata.annotations.as_ref())
+        .and_then(|annotations| annotations.get(OWNER))
+        .map(String::as_str)
+        == Some(registration_uid);
+    if current.metadata.uid.as_deref() != Some(uid)
+        || !still_owned
+        || current.spec.as_ref().and_then(|spec| spec.replicas) != Some(0)
+    {
+        return Err("Retiring SRE consumer changed after quiescence; preserved".into());
+    }
+    if current.metadata.deletion_timestamp.is_some() {
+        return Err(WAITING_FOR_CONSUMER_REMOVAL.into());
+    }
+    let version = current
+        .metadata
+        .resource_version
+        .filter(|version| !version.is_empty())
+        .ok_or("Retiring SRE consumer resourceVersion is missing")?;
+    match api
+        .delete(
+            "sre",
+            &DeleteParams {
+                preconditions: Some(Preconditions {
+                    uid: Some(uid.into()),
+                    resource_version: Some(version),
+                }),
+                ..Default::default()
+            },
+        )
+        .await
+    {
+        Ok(_) => {}
+        Err(kube::Error::Api(error)) if error.code == 404 => {}
+        Err(error) => return Err(api_error("Remove stopped owned SRE consumer", error)),
+    }
+    if api
+        .get_opt("sre")
+        .await
+        .map_err(|error| api_error("Verify owned SRE consumer removal", error))?
+        .is_some()
+    {
+        return Err(WAITING_FOR_CONSUMER_REMOVAL.into());
+    }
+    Ok(())
 }
 
 fn current_boundary(deployment: &Deployment, reg: &KarsSRERegistration) -> bool {

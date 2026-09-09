@@ -179,6 +179,7 @@ async fn reconcile_inner(client: &Client, reg: &KarsSRERegistration) -> Result<(
                 && status.privacy_revision.as_deref() == Some(crate::sre_privacy::REVISION)
         })
     {
+        migration::stop_registered_consumer_for_retirement(client, reg).await?;
         return check_secret_denial(client, &reg.spec.runtime_namespace.name).await;
     }
     if !reg.spec.enabled {
