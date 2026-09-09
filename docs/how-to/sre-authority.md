@@ -214,6 +214,15 @@ and requires cluster-wide `apps/replicasets` CREATE authority; namespaced
 workload permissions are insufficient. It does not grant the Deployment
 controller Pod CREATE or registrar authority.
 
+The registered router's API egress includes the canonical Service IP and its
+ready HTTPS endpoint IP/port pairs, since policy enforcement can see the
+post-DNAT destination rather than the Service VIP. These are exact `/32` or
+`/128` targets, not private-subnet allowances; malformed, missing, terminating,
+or oversized endpoint inventories fail closed. The controller fetches
+`default/kubernetes`, with only named `kubernetes` Endpoints GET added to its
+authority role, and refreshes registered SRE reconciliation every 30 seconds.
+The UID-1000 egress guard and opaque agent credential are unchanged.
+
 The proxy checks current registration and live UID/claim authority. It permits
 the bounded first-party diagnostic read/log/metrics paths and Pending-only
 `KarsSREAction` creation in `kars-sre`. Secret responses retain key names but
