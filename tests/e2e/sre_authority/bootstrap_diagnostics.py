@@ -3,6 +3,7 @@
 
 """Allowlisted public admission evidence; never dump Pod specs, argv or bodies."""
 
+import json
 import re
 import subprocess
 
@@ -39,12 +40,33 @@ def router_readiness_facts(text):
                   "source-identity", "service-account", "privacy-transport", "privacy-denied",
                   "privacy-not-denied", "metadata-transport", "metadata-denied", "legacy-alias",
                   "credential-expired", "unclassified")
+    messages = ("SRE authority transport failure", "SRE authority request denied",
+                "SRE readiness authority rejected", "SRE readiness authority slow")
     for line in text.splitlines()[-150:]:
         line = re.sub(r"\x1b\[[0-9;]*m", "", line)
-        if not any(message in line for message in ("SRE authority transport failure",
-                                                    "SRE authority request denied",
-                                                    "SRE readiness authority rejected",
-                                                    "SRE readiness authority slow")):
+        try:
+            event = json.loads(line)
+        except ValueError:
+            event = None
+        if isinstance(event, dict):
+            fields = event.get("fields", {})
+            if not isinstance(fields, dict) or fields.get("message") not in messages:
+                continue
+            value = {}
+            for key, allowed in (("stage", stages), ("category", categories)):
+                if fields.get(key) in allowed:
+                    value[key] = fields[key]
+            for key in ("timed_out", "connect_error", "authorized"):
+                if isinstance(fields.get(key), bool):
+                    value[key] = fields[key]
+            if type(fields.get("http_status")) is int and 100 <= fields["http_status"] <= 599:
+                value["httpStatus"] = fields["http_status"]
+            if type(fields.get("elapsed_seconds")) is int and 0 <= fields["elapsed_seconds"] <= 999:
+                value["elapsedSeconds"] = fields["elapsed_seconds"]
+            if value and value not in facts:
+                facts.append(value)
+            continue
+        if not any(message in line for message in messages):
             continue
         value = {}
         for key, allowed in (("stage", stages), ("category", categories)):
