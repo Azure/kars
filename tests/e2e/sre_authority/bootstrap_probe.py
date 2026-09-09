@@ -233,6 +233,11 @@ def main(root, diagnostics_only, candidate=False, retirement=False):
                     from sre_authority.binding_probe import prove
                     prove(root, port, state, objects,
                           lambda facts: write_report(root, "bootstrap-binding-retirement.json", facts))
+                from sre_authority.bootstrap_cases import deployment_controller_cases
+                controller_cases = deployment_controller_cases(port, policies)
+                write_report(root, "bootstrap-workload-controller.json", {"cases": controller_cases})
+                if not all(case["matched"] for case in controller_cases):
+                    raise RuntimeError("Built-in Deployment controller cannot create the private SRE ReplicaSet")
             finally:
                 write_report(root, "bootstrap-final.json", collect(port, policies, request))
                 write_report(root, "bootstrap-controller-stack.json", controller_stack(
