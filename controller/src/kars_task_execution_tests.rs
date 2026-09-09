@@ -261,6 +261,8 @@ async fn materialized_resources_match_the_authorization_blueprint() {
             host: "docs.example.com".into(),
             port: Some(443),
         }],
+        credential_bindings: None,
+        github_binding: None,
     });
     Mock::given(method("GET"))
         .and(path(OBJECT_PATH))

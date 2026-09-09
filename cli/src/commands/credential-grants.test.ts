@@ -32,6 +32,14 @@ describe("operator credential grant preflight",()=>{
     expect(f.execute.mock.calls.every(([args])=>["get","auth"].includes(args[0]!))).toBe(true);
     expect(JSON.stringify(f.document)).not.toContain("PRIVATE_VALUE_SENTINEL");
   });
+  it("allows explicit writer retirement without disabling existing delivery authority",async()=>{
+    const f=fixture();
+    f.document.spec.writers=[];
+    await validateGrantDocument(f.execute,f.document);
+    expect(f.document.spec.enabled).toBe(true);
+    expect(f.execute.mock.calls.some(([args])=>args[1]==="serviceaccount")).toBe(false);
+    expect(f.execute.mock.calls.every(([args])=>["get","auth"].includes(args[0]!))).toBe(true);
+  });
   it.each(["workspace","writer","store"])("rejects replaced %s identities before any mutation",async changed=>{
     const f=fixture();
     if(changed==="workspace")f.document.spec.workspaceUid="other";

@@ -13,6 +13,7 @@ pub const STATUS_FIELD: &str = "serviceObservation";
 pub const TLS_SECRET: &str = "router-services-observer-identity";
 pub const TLS_DIRECTORY: &str = "/etc/kars/observation-identity";
 pub const PORT: u16 = 9447;
+pub const ACTIVE_PRIVACY_UNAVAILABLE: &str = "Private observations with active SRE require an isolated live privacy verifier; status-only proof and ambient Secret inventory access are not authority";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]

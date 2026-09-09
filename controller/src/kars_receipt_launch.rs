@@ -161,6 +161,8 @@ mod tests {
                     isolation: Some("enhanced".into()),
                     memory: Some("review-memory".into()),
                     model_fallbacks: Vec::new(),
+                    credential_bindings: None,
+                    github_binding: None,
                 }),
                 display_name: Some("Review".into()),
             },

@@ -75,8 +75,13 @@ pub(crate) struct Projection {
 impl Projection {
     pub(crate) fn retired(purpose: Purpose, sandbox: &KarsSandbox) -> Result<Self, String> {
         Ok(Self {
-            version: format!("retired:{}:{}", sandbox.uid().ok_or("Retired credential Sandbox UID missing")?,
-                sandbox.metadata.generation.unwrap_or_default()),
+            version: format!(
+                "retired:{}:{}",
+                sandbox
+                    .uid()
+                    .ok_or("Retired credential Sandbox UID missing")?,
+                sandbox.metadata.generation.unwrap_or_default()
+            ),
             epoch: None,
             purpose,
         })
@@ -293,14 +298,14 @@ async fn checked_epoch(
         }
         Err(error) => Err(error),
     };
-    if let Err(error) = &result {
-        if let Some(secret) = existing {
-            quarantine(client, namespace, name, secret, purpose)
-                .await
-                .map_err(|failure| {
-                    format!("{error}; owned control credential quarantine failed: {failure}")
-                })?;
-        }
+    if let Err(error) = &result
+        && let Some(secret) = existing
+    {
+        quarantine(client, namespace, name, secret, purpose)
+            .await
+            .map_err(|failure| {
+                format!("{error}; owned control credential quarantine failed: {failure}")
+            })?;
     }
     result.map_err(IssuanceError::Rejected)
 }
@@ -409,9 +414,13 @@ pub(crate) async fn ensure_bound(
     let secret = if let Some(secret) = existing.as_ref().filter(|secret| {
         current(secret, epoch.as_deref())
             && source_revision.is_none_or(|revision| {
-                secret.metadata.annotations.as_ref()
+                secret
+                    .metadata
+                    .annotations
+                    .as_ref()
                     .and_then(|annotations| annotations.get(SOURCE_REVISION))
-                    .map(String::as_str) == Some(revision)
+                    .map(String::as_str)
+                    == Some(revision)
             })
             && configuration.is_none_or(|configuration| {
                 secret
@@ -484,9 +493,13 @@ pub(crate) async fn ensure_bound(
     validate(&secret, source_uid, namespace, purpose)?;
     if !current(&secret, epoch.as_deref())
         || source_revision.is_some_and(|revision| {
-            secret.metadata.annotations.as_ref()
+            secret
+                .metadata
+                .annotations
+                .as_ref()
                 .and_then(|annotations| annotations.get(SOURCE_REVISION))
-                .map(String::as_str) != Some(revision)
+                .map(String::as_str)
+                != Some(revision)
         })
     {
         return Err(
@@ -570,7 +583,8 @@ pub(crate) async fn existing_configuration(
         Some(&secret),
         purpose,
     )
-    .await.map_err(|error| error.to_string())?;
+    .await
+    .map_err(|error| error.to_string())?;
     if !current(&secret, epoch.as_deref()) {
         return Ok(None);
     }

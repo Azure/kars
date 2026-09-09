@@ -31,6 +31,21 @@ key. Native Kubernetes GET and ServiceAccount RoleBinding subjects remain
 name-bound, not UID-bound; the observation endpoint additionally verifies
 current grant, Sandbox, runtime namespace and recipient identities.
 
+Before granting native read rights, core installs controller-UID-protected
+finalizers on the enrolled ServiceAccount and its actual namespace. Admission
+also covers namespace status/finalize and RoleBinding aliases. Deleting the
+writer remains allowed, but its name cannot finish retirement until core has
+revoked its owned source/store and observer read Roles and verified that the
+Roles and bindings are actually absent, not merely acknowledged for deletion.
+The namespace also retains its native `kubernetes` finalizer until that release;
+ordinary metadata finalizers alone are not its storage-finalization boundary.
+Only enrolled identities are held; this is not a tenant-wide ServiceAccount
+deletion ban. Effective permission reviews include the ServiceAccount UID and
+all three standard authentication groups, and reject broad Secret, workload,
+RBAC and impersonation side channels before issuing writer rights.
+New writer authority requires the default controller leadership barrier;
+disabling leader election does not enable a parallel unfenced issuer.
+
 The read-only TLS listener on 9447 exposes `GET /internal/observations/scope`
 and `GET /internal/observations/egress/learned`. Both require exact Bearer
 authentication; learned observations also require the current
@@ -44,6 +59,23 @@ isolation must explicitly permit that verified runtime's TCP 9447 before
 observation enrollment is usable. Core must not create an egress-only policy
 that accidentally isolates a previously unrestricted BFF and blocks its
 Kubernetes, provider, GitHub or OIDC calls.
+
+Core now performs a read-only preflight against the actual BFF Pods and their
+selected NetworkPolicies before issuing an observation credential. Unrestricted
+senders need no new policy. Isolated senders require an explicit TCP 9447 path
+to the selected runtime namespace and Sandbox Pods. The private chart's
+`networkPolicy.observations` option is off by default, requires confirmation
+of **existing** isolation, and accepts only explicitly reviewed target namespace
+names. It does not replace the existing API/provider/OIDC/GitHub egress baseline.
+
+**Active-SRE observation remains unavailable pending a privacy-verifier
+architecture decision.** The issuer still calls the full `privacy_epoch`
+contract, but the ordinary router identity cannot safely repeat its private
+Secret metadata scan: Kubernetes `list` permission also authorizes full Secret
+values. Both issuance and runtime reuse therefore reject a nonempty SRE epoch.
+Absent/fully retired registration continues to require live GET/LIST/WATCH
+denials. Pending SRE migration still does not retire its unfinished rollout.
+No status-only success or ambient Secret inventory permission is substituted.
 
 ## Operator workflow
 
@@ -184,6 +216,17 @@ source UID checks prevent adopting a replacement. Source cleanup follows its
 actual target UID; workspace sources and operator stores are not Helm-owned and
 remain after Bridge uninstall. Legacy stores remain for explicit review.
 
+Writer status is now separate from delivery status. `WriterReady=False`
+prevents delegated writes, but a deleted, terminating or replaced writer does
+not revoke valid source/GitHub delivery authority. An operator can explicitly
+retire writers with a reviewed `spec.writers: []` while retaining `enabled:
+true`. Deleting/replacing a selected source or disabling/deleting its grant
+still fails delivery closed. Private add-on uninstall needs the core controller
+running so it can release the enrolled name holds; it does not delete core
+data. A changed controller ServiceAccount UID or a foreign/legacy reader Role
+without controller provenance requires operator review rather than adoption.
+Do not force-remove a guard to bypass a failed revocation.
+
 Kubernetes reconciliation is asynchronous. Permission, node or API failures
 can delay consumer termination and revocation; this does not revoke a token at
 its external provider or erase values an agent already observed.
@@ -192,10 +235,11 @@ This candidate still requires coordinated Rust and real API/admission lifecycle
 qualification before release. The Bridge app remains private; this core
 contract is not permission to publish that application or its images.
 
-Outstanding qualification boundaries include ServiceAccount recreation while
-native Secret-read Roles exist, and live observation RPC privacy checks beyond
-registration status plus GET/LIST/WATCH denials. The issuer calls the full
-strict helper; the RPC currently does not repeat the controller's admission
-and private-SA token-alias inventory. TLS, CA integrity, projected private
-volumes, Kubernetes admission and control-plane integrity remain trust
-dependencies. Do not claim complete end-to-end UID/privacy qualification yet.
+The new name-continuity admission/lifecycle code passes targeted core Rust tests
+and strict Clippy, but still requires real Kubernetes qualification, including deletion/status/finalize, inherited RBAC,
+controller leadership/restart and delayed Role deletion. Active-SRE observations
+require either a purpose-only core privacy RPC or a separately protected private
+metadata-verifier identity; neither architecture is silently added by this
+candidate. TLS, CA integrity, projected private volumes, Kubernetes admission
+and control-plane integrity remain trust dependencies. Do not claim complete
+end-to-end UID/privacy qualification yet.

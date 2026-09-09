@@ -48,6 +48,7 @@ pub(super) async fn apply(
         }
     }
     let name = name(grant)?;
+    let controller = super::writers::controller_uid(client).await?;
     let mut names = sources
         .iter()
         .filter(|s| s.phase == "Ready" || s.phase == "Unbound")
@@ -86,12 +87,14 @@ pub(super) async fn apply(
     }
     let role:Role=serde_json::from_value(json!({"apiVersion":"rbac.authorization.k8s.io/v1","kind":"Role",
         "metadata":{"name":name,"namespace":namespace,"annotations":{GRANT_OWNER:grant.metadata.uid,
+            "kars.azure.com/credential-reader-controller-uid":controller,
             "kars.azure.com/credential-workspace-uid":grant.spec.workspace_uid},
             "ownerReferences":[{"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant","name":NAME,
                 "uid":grant.metadata.uid,"controller":true,"blockOwnerDeletion":false}]},
         "rules":rules})).map_err(|_|"Credential role serialization failed")?;
     let binding:RoleBinding=serde_json::from_value(json!({"apiVersion":"rbac.authorization.k8s.io/v1","kind":"RoleBinding",
         "metadata":{"name":name,"namespace":namespace,"annotations":{GRANT_OWNER:grant.metadata.uid,
+            "kars.azure.com/credential-reader-controller-uid":controller,
             "kars.azure.com/credential-workspace-uid":grant.spec.workspace_uid},
             "ownerReferences":[{"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant","name":NAME,
                 "uid":grant.metadata.uid,"controller":true,"blockOwnerDeletion":false}]},
@@ -111,7 +114,14 @@ pub(super) async fn apply(
                 .map_err(|e| api_error("Create credential writer role", e))?;
         }
         Some(old) => {
-            if !owned(&old.metadata, grant) {
+            if !owned(&old.metadata, grant)
+                || old
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("kars.azure.com/credential-reader-controller-uid"))
+                    != Some(&controller)
+            {
                 return Err("Credential writer role belongs to another identity".into());
             }
             if old.rules != role.rules {
@@ -128,6 +138,7 @@ pub(super) async fn apply(
         }
     }
     super::verify(client, grant).await?;
+    super::writers::verify(client, grant).await?;
     let bindings: Api<RoleBinding> = Api::namespaced(client.clone(), &namespace);
     match bindings
         .get_opt(&name)
@@ -141,7 +152,15 @@ pub(super) async fn apply(
                 .map_err(|e| api_error("Create credential writer binding", e))?;
         }
         Some(old) => {
-            if !owned(&old.metadata, grant) || old.role_ref != binding.role_ref {
+            if !owned(&old.metadata, grant)
+                || old.role_ref != binding.role_ref
+                || old
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("kars.azure.com/credential-reader-controller-uid"))
+                    != Some(&controller)
+            {
                 return Err("Credential writer binding belongs to another authority".into());
             }
             if old.subjects != binding.subjects {

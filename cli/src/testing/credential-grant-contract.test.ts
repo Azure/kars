@@ -19,6 +19,40 @@ const specSchema=(name:string)=>resource("CustomResourceDefinition",`${name}.kar
 const source=(path:string)=>readFileSync(new URL(path,root),"utf8");
 
 describe("governed credential public contract",()=>{
+  it("holds only enrolled reader identities through revoke-before-release finalizers",()=>{
+    const policy=resource("ValidatingAdmissionPolicy","kars-credential-reader-continuity");
+    expect(policy.spec.paramKind).toBeUndefined();
+    expect(policy.spec.matchConstraints.resourceRules[0].resources)
+      .toEqual(["serviceaccounts","namespaces","namespaces/status","namespaces/finalize"]);
+    const text=JSON.stringify(policy.spec);
+    expect(text).toContain("request.userInfo.uid");
+    expect(text).toContain("variables.before[key]");
+    expect(text).toContain("request.subResource != 'finalize'");
+    expect(text).not.toContain("request.operation != 'DELETE'");
+    expect(resource("ValidatingAdmissionPolicyBinding",policy.metadata.name).spec.validationActions).toContain("Deny");
+    expect(resource("ValidatingAdmissionPolicy","kars-credential-reader-rbac-bindings").spec.matchConditions[0].expression)
+      .toContain("o.roleRef.name.startsWith(prefix)");
+    expect(JSON.stringify(resource("ValidatingAdmissionPolicy","kars-credential-reader-rbac-roles").spec))
+      .not.toContain("roleRef");
+    const retirement=resource("ValidatingAdmissionPolicy","kars-credential-namespace-retirement");
+    expect(retirement.spec.matchConstraints.resourceRules[0].resources)
+      .toEqual(["namespaces","namespaces/status","namespaces/finalize"]);
+    expect(retirement.spec.validations[0].expression).toContain("'kubernetes' in variables.value.spec.finalizers");
+    expect(source("controller/src/credential_grants/writers/guards.rs")).toContain("no_read_authority(client, grant).await?");
+  });
+
+  it("separates writer retirement from valid source delivery and preflights observer sender egress",()=>{
+    expect(specSchema("karscredentialgrants").properties.writers.minItems??0).toBe(0);
+    expect(source("controller/src/credential_grants.rs")).toContain('"WriterReady"');
+    expect(source("controller/src/credential_grants/writers.rs")).toContain("valid source delivery is retained");
+    expect(JSON.stringify(resource("ValidatingAdmissionPolicy","kars-credential-source-writes").spec))
+      .toContain("WriterReady");
+    expect(source("controller/src/credential_grants/operator.rs")).toContain("observation_network::verify");
+    const egress=source("controller/src/credential_grants/observation_network.rs");
+    expect(egress).toContain("Private observations unavailable");
+    expect(egress).not.toContain(".create(");
+    expect(egress).not.toContain(".patch(");
+  });
   it("defines metadata-only namespace authority without installing an operator grant",()=>{
     const crd=resource("CustomResourceDefinition","karscredentialgrants.kars.azure.com");
     expect(crd.spec.scope).toBe("Namespaced");

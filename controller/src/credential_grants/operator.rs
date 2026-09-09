@@ -32,6 +32,7 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         crate::reconciler::namespace_ownership::recheck(client, &sandbox, &namespace)
             .await
             .map_err(|_| "Observation target namespace ownership changed")?;
+        super::observation_network::verify(client, grant, &sandbox, &namespace).await?;
         match crate::sre_authority::privacy_readiness(client, &namespace.name_any()).await {
             Ok(crate::sre_authority::PrivacyReadiness::Pending) => {
                 publish(client, &sandbox, None).await?;
@@ -45,6 +46,9 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
             Ok(crate::sre_authority::PrivacyReadiness::Qualified(_)) => {}
         }
         let epoch = crate::sre_authority::privacy_epoch(client, &namespace.name_any()).await?;
+        if epoch.is_some() {
+            return Err(service_observer::ACTIVE_PRIVACY_UNAVAILABLE.into());
+        }
         let identity = governed_services::identity(client, &sandbox, &namespace).await?;
         let server_name = format!(
             "observer-{}.kars.internal",
@@ -248,7 +252,7 @@ async fn publish(
     }
     api.patch_status(&sandbox.name_any(),&PatchParams::default(),&Patch::Merge(json!({
         "metadata":{"uid":current.metadata.uid,"resourceVersion":current.metadata.resource_version},
-        "status":{"serviceObservation":status}
+        "status":{(service_observer::STATUS_FIELD):status}
     }))).await.map_err(|e|api_error("Publish private observation capability",e))?;
     Ok(())
 }
@@ -279,8 +283,15 @@ pub(super) async fn revoke(client: &Client, grant: &KarsCredentialGrant) -> Resu
     Ok(())
 }
 
-async fn retire(client: &Client, sandbox: &KarsSandbox, namespace: &Namespace) -> Result<(), String> {
-    for purpose in [governed_services::credentials::OBSERVER, governed_services::credentials::OBSERVER_TLS] {
+async fn retire(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+) -> Result<(), String> {
+    for purpose in [
+        governed_services::credentials::OBSERVER,
+        governed_services::credentials::OBSERVER_TLS,
+    ] {
         governed_services::credentials::retire_for(client, sandbox, namespace, purpose).await?;
     }
     Ok(())
@@ -294,7 +305,7 @@ pub(crate) fn mount(pod: &mut serde_json::Value, sandbox: &KarsSandbox) -> Optio
         return None;
     }
     pod["volumes"].as_array_mut()?.push(json!({"name":"service-observations","secret":{
-        "secretName":service_observer::SECRET,"items":[{"key":"observation-token","path":"observation-token"},
+        "secretName":service_observer::SECRET,"items":[{"key":service_observer::TOKEN_KEY,"path":service_observer::TOKEN_KEY},
             {"key":"config.json","path":"config.json"}]}}));
     pod["volumes"].as_array_mut()?.push(json!({"name":"service-observation-identity","secret":{
         "secretName":service_observer::TLS_SECRET,"items":[{"key":"config.json","path":"config.json"}]}}));
