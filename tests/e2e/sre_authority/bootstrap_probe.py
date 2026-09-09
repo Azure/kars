@@ -222,6 +222,15 @@ def main(root, diagnostics_only, candidate=False, retirement=False):
                 CONTEXT, "kube-controller-manager-kars-e2e-control-plane"))
         else:
             try:
+                media = []
+                path = ("/api/v1/namespaces/kube-system/pods/kube-controller-manager-kars-e2e-control-plane/log"
+                        "?container=kube-controller-manager&tailLines=1&limitBytes=4096")
+                for accept in ("text/plain", "application/json", "*/*"):
+                    code, _ = request(port, "GET", path, accept=accept)
+                    media.append({"accept": accept, "httpStatus": code})
+                write_report(root, "bootstrap-log-media.json", {"cases": media})
+                if next(case["httpStatus"] for case in media if case["accept"] == "application/json") != 200:
+                    raise RuntimeError("Actual API log media precondition failed")
                 state = exercise(root, port, objects, policies, wait_seconds=180 if candidate else 90,
                                  retirement=retirement and not candidate)
                 from sre_authority.bootstrap_cases import admission_cases

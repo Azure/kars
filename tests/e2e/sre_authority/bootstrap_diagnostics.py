@@ -173,6 +173,12 @@ def exception_summary(error, root):
         body = response.json()
     except (ValueError, TypeError):
         return result
+    result.update(response_summary(status, body, root))
+    return result
+
+
+def response_summary(status, body, root):
+    result = {"httpStatus": status}
     if not isinstance(body, dict) or body.get("kind") != "Status":
         return result
     reason = body.get("reason")
