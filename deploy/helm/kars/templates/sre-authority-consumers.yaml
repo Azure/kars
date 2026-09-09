@@ -173,6 +173,10 @@ spec:
         !variables.privateMaterial ||
         authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed() ||
         authorizer.group('').resource('pods').check('create').allowed()
+        {{- if eq $kind "workloads" }}
+        || (request.resource.group == 'apps' && request.resource.resource == 'replicasets' &&
+          authorizer.group('apps').resource('replicasets').check('create').allowed())
+        {{- end }}
       message: "Private SRE workload templates require registrar or cluster-wide workload-controller authority"
       reason: Forbidden
 ---
