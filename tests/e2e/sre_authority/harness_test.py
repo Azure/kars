@@ -20,7 +20,7 @@ from sre_authority.common import (
 )
 from sre_authority.fixtures import seed_control_consumer
 from sre_authority.admission import reserved_source_probe
-from sre_authority.proxy import MARKER, assert_filtered, secret_list_wire_facts
+from sre_authority.proxy import MARKER, assert_filtered, log_reader_facts, secret_list_wire_facts
 from sre_authority.credential_paths import assert_token_type_immutable, assert_watch_result
 
 
@@ -34,6 +34,19 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_log_reader_diagnostics_never_echo_log_text_or_error_body(self):
+        root = Path(__file__).resolve().parents[3]
+        facts = log_reader_facts(root, {"error": "406 Not Acceptable",
+            "body": json.dumps({"kind": "Status", "reason": "SREProxyDenied",
+                               "message": "Kubernetes rejected the diagnostic/proposal request", "data": MARKER})})
+        self.assertEqual(facts["httpStatus"], 406)
+        self.assertTrue(facts["hasError"])
+        self.assertIn("responseSite", facts)
+        self.assertNotIn(MARKER, json.dumps(facts))
+        facts = log_reader_facts(root, {"logs": "sre-standin-alive " + MARKER})
+        self.assertTrue(facts["standinMarker"])
+        self.assertNotIn(MARKER, json.dumps(facts))
+
     def test_native_secret_list_wire_facts_publish_no_synthetic_secret_fields(self):
         value = {"kind": "SecretList", "items": [{"metadata": {"uid": "fixture", "annotations": {"copy": MARKER}},
                                                 "data": {"token": MARKER}}]}

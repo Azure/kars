@@ -4,6 +4,7 @@
 import importlib.util
 import json
 import os
+import re
 import sys
 import types
 
@@ -152,6 +153,22 @@ def secret_list_wire_facts(value, uid):
             "itemHasApiVersion": "apiVersion" in item, "itemMetadataObject": isinstance(item.get("metadata"), dict)}
 
 
+def log_reader_facts(root, value):
+    from .bootstrap_diagnostics import response_summary
+    text = value.get("logs")
+    facts = {"hasError": "error" in value, "hasText": isinstance(text, str),
+             "standinMarker": isinstance(text, str) and "sre-standin-alive" in text}
+    error = value.get("error")
+    status = re.match(r"^([1-5][0-9]{2}) ", error) if isinstance(error, str) else None
+    if status:
+        try:
+            body = json.loads(value.get("body", ""))
+        except (ValueError, TypeError):
+            body = None
+        facts.update(response_summary(int(status[1]), body, root))
+    return facts
+
+
 def proxy_acceptance(h):
     install_metrics(h)
     pod = alive_pinned_source(h)
@@ -178,6 +195,7 @@ def proxy_acceptance(h):
             assert_filtered(listing["items"][0])
             h.passed("Unchanged Hermes HTTPS client GET/LIST retains Secret key names but no values or metadata copies")
             logs = sre._impl_sre_logs(namespace=RUNTIME, pod=pod["metadata"]["name"], container="agent", tail=20)
+            print("SRE-LOG-WIRE", json.dumps(log_reader_facts(h.root, logs)), flush=True)
             require("error" not in logs and "sre-standin-alive" in logs.get("logs", ""), "Unchanged Hermes raw log reader failed")
             metrics = kube.get("/apis/metrics.k8s.io/v1beta1/nodes")
             require(metrics.get("kind") == "NodeMetricsList" and metrics.get("items"), "Real metrics did not pass the filtered proxy")
