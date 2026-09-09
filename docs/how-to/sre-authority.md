@@ -72,11 +72,43 @@ and wait for migration:
 kars sre authority migrate --namespace kars-system --release kars
 ```
 
-The controller validates the full review set before mutation, removes only the
-legacy SRE subject from the reviewed bindings using UID/resourceVersion
-preconditions, preserves unrelated subjects, and stops the reviewed old
-consumer. Broad group grants or unreviewed/custom resources stop migration;
-the operator must restructure those grants explicitly.
+The controller validates the full review set, then submits every planned
+retirement PATCH to the API server with `dryRun=All` before applying any of
+them. Each dry-run and real PATCH uses the identical reviewed UID/resourceVersion,
+retirement annotation and surviving subjects. Only the legacy SRE subject is
+removed; unrelated subjects and the binding's roleRef remain intact. The
+reviewed old consumer is stopped only after all binding retirements succeed.
+Broad group grants and unreviewed resources stop migration; the operator must
+restructure those grants explicitly.
+
+### Binding authorization and custom roles
+
+Kubernetes applies RBAC privilege-escalation checks even to a **subtractive**
+ClusterRoleBinding or RoleBinding update. Ordinary `patch` permission and
+registrar `use` are not sufficient: the controller must already hold the
+referenced permissions or have the appropriate named `bind` permission.
+The chart grants `bind` on exactly `kars-sre-reader`,
+`kars-sre-private-diagnostics`, `kars-sre-action-author` and `kars-sre-router-renew`.
+It does not grant wildcard `bind`, `escalate`, cluster-admin, or automatic
+authority over custom roles.
+
+A reviewed custom role can therefore fail server-side preflight. A failure
+such as `Preflight reviewed SRE ClusterRoleBinding retirement: Kubernetes status 403`
+leaves all legacy bindings and the consumer unchanged on that initial attempt.
+The controller relies on the actual API server's RBAC, admission and validation
+decisions; it does not simulate those checks or grant itself missing authority.
+An operator must inspect the referenced role and explicitly resolve the grant:
+restructure or retire it, or separately authorize only the exact required
+role-specific binding permission after review. Never add broad bind/escalate
+rights merely to make migration pass. Refresh enrollment UID/resourceVersion
+reviews if an operator changes the reviewed resources.
+
+Preflight is **not a multi-resource transaction**. RBAC, admission or object
+versions can change before a real PATCH. Every real write still enforces its
+original UID/resourceVersion and current API authorization, and errors stop the
+attempt. Earlier successful retirements can remain applied; they are recognized
+on retry, not rolled back by restoring old privileges. The consumer is not
+stopped and private credentials are not issued while retirement remains incomplete.
 
 Real Kubernetes authorization reviews must deny the old SRE principal Secret
 get/list/watch access before private credentials are issued. The shared
