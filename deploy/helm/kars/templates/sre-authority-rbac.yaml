@@ -112,7 +112,7 @@ rules:
     verbs: ["create", "patch", "update", "delete"]
   - apiGroups: ["rbac.authorization.k8s.io"]
     resources: ["clusterroles"]
-    resourceNames: ["kars-sre-private-diagnostics", "kars-sre-action-author", "kars-sre-router-renew"]
+    resourceNames: ["kars-sre-private-diagnostics", "kars-sre-action-author", "kars-sre-router-renew", "kars-sre-reader"]
     verbs: ["bind"]
   - apiGroups: ["authorization.k8s.io"]
     resources: ["subjectaccessreviews"]
