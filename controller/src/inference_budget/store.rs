@@ -375,7 +375,10 @@ impl Store {
             {
                 Ok(stored) => {
                     Self::validate_identity(&stored, root, account_uid)?;
-                    if stored.status != next.status {
+                    // Kubernetes Time drops subsecond precision on the wire.
+                    if serde_json::to_value(&stored.status).map_err(|_| BudgetError::Corrupt)?
+                        != serde_json::to_value(&next.status).map_err(|_| BudgetError::Corrupt)?
+                    {
                         return Err(BudgetError::Corrupt.into());
                     }
                     return Ok(stored);

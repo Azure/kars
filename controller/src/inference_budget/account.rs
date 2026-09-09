@@ -51,7 +51,50 @@ pub struct KarsBudgetAccountStatus {
     #[schemars(schema_with = "conditions_schema")]
     pub conditions: Vec<Condition>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "ledger_schema")]
     pub ledger: Option<Ledger>,
+}
+
+// Keep the bounded Helm ledger envelope. Runtime Ledger::validate checks its
+// full tagged-union contents; kube's structural union rewrite cannot represent
+// the distinct MaximumPrice discriminator schemas without changing that wire.
+fn ledger_schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
+    use crate::inference_budget_contract::{
+        CONTRACT_VERSION, MAX_ATTEMPTS, MAX_NODES, MAX_SESSIONS,
+    };
+    schemars::json_schema!({
+        "type": "object",
+        "x-kubernetes-preserve-unknown-fields": true,
+        "required": ["version", "scope", "accountUid", "root", "limits", "phase",
+                     "meters", "nodes", "sessions", "attempts"],
+        "properties": {
+            "version": {"type": "string", "enum": [CONTRACT_VERSION]},
+            "scope": {"type": "string", "enum": ["GovernedInference"]},
+            "accountUid": {"type": "string", "minLength": 1, "maxLength": 128},
+            "phase": {"type": "string", "enum": ["Active", "Closing", "Closed", "Frozen"]},
+            "root": {"type": "object", "x-kubernetes-preserve-unknown-fields": true},
+            "limits": {
+                "type": "object",
+                "properties": {
+                    "tokens": {"type": "integer", "format": "int64", "minimum": 0},
+                    "usdMicros": {"type": "integer", "format": "int64", "minimum": 0}
+                }
+            },
+            "meters": {"type": "object", "x-kubernetes-preserve-unknown-fields": true},
+            "nodes": {
+                "type": "object", "maxProperties": MAX_NODES,
+                "additionalProperties": {"type": "object", "x-kubernetes-preserve-unknown-fields": true}
+            },
+            "sessions": {
+                "type": "object", "maxProperties": MAX_SESSIONS,
+                "additionalProperties": {"type": "object", "x-kubernetes-preserve-unknown-fields": true}
+            },
+            "attempts": {
+                "type": "object", "maxProperties": MAX_ATTEMPTS,
+                "additionalProperties": {"type": "object", "x-kubernetes-preserve-unknown-fields": true}
+            }
+        }
+    })
 }
 
 fn conditions_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
