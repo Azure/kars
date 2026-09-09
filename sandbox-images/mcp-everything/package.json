@@ -5,5 +5,8 @@
   "description": "Hermetic image wrapper for the MCP reference everything server",
   "dependencies": {
     "@modelcontextprotocol/server-everything": "2026.7.4"
+  },
+  "overrides": {
+    "fast-uri": "3.1.6"
   }
 }

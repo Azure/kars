@@ -1,0 +1,31 @@
+name: Prepare MCP dependency lock
+
+on:
+  pull_request:
+    branches: ["public/pr7-governed-services"]
+    paths:
+      - "sandbox-images/mcp-everything/package.json"
+      - ".github/workflows/mcp-lock-preparation.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020
+        with:
+          node-version: "22"
+      - name: Generate lockfile for explicit patched dependency
+        working-directory: sandbox-images/mcp-everything
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Upload generated lockfile for review, not release
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: mcp-patched-lock
+          path: sandbox-images/mcp-everything/package-lock.json
+          if-no-files-found: error
+          retention-days: 1
