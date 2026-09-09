@@ -19,6 +19,35 @@ const specSchema=(name:string)=>resource("CustomResourceDefinition",`${name}.kar
 const source=(path:string)=>readFileSync(new URL(path,root),"utf8");
 
 describe("governed credential public contract",()=>{
+  it("keeps native CEL key, null and cross-kind checks type-compatible without relaxing guards",()=>{
+    const store=resource("ValidatingAdmissionPolicy","kars-credential-enrolled-store-shape");
+    const expression=store.spec.validations[0].expression;
+    expect(expression).toContain("object.?data.orValue({}).map(key, key)");
+    expect(expression).toContain("object.?stringData.orValue({}).map(key, key)");
+    expect(expression).toContain("object.metadata.uid == store.secret.uid");
+    expect(expression).toContain("params.metadata.uid");
+    expect(expression).toContain("key == 'configuration'");
+    const rebind=resource("ValidatingAdmissionPolicy","kars-credential-rebind-authority");
+    expect(rebind.spec.validations[1].expression)
+      .toContain("!has(oldObject.status.envelopeDigest) || dyn(oldObject.status.envelopeDigest) == null");
+    expect(rebind.spec.validations[1].expression).toContain("oldObject.metadata.generation");
+    expect(rebind.spec.validations[1].expression).toContain("c.status == 'False'");
+    const exposure=resource("ValidatingAdmissionPolicy","kars-no-public-router-exposure");
+    expect(exposure.spec.matchConstraints.namespaceSelector)
+      .toEqual({matchLabels:{"kars.azure.com/isolated":"strict"}});
+    expect(exposure.spec.matchConstraints.resourceRules.flatMap((rule:{resources:string[]})=>rule.resources))
+      .toEqual(["services","ingresses","networkpolicies","httproutes","tlsroutes","tcproutes"]);
+    expect(exposure.spec.validations[0].expression).toContain('object.kind == "Service"');
+    expect(exposure.spec.validations[0].expression).toContain("dyn(object.spec).?type");
+    expect(exposure.spec.validations[2].expression).toContain('object.kind == "NetworkPolicy"');
+    expect(exposure.spec.validations[2].expression).toContain("dyn(object.spec).?ingress");
+    for(const policy of [store,rebind,exposure]){
+      expect(policy.spec.failurePolicy).toBe("Fail");
+      const binding=resource("ValidatingAdmissionPolicyBinding",
+        policy===exposure?"kars-no-public-router-exposure-binding":policy.metadata.name);
+      expect(binding.spec.validationActions).toContain("Deny");
+    }
+  });
   it("protects non-destructive rebind state and requires paused authority before resuming",()=>{
     const rebind=resource("ValidatingAdmissionPolicy","kars-credential-rebind-authority");
     expect(rebind.spec.matchConstraints.resourceRules[0].resources).toEqual(["karstasks"]);
