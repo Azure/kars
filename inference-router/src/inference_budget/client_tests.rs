@@ -22,11 +22,7 @@ async fn native_stream_settlement_never_refunds_missing_or_inconsistent_final_us
     for (name, wire) in super::super::anthropic_cases::incomplete() {
         let fixture = Fixture::for_operation(100, false, Operation::AnthropicMessages).await;
         Mock::given(wiremock::matchers::method("POST"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .insert_header("content-type", "text/event-stream")
-                    .set_body_string(wire),
-            )
+            .respond_with(ResponseTemplate::new(200).set_body_raw(wire, "text/event-stream"))
             .mount(&fixture.provider)
             .await;
         let (_, _, stream) = crate::proxy::forward_stream(
@@ -55,11 +51,10 @@ async fn native_stream_settlement_never_refunds_missing_or_inconsistent_final_us
 async fn native_stream_with_final_usage_settles_exact_evidence_once() {
     let fixture = Fixture::for_operation(100, false, Operation::AnthropicMessages).await;
     Mock::given(wiremock::matchers::method("POST"))
-        .respond_with(
-            ResponseTemplate::new(200)
-                .insert_header("content-type", "text/event-stream")
-                .set_body_string(super::super::anthropic_cases::complete()),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            super::super::anthropic_cases::complete(),
+            "text/event-stream",
+        ))
         .mount(&fixture.provider)
         .await;
     let (_, _, stream) = crate::proxy::forward_stream(
@@ -235,7 +230,7 @@ impl Fixture {
             endpoint: provider.uri(),
             model: "model".into(),
             operation,
-            output_field: OutputField::MaxTokens,
+            output_field: OutputField::Tokens,
             maximum_input_tokens: 10,
             maximum_output_tokens: 20,
             maximum_wire_bytes: 4096,
@@ -387,10 +382,13 @@ async fn lost_begin_ack_funds_uncertain_work_but_never_sends_or_regrants_that_at
 #[tokio::test]
 async fn actual_stream_eof_requires_terminal_usage_and_charges_output_once() {
     let fixture = Fixture::new(100, false).await;
-    Mock::given(wiremock::matchers::method("POST")).respond_with(
-        ResponseTemplate::new(200).insert_header("content-type", "text/event-stream")
-            .set_body_string("data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n\ndata: [DONE]\n\n"),
-    ).mount(&fixture.provider).await;
+    Mock::given(wiremock::matchers::method("POST"))
+        .respond_with(ResponseTemplate::new(200).set_body_raw(
+            "data: {\"usage\":{\"prompt_tokens\":3,\"completion_tokens\":5}}\n\ndata: [DONE]\n\n",
+            "text/event-stream",
+        ))
+        .mount(&fixture.provider)
+        .await;
     let (_, _, stream) = crate::proxy::forward_stream(
         Arc::new(WorkloadIdentityAuth::new()),
         None,

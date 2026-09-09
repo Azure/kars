@@ -33,10 +33,11 @@ impl Respond for ApiServer {
         if request.method == "GET" && path.ends_with("/karstasks/task") {
             return ResponseTemplate::new(200).set_body_json(&objects.task);
         }
-        if request.method == "GET" && path.ends_with("/karstasks/parent") {
-            if let Some(parent) = &objects.parent {
-                return ResponseTemplate::new(200).set_body_json(parent);
-            }
+        if request.method == "GET"
+            && path.ends_with("/karstasks/parent")
+            && let Some(parent) = &objects.parent
+        {
+            return ResponseTemplate::new(200).set_body_json(parent);
         }
         if request.method == "PATCH" && path.ends_with("/karstasks/task/status") {
             let patch: Value = serde_json::from_slice(&request.body).unwrap();

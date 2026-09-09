@@ -286,11 +286,10 @@ impl Store {
             next.status = Some(KarsBudgetAccountStatus {
                 ledger: Some(mutation.next),
             });
-            let bytes = serde_json::to_vec(&next).map_err(|_| BudgetError::Corrupt)?;
             let committed = tokio::time::timeout_at(
                 deadline,
                 self.accounts
-                    .replace_status(&name_for_root(root), &PostParams::default(), bytes),
+                    .replace_status(&name_for_root(root), &PostParams::default(), &next),
             )
             .await
             .map_err(|_| StoreError::Contention)?;

@@ -103,24 +103,6 @@ impl Catalog {
         }
         quote.validate(now, money_required)
     }
-
-    pub fn allows_mediated_non_inference(
-        &self,
-        host: &str,
-        configured_model_hosts: &[String],
-    ) -> bool {
-        let host = host.trim_end_matches('.').to_ascii_lowercase();
-        self.non_inference_egress_hosts
-            .iter()
-            .any(|allowed| allowed == &host)
-            && !configured_model_hosts
-                .iter()
-                .any(|model| model.eq_ignore_ascii_case(&host))
-            && !self
-                .contracts
-                .iter()
-                .any(|contract| endpoint_host(&contract.endpoint) == Some(host.as_str()))
-    }
 }
 
 pub fn endpoint_host(endpoint: &str) -> Option<&str> {
@@ -129,30 +111,14 @@ pub fn endpoint_host(endpoint: &str) -> Option<&str> {
     if authority.is_empty() || authority.contains('@') || authority.starts_with('[') {
         return None;
     }
-    Some(authority.split(':').next()?)
-}
-
-/// Exact, closed final-dispatch path classification. No substring such as
-/// "completion" grants access to an unimplemented provider operation.
-pub fn operation(path: &str) -> Option<Operation> {
-    if path.contains(['?', '#']) {
-        return None;
-    }
-    let path = path.trim_matches('/');
-    match path {
-        "chat/completions" | "v1/chat/completions" | "openai/v1/chat/completions" => {
-            Some(Operation::ChatCompletions)
-        }
-        "messages" | "v1/messages" | "anthropic/v1/messages" => Some(Operation::AnthropicMessages),
-        "responses" | "v1/responses" | "openai/v1/responses" => Some(Operation::Responses),
-        _ => None,
-    }
+    authority.split(':').next()
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::inference_budget_contract::tariffs::{MaximumPrice, OutputField};
+    use crate::inference_budget_dispatch::operation;
 
     fn catalog() -> Catalog {
         Catalog {
@@ -165,7 +131,7 @@ mod tests {
                 endpoint: "https://models.example".into(),
                 model: "model".into(),
                 operation: Operation::ChatCompletions,
-                output_field: OutputField::MaxTokens,
+                output_field: OutputField::Tokens,
                 maximum_input_tokens: 100,
                 maximum_output_tokens: 50,
                 maximum_wire_bytes: 4096,

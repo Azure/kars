@@ -112,7 +112,7 @@ pub struct Amounts {
 }
 
 impl Amounts {
-    pub fn add(self, other: Self) -> Result<Self, BudgetError> {
+    pub fn checked_add(self, other: Self) -> Result<Self, BudgetError> {
         let amount = Self {
             tokens: self
                 .tokens

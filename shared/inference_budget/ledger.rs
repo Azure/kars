@@ -25,7 +25,9 @@ pub struct Meters {
 
 impl Meters {
     pub fn total(&self) -> Result<Amounts, BudgetError> {
-        self.reserved.add(self.settled)?.add(self.uncertain)
+        self.reserved
+            .checked_add(self.settled)?
+            .checked_add(self.uncertain)
     }
 }
 
@@ -287,10 +289,11 @@ impl Ledger {
             return Err(BudgetError::Contract);
         }
         let mut next = self.clone();
-        next.nodes
+        let node = next
+            .nodes
             .get_mut(&authority.task.uid)
-            .ok_or(BudgetError::Corrupt)?
-            .authority = authority;
+            .ok_or(BudgetError::Corrupt)?;
+        node.authority = authority;
         self.mutation(next, ())
     }
 
@@ -380,12 +383,14 @@ impl Ledger {
             .quote
             .validate(now, self.requires_price(&request.identity.task_uid)?)?;
         let maximum = request.quote.maximum;
-        if !self.limits.allows(self.meters.total()?.add(maximum)?)
+        if !self
+            .limits
+            .allows(self.meters.total()?.checked_add(maximum)?)
             || path.iter().any(|uid| {
                 let node = &self.nodes[uid];
                 node.meters
                     .total()
-                    .and_then(|total| total.add(maximum))
+                    .and_then(|total| total.checked_add(maximum))
                     .map_or(true, |total| !node.authority.limits.allows(total))
             })
         {
@@ -400,10 +405,10 @@ impl Ledger {
                     .timestamp(),
             );
         let mut next = self.clone();
-        next.meters.reserved = next.meters.reserved.add(maximum)?;
+        next.meters.reserved = next.meters.reserved.checked_add(maximum)?;
         for uid in path {
             let node = next.nodes.get_mut(&uid).ok_or(BudgetError::Corrupt)?;
-            node.meters.reserved = node.meters.reserved.add(maximum)?;
+            node.meters.reserved = node.meters.reserved.checked_add(maximum)?;
         }
         next.sessions
             .get_mut(&key.pod_uid)
@@ -510,9 +515,9 @@ impl Ledger {
         let apply = |meters: &mut Meters| -> Result<(), BudgetError> {
             meters.reserved = meters.reserved.subtract(attempt.quote.maximum)?;
             if phase == AttemptPhase::Uncertain {
-                meters.uncertain = meters.uncertain.add(charged)?;
+                meters.uncertain = meters.uncertain.checked_add(charged)?;
             } else {
-                meters.settled = meters.settled.add(charged)?;
+                meters.settled = meters.settled.checked_add(charged)?;
             }
             if phase != AttemptPhase::Expired && !attempt.quote.price_covered {
                 meters.unpriced_attempts = meters

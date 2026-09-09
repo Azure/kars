@@ -66,24 +66,24 @@ impl Ledger {
             if *root_uid != node.authority.root_task_uid {
                 return Err(BudgetError::Corrupt);
             }
-            let used = node.meters.settled.add(node.meters.uncertain)?;
+            let used = node.meters.settled.checked_add(node.meters.uncertain)?;
             if let Some(parent) = &node.authority.parent_uid {
                 let prior = children_used.get(parent).copied().unwrap_or_default();
-                children_used.insert(parent.clone(), prior.add(used)?);
+                children_used.insert(parent.clone(), prior.checked_add(used)?);
             } else {
                 if self.root.kind == RootKind::KarsTask && node.authority.task != self.root.resource
                 {
                     return Err(BudgetError::Corrupt);
                 }
-                root_nodes_used = root_nodes_used.add(used)?;
+                root_nodes_used = root_nodes_used.checked_add(used)?;
             }
         }
-        if !root_nodes_used.within(self.meters.settled.add(self.meters.uncertain)?) {
+        if !root_nodes_used.within(self.meters.settled.checked_add(self.meters.uncertain)?) {
             return Err(BudgetError::Corrupt);
         }
         for (uid, used) in children_used {
             let node = self.nodes.get(&uid).ok_or(BudgetError::Corrupt)?;
-            if !used.within(node.meters.settled.add(node.meters.uncertain)?) {
+            if !used.within(node.meters.settled.checked_add(node.meters.uncertain)?) {
                 return Err(BudgetError::Corrupt);
             }
         }
@@ -137,10 +137,10 @@ impl Ledger {
                 if attempt.charged != Amounts::default() {
                     return Err(BudgetError::Corrupt);
                 }
-                root_reserved = root_reserved.add(attempt.quote.maximum)?;
+                root_reserved = root_reserved.checked_add(attempt.quote.maximum)?;
                 for uid in self.ancestors(&attempt.identity.task_uid)? {
                     let previous = node_reserved.get(&uid).copied().unwrap_or_default();
-                    node_reserved.insert(uid, previous.add(attempt.quote.maximum)?);
+                    node_reserved.insert(uid, previous.checked_add(attempt.quote.maximum)?);
                 }
             }
         }

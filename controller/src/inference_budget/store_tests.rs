@@ -99,7 +99,7 @@ fn reserve(pod: &str) -> ReserveRequest {
         endpoint: "https://configured.example".into(),
         model: "model".into(),
         operation: Operation::ChatCompletions,
-        output_field: OutputField::MaxTokens,
+        output_field: OutputField::Tokens,
         maximum_input_tokens: 10,
         maximum_output_tokens: 20,
         maximum_wire_bytes: 4096,
@@ -269,9 +269,10 @@ async fn concurrent_siblings_cannot_both_reserve_past_a_shared_ceiling() {
     let (_server, store, state) = setup(Some(account()), Fault::None).await;
     let a = reserve("a");
     let b = reserve("b");
+    let root = root();
     let (first, second) = tokio::join!(
-        store.transact(&root(), "account-uid", |ledger| ledger.reserve(&a, 100)),
-        store.transact(&root(), "account-uid", |ledger| ledger.reserve(&b, 100)),
+        store.transact(&root, "account-uid", |ledger| ledger.reserve(&a, 100)),
+        store.transact(&root, "account-uid", |ledger| ledger.reserve(&b, 100)),
     );
     assert_eq!(usize::from(first.is_ok()) + usize::from(second.is_ok()), 1);
     assert_eq!(

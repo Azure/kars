@@ -39,6 +39,9 @@ mod helm_drift;
 mod inference_budget;
 #[path = "../../shared/inference_budget/mod.rs"]
 mod inference_budget_contract;
+#[cfg(test)]
+#[path = "../../shared/inference_budget/dispatch.rs"]
+mod inference_budget_dispatch;
 mod inference_policy;
 mod inference_policy_compile;
 mod inference_policy_reconciler;

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use super::*;
-use serde_json::json;
+use serde_json::{Value, json};
 
 pub(super) fn contract() -> ModelContract {
     ModelContract {
@@ -13,7 +13,7 @@ pub(super) fn contract() -> ModelContract {
         endpoint: "https://operator.example/inference".into(),
         model: "model-revision-1".into(),
         operation: Operation::ChatCompletions,
-        output_field: OutputField::MaxCompletionTokens,
+        output_field: OutputField::Completion,
         maximum_input_tokens: 10,
         maximum_output_tokens: 20,
         maximum_wire_bytes: 4096,
@@ -31,6 +31,30 @@ fn request() -> Vec<u8> {
         &json!({"model": "model-revision-1", "messages": [{"role": "user", "content": "hello"}]}),
     )
     .unwrap()
+}
+
+#[test]
+fn output_field_wire_names_and_schema_remain_operator_compatible() {
+    let variants = [
+        (OutputField::Tokens, "MaxTokens"),
+        (OutputField::Completion, "MaxCompletionTokens"),
+        (OutputField::Output, "MaxOutputTokens"),
+    ];
+    for (variant, wire) in variants {
+        assert_eq!(serde_json::to_value(variant).unwrap(), json!(wire));
+        assert_eq!(
+            serde_json::from_value::<OutputField>(json!(wire)).unwrap(),
+            variant
+        );
+    }
+    let schema = serde_json::to_value(schemars::schema_for!(OutputField)).unwrap();
+    assert_eq!(
+        schema["enum"],
+        json!(["MaxTokens", "MaxCompletionTokens", "MaxOutputTokens"])
+    );
+    for internal_name in ["Tokens", "Completion", "Output"] {
+        assert!(serde_json::from_value::<OutputField>(json!(internal_name)).is_err());
+    }
 }
 
 #[test]
@@ -133,7 +157,7 @@ fn client_function_tools_remain_available_without_enabling_hosted_generation() {
 fn native_and_responses_shapes_have_explicit_distinct_output_contracts() {
     let mut contract = contract();
     contract.operation = Operation::AnthropicMessages;
-    contract.output_field = OutputField::MaxTokens;
+    contract.output_field = OutputField::Tokens;
     let body = json!({"model": contract.model, "messages": [{"role": "user", "content": "hello"}],
         "tools": [{"name": "read_file", "input_schema": {"type": "object"}}]});
     let (wire, _) = contract
@@ -144,7 +168,7 @@ fn native_and_responses_shapes_have_explicit_distinct_output_contracts() {
         20
     );
     contract.operation = Operation::Responses;
-    contract.output_field = OutputField::MaxOutputTokens;
+    contract.output_field = OutputField::Output;
     let body =
         json!({"model": contract.model, "input": "hello", "store": false, "background": false});
     let (wire, _) = contract
