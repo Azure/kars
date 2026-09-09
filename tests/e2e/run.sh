@@ -218,9 +218,11 @@ install_crds() {
         "${extra_set_args[@]}" \
         "$helm_wait_arg" --timeout 5m; then
         warn "Helm install did not converge within 5m — dumping diagnostics"
+        if [ "${KARS_E2E_SUITE:-full}" != "standalone-governed" ]; then
         PYTHONPATH="$ROOT_DIR/tests/e2e" python3 -m sre_authority.bootstrap_probe --diagnostics-only \
             || warn "Bounded controller admission diagnostics were incomplete"
         kubectl get all -n kars-system || true
+        fi
         return 1
     fi
 }
@@ -307,6 +309,7 @@ EOF
         pass "Sandbox namespace created (kars-e2e-test)"
     else
         warn "Namespace did not appear within 60s — dumping diagnostics"
+        if [ "${KARS_E2E_SUITE:-full}" != "standalone-governed" ]; then
         kubectl get karssandboxes -A -o wide || true
         kubectl describe karssandbox e2e-test -n kars-system || true
         kubectl get events -n kars-system --sort-by=.lastTimestamp | tail -30 || true
@@ -321,6 +324,7 @@ EOF
             echo "── previous (if any) ────────────────────────"
             kubectl logs -n kars-system "$pod" --tail=100 --previous 2>/dev/null || true
         done
+        fi
         fail "Sandbox namespace not created"
     fi
 }
@@ -377,11 +381,13 @@ test_sandbox_pod_starts() {
         # (harness/pull-policy bug); a non-zero terminated message means the
         # egress-guard command failed (a distroless tool break — sh/iptables
         # missing — the regression class this gate exists to catch).
+        if [ "${KARS_E2E_SUITE:-full}" != "standalone-governed" ]; then
         kubectl get pod -n "$ns" "$pod" \
             -o jsonpath='egress-guard waiting: {.status.initContainerStatuses[?(@.name=="egress-guard")].state.waiting.reason} {.status.initContainerStatuses[?(@.name=="egress-guard")].state.waiting.message}{"\n"}' 2>/dev/null || true
         kubectl get pod -n "$ns" "$pod" \
             -o jsonpath='egress-guard terminated: {.status.initContainerStatuses[?(@.name=="egress-guard")].lastState.terminated.message}{"\n"}' 2>/dev/null || true
         kubectl describe pod -n "$ns" "$pod" 2>/dev/null | sed -n '/Events:/,$p' | tail -25 || true
+        fi
         fail "Sandbox pod never passed the egress-guard init container"
         return
     fi
@@ -402,7 +408,9 @@ test_sandbox_pod_starts() {
     if [ "$probe_ok" -eq 1 ]; then
         pass "Router self-probe works in distroless image (kars-inference-router probe /healthz)"
     else
+        if [ "${KARS_E2E_SUITE:-full}" != "standalone-governed" ]; then
         kubectl logs -n "$ns" "$pod" -c inference-router --tail=30 2>/dev/null || true
+        fi
         fail "Router self-probe failed in distroless image — operator/CLI router calls would break"
     fi
 }
@@ -1787,11 +1795,21 @@ test_sandbox_deployment_exists() {
     # egress-guard init + router probe are asserted by
     # test_sandbox_pod_starts instead); only that the reconciler shaped
     # the workload correctly.
-    if kubectl get deploy -n kars-e2e-test --no-headers 2>/dev/null | grep -q .; then
-        pass "Sandbox Deployment created in sandbox namespace"
-    else
-        fail "No Deployment in sandbox namespace kars-e2e-test"
-    fi
+    local deadline=$(($(date +%s) + 90)) snapshot uid generation observed
+    while [ "$(date +%s)" -lt "$deadline" ]; do
+        snapshot=$(kubectl --context kind-kars-e2e --request-timeout=15s \
+            get deployment e2e-test -n kars-e2e-test \
+            -o jsonpath='{.metadata.uid}{"|"}{.metadata.generation}{"|"}{.status.observedGeneration}' 2>/dev/null) || snapshot=""
+        IFS='|' read -r uid generation observed <<< "$snapshot"
+        if [ -n "$uid" ] && [[ "$generation" =~ ^[0-9]+$ ]] && [[ "$observed" =~ ^[0-9]+$ ]] \
+            && [ "$generation" -gt 0 ] && [ "$observed" -ge "$generation" ]; then
+            pass "Sandbox Deployment created and observed before pod assertions"
+            return 0
+        fi
+        sleep 1
+    done
+    fail "Sandbox Deployment was absent or unobserved after its bounded readiness wait"
+    return 1
 }
 
 test_operator_default_deny_np() {

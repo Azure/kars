@@ -24,8 +24,8 @@ CHECKS = (
 
 
 class StandaloneGovernedTests(unittest.TestCase):
-    def invoke(self, *, failure="", clusters="", changed_uid=False, existing_config=False):
-        with tempfile.TemporaryDirectory() as directory:
+    def invoke(self, *, failure="", clusters="", changed_uid=False, existing_config=False, diagnostic_failure=False):
+        with tempfile.TemporaryDirectory(prefix=".standalone-unit-", dir=ROOT) as directory:
             config = Path(directory) / "owned-kubeconfig"
             if existing_config:
                 config.write_text("existing fixture")
@@ -47,6 +47,7 @@ kind() {
 }
 kubectl() { printf '%s' "$FIXTURE_UID"; }
 node() { printf 'STEP budget\n'; [ "$FIXTURE_FAILURE" != "budget" ]; }
+standalone_diagnostics() { printf 'SNAPSHOT %s\n' "$1"; [ "$FIXTURE_DIAGNOSTIC_FAILURE" != 1 ]; }
 prepare_sre_authority_legacy() { printf 'FORBIDDEN SRE PREPARE\n'; return 91; }
 test_sre_authority_migration() { printf 'FORBIDDEN SRE MIGRATION\n'; return 92; }
 sre_authority_cleanup() { printf 'FORBIDDEN SRE CLEANUP\n'; return 93; }
@@ -57,6 +58,7 @@ sre_authority_cleanup() { printf 'FORBIDDEN SRE CLEANUP\n'; return 93; }
             script += "standalone_governed_main\n"
             env = dict(os.environ, FIXTURE_RUNNER=str(RUNNER), FIXTURE_CONFIG=str(config),
                        FIXTURE_FAILURE=failure, FIXTURE_CLUSTERS=clusters, FIXTURE_UID="original")
+            env["FIXTURE_DIAGNOSTIC_FAILURE"] = "1" if diagnostic_failure else "0"
             result = subprocess.run(["bash", "-c", script], env=env, text=True,
                                     capture_output=True, timeout=20, check=False)
             return result, config.exists()
@@ -68,6 +70,7 @@ sre_authority_cleanup() { printf 'FORBIDDEN SRE CLEANUP\n'; return 93; }
             self.assertIn("STEP " + check, result.stdout)
         self.assertIn("STEP budget", result.stdout)
         self.assertIn("DELETE OWNED CLUSTER", result.stdout)
+        self.assertLess(result.stdout.index("SNAPSHOT final"), result.stdout.index("DELETE OWNED CLUSTER"))
         self.assertNotIn("FORBIDDEN", result.stdout)
 
     def test_each_feature_failure_remains_a_failed_run_and_still_cleans_owned_cluster(self):
@@ -77,6 +80,60 @@ sre_authority_cleanup() { printf 'FORBIDDEN SRE CLEANUP\n'; return 93; }
                 result, _ = self.invoke(failure=check)
                 self.assertNotEqual(result.returncode, 0)
                 self.assertIn("DELETE OWNED CLUSTER", result.stdout)
+                self.assertLess(result.stdout.index("SNAPSHOT "), result.stdout.index("DELETE OWNED CLUSTER"))
+
+    def test_diagnostic_failure_is_fatal_without_masking_the_original_failure(self):
+        for failed in ("", "budget"):
+            with self.subTest(failed=failed):
+                result, _ = self.invoke(failure=failed, diagnostic_failure=True)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("diagnostics incomplete", result.stderr)
+                self.assertIn("DELETE OWNED CLUSTER", result.stdout)
+                if failed:
+                    self.assertIn("Standalone check failed: standalone_budget", result.stdout)
+
+    def test_deployment_wait_observes_current_generation_before_pod_assertions(self):
+        with tempfile.TemporaryDirectory(prefix=".standalone-unit-", dir=ROOT) as directory:
+            counter = Path(directory) / "calls"
+            counter.write_text("0")
+            script = r'''
+source "$FIXTURE_MAIN"
+kubectl() {
+    count=$(cat "$FIXTURE_COUNTER"); count=$((count + 1)); printf '%s' "$count" > "$FIXTURE_COUNTER"
+    case "$count" in
+      1) return 1 ;;
+      2) printf 'deployment-uid|2|1' ;;
+      *) printf 'deployment-uid|2|2' ;;
+    esac
+}
+sleep() { printf 'BOUNDED POLL\n'; }
+test_sandbox_deployment_exists
+'''
+            result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=10,
+                env=dict(os.environ, FIXTURE_MAIN=str(ROOT / "tests/e2e/run.sh"), FIXTURE_COUNTER=str(counter)))
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertEqual(counter.read_text(), "3")
+            self.assertIn("created and observed", result.stdout)
+            self.assertEqual(result.stdout.count("BOUNDED POLL"), 2)
+
+    def test_exit_handler_preserves_a_nonstandard_original_failure_code(self):
+        script = r'''
+source "$FIXTURE_RUNNER"
+standalone_diagnostics() { return 1; }
+standalone_cleanup() { printf 'OWNED CLEANUP\n'; return 0; }
+standalone_exit 23
+'''
+        result = subprocess.run(["bash", "-c", script], text=True, capture_output=True, timeout=10,
+            env=dict(os.environ, FIXTURE_RUNNER=str(RUNNER)))
+        self.assertEqual(result.returncode, 23)
+        self.assertIn("OWNED CLEANUP", result.stdout)
+
+    def test_standalone_ci_does_not_dump_raw_pods_or_logs_after_teardown(self):
+        workflow = (ROOT / ".github/workflows/ci.yml").read_text()
+        diagnostics = workflow.split("      - name: Collect cluster diagnostics on failure\n", 1)[1]
+        self.assertIn("&& !(github.event_name == 'workflow_dispatch' && inputs.e2e_suite == 'standalone-governed')",
+                      diagnostics.split("run:", 1)[0])
+        self.assertIn("standalone_diagnostics_test mcp_probe_test", workflow)
 
     def test_setup_failure_does_not_adopt_or_teardown_unestablished_cluster(self):
         result, _ = self.invoke(failure="setup_cluster")

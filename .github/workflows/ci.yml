@@ -422,7 +422,7 @@ jobs:
           version: v1.30.5
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Check public-schema diagnostic privacy
-        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test credential_schema_test standalone_governed_test
+        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test credential_schema_test standalone_governed_test standalone_diagnostics_test mcp_probe_test
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
       - name: Prove native historical Helm wait orders CRDs before hooks and permits schema upgrades
@@ -802,7 +802,7 @@ jobs:
           esac
 
       - name: Collect cluster diagnostics on failure
-        if: failure() && steps.paths.outputs.run == 'true'
+        if: failure() && steps.paths.outputs.run == 'true' && !(github.event_name == 'workflow_dispatch' && inputs.e2e_suite == 'standalone-governed')
         run: |
           mkdir -p e2e-diag
           kubectl get pods -A -o wide > e2e-diag/pods.txt 2>&1 || true
@@ -812,7 +812,7 @@ jobs:
           kubectl logs -n kars-system -l app.kubernetes.io/component=inference-router --tail=500 > e2e-diag/router.log 2>&1 || true
 
       - name: Upload diagnostics
-        if: failure() && steps.paths.outputs.run == 'true'
+        if: (failure() || (github.event_name == 'workflow_dispatch' && inputs.e2e_suite == 'standalone-governed')) && steps.paths.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: e2e-diagnostics-${{ github.run_id }}

@@ -12,8 +12,7 @@ import signal
 import socket
 import subprocess
 import time
-import urllib.error
-import urllib.request
+from mcp_probe import Client
 
 ROOT = Path(__file__).resolve().parents[2]
 CONTEXT = "kind-kars-e2e"
@@ -97,21 +96,6 @@ def ready(namespace):
         and "echo" in status.get("discoveredTools", [])) else False
 
 
-def rpc(port, method, params, server=None):
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
-    if server:
-        headers["X-Kars-Mcp-Server"] = server
-    request = urllib.request.Request(f"http://127.0.0.1:{port}/mcp",
-        data=json.dumps({"jsonrpc": "2.0", "id": 1, "method": method, "params": params}).encode(),
-        headers=headers)
-    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
-    try:
-        with opener.open(request, timeout=15) as response:
-            return response.status, json.loads(response.read(2 * 1024 * 1024))
-    except urllib.error.HTTPError as error:
-        return error.code, None
-
-
 def build_image():
     run(["docker", "build", "-t", IMAGE, "-f", "sandbox-images/mcp-everything/Dockerfile",
          "sandbox-images/mcp-everything"], seconds=360)
@@ -172,19 +156,20 @@ def test():
         cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     PROCESSES.append(process)
     try:
+        rpc = Client(port, SERVER)
         def catalog():
             require(process.poll() is None, "MCP port-forward exited")
             try:
-                code, body = rpc(port, "tools/list", {}, SERVER)
+                code, body = rpc.call("tools/list", {})
                 return body if code == 200 and any(tool.get("name") == "e2e_tools.echo"
                     for tool in (body or {}).get("result", {}).get("tools", [])) else False
-            except (OSError, ValueError):
+            except (OSError, ValueError, AssertionError):
                 return False
         wait("actual routed MCP catalog after reconciliation", catalog, seconds=120)
-        code, body = rpc(port, "tools/call", {"name": "e2e_tools.echo", "arguments": {"message": "mcp-kind-proof"}}, SERVER)
+        code, body = rpc.call("tools/call", {"name": "e2e_tools.echo", "arguments": {"message": "mcp-kind-proof"}})
         require(code == 200 and "error" not in body and not body["result"].get("isError")
                 and "mcp-kind-proof" in json.dumps(body["result"]), "Real MCP echo did not execute through the router")
-        code, _ = rpc(port, "tools/list", {}, "unmounted")
+        code, _ = rpc.call("tools/list", {}, "unmounted")
         require(code == 404, "Unknown MCP server scope was not rejected")
         print("MCP-PASS Real router-scoped discovery and Everything echo work from an alive BYO fixture; no model run claimed", flush=True)
     finally:
