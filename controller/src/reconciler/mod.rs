@@ -1308,16 +1308,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // a graceful resume. We still walk the rest of this block so
         // image / env / volume drift is reflected on the suspended
         // Deployment (so resume picks up the latest spec).
-        let suspended_by_spec = spec.suspended.unwrap_or(false);
-        let desired_replicas: i64 = if suspended_by_spec
-            || sandbox
-                .annotations()
-                .contains_key(crate::kars_task_reconciler::rebind::HOLD)
-        {
-            0
-        } else {
-            1
-        };
+        let desired_replicas = crate::kars_task_reconciler::rebind::runtime_replicas(&sandbox);
 
         // S10.A2: image now comes from the runtime plan (already
         // resolved against the controller default fallback). The

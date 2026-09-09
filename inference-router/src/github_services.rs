@@ -9,7 +9,9 @@ use crate::{
     github_app::{Error, GitHubApp},
 };
 use serde::Deserialize;
-use std::{io::Read, path::PathBuf, sync::Arc};
+#[cfg(test)]
+use std::path::PathBuf;
+use std::{io::Read, sync::Arc};
 use tokio::sync::Mutex;
 
 pub(crate) const CONFIG_PATH: &str = "/etc/kars/github/config.json";
@@ -33,6 +35,7 @@ struct Loaded {
 }
 
 pub(crate) struct GitHubServices {
+    #[cfg(test)]
     path: PathBuf,
     identity: Option<Identity>,
     client: reqwest::Client,
@@ -42,6 +45,7 @@ pub(crate) struct GitHubServices {
 impl GitHubServices {
     pub(crate) fn new(identity: Option<Identity>, client: reqwest::Client) -> Self {
         Self {
+            #[cfg(test)]
             path: CONFIG_PATH.into(),
             identity,
             client,
@@ -95,8 +99,13 @@ impl GitHubServices {
         Ok(Some(app))
     }
 
+    #[cfg(not(test))]
     fn read(&self) -> Result<Option<Vec<u8>>, Error> {
-        let file = match std::fs::File::open(&self.path) {
+        Self::read_file(std::fs::File::open(CONFIG_PATH))
+    }
+
+    fn read_file(file: std::io::Result<std::fs::File>) -> Result<Option<Vec<u8>>, Error> {
+        let file = match file {
             Ok(file) => file,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
             Err(_) => return Err(Error::Configuration),

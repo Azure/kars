@@ -5,7 +5,10 @@
 
 use crate::{
     kars_task::{KarsTask, KarsTaskStatus},
-    status::{conditions, phase::{PHASE_DEGRADED, PHASE_READY}},
+    status::{
+        conditions,
+        phase::{PHASE_DEGRADED, PHASE_READY},
+    },
 };
 use kube::{Client, ResourceExt};
 
@@ -20,7 +23,9 @@ pub(crate) async fn preflight(client: &Client, task: &KarsTask) -> Result<(), St
         super::sources::preflight_task(client, task, bindings).await?;
     }
     if let Some(binding) = blueprint.github_binding.as_ref() {
-        let workspace = task.namespace().ok_or("Credential Task workspace missing")?;
+        let workspace = task
+            .namespace()
+            .ok_or("Credential Task workspace missing")?;
         super::github::preflight_binding(client, &workspace, binding).await?;
     }
     Ok(())
@@ -39,7 +44,9 @@ pub(crate) async fn enforce(client: &Client, task: &KarsTask, status: &mut KarsT
     if let Err(error) = preflight(client, task).await {
         status.phase = Some(PHASE_DEGRADED.into());
         status.envelope_digest = None;
-        let prior = task.status.as_ref()
+        let prior = task
+            .status
+            .as_ref()
             .and_then(|status| status.conditions.as_ref())
             .and_then(|conditions| conditions::find(conditions, conditions::TYPE_READY));
         let condition = conditions::preserve_transition_time(
@@ -58,14 +65,21 @@ pub(crate) async fn pause(client: &Client, task: &KarsTask, status: &mut KarsTas
     status.execution_phase = Some(PHASE_DEGRADED.into());
     match crate::kars_task_execution::pause_credentials(client, task).await {
         Ok(exists) => {
-            status.sandbox_ref = exists.then(|| crate::mcp_server::LocalObjectRef { name: task.name_any() });
+            status.sandbox_ref = exists.then(|| crate::mcp_server::LocalObjectRef {
+                name: task.name_any(),
+            });
             status.execution_detail = Some(
                 "Governed execution authority unavailable; runtime paused without deleting namespace or state".into(),
             );
         }
         Err(error) => {
-            status.sandbox_ref = task.status.as_ref().and_then(|status| status.sandbox_ref.clone());
-            status.execution_detail = Some(format!("Credential authority unavailable; owned execution pause failed: {error}"));
+            status.sandbox_ref = task
+                .status
+                .as_ref()
+                .and_then(|status| status.sandbox_ref.clone());
+            status.execution_detail = Some(format!(
+                "Credential authority unavailable; owned execution pause failed: {error}"
+            ));
         }
     }
 }

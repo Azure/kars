@@ -190,7 +190,7 @@ pub struct TaskBlueprint {
     /// Explicit governed credential sources and key grants; included in task authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credential_bindings: Option<crate::credential_grant::CredentialBindings>,
-    #[serde(default,skip_serializing_if="Option::is_none")]
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub github_binding: Option<crate::credential_grant::GitHubBinding>,
 
     /// System prompt / standing instructions for the agent, in addition to the
@@ -444,7 +444,7 @@ pub enum PolicyAxis {
     EgressAllowlist,
 }
 
-#[path="kars_task_violations.rs"]
+#[path = "kars_task_violations.rs"]
 mod violations;
 pub use violations::EnvelopeViolation;
 
@@ -550,8 +550,15 @@ pub fn validate_execution_contract(spec: &KarsTaskSpec) -> Result<(), String> {
     {
         crate::credential_grant::github::validate(binding)?;
         crate::credential_grant::github::agent_sources(blueprint.credential_bindings.as_ref())?;
-        if blueprint.egress.iter().any(|entry| crate::credential_grant::github::opaque_github_egress(&entry.host)) {
-            return Err("Keyless GitHub requires repository-enforced routes, not opaque GitHub egress".into());
+        if blueprint
+            .egress
+            .iter()
+            .any(|entry| crate::credential_grant::github::opaque_github_egress(&entry.host))
+        {
+            return Err(
+                "Keyless GitHub requires repository-enforced routes, not opaque GitHub egress"
+                    .into(),
+            );
         }
     }
     if let Some(bindings) = spec
@@ -604,8 +611,14 @@ pub fn spec_attenuation_violations(
 ) -> Vec<EnvelopeViolation> {
     let mut v = child.envelope.attenuation_violations(&parent.envelope);
     if !crate::credential_grant::github::attenuates(
-        child.blueprint.as_ref().and_then(|b|b.github_binding.as_ref()),
-        parent.blueprint.as_ref().and_then(|b|b.github_binding.as_ref()),
+        child
+            .blueprint
+            .as_ref()
+            .and_then(|b| b.github_binding.as_ref()),
+        parent
+            .blueprint
+            .as_ref()
+            .and_then(|b| b.github_binding.as_ref()),
     ) {
         v.push(EnvelopeViolation::GitHubGrantNotSubset);
     }

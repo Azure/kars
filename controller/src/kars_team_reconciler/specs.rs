@@ -55,7 +55,11 @@ pub(crate) fn member_blueprint(team: &KarsTeam, role: &TeamRole) -> Option<TaskB
     if let Some(member) = &mut blueprint
         && member.github_binding.is_none()
     {
-        member.github_binding = team.spec.blueprint.as_ref().and_then(|b|b.github_binding.clone());
+        member.github_binding = team
+            .spec
+            .blueprint
+            .as_ref()
+            .and_then(|b| b.github_binding.clone());
     }
     blueprint
 }
