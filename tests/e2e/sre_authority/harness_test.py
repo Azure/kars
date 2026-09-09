@@ -72,7 +72,8 @@ class HarnessTests(unittest.TestCase):
             "available": True, "uidMatches1001": True, "serviceExit": 0, "endpointExit": 0,
             "sameNodeControl": {"available": False},
             "guardControls": {variant: {"available": False} for variant in ("full", "filter-only", "legacy-full")},
-            "policyControl": {"available": False}, "denyAllPolicyControl": {"available": False}})
+            "policyControl": {"available": False}, "denyAllPolicyControl": {"available": False},
+            "apiEndpointPolicyControl": {"available": False}})
         self.assertEqual(len(writes), 1)
         method, path, args = writes[0]
         self.assertEqual(method, "PATCH")
@@ -122,6 +123,36 @@ class HarnessTests(unittest.TestCase):
         self.assertEqual(deleted[0][0], "DELETE")
         self.assertEqual(deleted[0][2]["body"]["preconditions"], {"uid": "control-uid", "resourceVersion": "7"})
 
+    def test_endpoint_candidate_keeps_full_guard_and_tests_separate_agent_uid(self):
+        h = Harness.__new__(Harness)
+        h.root = Path(__file__).resolve().parents[3]
+        pod = {"spec": {"nodeName": "sandbox-worker"}}
+        container = {"name": "network", "image": "kars-sandbox-e2e:dev",
+                     "command": ["sh", "-c", "uid test = 1001 uidMatches1001"],
+                     "securityContext": {"runAsUser": 1001, "capabilities": {"drop": ["ALL"]}}}
+        seen = []
+        current = {"metadata": {"uid": "control", "resourceVersion": "1"}, "status": {"phase": "Succeeded"}}
+        h.create = lambda obj: seen.append(obj) or current
+        h.get = lambda *_args: current
+        h.poll = lambda _label, predicate, **_kwargs: self.assertTrue(predicate())
+        h.k = lambda *args: (
+            '{"available":true,"uidMatches1000":true,"serviceExit":1,"endpointExit":124}'
+            if "agent-network" in args else '{"available":true,"uidMatches1001":true,"serviceExit":0,"endpointExit":0}')
+        h.api = lambda *_args, **_kwargs: None
+        with patch("sre_authority.network_diagnostics.guard_variant", return_value={"name": "guard"}) as guard:
+            result = h.control_connectivity_diagnostics(pod, container, policy=True, api_endpoint=True)
+        guard.assert_called_once_with(h.root, pod, "full")
+        actual = seen[0]["spec"]["containers"]
+        self.assertEqual([obj["securityContext"]["runAsUser"] for obj in actual], [1001, 1000])
+        self.assertIn("= 1000", actual[1]["command"][2])
+        self.assertIn("uidMatches1000", actual[1]["command"][2])
+        self.assertTrue(actual[0]["command"][2].startswith("sleep 10\n"))
+        self.assertTrue(result["agentUid1000"]["uidMatches1000"])
+        self.assertNotEqual(result["agentUid1000"]["endpointExit"], 0)
+        for obj in actual:
+            self.assertNotIn("volumeMounts", obj)
+            self.assertNotIn("envFrom", obj)
+
     def test_policy_comparison_targets_only_owned_control_and_never_changes_source_policy(self):
         h = Harness.__new__(Harness)
         source = {"spec": {"podSelector": {}, "policyTypes": ["Egress"],
@@ -136,12 +167,19 @@ class HarnessTests(unittest.TestCase):
         h.api = lambda method, path, **kwargs: deleted.append((method, path, kwargs))
         self.assertEqual(h.policy_connectivity_diagnostics({}, {}), {"policy": True})
         self.assertEqual(source, before)
+        h.get = lambda kind, name, namespace: (
+            {"subsets": [{"addresses": [{"ip": "172.18.0.2"}], "ports": [{"name": "https", "port": 6443}]}]}
+            if kind == "endpoints" else source if name == "sandbox-policy" else own)
+        h.policy_connectivity_diagnostics({}, {}, api_endpoint=True)
+        self.assertEqual(seen[1]["spec"]["egress"], source["spec"]["egress"] + [
+            {"to": [{"ipBlock": {"cidr": "172.18.0.2/32"}}], "ports": [{"protocol": "TCP", "port": 6443}]}])
+        self.assertEqual(source, before)
         self.assertEqual(seen[0]["spec"]["egress"], source["spec"]["egress"])
         self.assertEqual(seen[0]["spec"]["podSelector"],
                          {"matchLabels": {"kars.azure.com/e2e-policy-control": "true"}})
         self.assertEqual(deleted[0][2]["body"]["preconditions"], {"uid": "policy-uid", "resourceVersion": "3"})
         h.policy_connectivity_diagnostics({}, {}, deny_all=True)
-        self.assertEqual(seen[1]["spec"], {"policyTypes": ["Egress"], "egress": [],
+        self.assertEqual(seen[2]["spec"], {"policyTypes": ["Egress"], "egress": [],
             "podSelector": {"matchLabels": {"kars.azure.com/e2e-policy-control": "deny-all"}}})
         self.assertEqual(source, before)
 
