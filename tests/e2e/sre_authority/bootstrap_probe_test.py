@@ -31,7 +31,8 @@ class BootstrapProofTests(unittest.TestCase):
         self.assertNotIn("do-not-publish", json.dumps(cases))
         for call in actor.call_args_list:
             self.assertEqual(call.kwargs["method"], "DELETE")
-            self.assertTrue(call.args[1].endswith("?dryRun=All"))
+            self.assertNotIn("?", call.args[1])
+            self.assertEqual(call.args[2]["dryRun"], ["All"])
             self.assertEqual(call.args[2]["preconditions"], {"uid": "owned", "resourceVersion": "2"})
         self.assertEqual(api.call_args_list[-1].args[1], "DELETE")
         self.assertEqual(api.call_args_list[-1].args[3]["preconditions"], {"uid": "owned", "resourceVersion": "2"})
