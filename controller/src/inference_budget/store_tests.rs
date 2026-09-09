@@ -76,6 +76,7 @@ fn account() -> KarsBudgetAccount {
     account.metadata.namespace = Some("kars-system".into());
     account.metadata.uid = Some("account-uid".into());
     account.metadata.resource_version = Some("1".into());
+    account.metadata.generation = Some(1);
     account.labels_mut().insert(MANAGED_BY.into(), OWNER.into());
     account
         .annotations_mut()
@@ -86,7 +87,9 @@ fn account() -> KarsBudgetAccount {
     let ledger = ledger.register_session(identity("b")).unwrap().next;
     account.status = Some(KarsBudgetAccountStatus {
         ledger: Some(ledger),
+        ..Default::default()
     });
+    account.status = Some(super::super::status::project(&account, None));
     account
 }
 
@@ -128,6 +131,9 @@ enum Fault {
     ConflictOnce,
     CommitThenFail,
     RecreateOnWrite,
+    FailWrite,
+    FailRead,
+    ReserveOnConflict,
 }
 
 struct State {
@@ -156,6 +162,7 @@ impl Respond for Server {
     fn respond(&self, request: &Request) -> ResponseTemplate {
         let mut state = self.0.lock().unwrap();
         match (request.method.as_str(), request.url.path()) {
+            ("GET", OBJECT) if matches!(state.fault, Fault::FailRead) => failure(503),
             ("GET", OBJECT) => state
                 .account
                 .as_ref()
@@ -170,6 +177,7 @@ impl Respond for Server {
                 account.metadata.uid = Some("account-uid".into());
                 account.metadata.namespace = Some("kars-system".into());
                 account.metadata.resource_version = Some(state.version.to_string());
+                account.metadata.generation = Some(1);
                 let output = response(&account);
                 state.account = Some(account);
                 state.writes += 1;
@@ -179,6 +187,24 @@ impl Respond for Server {
                 let mut incoming: KarsBudgetAccount =
                     serde_json::from_slice(&request.body).unwrap();
                 match state.fault {
+                    Fault::FailWrite => return failure(503),
+                    Fault::ReserveOnConflict => {
+                        state.fault = Fault::None;
+                        let status = state.account.as_mut().unwrap().status.as_mut().unwrap();
+                        status.ledger = Some(
+                            status
+                                .ledger
+                                .as_ref()
+                                .unwrap()
+                                .reserve(&reserve("a"), 100)
+                                .unwrap()
+                                .next,
+                        );
+                        state.version += 1;
+                        let version = state.version.to_string();
+                        state.account.as_mut().unwrap().metadata.resource_version = Some(version);
+                        return failure(409);
+                    }
                     Fault::ConflictOnce => {
                         state.fault = Fault::None;
                         state.version += 1;
@@ -440,6 +466,10 @@ async fn bootstrap_is_metadata_first_and_sealed_only_after_uid_bound_status() {
         .await
         .unwrap();
     assert!(store.read(&root(), "account-uid").await.is_err());
+    let pending = anchor.status.as_ref().unwrap();
+    assert_eq!(pending.phase, Some(AccountStatusPhase::Bootstrap));
+    assert!(pending.ledger.is_none());
+    assert_eq!(pending.conditions[0].status, "False");
     let initialized = store
         .initialize(&root(), anchor.metadata.uid.as_deref().unwrap())
         .await
@@ -447,6 +477,10 @@ async fn bootstrap_is_metadata_first_and_sealed_only_after_uid_bound_status() {
     assert_eq!(
         initialized.annotations().get(BOOTSTRAP).map(String::as_str),
         Some("sealed")
+    );
+    assert_eq!(
+        initialized.status.as_ref().unwrap().phase,
+        Some(AccountStatusPhase::Active)
     );
     assert!(
         initialized
@@ -474,3 +508,6 @@ async fn replacement_between_read_and_commit_cannot_receive_a_grant() {
     );
     assert_eq!(state.lock().unwrap().writes, 0);
 }
+
+#[path = "status_tests.rs"]
+mod status_tests;

@@ -93,7 +93,7 @@ impl Store {
         Ok(())
     }
 
-    fn ledger(account: &KarsBudgetAccount) -> Result<&Ledger, StoreError> {
+    pub(super) fn ledger(account: &KarsBudgetAccount) -> Result<&Ledger, StoreError> {
         let ledger = account
             .status
             .as_ref()
@@ -120,6 +120,29 @@ impl Store {
         Ok(ledger)
     }
 
+    pub(super) fn bootstrap_ledger(account: &KarsBudgetAccount) -> Result<(), StoreError> {
+        if let Some(ledger) = account
+            .status
+            .as_ref()
+            .and_then(|status| status.ledger.as_ref())
+        {
+            ledger.validate()?;
+            if account.metadata.uid.as_deref() != Some(ledger.account_uid.as_str())
+                || ledger.root != account.spec.root
+                || ledger.scope != account.spec.scope
+                || ledger.limits.normalized() != account.spec.limits.normalized()
+                || !ledger.nodes.is_empty()
+                || !ledger.sessions.is_empty()
+                || !ledger.attempts.is_empty()
+                || ledger.meters != Default::default()
+                || ledger.phase != crate::inference_budget_contract::AccountPhase::Active
+            {
+                return Err(BudgetError::Corrupt.into());
+            }
+        }
+        Ok(())
+    }
+
     /// Reserve an account anchor. The owning root's protected status must pin
     /// the returned UID BEFORE `initialize` is called. Existing callers with a
     /// pin use `read`, never this bootstrap path.
@@ -140,7 +163,7 @@ impl Store {
             (BOOTSTRAP.into(), "pending".into()),
             (super::claim::ANNOTATION.into(), authority),
         ]));
-        match self.accounts.create(&PostParams::default(), &account).await {
+        let created = match self.accounts.create(&PostParams::default(), &account).await {
             Ok(created) => Ok(created),
             Err(kube::Error::Api(status)) if status.code == 409 => {
                 let existing = self
@@ -168,7 +191,13 @@ impl Store {
                 Ok(existing)
             }
             Err(error) => Err(api_error("create account anchor", error)),
-        }
+        }?;
+        self.refresh_status(
+            &created.spec.root,
+            created.metadata.uid.as_deref().ok_or(StoreError::Missing)?,
+            None,
+        )
+        .await
     }
 
     pub async fn initialize(
@@ -190,43 +219,41 @@ impl Store {
             Self::validate_identity(&account, root, pinned_uid)?;
             if account.annotations().get(BOOTSTRAP).map(String::as_str) == Some("sealed") {
                 Self::ledger(&account)?;
-                return Ok(account);
+                return self.refresh_status(root, pinned_uid, None).await;
             }
             if account.annotations().get(BOOTSTRAP).map(String::as_str) != Some("pending") {
                 return Err(StoreError::Missing);
             }
-            if let Some(ledger) = account
+            Self::bootstrap_ledger(&account)?;
+            if account
                 .status
                 .as_ref()
                 .and_then(|status| status.ledger.as_ref())
+                .is_some()
             {
                 // A crash after status initialization must validate the existing
                 // ledger, not reset it. Pending accounts cannot dispatch.
-                ledger.validate()?;
-                if ledger.account_uid != pinned_uid
-                    || ledger.root != *root
-                    || ledger.limits.normalized() != account.spec.limits.normalized()
-                    || !ledger.nodes.is_empty()
-                    || !ledger.sessions.is_empty()
-                    || !ledger.attempts.is_empty()
-                    || ledger.meters != Default::default()
-                {
-                    return Err(BudgetError::Corrupt.into());
-                }
                 match self.accounts.patch(&name, &PatchParams::default(), &Patch::Merge(json!({
                     "metadata": {"uid": pinned_uid, "resourceVersion": account.resource_version(),
                         "annotations": {BOOTSTRAP: "sealed"}}
                 }))).await {
-                    Ok(sealed) => { Self::ledger(&sealed)?; return Ok(sealed); }
+                    Ok(sealed) => {
+                        Self::ledger(&sealed)?;
+                        return self.refresh_status(root, pinned_uid, None).await;
+                    }
                     Err(kube::Error::Api(status)) if status.code == 409 => continue,
                     Err(error) => return Err(api_error("seal account bootstrap", error)),
                 }
             }
             let ledger = Ledger::new(pinned_uid.into(), root.clone(), account.spec.limits)?;
-            match self.accounts.patch_status(&name, &PatchParams::default(), &Patch::Merge(json!({
-                "metadata": {"uid": pinned_uid, "resourceVersion": account.resource_version()},
-                "status": {"ledger": ledger}
-            }))).await {
+            let mut next = account.clone();
+            next.status.get_or_insert_with(Default::default).ledger = Some(ledger);
+            next.status = Some(super::status::project(&next, None));
+            match self
+                .accounts
+                .replace_status(&name, &PostParams::default(), &next)
+                .await
+            {
                 Ok(_) => {}
                 Err(kube::Error::Api(status)) if status.code == 409 => continue,
                 Err(error) => return Err(api_error("initialize account ledger", error)),
@@ -283,9 +310,8 @@ impl Store {
             // Merge-patching maps would retain compacted attempt rows. Replace
             // the status as one value using PUT with UID/RV preconditions.
             let mut next = account.clone();
-            next.status = Some(KarsBudgetAccountStatus {
-                ledger: Some(mutation.next),
-            });
+            next.status.get_or_insert_with(Default::default).ledger = Some(mutation.next);
+            next.status = Some(super::status::project(&next, None));
             let committed = tokio::time::timeout_at(
                 deadline,
                 self.accounts
@@ -308,6 +334,54 @@ impl Store {
                 }
                 Err(kube::Error::Api(status)) if status.code == 409 => continue,
                 Err(error) => return Err(api_error("commit ledger transition", error)),
+            }
+        }
+        Err(StoreError::Contention)
+    }
+
+    /// Report only from a fresh UID/RV snapshot. Even corrupt or unavailable
+    /// accounts keep their exact ledger; a report can never initialize funding.
+    pub(super) async fn refresh_status(
+        &self,
+        root: &RootIdentity,
+        account_uid: &str,
+        error: Option<&StoreError>,
+    ) -> Result<KarsBudgetAccount, StoreError> {
+        root.validate()?;
+        if !crate::inference_budget_contract::valid_uid(account_uid) {
+            return Err(BudgetError::Identity.into());
+        }
+        let deadline =
+            tokio::time::Instant::now() + std::time::Duration::from_secs(MAX_OPERATION_SECONDS);
+        for _ in 0..RETRIES {
+            let account =
+                tokio::time::timeout_at(deadline, self.accounts.get(&name_for_root(root)))
+                    .await
+                    .map_err(|_| StoreError::Contention)?
+                    .map_err(|error| api_error("read account observation", error))?;
+            Self::validate_identity(&account, root, account_uid)?;
+            let mut next = account.clone();
+            next.status = Some(super::status::project(&account, error));
+            if next.status == account.status {
+                return Ok(account);
+            }
+            match tokio::time::timeout_at(
+                deadline,
+                self.accounts
+                    .replace_status(&name_for_root(root), &PostParams::default(), &next),
+            )
+            .await
+            .map_err(|_| StoreError::Contention)?
+            {
+                Ok(stored) => {
+                    Self::validate_identity(&stored, root, account_uid)?;
+                    if stored.status != next.status {
+                        return Err(BudgetError::Corrupt.into());
+                    }
+                    return Ok(stored);
+                }
+                Err(kube::Error::Api(status)) if status.code == 409 => continue,
+                Err(error) => return Err(api_error("commit account observation", error)),
             }
         }
         Err(StoreError::Contention)

@@ -12,6 +12,7 @@ pub mod pod;
 pub mod recovery;
 pub mod scope;
 pub mod service;
+mod status;
 pub mod store;
 pub mod team;
 pub mod transport;
