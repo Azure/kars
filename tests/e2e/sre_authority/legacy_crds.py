@@ -123,7 +123,9 @@ def bootstrap_legacy_crds(h, chart, sources):
         obj["metadata"]["annotations"] = {
             "meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": SYSTEM,
         }
-        h.create(obj)
+        # Use Helm's own field-manager name as well as its release metadata.
+        # Otherwise its later SSA schema upgrade conflicts with kubectl-create.
+        h.create(obj, manager="helm")
     h.k("wait", "--for=condition=Established",
         *[f'crd/{obj["metadata"]["name"]}' for obj in objects], "--timeout=60s", timeout=70)
 
