@@ -373,6 +373,7 @@ class Harness:
         print(f"SRE-PASS {message}", flush=True)
 
     def diagnostics(self):
+        from .bootstrap_diagnostics import failure_facts
         self.deadline = max(self.deadline, time.monotonic() + 50)
         # Status and identities only; never dump Secret bodies or whole Pods.
         for kind, name, namespace in [("karssreregistrations.kars.azure.com", "canonical", None),
@@ -389,7 +390,9 @@ class Harness:
                         **({"authorityFailure": authority_failure_site(self.root, status.get("detail"))}
                            if kind == "karssreregistrations.kars.azure.com" and status.get("phase") == "Blocked" else {}),
                         "conditions": [{"type": condition.get("type"), "status": condition.get("status"),
-                                        "reason": condition.get("reason")}
+                                        "reason": condition.get("reason"),
+                                        **failure_facts(condition.get("message"),
+                                                        {f"kars-sre-{name}": {} for name in POLICIES})}
                                        for condition in status.get("conditions", [])]}), flush=True)
             except Exception:
                 print(f"SRE-DIAG {kind}/{name} unavailable", flush=True)
