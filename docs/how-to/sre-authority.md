@@ -251,6 +251,11 @@ kars sre uninstall --namespace kars-system --release kars
 ```
 
 Retirement revokes owned private grants and credentials before source cleanup.
+The registrar-authorized controller first quiesces and UID/resourceVersion-
+fences deletion of its owned SRE Deployment; it does not leave that protected
+object for the unprivileged namespace controller. Foreign/replaced consumers
+and external finalizers are preserved, not adopted or forced. Retained Retired
+records can finish this owned cleanup without reissuing authority.
 Uninstall/destroy refuse an active enrollment or unretired legacy grants.
 Retired registrations remain audit records; recreating the source requires
 explicit enrollment of the new UIDs (`authority stage-source` can atomically
