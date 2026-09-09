@@ -1,7 +1,6 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use futures::StreamExt;
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::Duration;
@@ -16,7 +15,7 @@ pub(super) struct Probe {
     pub digest: String,
 }
 
-async fn payload(response: reqwest::Response, id: u64) -> Result<Value, String> {
+async fn payload(mut response: reqwest::Response, id: u64) -> Result<Value, String> {
     if !response.status().is_success() {
         return Err(format!(
             "Managed MCP probe HTTP {}",
@@ -34,10 +33,12 @@ async fn payload(response: reqwest::Response, id: u64) -> Result<Value, String> 
         .get("content-type")
         .and_then(|header| header.to_str().ok())
         .is_some_and(|header| header.starts_with("text/event-stream"));
-    let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk.map_err(|_| "Managed MCP probe response transport failure")?;
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Managed MCP probe response transport failure")?
+    {
         if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE {
             return Err("Managed MCP probe response exceeds its byte limit".into());
         }
