@@ -37,7 +37,51 @@ this repository.
 
 ## Current validation
 
-### Cross-layer review d033 repairs — source/fast qualification, Rust lease pending
+### Cross-layer repair core qualification — passed, lease released
+
+Immutable qualified code head:
+`45ccc89996707ca69aaf42da5b76b8ba2844fa01`.
+The reviewed logic remains the `24646e1b` repair checkpoint. Parent-approved
+mechanical corrections are isolated in `71a42f6b`, `cdb8ba78` and `45ccc899`:
+
+- explicit `kars_task_rebind/tests.rs` and `tests/suspension.rs` module paths;
+- relocation of the unchanged `hold_credential_runtime` function from an
+  accidental nested block to its intended module scope;
+- the missing `ListParams` import;
+- equivalent test-only CAS conditional syntax and lexical MutexGuard scope
+  for strict Clippy. Test assertions and production behavioral bodies are
+  unchanged; no lint waiver was added.
+
+The initial frozen check exposed the wiring errors before test execution.
+After correction, all targeted tests passed; there was no test-behavior
+failure to suppress or redesign during review.
+
+| Guarded paired/default-feature/offline/locked validation | Result |
+| --- | ---: |
+| `check --tests` | Pass |
+| `credential` | 108 (83 controller, 24 router unit, 1 router integration) |
+| `kars_team_reconciler` | 32 |
+| `kars_task_execution` | 16 |
+| `kars_task_reconciler` | 12 |
+| `privacy_rpc` | 11 |
+| `observation` | 16 |
+| `governed_services::continuity_tests` | 4 |
+| `github` | 43 |
+| Final re-run of `kars_task_reconciler::rebind` | 3 |
+| Strict paired all-target Clippy, `-D warnings` | Pass |
+
+Filters overlap. The lease is **released**; no Cargo/rustc process remained.
+Minimum free space under the renewed guard was **9.06 GiB**, above the
+**8.50 GiB** floor; release-time free space was **9.07 GiB**. No broad cleanup,
+new target, dependency installation, private BFF Cargo, Docker, deployment,
+H100/cloud operation or public push occurred.
+
+Private `3e571ea` was untouched during this core batch. Its Rust compilation/
+tests remain the parent's hosted PR31 responsibility. D033's bounded independent
+review and actual admission/CNI acceptance remain required; passing core tests
+does not supply a human sign-off or a UID-aware native Secret GET guarantee.
+
+### Earlier d033 repairs — source/fast qualification before this core lease
 
 The independent review identified seven semantic/lifecycle blockers. The
 `ec1ecf54` results below **do not qualify these subsequent repairs**.
