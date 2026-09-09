@@ -3,6 +3,7 @@
 
 import base64
 import contextlib
+import copy
 import hashlib
 import inspect
 import json
@@ -431,6 +432,22 @@ class Harness:
         except Exception as error:
             facts["connectivityDiagnosticError"] = type(error).__name__
         try:
+            source = self.get("karssandbox", "sre", SYSTEM)
+            policy = self.get("networkpolicy", "sandbox-policy", RUNTIME)
+            service = self.get("service", "kubernetes", "default")
+            service_ip = service["spec"]["clusterIP"]
+            rules = policy.get("spec", {}).get("egress", []) if policy else []
+            facts["sourceLabelSre"] = source.get("metadata", {}).get("labels", {}).get("kars.azure.com/role") == "sre"
+            facts["explicitApiServiceRule"] = any(
+                any(peer.get("ipBlock", {}).get("cidr") == f"{service_ip}/32" for peer in rule.get("to", []))
+                and any(port.get("port") == 443 and port.get("protocol", "TCP") == "TCP"
+                        for port in rule.get("ports", [])) for rule in rules)
+            agents = json.loads(self.k("get", "daemonsets", "-n", "kube-system", "-o", "json"))["items"]
+            facts["knownNetworkAgents"] = sorted(agent["metadata"]["name"] for agent in agents
+                if agent["metadata"]["name"] in ("kindnet", "cilium", "calico-node", "antrea-agent", "kube-flannel-ds"))
+        except Exception as error:
+            facts["networkPolicyDiagnosticError"] = type(error).__name__
+        try:
             for label, executable in (("configuredCommand", "kars-inference-router"),
                                       ("absoluteCommand", "/usr/local/bin/kars-inference-router")):
                 result = self.k("exec", "-n", RUNTIME, pod["metadata"]["name"], "-c", "inference-router",
@@ -476,14 +493,16 @@ class Harness:
         existing = current["spec"].get("ephemeralContainers", [])
         require(not any(item["name"] == name for item in existing), "Diagnostic container name is already occupied")
         script = """
-if ! command -v timeout >/dev/null || ! command -v bash >/dev/null; then
+if ! command -v timeout >/dev/null || ! command -v bash >/dev/null || ! command -v id >/dev/null; then
   printf '{"available":false}\\n'; exit 0
 fi
+uid=false
+[ "$(id -u)" = 1001 ] && uid=true
 timeout 6 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' sre-tcp "$1" "$2" >/dev/null 2>&1
 service=$?
 timeout 6 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' sre-tcp "$3" "$4" >/dev/null 2>&1
 endpoint=$?
-printf '{"available":true,"serviceExit":%s,"endpointExit":%s}\\n' "$service" "$endpoint"
+printf '{"available":true,"uidMatches1001":%s,"serviceExit":%s,"endpointExit":%s}\\n' "$uid" "$service" "$endpoint"
 """
         probe = {"name": name, "image": STANDIN, "imagePullPolicy": "IfNotPresent",
                  "command": ["/bin/sh", "-c", script, "sre-connectivity", service_ip, str(service_port),
@@ -502,14 +521,51 @@ printf '{"available":true,"serviceExit":%s,"endpointExit":%s}\\n' "$service" "$e
             return any(item.get("name") == name and "terminated" in item.get("state", {})
                        for item in current.get("status", {}).get("ephemeralContainerStatuses", []))
         self.poll("bounded UID-1001 API TCP probes", completed, seconds=20, interval=0.5)
-        result = json.loads(self.k("logs", "-n", RUNTIME, pod["metadata"]["name"], "-c", name, "--tail=5"))
+        result = self.parse_connectivity_result(self.k("logs", "-n", RUNTIME, pod["metadata"]["name"], "-c", name, "--tail=5"))
+        try:
+            result["sameNodeControl"] = self.control_connectivity_diagnostics(pod, probe)
+        except Exception as error:
+            result["controlDiagnosticError"] = type(error).__name__
+        return result
+
+    @staticmethod
+    def parse_connectivity_result(output):
+        result = json.loads(output)
         require(isinstance(result, dict) and type(result.get("available")) is bool
-                and set(result) == ({"available", "serviceExit", "endpointExit"}
+                and set(result) == ({"available", "uidMatches1001", "serviceExit", "endpointExit"}
                                     if result["available"] else {"available"})
+                and (not result["available"] or type(result.get("uidMatches1001")) is bool)
                 and all(type(value) is int and 0 <= value <= 255
-                        for key, value in result.items() if key != "available"),
+                        for key, value in result.items() if key not in ("available", "uidMatches1001")),
                 "Connectivity diagnostic produced an unexpected result")
         return result
+
+    def control_connectivity_diagnostics(self, pod, container):
+        name = "sre-e2e-api-connectivity"
+        require(pod["spec"].get("nodeName"), "Connectivity comparison requires the actual sandbox node")
+        created = self.create({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "namespace": TENANT},
+            "spec": {"nodeName": pod["spec"]["nodeName"], "automountServiceAccountToken": False,
+                     "restartPolicy": "Never", "securityContext": copy.deepcopy(pod["spec"].get("securityContext", {})),
+                     "containers": [copy.deepcopy(container)]}})
+        uid = created["metadata"]["uid"]
+        try:
+            def completed():
+                current = self.get("pod", name, TENANT)
+                require(current and current["metadata"]["uid"] == uid, "Connectivity control Pod was replaced")
+                return current.get("status", {}).get("phase") in ("Succeeded", "Failed")
+            self.poll("same-node credential-free TCP comparison", completed, seconds=25, interval=0.5)
+            return self.parse_connectivity_result(
+                self.k("logs", "-n", TENANT, name, "-c", container["name"], "--tail=5"))
+        finally:
+            try:
+                current = self.get("pod", name, TENANT)
+                require(current and current["metadata"]["uid"] == uid, "Connectivity control cleanup identity changed")
+                self.api("DELETE", f"/api/v1/namespaces/{TENANT}/pods/{name}", body={
+                    "apiVersion": "v1", "kind": "DeleteOptions",
+                    "preconditions": {"uid": uid, "resourceVersion": current["metadata"]["resourceVersion"]}},
+                    status=(200, 202))
+            except Exception:
+                print("SRE-DIAG owned connectivity control cleanup unavailable", flush=True)
 
     def close(self):
         for process in self.processes:

@@ -51,8 +51,11 @@ class HarnessTests(unittest.TestCase):
         h.get = get
         h.api = lambda method, path, **kwargs: writes.append((method, path, kwargs))
         h.poll = lambda _label, predicate, **_kwargs: self.assertTrue(predicate())
-        h.k = lambda *_args: '{"available":true,"serviceExit":0,"endpointExit":0}'
-        self.assertEqual(h.connectivity_diagnostics(pod), {"available": True, "serviceExit": 0, "endpointExit": 0})
+        h.k = lambda *_args: '{"available":true,"uidMatches1001":true,"serviceExit":0,"endpointExit":0}'
+        h.control_connectivity_diagnostics = lambda *_args: {"available": False}
+        self.assertEqual(h.connectivity_diagnostics(pod), {
+            "available": True, "uidMatches1001": True, "serviceExit": 0, "endpointExit": 0,
+            "sameNodeControl": {"available": False}})
         self.assertEqual(len(writes), 1)
         method, path, args = writes[0]
         self.assertEqual(method, "PATCH")
@@ -72,6 +75,35 @@ class HarnessTests(unittest.TestCase):
                 h.connectivity_diagnostics(pod)
             pod["spec"] = old
         self.assertEqual(len(writes), 1)
+
+    def test_connectivity_result_rejects_arbitrary_output_or_untyped_fields(self):
+        for value in ({"available": True}, {"available": 1},
+                      {"available": False, "data": MARKER},
+                      {"available": True, "uidMatches1001": True, "serviceExit": "0", "endpointExit": 0}):
+            with self.assertRaises(AssertionError):
+                Harness.parse_connectivity_result(json.dumps(value))
+        self.assertEqual(Harness.parse_connectivity_result('{"available":false}'), {"available": False})
+
+    def test_same_node_control_creates_only_unprivileged_owned_pod_and_uid_fenced_cleanup(self):
+        h = Harness.__new__(Harness)
+        pod = {"spec": {"nodeName": "sandbox-worker", "securityContext": {"runAsNonRoot": True}}}
+        container = {"name": "network", "image": "kars-sandbox-e2e:dev",
+                     "securityContext": {"runAsUser": 1001, "capabilities": {"drop": ["ALL"]}}}
+        seen, deleted = [], []
+        current = {"metadata": {"uid": "control-uid", "resourceVersion": "7"}, "status": {"phase": "Succeeded"}}
+        h.create = lambda obj: seen.append(obj) or current
+        h.get = lambda *_args: current
+        h.poll = lambda _label, predicate, **_kwargs: self.assertTrue(predicate())
+        h.k = lambda *_args: '{"available":true,"uidMatches1001":true,"serviceExit":0,"endpointExit":0}'
+        h.api = lambda method, path, **kwargs: deleted.append((method, path, kwargs))
+        h.control_connectivity_diagnostics(pod, container)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["spec"]["nodeName"], "sandbox-worker")
+        self.assertFalse(seen[0]["spec"]["automountServiceAccountToken"])
+        self.assertNotIn("shareProcessNamespace", seen[0]["spec"])
+        self.assertNotIn("volumes", seen[0]["spec"])
+        self.assertEqual(deleted[0][0], "DELETE")
+        self.assertEqual(deleted[0][2]["body"]["preconditions"], {"uid": "control-uid", "resourceVersion": "7"})
 
     def test_blocked_authority_diagnostics_report_source_coordinates_not_status_detail(self):
         root = Path(__file__).resolve().parents[3]
