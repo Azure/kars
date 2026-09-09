@@ -35,13 +35,17 @@ def probe_command_result(code, output):
 
 def router_readiness_facts(text):
     facts = []
-    stages = ("registration", "namespace", "source", "service-account", "privacy-review", "credential-metadata")
+    stages = ("registration", "namespace", "source", "service-account", "privacy-review", "credential-metadata",
+              "enabled", "loaded", "bound", "serving", "tcp-accepted", "tls-accepted", "tls-rejected",
+              "tls-timeout", "readiness-entered", "authority-entered")
+    steps = ("token", "request", "headers", "complete")
     categories = ("authority-transport", "authority-denied", "registration-stale", "namespace-claim",
                   "source-identity", "service-account", "privacy-transport", "privacy-denied",
                   "privacy-not-denied", "metadata-transport", "metadata-denied", "legacy-alias",
                   "credential-expired", "unclassified")
     messages = ("SRE authority transport failure", "SRE authority request denied",
-                "SRE readiness authority rejected", "SRE readiness authority slow")
+                "SRE readiness authority rejected", "SRE readiness authority slow",
+                "SRE transport progress", "SRE authority progress")
     for line in text.splitlines()[-150:]:
         line = re.sub(r"\x1b\[[0-9;]*m", "", line)
         try:
@@ -53,7 +57,7 @@ def router_readiness_facts(text):
             if not isinstance(fields, dict) or fields.get("message") not in messages:
                 continue
             value = {}
-            for key, allowed in (("stage", stages), ("category", categories)):
+            for key, allowed in (("stage", stages), ("category", categories), ("step", steps)):
                 if fields.get(key) in allowed:
                     value[key] = fields[key]
             for key in ("timed_out", "connect_error", "authorized"):
@@ -69,7 +73,7 @@ def router_readiness_facts(text):
         if not any(message in line for message in messages):
             continue
         value = {}
-        for key, allowed in (("stage", stages), ("category", categories)):
+        for key, allowed in (("stage", stages), ("category", categories), ("step", steps)):
             match = re.search(rf'\b{key}="?({"|".join(allowed)})"?(?:\s|$)', line)
             if match:
                 value[key] = match[1]
@@ -85,7 +89,7 @@ def router_readiness_facts(text):
             value["elapsedSeconds"] = int(elapsed[1])
         if value and value not in facts:
             facts.append(value)
-    return facts[:16]
+    return facts[:32]
 
 
 def router_log_summary(text, root):

@@ -423,6 +423,9 @@ class Harness:
                                         and entry.get("value") == "true" for entry in router.get("env", []))
         facts["routerUid1001"] = router.get("securityContext", {}).get("runAsUser") == 1001
         facts["expectedImage"] = router.get("image") == "kars-inference-router:e2e"
+        facts["progressLoggingEnabled"] = any(entry.get("name") == "RUST_LOG"
+                                            and "inference_router=debug" in entry.get("value", "")
+                                            for entry in router.get("env", []))
         try:
             for label, executable in (("configuredCommand", "kars-inference-router"),
                                       ("absoluteCommand", "/usr/local/bin/kars-inference-router")):

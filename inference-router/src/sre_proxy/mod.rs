@@ -76,7 +76,16 @@ fn readiness_failure_category(reason: &str) -> &'static str {
     }
 }
 
+fn transport_progress(stage: &'static str) {
+    tracing::debug!(
+        target: "inference_router::sre_proxy",
+        stage,
+        "SRE transport progress"
+    );
+}
+
 async fn ready(State(proxy): State<Proxy>) -> Response {
+    transport_progress("readiness-entered");
     let Ok(_permit) = proxy.capacity.try_acquire() else {
         return error(
             StatusCode::TOO_MANY_REQUESTS,
@@ -84,6 +93,7 @@ async fn ready(State(proxy): State<Proxy>) -> Response {
         );
     };
     let started = std::time::Instant::now();
+    transport_progress("authority-entered");
     let authorization = proxy.backend.authorize().await;
     let elapsed_seconds = started.elapsed().as_secs();
     if elapsed_seconds >= 2 {
@@ -268,13 +278,19 @@ impl axum::serve::Listener for Listener {
         loop {
             match self.tcp.accept().await {
                 Ok((stream, address)) => {
-                    if let Ok(Ok(stream)) = tokio::time::timeout(
+                    transport_progress("tcp-accepted");
+                    match tokio::time::timeout(
                         std::time::Duration::from_secs(3),
                         self.tls.accept(stream),
                     )
                     .await
                     {
-                        return (stream, address);
+                        Ok(Ok(stream)) => {
+                            transport_progress("tls-accepted");
+                            return (stream, address);
+                        }
+                        Ok(Err(_)) => transport_progress("tls-rejected"),
+                        Err(_) => transport_progress("tls-timeout"),
                     }
                 }
                 Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
@@ -308,6 +324,7 @@ pub async fn start() -> Result<Option<tokio::task::JoinHandle<()>>, String> {
     if std::env::var("KARS_SRE_API_ENABLED").as_deref() != Ok("true") {
         return Ok(None);
     }
+    transport_progress("enabled");
     let directory = PathBuf::from(DIRECTORY);
     let backend = Backend::load(&directory)?;
     let token = std::fs::read_to_string(directory.join("agent-token"))
@@ -315,12 +332,14 @@ pub async fn start() -> Result<Option<tokio::task::JoinHandle<()>>, String> {
     if token.trim().len() != 64 || !token.trim().bytes().all(|b| b.is_ascii_alphanumeric()) {
         return Err("SRE proxy credential invalid".into());
     }
+    transport_progress("loaded");
     let listener = Listener {
         tcp: TcpListener::bind(("127.0.0.1", PORT))
             .await
             .map_err(|_| "SRE loopback TLS listener unavailable")?,
         tls: tls(&directory)?,
     };
+    transport_progress("bound");
     backend.renew_in_background();
     let proxy = Proxy {
         backend,
@@ -329,6 +348,7 @@ pub async fn start() -> Result<Option<tokio::task::JoinHandle<()>>, String> {
     };
     let router = app(proxy);
     Ok(Some(tokio::spawn(async move {
+        transport_progress("serving");
         if axum::serve(listener, router).await.is_err() {
             tracing::error!("SRE TLS proxy stopped; router must restart");
             std::process::exit(1);
