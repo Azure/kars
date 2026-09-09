@@ -214,42 +214,64 @@ pub(super) async fn retire_legacy(
     reg: &KarsSRERegistration,
     bindings: &[Binding],
 ) -> Result<(), String> {
-    for binding in bindings {
-        if !binding.subjects.iter().any(legacy_subject) {
-            continue;
-        }
-        let subjects: Vec<_> = binding
-            .subjects
-            .iter()
-            .filter(|subject| !legacy_subject(subject))
-            .cloned()
-            .collect();
-        let patch = json!({
-            "metadata":{"uid":binding.metadata.uid,"resourceVersion":binding.metadata.resource_version,
-                "annotations":{RETIRED:reg.metadata.uid}},
-            "subjects":subjects,
-        });
-        if binding.review.kind == "ClusterRoleBinding" {
-            Api::<ClusterRoleBinding>::all(client.clone())
-                .patch(
-                    &binding.review.name,
-                    &PatchParams::default(),
-                    &Patch::Merge(patch),
+    let plans: Vec<_> = bindings
+        .iter()
+        .filter(|binding| binding.subjects.iter().any(legacy_subject))
+        .map(|binding| {
+            let subjects: Vec<_> = binding
+                .subjects
+                .iter()
+                .filter(|subject| !legacy_subject(subject))
+                .cloned()
+                .collect();
+            let patch = json!({
+                "metadata":{"uid":binding.metadata.uid,"resourceVersion":binding.metadata.resource_version,
+                    "annotations":{RETIRED:reg.metadata.uid}},
+                "subjects":subjects,
+            });
+            (binding, patch)
+        })
+        .collect();
+    // RBAC escalation checks also apply to subtractive binding updates.
+    // Preflight every exact patch before any write; this is not a transaction.
+    for dry_run in [true, false] {
+        let params = PatchParams {
+            dry_run,
+            ..Default::default()
+        };
+        for (binding, patch) in &plans {
+            if binding.review.kind == "ClusterRoleBinding" {
+                Api::<ClusterRoleBinding>::all(client.clone())
+                    .patch(&binding.review.name, &params, &Patch::Merge(patch))
+                    .await
+                    .map_err(|e| {
+                        api_error(
+                            if dry_run {
+                                "Preflight reviewed SRE ClusterRoleBinding retirement"
+                            } else {
+                                "Retire reviewed SRE ClusterRoleBinding"
+                            },
+                            e,
+                        )
+                    })?;
+            } else {
+                Api::<RoleBinding>::namespaced(
+                    client.clone(),
+                    binding.review.namespace.as_deref().unwrap(),
                 )
+                .patch(&binding.review.name, &params, &Patch::Merge(patch))
                 .await
-                .map_err(|e| api_error("Retire reviewed SRE ClusterRoleBinding", e))?;
-        } else {
-            Api::<RoleBinding>::namespaced(
-                client.clone(),
-                binding.review.namespace.as_deref().unwrap(),
-            )
-            .patch(
-                &binding.review.name,
-                &PatchParams::default(),
-                &Patch::Merge(patch),
-            )
-            .await
-            .map_err(|e| api_error("Retire reviewed SRE RoleBinding", e))?;
+                .map_err(|e| {
+                    api_error(
+                        if dry_run {
+                            "Preflight reviewed SRE RoleBinding retirement"
+                        } else {
+                            "Retire reviewed SRE RoleBinding"
+                        },
+                        e,
+                    )
+                })?;
+            }
         }
     }
     Ok(())
