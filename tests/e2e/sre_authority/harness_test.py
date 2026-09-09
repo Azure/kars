@@ -34,6 +34,45 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_connectivity_diagnostic_is_uid_fenced_nonprivileged_and_has_no_credentials(self):
+        h = Harness.__new__(Harness)
+        pod = {"metadata": {"name": "sre-probe", "uid": "pod-uid", "resourceVersion": "17"},
+               "spec": {"automountServiceAccountToken": False},
+               "status": {"ephemeralContainerStatuses": [{"name": "sre-e2e-network-diagnostic",
+                                                          "state": {"terminated": {"exitCode": 0}}}]}}
+        def get(kind, _name, _namespace):
+            if kind == "service":
+                return {"spec": {"clusterIP": "10.96.0.1", "ports": [{"name": "https", "port": 443}]}}
+            if kind == "endpoints":
+                return {"subsets": [{"addresses": [{"ip": "172.18.0.2"}],
+                                     "ports": [{"name": "https", "port": 6443}]}]}
+            return pod
+        writes = []
+        h.get = get
+        h.api = lambda method, path, **kwargs: writes.append((method, path, kwargs))
+        h.poll = lambda _label, predicate, **_kwargs: self.assertTrue(predicate())
+        h.k = lambda *_args: '{"available":true,"serviceExit":0,"endpointExit":0}'
+        self.assertEqual(h.connectivity_diagnostics(pod), {"available": True, "serviceExit": 0, "endpointExit": 0})
+        self.assertEqual(len(writes), 1)
+        method, path, args = writes[0]
+        self.assertEqual(method, "PATCH")
+        self.assertTrue(path.endswith("/ephemeralcontainers"))
+        body = args["body"]
+        self.assertEqual(body["metadata"], {"uid": "pod-uid", "resourceVersion": "17"})
+        probe = body["spec"]["ephemeralContainers"][0]
+        self.assertEqual(probe["securityContext"]["runAsUser"], 1001)
+        self.assertFalse(probe["securityContext"]["allowPrivilegeEscalation"])
+        self.assertEqual(probe["securityContext"]["capabilities"], {"drop": ["ALL"]})
+        for field in ("targetContainerName", "volumeMounts", "env", "envFrom"):
+            self.assertNotIn(field, probe)
+        for key, value in (("automountServiceAccountToken", True), ("shareProcessNamespace", True)):
+            old = copy.deepcopy(pod["spec"])
+            pod["spec"][key] = value
+            with self.assertRaises(AssertionError):
+                h.connectivity_diagnostics(pod)
+            pod["spec"] = old
+        self.assertEqual(len(writes), 1)
+
     def test_blocked_authority_diagnostics_report_source_coordinates_not_status_detail(self):
         root = Path(__file__).resolve().parents[3]
         cases = [
