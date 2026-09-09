@@ -67,10 +67,12 @@ class HarnessTests(unittest.TestCase):
         h.poll = lambda _label, predicate, **_kwargs: self.assertTrue(predicate())
         h.k = lambda *_args: '{"available":true,"uidMatches1001":true,"serviceExit":0,"endpointExit":0}'
         h.control_connectivity_diagnostics = lambda *_args: {"available": False}
+        h.policy_connectivity_diagnostics = lambda *_args, **_kwargs: {"available": False}
         self.assertEqual(h.connectivity_diagnostics(pod), {
             "available": True, "uidMatches1001": True, "serviceExit": 0, "endpointExit": 0,
             "sameNodeControl": {"available": False},
-            "guardControls": {variant: {"available": False} for variant in ("full", "filter-only", "legacy-full")}})
+            "guardControls": {variant: {"available": False} for variant in ("full", "filter-only", "legacy-full")},
+            "policyControl": {"available": False}, "denyAllPolicyControl": {"available": False}})
         self.assertEqual(len(writes), 1)
         method, path, args = writes[0]
         self.assertEqual(method, "PATCH")
@@ -119,6 +121,29 @@ class HarnessTests(unittest.TestCase):
         self.assertNotIn("volumes", seen[0]["spec"])
         self.assertEqual(deleted[0][0], "DELETE")
         self.assertEqual(deleted[0][2]["body"]["preconditions"], {"uid": "control-uid", "resourceVersion": "7"})
+
+    def test_policy_comparison_targets_only_owned_control_and_never_changes_source_policy(self):
+        h = Harness.__new__(Harness)
+        source = {"spec": {"podSelector": {}, "policyTypes": ["Egress"],
+                          "egress": [{"to": [{"ipBlock": {"cidr": "10.96.0.1/32"}}],
+                                      "ports": [{"port": 443, "protocol": "TCP"}]}]}}
+        before = copy.deepcopy(source)
+        seen, deleted = [], []
+        own = {"metadata": {"uid": "policy-uid", "resourceVersion": "3"}}
+        h.get = lambda kind, name, namespace: source if name == "sandbox-policy" else own
+        h.create = lambda obj: seen.append(obj) or own
+        h.control_connectivity_diagnostics = lambda *_args, **kwargs: {"policy": kwargs["policy"]}
+        h.api = lambda method, path, **kwargs: deleted.append((method, path, kwargs))
+        self.assertEqual(h.policy_connectivity_diagnostics({}, {}), {"policy": True})
+        self.assertEqual(source, before)
+        self.assertEqual(seen[0]["spec"]["egress"], source["spec"]["egress"])
+        self.assertEqual(seen[0]["spec"]["podSelector"],
+                         {"matchLabels": {"kars.azure.com/e2e-policy-control": "true"}})
+        self.assertEqual(deleted[0][2]["body"]["preconditions"], {"uid": "policy-uid", "resourceVersion": "3"})
+        h.policy_connectivity_diagnostics({}, {}, deny_all=True)
+        self.assertEqual(seen[1]["spec"], {"policyTypes": ["Egress"], "egress": [],
+            "podSelector": {"matchLabels": {"kars.azure.com/e2e-policy-control": "deny-all"}}})
+        self.assertEqual(source, before)
 
     def test_blocked_authority_diagnostics_report_source_coordinates_not_status_detail(self):
         root = Path(__file__).resolve().parents[3]

@@ -572,6 +572,14 @@ printf '{"available":true,"uidMatches1001":%s,"serviceExit":%s,"endpointExit":%s
                 result["guardControls"][variant] = self.control_connectivity_diagnostics(pod, probe, variant)
             except Exception as error:
                 result["guardControls"][variant] = {"diagnosticError": type(error).__name__}
+        try:
+            result["policyControl"] = self.policy_connectivity_diagnostics(pod, probe)
+        except Exception as error:
+            result["policyControl"] = {"diagnosticError": type(error).__name__}
+        try:
+            result["denyAllPolicyControl"] = self.policy_connectivity_diagnostics(pod, probe, deny_all=True)
+        except Exception as error:
+            result["denyAllPolicyControl"] = {"diagnosticError": type(error).__name__}
         return result
 
     @staticmethod
@@ -586,17 +594,21 @@ printf '{"available":true,"uidMatches1001":%s,"serviceExit":%s,"endpointExit":%s
                 "Connectivity diagnostic produced an unexpected result")
         return result
 
-    def control_connectivity_diagnostics(self, pod, container, variant=None):
+    def control_connectivity_diagnostics(self, pod, container, variant=None, *, policy=False, deny_all=False):
         from .network_diagnostics import guard_variant
-        name = "sre-e2e-api-connectivity" + (f"-{variant}" if variant else "")
+        suffix = "-deny-all" if deny_all else "-policy" if policy else f"-{variant}" if variant else ""
+        name = "sre-e2e-api-connectivity" + suffix
         require(pod["spec"].get("nodeName"), "Connectivity comparison requires the actual sandbox node")
         spec = {"nodeName": pod["spec"]["nodeName"], "automountServiceAccountToken": False,
                 "restartPolicy": "Never", "securityContext": copy.deepcopy(pod["spec"].get("securityContext", {})),
                 "containers": [copy.deepcopy(container)]}
         if variant:
             spec["initContainers"] = [guard_variant(self.root, pod, variant)]
-        created = self.create({"apiVersion": "v1", "kind": "Pod",
-                              "metadata": {"name": name, "namespace": TENANT}, "spec": spec})
+        metadata = {"name": name, "namespace": TENANT}
+        if policy:
+            metadata["labels"] = {"kars.azure.com/e2e-policy-control": "deny-all" if deny_all else "true"}
+            spec["containers"][0]["command"][2] = "sleep 10\n" + spec["containers"][0]["command"][2]
+        created = self.create({"apiVersion": "v1", "kind": "Pod", "metadata": metadata, "spec": spec})
         uid = created["metadata"]["uid"]
         try:
             def completed():
@@ -606,7 +618,7 @@ printf '{"available":true,"uidMatches1001":%s,"serviceExit":%s,"endpointExit":%s
                 return status.get("phase") in ("Succeeded", "Failed") or any(
                     item.get("state", {}).get("terminated", {}).get("exitCode", 0) != 0
                     for item in status.get("initContainerStatuses", []))
-            self.poll("same-node credential-free TCP comparison", completed, seconds=25, interval=0.5)
+            self.poll("same-node credential-free TCP comparison", completed, seconds=35, interval=0.5)
             current = self.get("pod", name, TENANT)
             for item in current.get("status", {}).get("initContainerStatuses", []):
                 code = item.get("state", {}).get("terminated", {}).get("exitCode", 0)
@@ -624,6 +636,28 @@ printf '{"available":true,"uidMatches1001":%s,"serviceExit":%s,"endpointExit":%s
                     status=(200, 202))
             except Exception:
                 print("SRE-DIAG owned connectivity control cleanup unavailable", flush=True)
+
+    def policy_connectivity_diagnostics(self, pod, container, *, deny_all=False):
+        source = self.get("networkpolicy", "sandbox-policy", RUNTIME)
+        require(source is not None, "SRE network policy is unavailable for a read-only comparison")
+        spec = {"policyTypes": ["Egress"], "egress": []} if deny_all else copy.deepcopy(source["spec"])
+        spec["podSelector"] = {"matchLabels": {"kars.azure.com/e2e-policy-control": "deny-all" if deny_all else "true"}}
+        name = "sre-e2e-policy-control" + ("-deny-all" if deny_all else "")
+        created = self.create({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                              "metadata": {"name": name, "namespace": TENANT}, "spec": spec})
+        uid = created["metadata"]["uid"]
+        try:
+            return self.control_connectivity_diagnostics(pod, container, policy=True, deny_all=deny_all)
+        finally:
+            try:
+                current = self.get("networkpolicy", name, TENANT)
+                require(current and current["metadata"]["uid"] == uid, "Connectivity policy cleanup identity changed")
+                self.api("DELETE", f"/apis/networking.k8s.io/v1/namespaces/{TENANT}/networkpolicies/{name}", body={
+                    "apiVersion": "v1", "kind": "DeleteOptions",
+                    "preconditions": {"uid": uid, "resourceVersion": current["metadata"]["resourceVersion"]}},
+                    status=(200, 202))
+            except Exception:
+                print("SRE-DIAG owned connectivity policy cleanup unavailable", flush=True)
 
     def close(self):
         for process in self.processes:
