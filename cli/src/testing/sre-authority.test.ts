@@ -38,6 +38,13 @@ describe("SRE authority chart and mutation integration",()=>{
       const controller=docs.find(doc=>doc.kind==="ClusterRole"&&doc.metadata.name==="kars-sre-authority-controller");
       expect(controller.rules.filter((rule:any)=>rule.resources.includes("karssreregistrations"))
         .every((rule:any)=>rule.verbs.every((verb:string)=>["get","list","watch","use"].includes(verb)))).toBe(true);
+      const privileged=controller.rules.filter((rule:any)=>
+        rule.verbs.some((verb:string)=>["bind","escalate","*"].includes(verb)));
+      expect(privileged).toEqual([{
+        apiGroups:["rbac.authorization.k8s.io"],resources:["clusterroles"],
+        resourceNames:["kars-sre-private-diagnostics","kars-sre-action-author","kars-sre-router-renew","kars-sre-reader"],
+        verbs:["bind"],
+      }]);
     }
   });
 

@@ -20,6 +20,18 @@ REPORT_PREFIX = ""
 def write_report(root, filename, report):
     schema_report(root, REPORT_PREFIX + filename, report)
 
+
+def failure_site(error):
+    result = {"category": type(error).__name__}
+    frame = error.__traceback__
+    while frame:
+        name = Path(frame.tb_frame.f_code.co_filename).name
+        if name in ("bootstrap_probe.py", "binding_probe.py"):
+            result.update(source=name, line=frame.tb_lineno)
+        frame = frame.tb_next
+    return result
+
+
 PATHS = {
     "CustomResourceDefinition": "/apis/apiextensions.k8s.io/v1/customresourcedefinitions",
     "ServiceAccount": "/api/v1/namespaces/{namespace}/serviceaccounts",
@@ -125,13 +137,17 @@ def upsert(port, obj, policies):
     return result
 
 
-def exercise(root, port, objects, policies, wait_seconds=90):
+def exercise(root, port, objects, policies, wait_seconds=90, retirement=False):
     results = []
     for name in ("kars-system", "kars-sre"):
         code, body = request(port, "POST", "/api/v1/namespaces", {
             "apiVersion": "v1", "kind": "Namespace", "metadata": {"name": name}})
         if code not in (201, 409):
             raise RuntimeError("Disposable bootstrap namespace unavailable")
+    retirement_state = None
+    if retirement:
+        from sre_authority.binding_probe import seed
+        retirement_state = seed(port, root)
     for kind in PATHS:
         if kind == "Deployment":
             continue
@@ -185,9 +201,10 @@ def exercise(root, port, objects, policies, wait_seconds=90):
                  "allPoliciesObservedBeforeCreate": observed})
     if not observed:
         raise RuntimeError("Public admission policy observation timed out; Pod evidence was still collected")
+    return retirement_state
 
 
-def main(root, diagnostics_only, candidate=False):
+def main(root, diagnostics_only, candidate=False, retirement=False):
     global REPORT_PREFIX
     REPORT_PREFIX = "candidate-" if candidate else ""
     with kind_proxy(root) as (port, version):
@@ -205,12 +222,22 @@ def main(root, diagnostics_only, candidate=False):
                 CONTEXT, "kube-controller-manager-kars-e2e-control-plane"))
         else:
             try:
-                exercise(root, port, objects, policies, wait_seconds=180 if candidate else 90)
+                state = exercise(root, port, objects, policies, wait_seconds=180 if candidate else 90,
+                                 retirement=retirement and not candidate)
                 from sre_authority.bootstrap_cases import admission_cases
                 cases = admission_cases(port, policies)
                 write_report(root, "bootstrap-admission-cases.json", {"cases": cases})
                 if not all(case["matched"] for case in cases):
                     raise RuntimeError("Schema failed intended ordinary/private admission outcomes")
+                if state:
+                    from sre_authority.binding_probe import prove
+                    prove(root, port, state, objects,
+                          lambda facts: write_report(root, "bootstrap-binding-retirement.json", facts))
+                from sre_authority.bootstrap_cases import deployment_controller_cases
+                controller_cases = deployment_controller_cases(port, policies)
+                write_report(root, "bootstrap-workload-controller.json", {"cases": controller_cases})
+                if not all(case["matched"] for case in controller_cases):
+                    raise RuntimeError("Built-in Deployment controller cannot create the private SRE ReplicaSet")
             finally:
                 write_report(root, "bootstrap-final.json", collect(port, policies, request))
                 write_report(root, "bootstrap-controller-stack.json", controller_stack(
@@ -223,9 +250,13 @@ if __name__ == "__main__":
     parser.add_argument("--diagnostics-only", action="store_true")
     parser.add_argument("--json-params-candidate", action="store_true",
                         help="Diagnose only the API-evidenced nil-schema adapter candidate; never edit production")
+    parser.add_argument("--retirement-bind-proof", action="store_true",
+                        help="Prove controller-principal retirement dry-runs with a test-only exact reader bind grant")
     args = parser.parse_args()
     try:
-        main(Path(__file__).resolve().parents[3], args.diagnostics_only, args.json_params_candidate)
+        main(Path(__file__).resolve().parents[3], args.diagnostics_only, args.json_params_candidate,
+             args.retirement_bind_proof)
     except Exception as error:
         print(f"SRE-BOOTSTRAP-FAIL category={type(error).__name__}", flush=True)
+        write_report(Path(__file__).resolve().parents[3], "bootstrap-failure-site.json", failure_site(error))
         raise SystemExit(1) from None
