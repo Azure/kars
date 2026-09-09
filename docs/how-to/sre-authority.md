@@ -209,6 +209,10 @@ CronJob templates from laundering a private mount through Kubernetes workload
 controllers. Exec/attach/port-forward into the private SRE runtime requires
 registrar authority. Cluster-wide workload controllers remain trusted;
 installing a custom privileged controller is a cluster-operator action.
+The Deployment-controller handoff is authorized only for ReplicaSet requests
+and requires cluster-wide `apps/replicasets` CREATE authority; namespaced
+workload permissions are insufficient. It does not grant the Deployment
+controller Pod CREATE or registrar authority.
 
 The proxy checks current registration and live UID/claim authority. It permits
 the bounded first-party diagnostic read/log/metrics paths and Pending-only
