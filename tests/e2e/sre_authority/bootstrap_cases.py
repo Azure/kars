@@ -17,8 +17,8 @@ USER = "system:serviceaccount:e2e-sre-bootstrap:tenant"
 DEPLOYMENT_CONTROLLER = "system:serviceaccount:kube-system:deployment-controller"
 
 
-def as_tenant(port, path, obj, *, user=USER):
-    req = Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(obj).encode(), method="POST",
+def as_tenant(port, path, obj, *, user=USER, method="POST"):
+    req = Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(obj).encode(), method=method,
                   headers={"Content-Type": "application/json", "Accept": "application/json",
                            "Impersonate-User": user})
     try:
@@ -207,3 +207,59 @@ def private_controller_chain(port, policies, report):
         time.sleep(0.5)
     report(snapshot)
     raise RuntimeError("Actual private Deployment/ReplicaSet controllers did not create the admission-only Pod")
+
+
+def namespace_cleanup_cases(port, policies):
+    path = "/apis/apps/v1/namespaces/kars-sre/deployments/sre"
+    code, _ = request(port, "GET", path)
+    if code != 404:
+        raise RuntimeError("Namespace cleanup proof refuses an existing canonical Deployment")
+    obj = {"apiVersion": "apps/v1", "kind": "Deployment",
+           "metadata": {"name": "sre", "namespace": "kars-sre"},
+           "spec": {"replicas": 0, "selector": {"matchLabels": {"app": "e2e-retired-consumer"}},
+                    "template": {"metadata": {"labels": {"app": "e2e-retired-consumer"}}, "spec": {
+                        "automountServiceAccountToken": False, "schedulerName": "kars-e2e-admission-never-schedule",
+                        "containers": [{"name": "probe", "image": "registry.invalid/kars-admission-proof:never",
+                                        "imagePullPolicy": "Never"}]}}}}
+    code, created = request(port, "POST", path.rsplit("/", 1)[0], obj)
+    if code != 201 or not created.get("metadata", {}).get("uid"):
+        raise RuntimeError("Canonical no-execution cleanup fixture CREATE failed")
+    uid = created["metadata"]["uid"]
+    reports = []
+    primary_failure = False
+    try:
+        for account, namespace, expected in (("namespace-controller", "kube-system", 403),
+                                               ("kars-controller", "kars-system", 200)):
+            principal = f"system:serviceaccount:{namespace}:{account}"
+            code, sa = request(port, "GET", f"/api/v1/namespaces/{namespace}/serviceaccounts/{account}")
+            if code != 200 or not sa.get("metadata", {}).get("uid"):
+                raise RuntimeError("Cleanup proof principal does not exist")
+            code, current = request(port, "GET", path)
+            if code != 200 or current.get("metadata", {}).get("uid") != uid:
+                raise RuntimeError("Cleanup proof Deployment was replaced before its dry-run")
+            code, response = as_tenant(port, path + "?dryRun=All", {
+                "apiVersion": "v1", "kind": "DeleteOptions",
+                "preconditions": {"uid": uid, "resourceVersion": current["metadata"]["resourceVersion"]}},
+                user=principal, method="DELETE")
+            result = api_result(code, response, policies)
+            result.update({"case": f"{account}-canonical-consumer-delete", "expectedStatus": expected,
+                           "matched": code == expected and (code != 403
+                               or "kars-sre-consumer-authority" in result.get("policies", []))})
+            reports.append(result)
+        return reports
+    except BaseException:
+        primary_failure = True
+        raise
+    finally:
+        try:
+            code, current = request(port, "GET", path)
+            if code != 200 or current.get("metadata", {}).get("uid") != uid:
+                raise RuntimeError("Cleanup proof Deployment identity changed")
+            code, _ = request(port, "DELETE", path, {"apiVersion": "v1", "kind": "DeleteOptions",
+                "preconditions": {"uid": uid, "resourceVersion": current["metadata"]["resourceVersion"]}})
+            if code not in (200, 202):
+                raise RuntimeError("Cleanup proof could not remove its owned Deployment")
+        except Exception:
+            if not primary_failure:
+                raise
+            print("SRE-DIAG owned canonical cleanup fixture removal unavailable", flush=True)
