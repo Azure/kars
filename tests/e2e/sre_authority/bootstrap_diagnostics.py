@@ -28,7 +28,7 @@ def probe_command_result(code, output):
         category = "succeeded"
     elif "executable file not found" in output:
         category = "executable-not-found"
-    elif code == 1 and not output.strip():
+    elif code == 1 and output.strip() in ("", "command terminated with exit code 1"):
         category = "probe-not-ready"
     return {"exitCode": code, "category": category}
 
@@ -49,7 +49,7 @@ def router_readiness_facts(text):
         except ValueError:
             event = None
         if isinstance(event, dict):
-            fields = event.get("fields", {})
+            fields = event.get("fields", event)
             if not isinstance(fields, dict) or fields.get("message") not in messages:
                 continue
             value = {}
@@ -86,6 +86,38 @@ def router_readiness_facts(text):
         if value and value not in facts:
             facts.append(value)
     return facts[:16]
+
+
+def router_log_summary(text, root):
+    paths = [
+        root / "inference-router/src/main.rs",
+        root / "inference-router/src/routes/mod.rs",
+        root / "inference-router/src/sre_proxy/mod.rs",
+        root / "inference-router/src/sre_proxy/backend.rs",
+    ]
+    sources = [(path, path.read_text().splitlines()) for path in paths]
+    summary = {"lines": len(text.splitlines()), "jsonEvents": 0, "sourceSites": []}
+    for line in text.splitlines()[-150:]:
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        summary["jsonEvents"] += 1
+        fields = obj.get("fields", obj)
+        if not isinstance(fields, dict) or not isinstance(fields.get("message"), str):
+            continue
+        literal = json.dumps(fields["message"], ensure_ascii=False)
+        for path, lines in sources:
+            match = next((number for number, source in enumerate(lines, 1) if literal in source), None)
+            if match:
+                site = {"source": str(path.relative_to(root)), "line": match}
+                if site not in summary["sourceSites"]:
+                    summary["sourceSites"].append(site)
+                break
+    summary["sourceSites"] = summary["sourceSites"][:32]
+    return summary
 
 
 def identifier(value):

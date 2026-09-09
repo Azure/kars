@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, probe_command_result, public_stack_facts, router_readiness_facts
+from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, probe_command_result, public_stack_facts, router_log_summary, router_readiness_facts
 from sre_authority.bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
@@ -15,6 +15,20 @@ POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
 
 
 class BootstrapProofTests(unittest.TestCase):
+    def test_router_startup_summary_reports_only_verified_source_coordinates(self):
+        root = Path(__file__).resolve().parents[3]
+        text = "\n".join([
+            json.dumps({"fields": {"message": "kars Inference Router starting", "token": "do-not-publish"}}),
+            json.dumps({"fields": {"message": "do-not-publish"}}),
+            "do-not-publish plaintext",
+        ])
+        result = router_log_summary(text, root)
+        self.assertEqual(result["lines"], 3)
+        self.assertEqual(result["jsonEvents"], 2)
+        self.assertEqual(len(result["sourceSites"]), 1)
+        self.assertEqual(result["sourceSites"][0]["source"], "inference-router/src/main.rs")
+        self.assertNotIn("do-not-publish", json.dumps(result))
+
     def test_actual_json_tracing_format_is_parsed_without_publishing_other_fields(self):
         events = [
             {"message": "SRE authority transport failure", "stage": "registration",
@@ -32,6 +46,7 @@ class BootstrapProofTests(unittest.TestCase):
             {"authorized": True, "elapsedSeconds": 8},
         ])
         self.assertNotIn("do-not-publish", json.dumps(facts))
+        self.assertEqual(router_readiness_facts(json.dumps(events[0])), [facts[0]])
 
     def test_router_readiness_logs_expose_only_fixed_stage_status_and_timeout_facts(self):
         text = (
@@ -55,6 +70,7 @@ class BootstrapProofTests(unittest.TestCase):
         for code, output, category in (
             (127, "exec: executable file not found in $PATH do-not-publish", "executable-not-found"),
             (1, "", "probe-not-ready"),
+            (1, "command terminated with exit code 1\n", "probe-not-ready"),
             (0, "do-not-publish", "succeeded"),
             (1, "do-not-publish", "unclassified"),
         ):
