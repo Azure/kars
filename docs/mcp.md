@@ -1,5 +1,10 @@
 # MCP servers in kars
 
+For controller-owned Playwright/Everything workloads, see
+[Managed MCP workloads](tutorials/managed-mcp.md). That path requires the
+qualified controller/chart, exact UID ownership and a successful protocol probe;
+it does not turn a capability request into an automatic resource grant.
+
 The [Model Context Protocol](https://modelcontextprotocol.io) (MCP) is how a
 kars agent reaches tools it doesn't ship with — a hosted search API, a wiki
 reader, a headless browser, your internal services. kars treats every MCP

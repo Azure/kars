@@ -114,6 +114,14 @@ sandbox:
       cpu: "2"
       memory: "4Gi"
 
+managedMcp:
+  namespace: kars-mcp
+  playwrightImage: mcr.microsoft.com/playwright/mcp@sha256:3d871c22ea2d4cca0966e2cfb1860e1cb03eb7353725a3d6cffd133296fb04eb
+  everythingImage: ghcr.io/azure/kars/mcp-everything:latest
+  # Optional pre-existing Secret in the claimed managed namespace.
+  # The controller does not copy credentials across namespaces.
+  imagePullSecret: ""
+
 # Multi-runtime adapter images. Each value is a fully-qualified
 # `<repo>:<tag>` string consumed by controller/src/reconciler/runtime.rs
 # via the `*_RUNTIME_IMAGE` env vars on the controller Deployment.

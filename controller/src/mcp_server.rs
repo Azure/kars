@@ -68,6 +68,12 @@ pub struct McpServerSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub url: Option<String>,
 
+    /// Closed controller-managed workload preset. Mutually exclusive with
+    /// url, bundleRef and endpoint authentication fields; the controller
+    /// derives its private endpoint. No arbitrary workload image is accepted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub managed: Option<ManagedMcpConfig>,
+
     /// OAuth 2.1 configuration. Required when `productionMode: true`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub oauth: Option<McpOAuthConfig>,
@@ -142,6 +148,21 @@ pub struct McpServerSpec {
     /// CR field there.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bearer_from_env: Option<String>,
+}
+
+/// A reviewed managed MCP workload, isolated from the controller namespace.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct ManagedMcpConfig {
+    pub preset: ManagedMcpPreset,
+}
+
+/// Workloads for which Kars provides concrete deployment and protocol support.
+#[derive(Debug, Serialize, Deserialize, Clone, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum ManagedMcpPreset {
+    Playwright,
+    Everything,
 }
 
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
@@ -223,6 +244,41 @@ pub struct McpServerStatus {
     /// Slice 1c.5 of `crd-well-oiled-machine`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bundle_ref_digest: Option<String>,
+
+    /// Managed or External. Managed readiness includes current workload
+    /// rollout and a successful bounded MCP initialize/tools/list probe.
+    #[serde(default)]
+    pub mode: Option<String>,
+
+    /// Effective upstream URL. Absent while a managed workload is unqualified.
+    #[serde(default)]
+    pub endpoint: Option<String>,
+
+    /// Display hint for the managed Deployment (namespace/name), never
+    /// sufficient authority for cleanup.
+    #[serde(default)]
+    pub workload_ref: Option<String>,
+
+    /// Exact API-server namespace incarnation holding the managed workload.
+    #[serde(default)]
+    pub managed_namespace_uid: Option<String>,
+
+    /// Deployment generation covered by the successful protocol probe.
+    #[serde(default)]
+    pub workload_generation: Option<i64>,
+
+    /// Exact image reference covered by the successful protocol probe.
+    #[serde(default)]
+    pub workload_image: Option<String>,
+
+    /// Last successfully probed, allowlisted upstream tool names.
+    #[serde(default)]
+    pub discovered_tools: Option<Vec<String>>,
+
+    /// Content digest of the discovered tool definitions, not a signature or
+    /// supply-chain attestation.
+    #[serde(default)]
+    pub tool_schema_digest: Option<String>,
 }
 
 /// Minimal `LocalObjectReference`-shaped struct with `name` only — the
