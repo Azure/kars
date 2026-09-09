@@ -289,6 +289,7 @@ pub(crate) async fn fence_deployment(
     Ok(())
 }
 #[cfg(test)]
+#[path = "kars_task_rebind/tests.rs"]
 mod tests;
 
 pub(crate) async fn apply_deployment(

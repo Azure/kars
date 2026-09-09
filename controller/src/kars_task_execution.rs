@@ -336,42 +336,6 @@ pub(crate) async fn credentials_quiescent(
     if !owned_by_task(&dynamic, task) || sandbox.metadata.deletion_timestamp.is_some() {
         return Err("Credential pause cannot adopt a foreign or terminating Sandbox".into());
     }
-
-    pub(crate) async fn hold_credential_runtime(
-        client: &Client,
-        task: &KarsTask,
-    ) -> Result<(), String> {
-        let namespace = task
-            .namespace()
-            .ok_or("Credential Task workspace missing")?;
-        let api = Api::<DynamicObject>::namespaced_with(
-            client.clone(),
-            &namespace,
-            &sandbox_api_resource(),
-        );
-        let Some(sandbox) = api
-            .get_opt(&task.name_any())
-            .await
-            .map_err(|e| crate::credential_grants::api_error("Read credential hold target", e))?
-        else {
-            return Ok(());
-        };
-        if !owned_by_task(&sandbox, task) || sandbox.metadata.deletion_timestamp.is_some() {
-            return Err("Credential hold target is foreign or terminating".into());
-        }
-        let marker = crate::kars_task_reconciler::rebind::HOLD;
-        if sandbox.annotations().get(marker) == task.metadata.uid.as_ref() {
-            return Ok(());
-        }
-        if sandbox.annotations().contains_key(marker) {
-            return Err("Credential runtime is held by another Task UID".into());
-        }
-        api.patch_metadata(&task.name_any(),&kube::api::PatchParams::default(),&kube::api::Patch::Merge(json!({
-            "metadata":{"uid":sandbox.metadata.uid,"resourceVersion":sandbox.metadata.resource_version,
-                "annotations":{marker:task.metadata.uid}}
-        }))).await.map_err(|e|crate::credential_grants::api_error("Hold owned credential runtime",e))?;
-        Ok(())
-    }
     match namespace {
         None => Ok(true),
         Some(namespace) => {
@@ -382,6 +346,38 @@ pub(crate) async fn credentials_quiescent(
     }
 }
 
+pub(crate) async fn hold_credential_runtime(
+    client: &Client,
+    task: &KarsTask,
+) -> Result<(), String> {
+    let namespace = task
+        .namespace()
+        .ok_or("Credential Task workspace missing")?;
+    let api =
+        Api::<DynamicObject>::namespaced_with(client.clone(), &namespace, &sandbox_api_resource());
+    let Some(sandbox) = api
+        .get_opt(&task.name_any())
+        .await
+        .map_err(|e| crate::credential_grants::api_error("Read credential hold target", e))?
+    else {
+        return Ok(());
+    };
+    if !owned_by_task(&sandbox, task) || sandbox.metadata.deletion_timestamp.is_some() {
+        return Err("Credential hold target is foreign or terminating".into());
+    }
+    let marker = crate::kars_task_reconciler::rebind::HOLD;
+    if sandbox.annotations().get(marker) == task.metadata.uid.as_ref() {
+        return Ok(());
+    }
+    if sandbox.annotations().contains_key(marker) {
+        return Err("Credential runtime is held by another Task UID".into());
+    }
+    api.patch_metadata(&task.name_any(),&kube::api::PatchParams::default(),&kube::api::Patch::Merge(json!({
+            "metadata":{"uid":sandbox.metadata.uid,"resourceVersion":sandbox.metadata.resource_version,
+                "annotations":{marker:task.metadata.uid}}
+        }))).await.map_err(|e|crate::credential_grants::api_error("Hold owned credential runtime",e))?;
+    Ok(())
+}
 fn owned_by_task(object: &DynamicObject, task: &KarsTask) -> bool {
     task.metadata
         .uid
