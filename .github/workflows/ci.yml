@@ -400,6 +400,9 @@ jobs:
     name: SRE CRD API Schema
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
     env:
       KUBECONFIG: ${{ github.workspace }}/.e2e-sre-schema-kubeconfig
       PYTHONDONTWRITEBYTECODE: "1"
@@ -415,6 +418,45 @@ jobs:
         with:
           version: v1.30.5
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - name: Verify unchanged production sources for existing CI router artifact
+        run: |
+          git fetch --no-tags --depth=1 origin a2b394a6ad77acc72a197255f25438fed40d41da
+          changed=$(git diff --name-only a2b394a6ad77acc72a197255f25438fed40d41da HEAD)
+          if printf '%s\n' "$changed" | grep -vE '^(tests/e2e/sre_authority/|\.github/workflows/ci\.yml$|$)'; then
+            echo "Refusing to diagnose with a binary from different production sources"
+            exit 1
+          fi
+      - name: Read verified existing CI binaries for command-only readiness diagnosis
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: kars-binaries-a2b394a6ad77acc72a197255f25438fed40d41da
+          run-id: 34350195081
+          github-token: ${{ github.token }}
+          path: .e2e-router-probe/bin
+      - name: Diagnose bare versus absolute readiness command in the unchanged distroless image
+        run: |
+          (cd .e2e-router-probe/bin && sha256sum --check SHA256SUMS)
+          chmod +x .e2e-router-probe/bin/amd64/kars-inference-router
+          docker build --quiet --build-arg TARGETARCH=amd64 \
+            --build-arg BIN_PATH_PREFIX=.e2e-router-probe/bin \
+            -f inference-router/Dockerfile -t kars-inference-router:e2e .
+          bare=0
+          docker run --rm --entrypoint kars-inference-router kars-inference-router:e2e sre-ready \
+            > .e2e-router-probe/bare.log 2>&1 || bare=$?
+          absolute=0
+          docker run --rm --entrypoint /usr/local/bin/kars-inference-router kars-inference-router:e2e sre-ready \
+            > .e2e-router-probe/absolute.log 2>&1 || absolute=$?
+          PYTHONPATH=tests/e2e python3 - "$bare" "$absolute" <<'PY'
+          import sys
+          from pathlib import Path
+          from sre_authority.bootstrap_diagnostics import probe_command_result
+          from sre_authority.registration_schema import write_report
+          facts = {name: probe_command_result(int(code), Path(f".e2e-router-probe/{name}.log").read_text())
+                   for name, code in zip(("bare", "absolute"), sys.argv[1:])}
+          write_report(Path.cwd(), "router-readiness-command.json", facts)
+          assert facts["absolute"]["category"] == "probe-not-ready"
+          assert facts["bare"]["category"] in ("probe-not-ready", "executable-not-found")
+          PY
       - name: Check public-schema diagnostic privacy
         run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test
       - name: Create the same disposable API server as the real harness
@@ -445,6 +487,7 @@ jobs:
           path: |
             e2e-sre-schema-diag/versions.json
             e2e-sre-schema-diag/legacy-helm-readiness.json
+            e2e-sre-schema-diag/router-readiness-command.json
             e2e-sre-schema-diag/validation.json
             e2e-sre-schema-diag/validation-instances.json
             e2e-sre-schema-diag/namespace-accessor-candidate.json

@@ -407,8 +407,32 @@ class Harness:
                         "state": {kind: {key: value.get(key) for key in ("reason", "exitCode") if key in value}
                                   for kind, value in container.get("state", {}).items()}}
                         for container in containers]}), flush=True)
+                router = next((container for container in status.get("containerStatuses", [])
+                               if container["name"] == "inference-router"), None)
+                if router and not router.get("ready") and "running" in router.get("state", {}):
+                    self.readiness_diagnostics(pod)
         except Exception:
             print("SRE-DIAG runtime Pod status unavailable", flush=True)
+
+    def readiness_diagnostics(self, pod):
+        from .bootstrap_diagnostics import probe_command_result
+        facts = {"kind": "RouterReadiness", "podUid": pod["metadata"]["uid"]}
+        try:
+            for label, executable in (("configuredCommand", "kars-inference-router"),
+                                      ("absoluteCommand", "/usr/local/bin/kars-inference-router")):
+                result = self.k("exec", "-n", RUNTIME, pod["metadata"]["name"], "-c", "inference-router",
+                                "--", executable, "sre-ready", expected=None, timeout=10)
+                facts[label] = probe_command_result(result.returncode, result.stdout + result.stderr)
+            ca = self.k("exec", "-n", RUNTIME, pod["metadata"]["name"], "-c", "agent",
+                        "--", "cat", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt", timeout=10)
+            context = ssl.create_default_context(cadata=ca)
+            with self.port_forward(pod["metadata"]["name"]) as port, \
+                    self.httpx.Client(verify=context, timeout=5, trust_env=False) as client:
+                response = client.get(f"https://127.0.0.1:{port}/readyz")
+                facts["verifiedLoopbackTlsStatus"] = response.status_code
+        except Exception as error:
+            facts["diagnosticError"] = type(error).__name__
+        print("SRE-DIAG", json.dumps(facts), flush=True)
 
     def close(self):
         for process in self.processes:

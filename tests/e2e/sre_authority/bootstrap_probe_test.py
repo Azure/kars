@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, public_stack_facts
+from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, probe_command_result, public_stack_facts
 from sre_authority.bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
@@ -15,6 +15,17 @@ POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
 
 
 class BootstrapProofTests(unittest.TestCase):
+    def test_probe_diagnostics_never_publish_executable_output(self):
+        for code, output, category in (
+            (127, "exec: executable file not found in $PATH do-not-publish", "executable-not-found"),
+            (1, "", "probe-not-ready"),
+            (0, "do-not-publish", "succeeded"),
+            (1, "do-not-publish", "unclassified"),
+        ):
+            facts = probe_command_result(code, output)
+            self.assertEqual(facts, {"exitCode": code, "category": category})
+            self.assertNotIn("do-not-publish", json.dumps(facts))
+
     def test_failure_metadata_keeps_public_cause_not_body_or_credentials(self):
         message = ('Error creating Pod: kars-sre-private-mounts evaluation failed: no such key: namespace; '
                    'token=do-not-publish argv=do-not-publish')

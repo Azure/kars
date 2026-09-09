@@ -21,6 +21,17 @@ FIELDS = {
 }
 
 
+def probe_command_result(code, output):
+    category = "unclassified"
+    if code == 0:
+        category = "succeeded"
+    elif "executable file not found" in output:
+        category = "executable-not-found"
+    elif code == 1 and not output.strip():
+        category = "probe-not-ready"
+    return {"exitCode": code, "category": category}
+
+
 def identifier(value):
     return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,253}", value) else None
 
