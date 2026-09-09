@@ -3,7 +3,6 @@
 
 use super::*;
 use crate::{crd::KarsSandbox, reconciler::governed_services, service_observer::Binding};
-use futures::StreamExt;
 use k8s_openapi::api::{
     apps::v1::{Deployment, ReplicaSet},
     core::v1::Pod,
@@ -175,16 +174,7 @@ pub(super) async fn probe(
         if response.status() != reqwest::StatusCode::OK {
             return Ok(false);
         }
-        let mut stream = response.bytes_stream();
-        let mut body = Vec::new();
-        while let Some(chunk) = stream.next().await {
-            let Ok(chunk) = chunk else { return Ok(false) };
-            if body.len() + chunk.len() > crate::observation_privacy::MAX_BODY {
-                return Ok(false);
-            }
-            body.extend_from_slice(&chunk);
-        }
-        let Ok(value) = serde_json::from_slice::<serde_json::Value>(&body) else {
+        let Ok(value) = read_body(response).await else {
             return Ok(false);
         };
         if value["capability"] != crate::service_observer::CAPABILITY
@@ -197,4 +187,91 @@ pub(super) async fn probe(
         seen = true;
     }
     Ok(seen)
+}
+
+async fn read_body(mut response: reqwest::Response) -> Result<serde_json::Value, &'static str> {
+    let mut body = Vec::new();
+    while let Some(chunk) = response
+        .chunk()
+        .await
+        .map_err(|_| "Observation probe body transport failed")?
+    {
+        if body.len().saturating_add(chunk.len()) > crate::observation_privacy::MAX_BODY {
+            return Err("Observation probe body exceeds its limit");
+        }
+        body.extend_from_slice(&chunk);
+    }
+    serde_json::from_slice(&body).map_err(|_| "Observation probe body is not valid JSON")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    async fn payload(
+        bytes: Vec<u8>,
+        declared_length: usize,
+    ) -> Result<serde_json::Value, &'static str> {
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            let mut request = Vec::new();
+            while !request.ends_with(b"\r\n\r\n") {
+                assert!(request.len() < 8192);
+                request.push(stream.read_u8().await.unwrap());
+            }
+            let header = format!(
+                "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {declared_length}\r\nConnection: close\r\n\r\n"
+            );
+            stream.write_all(header.as_bytes()).await.unwrap();
+            stream.write_all(&bytes).await.unwrap();
+            stream.shutdown().await.unwrap();
+        });
+        let response = reqwest::Client::builder()
+            .no_proxy()
+            .timeout(std::time::Duration::from_secs(5))
+            .build()
+            .unwrap()
+            .get(format!("http://{address}/"))
+            .send()
+            .await
+            .unwrap();
+        let result = read_body(response).await;
+        server.await.unwrap();
+        result
+    }
+
+    #[tokio::test]
+    async fn observer_runtime_body_accepts_the_exact_limit_and_rejects_excess() {
+        let mut bytes = b"{}".to_vec();
+        bytes.resize(crate::observation_privacy::MAX_BODY, b' ');
+        assert_eq!(
+            payload(bytes.clone(), bytes.len()).await.unwrap(),
+            serde_json::json!({})
+        );
+        bytes.push(b' ');
+        assert_eq!(
+            payload(bytes.clone(), bytes.len()).await.unwrap_err(),
+            "Observation probe body exceeds its limit"
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_runtime_body_rejects_truncated_transport_even_after_valid_json() {
+        assert_eq!(
+            payload(b"{}".to_vec(), 4).await.unwrap_err(),
+            "Observation probe body transport failed"
+        );
+    }
+
+    #[tokio::test]
+    async fn observer_runtime_body_rejects_invalid_json() {
+        assert_eq!(
+            payload(b"invalid".to_vec(), 7).await.unwrap_err(),
+            "Observation probe body is not valid JSON"
+        );
+    }
 }
