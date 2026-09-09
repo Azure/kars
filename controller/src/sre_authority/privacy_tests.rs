@@ -25,7 +25,7 @@ fn ready() -> KarsSRERegistration {
     reg
 }
 
-fn admission_ready(state: &Arc<Mutex<State>>) {
+pub(super) fn admission_ready(state: &Arc<Mutex<State>>) {
     let mut state = state.lock().unwrap();
     for name in admission::POLICIES {
         state.objects.insert(format!("/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/{name}"),json!({

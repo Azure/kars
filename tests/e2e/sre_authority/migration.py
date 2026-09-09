@@ -9,7 +9,9 @@ from .common import (
 )
 from .fixtures import CONTROL, CONTROL_NS, GROUP_BINDING, delegate_operators
 from .admission import admission_cases, policies_ready
-from .credential_paths import block_prestaged_paths, fixture_review, secret_watch, token_secret_denials
+from .credential_paths import (
+    assert_fresh_private_identity, block_prestaged_paths, fixture_review, secret_watch, token_secret_denials,
+)
 
 
 def cli_failure(result, text, label):
@@ -121,6 +123,8 @@ def legacy_migration(h):
         return reg if status.get("phase") == "Ready" and status.get("observedGeneration") == reg["metadata"]["generation"] else False
     reg = h.poll("reviewed migration and credential-order proof", migrated, seconds=240, interval=0.25)
     require(issuance_seen, "No private issuance was observed")
+    assert_fresh_private_identity(h, reg)
+    h.passed("Controller-created private ServiceAccount has a new registered UID, distinct from the operator-deleted unowned same-name fixture")
     h.cli("authority", "migrate", user="registrar", timeout=45)
     h.wait_ready()
     h.passed("Real old-principal GET/LIST/WATCH denial and old Pod termination precede private credential issuance")
