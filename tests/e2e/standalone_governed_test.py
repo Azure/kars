@@ -3,6 +3,7 @@
 
 """Runner routing checks only; these do not provide native execution evidence."""
 
+import json
 import os
 from pathlib import Path
 import subprocess
@@ -12,7 +13,8 @@ import unittest
 ROOT = Path(__file__).resolve().parents[2]
 RUNNER = ROOT / "tests/e2e/standalone-governed.sh"
 CHECKS = (
-    "setup_cluster", "build_images", "prepare_managed_mcp", "install_crds",
+    "setup_cluster", "build_images", "prepare_managed_mcp", "prepare_standalone_namespace",
+    "install_crds",
     "test_crd_installed", "test_controller_running", "test_controller_metrics_endpoint",
     "test_admission_policies_installed", "test_operator_default_deny_np",
     "test_create_sandbox", "test_sandbox_deployment_exists", "test_sandbox_pod_starts",
@@ -149,6 +151,48 @@ install_crds "$FIXTURE_MODE"
                 else:
                     self.assertEqual(result.returncode, 0, result.stderr)
                     self.assertIn("HELM_ARG " + expected, result.stdout)
+
+    def test_fresh_namespace_uses_chart_security_labels_and_exclusive_creation(self):
+        namespace = {
+            "apiVersion": "v1", "kind": "Namespace",
+            "metadata": {"name": "kars-system", "labels": {
+                "pod-security.kubernetes.io/enforce": "restricted",
+            }, "annotations": {"retained": "annotation"}},
+        }
+        script = r'''
+source "$FIXTURE_RUNNER"
+helm() { printf '%s' "$FIXTURE_NAMESPACE"; }
+kubectl() {
+    printf 'KUBE_CALL %s\n' "$*" >&2
+    cat
+}
+prepare_standalone_namespace
+'''
+        env = dict(os.environ, FIXTURE_RUNNER=str(RUNNER),
+                   FIXTURE_NAMESPACE=json.dumps(namespace))
+        result = subprocess.run(["bash", "-c", script], env=env, text=True,
+                                capture_output=True, timeout=20, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        metadata = json.loads(result.stdout)["metadata"]
+        self.assertEqual(metadata["labels"]["pod-security.kubernetes.io/enforce"], "restricted")
+        self.assertEqual(metadata["labels"]["app.kubernetes.io/managed-by"], "Helm")
+        self.assertEqual(metadata["annotations"], {
+            "retained": "annotation",
+            "meta.helm.sh/release-name": "kars",
+            "meta.helm.sh/release-namespace": "kars-system",
+        })
+        calls = [line for line in result.stderr.splitlines() if line.startswith("KUBE_CALL ")]
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(sum("create --dry-run=client --validate=strict" in call for call in calls), 1)
+        self.assertEqual(sum(call.endswith("create -f -") for call in calls), 1)
+        self.assertTrue(all("--context kind-kars-e2e" in call for call in calls))
+        self.assertFalse(any("apply" in call or "patch" in call for call in calls))
+
+    def test_namespace_preparation_failure_cleans_only_the_owned_cluster(self):
+        result, _ = self.invoke(failure="prepare_standalone_namespace")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertNotIn("STEP install_crds", result.stdout)
+        self.assertIn("DELETE OWNED CLUSTER", result.stdout)
 
 
 if __name__ == "__main__":

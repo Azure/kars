@@ -9,6 +9,29 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run.sh"
 
 STANDALONE_CLUSTER_UID=""
 
+prepare_standalone_namespace() {
+    # The chart owns kars-system. Create that exact manifest with release
+    # ownership before Helm needs its release-storage namespace; never adopt.
+    helm template kars "$ROOT_DIR/deploy/helm/kars" --namespace kars-system \
+        --show-only templates/namespace.yaml \
+        | kubectl --context kind-kars-e2e --request-timeout=15s \
+            create --dry-run=client --validate=strict -f - -o json \
+        | python3 -c '
+import json, sys
+namespace = json.load(sys.stdin)
+assert namespace.get("kind") == "Namespace"
+metadata = namespace["metadata"]
+assert metadata["name"] == "kars-system"
+metadata.setdefault("labels", {})["app.kubernetes.io/managed-by"] = "Helm"
+metadata.setdefault("annotations", {}).update({
+    "meta.helm.sh/release-name": "kars",
+    "meta.helm.sh/release-namespace": "kars-system",
+})
+json.dump(namespace, sys.stdout)
+' \
+        | kubectl --context kind-kars-e2e --request-timeout=15s create -f -
+}
+
 standalone_cleanup() {
     local current_uid
     current_uid=$(kubectl --context kind-kars-e2e --request-timeout=15s \
@@ -46,6 +69,7 @@ standalone_governed_main() {
     trap standalone_cleanup EXIT
     build_images
     prepare_managed_mcp
+    prepare_standalone_namespace
     install_crds standalone-governed
 
     info "Standalone governed services: no active SRE, no CNI-enforcement claim"
