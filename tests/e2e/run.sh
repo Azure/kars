@@ -152,6 +152,7 @@ install_crds() {
     local replicas="${KARS_E2E_CONTROLLER_REPLICAS:-1}"
     local disable_le="${KARS_E2E_DISABLE_LEADER_ELECTION:-1}"
     local extra_set_args=(
+        --set-string "managedMcp.everythingImage=kars-mcp-everything:e2e"
         --set "controller.replicas=${replicas}"
         --set "inferenceRouter.replicas=${replicas}"
         # Without a fake Foundry endpoint, the KarsSandbox reconciler
@@ -3016,6 +3017,7 @@ EOF
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 source "$SCRIPT_DIR/namespace-ownership.sh"
+source "$SCRIPT_DIR/managed-mcp.sh"
 source "$SCRIPT_DIR/credential-sources.sh"
 source "$SCRIPT_DIR/governed-services.sh"
 
@@ -3030,6 +3032,7 @@ main() {
 
     setup_cluster
     build_images
+    prepare_managed_mcp
     install_crds
 
     echo ""
@@ -3122,6 +3125,7 @@ main() {
             ;;
     esac
 
+    test_managed_mcp || fail "Managed MCP lifecycle/protocol gate failed"
     test_sre_namespace_ownership || fail "SRE namespace lifecycle gate failed"
     test_credential_sources || fail "Credential-source lifecycle gate failed"
 

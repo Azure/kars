@@ -11,7 +11,7 @@ import { loadContext } from "../config.js";
 import { preparePushTarget } from "../lib/deployment-target.js";
 import { inspectMeshInstallation } from "../lib/mesh-release.js";
 import { applyPushedImages } from "./push-apply.js";
-import { dockerPushDigest, PUSH_COMPONENTS, RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
+import { dockerPushDigest, MANAGED_MCP_IMAGE_TARGET, PUSH_COMPONENTS, RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
 import { stageRustBinaries } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
 import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
@@ -25,7 +25,7 @@ export function pushCommand(): Command {
     .description("Build and push images to ACR (uses cached context from last deploy)")
     .option("--acr <name>", "ACR name (default: from last deploy)")
     .option("--subscription <id>", "Azure subscription (must match saved deployment when present)")
-    .option("--only <image>", "Build one image: controller, router, sandbox, sandbox-base, relay, registry, or runtime-*")
+    .option("--only <image>", "Build one image: controller, router, sandbox, sandbox-base, relay, registry, mcp-everything, or runtime-*")
     .option("--include-base", "Include sandbox-base in a full push (skipped by default — rebuild only when upgrading OpenClaw/Python/Go)")
     .option("--apply", "Apply selected image configuration and verify the resulting rollouts")
     .option(
@@ -256,6 +256,8 @@ export function pushCommand(): Command {
         { name: "sandbox", tag: "openclaw-sandbox:latest", dockerfile: "sandbox-images/openclaw/Dockerfile",
           buildArgs: sandboxBuildArgs },
         ...meshImages,
+        { name: MANAGED_MCP_IMAGE_TARGET.name, tag: `${MANAGED_MCP_IMAGE_TARGET.repo}:latest`,
+          dockerfile: "sandbox-images/mcp-everything/Dockerfile", context: "sandbox-images/mcp-everything" },
         // Shared with release imports, upgrade values, and push application.
         ...RUNTIME_IMAGE_TARGETS.map(runtime => ({
           name: runtime.name, tag: `${runtime.repo}:latest`,
@@ -396,6 +398,7 @@ export function pushCommand(): Command {
             name: image.name, image: pushedArtifacts.get(image.name) ?? `${acrLoginServer}/${image.tag}`,
           })), path.join(repoRoot, "deploy/helm/kars"), mesh);
           spin.succeed(`Selected image configuration applied; ${applied.updatedSandboxes} eligible sandbox deployment(s) verified`);
+          if (applied.updatedManagedMcp !== undefined) console.log(chalk.dim(`  ${applied.updatedManagedMcp} managed MCP workload(s) verified; unreferenced defaults updated only.`));
           if (applied.preservedOverrides) console.log(chalk.dim(`  Preserved ${applied.preservedOverrides} explicit sandbox/overlay image override(s).`));
           if (applied.buildOnly.length) console.log(chalk.dim(`  Build-only (not deployed): ${applied.buildOnly.join(", ")}.`));
         } catch (e: any) {

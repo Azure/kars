@@ -451,6 +451,11 @@ async fn main() -> Result<()> {
         let memory_binding_for_platform = state.memory_binding.clone();
         let policy_status_for_platform = state.policy_status.clone();
         let telemetry = state.services.telemetry.clone();
+        let mcp_guard = (
+            state.governance.clone(),
+            state.services.clone(),
+            state.sandbox_name.as_ref().clone(),
+        );
         let services = routes::governed_service_routes(state.clone()).with_state(state.clone());
         let merged = public
             .merge(protected)
@@ -458,7 +463,7 @@ async fn main() -> Result<()> {
             .merge(handoff_mutations)
             .merge(handoff_status)
             .with_state(state)
-            .merge(build_mcp_router(Some(telemetry.clone())).await)
+            .merge(build_mcp_router(Some(telemetry.clone()), Some(mcp_guard)).await)
             .merge(build_platform_mcp_router(
                 Some(memory_binding_for_platform),
                 Some(policy_status_for_platform),
@@ -633,6 +638,11 @@ async fn main() -> Result<()> {
 /// unauthenticated MCP traffic.
 async fn build_mcp_router(
     telemetry: Option<Arc<kars_inference_router::task_telemetry::TaskTelemetry>>,
+    guard: Option<(
+        Arc<kars_inference_router::governance::Governance>,
+        Arc<kars_inference_router::governed_services::GovernedServices>,
+        String,
+    )>,
 ) -> Router {
     use kars_inference_router::mcp::forwarder::RouterToolDispatcher;
     use kars_inference_router::mcp::oauth::OAuthVerifierConfig;
@@ -686,8 +696,27 @@ async fn build_mcp_router(
 
     let mut state = routes::McpRouteState::standard();
     state.task_telemetry = telemetry;
+    state.managed_prefixes = registry_arc
+        .servers
+        .values()
+        .filter(|server| {
+            server
+                .meta
+                .as_ref()
+                .is_some_and(|meta| meta.source_uid.is_some())
+        })
+        .map(|server| {
+            format!(
+                "{}.",
+                kars_inference_router::mcp::forwarder::server_name_to_prefix(&server.name)
+            )
+        })
+        .collect();
     if let Some(d) = dispatcher_arc {
         state = state.with_tools(d);
+        if let Some((governance, services, principal)) = guard {
+            state = state.with_governance(governance, services, principal);
+        }
     }
 
     // Slice 4d.3 — prefer the multi-issuer path when MCP_JWKS_DIR is

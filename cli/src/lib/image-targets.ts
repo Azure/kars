@@ -20,7 +20,12 @@ export const RUNTIME_IMAGE_TARGETS: ReadonlyArray<{
 ];
 
 export interface PushedImage { name: string; image: string }
-export const PUSH_COMPONENTS = ["controller", "router", "sandbox", "sandbox-base", "relay", "registry", ...RUNTIME_IMAGE_TARGETS.map(item => item.name)];
+export const MANAGED_MCP_IMAGE_TARGET = {
+  name: "mcp-everything", repo: "mcp-everything",
+  valueKey: "managedMcp.everythingImage", env: "MCP_EVERYTHING_IMAGE",
+} as const;
+export const PUSH_COMPONENTS = ["controller", "router", "sandbox", "sandbox-base", "relay", "registry",
+  MANAGED_MCP_IMAGE_TARGET.name, ...RUNTIME_IMAGE_TARGETS.map(item => item.name)];
 
 export function splitImage(image: string): { repository: string; tag: string } {
   const withoutDigest = image.split("@")[0];
@@ -43,14 +48,16 @@ export function dockerPushDigest(output: string): string | undefined {
 
 export function controllerEnv(name: string): string | undefined {
   return name === "router" ? "INFERENCE_ROUTER_IMAGE"
-    : name === "sandbox" ? "SANDBOX_IMAGE" : runtimeTarget(name)?.env;
+    : name === "sandbox" ? "SANDBOX_IMAGE"
+    : name === MANAGED_MCP_IMAGE_TARGET.name ? MANAGED_MCP_IMAGE_TARGET.env : runtimeTarget(name)?.env;
 }
 
 export function coreImageValues(images: PushedImage[]): Record<string, string> {
   const values: Record<string, string> = {};
   for (const { name, image } of images) {
     const runtime = runtimeTarget(name);
-    if (runtime) values[runtime.valueKey] = image;
+    if (name === MANAGED_MCP_IMAGE_TARGET.name) values[MANAGED_MCP_IMAGE_TARGET.valueKey] = image;
+    else if (runtime) values[runtime.valueKey] = image;
     else if (["controller", "router", "sandbox"].includes(name)) {
       const prefix = name === "router" ? "inferenceRouter" : name;
       const { repository, tag } = splitImage(image);

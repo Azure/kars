@@ -159,6 +159,23 @@ spec:
                 description: Optional human-readable label for operator-TUI display.
                 nullable: true
                 type: string
+              managed:
+                additionalProperties: false
+                description: |-
+                  Closed controller-managed workload preset. Mutually exclusive with
+                  url, bundleRef and endpoint authentication fields; the controller
+                  derives its private endpoint. No arbitrary workload image is accepted.
+                nullable: true
+                properties:
+                  preset:
+                    description: Workloads for which Kars provides concrete deployment and protocol support.
+                    enum:
+                    - playwright
+                    - everything
+                    type: string
+                required:
+                - preset
+                type: object
               oauth:
                 description: 'OAuth 2.1 configuration. Required when `productionMode: true`.'
                 nullable: true
@@ -230,9 +247,12 @@ spec:
             - message: spec.oauth.pkce, when set, must be 'S256' (RFC 7636 §4.2)
               reason: FieldValueInvalid
               rule: '!has(self.oauth) || !has(self.oauth.pkce) || self.oauth.pkce == ''S256'''
-            - message: spec.bundleRef is mutually exclusive with spec.url, spec.oauth, spec.productionMode, spec.scopes, spec.allowedTools, and spec.displayName
+            - message: spec.bundleRef is mutually exclusive with spec.url, spec.oauth, spec.productionMode, spec.scopes, spec.allowedTools, and spec.displayName, and spec.managed
               reason: FieldValueInvalid
-              rule: '!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && !has(self.productionMode) && !has(self.scopes) && !has(self.allowedTools) && !has(self.displayName))'
+              rule: '!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && !has(self.productionMode) && !has(self.scopes) && !has(self.allowedTools) && !has(self.displayName) && !has(self.managed))'
+            - message: spec.managed is mutually exclusive with spec.url, spec.oauth, spec.productionMode, spec.scopes, spec.bearerFromEnv, and spec.bundleRef
+              reason: FieldValueInvalid
+              rule: '!has(self.managed) || (!has(self.url) && !has(self.oauth) && !has(self.productionMode) && !has(self.scopes) && !has(self.bearerFromEnv) && !has(self.bundleRef))'
           status:
             nullable: true
             properties:
@@ -282,6 +302,16 @@ spec:
                   type: object
                 nullable: true
                 type: array
+              discoveredTools:
+                description: Last successfully probed, allowlisted upstream tool names.
+                items:
+                  type: string
+                nullable: true
+                type: array
+              endpoint:
+                description: Effective upstream URL. Absent while a managed workload is unqualified.
+                nullable: true
+                type: string
               jwksConfigMapRef:
                 description: |-
                   Reference to the ConfigMap caching the issuer's JWKS. Present
@@ -297,6 +327,16 @@ spec:
                 type: object
               lastProbedAt:
                 description: Last health-check timestamp (RFC 3339).
+                nullable: true
+                type: string
+              managedNamespaceUid:
+                description: Exact API-server namespace incarnation holding the managed workload.
+                nullable: true
+                type: string
+              mode:
+                description: |-
+                  Managed or External. Managed readiness includes current workload
+                  rollout and a successful bounded MCP initialize/tools/list probe.
                 nullable: true
                 type: string
               observedGeneration:
@@ -323,6 +363,27 @@ spec:
                 required:
                 - name
                 type: object
+              toolSchemaDigest:
+                description: |-
+                  Content digest of the discovered tool definitions, not a signature or
+                  supply-chain attestation.
+                nullable: true
+                type: string
+              workloadGeneration:
+                description: Deployment generation covered by the successful protocol probe.
+                format: int64
+                nullable: true
+                type: integer
+              workloadImage:
+                description: Exact image reference covered by the successful protocol probe.
+                nullable: true
+                type: string
+              workloadRef:
+                description: |-
+                  Display hint for the managed Deployment (namespace/name), never
+                  sufficient authority for cleanup.
+                nullable: true
+                type: string
             type: object
         required:
         - spec
@@ -332,4 +393,3 @@ spec:
     storage: true
     subresources:
       status: {}
-
