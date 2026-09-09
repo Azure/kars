@@ -413,6 +413,15 @@ class Harness:
                                if container["name"] == "inference-router"), None)
                 if router and not router.get("ready") and "running" in router.get("state", {}):
                     self.readiness_diagnostics(pod)
+                elif router and router.get("ready"):
+                    from .bootstrap_diagnostics import router_readiness_facts
+                    try:
+                        logs = self.k("logs", "-n", RUNTIME, pod["metadata"]["name"], "-c", "inference-router",
+                                      "--tail=150", timeout=10)
+                        print("SRE-DIAG", json.dumps({"kind": "RouterAuthorityLog", "podUid": pod["metadata"]["uid"],
+                            "authorityChecks": router_readiness_facts(logs)}), flush=True)
+                    except Exception:
+                        print("SRE-DIAG Ready router authority log unavailable", flush=True)
         except Exception:
             print("SRE-DIAG runtime Pod status unavailable", flush=True)
 

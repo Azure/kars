@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, firewall_summary, object_status, policy_status, probe_command_result, public_stack_facts, router_log_summary, router_readiness_facts
+from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, exception_summary, failure_facts, firewall_summary, object_status, policy_status, probe_command_result, public_stack_facts, router_log_summary, router_readiness_facts
 from sre_authority.bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
@@ -15,6 +15,23 @@ POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
 
 
 class BootstrapProofTests(unittest.TestCase):
+    def test_http_failure_summary_reports_status_and_checked_source_not_body_url_or_headers(self):
+        root = Path(__file__).resolve().parents[3]
+        class Response:
+            status_code = 401
+            def json(self):
+                return {"kind": "Status", "reason": "SREProxyDenied",
+                        "message": "An SRE proxy credential is required", "data": "do-not-publish"}
+        error = RuntimeError("do-not-publish URL/header/credential")
+        error.response = Response()
+        facts = exception_summary(error, root)
+        self.assertEqual(facts["httpStatus"], 401)
+        self.assertTrue(facts["responseSite"]["source"].endswith("sre_proxy/mod.rs"))
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+        error.response.json = lambda: {"kind": "Status", "message": "do-not-publish"}
+        self.assertNotIn("responseSite", exception_summary(error, root))
+        self.assertNotIn("do-not-publish", json.dumps(exception_summary(error, root)))
+
     def test_firewall_summary_does_not_publish_rules_comments_addresses_or_unknown_chains(self):
         text = """*filter
 :OUTPUT ACCEPT [12:640]
