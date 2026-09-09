@@ -14,7 +14,12 @@ spec:
         resources: ["deployments", "deployments/scale"]
   matchConditions:
     - name: canonical-runtime-consumer
-      expression: "request.namespace == 'kars-sre' && request.name == 'sre'"
+      expression: >-
+        request.?namespace.orValue('') == 'kars-sre' &&
+        [request.?name.orValue(''),
+         object == null ? '' : object.?metadata.?name.orValue(''),
+         oldObject == null ? '' : oldObject.?metadata.?name.orValue('')]
+          .exists(n, n == 'sre')
   validations:
     - expression: >-
         authorizer.group('kars.azure.com').resource('karssreregistrations')
@@ -49,9 +54,13 @@ spec:
   matchConditions:
     - name: reserved-sre-role
       expression: >-
-        request.name in ['kars-sre-reader', 'kars-sre-action-author', 'kars-sre-router-renew', 'kars-sre-private-diagnostics',
-          'kars-sre-registrar', 'kars-sre-retired-agent'] ||
-        (request.namespace == 'kars-sre' && request.name == 'sre-api-self-renew')
+        [request.?name.orValue(''),
+         object == null ? '' : object.?metadata.?name.orValue(''),
+         oldObject == null ? '' : oldObject.?metadata.?name.orValue('')]
+          .exists(n,
+            n in ['kars-sre-reader', 'kars-sre-action-author', 'kars-sre-router-renew',
+                  'kars-sre-private-diagnostics', 'kars-sre-registrar', 'kars-sre-retired-agent'] ||
+            (request.?namespace.orValue('') == 'kars-sre' && n == 'sre-api-self-renew'))
   validations:
     - expression: >-
         authorizer.group('kars.azure.com').resource('karssreregistrations')

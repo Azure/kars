@@ -26,7 +26,8 @@ def failure_site(error):
     frame = error.__traceback__
     while frame:
         name = Path(frame.tb_frame.f_code.co_filename).name
-        if name in ("bootstrap_probe.py", "binding_probe.py", "bootstrap_cases.py", "controller_update_probe.py"):
+        if name in ("bootstrap_probe.py", "binding_probe.py", "bootstrap_cases.py",
+                    "controller_update_probe.py", "collection_delete_probe.py"):
             result.update(source=name, line=frame.tb_lineno)
         frame = frame.tb_next
     return result
@@ -258,6 +259,11 @@ def main(root, diagnostics_only, candidate=False, retirement=False):
                 write_report(root, "bootstrap-namespace-cleanup.json", {"cases": cleanup_cases})
                 if not all(case["matched"] for case in cleanup_cases):
                     raise RuntimeError("Canonical consumer cleanup authority differs from the expected boundary")
+                from sre_authority.collection_delete_probe import cases as collection_cases
+                collections = collection_cases(port, policies)
+                write_report(root, "bootstrap-collection-delete.json", {"cases": collections})
+                if not all(case["matched"] for case in collections):
+                    raise RuntimeError("Collection DELETE must preserve ordinary cleanup and protected-object denial")
             finally:
                 write_report(root, "bootstrap-final.json", collect(port, policies, request))
                 write_report(root, "bootstrap-controller-stack.json", controller_stack(
