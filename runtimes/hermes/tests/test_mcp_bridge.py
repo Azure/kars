@@ -26,7 +26,10 @@ def server():
             if body["method"] == "initialize":
                 self.send_response(200)
                 self.send_header("mcp-session-id", "session-one")
-                value = {"jsonrpc": "2.0", "id": body["id"], "result": {"protocolVersion": "2025-06-18", "capabilities": {}}}
+                value = {
+                    "jsonrpc": "2.0", "id": body["id"],
+                    "result": {"protocolVersion": "2025-06-18", "capabilities": {}},
+                }
             elif body["method"] == "notifications/initialized":
                 self.send_response(202)
                 self.end_headers()
@@ -37,7 +40,9 @@ def server():
                 if state["error"]:
                     value["error"] = state["error"]
                 else:
-                    value["result"] = {"tools": [{"name": "everything.echo"}]} if body["method"] == "tools/list" else state["result"]
+                    value["result"] = (
+                        {"tools": [{"name": "everything.echo"}]} if body["method"] == "tools/list" else state["result"]
+                    )
             data = json.dumps(value).encode()
             self.send_header("content-type", "application/json")
             self.send_header("content-length", str(len(data)))

@@ -1,13 +1,69 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::{crd::KarsSandbox, mcp_server::McpServer};
+use crate::{
+    crd::{GovernanceConfig, KarsSandbox},
+    mcp_server::McpServer,
+};
+use k8s_openapi::api::apps::v1::Deployment;
 use kube::{Api, Client, ResourceExt};
 
 pub(super) struct Binding {
     pub endpoint: Option<String>,
     pub signing: bool,
     pub revision: String,
+}
+
+pub(super) async fn resolve_all<'a>(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    governance: &'a GovernanceConfig,
+) -> Result<Vec<(&'a str, Binding)>, String> {
+    let name = sandbox.name_any();
+    if governance.uses_singular_mcp_server_ref() {
+        tracing::warn!(
+            sandbox = %name,
+            reason = crate::status::conditions::reason::MCP_SINGULAR_DEPRECATED,
+            "spec.governance.mcpServerRef is deprecated; migrate to \
+             spec.governance.mcpServerRefs (Slice 4d.1)",
+        );
+    }
+    let mut bindings = Vec::new();
+    for reference in governance.effective_mcp_server_refs() {
+        let mcp_name = reference.name.trim();
+        if mcp_name.is_empty() {
+            continue;
+        }
+        match resolve(client, sandbox, mcp_name).await? {
+            Some(binding) => bindings.push((mcp_name, binding)),
+            None => tracing::warn!(sandbox = %name, mcp = %mcp_name,
+                "MCP reference is not currently authorized and qualified"),
+        }
+    }
+    Ok(bindings)
+}
+
+pub(super) fn decorate(
+    deployment: &mut Deployment,
+    revisions: &[String],
+) -> Result<(), serde_json::Error> {
+    if !revisions.is_empty() {
+        deployment
+            .spec
+            .as_mut()
+            .unwrap()
+            .template
+            .metadata
+            .as_mut()
+            .unwrap()
+            .annotations
+            .get_or_insert_with(Default::default)
+            .insert(
+                "kars.azure.com/mcp-bindings-version".into(),
+                crate::providers::signing::content_digest(&serde_json::to_vec(revisions)?),
+            );
+    }
+    Ok(())
 }
 
 pub(super) fn api_error(error: kube::Error) -> String {
