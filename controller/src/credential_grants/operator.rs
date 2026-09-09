@@ -7,8 +7,12 @@ use super::*;
 use crate::{crd::KarsSandbox, reconciler::governed_services, service_observer};
 use k8s_openapi::api::apps::v1::Deployment;
 
-pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> Result<(), String> {
+pub(super) async fn reconcile(
+    client: &Client,
+    grant: &KarsCredentialGrant,
+) -> Result<bool, String> {
     let workspace = grant.namespace().ok_or("Observation workspace missing")?;
+    let mut ready = true;
     let sandboxes: Api<KarsSandbox> = Api::namespaced(client.clone(), &workspace);
     for target in &grant.spec.observation_targets {
         if target.kind != "KarsSandbox" || target.namespace != workspace || target.uid.is_empty() {
@@ -36,6 +40,7 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         match crate::sre_authority::privacy_readiness(client, &namespace.name_any()).await {
             Ok(crate::sre_authority::PrivacyReadiness::Pending) => {
                 publish(client, &sandbox, None).await?;
+                ready = false;
                 continue;
             }
             Err(error) => {
@@ -46,9 +51,8 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
             Ok(crate::sre_authority::PrivacyReadiness::Qualified(_)) => {}
         }
         let epoch = crate::sre_authority::privacy_epoch(client, &namespace.name_any()).await?;
-        if epoch.is_some() {
-            return Err(service_observer::ACTIVE_PRIVACY_UNAVAILABLE.into());
-        }
+        let verifier = crate::privacy_rpc::discovery::current(client).await?;
+        super::observation_network::rpc_baseline(client, &sandbox, &namespace, &verifier).await?;
         let identity = governed_services::identity(client, &sandbox, &namespace).await?;
         let server_name = format!(
             "observer-{}.kars.internal",
@@ -116,12 +120,17 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
             recipients,
             privacy_revision: crate::sre_privacy::REVISION.into(),
             privacy_epoch: epoch.clone(),
+            workspace_uid: grant.spec.workspace_uid.clone(),
+            verifier: Some(verifier),
+            expires_at: 0,
             server_name,
             ca_pem: tls["caPem"]
                 .as_str()
                 .ok_or("Observation CA missing")?
                 .into(),
         };
+        let binding =
+            super::observer_runtime::expiry(client, &sandbox, &namespace, binding).await?;
         if !binding.valid() {
             return Err("Observation binding is invalid".into());
         }
@@ -138,15 +147,14 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         if credential.epoch != epoch {
             return Err("Observation privacy changed during issuance".into());
         }
-        super::observer_metadata::ensure(client, grant, &sandbox, &namespace, &binding.recipients)
-            .await?;
+        super::observer_metadata::ensure(client, grant, &sandbox, &namespace, &binding).await?;
         let deployed = governed_services::credentials::review_consumer(
             client,
             &namespace.name_any(),
             &sandbox.name_any(),
         )
         .await?;
-        let current = deployed.as_ref().is_some_and(|deployment| {
+        let rolled_out = deployed.as_ref().is_some_and(|deployment| {
             deployment
                 .spec
                 .as_ref()
@@ -165,34 +173,49 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
             .next()
             .ok_or("Observation version missing")?
             .to_string();
-        publish(
-            client,
-            &sandbox,
-            Some(ObservationStatus {
-                capability: service_observer::CAPABILITY.into(),
-                phase: if current { "Ready" } else { "Prepared" }.into(),
-                reason: if current {
-                    "Qualified"
-                } else {
-                    "AwaitingCredentialRollout"
-                }
-                .into(),
-                version: credential.version,
-                grant: ObjectIdentity {
-                    name: NAME.into(),
-                    uid: grant.uid().ok_or("Grant UID missing")?,
-                },
-                secret: ObjectIdentity {
-                    name: service_observer::SECRET.into(),
-                    uid: secret_uid,
-                },
-                namespace_uid: namespace.uid().ok_or("Namespace UID missing")?,
-                privacy_revision: crate::sre_privacy::REVISION.into(),
-                privacy_epoch: epoch,
-                deployment_uid: deployed.as_ref().and_then(ResourceExt::uid),
-            }),
-        )
-        .await?;
+        let mut status = ObservationStatus {
+            capability: service_observer::CAPABILITY.into(),
+            phase: "Prepared".into(),
+            reason: "AwaitingPrivateVerifierCapability".into(),
+            version: credential.version.clone(),
+            grant: ObjectIdentity {
+                name: NAME.into(),
+                uid: grant.uid().ok_or("Grant UID missing")?,
+            },
+            secret: ObjectIdentity {
+                name: service_observer::SECRET.into(),
+                uid: secret_uid,
+            },
+            namespace_uid: namespace.uid().ok_or("Namespace UID missing")?,
+            privacy_revision: crate::sre_privacy::REVISION.into(),
+            privacy_epoch: epoch,
+            deployment_uid: deployed.as_ref().and_then(ResourceExt::uid),
+        };
+        if sandbox
+            .status
+            .as_ref()
+            .and_then(|s| s.service_observation.as_ref())
+            .is_none_or(|old| old.version != credential.version)
+        {
+            publish(client, &sandbox, Some(status.clone())).await?;
+        }
+        if rolled_out
+            && let Some(deployment) = &deployed
+            && super::observer_runtime::probe(
+                client,
+                &sandbox,
+                &namespace,
+                deployment,
+                &binding,
+                &credential.version,
+            )
+            .await?
+        {
+            status.phase = "Ready".into();
+            status.reason = "PrivateVerifierQualified".into();
+        }
+        ready &= status.phase == "Ready";
+        publish(client, &sandbox, Some(status)).await?;
     }
     for sandbox in sandboxes
         .list(&ListParams::default())
@@ -218,7 +241,8 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         }
     }
     super::observer_rbac::reconcile(client, grant).await?;
-    super::observer_metadata::revoke_stale(client, grant).await
+    super::observer_metadata::revoke_stale(client, grant).await?;
+    Ok(ready)
 }
 
 fn identity_of(meta: &kube::api::ObjectMeta) -> Result<(&str, &str), String> {

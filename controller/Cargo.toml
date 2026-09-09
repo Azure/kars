@@ -68,6 +68,8 @@ oci-client = { version = "=0.16.1", default-features = false, features = ["rustl
 # refuse to auto-detect and panic on first TLS handshake. Pin to
 # `aws-lc-rs` to align with the rest of the workspace.
 rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
 rcgen.workspace = true
 time.workspace = true
 regex = "1.12.3"

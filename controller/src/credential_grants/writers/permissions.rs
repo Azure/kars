@@ -13,6 +13,13 @@ fn requests(
 ) -> Result<Vec<Value>, String> {
     let workspace = grant.namespace().ok_or("Credential workspace missing")?;
     let mut scopes = BTreeSet::from([None, Some(workspace), Some(writer.namespace.clone())]);
+    if let Some((namespace, _)) = controller
+        .0
+        .strip_prefix("system:serviceaccount:")
+        .and_then(|identity| identity.split_once(':'))
+    {
+        scopes.insert(Some(namespace.into()));
+    }
     scopes.extend(
         grant
             .spec
@@ -34,6 +41,12 @@ fn requests(
                 Some(crate::service_observer::TLS_SECRET),
             ),
             ("", "secrets", "get", Some("router-github-app")),
+            (
+                "",
+                "secrets",
+                "get",
+                Some(crate::observation_privacy::SECRET),
+            ),
             ("", "serviceaccounts/token", "create", None),
             ("", "pods", "create", None),
             ("", "pods/exec", "create", None),

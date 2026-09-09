@@ -25,6 +25,8 @@ pub mod blocklist;
 pub mod budget;
 pub mod config;
 pub mod config_mount;
+#[path = "../../shared/constant_time.rs"]
+mod constant_time;
 pub mod copilot_auth;
 pub mod deployment_health;
 pub mod egress_allowlist_loader;
@@ -43,8 +45,13 @@ pub mod mcp;
 pub mod memory_binding_loader;
 pub mod mesh;
 pub mod metrics;
+#[path = "../../shared/observation_privacy.rs"]
+pub mod observation_privacy;
+mod observation_privacy_client;
 pub mod policy_envelope;
 pub mod policy_status;
+#[path = "../../shared/private_tls.rs"]
+mod private_tls;
 pub mod provider;
 pub mod providers;
 pub mod proxy;

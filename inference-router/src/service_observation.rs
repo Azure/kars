@@ -85,12 +85,19 @@ impl Observer {
             .await
     }
 
-    pub async fn authorized(&self, provided: Option<&str>, scope: &Scope) -> Result<(), String> {
+    pub async fn authorized(
+        &self,
+        provided: Option<&str>,
+        scope: &Scope,
+        operation: crate::observation_privacy::Operation,
+    ) -> Result<(), String> {
         if !self.recognizes(provided) {
             return Err("Observation credential required".into());
         }
-        if self.binding.privacy_epoch.is_some() {
-            return Err(ACTIVE_PRIVACY_UNAVAILABLE.into());
+        if self.binding.expires_at <= chrono::Utc::now().timestamp()
+            || self.binding.verifier.is_none()
+        {
+            return Err("Current private observation verifier capability required".into());
         }
         if serde_json::to_value(&scope.identity).map_err(|_| "Service identity invalid")?
             != self.binding.identity
@@ -114,7 +121,9 @@ impl Observer {
             || sandbox.metadata.deletion_timestamp.is_some()
             || observed["capability"] != CAPABILITY
             || observed["version"] != self.version
-            || observed["phase"] != "Ready"
+            || !(observed["phase"] == "Ready"
+                || (operation == crate::observation_privacy::Operation::Scope
+                    && observed["phase"] == "Prepared"))
             || observed["grant"]["uid"] != self.binding.grant.uid
             || observed["namespaceUid"] != scope.identity.namespace_uid
             || observed["privacyRevision"] != self.binding.privacy_revision
@@ -136,6 +145,15 @@ impl Observer {
             "v1alpha1",
             "KarsCredentialGrant",
         ));
+        let workspace = Api::<Namespace>::all(client.clone())
+            .get(namespace)
+            .await
+            .map_err(|_| "Observation workspace cannot be verified")?;
+        if workspace.uid().as_deref() != Some(self.binding.workspace_uid.as_str())
+            || workspace.metadata.deletion_timestamp.is_some()
+        {
+            return Err("Observation workspace was replaced".into());
+        }
         let grant = Api::<DynamicObject>::namespaced_with(
             client.clone(),
             &self.binding.grant.namespace,
@@ -148,6 +166,7 @@ impl Observer {
             || grant.metadata.generation != Some(self.binding.grant.generation)
             || grant.metadata.deletion_timestamp.is_some()
             || grant.data["spec"]["enabled"] != true
+            || grant.data["spec"]["workspaceUid"] != self.binding.workspace_uid
             || grant.data["status"]["phase"] != "Ready"
             || grant.data["status"]["observedGeneration"] != json!(self.binding.grant.generation)
             || !grant.data["status"]["conditions"]
@@ -241,6 +260,18 @@ impl Observer {
                     .map_err(|_| "Observation privacy response invalid")?,
             )
             .map_err(str::to_string)?;
+        }
+        crate::observation_privacy_client::verify(
+            client,
+            &self.binding,
+            &self.token,
+            &self.version,
+            scope,
+            operation,
+        )
+        .await?;
+        if self.binding.expires_at <= chrono::Utc::now().timestamp() {
+            return Err("Observation credential expired during verification".into());
         }
         Ok(())
     }

@@ -31,10 +31,10 @@ impl Projection {
         self.github.decorate(deployment);
     }
 
-    pub fn mount(&self,pod:&mut Value) {
+    pub fn mount(&self, pod: &mut Value) {
         mount(pod);
-        if let Some(required)=self.github.required_mount() {
-            super::github_services::mount(pod,required);
+        if let Some(required) = self.github.required_mount() {
+            super::github_services::mount(pod, required);
         }
     }
 
@@ -44,8 +44,13 @@ impl Projection {
         namespace: &str,
         name: &str,
     ) -> Result<bool, String> {
-        if !self.github.consumers_current(client,namespace,name).await?
-        { return Ok(false) }
+        if !self
+            .github
+            .consumers_current(client, namespace, name)
+            .await?
+        {
+            return Ok(false);
+        }
         self.credential
             .consumers_current(client, namespace, name)
             .await
@@ -114,6 +119,36 @@ pub(crate) async fn identity(
     if live.metadata.uid != sandbox.metadata.uid || owned.metadata.uid != namespace.metadata.uid {
         return Err("Governed service namespace or Sandbox incarnation changed".into());
     }
+    identity_from_live(client, &live, &owned).await
+}
+
+pub(crate) async fn identity_read_only(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+) -> Result<Value, String> {
+    super::namespace_ownership::recheck(client, sandbox, namespace)
+        .await
+        .map_err(|_| "Governed service namespace identity changed")?;
+    let workspace = sandbox.namespace().ok_or("Sandbox workspace missing")?;
+    let live = Api::<KarsSandbox>::namespaced(client.clone(), &workspace)
+        .get(&sandbox.name_any())
+        .await
+        .map_err(api_error)?;
+    if live.metadata.uid != sandbox.metadata.uid
+        || live.metadata.generation != sandbox.metadata.generation
+        || live.metadata.deletion_timestamp.is_some()
+    {
+        return Err("Governed service source changed".into());
+    }
+    identity_from_live(client, &live, namespace).await
+}
+
+async fn identity_from_live(
+    client: &Client,
+    live: &KarsSandbox,
+    owned: &Namespace,
+) -> Result<Value, String> {
     let sandbox_uid = live
         .metadata
         .uid
@@ -160,7 +195,8 @@ pub async fn ensure(
 ) -> Result<Projection, String> {
     let identity = identity(client, sandbox, namespace).await?;
     let credential = credentials::ensure(client, sandbox, namespace).await?;
-    let github = crate::credential_grants::github::ensure(client,sandbox,namespace,&identity).await?;
+    let github =
+        crate::credential_grants::github::ensure(client, sandbox, namespace, &identity).await?;
     Ok(Projection {
         identity,
         credential,
