@@ -166,9 +166,10 @@ async fn fixture() -> (
                 "kind":if key.contains("inferencepolicies"){"InferencePolicy"}else{"KarsReceipt"},
                 "metadata":{"uid":"created","resourceVersion":"0","generation":1}}));
             if let Some(uid)=body["metadata"]["uid"].as_str() {assert_eq!(value["metadata"]["uid"],uid);}
-            if let Some(rv)=body["metadata"]["resourceVersion"].as_str() {
-                if value["metadata"]["resourceVersion"]!=rv {return ResponseTemplate::new(409).set_body_json(json!({
-                    "apiVersion":"v1","kind":"Status","status":"Failure","code":409,"reason":"Conflict"}));}
+            if let Some(rv)=body["metadata"]["resourceVersion"].as_str()
+                && value["metadata"]["resourceVersion"]!=rv {
+                return ResponseTemplate::new(409).set_body_json(json!({
+                    "apiVersion":"v1","kind":"Status","status":"Failure","code":409,"reason":"Conflict"}));
             }
             let version=value["metadata"]["resourceVersion"].as_str().unwrap().parse::<u64>().unwrap()+1;
             let prior=value["spec"].clone();merge(&mut value,&body);
@@ -287,39 +288,40 @@ async fn credential_rebind_full_task_reconcile_preserves_uids_data_and_regenerat
         .unwrap();
     let task = current(&state);
     assert!(super::super::task_is_ready(&task));
-    let s = state.lock().unwrap();
-    assert_eq!(s.objects[TASK]["metadata"]["uid"], "task-uid");
-    assert_eq!(s.objects[SANDBOX]["metadata"]["uid"], "sandbox-uid");
-    assert_eq!(s.objects[RUNTIME]["metadata"]["uid"], "runtime-uid");
-    assert_eq!(
-        s.objects["/api/v1/namespaces/kars-run/configmaps/customer-state"]["data"]["retained"],
-        "important"
-    );
-    assert!(
-        s.objects[SANDBOX]["metadata"]["annotations"]
-            .get(HOLD)
-            .is_none()
-    );
-    assert_eq!(
-        s.objects[RECEIPT]["spec"]["envelopeDigest"],
-        task.envelope_digest()
-    );
-    assert_eq!(
-        s.objects[SANDBOX]["spec"]["credentialBindings"],
-        serde_json::to_value(task.spec.blueprint.unwrap().credential_bindings).unwrap()
-    );
-    assert!(
-        s.calls
-            .iter()
-            .all(|(method, path, _)| method != "DELETE" || path == RECEIPT)
-    );
-    assert!(
-        s.calls
-            .iter()
-            .filter(|(_, path, _)| path == TASK)
-            .all(|(_, _, body)| body["spec"]["execution"]["launch"] != false)
-    );
-    drop(s);
+    {
+        let s = state.lock().unwrap();
+        assert_eq!(s.objects[TASK]["metadata"]["uid"], "task-uid");
+        assert_eq!(s.objects[SANDBOX]["metadata"]["uid"], "sandbox-uid");
+        assert_eq!(s.objects[RUNTIME]["metadata"]["uid"], "runtime-uid");
+        assert_eq!(
+            s.objects["/api/v1/namespaces/kars-run/configmaps/customer-state"]["data"]["retained"],
+            "important"
+        );
+        assert!(
+            s.objects[SANDBOX]["metadata"]["annotations"]
+                .get(HOLD)
+                .is_none()
+        );
+        assert_eq!(
+            s.objects[RECEIPT]["spec"]["envelopeDigest"],
+            task.envelope_digest()
+        );
+        assert_eq!(
+            s.objects[SANDBOX]["spec"]["credentialBindings"],
+            serde_json::to_value(task.spec.blueprint.unwrap().credential_bindings).unwrap()
+        );
+        assert!(
+            s.calls
+                .iter()
+                .all(|(method, path, _)| method != "DELETE" || path == RECEIPT)
+        );
+        assert!(
+            s.calls
+                .iter()
+                .filter(|(_, path, _)| path == TASK)
+                .all(|(_, _, body)| body["spec"]["execution"]["launch"] != false)
+        );
+    }
     let (sandbox, namespace, mut deployment): (
         crate::crd::KarsSandbox,
         k8s_openapi::api::core::v1::Namespace,
