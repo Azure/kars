@@ -30,7 +30,9 @@ def _headers(server: str | None) -> dict[str, str]:
     return headers
 
 
-def _request(method: str, params: dict[str, Any], server: str | None, notification: bool = False) -> tuple[Any, dict[str, Any]]:
+def _request(
+    method: str, params: dict[str, Any], server: str | None, notification: bool = False
+) -> tuple[Any, dict[str, Any]]:
     global _NEXT_ID, _INITIALIZED
     request_id = _NEXT_ID
     _NEXT_ID += 1
@@ -120,7 +122,8 @@ def _call_tool(args: dict[str, Any], **_kwargs: Any) -> str:
     if not isinstance(arguments, dict):
         return _failure("arguments must be an object")
     try:
-        return json.dumps(_invoke("tools/call", {"name": name, "arguments": arguments}, args.get("server")), separators=(",", ":"))
+        result = _invoke("tools/call", {"name": name, "arguments": arguments}, args.get("server"))
+        return json.dumps(result, separators=(",", ":"))
     except Exception:
         return _failure("MCP invocation failed; calls are never automatically replayed")
 

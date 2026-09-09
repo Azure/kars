@@ -2351,29 +2351,12 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         //     given the CEL-enforced unique-by-name).
         //   - `MCP_SIGNING_KEY_DIR`: legacy single-dir pointer for the
         //     first entry; namespaced replacement TBD in 4d.3.
-        let mcp_refs = governance_config.effective_mcp_server_refs();
-        if governance_config.uses_singular_mcp_server_ref() {
-            tracing::warn!(
-                sandbox = %name,
-                reason = crate::status::conditions::reason::MCP_SINGULAR_DEPRECATED,
-                "spec.governance.mcpServerRef is deprecated; migrate to \
-                 spec.governance.mcpServerRefs (Slice 4d.1)",
-            );
-        }
-        let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(mcp_refs.len());
+        let bindings = mcp_binding::resolve_all(client, &sandbox, &governance_config)
+            .await
+            .map_err(ReconcileError::Configuration)?;
+        let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(bindings.len());
         let mut mcp_revisions = Vec::new();
-        for mcp_ref in &mcp_refs {
-            let mcp_name = mcp_ref.name.trim();
-            if mcp_name.is_empty() {
-                continue;
-            }
-            let Some(binding) = mcp_binding::resolve(client, &sandbox, mcp_name)
-                .await
-                .map_err(ReconcileError::Configuration)?
-            else {
-                tracing::warn!(sandbox = %name, mcp = %mcp_name, "MCP reference is not currently authorized and qualified");
-                continue;
-            };
+        for (mcp_name, binding) in bindings {
             let first_mcp = mirrored_mcp_names.is_empty();
             mcp_revisions.push(binding.revision);
             let jwks_cm = format!("mcp-{mcp_name}-jwks");
@@ -2687,22 +2670,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 }
             }
         }))?;
-        if !mcp_revisions.is_empty() {
-            deployment
-                .spec
-                .as_mut()
-                .unwrap()
-                .template
-                .metadata
-                .as_mut()
-                .unwrap()
-                .annotations
-                .get_or_insert_with(Default::default)
-                .insert(
-                    "kars.azure.com/mcp-bindings-version".into(),
-                    crate::providers::signing::content_digest(&serde_json::to_vec(&mcp_revisions)?),
-                );
-        }
+        mcp_binding::decorate(&mut deployment, &mcp_revisions)?;
         if let Some(projection) = sre_projection.as_ref() {
             let annotations =
                 crate::sre_authority::pod::annotations(projection, agent_container_name);
