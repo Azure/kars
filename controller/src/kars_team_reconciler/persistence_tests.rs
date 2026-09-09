@@ -10,6 +10,9 @@ use serde_json::Value;
 use std::{collections::BTreeMap, sync::Mutex};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+#[path = "budget_interleaving_tests.rs"]
+mod budget_interleavings;
+
 const TASKS_PATH: &str = "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karstasks";
 const CMS_PATH: &str = "/api/v1/namespaces/tenant-a/configmaps";
 const TEAM_STATUS_PATH: &str =
@@ -139,7 +142,7 @@ impl Respond for KubeServer {
                 return failure(409);
             }
             store.version += 1;
-            body["metadata"]["uid"] = json!(format!("uid-{name}"));
+            body["metadata"]["uid"] = json!(format!("uid-{name}-{}", store.version));
             body["metadata"]["resourceVersion"] = json!(store.version.to_string());
             body["metadata"]["generation"] = json!(1);
             body["metadata"]["creationTimestamp"] = json!(Utc::now().to_rfc3339());
@@ -446,6 +449,7 @@ async fn five_entry_history_recovers_cadence_after_oversized_objective_rejection
         .await
         .unwrap();
     }
+
     let name = runs::cadence_name(&team).unwrap();
     let all_history = crate::team_commons::prior_knowledge(&client, &team, usize::MAX)
         .await
@@ -494,6 +498,87 @@ async fn five_entry_history_recovers_cadence_after_oversized_objective_rejection
             .unwrap(),
         5
     );
+}
+
+#[tokio::test]
+async fn composed_budget_mcp_seat_preserves_only_authorized_credential_rebind_holds() {
+    for (governed, paused, pending, narrowed, launch) in [
+        (true, false, true, false, true),
+        (false, false, true, false, false),
+        (true, true, true, false, false),
+        (true, false, false, false, false),
+        (true, false, true, true, false),
+    ] {
+        let bindings = |key: &str| {
+            json!({
+                "grant": {"name": "workspace", "uid": "grant-uid"},
+                "sources": [{"scope": "workspace",
+                    "source": {"name": "kars-credential-input-workspace", "uid": "source-uid"},
+                    "keys": [key]}]
+            })
+        };
+        let mut team = team();
+        if governed {
+            team.spec.envelope.budget.as_mut().unwrap().scope =
+                Some(crate::inference_budget_contract::BudgetScope::GovernedInference);
+        }
+        team.spec.blueprint = Some(
+            serde_json::from_value(json!({
+                "model": {"provider": "azure-openai", "deployment": "model"},
+                "toolPolicy": "governed-tools", "mcpServers": ["everything"],
+                "credentialBindings": bindings("SLACK_BOT_TOKEN")
+            }))
+            .unwrap(),
+        );
+        let mut principal = super::tests::principal(&team);
+        principal
+            .spec
+            .blueprint
+            .as_mut()
+            .unwrap()
+            .credential_bindings =
+            Some(serde_json::from_value(bindings("TELEGRAM_BOT_TOKEN")).unwrap());
+        principal.spec.execution = Some(crate::kars_task::TaskExecution {
+            launch: true,
+            runtime: None,
+        });
+        if pending {
+            principal.annotations_mut().insert(
+                crate::kars_task_reconciler::rebind::PENDING.into(),
+                "true".into(),
+            );
+        }
+        team.spec.paused = paused;
+        if narrowed {
+            team.spec.envelope.authority_ceiling -= 1;
+        }
+        let uid = principal.uid();
+        let name = principal.name_any();
+        let (_server, client, store) = setup(&team).await;
+        store
+            .lock()
+            .unwrap()
+            .tasks
+            .insert(name.clone(), serde_json::to_value(&principal).unwrap());
+        tasks::reconcile_revocations(&Api::namespaced(client, "tenant-a"), &team)
+            .await
+            .unwrap();
+        let state = store.lock().unwrap();
+        assert_eq!(state.tasks.len(), 1);
+        assert_eq!(state.tasks[&name]["metadata"]["uid"], json!(uid));
+        assert_eq!(
+            state.tasks[&name]["spec"]["execution"]["launch"], launch,
+            "governed={governed}, paused={paused}, pending={pending}, narrowed={narrowed}"
+        );
+        assert_eq!(
+            state.tasks[&name]["spec"]["blueprint"]["mcpServers"],
+            json!(["everything"])
+        );
+        assert_eq!(
+            state.tasks[&name]["spec"]["blueprint"]["credentialBindings"],
+            bindings("TELEGRAM_BOT_TOKEN")
+        );
+    }
 }
 
 #[tokio::test]

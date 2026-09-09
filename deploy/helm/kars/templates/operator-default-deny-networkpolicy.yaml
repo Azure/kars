@@ -28,6 +28,18 @@ spec:
     - Ingress
     - Egress
   ingress:
+    {{- if ((.Values.inferenceBudget | default dict).enabled | default false) }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kars.azure.com/inference-budget: v1
+          podSelector:
+            matchLabels:
+              kars.azure.com/component: sandbox
+      ports:
+        - protocol: TCP
+          port: 9447
+    {{- end }}
     # Allow Prometheus / port-forward scrapes of /metrics on :9091.
     - from: []
       ports:

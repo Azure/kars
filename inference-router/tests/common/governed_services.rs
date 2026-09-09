@@ -82,6 +82,7 @@ pub fn state(workspace: &str, uid: &str) -> AppState {
             providers: Default::default(),
         }),
         budget: TokenBudgetTracker::new(1000, 100),
+        inference_budget: None,
         policy_provider: governance.clone(),
         audit_sink: governance.clone(),
         signing_provider: governance.clone(),
