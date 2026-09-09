@@ -5,6 +5,7 @@ use super::*;
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Mutex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+#[path = "tests/suspension.rs"]
 mod suspension;
 
 const TASK: &str = "/apis/kars.azure.com/v1alpha1/namespaces/work/karstasks/run";
