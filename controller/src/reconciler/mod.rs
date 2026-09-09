@@ -40,6 +40,7 @@ mod dev_env;
 pub(crate) mod governance_mounts;
 mod governed_services;
 mod inference;
+mod mcp_binding;
 mod mcp_egress;
 pub(crate) mod namespace_ownership;
 mod sre_writer;
@@ -2382,11 +2383,21 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             );
         }
         let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(mcp_refs.len());
-        for (idx, mcp_ref) in mcp_refs.iter().enumerate() {
+        let mut mcp_revisions = Vec::new();
+        for mcp_ref in &mcp_refs {
             let mcp_name = mcp_ref.name.trim();
             if mcp_name.is_empty() {
                 continue;
             }
+            let Some(binding) = mcp_binding::resolve(client, &sandbox, mcp_name)
+                .await
+                .map_err(ReconcileError::Configuration)?
+            else {
+                tracing::warn!(sandbox = %name, mcp = %mcp_name, "MCP reference is not currently authorized and qualified");
+                continue;
+            };
+            let first_mcp = mirrored_mcp_names.is_empty();
+            mcp_revisions.push(binding.revision);
             let jwks_cm = format!("mcp-{mcp_name}-jwks");
             let signing_secret = format!("mcp-{mcp_name}-signing");
             let jwks_volume = format!("mcp-jwks-{mcp_name}");
@@ -2409,7 +2420,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     // First-entry only: keep legacy single-file env var
                     // pointing at this server's jwks.json so the existing
                     // single-JWKS OAuth verifier keeps working unchanged.
-                    let legacy_env = if idx == 0 {
+                    let legacy_env = if first_mcp {
                         Some(("MCP_JWKS_PATH", format!("{jwks_mount}/jwks.json")))
                     } else {
                         None
@@ -2443,6 +2454,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     return Ok(Action::requeue(Duration::from_secs(15)));
                 }
             }
+            if !binding.signing {
+                continue;
+            }
             match governance_mounts::mirror_secret(
                 client,
                 &signing_secret,
@@ -2454,7 +2468,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             .await
             {
                 Ok(governance_mounts::MirrorOutcome::Mirrored) => {
-                    let legacy_env = if idx == 0 {
+                    let legacy_env = if first_mcp {
                         Some(("MCP_SIGNING_KEY_DIR", signing_mount.clone()))
                     } else {
                         None
@@ -2692,6 +2706,22 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 }
             }
         }))?;
+        if !mcp_revisions.is_empty() {
+            deployment
+                .spec
+                .as_mut()
+                .unwrap()
+                .template
+                .metadata
+                .as_mut()
+                .unwrap()
+                .annotations
+                .get_or_insert_with(Default::default)
+                .insert(
+                    "kars.azure.com/mcp-bindings-version".into(),
+                    crate::providers::signing::content_digest(&serde_json::to_vec(&mcp_revisions)?),
+                );
+        }
         if let Some(namespace) = owned_namespace.as_ref() {
             credentials.decorate(&mut deployment, &sandbox, namespace);
         }
@@ -3135,7 +3165,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
     Ok(Action::requeue(Duration::from_secs(
-        if sandbox.spec.credentials_ref.is_some() {
+        if sandbox.spec.credentials_ref.is_some()
+            || !governance_config.effective_mcp_server_refs().is_empty()
+        {
             30
         } else {
             300

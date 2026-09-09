@@ -107,12 +107,25 @@ pub fn mcp_server_validations() -> Vec<ValidationRule> {
         ValidationRule {
             rule: "!has(self.bundleRef) || (!has(self.url) && !has(self.oauth) && \
                    !has(self.productionMode) && !has(self.scopes) && \
-                   !has(self.allowedTools) && !has(self.displayName))"
+                   !has(self.allowedTools) && !has(self.displayName) && !has(self.managed))"
                 .into(),
             message: Some(
                 "spec.bundleRef is mutually exclusive with spec.url, spec.oauth, \
                  spec.productionMode, spec.scopes, spec.allowedTools, and \
-                 spec.displayName"
+                 spec.displayName, and spec.managed"
+                    .into(),
+            ),
+            reason: Some("FieldValueInvalid".into()),
+            ..ValidationRule::default()
+        },
+        ValidationRule {
+            rule: "!has(self.managed) || (!has(self.url) && !has(self.oauth) && \
+                   !has(self.productionMode) && !has(self.scopes) && \
+                   !has(self.bearerFromEnv) && !has(self.bundleRef))"
+                .into(),
+            message: Some(
+                "spec.managed is mutually exclusive with spec.url, spec.oauth, \
+                spec.productionMode, spec.scopes, spec.bearerFromEnv, and spec.bundleRef"
                     .into(),
             ),
             reason: Some("FieldValueInvalid".into()),
