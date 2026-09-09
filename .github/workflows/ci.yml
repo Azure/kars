@@ -602,7 +602,7 @@ jobs:
 
   e2e-kind:
     name: E2E (Kind)
-    needs: [changes]
+    needs: [changes, build-rust]
     # Phase 3 S4: closes the audit gap "make test-e2e is not in CI".
     # Runs on every push to dev/main, manual dispatch, and PRs that
     # touch the runtime surface area (controller, router, helm chart,
@@ -702,20 +702,8 @@ jobs:
         if: steps.paths.outputs.run == 'true'
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: kars-binaries-2b93664e3b7630fd302a4b4f1c3df232e6752eb5
-          run-id: 34390909456
-          github-token: ${{ github.token }}
+          name: kars-binaries-${{ github.sha }}
           path: ./bin/
-      - name: Verify diagnostic binary production equivalence and checksums
-        if: steps.paths.outputs.run == 'true'
-        run: |
-          git fetch --no-tags --depth=1 origin 2b93664e3b7630fd302a4b4f1c3df232e6752eb5
-          changed=$(git diff --name-only 2b93664e3b7630fd302a4b4f1c3df232e6752eb5 HEAD)
-          if printf '%s\n' "$changed" | grep -vE '^(tests/e2e/sre_authority/|tests/e2e/sre-authority\.py$|\.github/workflows/ci\.yml$|$)'; then
-            echo "Refusing diagnostic binaries from different production sources"
-            exit 1
-          fi
-          (cd bin && sha256sum --check SHA256SUMS)
       - name: chmod binaries
         if: steps.paths.outputs.run == 'true'
         # Per-arch layout (./bin/amd64/) matches release-internal.yml's

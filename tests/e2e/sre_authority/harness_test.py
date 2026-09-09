@@ -20,7 +20,7 @@ from sre_authority.common import (
 )
 from sre_authority.fixtures import seed_control_consumer
 from sre_authority.admission import reserved_source_probe
-from sre_authority.proxy import MARKER, assert_filtered
+from sre_authority.proxy import MARKER, assert_filtered, secret_list_wire_facts
 from sre_authority.credential_paths import assert_token_type_immutable, assert_watch_result
 
 
@@ -34,6 +34,18 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_native_secret_list_wire_facts_publish_no_synthetic_secret_fields(self):
+        value = {"kind": "SecretList", "items": [{"metadata": {"uid": "fixture", "annotations": {"copy": MARKER}},
+                                                "data": {"token": MARKER}}]}
+        facts = secret_list_wire_facts(value, "fixture")
+        self.assertEqual(facts, {"envelopeKind": "SecretList", "itemHasKind": False,
+                                 "itemHasApiVersion": False, "itemMetadataObject": True})
+        self.assertNotIn(MARKER, json.dumps(facts))
+        with self.assertRaises(AssertionError):
+            secret_list_wire_facts(value, "other")
+        with self.assertRaises(AssertionError):
+            secret_list_wire_facts({"kind": "List", "items": []}, "fixture")
+
     def test_firewall_diagnostic_requires_owned_node_before_readonly_namespace_entry(self):
         h = Harness.__new__(Harness)
         calls = []

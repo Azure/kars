@@ -93,7 +93,12 @@ async fn fixture() -> Fixture {
                 json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","metadata":{},"items":state.aliases})
             }
             "/api/v1/namespaces/kars-demo/secrets/router-services-admin" => secret(),
-            "/api/v1/secrets" => json!({"apiVersion":"v1","kind":"SecretList","metadata":{},"items":[secret()]}),
+            "/api/v1/secrets" => {
+                let mut item = secret();
+                item.as_object_mut().unwrap().remove("kind");
+                item.as_object_mut().unwrap().remove("apiVersion");
+                json!({"apiVersion":"v1","kind":"SecretList","metadata":{},"items":[item]})
+            }
             "/api/v1/namespaces/kars-demo/pods/app/log" => return ResponseTemplate::new(200).set_body_raw("legitimate pod log\n","text/plain"),
             "/apis/metrics.k8s.io/v1beta1/nodes" => json!({"kind":"NodeMetricsList","items":[]}),
             "/apis/kars.azure.com/v1alpha1/namespaces/kars-sre/karssreactions" if request.method=="POST" => {

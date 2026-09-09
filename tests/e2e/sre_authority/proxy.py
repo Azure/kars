@@ -141,18 +141,32 @@ def assert_filtered(secret):
     require(MARKER not in json.dumps(secret), "Secret material survived projection")
 
 
+def secret_list_wire_facts(value, uid):
+    require(isinstance(value, dict) and value.get("kind") == "SecretList"
+            and isinstance(value.get("items"), list) and len(value["items"]) == 1
+            and isinstance(value["items"][0], dict) and isinstance(value["items"][0].get("metadata"), dict)
+            and value["items"][0]["metadata"].get("uid") == uid,
+            "Native wire proof must select only the exact owned synthetic Secret")
+    item = value["items"][0]
+    return {"envelopeKind": "SecretList", "itemHasKind": "kind" in item,
+            "itemHasApiVersion": "apiVersion" in item, "itemMetadataObject": isinstance(item.get("metadata"), dict)}
+
+
 def proxy_acceptance(h):
     install_metrics(h)
     pod = alive_pinned_source(h)
     projection_and_files(h, pod)
     runtime_denials(h, pod["metadata"]["name"])
     token_secret_denials(h)
-    h.create({"apiVersion": "v1", "kind": "Secret",
+    fixture = h.create({"apiVersion": "v1", "kind": "Secret",
         "metadata": {"name": f"sre-filter-{h.phase}", "namespace": OPERATORS,
             "labels": {"copy": MARKER},
             "annotations": {"kubectl.kubernetes.io/last-applied-configuration": json.dumps({"data": {"copy": MARKER}})}},
         "stringData": {"operator-token": MARKER, "password": MARKER}})
     name = f"sre-filter-{h.phase}"
+    native = h.api("GET", f"/api/v1/namespaces/{OPERATORS}/secrets?fieldSelector=metadata.name%3D{name}",
+                   status=200).json()
+    print("SRE-WIRE", json.dumps(secret_list_wire_facts(native, fixture["metadata"]["uid"])), flush=True)
     with h.port_forward(pod["metadata"]["name"]) as port:
         kube_module, sre = load_unchanged_hermes(h, port)
         kube = kube_module.client()
