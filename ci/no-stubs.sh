@@ -19,6 +19,7 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 PROD_PATHS=(
+  'shared/'
   'controller/src/'
   'inference-router/src/'
   'cli/src/'
