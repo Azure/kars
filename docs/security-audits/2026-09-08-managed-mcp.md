@@ -47,8 +47,15 @@ manifests, lockfile and mesh source match the previously qualified GitHub
 candidate; no dependency installation, lockfile rewrite or placeholder
 declaration was used. Earlier focused CLI and Hermes evidence is retained.
 
-The candidate still needs forward-integrated prerequisite qualification and
-real Kind lifecycle/protocol acceptance. Image availability and publishing are
+The candidate now includes the exact governed-service prerequisite `068ae160`.
+Composition preserves both SRE privacy and MCP rollout annotations, runs SRE
+mutation preflight before image application, and retains mandatory SRE migration
+before the managed-resource acceptance phase. The composed source passed 315
+selected unit cases, 17 HTTP cases, strict paired Clippy, CLI type checking and
+53 image/application CLI cases.
+
+The candidate still needs hosted prerequisite qualification and real Kind
+lifecycle/protocol acceptance. Image availability and publishing are
 separate operator actions; no image release or full deployment readiness is
 asserted by these local results.
 

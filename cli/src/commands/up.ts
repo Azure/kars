@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { Command } from "commander";
+import { assertSafeMutation } from "../lib/sre-authority.js";
 import chalk from "chalk";
 import { existsSync } from "fs";
 import * as path from "path";
@@ -605,6 +606,7 @@ Auto-resume:
         ], { stdio: "pipe" });
         stepper.done("kubectl configured");
         markPhaseDone("kubectl", {}, resumeTopology);
+        await assertSafeMutation(execa);
 
         // ── Step 6: Get images into ACR ──────────────────────────────
         const acr = acrLoginServer.replace(".azurecr.io", "");
@@ -782,11 +784,8 @@ Auto-resume:
           // small system nodes. 10m avoids a spurious "context deadline
           // exceeded" while k8s is still legitimately rolling out.
           "--timeout", "10m",
-          // Take ownership of fields previously written by `kubectl apply`
-          // or `kubectl patch` (e.g. CRDs / ClusterRoles touched out-of-band
-          // during prior debugging). Without this, Helm's server-side apply
-          // refuses with "conflict with kubectl-client-side-apply" and the
-          // whole `kars up` flow fails after the 18-min image build.
+          // Preserve the existing core field-manager behavior; the SRE
+          // preflight above rejects unreviewed grant migration before this.
           "--force-conflicts",
         ];
         if (foundryEndpoint) {

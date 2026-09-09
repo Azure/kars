@@ -94,28 +94,14 @@ pub(crate) fn sandbox_node_selector_from(
 
 /// Build the egress-guard init-container command.
 ///
-/// Standard sandboxes (every kind except SRE) get the full lockdown:
+/// Every sandbox, including SRE, gets the full lockdown:
 /// UID 1000 → loopback + DNS allowed, everything else dropped, with
 /// :80/:443 NAT-redirected to the inference-router on :8444 for L7
 /// policy + audit.
 ///
-/// SRE-mode sandboxes (labelled `kars.azure.com/role=sre`) get ONE
-/// extra rule inserted into the OUTPUT NAT chain BEFORE the generic
-/// REDIRECT:  apiserver-bound traffic (KUBERNETES_SERVICE_HOST :
-/// KUBERNETES_SERVICE_PORT_HTTPS, both kubelet-auto-injected envs)
-/// is RETURNed — i.e. NOT NAT'd to :8444 — so the SRE plugin's K8s
-/// API client (sre_kube.py) can hit the apiserver directly with its
-/// projected SA token.
-///
-/// The K8s audit log is the audit surface for these apiserver calls
-/// (the router's L7 audit doesn't capture them, but K8s audit is
-/// stronger — every call carries the SA identity and the verb).
-///
-/// Privilege-containment design:  this capability is uniquely held by
-/// the SRE sandbox per the proposal §7.8. Future Slice 3 will add
-/// ValidatingAdmissionPolicies to gate WHO can apply the
-/// `role=sre` label (only chart-installer SAs; see §7.8.10 design).
-pub(crate) fn build_egress_guard_command(is_sre_sandbox: bool) -> String {
+/// SRE diagnostics use a registered, filtered loopback HTTPS service instead
+/// of direct Kubernetes access with an agent-held privileged credential.
+pub(crate) fn build_egress_guard_command(_is_sre_sandbox: bool) -> String {
     let mut cmd = String::with_capacity(1024);
     // Filter chain (OUTPUT): UID 1000 → allow loopback + DNS +
     // established, then DROP. Same for every sandbox kind.
@@ -126,35 +112,7 @@ pub(crate) fn build_egress_guard_command(is_sre_sandbox: bool) -> String {
         "iptables -A OUTPUT -m owner --uid-owner 1000 -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT && "
     );
 
-    // SRE-mode-only: filter-chain ACCEPT for apiserver-bound traffic.
-    // The filter chain runs AFTER the NAT chain — the NAT-bypass RETURN
-    // below just decides "don't redirect", but the filter chain's DROP
-    // (next rule) would still kill the packet. We have to ACCEPT it
-    // here BEFORE the catch-all DROP.
-    if is_sre_sandbox {
-        cmd.push_str(
-            "iptables -A OUTPUT -m owner --uid-owner 1000 \
-             -d \"${KUBERNETES_SERVICE_HOST}\" \
-             -p tcp --dport \"${KUBERNETES_SERVICE_PORT_HTTPS:-443}\" \
-             -j ACCEPT && ",
-        );
-    }
-
     cmd.push_str("iptables -A OUTPUT -m owner --uid-owner 1000 -j DROP && ");
-
-    // SRE-mode-only:  NAT-chain apiserver bypass.  Inserted BEFORE the
-    // generic :443 REDIRECT so apiserver traffic short-circuits to the
-    // real upstream rather than the router. KUBERNETES_SERVICE_HOST
-    // and KUBERNETES_SERVICE_PORT_HTTPS are auto-injected by the
-    // kubelet on every container (including init containers).
-    if is_sre_sandbox {
-        cmd.push_str(
-            "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 \
-             -d \"${KUBERNETES_SERVICE_HOST}\" \
-             -p tcp --dport \"${KUBERNETES_SERVICE_PORT_HTTPS:-443}\" \
-             -j RETURN && ",
-        );
-    }
 
     // NAT chain (OUTPUT):  :80/:443 → REDIRECT to :8444 (transparent
     // proxy in the inference-router sidecar).  Same for every sandbox.
@@ -165,15 +123,7 @@ pub(crate) fn build_egress_guard_command(is_sre_sandbox: bool) -> String {
         "iptables -t nat -A OUTPUT -m owner --uid-owner 1000 ! -o lo -p tcp --dport 443 -j REDIRECT --to-port 8444 && "
     );
 
-    if is_sre_sandbox {
-        cmd.push_str(
-            "echo 'egress-guard: UID 1000 → transparent proxy on :8444 + apiserver bypass (SRE mode)'"
-        );
-    } else {
-        cmd.push_str(
-            "echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'",
-        );
-    }
+    cmd.push_str("echo 'egress-guard: UID 1000 → transparent proxy on :8444 (learn + enforce)'");
 
     cmd
 }
@@ -193,53 +143,11 @@ mod egress_guard_tests {
     }
 
     #[test]
-    fn sre_sandbox_inserts_apiserver_bypass_before_redirect() {
+    fn sre_uses_the_same_network_lockdown_without_an_apiserver_bypass() {
         let cmd = build_egress_guard_command(true);
-        // The bypass MUST come before the :443 REDIRECT — otherwise
-        // the REDIRECT wins (iptables -A appends; rules evaluate in
-        // order) and the bypass is dead code.
-        let bypass_pos = cmd
-            .find("-t nat -A OUTPUT -m owner --uid-owner 1000              -d \"${KUBERNETES_SERVICE_HOST}\"")
-            .or_else(|| cmd.find("-t nat -A OUTPUT -m owner --uid-owner 1000 \t\t\t -d \"${KUBERNETES_SERVICE_HOST}\""))
-            .or_else(|| {
-                // Match the NAT-chain bypass specifically (not the filter ACCEPT)
-                cmd.match_indices("-t nat -A OUTPUT")
-                    .find(|(i, _)| cmd[*i..].contains("KUBERNETES_SERVICE_HOST"))
-                    .map(|(i, _)| i)
-            })
-            .expect("NAT-chain bypass rule missing");
-        let redirect_pos = cmd
-            .find("--dport 443 -j REDIRECT")
-            .expect("redirect rule missing");
-        assert!(
-            bypass_pos < redirect_pos,
-            "NAT bypass at {bypass_pos} must precede redirect at {redirect_pos}"
-        );
-        assert!(cmd.contains("apiserver bypass (SRE mode)"));
-
-        // ALSO check the filter-chain ACCEPT exists BEFORE the DROP — this
-        // was the bug we hit live: NAT bypass alone wasn't enough because
-        // the filter chain's DROP for UID 1000 killed the packet anyway.
-        let filter_accept = cmd
-            .find(
-                "-A OUTPUT -m owner --uid-owner 1000              -d \"${KUBERNETES_SERVICE_HOST}\"",
-            )
-            .or_else(|| {
-                cmd.match_indices("-A OUTPUT -m owner --uid-owner 1000")
-                    .find(|(i, _)| {
-                        let tail = &cmd[*i..*i + 200.min(cmd.len() - *i)];
-                        tail.contains("KUBERNETES_SERVICE_HOST") && tail.contains("-j ACCEPT")
-                    })
-                    .map(|(i, _)| i)
-            })
-            .expect("filter-chain ACCEPT for apiserver missing");
-        let filter_drop = cmd
-            .find("-A OUTPUT -m owner --uid-owner 1000 -j DROP")
-            .expect("filter DROP rule missing");
-        assert!(
-            filter_accept < filter_drop,
-            "filter ACCEPT at {filter_accept} must precede DROP at {filter_drop}"
-        );
+        assert_eq!(cmd, build_egress_guard_command(false));
+        assert!(!cmd.contains("KUBERNETES_SERVICE_HOST"));
+        assert!(!cmd.contains("-j RETURN"));
     }
 
     #[test]

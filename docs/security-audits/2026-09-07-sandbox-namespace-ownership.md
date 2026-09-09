@@ -1,8 +1,8 @@
 # Security Audit - Sandbox namespace ownership
 
 Date: 2026-09-07
-Review status: Implementation evidence prepared; independent review and genuine
-author/reviewer sign-offs are pending.
+Review status: Maintainer sign-off received; independent human review and
+sign-off remain pending.
 
 ## Scope
 
@@ -152,6 +152,34 @@ No live customer or dedicated test-cluster upgrade was performed.
 
 ## Verdict
 
-Pending independent review and migration-compatibility closure. This document is
-not an approval or a sign-off. Genuine author and independent reviewer sign-offs
-must be supplied before the capability-audit gate can pass.
+The earlier pending technical evidence above is superseded by closure at
+`62093414cb8d5d9937c1d9974504047c84669d6c` in Azure/kars#548. Automated review
+closed the bounded findings, and hosted technical gates passed, including 105
+disposable Kind cases with zero failures and the real SRE ownership/removal
+lifecycle. The hosted lifecycle evidence is
+https://github.com/Azure/kars/actions/runs/34150756641/job/101838058446.
+This is not a live customer migration or a second human review.
+
+The maintainer explicitly signed off and approved that qualified source on
+2026-09-08. The approval does not extend to later functional changes, other
+unresolved slices, a customer deployment or promotion to `main`.
+An independent person's review and sign-off remain required; this one approval
+does not satisfy both positions in the two-person capability-audit gate.
+
+Signed-off-by: pallakatos <191481949+pallakatos@users.noreply.github.com>
+
+## Explicit author waiver for integration assembly
+
+On 2026-09-08, Kars author `pallakatos` explicitly waived the second-person
+sign-off for Azure/kars#548: "just push them and say I waived it".
+This supersedes the independent-signature landing requirement above only for
+assembling the already-qualified source into `Azure/kars:kars-bridge`.
+It does not assert that an independent human review occurred.
+
+All other required technical and security gates must pass on the landing head.
+The signature-only branch-protection exception and the already-authorized
+account-specific review allowance must be restored immediately after the merge,
+including on failure. No CI result is rewritten as successful.
+The waiver does not cover functional changes beyond the qualified source,
+later unresolved slices, `main` promotion, customer deployments or public
+publication of the private Bridge application.
