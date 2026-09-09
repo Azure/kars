@@ -64,6 +64,12 @@ mod tests {
         assert_eq!(pod["volumes"].as_array().unwrap().len(), 1);
         assert_eq!(pod["volumes"][0]["secret"]["optional"], false);
         assert_eq!(pod["containers"][0]["volumeMounts"], json!([]));
-        assert_eq!(pod["containers"][1]["volumeMounts"].as_array().unwrap().len(), 1);
+        assert_eq!(
+            pod["containers"][1]["volumeMounts"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
     }
 }

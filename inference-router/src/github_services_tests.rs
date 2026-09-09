@@ -4,6 +4,12 @@
 use super::*;
 use crate::github_app::tests::{KEY, app};
 
+impl GitHubServices {
+    pub(super) fn read(&self) -> Result<Option<Vec<u8>>, Error> {
+        Self::read_file(std::fs::File::open(&self.path))
+    }
+}
+
 fn identity() -> Identity {
     serde_json::from_value(serde_json::json!({
         "sandbox":{"namespace":"workspace","name":"agent","uid":"sandbox-uid"},

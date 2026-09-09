@@ -7,6 +7,10 @@ pub(crate) const PENDING: &str = "kars.azure.com/credential-rebind-pending";
 pub(crate) const PAUSED: &str = "CredentialsPaused";
 pub(crate) const HOLD: &str = "kars.azure.com/credential-rebind-task-uid";
 
+pub(crate) fn runtime_replicas(sandbox: &crate::crd::KarsSandbox) -> i64 {
+    i64::from(!sandbox.spec.suspended.unwrap_or(false) && !sandbox.annotations().contains_key(HOLD))
+}
+
 pub(crate) fn pending(task: &KarsTask) -> bool {
     task.annotations()
         .get(PENDING)

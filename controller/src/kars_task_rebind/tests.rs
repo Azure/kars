@@ -14,6 +14,27 @@ const RUNTIME: &str = "/api/v1/namespaces/kars-run";
 const DEPLOYMENT: &str = "/apis/apps/v1/namespaces/kars-run/deployments/run";
 const RECEIPT: &str = "/apis/kars.azure.com/v1alpha1/namespaces/work/karsreceipts/run";
 
+#[test]
+fn runtime_replicas_honor_explicit_suspension_and_credential_holds() {
+    for suspended in [None, Some(false), Some(true)] {
+        for held in [false, true] {
+            let mut sandbox: crate::crd::KarsSandbox = serde_json::from_value(json!({
+                "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsSandbox",
+                "metadata":{"name":"run","namespace":"work"},
+                "spec":{"inferenceRef":{"name":"policy"},"suspended":suspended}
+            }))
+            .unwrap();
+            if held {
+                sandbox.annotations_mut().insert(HOLD.into(), String::new());
+            }
+            assert_eq!(
+                runtime_replicas(&sandbox),
+                i64::from(!suspended.unwrap_or(false) && !held)
+            );
+        }
+    }
+}
+
 #[derive(Default)]
 struct State {
     objects: BTreeMap<String, Value>,
