@@ -34,6 +34,20 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_firewall_diagnostic_requires_owned_node_before_readonly_namespace_entry(self):
+        h = Harness.__new__(Harness)
+        calls = []
+        h.run = lambda args, **_kwargs: calls.append(args) or "foreign-cluster"
+        pod = {"metadata": {"uid": "pod-uid"}, "spec": {"nodeName": "kars-e2e-worker"}}
+        with self.assertRaises(AssertionError):
+            h.firewall_diagnostics(pod)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:3], ["docker", "inspect", "kars-e2e-worker"])
+        pod["spec"]["hostNetwork"] = True
+        with self.assertRaises(AssertionError):
+            h.firewall_diagnostics(pod)
+        self.assertEqual(len(calls), 1)
+
     def test_connectivity_diagnostic_is_uid_fenced_nonprivileged_and_has_no_credentials(self):
         h = Harness.__new__(Harness)
         pod = {"metadata": {"name": "sre-probe", "uid": "pod-uid", "resourceVersion": "17"},

@@ -124,6 +124,36 @@ def router_log_summary(text, root):
     return summary
 
 
+def firewall_summary(text):
+    result = {"policies": [], "rules": []}
+    table = None
+    for line in text.splitlines():
+        if line.startswith("*"):
+            table = line[1:] if line[1:] in ("filter", "nat", "raw", "mangle", "security") else None
+        if not table:
+            continue
+        policy = re.fullmatch(r":(INPUT|OUTPUT|FORWARD) (ACCEPT|DROP) \[([0-9]+):[0-9]+\]", line)
+        if policy:
+            result["policies"].append({"table": table, "chain": policy[1],
+                                       "policy": policy[2], "packets": int(policy[3])})
+        match = re.match(r"(?:\[([0-9]+):[0-9]+\] )?-A ([A-Za-z0-9_-]+) ", line)
+        if not match:
+            continue
+        owner = re.search(r"(! )?--uid-owner (1000|1001)(?:\s|$)", line)
+        action = re.search(r" -j (ACCEPT|DROP|REJECT|REDIRECT|RETURN)(?:\s|$)", line)
+        result["rules"].append({
+            "table": table, "chain": match[2] if match[2] in ("INPUT", "OUTPUT", "FORWARD") else "custom",
+            "packets": int(match[1]) if match[1] else None,
+            "action": action[1] if action else "jump-or-other",
+            "owner": int(owner[2]) if owner else None,
+            "ownerNegated": bool(owner and owner[1]),
+            "loopback": bool(re.search(r"(?: -[io] lo)(?:\s|$)", line)),
+            "established": "--ctstate" in line and "ESTABLISHED" in line,
+        })
+    result["rules"] = result["rules"][:40]
+    return result
+
+
 def identifier(value):
     return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,253}", value) else None
 
