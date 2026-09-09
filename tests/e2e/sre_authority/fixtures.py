@@ -11,6 +11,7 @@ from .common import (
     enrollment_json, fingerprint, require,
 )
 from .credential_paths import seed_privacy_gaps
+from .legacy_crds import bootstrap_legacy_crds
 from .registration_schema import create_registration_crd
 
 LEGACY_COMMIT = "8b206065608593667a40665b3f48225ef9ce278d"
@@ -58,7 +59,8 @@ def prepare_legacy(h):
     data = subprocess.run(["git", "archive", LEGACY_COMMIT, "deploy/helm/kars"],
                           cwd=h.root, capture_output=True, timeout=30, check=True).stdout
     destination = h.work / "legacy-chart"
-    destination.mkdir(exist_ok=True)
+    require(not destination.exists(), "Historical fixture extraction destination already exists")
+    destination.mkdir()
     with tarfile.open(fileobj=io.BytesIO(data)) as chart:
         for member in chart.getmembers():
             require((member.name.startswith("deploy/helm/kars/")
@@ -66,6 +68,14 @@ def prepare_legacy(h):
                     and ".." not in member.name.split("/")
                     and (member.isdir() or member.isfile()), "Unsafe historical chart archive")
         chart.extractall(destination, filter="data")
+        sources = {
+            member.name.rsplit("/", 1)[-1]: chart.extractfile(member).read().decode()
+            for member in chart.getmembers()
+            if member.isfile() and member.name.startswith("deploy/helm/kars/templates/crd")
+        }
+    # The historical chart puts CRDs in templates/, so Helm's CRD-directory
+    # readiness does not order its post-install ToolPolicy hook.
+    bootstrap_legacy_crds(h, destination / "deploy/helm/kars", sources)
     h.run(["helm", "install", "kars", str(destination / "deploy/helm/kars"),
            "--kube-context", CONTEXT, "--namespace", SYSTEM, "--create-namespace",
            "--set", "controller.replicas=0", "--set", "controller.image.repository=kars-controller",
@@ -75,6 +85,9 @@ def prepare_legacy(h):
            "--set", "sandbox.image.tag=dev", "--set-string", f"runtimes.hermes.image={STANDIN}",
            "--set", "sre.enabled=false", "--set-string", "inferenceRouter.azure.openai.endpoint=https://e2e-fake.invalid/",
            "--set-string", "foundry.endpoint=https://e2e-fake.invalid/"], timeout=180)
+    require(h.get("toolpolicy", "kars-default", SYSTEM) is not None,
+            "Historical Helm post-install ToolPolicy hook did not create its policy")
+    h.passed("Historical Helm initial install and unchanged ToolPolicy post-install hook completed")
     h.k("wait", "--for=condition=Established", "crd/karssandboxes.kars.azure.com", "--timeout=60s", timeout=70)
     h.run(["helm", "upgrade", "kars", str(destination / "deploy/helm/kars"), "--kube-context", CONTEXT,
            "--namespace", SYSTEM, "--reuse-values", "--set", "sre.enabled=true"], timeout=120)
