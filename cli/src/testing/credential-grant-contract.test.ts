@@ -68,6 +68,9 @@ describe("governed credential public contract",()=>{
   it("defines metadata-only namespace authority without installing an operator grant",()=>{
     const crd=resource("CustomResourceDefinition","karscredentialgrants.kars.azure.com");
     expect(crd.spec.scope).toBe("Namespaced");
+    expect(crd.metadata.labels["app.kubernetes.io/name"]).toBe("kars");
+    expect(crd.spec.versions[0].schema.openAPIV3Schema["x-kubernetes-validations"])
+      .toContainEqual({rule:"self.metadata.name == 'workspace'",message:"The namespace credential grant is the canonical workspace instance"});
     const spec=specSchema("karscredentialgrants");
     expect(spec.required).toEqual(["workspaceUid","writers"]);
     expect(spec.properties).not.toHaveProperty("data");

@@ -52,7 +52,8 @@ describe("controller observation privacy RPC contract",()=>{
       expect(get(objects,"ValidatingAdmissionPolicyBinding",policy.metadata.name).spec.validationActions).toContain("Deny");
     }
     const material=JSON.stringify(get(objects,"ValidatingAdmissionPolicy","kars-observation-privacy-material").spec);
-    expect(material).toContain("namespaceObject.metadata.uid");
+    expect(material).toContain("dyn(namespaceObject.metadata).uid");
+    expect(material).not.toContain("namespaceObject.metadata.UID");
     expect(material).toContain("privacy-controller-uid");
   });
   it("gives the router only public descriptor reads and narrow private network paths, never raw Secret inventory",()=>{

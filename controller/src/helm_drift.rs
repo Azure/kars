@@ -190,6 +190,25 @@ mod tests {
                 return;
             }
         };
+        let helm_text = if helm_text.contains("{{") {
+            let path = std::path::Path::new(helm_path);
+            let chart = path.parent().unwrap().parent().unwrap();
+            let template = format!("templates/{}", path.file_name().unwrap().to_str().unwrap());
+            let output = std::process::Command::new("helm")
+                .args(["template", "kars"])
+                .arg(chart)
+                .args(["--namespace", "kars-system", "--show-only", &template])
+                .output()
+                .expect("Helm is required to compare rendered CRD templates");
+            assert!(
+                output.status.success(),
+                "Helm failed rendering {label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).expect("rendered Helm schema must be UTF-8")
+        } else {
+            helm_text
+        };
         let helm_crd: serde_json::Value =
             serde_yaml::from_str(&helm_text).expect("helm crd YAML must parse as JSON value");
 

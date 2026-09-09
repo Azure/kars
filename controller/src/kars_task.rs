@@ -189,8 +189,10 @@ pub struct TaskBlueprint {
 
     /// Explicit governed credential sources and key grants; included in task authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::credential_grant::schema::bindings")]
     pub credential_bindings: Option<crate::credential_grant::CredentialBindings>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::credential_grant::schema::github_binding")]
     pub github_binding: Option<crate::credential_grant::GitHubBinding>,
 
     /// System prompt / standing instructions for the agent, in addition to the

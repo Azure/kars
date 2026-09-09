@@ -19,6 +19,9 @@ pub const GRANT_OWNER: &str = "kars.azure.com/credential-grant-owner";
 pub const INPUT_STATE: &str = "kars.azure.com/credential-input-state";
 pub const REMOVED_KEYS: &str = "kars.azure.com/credential-removed-keys";
 
+#[path = "credential_grant_schema.rs"]
+pub(crate) mod schema;
+
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ObjectIdentity {
