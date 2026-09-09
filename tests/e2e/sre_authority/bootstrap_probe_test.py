@@ -15,6 +15,24 @@ POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
 
 
 class BootstrapProofTests(unittest.TestCase):
+    def test_actual_json_tracing_format_is_parsed_without_publishing_other_fields(self):
+        events = [
+            {"message": "SRE authority transport failure", "stage": "registration",
+             "timed_out": True, "connect_error": False, "token": "do-not-publish"},
+            {"message": "SRE authority request denied", "stage": "privacy-review", "http_status": 403},
+            {"message": "SRE readiness authority slow", "authorized": True, "elapsed_seconds": 8},
+            {"message": "unrelated do-not-publish", "stage": "namespace"},
+            {"message": "SRE authority request denied", "stage": "do-not-publish", "http_status": True},
+        ]
+        text = "\n".join(json.dumps({"fields": fields, "span": {"token": "do-not-publish"}}) for fields in events)
+        facts = router_readiness_facts(text)
+        self.assertEqual(facts, [
+            {"stage": "registration", "timed_out": True, "connect_error": False},
+            {"stage": "privacy-review", "httpStatus": 403},
+            {"authorized": True, "elapsedSeconds": 8},
+        ])
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+
     def test_router_readiness_logs_expose_only_fixed_stage_status_and_timeout_facts(self):
         text = (
             '\x1b[33mSRE authority transport failure\x1b[0m stage="registration" timed_out=true connect_error=false token=do-not-publish\n'
