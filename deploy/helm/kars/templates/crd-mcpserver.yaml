@@ -160,7 +160,6 @@ spec:
                 nullable: true
                 type: string
               managed:
-                additionalProperties: false
                 description: |-
                   Closed controller-managed workload preset. Mutually exclusive with
                   url, bundleRef and endpoint authentication fields; the controller
