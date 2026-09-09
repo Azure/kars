@@ -4,15 +4,17 @@
 mod admission;
 mod control;
 pub(crate) mod github;
-pub(crate) mod readiness;
 mod legacy;
 mod operator;
+pub(crate) mod readiness;
 pub(crate) use operator::decorate as decorate_observations;
 pub(crate) use operator::mount as mount_observations;
+mod observation_network;
 mod observer_metadata;
 mod observer_rbac;
 mod rbac;
 pub(crate) mod sources;
+mod writers;
 
 use crate::credential_grant::*;
 use k8s_openapi::api::core::v1::{Namespace, Secret, ServiceAccount};
@@ -57,7 +59,6 @@ pub(crate) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
     }
     if grant.name_any() != NAME
         || !grant.spec.enabled
-        || grant.spec.writers.is_empty()
         || grant.spec.writers.len() > 16
         || grant.spec.integration_stores.len() > 32
         || grant.spec.github_connections.len() > 32
@@ -74,15 +75,6 @@ pub(crate) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
         .map_err(|e| api_error("Verify credential workspace", e))?;
     if identity(&live.metadata)?.0 != grant.spec.workspace_uid {
         return Err("Credential workspace was replaced".into());
-    }
-    for writer in &grant.spec.writers {
-        let sa = Api::<ServiceAccount>::namespaced(client.clone(), &writer.namespace)
-            .get(&writer.name)
-            .await
-            .map_err(|e| api_error("Verify credential writer", e))?;
-        if identity(&sa.metadata)?.0 != writer.uid {
-            return Err("Credential writer ServiceAccount was replaced".into());
-        }
     }
     let mut names = std::collections::BTreeSet::new();
     let secrets: Api<Secret> = Api::namespaced(client.clone(), &namespace);
@@ -152,6 +144,11 @@ pub(crate) async fn current(
     Ok(grant)
 }
 
+struct AuxiliaryStatus {
+    integration: Result<String, String>,
+    writer_error: Option<String>,
+}
+
 async fn publish(
     client: &Client,
     grant: &KarsCredentialGrant,
@@ -159,8 +156,12 @@ async fn publish(
     reason: String,
     sources: Vec<SourceMetadata>,
     legacy_sources: Vec<LegacyImport>,
-    integration: Result<String, String>,
+    auxiliary: AuxiliaryStatus,
 ) -> Result<(), String> {
+    let AuxiliaryStatus {
+        integration,
+        writer_error,
+    } = auxiliary;
     let mut conditions = grant
         .status
         .as_ref()
@@ -202,6 +203,25 @@ async fn publish(
         grant.metadata.generation,
     );
     crate::status::conditions::set(&mut conditions, integration_condition);
+    let writer_condition = crate::status::conditions::preserve_transition_time(
+        crate::status::conditions::find(&conditions, "WriterReady"),
+        "WriterReady",
+        if writer_error.is_none() {
+            "True"
+        } else {
+            "False"
+        },
+        if writer_error.is_none() {
+            "Enrolled"
+        } else {
+            "WriterUnavailable"
+        },
+        writer_error
+            .as_deref()
+            .unwrap_or("Enrolled writer identities are current"),
+        grant.metadata.generation,
+    );
+    crate::status::conditions::set(&mut conditions, writer_condition);
     let status = CredentialGrantStatus {
         observed_generation: grant.metadata.generation.unwrap_or_default(),
         phase: phase.into(),
@@ -231,6 +251,7 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         github::revoke(client, grant).await?;
         operator::revoke(client, grant).await?;
         rbac::revoke(client, grant).await?;
+        writers::release(client, grant).await?;
         let finalizers = grant
             .metadata
             .finalizers
@@ -263,13 +284,20 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         admission::verify(client).await?;
         let sources = sources::inventory(client, grant).await?;
         let legacy = legacy::inventory(client, grant).await?;
-        rbac::apply(client, grant, &sources).await?;
         Ok::<_, String>((sources, legacy))
     }
     .await;
     match validation {
         Ok((sources, legacy)) => {
-            let observations = operator::reconcile(client, grant).await;
+            let (active, writer_error) = writers::authority(client, grant, &sources).await;
+            let observations =
+                if writer_error.is_some() && !grant.spec.observation_targets.is_empty() {
+                    Err("Observation recipient authority is unavailable".into())
+                } else if writer_error.is_some() {
+                    operator::revoke(client, grant).await
+                } else {
+                    operator::reconcile(client, &active).await
+                };
             let controls = control::reconcile(client, grant).await;
             let integration = match observations {
                 Ok(()) => controls,
@@ -277,7 +305,9 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                     let revoked = operator::revoke(client, grant).await;
                     let mut detail = match revoked {
                         Ok(()) => format!("Private observations unavailable: {error}"),
-                        Err(revoke) => format!("Private observations unavailable: {error}; revocation failed: {revoke}"),
+                        Err(revoke) => format!(
+                            "Private observations unavailable: {error}; revocation failed: {revoke}"
+                        ),
                     };
                     if let Err(control) = controls {
                         detail.push_str(&format!("; integration control unavailable: {control}"));
@@ -292,7 +322,10 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                 "Credential source and integration-store authority is current".into(),
                 sources,
                 legacy,
-                integration,
+                AuxiliaryStatus {
+                    integration,
+                    writer_error,
+                },
             )
             .await
         }
@@ -300,6 +333,9 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
             let revoked = rbac::revoke(client, grant).await;
             let operators = operator::revoke(client, grant).await;
             let github = github::revoke(client, grant).await;
+            if revoked.is_ok() && operators.is_ok() {
+                writers::release(client, grant).await?;
+            }
             let reason = revoked
                 .err()
                 .or_else(|| operators.err())
@@ -317,7 +353,10 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                 reason.clone(),
                 Vec::new(),
                 Vec::new(),
-                Ok(String::new()),
+                AuxiliaryStatus {
+                    integration: Ok(String::new()),
+                    writer_error: Some("Writer authority is revoked".into()),
+                },
             )
             .await?;
             Err(reason)

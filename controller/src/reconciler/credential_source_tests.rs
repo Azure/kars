@@ -56,6 +56,8 @@ fn mode_preserves_legacy_shape_and_keeps_projection_values_out_of_pod_specs() {
         version: "42".into(),
         source_uid: "source-a".into(),
         source_version: "30".into(),
+        source_keys: vec!["TELEGRAM_BOT_TOKEN".into()],
+        source_inputs: None,
     };
     mode.decorate(&mut deployment, &sandbox(), &namespace());
     assert_eq!(
@@ -424,20 +426,23 @@ async fn namespace_source_and_destination_races_never_write_values_after_failed_
 #[test]
 fn chart_schema_and_generated_reference_contract_agree() {
     use kube::CustomResourceExt;
-    use serde::Deserialize;
-    let document = serde_yaml::Deserializer::from_str(include_str!(
-        "../../../deploy/helm/kars/templates/crd.yaml"
-    ))
-    .next()
-    .unwrap();
-    let chart = serde_yaml::Value::deserialize(document).unwrap();
+    // Adjacent governed schemas are Helm includes; this v1 contract is static.
+    let template = include_str!("../../../deploy/helm/kars/templates/crd.yaml");
+    let contract = template
+        .split_once("                credentialsRef:\n")
+        .unwrap()
+        .1
+        .split_once("                runtime:\n")
+        .unwrap()
+        .0;
+    let chart: serde_yaml::Value = serde_yaml::from_str(contract).unwrap();
     let chart = serde_json::to_value(chart).unwrap();
     let generated = serde_json::to_value(KarsSandbox::crd()).unwrap();
     let path = "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/credentialsRef";
     for key in ["name", "uid"] {
         for attribute in ["type", "minLength", "maxLength", "pattern"] {
             assert_eq!(
-                chart.pointer(path).unwrap()["properties"][key][attribute],
+                chart["properties"][key][attribute],
                 generated.pointer(path).unwrap()["properties"][key][attribute],
                 "{key}/{attribute}"
             );
@@ -634,6 +639,8 @@ fn credential_status_acknowledges_metadata_versions_without_containing_values() 
         version: "100".into(),
         source_uid: "source-a".into(),
         source_version: "101".into(),
+        source_keys: vec!["TELEGRAM_BOT_TOKEN".into()],
+        source_inputs: None,
     };
     let mut sandbox = sandbox();
     assert!(mode.needs_status_update(&sandbox));

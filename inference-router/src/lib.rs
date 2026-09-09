@@ -36,10 +36,6 @@ mod github_app;
 mod github_services;
 pub mod governance;
 pub mod governed_services;
-#[path="../../shared/service_observer.rs"]
-pub mod service_observer;
-pub mod service_observation;
-pub mod service_observation_tls;
 pub mod guardrails;
 pub mod handoff;
 pub mod inference_policy_loader;
@@ -55,6 +51,10 @@ pub mod proxy;
 pub mod rate_limiter;
 pub mod routes;
 pub mod safety;
+pub mod service_observation;
+pub mod service_observation_tls;
+#[path = "../../shared/service_observer.rs"]
+pub mod service_observer;
 pub mod sidecar_client;
 pub mod spawn;
 #[path = "../../shared/sre_privacy.rs"]

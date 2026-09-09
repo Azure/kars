@@ -19,6 +19,7 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
     let workspace = grant
         .namespace()
         .ok_or("Operator grant workspace missing")?;
+    let controller = super::writers::controller_uid(client).await?;
     let sandboxes = Api::<crate::crd::KarsSandbox>::namespaced(client.clone(), &workspace)
         .list(&ListParams::default())
         .await
@@ -55,7 +56,8 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
         expected.insert(namespace.clone());
         let name = format!("kars-credential-operator-{}", identity(&grant.metadata)?.0);
         let metadata = json!({"name":name,"namespace":namespace,"labels":{LABEL:grant.metadata.uid},
-            "annotations":{GRANT_OWNER:grant.metadata.uid,"kars.azure.com/sandbox-uid":sandbox.metadata.uid,
+            "annotations":{GRANT_OWNER:grant.metadata.uid,"kars.azure.com/credential-reader-controller-uid":controller,
+                "kars.azure.com/sandbox-uid":sandbox.metadata.uid,
                 "kars.azure.com/namespace-uid":ns.metadata.uid},
             "ownerReferences":[{"apiVersion":"v1","kind":"Namespace","name":namespace,"uid":ns.metadata.uid,
                 "controller":true,"blockOwnerDeletion":false}]});
@@ -78,6 +80,12 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                     .metadata
                     .annotations
                     .as_ref()
+                    .and_then(|a| a.get("kars.azure.com/credential-reader-controller-uid"))
+                    != Some(&controller)
+                || old
+                    .metadata
+                    .annotations
+                    .as_ref()
                     .and_then(|a| a.get("kars.azure.com/sandbox-uid"))
                     != sandbox.metadata.uid.as_ref()
                 || old
@@ -96,13 +104,22 @@ pub(super) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                 .map_err(|e| api_error("Create exact-name operator role", e))?;
         }
         super::verify(client, grant).await?;
+        super::writers::verify(client, grant).await?;
         let bindings: Api<RoleBinding> = Api::namespaced(client.clone(), &namespace);
         if let Some(old) = bindings
             .get_opt(&name)
             .await
             .map_err(|e| api_error("Read operator binding", e))?
         {
-            if !owned(&old.metadata, grant) || old.role_ref != binding.role_ref {
+            if !owned(&old.metadata, grant)
+                || old.role_ref != binding.role_ref
+                || old
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("kars.azure.com/credential-reader-controller-uid"))
+                    != Some(&controller)
+            {
                 return Err("Foreign operator binding preserved".into());
             }
             if old.subjects != binding.subjects {

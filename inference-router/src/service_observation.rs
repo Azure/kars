@@ -13,7 +13,7 @@ use kube::{
     api::PostParams,
     core::{ApiResource, DynamicObject, GroupVersionKind},
 };
-use serde_json::{Value, json};
+use serde_json::json;
 use std::{path::Path, sync::Arc};
 use tokio::sync::OnceCell;
 
@@ -89,6 +89,9 @@ impl Observer {
         if !self.recognizes(provided) {
             return Err("Observation credential required".into());
         }
+        if self.binding.privacy_epoch.is_some() {
+            return Err(ACTIVE_PRIVACY_UNAVAILABLE.into());
+        }
         if serde_json::to_value(&scope.identity).map_err(|_| "Service identity invalid")?
             != self.binding.identity
         {
@@ -147,6 +150,16 @@ impl Observer {
             || grant.data["spec"]["enabled"] != true
             || grant.data["status"]["phase"] != "Ready"
             || grant.data["status"]["observedGeneration"] != json!(self.binding.grant.generation)
+            || !grant.data["status"]["conditions"]
+                .as_array()
+                .is_some_and(|conditions| {
+                    conditions.iter().any(|condition| {
+                        condition["type"] == "WriterReady"
+                            && condition["status"] == "True"
+                            && condition["observedGeneration"]
+                                == json!(self.binding.grant.generation)
+                    })
+                })
             || !grant.data["spec"]["observationTargets"]
                 .as_array()
                 .is_some_and(|targets| {
@@ -198,7 +211,11 @@ impl Observer {
                     && registration.data["status"]["privacyRevision"]
                         == crate::sre_privacy::REVISION
                     && registration.data["status"]["legacySecretAccessDenied"] == true;
-                let ready = self.binding.privacy_epoch.as_deref().is_some_and(|epoch| !epoch.is_empty())
+                let ready = self
+                    .binding
+                    .privacy_epoch
+                    .as_deref()
+                    .is_some_and(|epoch| !epoch.is_empty())
                     && registration.data["spec"]["enabled"] == true
                     && registration.data["status"]["phase"] == "Ready"
                     && registration.data["status"]["privacyEpoch"]

@@ -3,7 +3,10 @@
 
 use super::*;
 use serde_json::{Value, json};
-use std::{collections::BTreeMap, sync::{Arc, Mutex}};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Mutex},
+};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 const TASK: &str = "/apis/kars.azure.com/v1alpha1/namespaces/work/karstasks/task";
@@ -39,7 +42,8 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>, KarsTask) {
     let state = Arc::new(Mutex::new(State::default()));
     {
         let mut data = state.lock().unwrap();
-        data.objects.insert(TASK.into(), serde_json::to_value(&task).unwrap());
+        data.objects
+            .insert(TASK.into(), serde_json::to_value(&task).unwrap());
         data.objects.insert(GRANT.into(), json!({
             "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant",
             "metadata":{"name":"workspace","namespace":"work","uid":"grant","resourceVersion":"1","generation":1},
@@ -98,19 +102,71 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>, KarsTask) {
 }
 
 #[tokio::test]
-async fn credential_readiness_preflight_bootstraps_an_unready_task_without_writes_or_runtime_creation() {
+async fn credential_readiness_retains_delivery_after_writer_uninstall_but_not_source_deletion() {
+    let (_server, client, state, mut task) = fixture().await;
+    task.spec
+        .blueprint
+        .as_mut()
+        .unwrap()
+        .credential_bindings
+        .as_mut()
+        .unwrap()
+        .sources[0]
+        .keys = vec!["TELEGRAM_BOT_TOKEN".into()];
+    let values =
+        json!({"TELEGRAM_BOT_TOKEN":k8s_openapi::ByteString(b"retained-credential".to_vec())});
+    {
+        let mut data = state.lock().unwrap();
+        data.objects
+            .remove("/api/v1/namespaces/bridge/serviceaccounts/bff");
+        data.objects
+            .insert(TASK.into(), serde_json::to_value(&task).unwrap());
+        data.objects.get_mut(SOURCE).unwrap()["data"] = values.clone();
+        data.objects.insert(DEPLOYMENT.into(), json!({"apiVersion":"apps/v1","kind":"Deployment",
+            "metadata":{"name":"task","namespace":"kars-task","uid":"consumer","resourceVersion":"1"},
+            "spec":{"replicas":1,"selector":{"matchLabels":{"app":"agent"}},
+                "template":{"metadata":{"labels":{"app":"agent"}},
+                    "spec":{"containers":[{"name":"agent","image":"test:latest"}]}}}}));
+    }
+    preflight(&client, &task).await.unwrap();
+    let mut status: KarsTaskStatus = serde_json::from_value(json!({
+        "phase":"Ready","observedGeneration":1,"envelopeDigest":task.envelope_digest(),
+        "sandboxRef":{"name":"task"}
+    }))
+    .unwrap();
+    enforce(&client, &task, &mut status).await;
+    assert_eq!(status.phase.as_deref(), Some("Ready"));
+    {
+        let mut data = state.lock().unwrap();
+        assert_eq!(data.objects[SOURCE]["metadata"]["uid"], "source");
+        assert_eq!(data.objects[SOURCE]["data"], values);
+        assert_eq!(data.objects[DEPLOYMENT]["spec"]["replicas"], 1);
+        assert!(data.calls.iter().all(|(method, _, _)| method == "GET"));
+        data.objects.remove(SOURCE);
+    }
+    assert!(preflight(&client, &task).await.is_err());
+}
+
+#[tokio::test]
+async fn credential_readiness_preflight_bootstraps_an_unready_task_without_writes_or_runtime_creation()
+ {
     let (_server, client, state, task) = fixture().await;
     assert!(!crate::kars_task_reconciler::task_is_ready(&task));
     preflight(&client, &task).await.unwrap();
     let data = state.lock().unwrap();
     assert!(data.calls.iter().all(|(method, _, _)| method == "GET"));
-    assert!(data.objects[SOURCE]["metadata"].get("ownerReferences").is_none());
+    assert!(
+        data.objects[SOURCE]["metadata"]
+            .get("ownerReferences")
+            .is_none()
+    );
     assert!(!data.objects.contains_key(RUNTIME));
     assert!(!data.objects.contains_key(SANDBOX));
 }
 
 #[tokio::test]
-async fn credential_readiness_revocation_clears_the_canonical_ready_proof_without_losing_other_status() {
+async fn credential_readiness_revocation_clears_the_canonical_ready_proof_without_losing_other_status()
+ {
     let (_server, client, state, mut task) = fixture().await;
     state.lock().unwrap().objects.get_mut(GRANT).unwrap()["spec"]["enabled"] = false.into();
     task.status = Some(serde_json::from_value(json!({
@@ -120,7 +176,8 @@ async fn credential_readiness_revocation_clears_the_canonical_ready_proof_withou
     let mut status: KarsTaskStatus = serde_json::from_value(json!({
         "phase":"Ready","observedGeneration":1,"envelopeDigest":task.envelope_digest(),
         "lineage":["retained-ancestor"],"sandboxRef":{"name":"task"}
-    })).unwrap();
+    }))
+    .unwrap();
     enforce(&client, &task, &mut status).await;
     assert_eq!(status.phase.as_deref(), Some(PHASE_DEGRADED));
     assert!(status.envelope_digest.is_none());
@@ -128,19 +185,40 @@ async fn credential_readiness_revocation_clears_the_canonical_ready_proof_withou
     assert_eq!(status.sandbox_ref.as_ref().unwrap().name, "task");
     let ready = conditions::find(status.conditions.as_ref().unwrap(), "Ready").unwrap();
     assert_eq!(ready.reason, "CredentialAuthorityUnavailable");
-    assert_eq!(serde_json::to_value(&ready.last_transition_time).unwrap(), "2026-01-01T00:00:00Z");
+    assert_eq!(
+        serde_json::to_value(&ready.last_transition_time).unwrap(),
+        "2026-01-01T00:00:00Z"
+    );
     task.status = Some(status);
     assert!(!crate::kars_task_reconciler::task_is_ready(&task));
-    assert!(state.lock().unwrap().calls.iter().all(|(method, _, _)| method == "GET"));
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .all(|(method, _, _)| method == "GET")
+    );
 }
 
 #[tokio::test]
 async fn credential_readiness_team_owner_bootstraps_but_never_bypasses_an_unready_parent() {
     let (_server, client, state, mut task) = fixture().await;
     let team = crate::credential_grant::CredentialTarget {
-        kind:"KarsTeam".into(), namespace:"work".into(), name:"team".into(), uid:"team".into(),
+        kind: "KarsTeam".into(),
+        namespace: "work".into(),
+        name: "team".into(),
+        uid: "team".into(),
     };
-    let selection = &mut task.spec.blueprint.as_mut().unwrap().credential_bindings.as_mut().unwrap().sources[0];
+    let selection = &mut task
+        .spec
+        .blueprint
+        .as_mut()
+        .unwrap()
+        .credential_bindings
+        .as_mut()
+        .unwrap()
+        .sources[0];
     selection.scope = crate::credential_grant::CredentialScope::Team;
     selection.owner = Some(team.clone());
     selection.source.name = "kars-credential-input-team-team".into();
@@ -149,34 +227,53 @@ async fn credential_readiness_team_owner_bootstraps_but_never_bypasses_an_unread
     })).unwrap()]);
     {
         let mut data = state.lock().unwrap();
-        data.objects.insert(TASK.into(), serde_json::to_value(&task).unwrap());
+        data.objects
+            .insert(TASK.into(), serde_json::to_value(&task).unwrap());
         data.objects.insert("/apis/kars.azure.com/v1alpha1/namespaces/work/karsteams/team".into(), json!({
             "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsTeam","metadata":{"name":"team","namespace":"work","uid":"team","resourceVersion":"1"}
         }));
         let mut source = data.objects[SOURCE].clone();
         source["metadata"]["name"] = "kars-credential-input-team-team".into();
-        source["metadata"]["annotations"]["kars.azure.com/credential-target-kind"] = "KarsTeam".into();
+        source["metadata"]["annotations"]["kars.azure.com/credential-target-kind"] =
+            "KarsTeam".into();
         source["metadata"]["annotations"]["kars.azure.com/credential-target"] = "team".into();
-        data.objects.insert("/api/v1/namespaces/work/secrets/kars-credential-input-team-team".into(), source);
+        data.objects.insert(
+            "/api/v1/namespaces/work/secrets/kars-credential-input-team-team".into(),
+            source,
+        );
     }
     preflight(&client, &task).await.unwrap();
     task.metadata.owner_references = None;
-    task.spec.parent_ref = Some(crate::mcp_server::LocalObjectRef { name:"parent".into() });
+    task.spec.parent_ref = Some(crate::mcp_server::LocalObjectRef {
+        name: "parent".into(),
+    });
     {
         let mut data = state.lock().unwrap();
-        data.objects.insert(TASK.into(), serde_json::to_value(&task).unwrap());
+        data.objects
+            .insert(TASK.into(), serde_json::to_value(&task).unwrap());
         let mut parent = task.clone();
         parent.metadata.name = Some("parent".into());
         parent.metadata.uid = Some("parent".into());
         parent.spec.parent_ref = None;
-        data.objects.insert("/apis/kars.azure.com/v1alpha1/namespaces/work/karstasks/parent".into(), serde_json::to_value(parent).unwrap());
+        data.objects.insert(
+            "/apis/kars.azure.com/v1alpha1/namespaces/work/karstasks/parent".into(),
+            serde_json::to_value(parent).unwrap(),
+        );
     }
     assert!(preflight(&client, &task).await.is_err());
-    assert!(state.lock().unwrap().calls.iter().all(|(method, _, _)| method == "GET"));
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .all(|(method, _, _)| method == "GET")
+    );
 }
 
 #[tokio::test]
-async fn credential_readiness_pause_preserves_namespace_state_and_rejects_foreign_sandbox_ownership() {
+async fn credential_readiness_pause_preserves_namespace_state_and_rejects_foreign_sandbox_ownership()
+ {
     let (_server, client, state, task) = fixture().await;
     {
         let mut data = state.lock().unwrap();
@@ -198,16 +295,37 @@ async fn credential_readiness_pause_preserves_namespace_state_and_rejects_foreig
                 "annotations":{"kars.azure.com/credential-sandbox-uid":"sandbox","kars.azure.com/credential-namespace-uid":"runtime"}},
             "spec":{"replicas":1,"selector":{"matchLabels":{"app":"agent"}},"template":{"spec":{"containers":[{"name":"agent","image":"test"}]}}}}));
     }
-    assert!(crate::kars_task_execution::pause_credentials(&client, &task).await.unwrap());
+    assert!(
+        crate::kars_task_execution::pause_credentials(&client, &task)
+            .await
+            .unwrap()
+    );
     {
         let mut data = state.lock().unwrap();
         assert_eq!(data.objects[DEPLOYMENT]["spec"]["replicas"], 0);
         assert_eq!(data.objects[RUNTIME]["metadata"]["uid"], "runtime");
         assert_eq!(data.objects[SOURCE]["metadata"]["uid"], "source");
-        assert!(data.calls.iter().all(|(method, path, _)| method == "GET" || (method == "PATCH" && path == DEPLOYMENT)));
+        assert!(
+            data.calls
+                .iter()
+                .all(|(method, path, _)| method == "GET"
+                    || (method == "PATCH" && path == DEPLOYMENT))
+        );
         data.calls.clear();
-        data.objects.get_mut(SANDBOX).unwrap()["metadata"]["ownerReferences"][0]["uid"] = "foreign".into();
+        data.objects.get_mut(SANDBOX).unwrap()["metadata"]["ownerReferences"][0]["uid"] =
+            "foreign".into();
     }
-    assert!(crate::kars_task_execution::pause_credentials(&client, &task).await.is_err());
-    assert!(state.lock().unwrap().calls.iter().all(|(method, _, _)| method == "GET"));
+    assert!(
+        crate::kars_task_execution::pause_credentials(&client, &task)
+            .await
+            .is_err()
+    );
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .all(|(method, _, _)| method == "GET")
+    );
 }

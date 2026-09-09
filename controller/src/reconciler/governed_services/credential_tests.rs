@@ -326,8 +326,22 @@ async fn current_ready_epoch_is_required_and_recorded_before_control_token_creat
         state
             .calls
             .iter()
+            .take_while(|(method, path, _)| !(method == "POST" && path == SECRETS))
             .filter(|(_, path, _)| path.contains("/validatingadmissionpolicies/"))
-            .count(),
+            .map(|(_, path, _)| path)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        14
+    );
+    assert_eq!(
+        state
+            .calls
+            .iter()
+            .take_while(|(method, path, _)| !(method == "POST" && path == SECRETS))
+            .filter(|(_, path, _)| path.contains("/validatingadmissionpolicybindings/"))
+            .map(|(_, path, _)| path)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
         14
     );
 }

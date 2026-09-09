@@ -37,6 +37,8 @@ fn spec() -> KarsTaskSpec {
             isolation: Some("standard".into()),
             memory: Some("team-memory".into()),
             model_fallbacks: Vec::new(),
+            credential_bindings: None,
+            github_binding: None,
         }),
         ..Default::default()
     }

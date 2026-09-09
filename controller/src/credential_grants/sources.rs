@@ -166,7 +166,7 @@ pub(super) async fn inventory(
                         .metadata
                         .owner_references
                         .as_ref()
-                        .is_none_or(|refs| refs.is_empty() || refs == &[owner.clone()]);
+                        .is_none_or(|refs| refs.is_empty() || refs == std::slice::from_ref(&owner));
                 if !valid {
                     value.phase = "Blocked".into();
                     value.reason = "TargetIdentityOrOwnershipChanged".into();
@@ -268,7 +268,7 @@ async fn read_selected(
         .metadata
         .owner_references
         .as_ref()
-        .is_some_and(|refs| !refs.is_empty() && refs != &[expected.clone()])
+        .is_some_and(|refs| !refs.is_empty() && refs != std::slice::from_ref(&expected))
     {
         return Err("Credential source has a foreign owner; it is not adopted".into());
     }
@@ -344,7 +344,9 @@ pub(crate) async fn preflight_task(
     validate_bindings(bindings)?;
     let target = CredentialTarget {
         kind: "KarsTask".into(),
-        namespace: task.namespace().ok_or("Credential Task workspace missing")?,
+        namespace: task
+            .namespace()
+            .ok_or("Credential Task workspace missing")?,
         name: task.name_any(),
         uid: identity(&task.metadata)?.0.into(),
     };
@@ -355,13 +357,23 @@ pub(crate) async fn preflight_task(
     let grant = current(client, &target.namespace, &bindings.grant).await?;
     for selection in &bindings.sources {
         let (source, owner) = read_selected(client, &grant, &target, selection, Some(task)).await?;
-        if annotation(&source.metadata, "kars.azure.com/credential-import-revision").is_none() {
+        if annotation(
+            &source.metadata,
+            "kars.azure.com/credential-import-revision",
+        )
+        .is_none()
+        {
             super::legacy::import_values(
                 client,
                 &grant,
                 &source.name_any(),
-                if owner.kind == "Workspace" { None } else { Some(&owner) },
-            ).await?;
+                if owner.kind == "Workspace" {
+                    None
+                } else {
+                    Some(&owner)
+                },
+            )
+            .await?;
         }
     }
     Ok(())

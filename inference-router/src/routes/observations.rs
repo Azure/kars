@@ -103,7 +103,12 @@ async fn learned(State(state): State<AppState>, headers: HeaderMap) -> Response 
         return (StatusCode::CONFLICT, Json(json!({"error":"stale_scope"}))).into_response();
     }
     let mut value = super::egress::learned_projection(&state).await;
-    if !state.services.requests.scope().is_ok_and(|scope| scope.id == current.id) {
+    if !state
+        .services
+        .requests
+        .scope()
+        .is_ok_and(|scope| scope.id == current.id)
+    {
         return (StatusCode::CONFLICT, Json(json!({"error":"stale_scope"}))).into_response();
     }
     value["capability"] = CAPABILITY.into();
@@ -118,12 +123,20 @@ pub async fn purpose_boundary(
     request: Request,
     next: Next,
 ) -> Response {
-    if state
-        .services
-        .observer
-        .as_ref()
-        .is_some_and(|observer| observer.recognizes(bearer(request.headers())))
-        && (request.method() != Method::GET || ![SCOPE, LEARNED].contains(&request.uri().path()))
+    if state.services.observer.as_ref().is_some_and(|observer| {
+        request
+            .headers()
+            .get_all("authorization")
+            .iter()
+            .any(|value| {
+                observer.recognizes(
+                    value
+                        .to_str()
+                        .ok()
+                        .and_then(|value| value.strip_prefix("Bearer ")),
+                )
+            })
+    }) && (request.method() != Method::GET || ![SCOPE, LEARNED].contains(&request.uri().path()))
     {
         return (
             StatusCode::FORBIDDEN,

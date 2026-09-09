@@ -51,7 +51,7 @@ export async function validateGrantDocument(execute:Execute,document:any):Promis
     throw new Error("Explicit credential-grant operator permission is required");
   if((await get(execute,"namespace",ns))?.metadata.uid!==document.spec.workspaceUid)
     throw new Error("Reviewed workspace UID changed");
-  if(!Array.isArray(document.spec.writers)||!document.spec.writers.length)throw new Error("At least one reviewed writer is required");
+  if(!Array.isArray(document.spec.writers)||document.spec.writers.length>16)throw new Error("A reviewed writer list (at most 16 identities) is required");
   for(const writer of document.spec.writers){
     if((await get(execute,"serviceaccount",writer.name,writer.namespace))?.metadata.uid!==writer.uid)
       throw new Error("Reviewed writer ServiceAccount UID changed");
