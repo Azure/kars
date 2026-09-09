@@ -70,6 +70,10 @@ pub struct DiscoveredMcpServerMeta {
     /// this at discovery time. Empty (the default) = no outbound auth.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub bearer_from_env: String,
+    /// Controller-qualified managed workloads are local Sandbox capabilities,
+    /// not a remote OAuth publication surface.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uid: Option<String>,
 }
 
 /// A single McpServer discovered under `MCP_JWKS_DIR`.

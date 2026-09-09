@@ -88,6 +88,14 @@ spec:
               value: "{{ .Values.inferenceRouter.image.repository }}:{{ .Values.inferenceRouter.image.tag }}"
             - name: SANDBOX_IMAGE
               value: "{{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}"
+            - name: MCP_MANAGED_NAMESPACE
+              value: {{ (.Values.managedMcp | default dict).namespace | default "kars-mcp" | quote }}
+            - name: MCP_PLAYWRIGHT_IMAGE
+              value: {{ (.Values.managedMcp | default dict).playwrightImage | default "" | quote }}
+            - name: MCP_EVERYTHING_IMAGE
+              value: {{ (.Values.managedMcp | default dict).everythingImage | default "" | quote }}
+            - name: MCP_IMAGE_PULL_SECRET_NAME
+              value: {{ (.Values.managedMcp | default dict).imagePullSecret | default "" | quote }}
             # Multi-runtime adapter image overrides (consumed by
             # controller/src/reconciler/runtime.rs::*_default_image()).
             # Empty string keeps the controller's compiled-in default.

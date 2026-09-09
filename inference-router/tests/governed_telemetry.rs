@@ -477,7 +477,7 @@ async fn actual_mcp_http_errors_are_not_mistaken_for_success_and_bodies_are_not_
     state.task_telemetry = Some(telemetry.clone());
     let app = routes::mcp_route().with_state(state);
     for (id, name) in [(1, "echo"), (2, "missing-tool")] {
-        let request = Request::post("/mcp")
+        let mut request = Request::post("/mcp")
             .header("content-type", "application/json")
             .header("accept", "application/json, text/event-stream")
             .body(Body::from(
@@ -486,6 +486,12 @@ async fn actual_mcp_http_errors_are_not_mistaken_for_success_and_bodies_are_not_
                 .to_string(),
             ))
             .unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                12345,
+            ))));
         assert_eq!(
             app.clone().oneshot(request).await.unwrap().status(),
             StatusCode::OK
@@ -543,8 +549,14 @@ async fn mcp_is_error_and_dispatch_transport_failure_are_both_failure_observatio
     state.task_telemetry = Some(telemetry.clone());
     let app = routes::mcp_route().with_state(state);
     for (id, name) in [(1, "tool_error"), (2, "transport_error")] {
-        let request=Request::post("/mcp").header("content-type","application/json").header("accept","application/json, text/event-stream")
+        let mut request=Request::post("/mcp").header("content-type","application/json").header("accept","application/json, text/event-stream")
                 .body(Body::from(json!({"jsonrpc":"2.0","id":id,"method":"tools/call","params":{"name":name,"arguments":{}}}).to_string())).unwrap();
+        request
+            .extensions_mut()
+            .insert(axum::extract::ConnectInfo(std::net::SocketAddr::from((
+                [127, 0, 0, 1],
+                12345,
+            ))));
         assert_eq!(
             app.clone().oneshot(request).await.unwrap().status(),
             StatusCode::OK
