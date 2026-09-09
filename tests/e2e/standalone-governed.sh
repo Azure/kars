@@ -9,6 +9,40 @@ source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/run.sh"
 
 STANDALONE_CLUSTER_UID=""
 
+standalone_diagnostics() {
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_DIR" \
+        python3 -m standalone_diagnostics "$1"
+}
+
+standalone_exit() {
+    local result="$1"
+    trap - EXIT
+    if ! standalone_diagnostics final; then
+        printf 'Standalone diagnostics incomplete; original failure is retained\n' >&2
+        [ "$result" -ne 0 ] || result=1
+    fi
+    if ! standalone_cleanup; then
+        [ "$result" -ne 0 ] || result=1
+    fi
+    exit "$result"
+}
+
+standalone_check() {
+    local check="$1" stage="$2" success="${3:-}" before="$FAIL"
+    if "$check"; then
+        if [ "$FAIL" -eq "$before" ] && [ -n "$success" ]; then pass "$success"; fi
+    elif [ "$FAIL" -eq "$before" ]; then
+        fail "Standalone check failed: $check"
+    fi
+    if [ "$FAIL" -gt "$before" ]; then
+        standalone_diagnostics "$stage" || fail "Standalone diagnostics incomplete: $stage"
+    fi
+}
+
+standalone_budget() {
+    node "$SCRIPT_DIR/inference-budget-enforcement.mjs"
+}
+
 prepare_standalone_namespace() {
     # The chart owns kars-system. Create that exact manifest with release
     # ownership before Helm needs its release-storage namespace; never adopt.
@@ -66,7 +100,9 @@ standalone_governed_main() {
         printf 'Standalone cluster identity is unavailable\n' >&2
         return 1
     }
-    trap standalone_cleanup EXIT
+    export KARS_E2E_SUITE=standalone-governed
+    export KARS_STANDALONE_CLUSTER_UID="$STANDALONE_CLUSTER_UID"
+    trap 'standalone_exit "$?"' EXIT
     build_images
     prepare_managed_mcp
     prepare_standalone_namespace
@@ -77,21 +113,13 @@ standalone_governed_main() {
         test_controller_metrics_endpoint test_admission_policies_installed \
         test_operator_default_deny_np test_create_sandbox \
         test_sandbox_deployment_exists test_sandbox_pod_starts; do
-        "$check" || fail "Standalone prerequisite failed: $check"
+        standalone_check "$check" "$check"
     done
-    if test_governed_services; then
-        pass "Standalone private service credentials and scope lifecycle"
-    else
-        fail "Standalone private service credentials and scope lifecycle"
-    fi
-    test_managed_mcp || fail "Standalone managed MCP lifecycle/protocol"
-    test_credential_sources || fail "Standalone legacy credential-source lifecycle"
-    if node "$SCRIPT_DIR/inference-budget-enforcement.mjs"; then
-        pass "Standalone durable governed-inference broker enforcement"
-    else
-        fail "Standalone durable governed-inference broker enforcement"
-    fi
-    test_cleanup_sandbox || fail "Standalone sandbox cleanup"
+    standalone_check test_governed_services services "Standalone private service credentials and scope lifecycle"
+    standalone_check test_managed_mcp mcp
+    standalone_check test_credential_sources credentials
+    standalone_check standalone_budget budget "Standalone durable governed-inference broker enforcement"
+    standalone_check test_cleanup_sandbox sandbox-cleanup
     printf 'Standalone governed services: %s passed, %s failed\n' "$PASS" "$FAIL"
     [ "$FAIL" -eq 0 ]
 }

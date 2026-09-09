@@ -9,12 +9,14 @@ cleanup_credential_source_policy() {
     if ! "${k[@]}" delete inferencepolicy e2e-source-inference -n kars-system \
         --timeout=90s --request-timeout=20s >/dev/null; then
         fail "Credential-source InferencePolicy cleanup did not complete within 90s"
+        if [ "${KARS_E2E_SUITE:-full}" != "standalone-governed" ]; then
         "${k[@]}" get inferencepolicy e2e-source-inference -n kars-system \
             --request-timeout=20s -o yaml || true
         "${k[@]}" get configmap inferencepolicy-e2e-source-inference-profile -n kars-system \
             --request-timeout=20s -o go-template='{{.metadata}}{{"\n"}}' || true
         "${k[@]}" logs -n kars-system -l app.kubernetes.io/component=controller \
             --tail=1000 --since=5m --request-timeout=20s || true
+        fi
         return 1
     fi
 }
@@ -74,7 +76,7 @@ YAML
         fail "Admission accepted source credentials on an overlay-managed runtime"; return 1
     fi
     if ! printf '%s\n' "$admission" | grep -q "credentialsRef requires a controller-managed runtime"; then
-        printf '%s\n' "$admission"
+        if [ "${KARS_E2E_SUITE:-full}" != "standalone-governed" ]; then printf '%s\n' "$admission"; fi
         fail "Overlay admission failed for a reason other than the intended source guard"; return 1
     fi
     pass "The API server compiles the source schema and rejects overlay credentials for the intended reason"
