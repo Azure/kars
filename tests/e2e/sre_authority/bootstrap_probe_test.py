@@ -132,6 +132,56 @@ class BootstrapProofTests(unittest.TestCase):
         self.assertFalse(any(case["matched"] for case in cases))
         self.assertNotIn("do-not-publish", json.dumps(cases))
 
+    def test_builtin_controller_proof_preserves_real_identity_and_cluster_scope(self):
+        from sre_authority.bootstrap_cases import DEPLOYMENT_CONTROLLER, deployment_controller_cases
+        responses = [(200, {"metadata": {"uid": "actual-api-uid"}}),
+                     (201, {"status": {"allowed": True}}),
+                     (201, {"status": {"allowed": False}}),
+                     (201, {"status": {"allowed": False}})]
+        with patch("sre_authority.bootstrap_cases.request", side_effect=responses) as api, \
+                patch("sre_authority.bootstrap_cases.as_tenant", return_value=(201, {"kind": "ReplicaSet"})) as actor:
+            cases = deployment_controller_cases(1, POLICIES)
+        self.assertTrue(all(case["matched"] for case in cases))
+        self.assertEqual(cases[0]["authorization"], {
+            "createReplicaSetsClusterWide": True, "createPodsClusterWide": False, "useRegistrar": False})
+        for call in api.call_args_list[1:]:
+            spec = call.args[3]["spec"]
+            self.assertEqual(spec["user"], DEPLOYMENT_CONTROLLER)
+            self.assertNotIn("namespace", spec["resourceAttributes"])
+        for call in actor.call_args_list:
+            self.assertEqual(call.kwargs["user"], DEPLOYMENT_CONTROLLER)
+            self.assertTrue(call.args[1].endswith("?dryRun=All"))
+            pod = call.args[2]["spec"]["template"]["spec"]
+            self.assertEqual(pod["schedulerName"], "kars-e2e-admission-never-schedule")
+            self.assertEqual(pod["containers"][0]["imagePullPolicy"], "Never")
+
+    def test_private_controller_replicaset_denial_is_a_failure_not_a_security_pass(self):
+        from sre_authority.bootstrap_cases import deployment_controller_cases
+        policies = {"kars-sre-private-workloads": {}}
+        for code in (403, 404, 422, 500):
+            responses = [(200, {"metadata": {"uid": "actual-api-uid"}})] + [
+                (201, {"status": {"allowed": allowed}}) for allowed in (True, False, False)]
+            with patch("sre_authority.bootstrap_cases.request", side_effect=responses), \
+                    patch("sre_authority.bootstrap_cases.as_tenant", side_effect=[
+                        (201, {"kind": "ReplicaSet"}),
+                        (code, {"kind": "Status", "reason": "Forbidden",
+                                "message": "kars-sre-private-workloads forbids do-not-publish"})]):
+                cases = deployment_controller_cases(1, policies)
+            self.assertTrue(cases[0]["matched"])
+            self.assertFalse(cases[1]["matched"])
+            self.assertEqual(cases[1]["expectedStatus"], 201)
+            self.assertNotIn("do-not-publish", json.dumps(cases))
+
+    def test_controller_proof_requires_actual_account_and_valid_authorization_response(self):
+        from sre_authority.bootstrap_cases import deployment_controller_cases
+        for responses in ([(404, {})], [(200, {"metadata": {}})],
+                          [(200, {"metadata": {"uid": "uid"}}), (403, {})],
+                          [(200, {"metadata": {"uid": "uid"}}), (201, {"status": {"allowed": "true"}})]):
+            with patch("sre_authority.bootstrap_cases.request", side_effect=responses), \
+                    patch("sre_authority.bootstrap_cases.as_tenant") as actor, self.assertRaises(RuntimeError):
+                deployment_controller_cases(1, POLICIES)
+            actor.assert_not_called()
+
     def test_collection_tracks_real_uid_chain_without_logging_other_pods(self):
         def request(_port, _method, path):
             if path.endswith("/deployments"):
