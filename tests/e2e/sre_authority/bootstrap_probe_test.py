@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, probe_command_result, public_stack_facts, router_log_summary, router_readiness_facts
+from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, firewall_summary, object_status, policy_status, probe_command_result, public_stack_facts, router_log_summary, router_readiness_facts
 from sre_authority.bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
@@ -15,6 +15,21 @@ POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
 
 
 class BootstrapProofTests(unittest.TestCase):
+    def test_firewall_summary_does_not_publish_rules_comments_addresses_or_unknown_chains(self):
+        text = """*filter
+:OUTPUT ACCEPT [12:640]
+[4:240] -A OUTPUT -m owner --uid-owner 1000 -j DROP
+[3:120] -A OUTPUT -m owner ! --uid-owner 1001 -o lo -j ACCEPT
+[2:80] -A do-not-publish -s do-not-publish -m comment --comment do-not-publish -j DROP
+COMMIT
+"""
+        value = firewall_summary(text)
+        self.assertEqual(value["policies"], [{"table": "filter", "chain": "OUTPUT", "policy": "ACCEPT", "packets": 12}])
+        self.assertEqual(value["rules"][0]["owner"], 1000)
+        self.assertTrue(value["rules"][1]["ownerNegated"])
+        self.assertEqual(value["rules"][2]["chain"], "custom")
+        self.assertNotIn("do-not-publish", json.dumps(value))
+
     def test_router_startup_summary_reports_only_verified_source_coordinates(self):
         root = Path(__file__).resolve().parents[3]
         text = "\n".join([

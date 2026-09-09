@@ -445,8 +445,16 @@ class Harness:
             agents = json.loads(self.k("get", "daemonsets", "-n", "kube-system", "-o", "json"))["items"]
             facts["knownNetworkAgents"] = sorted(agent["metadata"]["name"] for agent in agents
                 if agent["metadata"]["name"] in ("kindnet", "cilium", "calico-node", "antrea-agent", "kube-flannel-ds"))
+            facts["minimalKindnetImage"] = any(
+                container.get("image", "").removeprefix("docker.io/").startswith("kindest/kindnetd:")
+                for agent in agents if agent["metadata"]["name"] == "kindnet"
+                for container in agent.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []))
         except Exception as error:
             facts["networkPolicyDiagnosticError"] = type(error).__name__
+        try:
+            facts["firewall"] = self.firewall_diagnostics(pod)
+        except Exception as error:
+            facts["firewallDiagnosticError"] = type(error).__name__
         try:
             for label, executable in (("configuredCommand", "kars-inference-router"),
                                       ("absoluteCommand", "/usr/local/bin/kars-inference-router")):
@@ -470,6 +478,38 @@ class Harness:
         except Exception:
             facts["authorityChecksUnavailable"] = True
         print("SRE-DIAG", json.dumps(facts), flush=True)
+
+    def firewall_diagnostics(self, pod):
+        from .bootstrap_diagnostics import firewall_summary
+        node = pod["spec"].get("nodeName")
+        require(node in ("kars-e2e-worker", "kars-e2e-control-plane")
+                and not pod["spec"].get("hostNetwork"), "Firewall diagnostic requires the owned Kind Pod network")
+        cluster = self.run(["docker", "inspect", node, "--format",
+                            '{{index .Config.Labels "io.x-k8s.kind.cluster"}}'], timeout=10).strip()
+        require(cluster == "kars-e2e", "Firewall diagnostic refuses a foreign node")
+        items = json.loads(self.run(["docker", "exec", node, "crictl", "pods",
+                                    "--label", f'io.kubernetes.pod.uid={pod["metadata"]["uid"]}',
+                                    "-o", "json"], timeout=10))["items"]
+        matches = [item for item in items if item.get("metadata", {}).get("uid") == pod["metadata"]["uid"]
+                   and item["metadata"].get("namespace") == RUNTIME and item.get("state") == "SANDBOX_READY"]
+        require(len(matches) == 1 and re.fullmatch(r"[0-9a-f]{64}", matches[0]["id"]),
+                "Firewall diagnostic could not identify the exact live Pod sandbox")
+        sandbox = matches[0]["id"]
+        def identity():
+            obj = json.loads(self.run(["docker", "exec", node, "crictl", "inspectp", "-o", "json", sandbox], timeout=10))
+            require(obj.get("status", {}).get("metadata", {}).get("uid") == pod["metadata"]["uid"],
+                    "Firewall diagnostic sandbox UID changed")
+            pid = obj.get("info", {}).get("pid")
+            require(type(pid) is int and 0 < pid < 2**31, "Firewall diagnostic sandbox PID is invalid")
+            return pid
+        pid = identity()
+        facts = {}
+        for backend in ("nft", "legacy"):
+            output = self.run(["docker", "exec", node, "nsenter", "--target", str(pid), "--net", "--",
+                               f"iptables-{backend}-save", "-c"], timeout=10, expected=None)
+            facts[backend] = firewall_summary(output.stdout) if output.returncode == 0 else {"available": False}
+        require(identity() == pid, "Firewall diagnostic sandbox changed during the read")
+        return facts
 
     def connectivity_diagnostics(self, pod):
         import ipaddress
