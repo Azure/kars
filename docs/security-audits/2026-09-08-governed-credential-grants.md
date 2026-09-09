@@ -37,7 +37,45 @@ this repository.
 
 ## Current validation
 
-### 2026-09-09 bounded core Rust qualification — lease released
+### 2026-09-09 public-parent forward — qualified core code, lease released
+
+Local checkpoint `45939f6b` preserves the credential closure and its first Rust
+qualification. Local merge `330113a0272ca5d12d9fd0e4e3eb40889289399d` then
+normally forwards public 550 at
+`2d85d5a8bcb1896095fe3431110d6bd87b75e53f`: the real SRE reader-binding/
+retirement preflight, fixtures, diagnostics and js-yaml 4.3.2 dependency patch.
+The merge was conflict-free. No private implementation was copied, no SRE
+worktree was edited, and neither local commit was pushed.
+
+The renewed core-only lease is **released**. The same guarded shared target,
+default features, both packages and offline/locked settings were used.
+
+| Combined-source validation | Result |
+| --- | --- |
+| Check with `--tests` | Pass |
+| `credential` | 96 passing tests |
+| `observation` | 12 passing tests, including real TLS |
+| `github` | 43 passing tests |
+| `sre_authority::` | 29 passing tests |
+| `governed_services::continuity_tests` | 4 passing tests |
+| Strict Clippy, `--all-targets -- -D warnings` | Pass |
+
+Filters overlap. Minimum free space during this forward batch was **9.98 GiB**
+against the **8.50 GiB** floor; release-time free space was **10.08 GiB**.
+No Cargo/rustc process remained. No private BFF Rust, dependency installation,
+new target, target cleanup, image build, cloud operation or public push occurred.
+The dependency patch is forwarded source/lock evidence, not a newly built image
+claim. The earlier fast CLI/private checks below are not relabeled as fresh
+image or private Rust qualification.
+
+**Remaining decision and qualification:** the active-SRE observer verifier
+architecture remains an explicit decision (options below); private BFF Rust/
+API integration and real Kubernetes admission/lifecycle/CNI tests remain open.
+Native Secret GET remains name-authorized Kubernetes RBAC. The name-hold
+protocol does not turn it into UID-aware authorization, and this record makes
+no end-to-end raw-GET UID-bound security claim.
+
+### Earlier 2026-09-09 bounded core Rust qualification — lease released
 
 The explicit core-only lease has completed and is **released**. Every Cargo
 command ran through the parent-provided `files/run-cargo-guard.py`, with this
@@ -319,6 +357,6 @@ cargo test --offline --locked --manifest-path bff/Cargo.toml credential
 cargo clippy --offline --locked --manifest-path bff/Cargo.toml --all-targets -- -D warnings
 ```
 
-Latest release observation: 10.21 GiB available; no Cargo/rustc processes.
-Minimum batch free space: 9.90 GiB. No new lease is implicitly acquired by
+Latest release observation: 10.08 GiB available; no Cargo/rustc processes.
+Minimum latest-batch free space: 9.98 GiB (earlier batch: 9.90 GiB). No new lease is implicitly acquired by
 editing documentation, formatting source, or forwarding another parent.
