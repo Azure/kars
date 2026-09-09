@@ -54,6 +54,15 @@ fn denied_response(stage: &'static str, status: reqwest::StatusCode) {
     );
 }
 
+fn authority_progress(stage: &'static str, step: &'static str) {
+    tracing::debug!(
+        target: "inference_router::sre_proxy",
+        stage,
+        step,
+        "SRE authority progress"
+    );
+}
+
 pub(super) struct Backend {
     pub config: Config,
     client: reqwest::Client,
@@ -198,6 +207,9 @@ impl Backend {
     }
 
     async fn metadata_json(&self, path: &str, stage: &'static str) -> Result<Value, String> {
+        authority_progress(stage, "token");
+        let token = self.bearer().await?;
+        authority_progress(stage, "request");
         let response = self
             .client
             .get(format!(
@@ -205,7 +217,7 @@ impl Backend {
                 self.config.kube_url.trim_end_matches('/'),
                 path
             ))
-            .bearer_auth(self.bearer().await?)
+            .bearer_auth(token)
             .header("accept", "application/json")
             .send()
             .await
@@ -213,14 +225,17 @@ impl Backend {
                 transport_failure(stage, &error);
                 "SRE authority read failed"
             })?;
+        authority_progress(stage, "headers");
         if !response.status().is_success() {
             denied_response(stage, response.status());
             return Err("SRE authority read denied".into());
         }
-        response
+        let value = response
             .json()
             .await
-            .map_err(|_| "SRE authority response invalid".into())
+            .map_err(|_| "SRE authority response invalid".to_string())?;
+        authority_progress(stage, "complete");
+        Ok(value)
     }
 
     pub(super) async fn authorize(&self) -> Result<(), String> {
@@ -299,6 +314,7 @@ impl Backend {
     }
 
     async fn verify_privacy(&self) -> Result<(), String> {
+        authority_progress("privacy-review", "request");
         for review in crate::sre_privacy::secret_access_reviews(&self.config.runtime_namespace) {
             let response = self
                 .client
@@ -324,6 +340,8 @@ impl Backend {
                 .map_err(|_| "SRE privacy authorization response invalid")?;
             crate::sre_privacy::require_denial(&response)?;
         }
+        authority_progress("privacy-review", "complete");
+        authority_progress("credential-metadata", "request");
         let response = self
             .client
             .get(format!(
@@ -354,6 +372,7 @@ impl Backend {
             &metadata,
             &[self.config.service_account_uid.as_str()],
         )?;
+        authority_progress("credential-metadata", "complete");
         Ok(())
     }
 

@@ -35,6 +35,9 @@ class BootstrapProofTests(unittest.TestCase):
              "timed_out": True, "connect_error": False, "token": "do-not-publish"},
             {"message": "SRE authority request denied", "stage": "privacy-review", "http_status": 403},
             {"message": "SRE readiness authority slow", "authorized": True, "elapsed_seconds": 8},
+            {"message": "SRE transport progress", "stage": "tls-accepted", "peer": "do-not-publish"},
+            {"message": "SRE authority progress", "stage": "registration",
+             "step": "request", "url": "do-not-publish"},
             {"message": "unrelated do-not-publish", "stage": "namespace"},
             {"message": "SRE authority request denied", "stage": "do-not-publish", "http_status": True},
         ]
@@ -44,6 +47,8 @@ class BootstrapProofTests(unittest.TestCase):
             {"stage": "registration", "timed_out": True, "connect_error": False},
             {"stage": "privacy-review", "httpStatus": 403},
             {"authorized": True, "elapsedSeconds": 8},
+            {"stage": "tls-accepted"},
+            {"stage": "registration", "step": "request"},
         ])
         self.assertNotIn("do-not-publish", json.dumps(facts))
         self.assertEqual(router_readiness_facts(json.dumps(events[0])), [facts[0]])
