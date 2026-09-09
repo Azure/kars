@@ -295,6 +295,7 @@ pub async fn resolve(
             .await
             .map_err(|error| api("recheck Task snapshot", error))?;
         if fresh.metadata.uid.as_deref() != Some(node.pin.task.uid.as_str())
+            || fresh.metadata.generation != Some(node.generation)
             || fresh.metadata.resource_version.as_deref() != Some(node.resource_version.as_str())
             || fresh.metadata.deletion_timestamp.is_some()
         {

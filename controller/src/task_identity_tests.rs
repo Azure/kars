@@ -164,6 +164,31 @@ async fn double_inventory_rejects_recreated_uid_instead_of_mixing_ancestry() {
 }
 
 #[tokio::test]
+async fn double_inventory_rechecks_the_verified_generation() {
+    let (server, client) = setup().await;
+    let leaf = task("leaf", None, true);
+    let snapshot = leaf.clone();
+    let calls = AtomicUsize::new(0);
+    Mock::given(method("GET"))
+        .and(path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karstasks/leaf",
+        ))
+        .respond_with(move |_: &Request| {
+            let mut task = snapshot.clone();
+            if calls.fetch_add(1, Ordering::SeqCst) > 0 {
+                task.metadata.generation = Some(2);
+            }
+            ResponseTemplate::new(200).set_body_json(task)
+        })
+        .mount(&server)
+        .await;
+    assert!(matches!(
+        resolve(&client, &leaf, LeafReadiness::RequireReady).await,
+        Err(Error::Changed)
+    ));
+}
+
+#[tokio::test]
 async fn stale_leaf_generation_and_foreign_namespace_are_not_adopted() {
     let (server, client) = setup().await;
     let leaf = task("leaf", None, true);

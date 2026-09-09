@@ -220,8 +220,11 @@ spec:
                     properties:
                       scope:
                         type: string
-                        enum: [GovernedInference]
-                        description: "Governed inference over the lifetime of this Team UID; other costs are excluded"
+                        enum: [GovernedInference, null]
+                        nullable: true
+                        description: |-
+                          Explicit opt-in to governed-inference tokens/configured maximum prices.
+                          An absent scope retains the foundation's planning-only interpretation.
                       tokens:
                         description: |-
                           Maximum total tokens the task subtree may consume. `0`/absent means
@@ -466,7 +469,11 @@ spec:
                           properties:
                             scope:
                               type: string
-                              enum: [GovernedInference]
+                              enum: [GovernedInference, null]
+                              nullable: true
+                              description: |-
+                                Explicit opt-in to governed-inference tokens/configured maximum prices.
+                                An absent scope retains the foundation's planning-only interpretation.
                             tokens:
                               description: |-
                                 Maximum total tokens the task subtree may consume. `0`/absent means
@@ -553,14 +560,6 @@ spec:
             - envelope
             type: object
             x-kubernetes-validations:
-            - message: First finite GovernedInference opt-in requires a new Task/Team UID; an existing unbounded runtime cannot be silently converted
-              reason: FieldValueForbidden
-              rule: >-
-                !has(self.envelope.budget) || !has(self.envelope.budget.scope) || self.envelope.budget.scope != 'GovernedInference' || ((!has(self.envelope.budget.tokens) || self.envelope.budget.tokens == 0) && (!has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros == 0)) || (has(oldSelf.envelope.budget) && has(oldSelf.envelope.budget.scope) && oldSelf.envelope.budget.scope == 'GovernedInference' && ((has(oldSelf.envelope.budget.tokens) && oldSelf.envelope.budget.tokens > 0) || (has(oldSelf.envelope.budget.usdMicros) && oldSelf.envelope.budget.usdMicros > 0)))
-            - message: GovernedInference scope cannot be removed or changed for an existing UID
-              reason: FieldValueForbidden
-              rule: >-
-                !has(oldSelf.envelope.budget) || !has(oldSelf.envelope.budget.scope) || oldSelf.envelope.budget.scope != 'GovernedInference' || (has(self.envelope.budget) && has(self.envelope.budget.scope) && self.envelope.budget.scope == 'GovernedInference')
             - message: spec.charter must be 1-8192 characters (or empty when spec.profileRef is set, to inherit the profile's charter)
               reason: FieldValueInvalid
               rule: (has(self.profileRef) && size(self.charter) == 0) || (size(self.charter) > 0 && size(self.charter) <= 8192)
@@ -579,17 +578,27 @@ spec:
             - message: spec.cadence.everyMinutes, when set, must be >= 1
               reason: FieldValueInvalid
               rule: '!has(self.cadence) || !has(self.cadence.everyMinutes) || self.cadence.everyMinutes >= 1'
+            - message: First finite GovernedInference opt-in requires a new Task/Team UID; an existing unbounded runtime cannot be silently converted
+              reason: FieldValueForbidden
+              rule: >-
+                !has(self.envelope.budget) || !has(self.envelope.budget.scope) || self.envelope.budget.scope != 'GovernedInference' || ((!has(self.envelope.budget.tokens) || self.envelope.budget.tokens == 0) && (!has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros == 0)) || (has(oldSelf.envelope.budget) && has(oldSelf.envelope.budget.scope) && oldSelf.envelope.budget.scope == 'GovernedInference' && ((has(oldSelf.envelope.budget.tokens) && oldSelf.envelope.budget.tokens > 0) || (has(oldSelf.envelope.budget.usdMicros) && oldSelf.envelope.budget.usdMicros > 0)))
+            - message: GovernedInference scope cannot be removed or changed for an existing UID
+              reason: FieldValueForbidden
+              rule: >-
+                !has(oldSelf.envelope.budget) || !has(oldSelf.envelope.budget.scope) || oldSelf.envelope.budget.scope != 'GovernedInference' || (has(self.envelope.budget) && has(self.envelope.budget.scope) && self.envelope.budget.scope == 'GovernedInference')
           status:
             description: '`KarsTeam.status` — the controller is the sole writer.'
             nullable: true
             properties:
               inferenceBudgetAccount:
                 type: object
-                required: [namespace, name, uid]
+                nullable: true
+                description: Lifetime Team-UID inference account; cadence runs never reset its balance.
+                required: [name, namespace, uid]
                 properties:
-                  namespace: {type: string, minLength: 1, maxLength: 63}
-                  name: {type: string, minLength: 1, maxLength: 253}
-                  uid: {type: string, minLength: 1, maxLength: 128}
+                  namespace: {type: string}
+                  name: {type: string}
+                  uid: {type: string}
               commonsEntryCount:
                 description: Number of entries in the team's knowledge commons (shared memory size).
                 format: int64

@@ -5,7 +5,7 @@ use super::{
     client::{AttemptGuard, Error},
     usage,
 };
-use crate::{inference_budget_contract::catalog, proxy::UpstreamConfig};
+use crate::{inference_budget_dispatch, proxy::UpstreamConfig};
 use axum::http::{Method, StatusCode};
 use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
@@ -28,7 +28,7 @@ pub async fn begin(
     if method != Method::POST {
         return Err(denied().into());
     }
-    let operation = catalog::operation(path).ok_or_else(denied)?;
+    let operation = inference_budget_dispatch::operation(path).ok_or_else(denied)?;
     let (wire, guard) = client
         .begin(
             upstream.telemetry_provider(),

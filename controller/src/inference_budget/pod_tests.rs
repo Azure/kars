@@ -100,7 +100,8 @@ async fn no_task_owner_no_reference_is_a_byte_safe_legacy_noop_without_api_acces
     let client = Client::try_from(config).unwrap();
     let sandbox: KarsSandbox = serde_json::from_value(json!({
         "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsSandbox",
-        "metadata":{"name":"legacy","namespace":"workspace","uid":"legacy-uid"}, "spec":{}
+        "metadata":{"name":"legacy","namespace":"workspace","uid":"legacy-uid"},
+        "spec":{"inferenceRef":{"name":"legacy-inference"}}
     }))
     .unwrap();
     let namespace: Namespace = serde_json::from_value(json!({

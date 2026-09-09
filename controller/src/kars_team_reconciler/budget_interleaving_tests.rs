@@ -64,7 +64,7 @@ fn contract() -> ModelContract {
         endpoint: "https://fixture.example".into(),
         model: "reviewed-model".into(),
         operation: Operation::ChatCompletions,
-        output_field: OutputField::MaxTokens,
+        output_field: OutputField::Tokens,
         maximum_input_tokens: 10,
         maximum_output_tokens: 20,
         maximum_wire_bytes: 4096,
