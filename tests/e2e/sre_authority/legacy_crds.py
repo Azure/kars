@@ -1,11 +1,9 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Create-only readiness for CRDs from the immutable historical Helm fixture."""
+"""Read-only validation of CRDs from the immutable historical Helm fixture."""
 
-import copy
-import json
-
+from .bootstrap_probe import converted_objects
 from .common import SYSTEM, require
 from .registration_schema import CRD_NAME, CRD_PATH
 
@@ -31,7 +29,6 @@ CRDS = {
 }
 # The historical crd.yaml contains both KarsSandbox and KarsPairing.
 IDENTITIES = (*CRDS.values(), ("karspairings", "KarsPairing", "Namespaced"))
-GROUP_VERSION = "kars.azure.com/v1alpha1"
 
 
 def validate_rendered_crds(rendered, historical):
@@ -89,65 +86,26 @@ def render_legacy_crds(h, chart, sources):
     for filename in CRDS:
         args += ["--show-only", f"templates/{filename}"]
     rendered = h.run(args, timeout=45)
-    converter = """
-const y=require('node:module').createRequire(process.cwd()+'/cli/package.json')('yaml');
-const input=JSON.parse(require('fs').readFileSync(0,'utf8'));
-function documents(text) {
-  return y.parseAllDocuments(text).map(doc => {
-    if (doc.errors.length) throw Error('Invalid historical YAML');
-    return doc.toJSON();
-  }).filter(doc => doc !== null);
-}
-const historical=Object.fromEntries(Object.entries(input.sources).map(([name,text]) => {
-  return [name,documents(text)];
-}));
-console.log(JSON.stringify({historical,rendered:documents(input.rendered)}));
-"""
-    parsed = json.loads(h.run(["node", "-e", converter],
-                              data=json.dumps({"sources": sources, "rendered": rendered}), timeout=20))
-    return validate_rendered_crds(parsed["rendered"], parsed["historical"])
+    def convert(text):
+        return converted_objects(h.k("create", "--dry-run=client", "--validate=strict",
+                                     "-f", "-", "-o", "json", data=text))
+    original = convert("\n---\n".join(sources[filename] for filename in CRDS))
+    require(len(original) == len(IDENTITIES), "Immutable historical CRD count changed")
+    historical, offset = {}, 0
+    for filename in CRDS:
+        count = 2 if filename == "crd.yaml" else 1
+        historical[filename] = original[offset:offset + count]
+        offset += count
+    return validate_rendered_crds(convert(rendered), historical)
 
 
-def bootstrap_legacy_crds(h, chart, sources):
+def preflight_legacy_crds(h, chart, sources):
     objects = render_legacy_crds(h, chart, sources)
-    # Preflight every absence before the first CREATE. An existing object,
-    # including one claiming this release, is never adopted or patched.
+    # Only Helm creates these objects, retaining its native SSA field ownership.
+    # An existing object, even one claiming this release, is never adopted.
     for name in [CRD_NAME] + [obj["metadata"]["name"] for obj in objects]:
         response = h.api("GET", f"{CRD_PATH}/{name}", status=404)
         body = response.json()
         require(body.get("kind") == "Status" and body.get("reason") == "NotFound",
                 "Historical CRD absence was not a Kubernetes NotFound")
-    for original in objects:
-        obj = copy.deepcopy(original)
-        obj["metadata"].setdefault("labels", {})["app.kubernetes.io/managed-by"] = "Helm"
-        obj["metadata"]["annotations"] = {
-            "meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": SYSTEM,
-        }
-        # Use Helm's own field-manager name as well as its release metadata.
-        # Otherwise its later SSA schema upgrade conflicts with kubectl-create.
-        h.create(obj, manager="helm")
-    h.k("wait", "--for=condition=Established",
-        *[f'crd/{obj["metadata"]["name"]}' for obj in objects], "--timeout=60s", timeout=70)
-
-    def discovered():
-        response = h.api("GET", f"/apis/{GROUP_VERSION}", status=(200, 404))
-        body = response.json()
-        if response.status_code == 404:
-            require(body.get("kind") == "Status" and body.get("reason") == "NotFound",
-                    "Historical API discovery returned an unexpected response")
-            return False
-        require(body.get("kind") == "APIResourceList" and body.get("groupVersion") == GROUP_VERSION
-                and isinstance(body.get("resources"), list),
-                "Historical API discovery returned an unexpected resource list")
-        resources = {item["name"]: item for item in body["resources"]}
-        for plural, kind, scope in IDENTITIES:
-            if plural not in resources:
-                return False
-            item = resources[plural]
-            require(item.get("kind") == kind and item.get("namespaced") == (scope == "Namespaced")
-                    and {"create", "get", "list", "watch"}.issubset(item.get("verbs", [])),
-                    "Historical API discovery differs from the immutable CRD identity")
-        return True
-
-    h.poll("Historical CRD API discovery before Helm hooks", discovered, seconds=60)
-    h.passed("All 18 unchanged historical CRDs created with Helm ownership, Established and discovered before initial hooks")
+    h.passed("All 18 historical CRDs match the immutable archive and are absent before Helm-owned creation")

@@ -419,8 +419,12 @@ jobs:
         run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
-      - name: Prove historical CRD bootstrap ownership permits unchanged Helm schema upgrades
+      - name: Prove native historical Helm wait orders CRDs before hooks and permits schema upgrades
         run: PYTHONPATH=tests/e2e python3 -m sre_authority.legacy_crd_probe
+      - name: Reset disposable cluster after historical Helm proof
+        run: |
+          kind delete cluster --name kars-e2e
+          kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
       - name: Validate the SRE CRD against the actual API server
         id: sre_schema
         run: python3 tests/e2e/sre_authority/registration_schema.py --exercise
@@ -440,7 +444,7 @@ jobs:
           name: sre-crd-schema-${{ github.run_id }}
           path: |
             e2e-sre-schema-diag/versions.json
-            e2e-sre-schema-diag/legacy-crd-ownership.json
+            e2e-sre-schema-diag/legacy-helm-readiness.json
             e2e-sre-schema-diag/validation.json
             e2e-sre-schema-diag/validation-instances.json
             e2e-sre-schema-diag/namespace-accessor-candidate.json

@@ -11,7 +11,7 @@ from .common import (
     enrollment_json, fingerprint, require,
 )
 from .credential_paths import seed_privacy_gaps
-from .legacy_crds import bootstrap_legacy_crds
+from .legacy_crds import preflight_legacy_crds
 from .registration_schema import create_registration_crd
 
 LEGACY_COMMIT = "8b206065608593667a40665b3f48225ef9ce278d"
@@ -49,10 +49,7 @@ def role_binding(h, name, role, account, namespace=None, account_namespace=OPERA
         "subjects": [{"kind": "ServiceAccount", "name": account, "namespace": account_namespace}]})
 
 
-def prepare_legacy(h):
-    require(not h.get("validatingadmissionpolicy", "kars-sre-source-authority"),
-            "Legacy fixtures must precede the new SRE admission guards")
-    require(not h.get("namespace", RUNTIME), "Disposable cluster contains a pre-existing SRE namespace")
+def install_historical_chart(h):
     h.run(["git", "fetch", "--no-tags", "--depth=1", "https://github.com/Azure/kars.git", LEGACY_COMMIT], timeout=90)
     # git archive is binary; invoke separately without decoding tar as text.
     import subprocess
@@ -73,11 +70,15 @@ def prepare_legacy(h):
             for member in chart.getmembers()
             if member.isfile() and member.name.startswith("deploy/helm/kars/templates/crd")
         }
-    # The historical chart puts CRDs in templates/, so Helm's CRD-directory
-    # readiness does not order its post-install ToolPolicy hook.
-    bootstrap_legacy_crds(h, destination / "deploy/helm/kars", sources)
+    preflight_legacy_crds(h, destination / "deploy/helm/kars", sources)
+    version = h.run(["helm", "version", "--template", "{{.Version}}"]).strip()
+    wait_arg = h.run(["bash", "-c", 'source "$1"; sre_migration_helm_wait_arg "$2"',
+                     "legacy-helm-wait", str(h.root / "tests/e2e/sre-authority.sh"), version]).strip()
+    # Helm's legacy waiter includes templated CRDs (Established), and runs
+    # before post-install hooks. Let Helm retain its native SSA ownership.
     h.run(["helm", "install", "kars", str(destination / "deploy/helm/kars"),
            "--kube-context", CONTEXT, "--namespace", SYSTEM, "--create-namespace",
+           wait_arg, "--timeout", "120s",
            "--set", "controller.replicas=0", "--set", "controller.image.repository=kars-controller",
            "--set", "controller.image.tag=e2e", "--set", "controller.image.pullPolicy=Never",
            "--set", "inferenceRouter.image.repository=kars-inference-router",
@@ -91,6 +92,13 @@ def prepare_legacy(h):
     h.k("wait", "--for=condition=Established", "crd/karssandboxes.kars.azure.com", "--timeout=60s", timeout=70)
     h.run(["helm", "upgrade", "kars", str(destination / "deploy/helm/kars"), "--kube-context", CONTEXT,
            "--namespace", SYSTEM, "--reuse-values", "--set", "sre.enabled=true"], timeout=120)
+
+
+def prepare_legacy(h):
+    require(not h.get("validatingadmissionpolicy", "kars-sre-source-authority"),
+            "Legacy fixtures must precede the new SRE admission guards")
+    require(not h.get("namespace", RUNTIME), "Disposable cluster contains a pre-existing SRE namespace")
+    install_historical_chart(h)
     source = h.get("karssandbox", "sre", SYSTEM)
     require(source is not None, "Historical chart did not create its source CR")
     h.state["legacy_source_uid"] = source["metadata"]["uid"]

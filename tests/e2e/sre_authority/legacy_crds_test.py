@@ -10,10 +10,9 @@ import unittest
 from unittest.mock import Mock, patch
 
 from sre_authority.legacy_crds import (
-    CRDS, GROUP_VERSION, IDENTITIES, bootstrap_legacy_crds, render_legacy_crds, validate_rendered_crds,
+    CRDS, IDENTITIES, preflight_legacy_crds, render_legacy_crds, validate_rendered_crds,
 )
 from sre_authority.registration_schema import CRD_NAME
-from sre_authority.legacy_crd_probe import conflict_report
 
 
 def historical_objects():
@@ -34,62 +33,7 @@ def flattened(historical):
     return [obj for objects in historical.values() for obj in objects]
 
 
-def discovery():
-    return {"kind": "APIResourceList", "groupVersion": GROUP_VERSION, "resources": [
-        {"name": plural, "kind": kind, "namespaced": scope == "Namespaced",
-         "verbs": ["create", "get", "list", "watch"]}
-        for plural, kind, scope in IDENTITIES
-    ]}
-
-
-class FixtureHarness:
-    def __init__(self):
-        self.events = []
-        self.responses = [(200, discovery())]
-        self.existing = None
-        self.create_failure = False
-        self.wait_failure = False
-
-    def api(self, method, path, *, status):
-        self.events.append(("api", method, path))
-        if path == f"/apis/{GROUP_VERSION}":
-            code, body = self.responses.pop(0)
-        elif path.endswith("/" + str(self.existing)):
-            code, body = 200, {"kind": "CustomResourceDefinition"}
-        else:
-            code, body = 404, {"kind": "Status", "reason": "NotFound"}
-        if code not in (status if isinstance(status, tuple) else (status,)):
-            raise AssertionError(f"HTTP {code}")
-        return types.SimpleNamespace(status_code=code, json=lambda: body)
-
-    def create(self, obj, *, manager):
-        self.events.append(("create", obj, manager))
-        if self.create_failure:
-            raise AssertionError("HTTP 409")
-
-    def k(self, *args, **kwargs):
-        self.events.append(("wait", args, kwargs))
-        if self.wait_failure:
-            raise AssertionError("wait-timeout")
-
-    def poll(self, label, predicate, *, seconds):
-        self.events.append(("poll", label, seconds))
-        for _ in range(3):
-            if predicate():
-                return True
-        raise AssertionError("bounded discovery deadline")
-
-    def passed(self, message):
-        self.events.append(("passed", message))
-
-
 class LegacyCRDTests(unittest.TestCase):
-    def bootstrap(self, h):
-        objects = flattened(historical_objects())
-        with patch("sre_authority.legacy_crds.render_legacy_crds", return_value=objects):
-            bootstrap_legacy_crds(h, Path("unused-test-chart"), {})
-        return objects
-
     def test_render_requires_exact_historical_content_not_just_a_matching_name(self):
         historical = historical_objects()
         rendered = flattened(copy.deepcopy(historical))
@@ -130,7 +74,6 @@ class LegacyCRDTests(unittest.TestCase):
 
     def test_changed_extracted_source_and_unexpected_inventory_fail_before_render(self):
         h = Mock()
-        # A small path double avoids filesystem writes in these pure checks.
         class Chart:
             def __truediv__(self, _name):
                 return self
@@ -146,109 +89,55 @@ class LegacyCRDTests(unittest.TestCase):
             with self.assertRaises(AssertionError):
                 render_legacy_crds(h, Chart(), sources)
         h.run.assert_not_called()
+        h.k.assert_not_called()
 
-    def test_create_only_ownership_and_all_readiness_precede_hooks(self):
-        h = FixtureHarness()
-        originals = self.bootstrap(h)
-        names = [obj["metadata"]["name"] for obj in originals]
-        self.assertEqual(len(names), 18)
-        self.assertNotIn(CRD_NAME, names)
-        self.assertEqual([event[2].rsplit("/", 1)[-1] for event in h.events[:19]],
-                         [CRD_NAME] + names)
-        creates = [event[1] for event in h.events if event[0] == "create"]
-        self.assertEqual(len(creates), 18)
-        self.assertTrue(all(event[2] == "helm" for event in h.events if event[0] == "create"))
-        for original, created in zip(originals, creates):
-            self.assertNotIn("annotations", original["metadata"])
-            self.assertEqual(created["spec"], original["spec"])
-            self.assertEqual(created["metadata"]["labels"]["app.kubernetes.io/managed-by"], "Helm")
-            self.assertEqual(created["metadata"]["annotations"], {
-                "meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": "kars-system"})
-        wait = next(event for event in h.events if event[0] == "wait")
-        self.assertEqual(wait[1], ("wait", "--for=condition=Established",
-                                  *[f"crd/{name}" for name in names], "--timeout=60s"))
-        self.assertLess(h.events.index(wait), next(i for i, e in enumerate(h.events) if e[0] == "poll"))
-        self.assertEqual(h.events[-1][0], "passed")
-        fixture = (Path(__file__).with_name("fixtures.py")).read_text()
-        self.assertLess(fixture.index("bootstrap_legacy_crds(h,"), fixture.index('h.run(["helm", "install"'))
-        self.assertLess(fixture.index('h.run(["helm", "install"'), fixture.index('h.get("toolpolicy"'))
+    def test_every_absence_is_read_only_before_native_helm_creates_any_crd(self):
+        h = Mock()
+        h.api.return_value = types.SimpleNamespace(json=lambda: {"kind": "Status", "reason": "NotFound"})
+        objects = flattened(historical_objects())
+        with patch("sre_authority.legacy_crds.render_legacy_crds", return_value=objects):
+            preflight_legacy_crds(h, Path("unused-test-chart"), {})
+        names = [CRD_NAME] + [obj["metadata"]["name"] for obj in objects]
+        self.assertEqual(len(names), 19)
+        self.assertEqual([call.args[1].rsplit("/", 1)[-1] for call in h.api.call_args_list], names)
+        self.assertTrue(all(call.args[0] == "GET" and call.kwargs == {"status": 404}
+                            for call in h.api.call_args_list))
+        h.create.assert_not_called()
+        h.k.assert_not_called()
+        h.passed.assert_called_once()
+
+    def test_existing_or_inaccessible_crd_aborts_without_adoption_or_retry(self):
+        for code in (200, 401, 403, 409, 500):
+            h = Mock()
+            h.api.side_effect = AssertionError(f"HTTP {code}")
+            with patch("sre_authority.legacy_crds.render_legacy_crds",
+                       return_value=flattened(historical_objects())):
+                with self.subTest(code=code), self.assertRaisesRegex(AssertionError, f"HTTP {code}"):
+                    preflight_legacy_crds(h, Path("unused-test-chart"), {})
+            h.api.assert_called_once()
+            h.create.assert_not_called()
+            h.passed.assert_not_called()
+
+    def test_false_not_found_is_not_absence_proof(self):
+        for body in ({"kind": "Secret", "reason": "NotFound"}, {"kind": "Status", "reason": "Forbidden"}):
+            h = Mock()
+            h.api.return_value = types.SimpleNamespace(json=lambda: body)
+            with patch("sre_authority.legacy_crds.render_legacy_crds",
+                       return_value=flattened(historical_objects())), self.assertRaises(AssertionError):
+                preflight_legacy_crds(h, Path("unused-test-chart"), {})
+            h.create.assert_not_called()
+            h.passed.assert_not_called()
+
+    def test_initial_helm_uses_existing_versioned_waiter_without_custom_creation(self):
+        fixture = Path(__file__).with_name("fixtures.py").read_text()
+        install = fixture.split("def install_historical_chart(h):", 1)[1].split("def prepare_legacy(h):", 1)[0]
+        self.assertLess(install.index("preflight_legacy_crds(h,"), install.index('h.run(["helm", "install"'))
+        self.assertIn('sre_migration_helm_wait_arg "$2"', install)
+        self.assertIn('wait_arg, "--timeout", "120s"', install)
+        self.assertLess(install.index('h.run(["helm", "install"'), install.index('h.get("toolpolicy"'))
+        self.assertNotIn("h.create(", install)
         for bypass in ("--take-ownership", "--force", "--validate=false", "--no-hooks", "governance.enabled=false"):
             self.assertNotIn(bypass, fixture)
-
-    def test_existing_foreign_or_even_release_named_crd_is_never_adopted(self):
-        for name in (CRD_NAME, "toolpolicies.kars.azure.com", "karssandboxes.kars.azure.com"):
-            h = FixtureHarness()
-            h.existing = name
-            with self.subTest(name=name), self.assertRaisesRegex(AssertionError, "HTTP 200"):
-                self.bootstrap(h)
-            self.assertFalse(any(event[0] in ("create", "wait", "passed") for event in h.events))
-
-    def test_create_conflict_is_not_retried_as_apply_or_patch(self):
-        h = FixtureHarness()
-        h.create_failure = True
-        with self.assertRaisesRegex(AssertionError, "HTTP 409"):
-            self.bootstrap(h)
-        self.assertEqual(sum(event[0] == "create" for event in h.events), 1)
-        self.assertFalse(any(event[0] in ("wait", "passed") for event in h.events))
-
-    def test_established_failure_never_reaches_discovery_or_hooks(self):
-        h = FixtureHarness()
-        h.wait_failure = True
-        with self.assertRaisesRegex(AssertionError, "wait-timeout"):
-            self.bootstrap(h)
-        self.assertFalse(any(event[0] in ("poll", "passed") for event in h.events))
-
-    def test_discovery_retries_only_missing_group_or_resources(self):
-        h = FixtureHarness()
-        incomplete = discovery()
-        incomplete["resources"].pop()
-        h.responses = [(404, {"kind": "Status", "reason": "NotFound"}),
-                       (200, incomplete), (200, discovery())]
-        self.bootstrap(h)
-        self.assertEqual(h.responses, [])
-        self.assertEqual(h.events[-1][0], "passed")
-
-    def test_discovery_auth_server_errors_and_malformed_responses_are_fatal(self):
-        for response in ((403, {"kind": "Status", "reason": "Forbidden"}),
-                         (401, {"kind": "Status", "reason": "Unauthorized"}),
-                         (500, {"kind": "Status", "reason": "InternalError"}),
-                         (404, {"kind": "Status", "reason": "Forbidden"}),
-                         (200, {"kind": "Secret", "data": {"token": "must-not-log"}})):
-            h = FixtureHarness()
-            h.responses = [response, (200, discovery())]
-            with self.subTest(code=response[0]), self.assertRaises(AssertionError) as failure:
-                self.bootstrap(h)
-            self.assertNotIn("must-not-log", str(failure.exception))
-            self.assertEqual(len(h.responses), 1)
-            self.assertFalse(any(event[0] == "passed" for event in h.events))
-
-    def test_wrong_discovered_identity_or_verbs_fail_instead_of_retrying(self):
-        for key, value in (("kind", "Secret"), ("namespaced", False), ("verbs", ["get"])):
-            h = FixtureHarness()
-            body = discovery()
-            body["resources"][0][key] = value
-            h.responses = [(200, body)]
-            with self.subTest(key=key), self.assertRaises(AssertionError):
-                self.bootstrap(h)
-            self.assertFalse(any(event[0] == "passed" for event in h.events))
-
-    def test_discovery_deadline_is_not_success(self):
-        h = FixtureHarness()
-        body = discovery()
-        body["resources"] = []
-        h.responses = [(200, body)] * 3
-        with self.assertRaisesRegex(AssertionError, "bounded discovery deadline"):
-            self.bootstrap(h)
-        self.assertFalse(any(event[0] == "passed" for event in h.events))
-
-    def test_field_manager_evidence_requires_actual_conflict_without_echoing_bodies(self):
-        body = {"kind": "Status", "reason": "Conflict", "message": "must-not-log",
-                "details": {"causes": [{"reason": "FieldManagerConflict", "message": "must-not-log"}]}}
-        self.assertEqual(conflict_report(409, body), {"httpStatus": 409, "fieldManagerConflict": True})
-        for code, invalid in ((200, body), (403, body), (409, {}), (409, None),
-                              (409, {**body, "reason": "Forbidden"})):
-            self.assertFalse(conflict_report(code, invalid)["fieldManagerConflict"])
-            self.assertNotIn("must-not-log", str(conflict_report(code, invalid)))
 
 
 if __name__ == "__main__":
