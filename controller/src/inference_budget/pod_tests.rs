@@ -97,6 +97,7 @@ fn every_runtime_receives_only_a_router_private_token_mount() {
 async fn no_task_owner_no_reference_is_a_byte_safe_legacy_noop_without_api_access() {
     let server = wiremock::MockServer::start().await;
     let config = kube::Config::new(server.uri().parse().unwrap());
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let client = Client::try_from(config).unwrap();
     let sandbox: KarsSandbox = serde_json::from_value(json!({
         "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsSandbox",

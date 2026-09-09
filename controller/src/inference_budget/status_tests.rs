@@ -424,66 +424,23 @@ async fn observation_backfill_and_generation_update_preserve_stable_transition_t
 
 #[test]
 fn helm_budget_account_reporting_matches_generated_schema() {
-    fn without_descriptions(mut value: serde_json::Value) -> serde_json::Value {
+    fn canonical_schema(mut value: serde_json::Value) -> serde_json::Value {
         match &mut value {
             serde_json::Value::Object(fields) => {
                 fields.remove("description");
+                if let Some(serde_json::Value::Array(required)) = fields.get_mut("required") {
+                    required.sort_by(|a, b| a.as_str().cmp(&b.as_str()));
+                }
+                if let Some(minimum) = fields.get_mut("minimum") {
+                    *minimum = json!(minimum.as_f64().unwrap());
+                }
                 for field in fields.values_mut() {
-                    *field = without_descriptions(field.take());
-                }
-
-                #[tokio::test]
-                async fn observation_conflict_reloads_concurrently_reserved_money() {
-                    let (_server, store, state) =
-                        setup(Some(account()), Fault::ReserveOnConflict).await;
-                    let error = StoreError::Api {
-                        stage: "recovery",
-                        code: Some(503),
-                    };
-                    let reported = store
-                        .refresh_status(&root(), "account-uid", Some(&error))
-                        .await
-                        .unwrap();
-                    check(
-                        &reported,
-                        Phase::Unknown,
-                        "Unknown",
-                        "ReconciliationUnavailable",
-                    );
-                    let ledger = reported.status.as_ref().unwrap().ledger.as_ref().unwrap();
-                    assert_eq!(ledger.meters.reserved.tokens, 30);
-                    assert_eq!(ledger.attempts.len(), 1);
-                    assert_eq!(ledger.sessions["a"].next_sequence, 2);
-                    assert_eq!(snapshot(&state).status, reported.status);
-                }
-
-                #[tokio::test]
-                async fn lost_bootstrap_status_ack_reuses_the_same_ledger_before_sealing() {
-                    let (_server, store, state) = setup(None, Fault::None).await;
-                    store
-                        .create_anchor(
-                            account().spec,
-                            &crate::providers::signing::ReceiptSigner::from_bytes(&[7; 32]),
-                        )
-                        .await
-                        .unwrap();
-                    state.lock().unwrap().fault = Fault::CommitThenFail;
-                    assert!(store.initialize(&root(), "account-uid").await.is_err());
-                    let pending = snapshot(&state);
-                    check(&pending, Phase::Bootstrap, "False", "BootstrapPending");
-                    assert!(store.read(&root(), "account-uid").await.is_err());
-                    let initialized = store.initialize(&root(), "account-uid").await.unwrap();
-                    check(&initialized, Phase::Active, "True", "LedgerAvailable");
-                    assert_eq!(
-                        initialized.status.as_ref().unwrap().ledger,
-                        pending.status.as_ref().unwrap().ledger
-                    );
-                    assert_eq!(initialized.metadata.uid, pending.metadata.uid);
+                    *field = canonical_schema(field.take());
                 }
             }
             serde_json::Value::Array(items) => {
                 for item in items {
-                    *item = without_descriptions(item.take());
+                    *item = canonical_schema(item.take());
                 }
             }
             _ => {}
@@ -501,14 +458,62 @@ fn helm_budget_account_reporting_matches_generated_schema() {
         helm["additionalPrinterColumns"],
         generated["additionalPrinterColumns"]
     );
-    for field in ["phase", "observedGeneration", "conditions"] {
+    for field in ["phase", "observedGeneration", "conditions", "ledger"] {
         let path = |schema: &serde_json::Value| {
             schema["schema"]["openAPIV3Schema"]["properties"]["status"]["properties"][field].clone()
         };
         assert_eq!(
-            without_descriptions(path(helm)),
-            without_descriptions(path(generated)),
+            canonical_schema(path(helm)),
+            canonical_schema(path(generated)),
             "{field}"
         );
     }
+}
+
+#[tokio::test]
+async fn observation_conflict_reloads_concurrently_reserved_money() {
+    let (_server, store, state) = setup(Some(account()), Fault::ReserveOnConflict).await;
+    let error = StoreError::Api {
+        stage: "recovery",
+        code: Some(503),
+    };
+    let reported = store
+        .refresh_status(&root(), "account-uid", Some(&error))
+        .await
+        .unwrap();
+    check(
+        &reported,
+        Phase::Unknown,
+        "Unknown",
+        "ReconciliationUnavailable",
+    );
+    let ledger = reported.status.as_ref().unwrap().ledger.as_ref().unwrap();
+    assert_eq!(ledger.meters.reserved.tokens, 30);
+    assert_eq!(ledger.attempts.len(), 1);
+    assert_eq!(ledger.sessions["a"].next_sequence, 2);
+    assert_eq!(snapshot(&state).status, reported.status);
+}
+
+#[tokio::test]
+async fn lost_bootstrap_status_ack_reuses_the_same_ledger_before_sealing() {
+    let (_server, store, state) = setup(None, Fault::None).await;
+    store
+        .create_anchor(
+            account().spec,
+            &crate::providers::signing::ReceiptSigner::from_bytes(&[7; 32]),
+        )
+        .await
+        .unwrap();
+    state.lock().unwrap().fault = Fault::CommitThenFail;
+    assert!(store.initialize(&root(), "account-uid").await.is_err());
+    let pending = snapshot(&state);
+    check(&pending, Phase::Bootstrap, "False", "BootstrapPending");
+    assert!(store.read(&root(), "account-uid").await.is_err());
+    let initialized = store.initialize(&root(), "account-uid").await.unwrap();
+    check(&initialized, Phase::Active, "True", "LedgerAvailable");
+    assert_eq!(
+        initialized.status.as_ref().unwrap().ledger,
+        pending.status.as_ref().unwrap().ledger
+    );
+    assert_eq!(initialized.metadata.uid, pending.metadata.uid);
 }
