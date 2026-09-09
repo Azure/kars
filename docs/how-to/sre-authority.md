@@ -227,6 +227,8 @@ The proxy checks current registration and live UID/claim authority. It permits
 the bounded first-party diagnostic read/log/metrics paths and Pending-only
 `KarsSREAction` creation in `kars-sre`. Secret responses retain key names but
 exclude values, `stringData`, annotations, labels, and managed-field copies.
+The typed `SecretList` envelope supplies item types when Kubernetes omits item
+`kind`/`apiVersion`; conflicting explicit type metadata is still rejected.
 Encoded/noncanonical paths, watches, streaming log follow, token requests,
 exec/proxy subresources, arbitrary writes, and non-JSON media escapes are denied.
 The existing Hermes proposal builder's two diagnostic labels are accepted;
