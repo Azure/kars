@@ -26,7 +26,7 @@ def failure_site(error):
     frame = error.__traceback__
     while frame:
         name = Path(frame.tb_frame.f_code.co_filename).name
-        if name in ("bootstrap_probe.py", "binding_probe.py"):
+        if name in ("bootstrap_probe.py", "binding_probe.py", "bootstrap_cases.py"):
             result.update(source=name, line=frame.tb_lineno)
         frame = frame.tb_next
     return result
@@ -249,7 +249,7 @@ def main(root, diagnostics_only, candidate=False, retirement=False):
                     raise RuntimeError("Built-in Deployment controller cannot create the private SRE ReplicaSet")
                 private_controller_chain(port, policies,
                     lambda facts: write_report(root, "bootstrap-private-controller-chain.json", facts))
-                cleanup_cases = namespace_cleanup_cases(port, policies)
+                cleanup_cases = namespace_cleanup_cases(port, policies, state["consumer"] if state else None)
                 write_report(root, "bootstrap-namespace-cleanup.json", {"cases": cleanup_cases})
                 if not all(case["matched"] for case in cleanup_cases):
                     raise RuntimeError("Canonical consumer cleanup authority differs from the expected boundary")

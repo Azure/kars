@@ -36,6 +36,17 @@ class BootstrapProofTests(unittest.TestCase):
         self.assertEqual(api.call_args_list[-1].args[1], "DELETE")
         self.assertEqual(api.call_args_list[-1].args[3]["preconditions"], {"uid": "owned", "resourceVersion": "2"})
 
+    def test_cleanup_proof_never_adopts_an_unexpected_existing_consumer(self):
+        from sre_authority.bootstrap_cases import namespace_cleanup_cases
+        owned = {"metadata": {"uid": "owned"}, "spec": {"replicas": 0}}
+        for current, expected in ((owned, None),
+                                  ({"metadata": {"uid": "other"}, "spec": owned["spec"]}, owned),
+                                  ({"metadata": owned["metadata"], "spec": {"replicas": 1}}, owned)):
+            with patch("sre_authority.bootstrap_cases.request", return_value=(200, current)) as api, \
+                    self.assertRaises(RuntimeError):
+                namespace_cleanup_cases(1, {}, expected)
+            api.assert_called_once()
+
     def test_http_failure_summary_reports_status_and_checked_source_not_body_url_or_headers(self):
         root = Path(__file__).resolve().parents[3]
         class Response:
