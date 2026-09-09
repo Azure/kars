@@ -107,7 +107,7 @@ spec:
     - expression: >-
         authorizer.group('kars.azure.com').resource('karssreregistrations')
           .name('canonical').check('use').allowed() ||
-        (request.subResource == 'token' &&
+        (request.?subResource.orValue('') == 'token' &&
           authorizer.group('kars.azure.com').resource('karssreregistrations')
             .name('canonical').check('renew').allowed())
       message: "Reserved SRE router identity requires registrar use; its TokenRequest renewal requires explicit renew authority"

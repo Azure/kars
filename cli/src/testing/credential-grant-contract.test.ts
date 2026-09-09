@@ -68,7 +68,7 @@ describe("governed credential public contract",()=>{
     const text=JSON.stringify(policy.spec);
     expect(text).toContain("request.userInfo.uid");
     expect(text).toContain("variables.before[key]");
-    expect(text).toContain("request.subResource != 'finalize'");
+    expect(text).toContain("request.?subResource.orValue('') != 'finalize'");
     expect(text).not.toContain("request.operation != 'DELETE'");
     expect(resource("ValidatingAdmissionPolicyBinding",policy.metadata.name).spec.validationActions).toContain("Deny");
     expect(resource("ValidatingAdmissionPolicy","kars-credential-reader-rbac-bindings").spec.matchConditions[0].expression)
@@ -184,6 +184,13 @@ describe("governed credential public contract",()=>{
     const policy=resource("ValidatingAdmissionPolicy","kars-credential-grant-authority");
     expect(JSON.stringify(policy.spec.validations)).toContain("object.spec == oldObject.spec");
     expect(JSON.stringify(policy.spec.validations)).toContain("review.secret.name");
+    expect(JSON.stringify(policy.spec.validations)).toContain("request.?subResource.orValue('')");
+    for(const admission of manifests.filter(item=>item.kind==="ValidatingAdmissionPolicy")){
+      expect(JSON.stringify(admission.spec)).not.toContain("request.subResource");
+    }
+    const identity=resource("ValidatingAdmissionPolicy","kars-sre-private-identity");
+    expect(JSON.stringify(identity.spec.validations))
+      .toContain("request.?subResource.orValue('') == 'token'");
   });
 
   it("uses resource-specific consumer policies whose fields exist in each schema",()=>{
