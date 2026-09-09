@@ -1309,7 +1309,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // image / env / volume drift is reflected on the suspended
         // Deployment (so resume picks up the latest spec).
         let suspended_by_spec = spec.suspended.unwrap_or(false);
-        let desired_replicas: i64 = if suspended_by_spec { 0 } else { 1 };
+        let desired_replicas: i64 = if suspended_by_spec
+            || sandbox
+                .annotations()
+                .contains_key(crate::kars_task_reconciler::rebind::HOLD)
+        {
+            0
+        } else {
+            1
+        };
 
         // S10.A2: image now comes from the runtime plan (already
         // resolved against the controller default fallback). The
@@ -1325,8 +1333,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         } else {
             "Always"
         };
-
-        let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
 
         // Token budget values resolved from the InferencePolicy ref above
         // (hoisted to the top of `reconcile` after S13). 0 = unlimited.
@@ -2041,7 +2047,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         });
 
         service_identity.mount(&mut pod_spec);
-        crate::credential_grants::mount_observations(&mut pod_spec,&sandbox);
+        crate::credential_grants::mount_observations(&mut pod_spec, &sandbox);
 
         // Set runtimeClassName for Kata (confidential) isolation
         if let Some(rc) = runtime_class {
@@ -2696,14 +2702,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             credentials.decorate(&mut deployment, &sandbox, namespace);
         }
         service_identity.decorate(&mut deployment);
-        crate::credential_grants::decorate_observations(&mut deployment,&sandbox);
-        deploy_api
-            .patch(
-                &name,
-                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
-                &Patch::Apply(deployment),
-            )
-            .await?;
+        crate::credential_grants::decorate_observations(&mut deployment, &sandbox);
+        crate::kars_task_reconciler::rebind::apply_deployment(
+            client,
+            &sandbox,
+            deployment,
+            &service_identity.identity,
+        )
+        .await
+        .map_err(ReconcileError::Configuration)?;
         service_projection = Some(service_identity);
     } // end 'deployment_block
 

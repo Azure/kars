@@ -17,6 +17,7 @@ pub const TARGET_KIND: &str = "kars.azure.com/credential-target-kind";
 pub const TARGET_UID: &str = "kars.azure.com/credential-target-uid";
 pub const GRANT_OWNER: &str = "kars.azure.com/credential-grant-owner";
 pub const INPUT_STATE: &str = "kars.azure.com/credential-input-state";
+pub const REMOVED_KEYS: &str = "kars.azure.com/credential-removed-keys";
 
 #[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
@@ -92,27 +93,27 @@ pub struct IntegrationStore {
     pub purpose: String,
 }
 
-#[derive(Clone,Debug,Serialize,Deserialize,JsonSchema,PartialEq,Eq)]
-#[serde(rename_all="camelCase")]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
 pub struct GitHubBinding {
-    pub grant:ObjectIdentity,
-    pub connection:ObjectIdentity,
-    pub repositories:Vec<String>,
+    pub grant: ObjectIdentity,
+    pub connection: ObjectIdentity,
+    pub repositories: Vec<String>,
     #[serde(default)]
-    pub write:bool,
+    pub write: bool,
 }
 
-#[derive(Clone,Debug,Serialize,Deserialize,JsonSchema)]
-#[serde(rename_all="camelCase")]
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
 pub struct GitHubConnectionGrant {
-    pub connection:ObjectIdentity,
-    pub app_secret:ObjectIdentity,
-    pub app_id:String,
-    pub owner_subject:String,
-    pub installation_id:u64,
-    pub repositories:Vec<String>,
+    pub connection: ObjectIdentity,
+    pub app_secret: ObjectIdentity,
+    pub app_id: String,
+    pub owner_subject: String,
+    pub installation_id: u64,
+    pub repositories: Vec<String>,
     #[serde(default)]
-    pub write:bool,
+    pub write: bool,
 }
 
 #[path = "credential_grant_github.rs"]
@@ -353,15 +354,41 @@ pub fn validate_bindings(bindings: &CredentialBindings) -> Result<(), String> {
 pub fn attenuates(child: Option<&CredentialBindings>, parent: Option<&CredentialBindings>) -> bool {
     let Some(child) = child else { return true };
     let Some(parent) = parent else { return false };
-    child.grant == parent.grant
-        && child.sources.iter().all(|source| {
-            parent.sources.iter().any(|bound| {
-                source.scope == bound.scope
-                    && source.source == bound.source
-                    && source.owner == bound.owner
-                    && source.keys.iter().all(|key| bound.keys.contains(key))
-            })
+    if validate_bindings(child).is_err()
+        || validate_bindings(parent).is_err()
+        || child.grant != parent.grant
+    {
+        return false;
+    }
+    let effective = |bindings: &CredentialBindings| {
+        let mut keys = std::collections::BTreeMap::new();
+        for selection in &bindings.sources {
+            for key in &selection.keys {
+                // A declared later source masks earlier authority even when its
+                // Secret currently has no value for this key.
+                keys.insert(
+                    key.clone(),
+                    (
+                        selection.scope,
+                        selection.source.clone(),
+                        selection.owner.clone(),
+                    ),
+                );
+            }
+        }
+        keys
+    };
+    let parent_effective = effective(parent);
+    child.sources.iter().all(|source| {
+        parent.sources.iter().any(|bound| {
+            source.scope == bound.scope
+                && source.source == bound.source
+                && source.owner == bound.owner
+                && source.keys.iter().all(|key| bound.keys.contains(key))
         })
+    }) && effective(child)
+        .iter()
+        .all(|(key, authority)| parent_effective.get(key) == Some(authority))
 }
 
 pub fn integration_keys(purpose: &str, name: &str, key: &str) -> bool {

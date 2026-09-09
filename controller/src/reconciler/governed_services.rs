@@ -75,7 +75,8 @@ fn authorized_task(
 ) -> Option<String> {
     let status = task.status.as_ref()?;
     let authorization = task.spec.authorization_digest();
-    (task.metadata.namespace.as_deref() == Some(workspace)
+    (!crate::kars_task_reconciler::rebind::pending(task)
+        && task.metadata.namespace.as_deref() == Some(workspace)
         && task.metadata.name.as_deref() == Some(name)
         && task.metadata.uid.as_deref() == Some(uid)
         && task

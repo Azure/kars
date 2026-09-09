@@ -35,6 +35,22 @@ pub(crate) async fn pause_owned(
     workloads::pause(client, sandbox, namespace, false).await
 }
 
+pub(crate) async fn quiescent_owned(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+) -> Result<bool, Error> {
+    workloads::quiescent(client, sandbox, namespace).await
+}
+
+pub(crate) fn validate_owned_deployment(
+    deployment: &Deployment,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+) -> Result<(), Error> {
+    workloads::owned(&deployment.metadata, sandbox, namespace)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("CredentialSourceUnavailable: {0}")]

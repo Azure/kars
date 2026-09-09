@@ -5,13 +5,28 @@ use super::*;
 use crate::credential_source::{INTENT, PURPOSE, TARGET, WORKSPACE};
 use k8s_openapi::{ByteString, apimachinery::pkg::apis::meta::v1::OwnerReference};
 use kube::api::PostParams;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 #[path = "targets.rs"]
 mod targets;
+#[cfg(test)]
+mod tests;
 
 fn annotation<'a>(metadata: &'a kube::api::ObjectMeta, key: &str) -> Option<&'a str> {
     metadata.annotations.as_ref()?.get(key).map(String::as_str)
+}
+
+fn removed_keys(source: &Secret, grant: &KarsCredentialGrant) -> Result<BTreeSet<String>, String> {
+    let keys: Vec<String> = annotation(&source.metadata, REMOVED_KEYS)
+        .map(serde_json::from_str)
+        .transpose()
+        .map_err(|_| "Credential removal intent is malformed")?
+        .unwrap_or_default();
+    let allowed = permitted_agent_keys(grant)?;
+    if keys.len() > 128 || keys.iter().any(|key| !allowed.contains(key)) {
+        return Err("Credential removal intent exceeds the operator key grant".into());
+    }
+    Ok(keys.into_iter().collect())
 }
 
 pub fn input_name(kind: &str, name: &str) -> Result<String, String> {
@@ -53,10 +68,12 @@ fn source_metadata(source: &Secret, grant: &KarsCredentialGrant) -> Result<Sourc
             name: name.into(),
             uid: uid.into(),
         });
+    let removed = removed_keys(source, grant)?;
     let keys = source
         .data
         .iter()
         .flatten()
+        .filter(|(key, _)| !removed.contains(*key))
         .map(|(key, _)| key.clone())
         .collect::<Vec<_>>();
     let allowed = permitted_agent_keys(grant)?;
@@ -110,10 +127,16 @@ pub(super) async fn inventory(
         {
             continue;
         }
+        if item.metadata.deletion_timestamp.is_some() {
+            continue;
+        }
         let source = api
             .get(&item.name_any())
             .await
             .map_err(|e| api_error("Read enrolled credential source", e))?;
+        if source.metadata.deletion_timestamp.is_some() {
+            continue;
+        }
         if identity(&source.metadata)? != identity(&item.metadata)? {
             return Err("Source changed during inventory".into());
         }
@@ -137,6 +160,12 @@ pub(super) async fn inventory(
                 .await
                 .map_err(|e| api_error("Read explicitly bound source target", e))?
                 {
+                    if target.metadata.deletion_timestamp.is_some() {
+                        value.phase = "Blocked".into();
+                        value.reason = "TargetTerminating".into();
+                        sources.push(value);
+                        continue;
+                    }
                     let bindings = if kind == "KarsSandbox" {
                         &target.data["spec"]["credentialBindings"]
                     } else {
@@ -242,7 +271,7 @@ async fn read_selected(
     if identity(&meta.metadata)?.0 != selection.source.uid {
         return Err("Selected credential source was replaced".into());
     }
-    let source = api
+    let mut source = api
         .get(&selection.source.name)
         .await
         .map_err(|e| api_error("Read selected agent credentials", e))?;
@@ -271,6 +300,10 @@ async fn read_selected(
         .is_some_and(|refs| !refs.is_empty() && refs != std::slice::from_ref(&expected))
     {
         return Err("Credential source has a foreign owner; it is not adopted".into());
+    }
+    let removed = removed_keys(&source, grant)?;
+    if let Some(values) = source.data.as_mut() {
+        values.retain(|key, _| !removed.contains(key));
     }
     Ok((source, owner))
 }
@@ -318,6 +351,13 @@ async fn read_input(
     }
     if let Some((mut imported, revision)) = migration {
         imported.extend(source.data.clone().unwrap_or_default());
+        let removed = removed_keys(&source, grant)?;
+        imported.retain(|key, _| !removed.contains(key));
+        let mut patch_data = serde_json::to_value(&imported)
+            .map_err(|_| "Credential import serialization failed")?;
+        for key in removed {
+            patch_data[&key] = serde_json::Value::Null;
+        }
         let (uid, rv) = identity(&source.metadata)?;
         let written = api
             .patch_metadata(
@@ -325,7 +365,7 @@ async fn read_input(
                 &PatchParams::default(),
                 &Patch::Merge(json!({
                     "metadata":{"uid":uid,"resourceVersion":rv,"annotations":{import_key:revision}},
-                    "data":imported,
+                    "data":patch_data,
                 })),
             )
             .await
@@ -387,6 +427,20 @@ fn bundle_name(target: &CredentialTarget) -> String {
     )
 }
 
+fn apply_selection(
+    values: &mut BTreeMap<String, ByteString>,
+    source: &Secret,
+    selection: &CredentialSelection,
+) {
+    for key in &selection.keys {
+        if let Some(value) = source.data.as_ref().and_then(|data| data.get(key)) {
+            values.insert(key.clone(), value.clone());
+        } else {
+            values.remove(key);
+        }
+    }
+}
+
 pub(crate) async fn prepare(
     client: &Client,
     target: &CredentialTarget,
@@ -408,13 +462,7 @@ pub(crate) async fn prepare(
     let mut states = Vec::new();
     for selection in &bindings.sources {
         let source = read_input(client, &grant, target, selection).await?;
-        for key in &selection.keys {
-            if let Some(value) = source.data.as_ref().and_then(|data| data.get(key)) {
-                values.insert(key.clone(), value.clone());
-            } else {
-                values.remove(key);
-            }
-        }
+        apply_selection(&mut values, &source, selection);
         states.push(json!({"name":source.name_any(),"uid":source.metadata.uid,"resourceVersion":source.metadata.resource_version,
             "keys":selection.keys,"scope":selection.scope}));
     }

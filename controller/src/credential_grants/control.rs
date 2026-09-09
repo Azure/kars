@@ -6,6 +6,10 @@
 use super::*;
 use k8s_openapi::api::apps::v1::Deployment;
 use serde::Deserialize;
+use sha2::{Digest, Sha256};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -82,19 +86,9 @@ pub(super) async fn reconcile(
             let changes: Vec<EnvChange> =
                 serde_json::from_slice(&raw.0).map_err(|_| "Controller settings are invalid")?;
             let current = deployment(client, &namespace, reference).await?;
-            let revision = format!("{}:{}", store.secret.uid, identity(&source.metadata)?.1);
-            if current
-                .spec
-                .as_ref()
-                .and_then(|s| s.template.metadata.as_ref())
-                .and_then(|m| m.annotations.as_ref())
-                .and_then(|a| a.get("kars.azure.com/credential-settings-revision"))
-                == Some(&revision)
-            {
-                continue;
-            }
             let mut env = Vec::new();
             let mut unique = std::collections::BTreeSet::new();
+            let mut references = std::collections::BTreeMap::new();
             for change in changes {
                 if !unique.insert(change.name.clone())
                     || ![
@@ -149,10 +143,49 @@ pub(super) async fn reconcile(
                             "Controller credential key is outside its enrolled purpose".into()
                         );
                     }
+                    let actual = secrets.get(&key.name).await.map_err(|error| {
+                        api_error("Read enrolled controller credential reference", error)
+                    })?;
+                    let (uid, version) = identity(&actual.metadata)?;
+                    if uid != key.uid
+                        || actual.type_.as_deref() != Some("Opaque")
+                        || actual
+                            .data
+                            .as_ref()
+                            .is_none_or(|data| !data.contains_key(&key.key))
+                    {
+                        return Err(
+                            "Controller credential reference UID, type, or key changed".into()
+                        );
+                    }
+                    references.insert(
+                        (key.name.clone(), key.key.clone()),
+                        json!({"name":key.name,"uid":uid,"resourceVersion":version,"key":key.key,"purpose":enrolled.purpose}),
+                    );
                     env.push(json!({"name":change.name,"value":null,"valueFrom":{"secretKeyRef":{"name":key.name,"key":key.key}}}));
                 }
             }
             super::verify(client, grant).await?;
+            let evidence = json!({"settings":{"uid":store.secret.uid,"resourceVersion":identity(&source.metadata)?.1},
+                "references":references.into_values().collect::<Vec<_>>()});
+            let revision = format!(
+                "sha256:{:x}",
+                Sha256::digest(
+                    serde_json::to_vec(&evidence)
+                        .map_err(|_| "Controller credential revision serialization failed")?
+                )
+            );
+            revisions.push(revision.clone());
+            if current
+                .spec
+                .as_ref()
+                .and_then(|s| s.template.metadata.as_ref())
+                .and_then(|m| m.annotations.as_ref())
+                .and_then(|a| a.get("kars.azure.com/credential-settings-revision"))
+                == Some(&revision)
+            {
+                continue;
+            }
             Api::<Deployment>::namespaced(client.clone(),&namespace).patch(&reference.name,&PatchParams::default(),
                 &Patch::Strategic(json!({"metadata":{"uid":reference.uid,"resourceVersion":current.metadata.resource_version},
                     "spec":{"template":{"metadata":{"annotations":{"kars.azure.com/credential-settings-revision":revision}},

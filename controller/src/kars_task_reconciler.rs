@@ -32,6 +32,8 @@ use crate::status::conditions::{self, TYPE_READY, reason as cond_reason, status 
 use crate::status::phase::{PHASE_DEGRADED, PHASE_PENDING, PHASE_READY};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_TASK;
+#[path = "kars_task_rebind.rs"]
+pub(crate) mod rebind;
 const FINALIZER: &str = "kars.azure.com/karstask-cleanup";
 /// Server-Side Apply field manager for Governance Receipt writes.
 const RECEIPT_FIELD_MANAGER: &str = "kars-controller/receipt";
@@ -154,6 +156,16 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
 
+    if rebind::pending(&task)
+        && task
+            .spec
+            .execution
+            .as_ref()
+            .is_some_and(|execution| execution.launch)
+    {
+        rebind::reconcile(&task, &ctx).await?;
+        return Ok(Action::requeue(REQUEUE_PENDING));
+    }
     let generation = task.metadata.generation;
     let prior_conditions = task
         .status
@@ -262,6 +274,9 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // there is no validated authority to attest. The receipt is deterministic,
     // so this is idempotent across requeues.
     reconcile_receipt(&ctx.client, &ns, &task, &new_status, &ctx.signer).await;
+    if let Err(error) = rebind::resume(&ctx.client, &task).await {
+        tracing::warn!(karstask=%name,error=%error,"Credential runtime remains held");
+    }
 
     // A child still waiting on its parent requeues quickly to converge.
     let requeue = if crate::credential_grants::readiness::selected(&task)
@@ -354,6 +369,9 @@ async fn resolve_delegation(
 /// A task is governance-`Ready` when its `Ready` condition is `True` and it
 /// carries a stamped envelope digest — the proof its authority was validated.
 pub(crate) fn task_is_ready(task: &KarsTask) -> bool {
+    if rebind::pending(task) {
+        return false;
+    }
     let Some(status) = task.status.as_ref() else {
         return false;
     };
@@ -570,8 +588,45 @@ async fn reconcile_receipt(
     let Some(mut statement) = build_statement(task, status, &signer.key_id, &facts, completeness)
     else {
         // No digest → no receipt. Retract any prior one.
+        let existing = match receipts.get_opt(&name).await {
+            Ok(Some(receipt)) => receipt,
+            Ok(None) => return,
+            Err(error) => {
+                tracing::warn!(karstask=%name,error=%error,"Could not verify stale receipt ownership");
+                return;
+            }
+        };
+        if existing
+            .metadata
+            .owner_references
+            .as_ref()
+            .is_none_or(|owners| {
+                !owners.iter().any(|owner| {
+                    owner.kind == "KarsTask"
+                        && owner.controller == Some(true)
+                        && Some(&owner.uid) == task.metadata.uid.as_ref()
+                })
+            })
+            || existing.metadata.uid.as_deref().is_none_or(str::is_empty)
+            || existing
+                .metadata
+                .resource_version
+                .as_deref()
+                .is_none_or(str::is_empty)
+        {
+            return;
+        }
         match receipts
-            .delete(&name, &kube::api::DeleteParams::default())
+            .delete(
+                &name,
+                &kube::api::DeleteParams {
+                    preconditions: Some(kube::api::Preconditions {
+                        uid: existing.metadata.uid,
+                        resource_version: existing.metadata.resource_version,
+                    }),
+                    ..Default::default()
+                },
+            )
             .await
         {
             Ok(_) => {}

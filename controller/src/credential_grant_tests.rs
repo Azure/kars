@@ -62,7 +62,7 @@ fn governed_credentials_keep_legacy_defaults_and_require_explicit_custom_key_gra
             controller: None,
             bridge_consumers: None,
             observation_targets: Vec::new(),
-            github_connections:Vec::new(),
+            github_connections: Vec::new(),
             enabled: true,
         },
     );
@@ -161,4 +161,49 @@ fn governed_credentials_preserve_order_and_do_not_use_arbitrary_secret_names() {
         "customer-teams",
         "session-secret"
     ));
+}
+
+#[test]
+fn governed_credentials_attenuation_retains_effective_override_and_absent_key_masks() {
+    for scope in [CredentialScope::Team, CredentialScope::Target] {
+        let mut parent = bindings();
+        parent.sources[0].keys.push("BRAVE_API_KEY".into());
+        parent.sources.push(CredentialSelection {
+            scope,
+            source: ObjectIdentity {
+                name: format!("{INPUT_PREFIX}later"),
+                uid: "later".into(),
+            },
+            keys: vec!["GITHUB_TOKEN".into()],
+            owner: Some(CredentialTarget {
+                kind: if scope == CredentialScope::Team {
+                    "KarsTeam"
+                } else {
+                    "KarsTask"
+                }
+                .into(),
+                namespace: "work".into(),
+                name: "owner".into(),
+                uid: "owner-uid".into(),
+            }),
+        });
+        // This is declaration-only: the same checks apply to a present later
+        // value and to an absent later value that masks the workspace value.
+        let mut child = parent.clone();
+        child.sources.pop();
+        assert!(!attenuates(Some(&child), Some(&parent)));
+        child.sources[0].keys.retain(|key| key == "BRAVE_API_KEY");
+        assert!(attenuates(Some(&child), Some(&parent)));
+        child = parent.clone();
+        child.sources[1].keys.clear();
+        assert!(!attenuates(Some(&child), Some(&parent)));
+        child.sources[0].keys.retain(|key| key == "BRAVE_API_KEY");
+        assert!(attenuates(Some(&child), Some(&parent)));
+        child = parent.clone();
+        child.sources[0].keys.clear();
+        assert!(attenuates(Some(&child), Some(&parent)));
+        child.sources.swap(0, 1);
+        assert!(!attenuates(Some(&child), Some(&parent)));
+        assert!(!attenuates(Some(&parent), Some(&child)));
+    }
 }

@@ -19,6 +19,18 @@ const specSchema=(name:string)=>resource("CustomResourceDefinition",`${name}.kar
 const source=(path:string)=>readFileSync(new URL(path,root),"utf8");
 
 describe("governed credential public contract",()=>{
+  it("protects non-destructive rebind state and requires paused authority before resuming",()=>{
+    const rebind=resource("ValidatingAdmissionPolicy","kars-credential-rebind-authority");
+    expect(rebind.spec.matchConstraints.resourceRules[0].resources).toEqual(["karstasks"]);
+    expect(JSON.stringify(rebind.spec.validations)).toContain("CredentialsPaused");
+    expect(JSON.stringify(rebind.spec.variables)).toContain("project-credentials");
+    const hold=resource("ValidatingAdmissionPolicy","kars-credential-runtime-hold");
+    expect(hold.spec.matchConstraints.resourceRules[0].resources).toEqual(["karssandboxes","karssandboxes/status"]);
+    expect(JSON.stringify(hold.spec.validations)).toContain("owner.uid");
+    expect(source("controller/src/kars_team_reconciler/credential_bindings.rs")).not.toContain('"launch":false');
+    expect(source("controller/src/kars_task_rebind.rs")).toContain("envelopeDigest");
+    expect(source("controller/src/kars_task_rebind.rs")).toContain("credentials_quiescent");
+  });
   it("holds only enrolled reader identities through revoke-before-release finalizers",()=>{
     const policy=resource("ValidatingAdmissionPolicy","kars-credential-reader-continuity");
     expect(policy.spec.paramKind).toBeUndefined();
