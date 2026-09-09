@@ -566,6 +566,12 @@ printf '{"available":true,"uidMatches1001":%s,"serviceExit":%s,"endpointExit":%s
             result["sameNodeControl"] = self.control_connectivity_diagnostics(pod, probe)
         except Exception as error:
             result["controlDiagnosticError"] = type(error).__name__
+        result["guardControls"] = {}
+        for variant in ("full", "filter-only", "legacy-full"):
+            try:
+                result["guardControls"][variant] = self.control_connectivity_diagnostics(pod, probe, variant)
+            except Exception as error:
+                result["guardControls"][variant] = {"diagnosticError": type(error).__name__}
         return result
 
     @staticmethod
@@ -580,20 +586,32 @@ printf '{"available":true,"uidMatches1001":%s,"serviceExit":%s,"endpointExit":%s
                 "Connectivity diagnostic produced an unexpected result")
         return result
 
-    def control_connectivity_diagnostics(self, pod, container):
-        name = "sre-e2e-api-connectivity"
+    def control_connectivity_diagnostics(self, pod, container, variant=None):
+        from .network_diagnostics import guard_variant
+        name = "sre-e2e-api-connectivity" + (f"-{variant}" if variant else "")
         require(pod["spec"].get("nodeName"), "Connectivity comparison requires the actual sandbox node")
-        created = self.create({"apiVersion": "v1", "kind": "Pod", "metadata": {"name": name, "namespace": TENANT},
-            "spec": {"nodeName": pod["spec"]["nodeName"], "automountServiceAccountToken": False,
-                     "restartPolicy": "Never", "securityContext": copy.deepcopy(pod["spec"].get("securityContext", {})),
-                     "containers": [copy.deepcopy(container)]}})
+        spec = {"nodeName": pod["spec"]["nodeName"], "automountServiceAccountToken": False,
+                "restartPolicy": "Never", "securityContext": copy.deepcopy(pod["spec"].get("securityContext", {})),
+                "containers": [copy.deepcopy(container)]}
+        if variant:
+            spec["initContainers"] = [guard_variant(self.root, pod, variant)]
+        created = self.create({"apiVersion": "v1", "kind": "Pod",
+                              "metadata": {"name": name, "namespace": TENANT}, "spec": spec})
         uid = created["metadata"]["uid"]
         try:
             def completed():
                 current = self.get("pod", name, TENANT)
                 require(current and current["metadata"]["uid"] == uid, "Connectivity control Pod was replaced")
-                return current.get("status", {}).get("phase") in ("Succeeded", "Failed")
+                status = current.get("status", {})
+                return status.get("phase") in ("Succeeded", "Failed") or any(
+                    item.get("state", {}).get("terminated", {}).get("exitCode", 0) != 0
+                    for item in status.get("initContainerStatuses", []))
             self.poll("same-node credential-free TCP comparison", completed, seconds=25, interval=0.5)
+            current = self.get("pod", name, TENANT)
+            for item in current.get("status", {}).get("initContainerStatuses", []):
+                code = item.get("state", {}).get("terminated", {}).get("exitCode", 0)
+                if code != 0:
+                    return {"available": False, "initExit": code}
             return self.parse_connectivity_result(
                 self.k("logs", "-n", TENANT, name, "-c", container["name"], "--tail=5"))
         finally:
