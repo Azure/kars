@@ -6,7 +6,6 @@
 use super::*;
 use k8s_openapi::api::apps::v1::Deployment;
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 mod tests;
@@ -169,9 +168,9 @@ pub(super) async fn reconcile(
             let evidence = json!({"settings":{"uid":store.secret.uid,"resourceVersion":identity(&source.metadata)?.1},
                 "references":references.into_values().collect::<Vec<_>>()});
             let revision = format!(
-                "sha256:{:x}",
-                Sha256::digest(
-                    serde_json::to_vec(&evidence)
+                "sha256:{}",
+                crate::providers::signing::sha256_hex(
+                    &serde_json::to_vec(&evidence)
                         .map_err(|_| "Controller credential revision serialization failed")?
                 )
             );

@@ -3,7 +3,6 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 pub const CAPABILITY: &str = "kars.azure.com/observation-privacy/v1";
 pub const PURPOSE: &str = "read-only-observation-privacy";
@@ -194,10 +193,17 @@ impl Proof {
 }
 
 pub fn digest(value: &impl Serialize) -> String {
-    format!(
-        "{:x}",
-        Sha256::digest(serde_json::to_vec(value).expect("privacy wire types serialize"))
+    crate::providers::signing::sha256_hex(
+        &serde_json::to_vec(value).expect("privacy wire types serialize"),
     )
+}
+
+#[test]
+fn privacy_digest_retains_the_full_sha256_wire_contract() {
+    assert_eq!(
+        digest(&serde_json::json!({})),
+        "44136fa355b3678a1146ad16f7e8649e94fb4fc21fe77e8310c060f61caaff8a"
+    );
 }
 
 pub fn tls_access_reviews(namespace: &str) -> Vec<Value> {
