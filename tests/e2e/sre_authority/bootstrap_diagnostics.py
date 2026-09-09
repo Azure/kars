@@ -154,6 +154,43 @@ def firewall_summary(text):
     return result
 
 
+def exception_summary(error, root):
+    result = {"category": type(error).__name__}
+    frame = error.__traceback__
+    while frame:
+        source = str(frame.tb_frame.f_code.co_filename)
+        prefix = str(root / "tests/e2e/sre_authority") + "/"
+        if source.startswith(prefix):
+            result["callSite"] = {"source": source[len(str(root)) + 1:],
+                                  "function": frame.tb_frame.f_code.co_name, "line": frame.tb_lineno}
+        frame = frame.tb_next
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    if type(status) is not int or not 100 <= status <= 599:
+        return result
+    result["httpStatus"] = status
+    try:
+        body = response.json()
+    except (ValueError, TypeError):
+        return result
+    if not isinstance(body, dict) or body.get("kind") != "Status":
+        return result
+    reason = body.get("reason")
+    if isinstance(reason, str) and (reason in REASONS or reason == "SREProxyDenied"):
+        result["reason"] = reason
+    message = body.get("message")
+    if not isinstance(message, str) or not 0 < len(message) <= 4096:
+        return result
+    literal = json.dumps(message, ensure_ascii=False)
+    for name in ("mod.rs", "policy.rs", "backend.rs"):
+        path = root / "inference-router/src/sre_proxy" / name
+        for number, source in enumerate(path.read_text().splitlines(), 1):
+            if literal in source:
+                result["responseSite"] = {"source": str(path.relative_to(root)), "line": number}
+                return result
+    return result
+
+
 def identifier(value):
     return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,253}", value) else None
 
