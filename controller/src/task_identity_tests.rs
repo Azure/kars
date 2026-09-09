@@ -36,6 +36,7 @@ fn task(name: &str, parent: Option<&str>, ready: bool) -> KarsTask {
 }
 
 async fn setup() -> (MockServer, Client) {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/namespaces/workspace"))
