@@ -404,6 +404,7 @@ class Harness:
                 print("SRE-DIAG", json.dumps({"kind": "Pod", "name": pod["metadata"]["name"],
                     "uid": pod["metadata"]["uid"], "phase": status.get("phase"),
                     "containers": [{"name": container["name"], "ready": container.get("ready"),
+                        "restartCount": container.get("restartCount"),
                         "state": {kind: {key: value.get(key) for key in ("reason", "exitCode") if key in value}
                                   for kind, value in container.get("state", {}).items()}}
                         for container in containers]}), flush=True)
@@ -415,8 +416,13 @@ class Harness:
             print("SRE-DIAG runtime Pod status unavailable", flush=True)
 
     def readiness_diagnostics(self, pod):
-        from .bootstrap_diagnostics import probe_command_result, router_readiness_facts
+        from .bootstrap_diagnostics import probe_command_result, router_log_summary, router_readiness_facts
         facts = {"kind": "RouterReadiness", "podUid": pod["metadata"]["uid"]}
+        router = next(item for item in pod["spec"]["containers"] if item["name"] == "inference-router")
+        facts["privateApiEnabled"] = any(entry.get("name") == "KARS_SRE_API_ENABLED"
+                                        and entry.get("value") == "true" for entry in router.get("env", []))
+        facts["routerUid1001"] = router.get("securityContext", {}).get("runAsUser") == 1001
+        facts["expectedImage"] = router.get("image") == "kars-inference-router:e2e"
         try:
             for label, executable in (("configuredCommand", "kars-inference-router"),
                                       ("absoluteCommand", "/usr/local/bin/kars-inference-router")):
@@ -436,6 +442,7 @@ class Harness:
             logs = self.k("logs", "-n", RUNTIME, pod["metadata"]["name"], "-c", "inference-router",
                           "--tail=150", timeout=10)
             facts["authorityChecks"] = router_readiness_facts(logs)
+            facts["logSummary"] = router_log_summary(logs, self.root)
         except Exception:
             facts["authorityChecksUnavailable"] = True
         print("SRE-DIAG", json.dumps(facts), flush=True)
