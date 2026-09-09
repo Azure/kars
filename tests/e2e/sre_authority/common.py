@@ -374,7 +374,7 @@ class Harness:
 
     def diagnostics(self):
         from .bootstrap_diagnostics import failure_facts
-        self.deadline = max(self.deadline, time.monotonic() + 50)
+        self.deadline = max(self.deadline, time.monotonic() + 90)
         # Status and identities only; never dump Secret bodies or whole Pods.
         for kind, name, namespace in [("karssreregistrations.kars.azure.com", "canonical", None),
                                       ("karssandbox", "sre", SYSTEM), ("deployment", "sre", RUNTIME)]:
@@ -427,6 +427,10 @@ class Harness:
                                             and "inference_router=debug" in entry.get("value", "")
                                             for entry in router.get("env", []))
         try:
+            facts["apiConnectivity"] = self.connectivity_diagnostics(pod)
+        except Exception as error:
+            facts["connectivityDiagnosticError"] = type(error).__name__
+        try:
             for label, executable in (("configuredCommand", "kars-inference-router"),
                                       ("absoluteCommand", "/usr/local/bin/kars-inference-router")):
                 result = self.k("exec", "-n", RUNTIME, pod["metadata"]["name"], "-c", "inference-router",
@@ -436,7 +440,7 @@ class Harness:
                         "--", "cat", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt", timeout=10)
             context = ssl.create_default_context(cadata=ca)
             with self.port_forward(pod["metadata"]["name"]) as port, \
-                    self.httpx.Client(verify=context, timeout=5, trust_env=False) as client:
+                    self.httpx.Client(verify=context, timeout=25, trust_env=False) as client:
                 response = client.get(f"https://127.0.0.1:{port}/readyz")
                 facts["verifiedLoopbackTlsStatus"] = response.status_code
         except Exception as error:
@@ -449,6 +453,63 @@ class Harness:
         except Exception:
             facts["authorityChecksUnavailable"] = True
         print("SRE-DIAG", json.dumps(facts), flush=True)
+
+    def connectivity_diagnostics(self, pod):
+        import ipaddress
+        service = self.get("service", "kubernetes", "default")
+        endpoint = self.get("endpoints", "kubernetes", "default")
+        service_ip = service["spec"]["clusterIP"]
+        service_port = next(port["port"] for port in service["spec"]["ports"] if port["name"] == "https")
+        subset = endpoint["subsets"][0]
+        endpoint_ip = subset["addresses"][0]["ip"]
+        endpoint_port = next(port["port"] for port in subset["ports"] if port["name"] == "https")
+        require(all(ipaddress.ip_address(address).is_private for address in (service_ip, endpoint_ip))
+                and all(type(port) is int and 0 < port < 65536 for port in (service_port, endpoint_port)),
+                "Connectivity diagnostic refuses non-private or invalid API targets")
+        current = self.get("pod", pod["metadata"]["name"], RUNTIME)
+        require(current["metadata"]["uid"] == pod["metadata"]["uid"],
+                "Diagnostic Pod changed before connectivity inspection")
+        require(current["spec"].get("automountServiceAccountToken") is False
+                and current["spec"].get("shareProcessNamespace") is not True,
+                "Connectivity diagnostic requires isolated processes and no ambient token")
+        name = "sre-e2e-network-diagnostic"
+        existing = current["spec"].get("ephemeralContainers", [])
+        require(not any(item["name"] == name for item in existing), "Diagnostic container name is already occupied")
+        script = """
+if ! command -v timeout >/dev/null || ! command -v bash >/dev/null; then
+  printf '{"available":false}\\n'; exit 0
+fi
+timeout 6 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' sre-tcp "$1" "$2" >/dev/null 2>&1
+service=$?
+timeout 6 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' sre-tcp "$3" "$4" >/dev/null 2>&1
+endpoint=$?
+printf '{"available":true,"serviceExit":%s,"endpointExit":%s}\\n' "$service" "$endpoint"
+"""
+        probe = {"name": name, "image": STANDIN, "imagePullPolicy": "IfNotPresent",
+                 "command": ["/bin/sh", "-c", script, "sre-connectivity", service_ip, str(service_port),
+                             endpoint_ip, str(endpoint_port)],
+                 "securityContext": {"runAsUser": 1001, "runAsNonRoot": True,
+                                     "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                                     "capabilities": {"drop": ["ALL"]}}}
+        self.api("PATCH", f"/api/v1/namespaces/{RUNTIME}/pods/{pod['metadata']['name']}/ephemeralcontainers",
+                 body={"metadata": {"uid": current["metadata"]["uid"],
+                                    "resourceVersion": current["metadata"]["resourceVersion"]},
+                       "spec": {"ephemeralContainers": existing + [probe]}}, status=200)
+        def completed():
+            current = self.get("pod", pod["metadata"]["name"], RUNTIME)
+            require(current and current["metadata"]["uid"] == pod["metadata"]["uid"],
+                    "Diagnostic Pod changed during connectivity inspection")
+            return any(item.get("name") == name and "terminated" in item.get("state", {})
+                       for item in current.get("status", {}).get("ephemeralContainerStatuses", []))
+        self.poll("bounded UID-1001 API TCP probes", completed, seconds=20, interval=0.5)
+        result = json.loads(self.k("logs", "-n", RUNTIME, pod["metadata"]["name"], "-c", name, "--tail=5"))
+        require(isinstance(result, dict) and type(result.get("available")) is bool
+                and set(result) == ({"available", "serviceExit", "endpointExit"}
+                                    if result["available"] else {"available"})
+                and all(type(value) is int and 0 <= value <= 255
+                        for key, value in result.items() if key != "available"),
+                "Connectivity diagnostic produced an unexpected result")
+        return result
 
     def close(self):
         for process in self.processes:
