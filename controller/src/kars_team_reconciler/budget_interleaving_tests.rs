@@ -291,6 +291,7 @@ fn enroll(store: &Arc<Mutex<Store>>, apis: &BudgetApis) {
     account.metadata.annotations = Some([(BOOTSTRAP.into(), "sealed".into())].into());
     account.status = Some(KarsBudgetAccountStatus {
         ledger: Some(ledger),
+        ..Default::default()
     });
     *apis.account.lock().unwrap() = Some(account);
 }

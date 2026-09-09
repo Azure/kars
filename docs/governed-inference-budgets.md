@@ -118,6 +118,36 @@ smaller than the model's hard context/output maximum can refuse even a short
 prompt; concurrency needs room for all simultaneous maxima. This version does
 not substitute a character heuristic for exact pre-dispatch token evidence.
 
+## Account observations
+
+`KarsBudgetAccount.status.phase` (the `kubectl` Phase column) and the standard
+`Ready`/`LedgerValid` conditions describe the last observed account state.
+They include `observedGeneration`; condition transition timestamps change only
+when the corresponding True/False/Unknown value changes.
+
+- **Bootstrap:** the UID anchor is not sealed; it cannot dispatch.
+- **Active / LedgerAvailable:** the validated, sealed ledger has headroom.
+  This is not router health, provider availability, or permission for a send.
+- **Blocked / BudgetReserved:** reservations occupy a declared ceiling.
+  Already funded executions and their Task UIDs remain intact.
+- **Blocked / BudgetExhausted:** settled or uncertain charges occupy a ceiling.
+- **Blocked / AuthorityRevoked** or **AttemptCapacityReached:** enrolled
+  authorities are closed, or bounded attempt storage has no room.
+- **Frozen / ContractBreach**, **Closing**, or **Closed / AccountRetired:**
+  the ledger's enforcement phase is retained, including historical liabilities.
+- **Corrupt / LedgerInvalid:** identity, sealing or ledger validation failed.
+  Reporting does not repair, reinitialize, or zero the ledger.
+- **Unknown / ReconciliationUnavailable:** a live API read or reconciliation
+  could not complete. If the account API itself is unavailable, an error cannot
+  be persisted: the last stored observation remains, and the operation fails.
+
+Bootstrap, ledger transitions, and periodic recovery populate these observations.
+Reporting writes use a fresh UID/resourceVersion and replace the complete status
+without changing its ledger. The original `status.ledger.phase` wire contract
+remains unchanged. Neither a Phase value nor `Ready=True` is spend authority:
+every send still requires live Pod/Task authority, the sealed validated ledger,
+an operator contract, and an atomic reservation/begin transition.
+
 ## Operator contracts and unavoidable configuration
 
 Enable the optional Helm `inferenceBudget` section only after supplying:

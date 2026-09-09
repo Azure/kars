@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 use super::{
-    account::{KarsBudgetAccount, MANAGED_BY, OWNER},
+    account::{BOOTSTRAP, KarsBudgetAccount, MANAGED_BY, OWNER},
     config::Settings,
     store::{Store, StoreError},
 };
@@ -47,10 +47,7 @@ async fn scan(client: &Client, settings: &Settings) -> Result<(), StoreError> {
     loop {
         let page = api.list(&params).await.map_err(api_error)?;
         for account in page.items {
-            if account.status.is_none() {
-                continue;
-            }
-            if recover(client, &store, &account).await.is_err() {
+            if reconcile_account(client, &store, &account).await.is_err() {
                 tracing::error!(account = %account.name_any(),
                     "Governed inference account recovery failed closed; no balances reset");
             }
@@ -61,6 +58,26 @@ async fn scan(client: &Client, settings: &Settings) -> Result<(), StoreError> {
         params = params.continue_token(&token);
     }
     Ok(())
+}
+
+pub(super) async fn reconcile_account(
+    client: &Client,
+    store: &Store,
+    account: &KarsBudgetAccount,
+) -> Result<(), StoreError> {
+    let result = if account.annotations().get(BOOTSTRAP).map(String::as_str) == Some("pending") {
+        Ok(())
+    } else {
+        recover(client, store, account).await
+    };
+    store
+        .refresh_status(
+            &account.spec.root,
+            account.metadata.uid.as_deref().ok_or(StoreError::Missing)?,
+            result.as_ref().err(),
+        )
+        .await?;
+    result
 }
 
 async fn recover(

@@ -55,6 +55,30 @@ const configured = {
 };
 
 describe("governed inference budget Helm contract", () => {
+  it.each([undefined, configured])(
+    "publishes observational account phase and keyed standard conditions with %s", (value) => {
+      const definition = render(value).find((doc: { kind: string; spec?: { names?: { kind?: string } } }) =>
+        doc.kind === "CustomResourceDefinition" && doc.spec?.names?.kind === "KarsBudgetAccount");
+      const version = definition.spec.versions[0];
+      expect(version.additionalPrinterColumns).toContainEqual({
+        name: "Phase", type: "string", jsonPath: ".status.phase",
+      });
+      const status = version.schema.openAPIV3Schema.properties.status.properties;
+      expect(status.phase.enum).toEqual([
+        "Bootstrap", "Active", "Blocked", "Closing", "Closed", "Frozen", "Corrupt", "Unknown", null,
+      ]);
+      expect(status.conditions.type).toBe("array");
+      expect(status.conditions["x-kubernetes-list-type"]).toBe("map");
+      expect(status.conditions["x-kubernetes-list-map-keys"]).toEqual(["type"]);
+      expect(status.conditions.items.required).toEqual([
+        "lastTransitionTime", "message", "reason", "status", "type",
+      ]);
+      expect(status.conditions.items.properties.lastTransitionTime.format).toBe("date-time");
+      expect(status.conditions.items.properties.observedGeneration.format).toBe("int64");
+      expect(status.ledger.properties.phase.enum).toEqual(["Active", "Closing", "Closed", "Frozen"]);
+    },
+  );
+
   it("keeps generated Task/Team CEL in sync with the Rust scope contract", () => {
     const source = readFileSync(join(chart, "../../../controller/src/inference_budget/scope.rs"), "utf8");
     const rule = (name: string): string => {

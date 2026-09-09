@@ -29,7 +29,7 @@ spec:
           jsonPath: .spec.scope
         - name: Phase
           type: string
-          jsonPath: .status.ledger.phase
+          jsonPath: .status.phase
       schema:
         openAPIV3Schema:
           type: object
@@ -75,6 +75,33 @@ spec:
             status:
               type: object
               properties:
+                phase:
+                  type: string
+                  nullable: true
+                  enum: [Bootstrap, Active, Blocked, Closing, Closed, Frozen, Corrupt, Unknown, null]
+                  description: "Observational ledger admission state, never spend authority or router readiness."
+                observedGeneration:
+                  type: integer
+                  format: int64
+                  nullable: true
+                conditions:
+                  type: array
+                  x-kubernetes-list-type: map
+                  x-kubernetes-list-map-keys: [type]
+                  items:
+                    type: object
+                    required: [lastTransitionTime, message, reason, status, type]
+                    properties:
+                      lastTransitionTime:
+                        type: string
+                        format: date-time
+                      message: {type: string}
+                      observedGeneration:
+                        type: integer
+                        format: int64
+                      reason: {type: string}
+                      status: {type: string}
+                      type: {type: string}
                 ledger:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
