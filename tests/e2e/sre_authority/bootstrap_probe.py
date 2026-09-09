@@ -242,13 +242,17 @@ def main(root, diagnostics_only, candidate=False, retirement=False):
                     from sre_authority.binding_probe import prove
                     prove(root, port, state, objects,
                           lambda facts: write_report(root, "bootstrap-binding-retirement.json", facts))
-                from sre_authority.bootstrap_cases import deployment_controller_cases, private_controller_chain
+                from sre_authority.bootstrap_cases import deployment_controller_cases, namespace_cleanup_cases, private_controller_chain
                 controller_cases = deployment_controller_cases(port, policies)
                 write_report(root, "bootstrap-workload-controller.json", {"cases": controller_cases})
                 if not all(case["matched"] for case in controller_cases):
                     raise RuntimeError("Built-in Deployment controller cannot create the private SRE ReplicaSet")
                 private_controller_chain(port, policies,
                     lambda facts: write_report(root, "bootstrap-private-controller-chain.json", facts))
+                cleanup_cases = namespace_cleanup_cases(port, policies)
+                write_report(root, "bootstrap-namespace-cleanup.json", {"cases": cleanup_cases})
+                if not all(case["matched"] for case in cleanup_cases):
+                    raise RuntimeError("Canonical consumer cleanup authority differs from the expected boundary")
             finally:
                 write_report(root, "bootstrap-final.json", collect(port, policies, request))
                 write_report(root, "bootstrap-controller-stack.json", controller_stack(

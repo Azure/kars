@@ -15,6 +15,27 @@ POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
 
 
 class BootstrapProofTests(unittest.TestCase):
+    def test_namespace_cleanup_proof_retains_guard_and_fences_all_deletes(self):
+        from sre_authority.bootstrap_cases import namespace_cleanup_cases
+        deployment = {"metadata": {"uid": "owned", "resourceVersion": "2"}}
+        responses = [(404, {}), (201, deployment), (200, {"metadata": {"uid": "namespace-controller"}}),
+                     (200, deployment), (200, {"metadata": {"uid": "kars-controller"}}),
+                     (200, deployment), (200, deployment), (200, {})]
+        with patch("sre_authority.bootstrap_cases.request", side_effect=responses) as api, \
+                patch("sre_authority.bootstrap_cases.as_tenant", side_effect=[
+                    (403, {"kind": "Status", "reason": "Forbidden",
+                           "message": "kars-sre-consumer-authority denied do-not-publish"}),
+                    (200, {"kind": "Status", "status": "Success"})]) as actor:
+            cases = namespace_cleanup_cases(1, {"kars-sre-consumer-authority": {}})
+        self.assertTrue(all(case["matched"] for case in cases))
+        self.assertNotIn("do-not-publish", json.dumps(cases))
+        for call in actor.call_args_list:
+            self.assertEqual(call.kwargs["method"], "DELETE")
+            self.assertTrue(call.args[1].endswith("?dryRun=All"))
+            self.assertEqual(call.args[2]["preconditions"], {"uid": "owned", "resourceVersion": "2"})
+        self.assertEqual(api.call_args_list[-1].args[1], "DELETE")
+        self.assertEqual(api.call_args_list[-1].args[3]["preconditions"], {"uid": "owned", "resourceVersion": "2"})
+
     def test_http_failure_summary_reports_status_and_checked_source_not_body_url_or_headers(self):
         root = Path(__file__).resolve().parents[3]
         class Response:

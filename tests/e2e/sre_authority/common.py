@@ -378,7 +378,8 @@ class Harness:
         self.deadline = max(self.deadline, time.monotonic() + 90)
         # Status and identities only; never dump Secret bodies or whole Pods.
         for kind, name, namespace in [("karssreregistrations.kars.azure.com", "canonical", None),
-                                      ("karssandbox", "sre", SYSTEM), ("deployment", "sre", RUNTIME)]:
+                                      ("karssandbox", "sre", SYSTEM), ("deployment", "sre", RUNTIME),
+                                      ("namespace", RUNTIME, None)]:
             try:
                 obj = self.get(kind, name, namespace)
                 if obj:
