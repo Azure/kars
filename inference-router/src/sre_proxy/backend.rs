@@ -37,6 +37,23 @@ struct Token {
     expiry: DateTime<Utc>,
 }
 
+fn transport_failure(stage: &'static str, error: &reqwest::Error) {
+    tracing::warn!(
+        stage,
+        timed_out = error.is_timeout(),
+        connect_error = error.is_connect(),
+        "SRE authority transport failure"
+    );
+}
+
+fn denied_response(stage: &'static str, status: reqwest::StatusCode) {
+    tracing::warn!(
+        stage,
+        http_status = status.as_u16(),
+        "SRE authority request denied"
+    );
+}
+
 pub(super) struct Backend {
     pub config: Config,
     client: reqwest::Client,
@@ -180,7 +197,7 @@ impl Backend {
         Ok(token.value.clone())
     }
 
-    async fn metadata_json(&self, path: &str) -> Result<Value, String> {
+    async fn metadata_json(&self, path: &str, stage: &'static str) -> Result<Value, String> {
         let response = self
             .client
             .get(format!(
@@ -192,8 +209,12 @@ impl Backend {
             .header("accept", "application/json")
             .send()
             .await
-            .map_err(|_| "SRE authority read failed")?;
+            .map_err(|error| {
+                transport_failure(stage, &error);
+                "SRE authority read failed"
+            })?;
         if !response.status().is_success() {
+            denied_response(stage, response.status());
             return Err("SRE authority read denied".into());
         }
         response
@@ -204,7 +225,10 @@ impl Backend {
 
     pub(super) async fn authorize(&self) -> Result<(), String> {
         let reg = self
-            .metadata_json("/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical")
+            .metadata_json(
+                "/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical",
+                "registration",
+            )
             .await?;
         if reg["metadata"]["uid"] != self.config.registration_uid
             || !reg["metadata"]["deletionTimestamp"].is_null()
@@ -221,10 +245,10 @@ impl Backend {
             return Err("SRE authority is no longer current".into());
         }
         let namespace = self
-            .metadata_json(&format!(
-                "/api/v1/namespaces/{}",
-                self.config.runtime_namespace
-            ))
+            .metadata_json(
+                &format!("/api/v1/namespaces/{}", self.config.runtime_namespace),
+                "namespace",
+            )
             .await?;
         let annotations = &namespace["metadata"]["annotations"];
         if namespace["metadata"]["uid"] != self.config.namespace_uid
@@ -241,10 +265,13 @@ impl Backend {
             return Err("SRE runtime namespace ownership changed".into());
         }
         let sandbox = self
-            .metadata_json(&format!(
-                "/apis/kars.azure.com/v1alpha1/namespaces/{}/karssandboxes/{}",
-                self.config.source.namespace, self.config.source.name
-            ))
+            .metadata_json(
+                &format!(
+                    "/apis/kars.azure.com/v1alpha1/namespaces/{}/karssandboxes/{}",
+                    self.config.source.namespace, self.config.source.name
+                ),
+                "source",
+            )
             .await?;
         if sandbox["metadata"]["uid"] != self.config.source.uid
             || !sandbox["metadata"]["deletionTimestamp"].is_null()
@@ -254,10 +281,13 @@ impl Backend {
             return Err("SRE source identity changed".into());
         }
         let sa = self
-            .metadata_json(&format!(
-                "/api/v1/namespaces/{}/serviceaccounts/sre-api-router",
-                self.config.runtime_namespace
-            ))
+            .metadata_json(
+                &format!(
+                    "/api/v1/namespaces/{}/serviceaccounts/sre-api-router",
+                    self.config.runtime_namespace
+                ),
+                "service-account",
+            )
             .await?;
         if sa["metadata"]["uid"] != self.config.service_account_uid
             || !sa["metadata"]["deletionTimestamp"].is_null()
@@ -280,8 +310,12 @@ impl Backend {
                 .json(&review)
                 .send()
                 .await
-                .map_err(|_| "SRE privacy authorization transport failure")?;
+                .map_err(|error| {
+                    transport_failure("privacy-review", &error);
+                    "SRE privacy authorization transport failure"
+                })?;
             if !response.status().is_success() {
+                denied_response("privacy-review", response.status());
                 return Err("SRE privacy authorization review denied".into());
             }
             let response: Value = response
@@ -304,8 +338,12 @@ impl Backend {
             )
             .send()
             .await
-            .map_err(|_| "SRE credential metadata inventory failed")?;
+            .map_err(|error| {
+                transport_failure("credential-metadata", &error);
+                "SRE credential metadata inventory failed"
+            })?;
         if !response.status().is_success() {
+            denied_response("credential-metadata", response.status());
             return Err("SRE credential metadata inventory denied".into());
         }
         let metadata: Value = response

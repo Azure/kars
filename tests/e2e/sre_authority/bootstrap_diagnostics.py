@@ -32,6 +32,40 @@ def probe_command_result(code, output):
     return {"exitCode": code, "category": category}
 
 
+def router_readiness_facts(text):
+    facts = []
+    stages = ("registration", "namespace", "source", "service-account", "privacy-review", "credential-metadata")
+    categories = ("authority-transport", "authority-denied", "registration-stale", "namespace-claim",
+                  "source-identity", "service-account", "privacy-transport", "privacy-denied",
+                  "privacy-not-denied", "metadata-transport", "metadata-denied", "legacy-alias",
+                  "credential-expired", "unclassified")
+    for line in text.splitlines()[-150:]:
+        line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        if not any(message in line for message in ("SRE authority transport failure",
+                                                    "SRE authority request denied",
+                                                    "SRE readiness authority rejected",
+                                                    "SRE readiness authority slow")):
+            continue
+        value = {}
+        for key, allowed in (("stage", stages), ("category", categories)):
+            match = re.search(rf'\b{key}="?({"|".join(allowed)})"?(?:\s|$)', line)
+            if match:
+                value[key] = match[1]
+        for key in ("timed_out", "connect_error", "authorized"):
+            match = re.search(rf"\b{key}=(true|false)(?:\s|$)", line)
+            if match:
+                value[key] = match[1] == "true"
+        status = re.search(r"\bhttp_status=([1-5][0-9]{2})(?:\s|$)", line)
+        if status:
+            value["httpStatus"] = int(status[1])
+        elapsed = re.search(r"\belapsed_seconds=([0-9]{1,3})(?:\s|$)", line)
+        if elapsed:
+            value["elapsedSeconds"] = int(elapsed[1])
+        if value and value not in facts:
+            facts.append(value)
+    return facts[:16]
+
+
 def identifier(value):
     return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,253}", value) else None
 

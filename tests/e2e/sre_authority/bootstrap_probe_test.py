@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, probe_command_result, public_stack_facts
+from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, probe_command_result, public_stack_facts, router_readiness_facts
 from sre_authority.bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
@@ -15,6 +15,24 @@ POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
 
 
 class BootstrapProofTests(unittest.TestCase):
+    def test_router_readiness_logs_expose_only_fixed_stage_status_and_timeout_facts(self):
+        text = (
+            '\x1b[33mSRE authority transport failure\x1b[0m stage="registration" timed_out=true connect_error=false token=do-not-publish\n'
+            'SRE authority request denied stage="privacy-review" http_status=403 body=do-not-publish\n'
+            'SRE readiness authority rejected category="authority-transport" do-not-publish\n'
+            'SRE readiness authority slow elapsed_seconds=20 authorized=false do-not-publish\n'
+            'unrelated log stage="source" do-not-publish\n'
+            'SRE authority request denied stage="do-not-publish" http_status=999\n'
+        )
+        facts = router_readiness_facts(text)
+        self.assertEqual(facts, [
+            {"stage": "registration", "timed_out": True, "connect_error": False},
+            {"stage": "privacy-review", "httpStatus": 403},
+            {"category": "authority-transport"},
+            {"authorized": False, "elapsedSeconds": 20},
+        ])
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+
     def test_probe_diagnostics_never_publish_executable_output(self):
         for code, output, category in (
             (127, "exec: executable file not found in $PATH do-not-publish", "executable-not-found"),
