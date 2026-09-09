@@ -415,7 +415,7 @@ class Harness:
             print("SRE-DIAG runtime Pod status unavailable", flush=True)
 
     def readiness_diagnostics(self, pod):
-        from .bootstrap_diagnostics import probe_command_result
+        from .bootstrap_diagnostics import probe_command_result, router_readiness_facts
         facts = {"kind": "RouterReadiness", "podUid": pod["metadata"]["uid"]}
         try:
             for label, executable in (("configuredCommand", "kars-inference-router"),
@@ -432,6 +432,12 @@ class Harness:
                 facts["verifiedLoopbackTlsStatus"] = response.status_code
         except Exception as error:
             facts["diagnosticError"] = type(error).__name__
+        try:
+            logs = self.k("logs", "-n", RUNTIME, pod["metadata"]["name"], "-c", "inference-router",
+                          "--tail=150", timeout=10)
+            facts["authorityChecks"] = router_readiness_facts(logs)
+        except Exception:
+            facts["authorityChecksUnavailable"] = True
         print("SRE-DIAG", json.dumps(facts), flush=True)
 
     def close(self):
