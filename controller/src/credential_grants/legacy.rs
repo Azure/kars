@@ -7,22 +7,17 @@ use super::*;
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use std::collections::{BTreeMap, BTreeSet};
 
+#[cfg(test)]
+mod tests;
+
 async fn inspect(
     client: &Client,
     namespace: &str,
     name: &str,
     source_name: String,
     target: Option<CredentialTarget>,
+    selected: bool,
 ) -> Result<Option<LegacyImport>, String> {
-    let namespaces: Api<Namespace> = Api::all(client.clone());
-    let Some(ns) = namespaces
-        .get_opt(namespace)
-        .await
-        .map_err(|e| api_error("Inspect legacy credential namespace", e))?
-    else {
-        return Ok(None);
-    };
-    let namespace_uid = identity(&ns.metadata)?.0.to_string();
     let api: Api<Secret> = Api::namespaced(client.clone(), namespace);
     let Some(meta) = api
         .get_metadata_opt(name)
@@ -31,6 +26,26 @@ async fn inspect(
     else {
         return Ok(None);
     };
+    let namespaces: Api<Namespace> = Api::all(client.clone());
+    let Some(ns) = namespaces
+        .get_opt(namespace)
+        .await
+        .map_err(|e| api_error("Inspect legacy credential namespace", e))?
+    else {
+        return if selected {
+            Err("Selected legacy credential namespace disappeared".into())
+        } else {
+            Ok(None)
+        };
+    };
+    if ns.metadata.deletion_timestamp.is_some() || meta.metadata.deletion_timestamp.is_some() {
+        return if selected {
+            Err("Selected legacy credential namespace or store is terminating".into())
+        } else {
+            Ok(None)
+        };
+    }
+    let namespace_uid = identity(&ns.metadata)?.0.to_string();
     let secret = api
         .get(name)
         .await
@@ -76,6 +91,7 @@ pub(super) async fn inventory(
             "kars-workspace-channels",
             format!("{INPUT_PREFIX}workspace"),
             None,
+            false,
         )
         .await?
         {
@@ -90,6 +106,9 @@ pub(super) async fn inventory(
             .await
             .map_err(|e| api_error("Inspect legacy credential targets", e))?;
         for target in targets {
+            if target.metadata.deletion_timestamp.is_some() {
+                continue;
+            }
             let target = CredentialTarget {
                 kind: kind.into(),
                 namespace: namespace.clone(),
@@ -105,6 +124,7 @@ pub(super) async fn inventory(
                         &format!("kars-team-channel-{}", target.name),
                         source_name.clone(),
                         Some(target.clone()),
+                        false,
                     )
                     .await?
                     {
@@ -118,6 +138,7 @@ pub(super) async fn inventory(
                 &format!("{}-credentials", target.name),
                 source_name,
                 Some(target),
+                false,
             )
             .await?
             {
@@ -134,7 +155,89 @@ pub(super) async fn import_values(
     source_name: &str,
     target: Option<&CredentialTarget>,
 ) -> Result<(BTreeMap<String, k8s_openapi::ByteString>, String), String> {
-    let discovered = inventory(client, grant).await?;
+    let namespace = grant.namespace().ok_or("Grant workspace missing")?;
+    let mut workspaces = BTreeSet::from([namespace.clone(), "kars-system".into()]);
+    workspaces.extend(
+        grant
+            .spec
+            .legacy_imports
+            .iter()
+            .map(|entry| entry.namespace.clone()),
+    );
+    let mut discovered = Vec::new();
+    if let Some(target) = target {
+        let resource = ApiResource::from_gvk(&GroupVersionKind::gvk(
+            "kars.azure.com",
+            "v1alpha1",
+            &target.kind,
+        ));
+        let live = Api::<DynamicObject>::namespaced_with(client.clone(), &namespace, &resource)
+            .get(&target.name)
+            .await
+            .map_err(|e| api_error("Verify selected legacy credential owner", e))?;
+        if identity(&live.metadata)?.0 != target.uid || target.namespace != namespace {
+            return Err("Selected legacy credential owner changed".into());
+        }
+        if target.kind == "KarsTeam" {
+            for workspace in &workspaces {
+                if let Some(store) = inspect(
+                    client,
+                    workspace,
+                    &format!("kars-team-channel-{}", target.name),
+                    source_name.into(),
+                    Some(target.clone()),
+                    true,
+                )
+                .await?
+                {
+                    discovered.push(store);
+                }
+            }
+        }
+        if let Some(store) = inspect(
+            client,
+            &format!("kars-{}", target.name),
+            &format!("{}-credentials", target.name),
+            source_name.into(),
+            Some(target.clone()),
+            true,
+        )
+        .await?
+        {
+            discovered.push(store);
+        }
+    } else {
+        for workspace in &workspaces {
+            if let Some(store) = inspect(
+                client,
+                workspace,
+                "kars-workspace-channels",
+                source_name.into(),
+                None,
+                true,
+            )
+            .await?
+            {
+                discovered.push(store);
+            }
+        }
+    }
+    for reviewed in grant
+        .spec
+        .legacy_imports
+        .iter()
+        .filter(|entry| entry.source_name == source_name && entry.target.as_ref() == target)
+    {
+        if !discovered.iter().any(|entry| {
+            entry.namespace == reviewed.namespace
+                && entry.secret == reviewed.secret
+                && entry.namespace_uid == reviewed.namespace_uid
+        }) {
+            return Err(
+                "Selected reviewed legacy credentials disappeared or changed identity".into(),
+            );
+        }
+    }
     let candidates = discovered
         .iter()
         .filter(|entry| entry.source_name == source_name && entry.target.as_ref() == target)

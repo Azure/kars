@@ -193,6 +193,11 @@ Each selection contains a source `{name, uid}`, approved key names and, for
 Team/target scopes, the owning target identity. References and key grants are
 part of the shared effective Task authorization snapshot. Child references
 and key sets may not exceed their parent's credential authority.
+Attenuation compares the final **declared source authority per key** after
+ordered precedence, not only each selection independently. A later selection
+is still an overriding authority/mask when its Secret has no value. A child
+cannot drop that selection (or its retained key) to reveal a parent's hidden
+earlier credential.
 
 Before publishing ordinary Task `Ready`, core performs a read-only live grant,
 source and GitHub-enrollment preflight. This does not prepare bundles or mint
@@ -209,6 +214,13 @@ Core verifies current Task authority before preparing a UID-owned bundle and
 the existing UID-fenced runtime projection. Agent values never enter router
 EnvFrom. Runtime environment overrides of selected keys are rejected.
 
+Removing an agent key records persistent metadata-only removal intent in the
+source annotation `kars.azure.com/credential-removed-keys`. The source value and
+intent update together under UID/resourceVersion CAS. Core applies these masks
+after reviewed legacy import, including when the source was created before its
+first import. Retries do not restore the key; explicitly setting it again clears
+its tombstone. Secret values never enter that annotation.
+
 Missing selected keys mask lower-priority values. Removing a key does not remove
 the binding or restore direct credentials. Missing/replaced/revoked authority
 stops the credential consumer and clears only its owned projection. Previously
@@ -219,6 +231,17 @@ runtime rather than deleting the Sandbox, namespace or stored state. Explicit
 unlaunch/deletion retains the established cleanup behavior. Optional private
 observations report separate integration errors and cannot create a circular
 dependency between the source grant's readiness and the Task they observe.
+
+Team credential rebinds do **not** unlaunch Tasks. The controller requests a
+credential pause, durably clears Ready/its authorization digest, retracts the
+old current attestation and holds the exact owned Sandbox runtime at zero
+replicas. It waits for all old Pods, including terminating Pods, before changing
+the binding. Task, Sandbox, namespace and stored-data UIDs remain unchanged.
+Resume requires current Team/Task constraints, a newly validated configuration,
+the matching current receipt and the same owned quiescent runtime. A
+UID/resourceVersion-fenced Deployment apply prevents stale work from undoing
+the pause. Existing explicit Sandbox suspension is preserved. Explicit user
+unlaunch/deletion retains normal teardown behavior.
 
 `CredentialsReady` and grant status expose key names, source/bundle/projection
 UIDs, observed versions and reasons—not values. Non-404 API errors are errors,
@@ -275,6 +298,18 @@ Grant finalization revokes its owned writer/operator bindings. Namespace and
 source UID checks prevent adopting a replacement. Source cleanup follows its
 actual target UID; workspace sources and operator stores are not Helm-owned and
 remain after Bridge uninstall. Legacy stores remain for explicit review.
+Legacy discovery skips unrelated terminating targets/stores/namespaces; it first
+checks whether the legacy Secret exists. Transport/authorization errors are not
+reported as absence. Selected owners and reviewed source identities still fail
+closed on deletion/replacement. An unrelated stuck deletion must not revoke
+the whole workspace's writer, observer or GitHub authority.
+
+Typed controller settings validate every enrolled credential Secret UID, purpose
+and referenced key before taking an unchanged-config fast path. Rollout
+revisions include the current UID/resourceVersion of those references as well
+as the settings store. Rotating a token behind an unchanged `secretKeyRef`
+therefore refreshes controller environment; grant status-only writes do not
+cause a rollout loop. Revision evidence contains no values.
 
 Writer status is now separate from delivery status. `WriterReady=False`
 prevents delegated writes, but a deleted, terminating or replaced writer does

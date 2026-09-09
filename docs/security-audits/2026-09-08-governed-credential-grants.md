@@ -37,6 +37,81 @@ this repository.
 
 ## Current validation
 
+### Cross-layer review d033 repairs — source/fast qualification, Rust lease pending
+
+The independent review identified seven semantic/lifecycle blockers. The
+`ec1ecf54` results below **do not qualify these subsequent repairs**.
+Implementation and regressions now cover:
+
+1. **Ordered attenuation:** retained keys must keep the parent's effective
+   declared final source/owner identity. Later absent-value masks are authority,
+   not permission to reveal lower-priority values. Tests exercise the actual
+   selection projection for both present overrides and absent masks, plus
+   dropped keys, retained masks and reordering.
+2. **Non-destructive Team rebinding:** the existing pending marker now drives
+   Ready/digest invalidation, owned runtime holds and scale-to-zero, including
+   waiting for terminating Pods. Team principal/member/taskforce credential
+   drift is separated from other authority revocations. Binding changes retain
+   Task/Sandbox/namespace identities; current Team/Task constraints and the new
+   current receipt gate hold release. A UID/RV-fenced Deployment apply prevents
+   stale work from undoing the hold; explicit Sandbox suspension is preserved.
+   A full Task reconciliation regression exercises pause, quiescence, binding
+   update, fresh authority/receipt, real fenced Deployment apply and explicit
+   unlaunch cleanup—not a mocked teardown bypass.
+3. **Persistent removal intent:** source value changes and
+   `kars.azure.com/credential-removed-keys` update under the same UID/RV fence.
+   Core applies tombstones after legacy import and keeps them across retries.
+   Tests cover fresh sources, existing pending-import values and explicit re-set.
+4. **Local legacy lifecycle handling:** unrelated terminating targets and
+   stores/namespaces no longer invalidate global inventory. Secret existence
+   precedes namespace validation; transport errors still propagate. Selected
+   owners and reviewed source identities remain fail-closed. Related terminating
+   source inventory entries are localized rather than revoking unrelated grants.
+5. **Private reused values:** templates, not only `values.yaml`, default absent
+   new maps. The exact BASE105 values fixture has Git blob
+   `09ea1c58f5f6ae9e9705b031aa35386fff7ee35c`. Tests replace current chart defaults
+   and exercise actual Helm server-side `lookup` against a local read-only API;
+   no real cluster or deployment was used.
+6. **Supported v1 consumers:** complete workspace consumer plans are validated
+   before consumer changes. Valid v1 and existing unbounded standalone consumers
+   are preserved, never mixed with v2 implicitly. Fresh/opted-in v2 updates are
+   exercised. Conflicting late entries fail before earlier conversion, and
+   malformed private/internal references are not grandfathered. Every write
+   remains UID/RV-fenced.
+7. **Referenced credential rollout revision:** settings reconcile validates the
+   actual enrolled Secret UID/type/key/purpose before a fast path, and hashes
+   referenced UID/RV metadata into the rollout version. Tests cover stable
+   settings with rotated tokens, wrong UID/missing key/type and no-op/status-RV
+   changes. Neither revisions nor patches emit credential values.
+
+Fast validation currently passes **47 core CLI/schema/RPC tests + CLI types**
+and **23 private chart/upgrade/packaging tests + gateway lint/types**. Both Helm
+lints pass. All owned private changed Rust files were formatted with the private
+default configuration (edition 2024), resolving the earlier format-only gate.
+Private Next **16.3.3** manifests and its verified lock artifact are unchanged.
+
+No Cargo has run for this repair batch: no core lease is currently held, and
+private Cargo remains prohibited pending its separate hosted plan. Rust
+regressions are present but **unexecuted**; source parsing is not semantic
+qualification. Required core selectors after an explicit paired/default-feature,
+offline/locked, existing-target guarded lease:
+
+```sh
+cargo check --offline --locked -p kars-controller -p kars-inference-router --tests
+cargo test --offline --locked -p kars-controller -p kars-inference-router credential
+cargo test --offline --locked -p kars-controller -p kars-inference-router kars_team_reconciler
+cargo test --offline --locked -p kars-controller -p kars-inference-router kars_task_execution
+cargo test --offline --locked -p kars-controller -p kars-inference-router kars_task_reconciler
+cargo test --offline --locked -p kars-controller -p kars-inference-router privacy_rpc
+cargo test --offline --locked -p kars-controller -p kars-inference-router observation
+cargo clippy --offline --locked -p kars-controller -p kars-inference-router --all-targets -- -D warnings
+```
+
+Private qualification must include `credential` and `observation` tests and its
+existing format/type/Clippy gates on the private workspace/hosted CI, not the
+core target. A bounded independent d033 re-review and real admission/CNI
+acceptance still follow qualification. No earlier human waiver applies.
+
 ### 2026-09-09 approved core privacy RPC — implemented and core-qualified
 
 The user selected `observation_verifier=core-privacy-rpc`. The former active-SRE

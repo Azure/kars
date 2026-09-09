@@ -10,6 +10,8 @@ use kube::{Api, Client};
 pub(super) async fn verify(client: &Client) -> Result<(), String> {
     for name in [
         "kars-credential-grant-authority",
+        "kars-credential-rebind-authority",
+        "kars-credential-runtime-hold",
         "kars-credential-reader-continuity",
         "kars-credential-reader-rbac-roles",
         "kars-credential-reader-rbac-bindings",

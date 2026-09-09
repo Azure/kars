@@ -6,7 +6,7 @@
 //! separate modules. Teams remain additive; Bridge is an optional consumer.
 
 mod capabilities;
-mod credential_bindings;
+pub(crate) mod credential_bindings;
 #[cfg(test)]
 mod persistence_tests;
 mod promotion;
@@ -43,7 +43,7 @@ const ANNOT_RUN_REQUESTED: &str = "kars.azure.com/run-requested";
 const MAX_CONCURRENT_RUNS: usize = 2;
 
 #[derive(thiserror::Error, Debug)]
-enum ReconcileError {
+pub(crate) enum ReconcileError {
     #[error("Kubernetes API error: {0}")]
     Kube(#[from] kube::Error),
     #[error("JSON serialization error: {0}")]
@@ -175,6 +175,9 @@ async fn reconcile_valid(
     team: &KarsTeam,
     client: &Client,
 ) -> Result<Action, ReconcileError> {
+    // Credential-only drift enters a state-preserving pause before ordinary
+    // authority/seat revocations can mistake it for an invalid run.
+    credential_bindings::reconcile(client, tasks_api, team).await?;
     // Revoke old task-force authority and removed seats before creating anything.
     tasks::reconcile_revocations(tasks_api, team).await?;
     crate::team_commons::ensure_commons(client, team).await?;
@@ -207,7 +210,6 @@ async fn reconcile_valid(
     }
 
     let prior = team.status.clone().unwrap_or_default();
-    credential_bindings::reconcile(tasks_api, team).await?;
     let now = Utc::now();
     let every = team
         .spec

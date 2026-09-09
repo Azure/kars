@@ -131,6 +131,11 @@ pub async fn materialize(
     namespace: &str,
     task: &KarsTask,
 ) -> Result<ExecutionOutcome, kube::Error> {
+    if crate::kars_task_reconciler::rebind::pending(task) {
+        return Err(contract_error(
+            "Credential rebind is awaiting owned runtime quiescence".into(),
+        ));
+    }
     crate::kars_task::validate_execution_contract(&task.spec).map_err(contract_error)?;
     let task_name = task.name_any();
     let inference_name = format!("{task_name}-inference");
@@ -218,6 +223,15 @@ pub async fn materialize(
                     "sandbox was replaced after materialization".into(),
                 ));
             }
+            if sb
+                .annotations()
+                .contains_key(crate::kars_task_reconciler::rebind::HOLD)
+            {
+                return Ok(ExecutionOutcome {
+                    phase:"Launching".into(),sandbox_name:task_name,
+                    detail:"Credential runtime remains held until current authorization and attestation are durable".into(),
+                });
+            }
             let sb_phase = sb
                 .data
                 .get("status")
@@ -259,14 +273,15 @@ pub async fn teardown(
     Ok(sandbox_gone && policy_gone)
 }
 
-pub(crate) async fn pause_credentials(
-    client: &Client,
-    task: &KarsTask,
-) -> Result<bool, String> {
-    let namespace = task.namespace().ok_or("Credential Task workspace missing")?;
-    let api: Api<DynamicObject> = Api::namespaced_with(client.clone(), &namespace, &sandbox_api_resource());
-    let Some(object) = api.get_opt(&task.name_any()).await
-        .map_err(|error| crate::credential_grants::api_error("Read credential Task execution", error))?
+pub(crate) async fn pause_credentials(client: &Client, task: &KarsTask) -> Result<bool, String> {
+    let namespace = task
+        .namespace()
+        .ok_or("Credential Task workspace missing")?;
+    let api: Api<DynamicObject> =
+        Api::namespaced_with(client.clone(), &namespace, &sandbox_api_resource());
+    let Some(object) = api.get_opt(&task.name_any()).await.map_err(|error| {
+        crate::credential_grants::api_error("Read credential Task execution", error)
+    })?
     else {
         return Ok(false);
     };
@@ -275,15 +290,96 @@ pub(crate) async fn pause_credentials(
     }
     let sandbox: crate::crd::KarsSandbox = serde_json::from_value(
         serde_json::to_value(object).map_err(|_| "Credential Sandbox serialization failed")?,
-    ).map_err(|_| "Credential Sandbox is malformed")?;
+    )
+    .map_err(|_| "Credential Sandbox is malformed")?;
     if let Some(runtime) = Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone())
-        .get_opt(&format!("kars-{}", sandbox.name_any())).await
-        .map_err(|error| crate::credential_grants::api_error("Read credential runtime namespace", error))?
+        .get_opt(&format!("kars-{}", sandbox.name_any()))
+        .await
+        .map_err(|error| {
+            crate::credential_grants::api_error("Read credential runtime namespace", error)
+        })?
     {
         crate::reconciler::credential_sources::pause_owned(client, &sandbox, &runtime)
-            .await.map_err(|error| error.to_string())?;
+            .await
+            .map_err(|error| error.to_string())?;
     }
     Ok(true)
+}
+
+pub(crate) async fn credentials_quiescent(
+    client: &Client,
+    task: &KarsTask,
+) -> Result<bool, String> {
+    let workspace = task
+        .namespace()
+        .ok_or("Credential Task workspace missing")?;
+    let sandbox = Api::<crate::crd::KarsSandbox>::namespaced(client.clone(), &workspace)
+        .get_opt(&task.name_any())
+        .await
+        .map_err(|e| crate::credential_grants::api_error("Read paused credential Sandbox", e))?;
+    let namespace = Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone())
+        .get_opt(&format!("kars-{}", task.name_any()))
+        .await
+        .map_err(|e| crate::credential_grants::api_error("Read paused credential namespace", e))?;
+    let Some(sandbox) = sandbox else {
+        return if namespace.is_none() {
+            Ok(true)
+        } else {
+            Err("Credential namespace exists without its current owned Sandbox".into())
+        };
+    };
+    let dynamic: DynamicObject = serde_json::from_value(
+        serde_json::to_value(&sandbox)
+            .map_err(|_| "Credential Sandbox identity encoding failed")?,
+    )
+    .map_err(|_| "Credential Sandbox identity invalid")?;
+    if !owned_by_task(&dynamic, task) || sandbox.metadata.deletion_timestamp.is_some() {
+        return Err("Credential pause cannot adopt a foreign or terminating Sandbox".into());
+    }
+
+    pub(crate) async fn hold_credential_runtime(
+        client: &Client,
+        task: &KarsTask,
+    ) -> Result<(), String> {
+        let namespace = task
+            .namespace()
+            .ok_or("Credential Task workspace missing")?;
+        let api = Api::<DynamicObject>::namespaced_with(
+            client.clone(),
+            &namespace,
+            &sandbox_api_resource(),
+        );
+        let Some(sandbox) = api
+            .get_opt(&task.name_any())
+            .await
+            .map_err(|e| crate::credential_grants::api_error("Read credential hold target", e))?
+        else {
+            return Ok(());
+        };
+        if !owned_by_task(&sandbox, task) || sandbox.metadata.deletion_timestamp.is_some() {
+            return Err("Credential hold target is foreign or terminating".into());
+        }
+        let marker = crate::kars_task_reconciler::rebind::HOLD;
+        if sandbox.annotations().get(marker) == task.metadata.uid.as_ref() {
+            return Ok(());
+        }
+        if sandbox.annotations().contains_key(marker) {
+            return Err("Credential runtime is held by another Task UID".into());
+        }
+        api.patch_metadata(&task.name_any(),&kube::api::PatchParams::default(),&kube::api::Patch::Merge(json!({
+            "metadata":{"uid":sandbox.metadata.uid,"resourceVersion":sandbox.metadata.resource_version,
+                "annotations":{marker:task.metadata.uid}}
+        }))).await.map_err(|e|crate::credential_grants::api_error("Hold owned credential runtime",e))?;
+        Ok(())
+    }
+    match namespace {
+        None => Ok(true),
+        Some(namespace) => {
+            crate::reconciler::credential_sources::quiescent_owned(client, &sandbox, &namespace)
+                .await
+                .map_err(|e| e.to_string())
+        }
+    }
 }
 
 fn owned_by_task(object: &DynamicObject, task: &KarsTask) -> bool {
@@ -454,6 +550,25 @@ async fn apply_dynamic(
                 )));
             }
             object_preconditions(&current)?;
+            if ar.kind == "KarsSandbox" {
+                if current.data["spec"]["suspended"] == true {
+                    obj.data["spec"]["suspended"] = true.into();
+                }
+                if let Some(reference) = current.data["spec"]
+                    .get("credentialsRef")
+                    .filter(|value| !value.is_null())
+                    .cloned()
+                {
+                    if obj.data["spec"]["credentialBindings"].is_object()
+                        && !reference["name"]
+                            .as_str()
+                            .is_some_and(|name| name.starts_with("kars-credential-bundle-"))
+                    {
+                        return Err(contract_error("Existing v1 runtime credentials require explicit migration before a governed rebind".into()));
+                    }
+                    obj.data["spec"]["credentialsRef"] = reference;
+                }
+            }
             current.data["spec"] = obj.data["spec"].clone();
             current
                 .metadata
