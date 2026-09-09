@@ -374,14 +374,7 @@ impl Backend {
                 format!("{}{}", self.config.kube_url.trim_end_matches('/'), path),
             )
             .bearer_auth(self.bearer().await?)
-            .header(
-                "accept",
-                if logs {
-                    "text/plain"
-                } else {
-                    "application/json"
-                },
-            );
+            .header("accept", if logs { "*/*" } else { "application/json" });
         if let Some(body) = body {
             request = request.json(&body);
         }

@@ -204,6 +204,8 @@ Standard `KUBERNETES_SERVICE_HOST/PORT` point to `https://127.0.0.1:9446`.
 Pinned Hermes clients continue using HTTPS, CA verification, raw pod-log GETs,
 and proposal POSTs without an image-specific fallback. Azure token projection
 is excluded from the agent container. The old apiserver egress bypass is gone.
+Upstream Pod-log requests use API-compatible media negotiation; the facade
+still returns only the bounded plain-text log response.
 Admission protects both direct Pod mounts and Deployment/ReplicaSet/Job and
 CronJob templates from laundering a private mount through Kubernetes workload
 controllers. Exec/attach/port-forward into the private SRE runtime requires
