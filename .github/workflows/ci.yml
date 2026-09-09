@@ -416,7 +416,7 @@ jobs:
           version: v1.30.5
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Check public-schema diagnostic privacy
-        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test credential_schema_test
+        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test credential_schema_test credential_policy_schema_test
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
       - name: Prove native historical Helm wait orders CRDs before hooks and permits schema upgrades
@@ -431,6 +431,9 @@ jobs:
       - name: Prove shipped credential CEL with matching and mismatched native namespace UIDs
         id: credential_schema
         run: PYTHONPATH=tests/e2e python3 -m credential_schema
+      - name: Prove shipped credential store, rebind and exposure policies against native types
+        id: credential_policy_schema
+        run: PYTHONPATH=tests/e2e python3 -m credential_policy_schema
       - name: Prove controller Pod admission with all chart policies and no image execution
         if: ${{ !cancelled() && steps.sre_schema.outcome == 'success' }}
         id: sre_bootstrap
@@ -452,6 +455,7 @@ jobs:
             e2e-sre-schema-diag/validation.json
             e2e-sre-schema-diag/validation-instances.json
             e2e-sre-schema-diag/credential-namespace-uid.json
+            e2e-sre-schema-diag/credential-policy-typechecking.json
             e2e-sre-schema-diag/namespace-accessor-candidate.json
             e2e-sre-schema-diag/namespace-accessor-candidate-instances.json
             e2e-sre-schema-diag/bootstrap-*.json

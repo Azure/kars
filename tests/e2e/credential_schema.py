@@ -62,7 +62,7 @@ def evidence(case, code, category):
     return item
 
 
-def select_shipped(raw):
+def decode_documents(raw):
     decoder, objects = json.JSONDecoder(), {}
     while raw.strip():
         obj, end = decoder.raw_decode(raw.lstrip())
@@ -71,6 +71,11 @@ def select_shipped(raw):
             key = (value.get("kind"), value.get("metadata", {}).get("name"))
             require(key not in objects, "render")
             objects[key] = value
+    return objects
+
+
+def select_shipped(raw):
+    objects = decode_documents(raw)
     crd = objects.get(("CustomResourceDefinition", CRD), {})
     require(crd.get("spec", {}).get("names", {}).get("kind") == "KarsCredentialGrant"
             and crd["spec"].get("scope") == "Namespaced", "render")
