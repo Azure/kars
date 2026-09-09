@@ -23,14 +23,14 @@ mod auth_config;
 mod auth_config_reconciler;
 mod backoff;
 mod config_hash;
+#[path = "../../shared/constant_time.rs"]
+mod constant_time;
 mod crd;
 #[allow(dead_code)]
 // CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
 mod crd_validations;
 mod credential_grant;
 mod credential_grants;
-#[path="../../shared/service_observer.rs"]
-mod service_observer;
 mod credential_source;
 mod egress_allowlist_compile;
 mod egress_approval;
@@ -70,12 +70,19 @@ mod mcp_server_reconciler;
 mod mesh_peer;
 mod metrics;
 mod metrics_server;
+#[path = "../../shared/observation_privacy.rs"]
+mod observation_privacy;
 mod pairing;
 mod pairing_reconciler;
 mod policy_canonical;
 mod policy_fetcher;
+mod privacy_rpc;
+#[path = "../../shared/private_tls.rs"]
+mod private_tls;
 mod providers;
 mod reconciler;
+#[path = "../../shared/service_observer.rs"]
+mod service_observer;
 mod signer_policy;
 mod sre_authority;
 #[path = "../../shared/sre_privacy.rs"]
@@ -141,6 +148,7 @@ async fn main() -> Result<()> {
     );
 
     let client = Client::try_default().await?;
+    privacy_rpc::start(client.clone());
 
     // S7.E: Prometheus + health server. Default ON; opt out via
     // `CONTROLLER_METRICS_ADDR=disabled` (or empty). Failures here are

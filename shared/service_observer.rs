@@ -13,7 +13,6 @@ pub const STATUS_FIELD: &str = "serviceObservation";
 pub const TLS_SECRET: &str = "router-services-observer-identity";
 pub const TLS_DIRECTORY: &str = "/etc/kars/observation-identity";
 pub const PORT: u16 = 9447;
-pub const ACTIVE_PRIVACY_UNAVAILABLE: &str = "Private observations with active SRE require an isolated live privacy verifier; status-only proof and ambient Secret inventory access are not authority";
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -44,6 +43,12 @@ pub struct Binding {
     pub privacy_epoch: Option<String>,
     pub server_name: String,
     pub ca_pem: String,
+    #[serde(default)]
+    pub workspace_uid: String,
+    #[serde(default)]
+    pub expires_at: i64,
+    #[serde(default)]
+    pub verifier: Option<crate::observation_privacy::Endpoint>,
 }
 
 impl Binding {
@@ -73,5 +78,11 @@ impl Binding {
             && self.server_name.ends_with(".kars.internal")
             && name(&self.server_name, 253)
             && self.ca_pem.starts_with("-----BEGIN CERTIFICATE-----")
+            && name(&self.workspace_uid, 128)
+            && self.expires_at > 0
+            && self
+                .verifier
+                .as_ref()
+                .is_some_and(|endpoint| endpoint.valid(0))
     }
 }

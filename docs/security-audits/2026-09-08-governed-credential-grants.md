@@ -37,7 +37,111 @@ this repository.
 
 ## Current validation
 
-### 2026-09-09 public-parent forward — qualified core code, lease released
+### 2026-09-09 approved core privacy RPC — implemented and core-qualified
+
+The user selected `observation_verifier=core-privacy-rpc`. The former active-SRE
+architecture blocker is **closed in code**, without widening Secret-read
+permissions or adding another Kubernetes credential/sidecar/proxy.
+
+The existing controller now has a separate authenticated TLS listener on 9448,
+with exactly one read-only verification operation. It derives canonical target
+lookups, validates the current observer Secret/token/UID/resourceVersion and
+full identity/purpose/expiry, rechecks declared recipient/workspace/runtime/
+Sandbox/grant identities and name holds, and executes the full `privacy_epoch`
+contract for each request. It also checks current registration/private-SA
+identity and actual denied access to the verifier's private TLS material by
+legacy SRE, declared recipients and the runtime agent identity.
+
+The router pins a live core-owned descriptor, Service/namespace/controller
+identity, CA and UID hostname. It makes a fresh bounded TLS request with a
+256-bit nonce and request digest, and accepts only a matching operation,
+target, scope, version and epoch proof. It neither caches positive proofs nor
+reuses an HTTP connection across RPCs. A local scope reset during verification
+rejects the old proof. Generic denials reveal no aliases, values, token, key or
+backend diagnostic; arbitrary Secret/URL, mutation and token-mint surfaces do
+not exist.
+
+Core issues its own TLS material with the existing provider, advertises only
+running revision-qualified Pods, and revision-selects the canonical Service.
+Recreated/rotated TLS material changes the binding even with identical content.
+Observer credentials are explicitly expiring and renew ahead of expiry without
+a rollout every reconciliation. Only verifier-backed `Scope` discovery is
+allowed during `Prepared`; learned data requires `Ready`. A real TLS
+Pod→ReplicaSet→Deployment capability probe checks for the new router marker.
+Pending readiness is not handled as destructive revocation.
+
+The chart is opt-in and old/reused values default safely to disabled. Scoped
+runtime/controller policies require existing isolation and do not introduce a
+blanket BFF egress policy. Metrics 9091 remains separate and does not receive
+the bearer. Native Secret GET remains name-authorized RBAC; the name-hold
+protocol is retained, not represented as a UID-aware native authorizer.
+
+No new package versions were introduced: the controller now directly consumes
+the already-locked workspace `tokio-rustls` and `rustls-pemfile` used by the
+router. `Cargo.lock` only adds those existing dependency edges. The existing
+TLS transport and constant-time equality implementation are shared, with the
+SRE/handoff public entry points preserved.
+
+Core qualification under the explicit existing-target guard passed:
+
+| Filter/check | Result |
+| --- | ---: |
+| Paired `cargo check --offline --locked ... --tests` | Pass |
+| `privacy_rpc` (real TLS + canonical API/full-helper/lifecycle cases) | 11 |
+| `observation` (fresh RPC client, purpose and local-scope fences) | 16 |
+| `credential` | 97 |
+| `github` | 43 |
+| `sre_proxy::` | 11 |
+| `sre_authority::` | 29 |
+| `governed_services::continuity_tests` | 4 |
+| `constant_time` | 3 |
+| Paired strict Clippy, all targets, `-D warnings` | Pass |
+| CLI/schema/Helm regressions + CLI types | 46 tests + typecheck pass |
+
+Filters overlap. Tests include healthy active SRE; alias/admission/UID/epoch/
+version/recipient loss; expiry; qualified `None`; nonce/scope/target/purpose
+replay; no mutation/arbitrary-Secret endpoint; body/concurrency/deadline bounds;
+TLS CA/hostname rejection; material recreation; namespace isolation preflight;
+and old capability unavailability. Kind/CNI was **not** run.
+
+The core Cargo lease is **released**, with no remaining Cargo/rustc process.
+Minimum observed free space was **8.76 GiB**, above the **8.50 GiB** floor;
+release-time free space was **10.03 GiB**. No cleanup of the shared target,
+new target/feature variant, network install, image/Docker, cloud/H100, private
+BFF Rust or public push occurred.
+
+The private BFF source now requires the new verifier marker and unexpired
+binding. Its additional Rust tests are recorded but **not executed** under this
+core lease. After release, its Rust source syntax, 19 existing private chart/
+packaging tests, gateway lint and Helm lint pass; those checks are not a private
+Rust type/test qualification. Parent-coordinated private Rust/API qualification, real Kind/CNI
+acceptance and independent review remain required before publication or rollout.
+
+RPC implementation files:
+
+```text
+shared/observation_privacy.rs
+shared/private_tls.rs
+shared/constant_time.rs
+controller/src/privacy_rpc.rs
+controller/src/privacy_rpc/{authority,discovery,identity,publication}.rs
+controller/src/privacy_rpc/tests.rs
+controller/src/privacy_rpc/tests/{fixture,lifecycle,boundaries}.rs
+controller/src/credential_grants/observer_runtime.rs
+inference-router/src/observation_privacy_client.rs
+inference-router/src/observation_privacy_client/tests.rs
+deploy/helm/kars/templates/observation-privacy.yaml
+cli/src/testing/observation-privacy-contract.test.ts
+```
+
+Existing controller startup, observer issuer/metadata/network paths, read-only
+service identity helper, shared observer contract, router authorization, chart
+deployment/values and related tests are wired to these modules. The private
+adapter changes are confined to `operator_credentials.rs`,
+`observation_credential_tests.rs` and its governed-credentials documentation;
+all prior owner edits remain preserved.
+
+### Earlier public-parent forward — qualified core code, lease released
 
 Local checkpoint `45939f6b` preserves the credential closure and its first Rust
 qualification. Local merge `330113a0272ca5d12d9fd0e4e3eb40889289399d` then
@@ -241,7 +345,7 @@ is not claimed to provide UID-bound GET. A missing/replaced controller identity
 or preexisting reader Role without pinned provenance requires explicit operator
 recovery rather than silently adopting it.
 
-### Required architecture decision: active-SRE observation privacy
+### Historical architecture decision (now implemented above)
 
 `privacy_epoch` performs a live private-SA token-alias Secret metadata inventory.
 The BFF/ordinary router identity cannot receive native Secret `list` permission
@@ -260,8 +364,9 @@ Safe bounded choices for approval are:
    with explicit review of its unavoidable raw-list authority and revocation.
 
 Neither new authority path has been silently designed into this candidate.
-Active-SRE observations, combined core Rust qualification and private BFF Rust/
-TLS/API qualification remain blockers. This is not a completed feature sign-off.
+At that checkpoint active-SRE observations and combined core qualification were
+blocked. The approved RPC and core qualification above supersede those two
+blockers; private BFF Rust/TLS/API and real cluster acceptance remain open.
 
 Rust parser checks and Helm lint have run without Cargo. Nineteen
 operator CLI/schema/v1 compatibility tests pass using the existing verified
@@ -313,9 +418,9 @@ Any author waiver on earlier publication PRs does not apply to this change.
   Further passing regressions cover pre-Ready source checks, ordinary Ready
   revocation, self-bootstrap versus ancestor readiness, UID-owned pause without
   data deletion, and retirement that cannot re-enable the legacy GitHub mount.
-- The issuer consumes the full strict `privacy_epoch` helper. Active-SRE
-  observation issuance/reuse is now explicitly unavailable pending the
-  architecture decision above; status is not treated as full live proof.
+- The approved RPC invokes the full strict `privacy_epoch` helper for active-SRE
+  observations; status is not treated as full live proof. Real cluster and
+  private BFF integration qualification remain required.
 - Native Secret GET Roles and RoleBinding subjects are name-bound. The
   observer endpoint additionally rejects stale recipient UIDs, but raw agent/
   integration-store reads cannot acquire UID semantics through that endpoint.
@@ -357,6 +462,6 @@ cargo test --offline --locked --manifest-path bff/Cargo.toml credential
 cargo clippy --offline --locked --manifest-path bff/Cargo.toml --all-targets -- -D warnings
 ```
 
-Latest release observation: 10.08 GiB available; no Cargo/rustc processes.
-Minimum latest-batch free space: 9.98 GiB (earlier batch: 9.90 GiB). No new lease is implicitly acquired by
+Latest release observation: 10.03 GiB available; no Cargo/rustc processes.
+Minimum latest-batch free space: 8.76 GiB. No new lease is implicitly acquired by
 editing documentation, formatting source, or forwarding another parent.

@@ -9,9 +9,16 @@ mod operator;
 pub(crate) mod readiness;
 pub(crate) use operator::decorate as decorate_observations;
 pub(crate) use operator::mount as mount_observations;
-mod observation_network;
+pub(crate) async fn verify_observation_writers(
+    client: &Client,
+    grant: &KarsCredentialGrant,
+) -> Result<(), String> {
+    writers::verify(client, grant).await
+}
+pub(crate) mod observation_network;
 mod observer_metadata;
 mod observer_rbac;
+mod observer_runtime;
 mod rbac;
 pub(crate) mod sources;
 mod writers;
@@ -294,13 +301,23 @@ pub(crate) async fn reconcile(client: &Client, grant: &KarsCredentialGrant) -> R
                 if writer_error.is_some() && !grant.spec.observation_targets.is_empty() {
                     Err("Observation recipient authority is unavailable".into())
                 } else if writer_error.is_some() {
-                    operator::revoke(client, grant).await
+                    operator::revoke(client, grant).await.map(|_| true)
                 } else {
                     operator::reconcile(client, &active).await
                 };
             let controls = control::reconcile(client, grant).await;
             let integration = match observations {
-                Ok(()) => controls,
+                Ok(true) => controls,
+                Ok(false) => Err(controls
+                    .err()
+                    .map(|error| {
+                        format!(
+                            "Private observations awaiting verifier/consumer readiness; {error}"
+                        )
+                    })
+                    .unwrap_or_else(|| {
+                        "Private observations awaiting verifier/consumer readiness".into()
+                    })),
                 Err(error) => {
                     let revoked = operator::revoke(client, grant).await;
                     let mut detail = match revoked {

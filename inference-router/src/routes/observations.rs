@@ -5,7 +5,7 @@ use super::AppState;
 use crate::service_observer::CAPABILITY;
 use axum::{
     Json, Router,
-    extract::{ConnectInfo, Request, State},
+    extract::{ConnectInfo, Extension, Request, State},
     http::{HeaderMap, Method, StatusCode},
     middleware::{self, Next},
     response::{IntoResponse, Response},
@@ -16,6 +16,9 @@ use std::net::SocketAddr;
 
 const SCOPE: &str = "/internal/observations/scope";
 const LEARNED: &str = "/internal/observations/egress/learned";
+
+#[derive(Clone)]
+struct VerifiedScope(String);
 
 #[cfg(test)]
 #[path = "observation_tests.rs"]
@@ -40,7 +43,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
         .layer(tower::limit::ConcurrencyLimitLayer::new(8))
 }
 
-async fn authorize(State(state): State<AppState>, request: Request, next: Next) -> Response {
+async fn authorize(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
     let Some(observer) = state.services.observer.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -54,11 +57,20 @@ async fn authorize(State(state): State<AppState>, request: Request, next: Next) 
             return (StatusCode::SERVICE_UNAVAILABLE, "Service scope unavailable").into_response();
         }
     };
+    let operation = if request.uri().path() == SCOPE {
+        crate::observation_privacy::Operation::Scope
+    } else {
+        crate::observation_privacy::Operation::Learned
+    };
     if !state.services.identity_valid
-        || observer
-            .authorized(bearer(request.headers()), &current)
-            .await
-            .is_err()
+        || !matches!(
+            tokio::time::timeout(
+                std::time::Duration::from_secs(12),
+                observer.authorized(bearer(request.headers()), &current, operation)
+            )
+            .await,
+            Ok(Ok(()))
+        )
     {
         return (
             StatusCode::FORBIDDEN,
@@ -75,30 +87,52 @@ async fn authorize(State(state): State<AppState>, request: Request, next: Next) 
             return (StatusCode::FORBIDDEN, "Observation origin is not allowed").into_response();
         }
     }
+    if !state
+        .services
+        .requests
+        .scope()
+        .is_ok_and(|scope| scope.id == current.id)
+    {
+        return (StatusCode::CONFLICT, Json(json!({"error":"stale_scope"}))).into_response();
+    }
+    request.extensions_mut().insert(VerifiedScope(current.id));
     next.run(request).await
 }
 
-async fn scope(State(state): State<AppState>) -> Response {
+async fn scope(
+    State(state): State<AppState>,
+    Extension(verified): Extension<VerifiedScope>,
+) -> Response {
     match state.services.requests.scope() {
         Ok(scope) => {
-            Json(json!({"capability":CAPABILITY,"scope_id":scope.id,"identity":scope.identity}))
+            if scope.id != verified.0 {
+                return (StatusCode::CONFLICT, Json(json!({"error":"stale_scope"})))
+                    .into_response();
+            }
+            Json(json!({"capability":CAPABILITY,"privacy_verifier":crate::observation_privacy::CAPABILITY,
+                "scope_id":scope.id,"identity":scope.identity}))
                 .into_response()
         }
         Err(_) => (StatusCode::SERVICE_UNAVAILABLE, "Service scope unavailable").into_response(),
     }
 }
 
-async fn learned(State(state): State<AppState>, headers: HeaderMap) -> Response {
+async fn learned(
+    State(state): State<AppState>,
+    Extension(verified): Extension<VerifiedScope>,
+    headers: HeaderMap,
+) -> Response {
     let current = match state.services.requests.scope() {
         Ok(scope) => scope,
         Err(_) => {
             return (StatusCode::SERVICE_UNAVAILABLE, "Service scope unavailable").into_response();
         }
     };
-    if headers
-        .get("x-kars-service-scope")
-        .and_then(|value| value.to_str().ok())
-        != Some(current.id.as_str())
+    if current.id != verified.0
+        || headers
+            .get("x-kars-service-scope")
+            .and_then(|value| value.to_str().ok())
+            != Some(current.id.as_str())
     {
         return (StatusCode::CONFLICT, Json(json!({"error":"stale_scope"}))).into_response();
     }

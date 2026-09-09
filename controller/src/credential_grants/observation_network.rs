@@ -41,6 +41,73 @@ fn matches(selector: &LabelSelector, labels: &BTreeMap<String, String>) -> bool 
         })
 }
 
+pub(crate) fn isolated(
+    policies: &[NetworkPolicy],
+    labels: &BTreeMap<String, String>,
+    direction: &str,
+) -> bool {
+    policies
+        .iter()
+        .filter(|policy| {
+            !policy
+                .metadata
+                .labels
+                .as_ref()
+                .is_some_and(|labels| labels.contains_key("kars.azure.com/observer-metadata-grant"))
+        })
+        .filter_map(|policy| policy.spec.as_ref())
+        .any(|spec| {
+            spec.pod_selector
+                .as_ref()
+                .is_none_or(|selector| matches(selector, labels))
+                && spec.policy_types.as_ref().map_or_else(
+                    || direction == "Ingress" || spec.egress.is_some(),
+                    |types| types.iter().any(|kind| kind == direction),
+                )
+        })
+}
+
+pub(super) async fn rpc_baseline(
+    client: &Client,
+    sandbox: &crate::crd::KarsSandbox,
+    runtime: &Namespace,
+    endpoint: &crate::observation_privacy::Endpoint,
+) -> Result<(), String> {
+    let controller = Api::<Namespace>::all(client.clone())
+        .get(&endpoint.namespace)
+        .await
+        .map_err(|e| api_error("Read verifier network namespace", e))?;
+    if controller.uid().as_deref() != Some(endpoint.namespace_uid.as_str())
+        || controller.metadata.deletion_timestamp.is_some()
+    {
+        return Err("Verifier network namespace changed".into());
+    }
+    for (namespace, labels) in [
+        (
+            runtime.name_any(),
+            BTreeMap::from([("kars.azure.com/sandbox".into(), sandbox.name_any())]),
+        ),
+        (
+            endpoint.namespace.clone(),
+            BTreeMap::from([
+                ("app.kubernetes.io/name".into(), "kars".into()),
+                ("app.kubernetes.io/component".into(), "controller".into()),
+            ]),
+        ),
+    ] {
+        let policies = Api::<NetworkPolicy>::namespaced(client.clone(), &namespace)
+            .list(&ListParams::default())
+            .await
+            .map_err(|e| api_error("Read approved verifier network baseline", e))?;
+        for direction in ["Ingress", "Egress"] {
+            if !isolated(&policies.items, &labels, direction) {
+                return Err("Observation verifier requires approved existing controller/runtime network isolation; no new global isolation was created".into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn peer_allows(
     peer: &NetworkPolicyPeer,
     sender_namespace: &str,

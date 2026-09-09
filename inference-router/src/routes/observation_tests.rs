@@ -33,6 +33,7 @@ struct Metadata {
     calls: Vec<(String, String, Value)>,
     allow: Option<String>,
     fail: Option<String>,
+    verifier: Option<Arc<crate::observation_privacy_client::tests::Verifier>>,
 }
 
 fn observer_token() -> String {
@@ -44,6 +45,7 @@ fn control_token() -> String {
 
 async fn fixture() -> (MockServer, AppState, Arc<Mutex<Metadata>>) {
     let server = MockServer::start().await;
+    let verifier = crate::observation_privacy_client::tests::Verifier::start().await;
     let identity: Identity = serde_json::from_value(json!({
         "sandbox":{"namespace":"workspace","name":"agent","uid":"sandbox-uid"},
         "namespace_uid":"runtime-uid","task":null,"task_authorization":null,
@@ -69,10 +71,15 @@ async fn fixture() -> (MockServer, AppState, Arc<Mutex<Metadata>>) {
         privacy_epoch: None,
         server_name: "observer-sandbox-uid.kars.internal".into(),
         ca_pem: "-----BEGIN CERTIFICATE-----test".into(),
+        workspace_uid: "workspace-uid".into(),
+        expires_at: chrono::Utc::now().timestamp() + 600,
+        verifier: Some(verifier.endpoint.clone()),
     };
     let metadata = Arc::new(Mutex::new(Metadata::default()));
     {
         let mut data = metadata.lock().unwrap();
+        data.objects.extend(verifier.objects());
+        data.verifier = Some(verifier);
         data.objects.insert(SANDBOX.into(),json!({
             "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsSandbox",
             "metadata":{"name":"agent","namespace":"workspace","uid":"sandbox-uid","resourceVersion":"1"},
@@ -83,11 +90,15 @@ async fn fixture() -> (MockServer, AppState, Arc<Mutex<Metadata>>) {
         data.objects.insert(GRANT.into(),json!({
             "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant",
             "metadata":{"name":"workspace","namespace":"workspace","uid":"grant-uid","generation":1,"resourceVersion":"1"},
-            "spec":{"enabled":true,"observationTargets":[{"kind":"KarsSandbox","namespace":"workspace","name":"agent","uid":"sandbox-uid"}]},
+            "spec":{"enabled":true,"workspaceUid":"workspace-uid","observationTargets":[{"kind":"KarsSandbox","namespace":"workspace","name":"agent","uid":"sandbox-uid"}]},
             "status":{"phase":"Ready","observedGeneration":1,
                 "conditions":[{"type":"WriterReady","status":"True","observedGeneration":1}]}
         }));
-        for (name, uid) in [("kars-agent", "runtime-uid"), ("bridge", "bridge-uid")] {
+        for (name, uid) in [
+            ("kars-agent", "runtime-uid"),
+            ("bridge", "bridge-uid"),
+            ("workspace", "workspace-uid"),
+        ] {
             data.objects.insert(format!("/api/v1/namespaces/{name}"),json!({
                 "apiVersion":"v1","kind":"Namespace","metadata":{"name":name,"uid":uid,"resourceVersion":"1"}
             }));
@@ -268,7 +279,7 @@ async fn observation_rejects_replaced_foreign_or_revoked_authority_and_stale_rol
         (
             SANDBOX,
             "/status/serviceObservation/phase",
-            json!("Prepared"),
+            json!("Retired"),
         ),
         (
             SANDBOX,

@@ -5,7 +5,7 @@
 //! Network labels select traffic; they never establish credential authority.
 
 use super::*;
-use crate::{crd::KarsSandbox, service_observer::Recipient};
+use crate::{crd::KarsSandbox, service_observer::Binding};
 use kube::{
     api::{DeleteParams, PostParams, Preconditions},
     core::{ApiResource, DynamicObject, GroupVersionKind},
@@ -109,8 +109,14 @@ pub(super) async fn ensure(
     grant: &KarsCredentialGrant,
     sandbox: &KarsSandbox,
     namespace: &Namespace,
-    recipients: &[Recipient],
+    binding: &Binding,
 ) -> Result<(), String> {
+    let recipients = &binding.recipients;
+    let verifier = binding
+        .verifier
+        .as_ref()
+        .ok_or("Privacy verifier capability missing")?;
+    super::observation_network::rpc_baseline(client, sandbox, namespace, verifier).await?;
     let uid = sandbox.uid().ok_or("Observer source UID missing")?;
     let prefix = format!(
         "kars-observer-meta-{}-{}-g{}",
@@ -129,6 +135,7 @@ pub(super) async fn ensure(
         .ok_or("Observer source workspace missing")?;
     let subject = json!([{"kind":"ServiceAccount","name":"sandbox","namespace":runtime}]);
     let mut namespaces = BTreeSet::from([runtime.clone(), workspace.clone()]);
+    namespaces.insert(verifier.namespace.clone());
     namespaces.extend(
         recipients
             .iter()
@@ -183,6 +190,31 @@ pub(super) async fn ensure(
                     .map(|recipient|json!({"kind":"ServiceAccount","name":recipient.name,"namespace":recipient.namespace})))
                 .collect::<Vec<_>>()})).await?;
     }
+    let rpc_role = format!("{prefix}-rpc");
+    apply(client,grant,Some(&verifier.namespace),"Role",&rpc_role,json!({"rules":[
+        {"apiGroups":[""],"resources":["configmaps"],"resourceNames":[crate::observation_privacy::DESCRIPTOR],"verbs":["get"]},
+        {"apiGroups":[""],"resources":["services"],"resourceNames":[crate::observation_privacy::SERVICE],"verbs":["get"]},
+        {"apiGroups":[""],"resources":["serviceaccounts"],"resourceNames":["kars-controller"],"verbs":["get"]},
+    ]})).await?;
+    apply(client,grant,Some(&verifier.namespace),"RoleBinding",&rpc_role,json!({
+        "roleRef":{"apiGroup":"rbac.authorization.k8s.io","kind":"Role","name":rpc_role},"subjects":subject
+    })).await?;
+    let runtime_peer = json!({"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":runtime}},
+        "podSelector":{"matchLabels":{"kars.azure.com/sandbox":sandbox.name_any()}}});
+    let controller_peer = json!({"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":verifier.namespace}},
+        "podSelector":{"matchLabels":{"app.kubernetes.io/name":"kars","app.kubernetes.io/component":"controller",
+            crate::observation_privacy::REVISION_LABEL:verifier.revision()}}});
+    apply(client,grant,Some(&runtime),"NetworkPolicy",&format!("{prefix}-rpc"),json!({"spec":{
+        "podSelector":{"matchLabels":{"kars.azure.com/sandbox":sandbox.name_any()}},"policyTypes":["Ingress","Egress"],
+        "egress":[{"to":[controller_peer],"ports":[{"protocol":"TCP","port":crate::observation_privacy::PORT}]}],
+        "ingress":[{"from":[controller_peer],"ports":[{"protocol":"TCP","port":crate::service_observer::PORT}]}],
+    }})).await?;
+    apply(client,grant,Some(&verifier.namespace),"NetworkPolicy",&format!("{prefix}-rpc"),json!({"spec":{
+        "podSelector":{"matchLabels":{"app.kubernetes.io/name":"kars","app.kubernetes.io/component":"controller"}},
+        "policyTypes":["Ingress","Egress"],
+        "ingress":[{"from":[runtime_peer],"ports":[{"protocol":"TCP","port":crate::observation_privacy::PORT}]}],
+        "egress":[{"to":[runtime_peer],"ports":[{"protocol":"TCP","port":crate::service_observer::PORT}]}],
+    }})).await?;
     apply(client,grant,Some(&runtime),"NetworkPolicy",&prefix,json!({"spec":{
         "podSelector":{"matchLabels":{"kars.azure.com/sandbox":sandbox.name_any()}},"policyTypes":["Ingress"],
         "ingress":recipients.iter().map(|recipient|json!({"from":[{"namespaceSelector":{"matchLabels":{

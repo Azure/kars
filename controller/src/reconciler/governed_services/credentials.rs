@@ -122,7 +122,7 @@ impl Projection {
     }
 }
 
-fn validate(
+pub(crate) fn validate(
     secret: &Secret,
     source_uid: &str,
     namespace: &Namespace,
@@ -185,7 +185,7 @@ fn validate(
     Ok(())
 }
 
-fn current(secret: &Secret, epoch: Option<&str>) -> bool {
+pub(crate) fn current(secret: &Secret, epoch: Option<&str>) -> bool {
     let annotations = secret.metadata.annotations.as_ref();
     if annotations.is_some_and(|annotations| annotations.contains_key(RETIRED)) {
         return false;

@@ -68,14 +68,74 @@ to the selected runtime namespace and Sandbox Pods. The private chart's
 of **existing** isolation, and accepts only explicitly reviewed target namespace
 names. It does not replace the existing API/provider/OIDC/GitHub egress baseline.
 
-**Active-SRE observation remains unavailable pending a privacy-verifier
-architecture decision.** The issuer still calls the full `privacy_epoch`
-contract, but the ordinary router identity cannot safely repeat its private
-Secret metadata scan: Kubernetes `list` permission also authorizes full Secret
-values. Both issuance and runtime reuse therefore reject a nonempty SRE epoch.
-Absent/fully retired registration continues to require live GET/LIST/WATCH
-denials. Pending SRE migration still does not retire its unfinished rollout.
-No status-only success or ambient Secret inventory permission is substituted.
+### Controller privacy verification RPC
+
+Enable the approved core verifier explicitly:
+
+```yaml
+observationPrivacyRpc:
+  enabled: true
+```
+
+The default is off, including upgrades with old reused values. This neither
+changes standalone/unbounded agents nor requires Bridge to be installed.
+Observations require the declared verifier capability; an old/disabled
+controller is unavailable, never an invitation to use legacy admin credentials.
+
+The existing controller serves only authenticated
+`POST /internal/observations/verify-privacy` over private TLS TCP 9448.
+It calls the **full `privacy_epoch` helper on every request**, including active
+SRE admission, identity and private token-alias inventory. It also rechecks the
+registration/private SA identity and real GET/LIST/WATCH denial for the RPC's
+TLS material. No raw Secret read/list permission or additional Kubernetes
+credential is granted to the BFF, router or agent.
+
+The existing observation bearer is explicitly scoped to this read-only
+verification protocol. The controller derives the only credential lookup from
+the verified Sandbox: `kars-<sandbox>/router-services-observer`. It checks that
+Secret's current UID/resourceVersion, ownership, purpose, token and configuration,
+not merely status. The request binds actual workspace/Sandbox/runtime UIDs,
+grant UID/generation, all declared recipient SA/namespace UIDs, canonical service
+identity, local scope, operation, verifier identity and a fresh 256-bit nonce.
+This is **not** a claim that an opaque token authenticates a Pod or audience.
+
+Successful responses contain only allow/proof metadata, a request digest,
+nonce and qualified epoch. Denials are generic and contain no token, alias name,
+Secret data or backend diagnostic. Pending/error/timeout, a wrong epoch,
+expired credential or replaced identity denies access. Qualified `None` is
+accepted only through the real no-registration/retired privacy contract.
+Each observation fetches a new proof; no positive proof or HTTP connection is
+cached between RPCs. Replies are checked against the current local scope after
+the request, so replay across nonce/target/version/scope/operation cannot grant
+authority. The endpoint bounds bodies to 32 KiB, concurrency to four and the
+entire verification to eight seconds.
+
+Core issues the verifier certificate with the existing TLS provider and keeps
+it in the fixed core-owned Secret `kars-observation-privacy-tls`. Its public
+descriptor ConfigMap and canonical Service are both named
+`kars-observation-privacy` in the configured controller namespace. Clients check
+live descriptor/Service/namespace/controller identities, pin the issued CA and
+namespace-UID hostname, and resolve only the verified Service ClusterIP.
+Redirects, ambient proxies/trust roots and plaintext metrics-port transport are
+not used. The shared TLS transport uses already-locked workspace libraries,
+without adding package versions or a separate credential/sidecar.
+
+Only a running controller advertises the current TLS revision on its Pod. The
+Service selector follows that revision; old binaries do not acquire a ready
+endpoint through chart labels alone. Certificate/Secret recreation or rotation
+changes the descriptor and observation binding even when material is identical.
+The observation token expires within one hour and is renewed ahead of expiry
+without rotating it on every reconciliation.
+
+Per-target additive NetworkPolicies permit runtime-to-controller TCP 9448 and
+the controller's reverse capability probe on runtime TCP 9447. Existing approved
+controller/runtime ingress and egress isolation is required first; no blanket
+BFF egress policy is created. The BFF's separately approved TCP 9447 path remains
+unchanged. `Prepared` permits only verifier-backed scope discovery, allowing
+bootstrap without a Ready cycle. Learned data remains unavailable until the
+controller verifies current Pod→ReplicaSet→Deployment lineage and the live TLS
+scope response declares the new verifier. Failed/Pending probes preserve the
+unfinished rollout rather than destroying it.
 
 ## Operator workflow
 
@@ -237,9 +297,9 @@ contract is not permission to publish that application or its images.
 
 The new name-continuity admission/lifecycle code passes targeted core Rust tests
 and strict Clippy, but still requires real Kubernetes qualification, including deletion/status/finalize, inherited RBAC,
-controller leadership/restart and delayed Role deletion. Active-SRE observations
-require either a purpose-only core privacy RPC or a separately protected private
-metadata-verifier identity; neither architecture is silently added by this
-candidate. TLS, CA integrity, projected private volumes, Kubernetes admission
+controller leadership/restart and delayed Role deletion. The approved purpose-only
+core privacy RPC now supplies active-SRE verification; real Kind/CNI acceptance
+of its network path and private BFF Rust/API qualification remain required.
+TLS, CA integrity, projected private volumes, Kubernetes admission
 and control-plane integrity remain trust dependencies. Do not claim complete
 end-to-end UID/privacy qualification yet.
