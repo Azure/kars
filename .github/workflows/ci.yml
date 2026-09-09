@@ -6,7 +6,13 @@ on:
   pull_request:
     branches: [main, dev, kars-bridge, 'public/pr*']
   workflow_call:      # allow reuse from release.yml
-  workflow_dispatch:  # manual trigger
+  workflow_dispatch:
+    inputs:
+      e2e_suite:
+        description: Independent standalone coverage never replaces the full E2E gate
+        type: choice
+        options: [full, standalone-governed]
+        default: full
 
 permissions:
   contents: read
@@ -416,7 +422,7 @@ jobs:
           version: v1.30.5
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Check public-schema diagnostic privacy
-        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test credential_schema_test
+        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test credential_schema_test standalone_governed_test
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
       - name: Prove native historical Helm wait orders CRDs before hooks and permits schema upgrades
@@ -637,7 +643,7 @@ jobs:
       - run: cargo test --package kars-chaos-tests --features chaos --tests --no-fail-fast
 
   e2e-kind:
-    name: E2E (Kind)
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.e2e_suite == 'standalone-governed' && 'Standalone governed services (Kind)' || 'E2E (Kind)' }}
     needs: [changes, build-rust]
     # Phase 3 S4: closes the audit gap "make test-e2e is not in CI".
     # Runs on every push to dev/main, manual dispatch, and PRs that
@@ -773,6 +779,7 @@ jobs:
       - name: Run e2e
         if: steps.paths.outputs.run == 'true'
         env:
+          KARS_E2E_SUITE: ${{ github.event_name == 'workflow_dispatch' && inputs.e2e_suite || 'full' }}
           # The harness honours this to default to OpenClaw if unset;
           # the variable is plumbed through for future runtime matrix
           # expansion (Phase 3 S4 follow-up).
@@ -788,7 +795,11 @@ jobs:
           KARS_E2E_SKIP_IMAGE_BUILD: "1"
         run: |
           set -euo pipefail
-          make test-e2e
+          case "$KARS_E2E_SUITE" in
+            full) make test-e2e ;;
+            standalone-governed) bash tests/e2e/standalone-governed.sh ;;
+            *) echo "Unsupported E2E qualification suite" >&2; exit 2 ;;
+          esac
 
       - name: Collect cluster diagnostics on failure
         if: failure() && steps.paths.outputs.run == 'true'

@@ -172,6 +172,17 @@ install_crds() {
         --set-string "foundry.endpoint=https://e2e-fake.invalid/"
         --set-string "foundry.projectEndpoint=https://e2e-fake.invalid/"
     )
+    case "${1:-full}" in
+        full) ;;
+        standalone-governed)
+            if [ "$SRE_LEGACY_PREPARED" != "0" ]; then
+                warn "Standalone installation refuses prepared SRE authority"
+                return 1
+            fi
+            extra_set_args+=(--set sre.enabled=false)
+            ;;
+        *) warn "Unknown E2E installation mode"; return 1 ;;
+    esac
     if [ "$disable_le" = "1" ] || [ "$disable_le" = "true" ]; then
         # `--set-string` is mandatory here: K8s pod spec requires env
         # `value` to be a string, but `--set value=false` would render
@@ -3178,4 +3189,6 @@ main() {
     fi
 }
 
-main "$@"
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    main "$@"
+fi
