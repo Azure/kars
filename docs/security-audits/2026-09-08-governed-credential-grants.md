@@ -58,9 +58,28 @@ CRD; no fields or assertions are excluded.
 
 Local qualification passed all 30 Helm drift cases, 17 CNCF criteria cases,
 84 controller credential cases, strict paired all-target Clippy, and 16 CLI
-credential/observer contract cases. Native namespace-UID positive/negative
-execution and fresh full hosted qualification remain outstanding. This is not
-an audit signature or complete admission/CNI acceptance.
+credential/observer contract cases. At `f8d641f6`, native job `102629811011`
+subsequently passed source-writes 201/403/201, privacy-material 201/422/201 and
+privacy-Pod 201/403/201 cases, canonical/noncanonical grant cases and cleanup.
+The unchanged all-policy controller Pod bootstrap also passed. These are native
+expression checks using explicit impersonation of actual ServiceAccount UIDs,
+not bearer authentication or complete BFF/grant/CNI acceptance.
+
+The broader native API suite then exposed three additional type-check issues:
+the enrolled-store predicate combined byte-valued and string-valued maps,
+the rebind predicate compared a statically declared string with its nullable
+wire value, and the cross-kind exposure policy referenced kind-specific fields.
+The candidate combines only Secret key lists, preserves the exact nullable
+digest comparison using `dyn`, and keeps kind-specific field access behind the
+existing kind guards. Store UID/purpose/key restrictions, current paused
+generation and Ready=False requirements, exposure resource/namespace selectors,
+denial reasons, and Fail/Deny enforcement remain unchanged.
+
+Seventeen CLI contract cases and Helm rendering pass for these additional
+repairs. Their native positive/negative/type-check qualification remains
+outstanding. Full Rust and CodeQL passed at `f8d641f6`; complete SRE migration
+and the separate controller-only observer streaming compilation repair remain
+separate gates. No result here supplies a human audit signature.
 
 Separately, the owner explicitly approved false-positive disposition of only
 CodeQL alert 804. Its sink is test-only local fixture path injection; production
