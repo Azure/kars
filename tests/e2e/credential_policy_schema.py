@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Bounded hosted Kind regression for three shipped admission type-check repairs.
+"""Bounded hosted Kind regression for credential authority and policy repairs.
 
 Uses disposable admin expression fixtures, not controller bearer authentication.
 Controlled Task status is NOT proof of workload quiescence. No controller, Pod,
@@ -33,14 +33,16 @@ POLICIES = {
     "store": "kars-credential-enrolled-store-shape",
     "rebind": "kars-credential-rebind-authority",
     "exposure": "kars-no-public-router-exposure",
+    "authority": "kars-credential-grant-authority",
 }
 TEMPLATES = ("credential-store-admission.yaml", "credential-rebind-admission.yaml",
              "admission-no-public-router-exposure.yaml", "crd-karscredentialgrant.yaml",
-             "crd-karstask.yaml")
+             "crd-karstask.yaml", "credential-grant-admission.yaml")
 STORE_ANNOTATION = "kars.azure.com/credential-store-grant-uid"
 PENDING = "kars.azure.com/credential-rebind-pending"
 REPORT = "e2e-sre-schema-diag/credential-policy-typechecking.json"
 CASES = {"render", "fixtures", "controller-free", "grant-schema", "task-schema",
+         "grant-primary", "grant-primary-update", "grant-status",
          "store-enroll", "store-unchanged", "task-status", "task-unchanged",
          "exposure-unpersisted", "cleanup", "deadline", "complete"}
 CASES.update(f"{key}-policy" for key in POLICIES)
@@ -123,7 +125,7 @@ def select_shipped(raw):
         validations = spec.get("validations", [])
         require(policy.get("apiVersion") == "admissionregistration.k8s.io/v1"
                 and spec.get("failurePolicy") == "Fail" and len(bindings) == 1
-                and len(validations) == (1 if key == "store" else 3)
+                and len(validations) == {"store": 1, "rebind": 3, "exposure": 3, "authority": 4}[key]
                 and all(isinstance(v.get("expression"), str) and v["expression"].strip()
                         and isinstance(v.get("message"), str) and v["message"]
                         and v.get("reason", "Invalid") in ("Invalid", "Forbidden")
@@ -313,13 +315,28 @@ def prove_store(port, owned, namespace, namespace_uid, policy, results):
     path = f"/api/v1/namespaces/{namespace}/secrets"
     stored = owned.create(path, {"apiVersion": "v1", "kind": "Secret", "type": "Opaque",
         "metadata": {"name": "kars-foundry-credentials", "namespace": namespace}})
-    grant = owned.create(f"/apis/kars.azure.com/v1alpha1/namespaces/{namespace}/karscredentialgrants", {
+    grant_path = f"/apis/kars.azure.com/v1alpha1/namespaces/{namespace}/karscredentialgrants"
+    grant = owned.create(grant_path, {
         "apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsCredentialGrant",
         "metadata": {"name": "workspace", "namespace": namespace},
         "spec": {"workspaceUid": namespace_uid, "enabled": True, "writers": [],
                  "integrationStores": [{"purpose": "foundry", "secret": {
                      "name": stored["metadata"]["name"],
-                     "uid": stored["metadata"]["uid"]}}]}})
+                     "uid": stored["metadata"]["uid"]}}]}}, "grant-primary")
+    results.append(evidence("grant-primary", 201, "accepted"))
+    primary = copy.deepcopy(grant)
+    primary["metadata"]["annotations"] = {"kars.azure.com/admission-proof": "fixture"}
+    code, grant = request(port, "PUT", grant_path + "/workspace", primary)
+    require(accepted(code, grant, primary, "PUT") and grant.get("spec") == primary["spec"],
+            "grant-primary-update", code, "native-error")
+    results.append(evidence("grant-primary-update", code, "accepted"))
+    status = copy.deepcopy(grant)
+    status["status"] = {"phase": "AdmissionFixture",
+                        "observedGeneration": grant["metadata"]["generation"]}
+    code, grant = request(port, "PUT", grant_path + "/workspace/status", status)
+    require(accepted(code, grant, status, "PUT") and grant.get("status") == status["status"]
+            and grant.get("spec") == status["spec"], "grant-status", code, "native-error")
+    results.append(evidence("grant-status", code, "accepted"))
     path += "/" + stored["metadata"]["name"]
     enrolled = copy.deepcopy(stored)
     enrolled["metadata"]["annotations"] = {STORE_ANNOTATION: grant["metadata"]["uid"]}

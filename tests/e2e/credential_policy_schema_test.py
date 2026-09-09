@@ -40,7 +40,7 @@ def documents():
             "matchConditions": [{"name": "unchanged", "expression": "true"}],
             "variables": [{"name": "unchanged", "expression": "true"}],
             "validations": [{"expression": "true", "message": f"Unit invariant {key} {index}"}
-                            for index in range(1 if key == "store" else 3)]}
+                            for index in range({"store": 1, "rebind": 3, "exposure": 3, "authority": 4}[key])]}
         binding = {"policyName": name, "validationActions": ["Deny", "Audit"]}
         if key == "store":
             spec["paramKind"] = {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsCredentialGrant"}
@@ -206,7 +206,7 @@ class CredentialPolicySchemaTests(unittest.TestCase):
         with patch.object(schema, "command", side_effect=run) as command:
             schema.render(Path("."), NAMESPACE, "v1.31.0")
         helm, kubectl = command.call_args_list
-        self.assertEqual(helm.args[1].count("--show-only"), 5)
+        self.assertEqual(helm.args[1].count("--show-only"), 6)
         self.assertEqual(helm.args[1][0], "helm")
         self.assertIn("--kube-version", helm.args[1])
         for template in schema.TEMPLATES:
@@ -345,7 +345,7 @@ class CredentialPolicySchemaTests(unittest.TestCase):
         with fixture_transport(api), patch.object(schema, "render", return_value=selected()), \
              contextlib.redirect_stdout(io.StringIO()):
             schema.exercise(Path("."), 1, "v1.31.0", TOKEN, results)
-        self.assertEqual(len(results), 41)
+        self.assertEqual(len(results), 45)
         self.assertEqual(len([r for r in results if r["category"] == "intended-denial"]), 18)
         self.assertEqual(api.objects, {})
         self.assertEqual(results[-1], {"case": "cleanup", "httpStatus": 0, "category": "cleaned"})
@@ -362,6 +362,8 @@ class CredentialPolicySchemaTests(unittest.TestCase):
         self.assertEqual(store["purpose"], "foundry")
         self.assertTrue(store["secret"]["uid"].startswith("native-uid-"))
         self.assertEqual(set(store["secret"]), {"name", "uid"})
+        self.assertEqual({row["case"] for row in results if row["case"].startswith("grant-")},
+                         {"grant-schema", "grant-primary", "grant-primary-update", "grant-status"})
         self.assertNotIn(schema.STORE_ANNOTATION, creates[secret_index][1]["metadata"].get("annotations", {}))
         statuses = []
         for method, path, obj in api.calls:
@@ -386,6 +388,28 @@ class CredentialPolicySchemaTests(unittest.TestCase):
         self.assertEqual(statuses[4]["executionPhase"], "Running")
         self.assertEqual(statuses[5]["observedGeneration"], 0)
         self.assertEqual(statuses[6]["conditions"][0]["status"], "True")
+
+    def test_primary_grant_failure_is_fatal_without_preseeding_or_bypassing_authority(self):
+        api = FixtureAPI()
+        original = api.request
+
+        def blocked(port, method, path, obj=None):
+            if method == "POST" and obj and obj.get("kind") == "KarsCredentialGrant":
+                return 422, {"kind": "Status", "message": PRIVATE}
+            return original(port, method, path, obj)
+
+        api.request = blocked
+        output = io.StringIO()
+        with fixture_transport(api), patch.object(schema, "render", return_value=selected()), \
+             contextlib.redirect_stdout(output), self.assertRaises(schema.Failure) as failure:
+            schema.exercise(Path("."), 1, "v1.31.0", TOKEN, [])
+        self.assertEqual(failure.exception.case, "grant-primary")
+        self.assertEqual(failure.exception.code, 422)
+        self.assertEqual(failure.exception.category, "native-error")
+        self.assertEqual(api.objects, {})
+        self.assertNotIn(PRIVATE, output.getvalue())
+        self.assertFalse(any(method == "PUT" and "/karscredentialgrants/" in path
+                             for method, path, _ in api.calls))
 
     def test_unchanged_detects_dry_run_mutation_and_positive_cannot_mask_denials(self):
         original = {"metadata": {"uid": "actual", "resourceVersion": "1"}}

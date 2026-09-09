@@ -76,10 +76,22 @@ generation and Ready=False requirements, exposure resource/namespace selectors,
 denial reasons, and Fail/Deny enforcement remain unchanged.
 
 Seventeen CLI contract cases and Helm rendering pass for these additional
-repairs. Their native positive/negative/type-check qualification remains
-outstanding. Full Rust and CodeQL passed at `f8d641f6`; complete SRE migration
-and the separate controller-only observer streaming compilation repair remain
+repairs. Native job `102672351688` at `9caf91ed` passed all 42 policy evidence
+records, including accepted and forbidden Secret representations, nullable
+paused-authority cases and exposure checks. Full Rust and CodeQL passed at
+`f8d641f6`. Isolated controller compilation subsequently passed at `4b24d9c5`;
+the three observer-body cases passed on equivalent source at `df4c5932`.
+Complete SRE migration, benchmark performance and full BFF/CNI lifecycle remain
 separate gates. No result here supplies a human audit signature.
+
+The full-chart native BFF run then exposed an omitted-field error on primary
+grant creation: Kubernetes omits empty `request.subResource`. Admission now
+normalizes only that absence to the empty primary-resource name, retaining
+explicit status, token and finalize handling. The native policy probe now also
+installs the actual grant-authority policy before exercising primary creation,
+metadata updates and status updates; it does not pre-seed around admission.
+All 75 unit/harness and 17 CLI contract cases pass. The expanded native proof
+and real delegated-controller lifecycle remain pending, not waived.
 
 Separately, the owner explicitly approved false-positive disposition of only
 CodeQL alert 804. Its sink is test-only local fixture path injection; production
