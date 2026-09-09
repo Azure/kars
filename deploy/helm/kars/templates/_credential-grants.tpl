@@ -23,7 +23,7 @@ properties:
 {{- end -}}
 {{- define "kars.credentialTargetSchema" -}}
 type: object
-required: [kind, namespace, name, uid]
+required: [kind, name, namespace, uid]
 properties:
   kind: {type: string, enum: [KarsSandbox, KarsTask, KarsTeam]}
   namespace: {type: string, minLength: 1, maxLength: 63}
@@ -31,6 +31,7 @@ properties:
   uid: {type: string, minLength: 1, maxLength: 128}
 {{- end -}}
 {{- define "kars.credentialBindingsSchema" -}}
+description: Explicit governed credential sources and key grants; included in task authority.
 type: object
 required: [grant, sources]
 properties:
@@ -42,7 +43,7 @@ properties:
     maxItems: 3
     items:
       type: object
-      required: [scope, source, keys]
+      required: [keys, scope, source]
       properties:
         scope: {type: string, enum: [workspace, team, target]}
         source:
@@ -56,7 +57,7 @@ properties:
 {{- end -}}
 {{- define "kars.githubBindingSchema" -}}
 type: object
-required: [grant, connection, repositories]
+required: [connection, grant, repositories]
 properties:
   grant:
     {{- include "kars.credentialIdentitySchema" . | nindent 4 }}

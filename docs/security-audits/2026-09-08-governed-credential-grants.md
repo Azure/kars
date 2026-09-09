@@ -37,6 +37,37 @@ this repository.
 
 ## Current validation
 
+### Native admission and generated-schema repair
+
+The full hosted run at `80cffb63` exposed additional issues: creation of
+`kars-credential-source-writes` failed CEL compilation; the new grant lacked
+its standard CRD label/CEL coverage; Task/Team drift checks parsed unrendered
+Helm includes rather than the shipped schema.
+
+Kubernetes 1.31 and 1.34 declare `NamespaceMetadata.UID` in the CEL type but
+convert the runtime namespace to JSON with `metadata.uid`. The three affected
+policies now select `dyn(namespaceObject.metadata).uid`, preserving the exact
+native UID equality without a fallback. Merely changing the selector to
+uppercase would leave runtime evaluation broken.
+
+The grant now carries the standard application label and a root CEL rule
+requiring its canonical `workspace` name. Generated Task/Team credential and
+GitHub binding schemas match the existing bounded Helm schema. Drift checks
+render templates that use includes and still compare the complete canonical
+CRD; no fields or assertions are excluded.
+
+Local qualification passed all 30 Helm drift cases, 17 CNCF criteria cases,
+84 controller credential cases, strict paired all-target Clippy, and 16 CLI
+credential/observer contract cases. Native namespace-UID positive/negative
+execution and fresh full hosted qualification remain outstanding. This is not
+an audit signature or complete admission/CNI acceptance.
+
+Separately, the owner explicitly approved false-positive disposition of only
+CodeQL alert 804. Its sink is test-only local fixture path injection; production
+opens the fixed mounted configuration path. The reported source is server-owned
+Axum State. Evidence is recorded in PR554 comment `5607765226`; no query,
+security check, audit-signature requirement or other alert was waived.
+
 ### Cross-layer repair core qualification — passed, lease released
 
 Immutable qualified code head:
