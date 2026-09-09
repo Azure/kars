@@ -54,10 +54,11 @@ spec:
         kars.azure.com/isolated: strict
   validations:
     # Service: LoadBalancer / NodePort forbidden in sandbox namespaces.
+    # Keep kind guards; these spec fields do not exist on every matched kind.
     - expression: |
         !(object.kind == "Service" && (
-          object.spec.?type.orValue("ClusterIP") == "LoadBalancer" ||
-          object.spec.?type.orValue("ClusterIP") == "NodePort"
+          dyn(object.spec).?type.orValue("ClusterIP") == "LoadBalancer" ||
+          dyn(object.spec).?type.orValue("ClusterIP") == "NodePort"
         ))
       message: "Sandbox namespaces forbid LoadBalancer/NodePort Services. A2A ingress goes through kars-a2a-gateway only (ADR-0001 D2)."
       reason: Forbidden
@@ -70,7 +71,7 @@ spec:
     # NetworkPolicy ingress from 0.0.0.0/0 or ::/0 is implicitly public.
     - expression: |
         !(object.kind == "NetworkPolicy" &&
-          object.spec.?ingress.orValue([]).exists(rule,
+          dyn(object.spec).?ingress.orValue([]).exists(rule,
             rule.?from.orValue([]).exists(peer,
               peer.?ipBlock.?cidr.orValue("") == "0.0.0.0/0" ||
               peer.?ipBlock.?cidr.orValue("") == "::/0"
