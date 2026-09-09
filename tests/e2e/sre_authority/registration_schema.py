@@ -111,10 +111,10 @@ def command(stage, args, *, root, data=None):
     return result.stdout
 
 
-def request(port, method, path, obj=None):
+def request(port, method, path, obj=None, *, content_type="application/json"):
     body = None if obj is None else json.dumps(obj).encode()
     req = Request(f"http://127.0.0.1:{port}{path}", data=body, method=method,
-                  headers={"Content-Type": "application/json", "Accept": "application/json"})
+                  headers={"Content-Type": content_type, "Accept": "application/json"})
     opener = build_opener(ProxyHandler({}))
     try:
         response = opener.open(req, timeout=15)

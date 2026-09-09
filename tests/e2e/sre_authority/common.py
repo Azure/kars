@@ -73,6 +73,7 @@ def command_error_category(stderr):
                              ("unknown flag", "cli-argument"),
                              ("required value", "required-field"),
                              ("no matches for kind", "api-discovery"),
+                             ("conflict occurred while applying object", "server-side-apply-conflict"),
                              ("the server doesn't have a resource type", "api-discovery"),
                              ("timed out waiting", "wait-timeout")):
         if needle in text:

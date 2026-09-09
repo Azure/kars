@@ -13,6 +13,7 @@ from sre_authority.legacy_crds import (
     CRDS, GROUP_VERSION, IDENTITIES, bootstrap_legacy_crds, render_legacy_crds, validate_rendered_crds,
 )
 from sre_authority.registration_schema import CRD_NAME
+from sre_authority.legacy_crd_probe import conflict_report
 
 
 def historical_objects():
@@ -61,8 +62,8 @@ class FixtureHarness:
             raise AssertionError(f"HTTP {code}")
         return types.SimpleNamespace(status_code=code, json=lambda: body)
 
-    def create(self, obj):
-        self.events.append(("create", obj))
+    def create(self, obj, *, manager):
+        self.events.append(("create", obj, manager))
         if self.create_failure:
             raise AssertionError("HTTP 409")
 
@@ -156,6 +157,7 @@ class LegacyCRDTests(unittest.TestCase):
                          [CRD_NAME] + names)
         creates = [event[1] for event in h.events if event[0] == "create"]
         self.assertEqual(len(creates), 18)
+        self.assertTrue(all(event[2] == "helm" for event in h.events if event[0] == "create"))
         for original, created in zip(originals, creates):
             self.assertNotIn("annotations", original["metadata"])
             self.assertEqual(created["spec"], original["spec"])
@@ -238,6 +240,15 @@ class LegacyCRDTests(unittest.TestCase):
         with self.assertRaisesRegex(AssertionError, "bounded discovery deadline"):
             self.bootstrap(h)
         self.assertFalse(any(event[0] == "passed" for event in h.events))
+
+    def test_field_manager_evidence_requires_actual_conflict_without_echoing_bodies(self):
+        body = {"kind": "Status", "reason": "Conflict", "message": "must-not-log",
+                "details": {"causes": [{"reason": "FieldManagerConflict", "message": "must-not-log"}]}}
+        self.assertEqual(conflict_report(409, body), {"httpStatus": 409, "fieldManagerConflict": True})
+        for code, invalid in ((200, body), (403, body), (409, {}), (409, None),
+                              (409, {**body, "reason": "Forbidden"})):
+            self.assertFalse(conflict_report(code, invalid)["fieldManagerConflict"])
+            self.assertNotIn("must-not-log", str(conflict_report(code, invalid)))
 
 
 if __name__ == "__main__":
