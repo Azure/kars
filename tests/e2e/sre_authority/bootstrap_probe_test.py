@@ -182,6 +182,73 @@ class BootstrapProofTests(unittest.TestCase):
                 deployment_controller_cases(1, POLICIES)
             actor.assert_not_called()
 
+    def private_chain_api(self, *, pod_change=None, replaced=False, no_child=False):
+        created = {}
+        def api(_port, method, path, obj=None):
+            if method == "POST":
+                created.update(copy.deepcopy(obj))
+                created["metadata"]["uid"] = "deployment-uid"
+                return 201, created
+            if "/deployments/" in path:
+                current = copy.deepcopy(created)
+                if replaced:
+                    current["metadata"]["uid"] = "replacement"
+                current["status"] = {"conditions": [{"type": "Progressing", "status": "False",
+                    "reason": "ReplicaSetCreateError", "message": "kars-sre-private-workloads forbidden do-not-publish"}]}
+                return 200, current
+            if "/replicasets?" in path:
+                return 200, {"items": [{"metadata": {"name": "owned-rs", "uid": "replicaset-uid",
+                    "ownerReferences": [{"uid": "deployment-uid", "controller": True}]}}]}
+            if "/pods?" in path:
+                pod = {"metadata": {"name": "owned-pod", "uid": "pod-uid",
+                    "ownerReferences": [{"uid": "replicaset-uid", "controller": True}]},
+                    "spec": copy.deepcopy(created["spec"]["template"]["spec"])}
+                if pod_change:
+                    pod_change(pod)
+                return 200, {"items": [] if no_child else [pod, {"metadata": {"name": "do-not-publish",
+                    "uid": "foreign", "ownerReferences": [{"uid": "not-ours", "controller": True}]}}]}
+            raise AssertionError("Unexpected private chain API request")
+        return api
+
+    def test_actual_private_chain_requires_deployment_replicaset_pod_uid_ownership(self):
+        from sre_authority.bootstrap_cases import private_controller_chain
+        reports = []
+        with patch("sre_authority.bootstrap_cases.request", side_effect=self.private_chain_api()) as api:
+            private_controller_chain(1, {"kars-sre-private-workloads": {}}, reports.append)
+        self.assertTrue(reports[0]["privateMountPreserved"])
+        self.assertTrue(reports[0]["noWorkloadExecution"])
+        self.assertEqual([pod["uid"] for pod in reports[0]["pods"]], ["pod-uid"])
+        self.assertNotIn("do-not-publish", json.dumps(reports))
+        self.assertEqual([call.args[1] for call in api.call_args_list], ["POST", "GET", "GET", "GET"])
+        self.assertTrue(api.call_args_list[0].args[2].endswith("/deployments"))
+
+    def test_private_chain_rejects_replacement_missing_mount_or_execution(self):
+        from sre_authority.bootstrap_cases import private_controller_chain
+        variants = [
+            {"replaced": True},
+            {"pod_change": lambda pod: pod["spec"].update(nodeName="scheduled-node")},
+            {"pod_change": lambda pod: pod["spec"].pop("volumes")},
+            {"pod_change": lambda pod: pod["spec"]["containers"][0].pop("volumeMounts")},
+        ]
+        for variant in variants:
+            with patch("sre_authority.bootstrap_cases.request", side_effect=self.private_chain_api(**variant)), \
+                    self.subTest(variant=variant), self.assertRaises(RuntimeError):
+                private_controller_chain(1, POLICIES, lambda _report: None)
+
+    def test_private_chain_timeout_reports_sanitized_blocker_not_success(self):
+        from sre_authority.bootstrap_cases import private_controller_chain
+        for variant in ({"no_child": True},
+                        {"pod_change": lambda pod: pod["metadata"]["ownerReferences"][0].update(uid="foreign")},
+                        {"pod_change": lambda pod: pod["metadata"]["ownerReferences"][0].update(controller=False)}):
+            reports = []
+            with patch("sre_authority.bootstrap_cases.request", side_effect=self.private_chain_api(**variant)), \
+                    patch("sre_authority.bootstrap_cases.time.monotonic", side_effect=[0, 1, 46]), \
+                    patch("sre_authority.bootstrap_cases.time.sleep"), self.assertRaises(RuntimeError):
+                private_controller_chain(1, {"kars-sre-private-workloads": {}}, reports.append)
+            self.assertFalse(reports[0]["privateMountPreserved"])
+            self.assertFalse(reports[0]["noWorkloadExecution"])
+            self.assertNotIn("do-not-publish", json.dumps(reports))
+
     def test_collection_tracks_real_uid_chain_without_logging_other_pods(self):
         def request(_port, _method, path):
             if path.endswith("/deployments"):
