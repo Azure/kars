@@ -9,6 +9,19 @@ localInference:
   # namespace, nonempty matchLabels and destination pod TCP ports.
   targets: []
 
+inferenceBudget:
+  # Required for finite mode: operator-qualified image containing this broker
+  # client. A floating legacy :latest sidecar cannot silently ignore enforcement.
+  routerImageDigest: ""
+  # Opt-in governed inference only, not an all-in invoice/compute/tool budget.
+  enabled: false
+  catalogVersion: ""
+  contracts: []
+  nonInferenceEgressHosts: []
+  # Explicit operator-owned TLS identity. No key or pricing is generated here.
+  tlsSecretName: ""
+  caBundle: ""
+
 # Controller configuration
 # Required for explicitly enrolled private observations. Does not expose a
 # general API or change standalone/Bridgeless behavior when disabled.

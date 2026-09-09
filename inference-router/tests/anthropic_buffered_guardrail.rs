@@ -76,6 +76,7 @@ fn test_state(anthropic_endpoint: String, moderation_endpoint: String) -> AppSta
             providers: Default::default(),
         }),
         budget: TokenBudgetTracker::new(1_000_000_000, 1_000_000_000),
+        inference_budget: None,
         policy_provider: Arc::clone(&governance) as Arc<dyn PolicyDecisionProvider>,
         audit_sink: Arc::clone(&governance) as Arc<dyn AuditSink>,
         signing_provider: Arc::clone(&governance) as Arc<dyn SigningProvider>,

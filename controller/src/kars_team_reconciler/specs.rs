@@ -10,13 +10,16 @@ use crate::mcp_server::LocalObjectRef;
 /// Matches the existing KarsTask objective CEL rule; covered by a drift test.
 pub(crate) const MAX_OBJECTIVE_CHARS: usize = 4096;
 
-/// The foundation cannot enforce durable total/subtree or monetary budgets.
-/// Finite budgets are valid plans, but must never become running tasks.
+/// Positive ceilings require the explicit governed-inference capability.
 pub(crate) fn has_positive_budget(envelope: &TaskEnvelope) -> bool {
     envelope.budget.as_ref().is_some_and(|budget| {
         budget.tokens.is_some_and(|value| value > 0)
             || budget.usd_micros.is_some_and(|value| value > 0)
     })
+}
+
+pub(crate) fn unsupported_budget(envelope: &TaskEnvelope) -> bool {
+    crate::inference_budget::scope::unsupported(envelope)
 }
 
 pub(crate) fn default_member_envelope(parent: &TaskEnvelope) -> TaskEnvelope {

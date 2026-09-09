@@ -67,3 +67,18 @@ pub trait SigningProvider: Send + Sync {
         sig: &Signature,
     ) -> Result<bool, SigningError>;
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn composed_credential_and_budget_authority_uses_full_sha256_with_leading_zeroes() {
+        assert_eq!(
+            super::sha256_hex(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_eq!(
+            super::sha256_hex(&[3]),
+            "084fed08b978af4d7d196a7446a86b58009e636b611db16211b65a9aadff29c5"
+        );
+    }
+}

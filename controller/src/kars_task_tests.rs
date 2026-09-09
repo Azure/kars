@@ -9,6 +9,7 @@ fn sample_envelope() -> TaskEnvelope {
         budget: Some(TaskBudget {
             tokens: Some(100_000),
             usd_micros: Some(5_000_000),
+            ..Default::default()
         }),
         tool_policy_ref: Some(LocalObjectRef {
             name: "default-tools".into(),
@@ -50,10 +51,12 @@ fn bounded_launch_fails_closed_but_planning_remains_available() {
         TaskBudget {
             tokens: Some(100),
             usd_micros: None,
+            ..Default::default()
         },
         TaskBudget {
             tokens: None,
             usd_micros: Some(100),
+            ..Default::default()
         },
     ] {
         let mut spec = KarsTaskSpec::default();
@@ -80,6 +83,7 @@ fn bounded_launch_fails_closed_but_planning_remains_available() {
     spec.envelope.budget = Some(TaskBudget {
         tokens: Some(0),
         usd_micros: Some(0),
+        ..Default::default()
     });
     assert!(validate_execution_contract(&spec).is_ok());
 }
@@ -178,6 +182,7 @@ fn parent_envelope() -> TaskEnvelope {
         budget: Some(TaskBudget {
             tokens: Some(1_000_000),
             usd_micros: Some(50_000_000),
+            ..Default::default()
         }),
         tool_policy_ref: Some(LocalObjectRef {
             name: "strict-tools".into(),
@@ -196,6 +201,7 @@ fn valid_child_attenuates_on_every_axis() {
         budget: Some(TaskBudget {
             tokens: Some(100_000),
             usd_micros: Some(5_000_000),
+            ..Default::default()
         }),
         tool_policy_ref: Some(LocalObjectRef {
             name: "strict-tools".into(),
@@ -294,6 +300,7 @@ fn child_budget_over_parent_cap_is_amplification() {
     child.budget = Some(TaskBudget {
         tokens: Some(2_000_000),
         usd_micros: Some(1_000_000),
+        ..Default::default()
     });
     assert!(
         child
@@ -420,6 +427,7 @@ fn child_envelope() -> TaskEnvelope {
         budget: Some(TaskBudget {
             tokens: Some(100_000),
             usd_micros: Some(5_000_000),
+            ..Default::default()
         }),
         tool_policy_ref: Some(LocalObjectRef {
             name: "strict-tools".into(),

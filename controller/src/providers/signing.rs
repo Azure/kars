@@ -38,7 +38,7 @@
 
 use anyhow::{Context, Result};
 use base64::{Engine as _, engine::general_purpose::STANDARD as BASE64};
-use ed25519_dalek::{Signer, SigningKey, VerifyingKey};
+use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use kube::{
     Client,
@@ -153,6 +153,19 @@ impl ReceiptSigner {
     pub fn sign_note(&self, note: &[u8]) -> String {
         BASE64.encode(self.signing_key.sign(note).to_bytes())
     }
+
+    pub fn verify_note(&self, note: &[u8], signature: &str) -> bool {
+        let Ok(bytes) = BASE64.decode(signature) else {
+            return false;
+        };
+        let Ok(signature) = Signature::from_slice(&bytes) else {
+            return false;
+        };
+        self.signing_key
+            .verifying_key()
+            .verify(note, &signature)
+            .is_ok()
+    }
 }
 
 /// Hex SHA-256 fingerprint of an Ed25519 public key.
@@ -170,6 +183,48 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
     }
 
     out
+}
+
+/// Standard rustls server configuration for operator-provided broker TLS
+/// material. No private key or PEM parse error is returned to callers/logs.
+pub fn inference_budget_tls_config(
+    cert: &[u8],
+    key: &[u8],
+) -> Result<std::sync::Arc<rustls::ServerConfig>> {
+    let certificates = rustls_pemfile::certs(&mut std::io::Cursor::new(cert))
+        .collect::<std::result::Result<Vec<_>, _>>()
+        .map_err(|_| anyhow::anyhow!("Inference budget TLS certificate is invalid"))?;
+    if certificates.is_empty() {
+        anyhow::bail!("Inference budget TLS certificate is empty");
+    }
+    let private = rustls_pemfile::private_key(&mut std::io::Cursor::new(key))
+        .map_err(|_| anyhow::anyhow!("Inference budget TLS key is invalid"))?
+        .ok_or_else(|| anyhow::anyhow!("Inference budget TLS key is missing"))?;
+    let config = rustls::ServerConfig::builder()
+        .with_no_client_auth()
+        .with_single_cert(certificates, private)
+        .map_err(|_| anyhow::anyhow!("Inference budget TLS identity is invalid"))?;
+    Ok(std::sync::Arc::new(config))
+}
+
+/// Read the existing controller identity without creating, rotating or
+/// publishing anything. Callers must establish their current privacy proof.
+pub async fn load_existing(client: &Client) -> Result<ReceiptSigner> {
+    let secrets: Api<Secret> = Api::namespaced(client.clone(), &receipt_namespace());
+    let secret = secrets
+        .get(IDENTITY_SECRET_NAME)
+        .await
+        .map_err(|_| anyhow::anyhow!("Controller signing identity unavailable"))?;
+    if secret.metadata.deletion_timestamp.is_some() || secret.metadata.uid.is_none() {
+        anyhow::bail!("Controller signing identity is not live");
+    }
+    let bytes = secret
+        .data
+        .as_ref()
+        .and_then(|data| data.get("signing_key"))
+        .and_then(|bytes| <[u8; 32]>::try_from(bytes.0.as_slice()).ok())
+        .ok_or_else(|| anyhow::anyhow!("Controller signing identity malformed"))?;
+    Ok(ReceiptSigner::from_bytes(&bytes))
 }
 
 /// Preserve the existing 128-bit content identifier used by skills, profiles

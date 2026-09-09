@@ -382,6 +382,7 @@ pub(super) mod tests {
             client: reqwest::Client::new(),
             config: Arc::new(config),
             budget: crate::budget::TokenBudgetTracker::new(0, 0),
+            inference_budget: None,
             policy_provider: governance.clone(),
             audit_sink: governance.clone(),
             signing_provider: governance.clone(),
