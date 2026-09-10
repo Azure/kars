@@ -7,6 +7,7 @@ import { applyReviewedGrant } from "../commands/credential-grants.js";
 import {
   bundleDefinition, previewPrivateActivation, stagePrivateActivation, validatePrivateActivation,
   validateQualifiedActivation, privateMaterial, PRIVATE_PREFIX,
+  consumesPrivateAuthority,
 } from "./private-activation.js";
 
 function fixture() {
@@ -26,9 +27,10 @@ function fixture() {
     metadata: { name, namespace: "kube-system", uid: `${name}-uid`, resourceVersion: "1" },
   });
   const deployment = {
-    kind: "Deployment", metadata: { name: "kars-controller", namespace: "core", uid: "deployment", resourceVersion: "1" },
+    kind: "Deployment", metadata: { name: "kars-controller", namespace: "core", uid: "deployment", resourceVersion: "1", generation: 1 },
     spec: { replicas: 1, template: { metadata: {}, spec: { serviceAccountName: "kars-controller",
       containers: [{ name: "controller", image: "fixture", command: ["controller"] }] } } },
+    status: { observedGeneration: 1, updatedReplicas: 1, availableReplicas: 1 },
   };
   objects.set(key("deployment", "kars-controller", "core"), deployment);
   objects.set(key("deployments.apps", "kars-controller", "core"), deployment);
@@ -75,13 +77,127 @@ function fixture() {
     expect(patch.metadata.resourceVersion).toBe(value.metadata.resourceVersion);
     merge(value, patch);
     value.metadata.resourceVersion = String(Number(value.metadata.resourceVersion) + 1);
+    if (value.kind === "Deployment" && patch.spec) {
+      value.metadata.generation = Number(value.metadata.generation) + 1;
+      value.status = { observedGeneration: value.metadata.generation,
+        updatedReplicas: value.spec.replicas, availableReplicas: value.spec.replicas };
+    }
     return JSON.stringify(value);
   };
   const preview = () => previewPrivateActivation(execute, "work", [{ namespace: "reader" }], [], "core", "kcm-certificate", []);
   return { objects, pods, calls, execute, preview, key, deployment };
 }
 
+function rootPod(f: ReturnType<typeof fixture>, uid = "old-root") {
+  const root = f.objects.get(f.key("deployment", "kars-controller", "core"));
+  f.objects.set(f.key("replicasets.apps", "root-rs", "core"), {
+    kind: "ReplicaSet", metadata: { name: "root-rs", namespace: "core", uid: "root-rs-uid", resourceVersion: "1",
+      ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "kars-controller", uid: "deployment", controller: true }] },
+    spec: { template: structuredClone(root.spec.template) },
+  });
+  return {
+    kind: "Pod", metadata: { name: uid, namespace: "core", uid, resourceVersion: "1",
+      annotations: {},
+      ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "root-rs", uid: "root-rs-uid", controller: true }] },
+    spec: structuredClone(root.spec.template.spec),
+  };
+}
+
 describe("generic private activation staging", () => {
+  it.each(["absent", "false"])("blocks qualification while an old root token UID is terminating with budget=%s and no TLS", async budget => {
+    const f = fixture();
+    const root = f.objects.get(f.key("deployment", "kars-controller", "core"));
+    if (budget === "false") root.spec.template.spec.containers[0].env = [
+      { name: "KARS_INFERENCE_BUDGET_ENABLED", value: "false" },
+    ];
+    const pod: any = rootPod(f);
+    f.pods.set("core", [pod]);
+    const review = await f.preview();
+    const execute = async (args: string[], input?: string) => {
+      const result = await f.execute(args, input);
+      if (args[0] === "patch" && args[1] === "deployments.apps") {
+        const patch = JSON.parse(args[args.indexOf("-p") + 1]!);
+        if (patch.spec?.replicas === 0) pod.metadata.deletionTimestamp = "2026-01-01T00:00:00Z";
+      }
+      return result;
+    };
+    const now = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(120_001);
+    try {
+      await expect(stagePrivateActivation(execute, review)).rejects.toThrow("have not finished retirement");
+    } finally { now.mockRestore(); }
+    expect(f.objects.get(f.key("namespace", "core")).metadata.annotations[`${PRIVATE_PREFIX}epoch`]).toBeUndefined();
+    expect(root.spec.replicas).toBe(0);
+    expect(f.pods.get("core")?.[0].metadata.uid).toBe("old-root");
+    expect(f.calls.some(args => args[0] === "delete")).toBe(false);
+  });
+
+  it.each(["automount", "projected", "host"])("retires %s authority before epoch, marks the template, then restores root replicas without budget TLS", async mode => {
+    const f = fixture();
+    const root = f.objects.get(f.key("deployment", "kars-controller", "core"));
+    if (mode !== "automount") root.spec.template.spec.automountServiceAccountToken = false;
+    if (mode === "projected") root.spec.template.spec.volumes = [{ name: "api-token", projected: { sources: [
+      { serviceAccountToken: { audience: "api", path: "token" } },
+    ] } }];
+    if (mode === "host") root.spec.template.spec.hostPID = true;
+    const old = rootPod(f);
+    f.pods.set("core", [old]);
+    const review = await f.preview();
+    const order: string[] = [];
+    let paused = false;
+    let restored = false;
+    const execute = async (args: string[], input?: string) => {
+      if (args[0] === "get" && args[1] === "pods" && args[args.indexOf("-n") + 1] === "core"
+        && paused && !restored && f.pods.get("core")?.some(pod => pod.metadata.uid === old.metadata.uid)) {
+        order.push("old-uid-absent");
+        f.pods.set("core", []);
+      }
+      if (args[0] === "patch") {
+        const patch = JSON.parse(args[args.indexOf("-p") + 1]!);
+        if (args[1] === "namespace" && patch.metadata.annotations?.[`${PRIVATE_PREFIX}epoch`]) {
+          expect(f.pods.get("core")?.some(pod => pod.metadata.uid === old.metadata.uid)).toBe(false);
+          order.push(args[2] === "core" ? "root-epoch" : "epoch");
+        }
+        if (args[2] === "kars-controller") {
+          if (patch.spec?.replicas === 0) { paused = true; order.push("pause"); }
+          if (patch.spec?.template) order.push("template");
+          if (patch.spec?.replicas === 1 && paused) { restored = true; order.push("restore"); }
+        }
+      }
+      const result = await f.execute(args, input);
+      if (restored && f.pods.get("core")?.length === 0) f.pods.set("core", [rootPod(f, "new-root")]);
+      return result;
+    };
+    const staged = await stagePrivateActivation(execute, review);
+    expect(staged.phase).toBe("qualified");
+    expect(order.indexOf("pause")).toBeLessThan(order.indexOf("old-uid-absent"));
+    expect(order.indexOf("old-uid-absent")).toBeLessThan(order.indexOf("epoch"));
+    expect(order.indexOf("root-epoch")).toBeLessThan(order.indexOf("template"));
+    expect(order.indexOf("template")).toBeLessThan(order.indexOf("restore"));
+    expect(root.spec.replicas).toBe(1);
+    expect(root.metadata.uid).toBe("deployment");
+    expect(f.pods.get("core")?.map(pod => pod.metadata.uid)).toEqual(["new-root"]);
+    await validateQualifiedActivation(f.execute, staged);
+  });
+
+  it("preserves only a genuinely non-consuming privileged-SA holder, including its stale public marker", async () => {
+    const f = fixture();
+    const holder = {
+      kind: "Pod", metadata: { name: "holder", namespace: "core", uid: "holder", resourceVersion: "1",
+        annotations: { [`${PRIVATE_PREFIX}epoch`]: "old-marker" } },
+      spec: { serviceAccountName: "kars-controller", automountServiceAccountToken: false,
+        containers: [{ name: "holder", image: "fixture" }] },
+    };
+    f.pods.set("core", [holder]);
+    const review = await f.preview();
+    expect(consumesPrivateAuthority(holder, "core", review)).toBe(false);
+    const original = structuredClone(holder);
+    await stagePrivateActivation(f.execute, review);
+    expect(holder).toEqual(original);
+    expect(f.calls.some(args => args[0] === "delete")).toBe(false);
+    expect(Object.keys(f.objects.get(f.key("namespace", "core")).metadata.annotations)
+      .some(key => key.startsWith(`${PRIVATE_PREFIX}pod-`))).toBe(false);
+  });
+
   it("reviews configurable budget TLS metadata and requires a genuinely different public key before private enrollment", async () => {
     const f = fixture();
     const root = f.objects.get(f.key("deployment", "kars-controller", "core"));

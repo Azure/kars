@@ -104,10 +104,10 @@ def variants(value, additional=()):
     return values
 
 
-def denied(response):
+def denied(response, policy=POLICY):
     message = response.json().get("message", "")
     require(response.status_code == 403 and isinstance(message, str)
-            and re.search(r"(?<![a-z0-9-])kars-private-consumption(?![a-z0-9-])", message) is not None,
+            and re.search(r"(?<![a-z0-9-])" + re.escape(policy) + r"(?![a-z0-9-])", message) is not None,
             "Expected the exact private consumption admission denial, not RBAC/schema failure")
 
 
@@ -178,6 +178,9 @@ def named_cases(h, namespace):
             ordinary["metadata"].setdefault("annotations", {})["private-consumption.test/ordinary"] = "reviewed"
             require(h.api("PUT", object_path + "?dryRun=All", body=ordinary, user=actor).status_code == 200,
                     "Ordinary named UPDATE was not preserved")
+            if kind == "Deployment":
+                namespace_surface_cases(h, namespace, actor, identity, object_path, live["metadata"]["uid"], created)
+                live = h.api("GET", object_path, status=200).json()
             updates = variants(live, additional)
             if kind == "Job":
                 # Job pod templates are immutable. Exercise its mutable
@@ -213,6 +216,112 @@ def named_cases(h, namespace):
             h.api("DELETE", object_path, body={"apiVersion": "v1", "kind": "DeleteOptions",
                 "preconditions": {"uid": expected_uid, "resourceVersion": value["metadata"]["resourceVersion"]}},
                 status=(200, 202))
+
+def namespace_surface_cases(h, namespace, actor, identity, workload_path, workload_uid, created):
+    name = "private-ns-fence-" + uuid.uuid4().hex[:8]
+    group = "/apis/rbac.authorization.k8s.io/v1"
+    role = h.api("POST", group + "/clusterroles", body={
+        "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+        "metadata": {"name": name},
+        "rules": [{"apiGroups": [""], "resources": ["namespaces/status", "namespaces/finalize"],
+                   "verbs": ["patch", "update"], "resourceNames": [namespace]}]}, status=201).json()
+    created.append((group + "/clusterroles/" + name, role["metadata"]["uid"]))
+    binding = h.api("POST", group + "/clusterrolebindings", body={
+        "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+        "metadata": {"name": name},
+        "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": name},
+        "subjects": [{"kind": "User", "name": identity["username"]}]}, status=201).json()
+    created.append((group + "/clusterrolebindings/" + name, binding["metadata"]["uid"]))
+    namespace_path = "/api/v1/namespaces/" + namespace
+    initial = h.api("GET", namespace_path, status=200).json()
+    expected_uid = initial["metadata"]["uid"]
+    fence = {key: value for key, value in initial["metadata"]["annotations"].items() if key.startswith(PREFIX)}
+    for surface in ("status", "finalize"):
+        for method, verb in (("PATCH", "patch"), ("PUT", "update")):
+            for named in (False, True):
+                attributes = {"group": "", "resource": "namespaces", "subresource": surface, "verb": verb}
+                if named:
+                    attributes["name"] = namespace
+                review = h.api("POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", body={
+                    "apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
+                    "spec": {"resourceAttributes": attributes}}, user=actor, status=201).json()
+                require(review.get("status", {}).get("allowed") is named,
+                        "Namespace subresource mutation must be genuinely name-authorized")
+            current = h.api("GET", namespace_path, status=200).json()
+            ordinary = copy.deepcopy(current)
+            ordinary["metadata"]["annotations"]["private-consumption.test/maintenance"] = "unchanged-fence"
+            if surface == "finalize":
+                ordinary["spec"]["finalizers"] = list(current["spec"].get("finalizers", []))
+            else:
+                ordinary["status"] = copy.deepcopy(current.get("status", {}))
+            if method == "PATCH":
+                field = "spec" if surface == "finalize" else "status"
+                ordinary = {"metadata": {"uid": expected_uid, "resourceVersion": current["metadata"]["resourceVersion"],
+                                         "annotations": {"private-consumption.test/maintenance": "unchanged-fence"}},
+                            field: ordinary.get(field, {})}
+            require(h.api(method, namespace_path + "/" + surface + "?dryRun=All",
+                          body=ordinary, user=actor).status_code == 200,
+                    "Namespace status/finalizer maintenance without fence changes must remain allowed")
+            for key, replacement in [
+                (PREFIX + "enabled", "false"), (PREFIX + "epoch", None),
+                (PREFIX + "namespace-uid", "wrong-namespace-uid"), (PREFIX + "root-uid", identity["uid"]),
+            ]:
+                current = h.api("GET", namespace_path, status=200).json()
+                require(current["metadata"]["uid"] == expected_uid
+                        and {k: v for k, v in current["metadata"]["annotations"].items() if k.startswith(PREFIX)} == fence,
+                        "Actual namespace fence changed during qualification")
+                invalid = copy.deepcopy(current)
+                if replacement is None:
+                    invalid["metadata"]["annotations"].pop(key, None)
+                else:
+                    invalid["metadata"]["annotations"][key] = replacement
+                if method == "PATCH":
+                    invalid = {"metadata": {"uid": expected_uid, "resourceVersion": current["metadata"]["resourceVersion"],
+                                            "annotations": {key: replacement}}}
+                denied(h.api(method, namespace_path + "/" + surface + "?dryRun=All", body=invalid, user=actor),
+                       "kars-private-consumption-namespace")
+                workload_value = h.api("GET", workload_path, status=200).json()
+                require(workload_value["metadata"]["uid"] == workload_uid, "Named workload fixture was replaced")
+                invalid_workload = variants(workload_value)[0]
+                denied(h.api("PATCH", workload_path + "?dryRun=All", body={
+                    "metadata": {"uid": workload_uid, "resourceVersion": workload_value["metadata"]["resourceVersion"]},
+                    "spec": invalid_workload["spec"]}, user=actor))
+
+def root_token_retirement_case(h, namespace, root_pod_name, root_pod_uid, activate):
+    """Prove bound API authority expires without reading a mounted token."""
+    pod = h.api("GET", path(namespace, "pods", name=root_pod_name), status=200).json()
+    require(pod["metadata"]["uid"] == root_pod_uid, "Reviewed root Pod was replaced before qualification")
+    account_name = pod["spec"]["serviceAccountName"]
+    account = h.api("GET", path(namespace, "serviceaccounts", name=account_name), status=200).json()
+    issued = h.api("POST", path(namespace, "serviceaccounts", name=account_name) + "/token", body={
+        "apiVersion": "authentication.k8s.io/v1", "kind": "TokenRequest",
+        "spec": {"audiences": [], "expirationSeconds": 600,
+                 "boundObjectRef": {"apiVersion": "v1", "kind": "Pod",
+                                    "name": root_pod_name, "uid": root_pod_uid}}},
+        status=201).json()
+    token = issued.get("status", {}).get("token")
+    require(isinstance(token, str) and bool(token), "Bound token request did not return a usable test credential")
+
+    def review():
+        return h.api("POST", "/apis/authentication.k8s.io/v1/tokenreviews", body={
+            "apiVersion": "authentication.k8s.io/v1", "kind": "TokenReview",
+            "spec": {"token": token}}, status=201).json().get("status", {})
+
+    try:
+        before = review()
+        require(before.get("authenticated") is True
+                and before.get("user", {}).get("uid") == account["metadata"]["uid"],
+                "Old root API authority was not verified before activation")
+        activate()
+        pods = h.api("GET", path(namespace, "pods"), status=200).json()
+        require(not pods.get("metadata", {}).get("continue")
+                and all(item["metadata"]["uid"] != root_pod_uid for item in pods["items"]),
+                "Old root Pod UID remains present, including terminating consumers")
+        h.poll("old root API authority invalidation", lambda: review().get("authenticated") is False,
+               seconds=90, interval=1)
+        h.passed("private activation retired the old root API authority")
+    finally:
+        token = None
 
 
 def pod_and_controller_cases(h, namespace, actor, identity, annotations, created):

@@ -393,19 +393,38 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
     }
   }
   const retire: { scope: NamespaceReview; consumer: ReviewedConsumer }[] = [];
+  const captured = new Map<string, Set<string>>();
+  const rootScope = staged.namespaces.find(scope => scope.namespace.name === staged.root.namespace.name);
+  if (!rootScope) throw new Error("Reviewed root namespace is absent from activation");
+  const rootBefore = await read(execute, "deployment", staged.root.deployment.name, staged.root.namespace.name);
+  if (reviewed(rootBefore).uid !== staged.root.deployment.uid || templateDigest(rootBefore) !== staged.root.templateDigest) {
+    throw new Error("Reviewed root changed before private consumer retirement");
+  }
+  const rootReplicas = at(rootBefore, "spec", "replicas") ?? 1;
+  if (typeof rootReplicas !== "number" || !Number.isSafeInteger(rootReplicas) || rootReplicas < 0) {
+    throw new Error("Reviewed root replica intent is invalid");
+  }
+  const retireRoot = consumesPrivateAuthority(rootBefore, rootScope.namespace.name, staged);
+  if (retireRoot) {
+    const rootConsumer = rootScope.consumers.find(consumer =>
+      consumer.kind === "Deployment" && consumer.object.uid === staged.root.deployment.uid);
+    if (!rootConsumer) throw new Error("Root retirement requires its explicit reviewed Deployment");
+    retire.push({ scope: rootScope, consumer: rootConsumer });
+  }
   for (const scope of staged.namespaces) {
     const pods = record(JSON.parse(await execute(["get", "pods", "-n", scope.namespace.name, "--chunk-size=0", "-o", "json"])));
     if (at(pods, "metadata", "continue")) throw new Error("Private consumer inventory is incomplete");
     for (const pod of list(pods.items)) {
-      if (!privateConsumer(pod, scope.namespace.name, staged)) continue;
+      if (!consumesPrivateAuthority(pod, scope.namespace.name, staged)) continue;
       const owner = await reviewedOwner(execute, pod, scope);
       if (!owner) throw new Error("Unexplained private consumer preserved; explicitly review its actual owner before activation");
-      if (materialForNamespace(template(pod).spec, scope.namespace.name, staged)) {
-        if (!["Deployment", "ReplicaSet", "StatefulSet", "ReplicationController"].includes(owner.kind)) {
-          throw new Error("This reviewed private consumer requires its existing owner-specific retirement before activation; it was preserved");
-        }
-        if (!retire.some(item => item.consumer.object.uid === owner.object.uid)) retire.push({ scope, consumer: owner });
+      if (!["Deployment", "ReplicaSet", "StatefulSet", "ReplicationController"].includes(owner.kind)) {
+        throw new Error("This reviewed private consumer requires its existing owner-specific retirement before activation; it was preserved");
       }
+      const ids = captured.get(scope.namespace.name) ?? new Set<string>();
+      ids.add(reviewed(pod, true).uid);
+      captured.set(scope.namespace.name, ids);
+      if (!retire.some(item => item.consumer.object.uid === owner.object.uid)) retire.push({ scope, consumer: owner });
     }
   }
   for (const { scope, consumer } of retire) {
@@ -418,23 +437,16 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
         spec: { replicas: 0 } })]);
   }
   const deadline = Date.now() + 120_000;
-  const preserved = new Map<string, Map<string, string>>();
   for (;;) {
     let pending = false;
-    preserved.clear();
     for (const scope of staged.namespaces) {
       const inventory = record(JSON.parse(await execute(["get", "pods", "-n", scope.namespace.name, "--chunk-size=0", "-o", "json"])));
       if (at(inventory, "metadata", "continue")) throw new Error("Private consumer retirement inventory is incomplete");
       for (const pod of list(inventory.items)) {
-        if (!privateConsumer(pod, scope.namespace.name, staged)) continue;
+        const capturedUid = captured.get(scope.namespace.name)?.has(reviewed(pod, true).uid);
+        if (!capturedUid && !consumesPrivateAuthority(pod, scope.namespace.name, staged)) continue;
         if (!await reviewedOwner(execute, pod, scope)) throw new Error("Unexplained private consumer preserved during retirement");
-        const material = materialForNamespace(template(pod).spec, scope.namespace.name, staged);
-        pending ||= material;
-        if (!material) {
-          const entries = preserved.get(scope.namespace.name) ?? new Map<string, string>();
-          entries.set(reviewed(pod, true).uid, digest(record(pod).spec));
-          preserved.set(scope.namespace.name, entries);
-        }
+        pending = true;
       }
     }
     if (!pending) break;
@@ -442,6 +454,11 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
     await new Promise(resolve => setTimeout(resolve, 500));
   }
   if (await verifyPrivateBundle(execute) !== staged.bundleRevision) throw new Error("Private admission changed before epoch creation");
+  const retiredRoot = await read(execute, "deployment", staged.root.deployment.name, staged.root.namespace.name);
+  if (reviewed(retiredRoot).uid !== staged.root.deployment.uid || templateDigest(retiredRoot) !== staged.root.templateDigest
+    || (retireRoot && at(retiredRoot, "spec", "replicas") !== 0)) {
+    throw new Error("Reviewed root retirement changed before epoch creation");
+  }
   for (const scope of staged.namespaces) {
     scope.epoch = randomBytes(32).toString("hex");
     await patchNamespace(execute, scope, {
@@ -454,9 +471,6 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
         [`${PRIVATE_PREFIX}budget-before-key`]: "",
       } : {}),
       ...Object.fromEntries(scope.consumers.map(c => [`${PRIVATE_PREFIX}parent-${c.object.uid}`, scope.epoch!])),
-      ...Object.fromEntries([...(preserved.get(scope.namespace.name) ?? [])].flatMap(([uid, spec]) => [
-        [`${PRIVATE_PREFIX}pod-${uid}`, scope.epoch!], [`${PRIVATE_PREFIX}pod-spec-${uid}`, spec],
-      ])),
     });
     for (const consumer of scope.consumers) {
       if (consumer.kind === "Job" || consumer.kind === "Pod") continue;
@@ -464,31 +478,42 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
       if (reviewed(current).uid !== consumer.object.uid || templateDigest(current) !== consumer.templateDigest) {
         throw new Error("Reviewed consumer changed before template qualification");
       }
-      if (staged.root.budgetTls) {
-        const oldRootPods = new Set(preserved.get(staged.root.namespace.name)?.keys() ?? []);
-        const deadline = Date.now() + 120_000;
-        for (;;) {
-          const deployment = await read(execute, "deployment", staged.root.deployment.name, staged.root.namespace.name);
-          if (reviewed(deployment).uid !== staged.root.deployment.uid || templateDigest(deployment) !== staged.root.templateDigest) {
-            throw new Error("Reviewed root changed during budget TLS consumer retirement");
-          }
-          const pods = record(JSON.parse(await execute(["get", "pods", "-n", staged.root.namespace.name, "--chunk-size=0", "-o", "json"])));
-          if (at(pods, "metadata", "continue")) throw new Error("Budget TLS consumer retirement inventory is incomplete");
-          const retiring = list(pods.items).some(pod => oldRootPods.has(reviewed(pod, true).uid));
-          const desired = at(deployment, "spec", "replicas") ?? 1;
-          const ready = typeof desired === "number" && desired > 0
-            && at(deployment, "status", "observedGeneration") === at(deployment, "metadata", "generation")
-            && at(deployment, "status", "updatedReplicas") === desired && at(deployment, "status", "availableReplicas") === desired;
-          if (!retiring && ready) break;
-          if (Date.now() >= deadline) throw new Error("Budget TLS root consumers have not completed retirement; no writer activation was published");
-          await new Promise(resolve => setTimeout(resolve, 500));
-        }
-      }
-      if (!privateConsumer(current, scope.namespace.name, staged)) continue;
+      if (!consumesPrivateAuthority(current, scope.namespace.name, staged)) continue;
       const marker = { metadata: { annotations: { [`${PRIVATE_PREFIX}epoch`]: scope.epoch } } };
       const spec = consumer.kind === "CronJob" ? { jobTemplate: { spec: { template: marker } } } : { template: marker };
       await execute(["patch", kinds[consumer.kind]!, consumer.object.name, "-n", scope.namespace.name, "--type=merge", "-p",
         JSON.stringify({ metadata: { uid: consumer.object.uid, resourceVersion: reviewed(current).resourceVersion }, spec })]);
+    }
+  }
+  if (retireRoot) {
+    const current = await read(execute, "deployment", staged.root.deployment.name, staged.root.namespace.name);
+    const rootEpoch = rootScope.epoch;
+    if (reviewed(current).uid !== staged.root.deployment.uid || templateDigest(current) !== staged.root.templateDigest
+      || at(current, "spec", "replicas") !== 0
+      || at(current, "spec", "template", "metadata", "annotations", `${PRIVATE_PREFIX}epoch`) !== rootEpoch) {
+      throw new Error("Reviewed root changed before restoring its captured replica intent");
+    }
+    await execute(["patch", "deployment", staged.root.deployment.name, "-n", staged.root.namespace.name, "--type=merge", "-p",
+      JSON.stringify({ metadata: { uid: staged.root.deployment.uid, resourceVersion: reviewed(current).resourceVersion },
+        spec: { replicas: rootReplicas } })]);
+  }
+  if (rootReplicas > 0) {
+    const deadline = Date.now() + 120_000;
+    for (;;) {
+      const deployment = await read(execute, "deployment", staged.root.deployment.name, staged.root.namespace.name);
+      if (reviewed(deployment).uid !== staged.root.deployment.uid || templateDigest(deployment) !== staged.root.templateDigest) {
+        throw new Error("Reviewed root changed during private authority replacement");
+      }
+      const pods = record(JSON.parse(await execute(["get", "pods", "-n", staged.root.namespace.name, "--chunk-size=0", "-o", "json"])));
+      if (at(pods, "metadata", "continue")) throw new Error("Root consumer retirement inventory is incomplete");
+      const retiring = list(pods.items).some(pod => captured.get(staged.root.namespace.name)?.has(reviewed(pod, true).uid));
+      const ready = at(deployment, "spec", "replicas") === rootReplicas
+        && at(deployment, "status", "observedGeneration") === at(deployment, "metadata", "generation")
+        && at(deployment, "status", "updatedReplicas") === rootReplicas
+        && at(deployment, "status", "availableReplicas") === rootReplicas;
+      if (!retiring && ready) break;
+      if (Date.now() >= deadline) throw new Error("Old root authority has not retired or its replacement is unavailable; no writer activation was published");
+      await new Promise(resolve => setTimeout(resolve, 500));
     }
   }
   staged.phase = "qualified";
@@ -513,10 +538,10 @@ export async function validateQualifiedActivation(execute: Execute, activation: 
     if (reviewed(await read(execute, "serviceaccount", name, "kube-system")).uid !== uid) {
       throw new Error("Controller profile changed before qualified publication");
     }
-    const root = await read(execute, "deployment", activation.root.deployment.name, activation.root.namespace.name);
-    if (!sameBudgetTls(await reviewBudgetTls(execute, root, activation.root.namespace.name), activation.root.budgetTls)) {
-      throw new Error("Budget TLS review changed before grant publication");
-    }
+  }
+  const root = await read(execute, "deployment", activation.root.deployment.name, activation.root.namespace.name);
+  if (!sameBudgetTls(await reviewBudgetTls(execute, root, activation.root.namespace.name), activation.root.budgetTls)) {
+    throw new Error("Budget TLS review changed before grant publication");
   }
   for (const scope of activation.namespaces) {
     const current = await read(execute, "namespace", scope.namespace.name);
@@ -554,8 +579,12 @@ export function privateMaterial(value: unknown, extraSecrets: string[] = []): bo
 }
 
 export function privateConsumer(value: unknown, namespace: string, activation: PrivateActivation): boolean {
+  return at(template(value), "metadata", "annotations", `${PRIVATE_PREFIX}epoch`) !== undefined
+    || consumesPrivateAuthority(value, namespace, activation);
+}
+
+export function consumesPrivateAuthority(value: unknown, namespace: string, activation: PrivateActivation): boolean {
   const pod = record(template(value).spec);
-  if (at(template(value), "metadata", "annotations", `${PRIVATE_PREFIX}epoch`) !== undefined) return true;
   if (materialForNamespace(pod, namespace, activation)) return true;
   const account = pod.serviceAccountName ?? "";
   const privilegedIdentity = (namespace === activation.root.namespace.name && account === activation.root.account.name)
