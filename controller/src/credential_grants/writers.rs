@@ -117,7 +117,7 @@ pub(super) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
             return Err("Writer identity lacks an enforced name-continuity guard".into());
         }
     }
-    Ok(())
+    permissions::verify(client, grant).await
 }
 
 pub(super) async fn reconcile(
@@ -168,7 +168,6 @@ pub(super) async fn reconcile(
         }
     }
     verify(client, &active).await?;
-    permissions::verify(client, &active).await?;
     Ok(active)
 }
 

@@ -145,6 +145,36 @@ async fn observation_prepared_only_allows_verifier_backed_scope_discovery_not_le
 }
 
 #[tokio::test]
+async fn observation_fresh_verifier_denial_blocks_scope_and_learned_without_a_cached_fallback() {
+    let (_server, state, metadata) = fixture().await;
+    let (status, scope) = call(&state, SCOPE, "GET", Some(&observer_token()), None).await;
+    assert_eq!(status, StatusCode::OK);
+    let verifier = metadata.lock().unwrap().verifier.as_ref().unwrap().clone();
+    verifier.control.lock().unwrap().fault = "deny".into();
+    for path in [SCOPE, LEARNED] {
+        let (status, value) = call(
+            &state,
+            path,
+            "GET",
+            Some(&observer_token()),
+            scope["scope_id"].as_str(),
+        )
+        .await;
+        assert_eq!(status, StatusCode::FORBIDDEN);
+        assert_eq!(value, json!({"error":"observation_authority_unavailable"}));
+    }
+    assert_eq!(verifier.control.lock().unwrap().calls.len(), 3);
+    assert!(
+        !metadata
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(_, path, _)| path.contains("/secrets"))
+    );
+}
+
+#[tokio::test]
 async fn observation_scope_reset_during_rpc_cannot_consume_the_old_scope_proof() {
     let (_server, state, metadata) = fixture().await;
     let verifier = metadata.lock().unwrap().verifier.as_ref().unwrap().clone();
