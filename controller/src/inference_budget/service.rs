@@ -82,6 +82,11 @@ impl IntoResponse for Failure {
                 "inference_budget_unavailable",
             ),
         };
+        tracing::warn!(
+            budget_stage = code,
+            http_status = status.as_u16(),
+            "Governed inference broker operation denied"
+        );
         // Deliberately neither the token, wire request, nor API response body.
         (
             status,
