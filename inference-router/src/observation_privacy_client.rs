@@ -26,26 +26,41 @@ async fn address(
     binding: &Binding,
     scope: &Scope,
 ) -> Result<SocketAddr, String> {
+    let mut diagnostic = wire::Readiness::new("verifier_endpoint");
     if !endpoint.valid(chrono::Utc::now().timestamp()) {
         return Err(ERROR.into());
     }
+    diagnostic.stage("verifier_namespace_read");
     let namespace = Api::<Namespace>::all(client.clone())
         .get(&endpoint.namespace)
         .await
-        .map_err(|_| ERROR)?;
+        .map_err(|error| {
+            diagnostic.api(&error);
+            ERROR
+        })?;
+    diagnostic.stage("verifier_account_read");
     let account = Api::<ServiceAccount>::namespaced(client.clone(), &endpoint.namespace)
         .get("kars-controller")
         .await
-        .map_err(|_| ERROR)?;
+        .map_err(|error| {
+            diagnostic.api(&error);
+            ERROR
+        })?;
+    diagnostic.stage("verifier_identity_current");
     if !live(&namespace.metadata, &endpoint.namespace_uid)
         || !live(&account.metadata, &endpoint.controller_uid)
     {
         return Err(ERROR.into());
     }
+    diagnostic.stage("verifier_descriptor_read");
     let descriptor = Api::<ConfigMap>::namespaced(client.clone(), &endpoint.namespace)
         .get(wire::DESCRIPTOR)
         .await
-        .map_err(|_| ERROR)?;
+        .map_err(|error| {
+            diagnostic.api(&error);
+            ERROR
+        })?;
+    diagnostic.stage("verifier_descriptor_current");
     if !live(&descriptor.metadata, &endpoint.descriptor_uid)
         || descriptor
             .metadata
@@ -65,10 +80,15 @@ async fn address(
     {
         return Err(ERROR.into());
     }
+    diagnostic.stage("verifier_service_read");
     let service = Api::<Service>::namespaced(client.clone(), &endpoint.namespace)
         .get(wire::SERVICE)
         .await
-        .map_err(|_| ERROR)?;
+        .map_err(|error| {
+            diagnostic.api(&error);
+            ERROR
+        })?;
+    diagnostic.stage("verifier_service_current");
     let spec = service.spec.as_ref().ok_or(ERROR)?;
     if !endpoint.service_matches(&service) {
         return Err(ERROR.into());
@@ -83,14 +103,20 @@ async fn address(
         &binding.recipients,
         &format!("kars-{}", scope.identity.sandbox.name),
     ) {
+        diagnostic.stage("verifier_audience_review");
         let request: SubjectAccessReview = serde_json::from_value(review).map_err(|_| ERROR)?;
         let response = Api::<SubjectAccessReview>::all(client.clone())
             .create(&PostParams::default(), &request)
             .await
-            .map_err(|_| ERROR)?;
+            .map_err(|error| {
+                diagnostic.api(&error);
+                ERROR
+            })?;
+        diagnostic.stage("verifier_audience_denial");
         crate::sre_privacy::require_denial(&serde_json::to_value(response).map_err(|_| ERROR)?)
             .map_err(|_| ERROR)?;
     }
+    diagnostic.finish();
     Ok(SocketAddr::new(ip, endpoint.port))
 }
 
@@ -102,8 +128,11 @@ pub(crate) async fn verify(
     scope: &Scope,
     operation: Operation,
 ) -> Result<(), String> {
+    let mut diagnostic = wire::Readiness::new("verifier_binding");
     let verifier = binding.verifier.as_ref().ok_or(ERROR)?;
+    diagnostic.stage("verifier_address");
     let address = address(client, verifier, binding, scope).await?;
+    diagnostic.stage("verifier_request");
     let nonce: String = rand::random::<[u8; 32]>()
         .iter()
         .map(|byte| format!("{byte:02x}"))
@@ -132,7 +161,10 @@ pub(crate) async fn verify(
     if !request.valid(chrono::Utc::now().timestamp()) {
         return Err(ERROR.into());
     }
-    exchange(verifier, address, token, &request).await
+    diagnostic.stage("verifier_exchange");
+    exchange(verifier, address, token, &request).await?;
+    diagnostic.finish();
+    Ok(())
 }
 
 async fn exchange(
@@ -141,6 +173,7 @@ async fn exchange(
     token: &str,
     request: &wire::Request,
 ) -> Result<(), String> {
+    let mut diagnostic = wire::Readiness::new("verifier_tls_client");
     let ca = reqwest::Certificate::from_pem(endpoint.ca_pem.as_bytes()).map_err(|_| ERROR)?;
     // Deliberately no shared client/proof cache: each request re-pins the current
     // descriptor and establishes TLS to the current canonical Service.
@@ -155,6 +188,7 @@ async fn exchange(
         .timeout(std::time::Duration::from_secs(wire::DEADLINE_SECONDS + 2))
         .build()
         .map_err(|_| ERROR)?;
+    diagnostic.stage("verifier_transport");
     let response = http
         .post(format!(
             "https://{}:{}{}",
@@ -166,7 +200,12 @@ async fn exchange(
         .json(request)
         .send()
         .await
-        .map_err(|_| ERROR)?;
+        .map_err(|error| {
+            diagnostic.transport(&error);
+            ERROR
+        })?;
+    diagnostic.stage("verifier_http");
+    diagnostic.status(response.status().as_u16());
     if response.status() != reqwest::StatusCode::OK
         || response
             .content_length()
@@ -174,19 +213,26 @@ async fn exchange(
     {
         return Err(ERROR.into());
     }
+    diagnostic.stage("verifier_body");
     let mut stream = response.bytes_stream();
     let mut bytes = Vec::new();
     while let Some(part) = stream.next().await {
-        let part = part.map_err(|_| ERROR)?;
+        let part = part.map_err(|error| {
+            diagnostic.transport(&error);
+            ERROR
+        })?;
         if bytes.len() + part.len() > wire::MAX_BODY {
             return Err(ERROR.into());
         }
         bytes.extend_from_slice(&part);
     }
+    diagnostic.stage("verifier_proof_json");
     let proof: wire::Proof = serde_json::from_slice(&bytes).map_err(|_| ERROR)?;
+    diagnostic.stage("verifier_proof_binding");
     if !proof.matches(request) || !endpoint.valid(chrono::Utc::now().timestamp()) {
         return Err(ERROR.into());
     }
+    diagnostic.finish();
     Ok(())
 }
 

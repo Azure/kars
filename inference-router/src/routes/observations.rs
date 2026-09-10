@@ -44,6 +44,7 @@ pub fn routes(state: AppState) -> Router<AppState> {
 }
 
 async fn authorize(State(state): State<AppState>, mut request: Request, next: Next) -> Response {
+    let mut diagnostic = crate::observation_privacy::Readiness::new("observer_configuration");
     let Some(observer) = state.services.observer.as_ref() else {
         return (
             StatusCode::SERVICE_UNAVAILABLE,
@@ -51,6 +52,7 @@ async fn authorize(State(state): State<AppState>, mut request: Request, next: Ne
         )
             .into_response();
     };
+    diagnostic.stage("observer_route_scope");
     let current = match state.services.requests.scope() {
         Ok(scope) => scope,
         Err(_) => {
@@ -62,22 +64,32 @@ async fn authorize(State(state): State<AppState>, mut request: Request, next: Ne
     } else {
         crate::observation_privacy::Operation::Learned
     };
-    if !state.services.identity_valid
-        || !matches!(
-            tokio::time::timeout(
-                std::time::Duration::from_secs(12),
-                observer.authorized(bearer(request.headers()), &current, operation)
-            )
-            .await,
-            Ok(Ok(()))
+    diagnostic.stage("observer_route_identity");
+    let authorized = if state.services.identity_valid {
+        diagnostic.stage("observer_route_authorization");
+        match tokio::time::timeout(
+            std::time::Duration::from_secs(12),
+            observer.authorized(bearer(request.headers()), &current, operation),
         )
-    {
+        .await
+        {
+            Ok(result) => result.is_ok(),
+            Err(_) => {
+                diagnostic.deadline();
+                false
+            }
+        }
+    } else {
+        false
+    };
+    if !authorized {
         return (
             StatusCode::FORBIDDEN,
             Json(json!({"error":"observation_authority_unavailable"})),
         )
             .into_response();
     }
+    diagnostic.stage("observer_origin");
     if let Some(allowed) = &state.services.allow_ips {
         let remote = request
             .extensions()
@@ -87,6 +99,7 @@ async fn authorize(State(state): State<AppState>, mut request: Request, next: Ne
             return (StatusCode::FORBIDDEN, "Observation origin is not allowed").into_response();
         }
     }
+    diagnostic.stage("observer_scope_current");
     if !state
         .services
         .requests
@@ -96,6 +109,7 @@ async fn authorize(State(state): State<AppState>, mut request: Request, next: Ne
         return (StatusCode::CONFLICT, Json(json!({"error":"stale_scope"}))).into_response();
     }
     request.extensions_mut().insert(VerifiedScope(current.id));
+    diagnostic.finish();
     next.run(request).await
 }
 

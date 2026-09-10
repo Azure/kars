@@ -76,12 +76,14 @@ async fn snapshot(
     request: &wire::Request,
     bearer: &str,
 ) -> Result<Binding, String> {
+    let mut diagnostic = wire::Readiness::new("rpc_grant_read");
     let target = &request.target;
     let grant = Api::<KarsCredentialGrant>::namespaced(client.clone(), &target.workspace)
         .get(NAME)
         .await
         .map_err(|_| DENIED)?;
     live(&grant.metadata)?;
+    diagnostic.stage("rpc_grant_current");
     if grant.uid().as_deref() != Some(request.grant_uid.as_str())
         || grant.metadata.generation != Some(request.grant_generation)
         || !grant.spec.enabled
@@ -104,11 +106,13 @@ async fn snapshot(
     {
         return Err(DENIED.into());
     }
+    diagnostic.stage("rpc_target_read");
     let sandbox = Api::<KarsSandbox>::namespaced(client.clone(), &target.workspace)
         .get(&target.name)
         .await
         .map_err(|_| DENIED)?;
     live(&sandbox.metadata)?;
+    diagnostic.stage("rpc_target_current");
     let observed = sandbox
         .status
         .as_ref()
@@ -125,6 +129,7 @@ async fn snapshot(
     {
         return Err(DENIED.into());
     }
+    diagnostic.stage("rpc_namespaces");
     let workspace = Api::<Namespace>::all(client.clone())
         .get(&target.workspace)
         .await
@@ -141,10 +146,12 @@ async fn snapshot(
     {
         return Err(DENIED.into());
     }
+    diagnostic.stage("rpc_credential_read");
     let secret = Api::<Secret>::namespaced(client.clone(), &runtime_name)
         .get(crate::service_observer::SECRET)
         .await
         .map_err(|_| DENIED)?;
+    diagnostic.stage("rpc_credential_current");
     governed_services::credentials::validate(
         &secret,
         &target.uid,
@@ -163,6 +170,7 @@ async fn snapshot(
     {
         return Err(DENIED.into());
     }
+    diagnostic.stage("rpc_bearer");
     let data = secret.data.as_ref().ok_or(DENIED)?;
     if data.len() != 2
         || !constant_time_eq(
@@ -175,6 +183,7 @@ async fn snapshot(
     {
         return Err(DENIED.into());
     }
+    diagnostic.stage("rpc_binding");
     let binding: Binding =
         serde_json::from_slice(&data.get("config.json").ok_or(DENIED)?.0).map_err(|_| DENIED)?;
     if !binding.valid()
@@ -198,6 +207,7 @@ async fn snapshot(
         return Err(DENIED.into());
     }
     for recipient in &binding.recipients {
+        diagnostic.stage("rpc_recipients");
         if !grant.spec.writers.iter().any(|writer| {
             writer.namespace == recipient.namespace
                 && writer.name == recipient.name
@@ -221,12 +231,15 @@ async fn snapshot(
             return Err(DENIED.into());
         }
     }
+    diagnostic.stage("rpc_writer_authority");
     crate::credential_grants::verify_observation_writers(client, &grant).await?;
+    diagnostic.stage("rpc_service_identity");
     if governed_services::identity_read_only(client, &sandbox, &namespace).await?
         != request.identity
     {
         return Err(DENIED.into());
     }
+    diagnostic.finish();
     Ok(binding)
 }
 
@@ -236,22 +249,28 @@ pub(super) async fn verify(
     bearer: &str,
     endpoint: &wire::Endpoint,
 ) -> Result<wire::Proof, String> {
+    let mut diagnostic = wire::Readiness::new("rpc_request");
     if !request.valid(chrono::Utc::now().timestamp()) || request.verifier != *endpoint {
         return Err(DENIED.into());
     }
+    diagnostic.stage("rpc_initial_snapshot");
     snapshot(client, request, bearer).await?;
+    diagnostic.stage("rpc_initial_endpoint");
     super::discovery::validate(client, endpoint).await?;
     // This is the complete controller proof, including private alias inventory.
     // No caller is granted the native Secret permissions required to compute it.
+    diagnostic.stage("rpc_runtime_privacy");
     let epoch =
         crate::sre_authority::privacy_epoch(client, &format!("kars-{}", request.target.name))
             .await?;
     if epoch != request.epoch {
         return Err(DENIED.into());
     }
+    diagnostic.stage("rpc_controller_privacy");
     if crate::sre_authority::privacy_epoch(client, &endpoint.namespace).await? != epoch {
         return Err(DENIED.into());
     }
+    diagnostic.stage("rpc_audience_denial");
     super::identity::access_denial(
         client,
         wire::audience_tls_reviews(
@@ -261,9 +280,14 @@ pub(super) async fn verify(
         ),
     )
     .await?;
+    diagnostic.stage("rpc_admission");
     super::identity::admission(client).await?;
+    diagnostic.stage("rpc_final_snapshot");
     snapshot(client, request, bearer).await?;
+    diagnostic.stage("rpc_final_endpoint");
     super::discovery::validate(client, endpoint).await?;
+    diagnostic.stage("rpc_registration");
     registration_current(client, epoch.as_deref()).await?;
+    diagnostic.finish();
     Ok(wire::Proof::allow(request, epoch))
 }
