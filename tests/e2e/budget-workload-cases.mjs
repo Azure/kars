@@ -3,7 +3,7 @@
 
 // Native admission/creation proof only. No account state or Pod readiness is fabricated.
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { withKindApi } from "./budget-api-client.mjs";
 
 const kubeControllers = [
   ["manager", "system:kube-controller-manager"],
@@ -210,41 +210,6 @@ export async function workloadCases(request, wait, { namespace, controller, prin
 }
 
 export async function runWorkloadProof(options) {
-  const { root, context, kubectl, until } = options;
-  const config = JSON.parse(kubectl(["config", "view", "--minify", "-o", "json"]));
-  assert(config.contexts?.length === 1 && config.contexts[0].name === context
-    && config.clusters?.length === 1
-    && ["localhost", "127.0.0.1", "[::1]"].includes(new URL(config.clusters[0].cluster.server).hostname),
-  "Budget workload proof requires the exact loopback Kind context");
-  const proxy = spawn("kubectl", ["--context", context, "--request-timeout=20s", "proxy",
-    "--address=127.0.0.1", "--port=0"], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
-  let output = "", port;
-  proxy.stdout.on("data", data => { output = (output + data).slice(-2048); });
-  proxy.stderr.on("data", () => {});
-  try {
-    await until(() => {
-      assert(proxy.exitCode === null, "Budget API proxy exited");
-      port = output.match(/127\.0\.0\.1:(\d+)/)?.[1];
-      return Boolean(port);
-    }, "budget workload API proxy");
-    const request = async (method, path, body, actor) => {
-      const response = await fetch(`http://127.0.0.1:${port}${path}`, {
-        method, signal: AbortSignal.timeout(15_000),
-        headers: { "Content-Type": method === "PATCH" ? "application/merge-patch+json" : "application/json",
-          Accept: "application/json", ...(actor ? { "Impersonate-User": actor, "Impersonate-Group": "system:authenticated" } : {}) },
-        body: body === undefined ? undefined : JSON.stringify(body),
-      });
-      return { status: response.status, body: await response.json().catch(() => null) };
-    };
-    await workloadCases(request, until, options,
-      result => console.log("BUDGET-WORKLOAD " + JSON.stringify(result)));
-  } finally {
-    if (proxy.exitCode === null) {
-      proxy.kill("SIGTERM");
-      await new Promise(resolve => {
-        const timer = setTimeout(() => { proxy.kill("SIGKILL"); resolve(); }, 5000);
-        proxy.once("exit", () => { clearTimeout(timer); resolve(); });
-      });
-    }
-  }
+  await withKindApi(options, request => workloadCases(request, options.until, options,
+    result => console.log("BUDGET-WORKLOAD " + JSON.stringify(result))));
 }
