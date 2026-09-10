@@ -1,0 +1,80 @@
+name: Reviewed Everything dependency lock
+
+# Temporary, artifact-only generation. Remove after importing the verified lock.
+"on":
+  workflow_dispatch:
+  push:
+    branches: [public/pr9-managed-mcp]
+    paths:
+      - .github/workflows/mcp-everything-lock.yml
+      - sandbox-images/mcp-everything/package.json
+      - sandbox-images/mcp-everything/verify-lock.mjs
+      - sandbox-images/mcp-everything/protocol-smoke.mjs
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    if: github.repository == 'Azure/kars' && github.ref == 'refs/heads/public/pr9-managed-mcp'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sandbox-images/mcp-everything
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+          package-manager-cache: false
+      - name: Generate only the reviewed lock
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Verify exact replacements and preserve unrelated lock entries
+        run: node verify-lock.mjs
+      - name: Verify tarball integrity through a clean script-disabled install
+        run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+      - name: Reject remaining advisories at every severity
+        run: npm audit --omit=dev --audit-level=low --json > dependency-audit.json
+      - name: Exercise the actual Everything Streamable HTTP server
+        run: node protocol-smoke.mjs > protocol-smoke.json
+      - name: Record bounded artifact provenance
+        run: |
+          node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import { execFileSync } from "node:child_process";
+          import { createHash } from "node:crypto";
+          import { readFileSync, writeFileSync } from "node:fs";
+          import { verifyLock } from "./verify-lock.mjs";
+          const checked = verifyLock();
+          const sourceSha = execFileSync("git", ["rev-parse", "HEAD"], {encoding:"utf8"}).trim();
+          assert.match(sourceSha, /^[0-9a-f]{40}$/);
+          assert.equal(sourceSha, process.env.GITHUB_SHA);
+          assert.match(process.env.GITHUB_RUN_ID, /^\d+$/);
+          const audit = JSON.parse(readFileSync("dependency-audit.json", "utf8"));
+          assert.equal(audit.metadata.vulnerabilities.total, 0);
+          const smoke = JSON.parse(readFileSync("protocol-smoke.json", "utf8"));
+          for (const key of ["initialized", "toolsListed", "echoPassed", "sessionClosed"]) {
+            assert.equal(smoke[key], true);
+          }
+          assert.ok(Number.isSafeInteger(smoke.toolCount) && smoke.toolCount > 0);
+          const hashes = Object.fromEntries(["package.json", "package-lock.json"].map(name =>
+            [name, createHash("sha256").update(readFileSync(name)).digest("hex")]));
+          const provenance = {sourceSha, runId:process.env.GITHUB_RUN_ID,
+            node:process.versions.node, npm:execFileSync("npm", ["--version"], {encoding:"utf8"}).trim(),
+            ...checked, hashes, npmCiIntegrityPassed:true, auditVulnerabilities:0,
+            protocolSmoke:{initialized:true,toolsListed:true,echoPassed:true,sessionClosed:true,
+              toolCount:smoke.toolCount}};
+          writeFileSync("lock-provenance.json", JSON.stringify(provenance, null, 2) + "\n");
+          JS
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: mcp-everything-reviewed-lock
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            sandbox-images/mcp-everything/package.json
+            sandbox-images/mcp-everything/package-lock.json
+            sandbox-images/mcp-everything/lock-provenance.json
