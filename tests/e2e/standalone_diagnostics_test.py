@@ -105,6 +105,40 @@ class StandaloneDiagnosticTests(unittest.TestCase):
                 diagnostic.collect(1, "other-uid", "final")
         self.assertEqual(request.call_count, 1)
 
+    def test_pagination_preserves_later_failure_events_without_exporting_cursors(self):
+        calls = []
+        def request(_port, _method, path):
+            calls.append(path)
+            if path == "/api/v1/namespaces/kube-system":
+                return 200, NAMESPACE
+            if path == "/api/v1/events?limit=256":
+                return 200, {"items": [], "metadata": {"continue": "cursor/next"}}
+            if path == "/api/v1/events?limit=256&continue=cursor%2Fnext":
+                return 200, {"items": [{"metadata": {"namespace": "kars-budget-money-left"},
+                    "involvedObject": {"kind": "Pod", "name": "budget-money-left", "uid": "pod"},
+                    "reason": "FailedScheduling", "message": "Insufficient cpu " + PRIVATE}]}
+            return 200, {"items": []}
+        with patch.object(diagnostic, "request", side_effect=request), \
+             patch.object(diagnostic.public, "controller_stack", return_value={"available": True}):
+            report = diagnostic.collect(1, "cluster-uid", "budget")
+        self.assertTrue(report["complete"])
+        self.assertEqual(len(report["events"]), 1)
+        self.assertIn("insufficient-cpu", report["events"][0]["categories"])
+        self.assertNotIn("cursor", json.dumps(report))
+        self.assertNotIn(PRIVATE, json.dumps(report))
+        self.assertIn("/api/v1/events?limit=256&continue=cursor%2Fnext", calls)
+
+    def test_excess_pages_still_report_incomplete_with_the_same_deadline(self):
+        def request(_port, _method, path):
+            if path == "/api/v1/namespaces/kube-system":
+                return 200, NAMESPACE
+            return 200, {"items": [], "metadata": {"continue": "more"}}
+        with patch.object(diagnostic, "request", side_effect=request), \
+             patch.object(diagnostic.public, "controller_stack", return_value={"available": True}):
+            report = diagnostic.collect(1, "cluster-uid", "final")
+        self.assertFalse(report["complete"])
+        self.assertEqual(sum(item.get("resource") == "Event" for item in report["api"]), 4)
+
     def test_api_failure_remains_incomplete_without_dumping_its_body(self):
         def request(_port, _method, path):
             return (200, NAMESPACE) if path == "/api/v1/namespaces/kube-system" else (503, {"message": PRIVATE})

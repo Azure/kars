@@ -10,6 +10,7 @@ from pathlib import Path
 import re
 import time
 from urllib.error import URLError
+from urllib.parse import quote
 
 from sre_authority import bootstrap_diagnostics as public
 from sre_authority.registration_schema import CONTEXT, kind_proxy, request
@@ -200,31 +201,40 @@ def collect(port, expected_uid, stage, seconds=70):
                              for warning in items(mapping(status.get("typeChecking")).get("expressionWarnings"))[:32]],
             })
     for kind, path in COLLECTIONS:
-        code, body = get(path + "?limit=256")
-        report["api"].append({"resource": kind, "httpStatus": code})
-        if code != 200 or not isinstance(body, dict):
-            continue
-        if body.get("metadata", {}).get("continue"):
-            report["complete"] = False
-        for obj in items(body.get("items"))[:256]:
-            meta = obj.get("metadata", {})
-            if kind == "Namespace":
-                if not selected(meta.get("name")):
+        continuation = ""
+        for _ in range(4):
+            query = "?limit=256" + ("&continue=" + quote(continuation, safe="") if continuation else "")
+            code, body = get(path + query)
+            report["api"].append({"resource": kind, "httpStatus": code})
+            if code != 200 or not isinstance(body, dict):
+                break
+            for obj in items(body.get("items"))[:256]:
+                meta = obj.get("metadata", {})
+                if kind == "Namespace":
+                    if not selected(meta.get("name")):
+                        continue
+                elif kind != "Node" and not selected(meta.get("namespace")):
                     continue
-            elif kind != "Node" and not selected(meta.get("namespace")):
-                continue
-            if kind == "Event":
-                involved = mapping(obj.get("involvedObject"))
-                if involved.get("kind") in KINDS:
-                    report["events"].append({
-                        "kind": involved["kind"], "name": public.identifier(involved.get("name")),
-                        "namespace": public.identifier(involved.get("namespace")),
-                        "uid": public.identifier(involved.get("uid")), "reason": reason(obj.get("reason")),
-                        "count": integer(obj.get("count")), "lastTimestamp": stamp(obj.get("lastTimestamp")),
-                        **facts(obj.get("message"), policies),
-                    })
-            else:
-                report["resources"].append(object_status(kind, obj, policies))
+                if kind == "Event":
+                    involved = mapping(obj.get("involvedObject"))
+                    if involved.get("kind") in KINDS:
+                        report["events"].append({
+                            "kind": involved["kind"], "name": public.identifier(involved.get("name")),
+                            "namespace": public.identifier(involved.get("namespace")),
+                            "uid": public.identifier(involved.get("uid")), "reason": reason(obj.get("reason")),
+                            "count": integer(obj.get("count")), "lastTimestamp": stamp(obj.get("lastTimestamp")),
+                            **facts(obj.get("message"), policies),
+                        })
+                else:
+                    report["resources"].append(object_status(kind, obj, policies))
+            continuation = mapping(body.get("metadata")).get("continue", "")
+            if not continuation:
+                break
+            if not isinstance(continuation, str):
+                report["complete"] = False
+                break
+        else:
+            report["complete"] = False
     if time.monotonic() < deadline:
         report["controllerManager"] = public.controller_stack(
             CONTEXT, "kube-controller-manager-kars-e2e-control-plane")
