@@ -123,10 +123,14 @@ export function parseInclusionSnapshot(snapshot: unknown, namespace: string): In
 }
 
 export async function readInclusionChain(namespace: string): Promise<InclusionEntry[] | null> {
+  if (!/^[a-z0-9](?:[-a-z0-9]{0,61}[a-z0-9])?$/.test(namespace)) {
+    throw new Error("Receipt log namespace must be a Kubernetes namespace name");
+  }
   const { execa } = await import("execa");
-  // A single, unpaginated snapshot cannot combine a stale head with new overflow.
+  // kubectl's ordinary JSON printer drops the collection resourceVersion.
+  // --raw preserves one complete, versioned API snapshot without discovery.
   const command = await execa("kubectl", [
-    "get", "configmaps", "-n", namespace, "--chunk-size=0", "-o", "json",
+    "get", "--raw", `/api/v1/namespaces/${namespace}/configmaps`,
   ], { stdio: "pipe", reject: false });
   if (command.failed) throw new Error("Unable to read receipt log ConfigMaps; verify API access");
   let snapshot: unknown;

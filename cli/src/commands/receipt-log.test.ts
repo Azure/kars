@@ -124,8 +124,13 @@ describe("receipt log snapshot", () => {
     run.mockResolvedValue({ failed: false, stdout: JSON.stringify(snapshot([map(0, chain())])) });
     expect(await readInclusionChain("custom-kars")).toEqual(chain());
     expect(run).toHaveBeenCalledExactlyOnceWith("kubectl", [
-      "get", "configmaps", "-n", "custom-kars", "--chunk-size=0", "-o", "json",
+      "get", "--raw", "/api/v1/namespaces/custom-kars/configmaps",
     ], { stdio: "pipe", reject: false });
+  });
+
+  it.each(["", "../default", "a/b", "A", "a".repeat(64)])("refuses invalid namespace %s", async value => {
+    await expect(readInclusionChain(value)).rejects.toThrow("Kubernetes namespace name");
+    expect(run).not.toHaveBeenCalled();
   });
 
   it("does not interpret failed API access or malformed output as absence", async () => {
