@@ -43,6 +43,10 @@ standalone_budget() {
     node "$SCRIPT_DIR/inference-budget-enforcement.mjs"
 }
 
+test_collection_deletes() {
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_DIR" python3 -m standalone_collection_probe
+}
+
 prepare_standalone_namespace() {
     # The chart owns kars-system. Create that exact manifest with release
     # ownership before Helm needs its release-storage namespace; never adopt.
@@ -109,6 +113,7 @@ standalone_governed_main() {
     install_crds standalone-governed
 
     info "Standalone governed services: no active SRE, no CNI-enforcement claim"
+    standalone_check test_collection_deletes collections "Standalone ordinary/protected collection DELETE boundaries"
     for check in test_crd_installed test_controller_running \
         test_controller_metrics_endpoint test_admission_policies_installed \
         test_operator_default_deny_np test_create_sandbox \

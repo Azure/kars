@@ -15,6 +15,7 @@ RUNNER = ROOT / "tests/e2e/standalone-governed.sh"
 CHECKS = (
     "setup_cluster", "build_images", "prepare_managed_mcp", "prepare_standalone_namespace",
     "install_crds",
+    "test_collection_deletes",
     "test_crd_installed", "test_controller_running", "test_controller_metrics_endpoint",
     "test_admission_policies_installed", "test_operator_default_deny_np",
     "test_create_sandbox", "test_sandbox_deployment_exists", "test_sandbox_pod_starts",
@@ -74,7 +75,7 @@ sre_authority_cleanup() { printf 'FORBIDDEN SRE CLEANUP\n'; return 93; }
         self.assertNotIn("FORBIDDEN", result.stdout)
 
     def test_each_feature_failure_remains_a_failed_run_and_still_cleans_owned_cluster(self):
-        for check in ("test_governed_services", "test_managed_mcp",
+        for check in ("test_collection_deletes", "test_governed_services", "test_managed_mcp",
                       "test_credential_sources", "budget", "test_cleanup_sandbox"):
             with self.subTest(check=check):
                 result, _ = self.invoke(failure=check)

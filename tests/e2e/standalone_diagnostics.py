@@ -15,11 +15,11 @@ from sre_authority import bootstrap_diagnostics as public
 from sre_authority.registration_schema import CONTEXT, kind_proxy, request
 
 ROOT = Path(__file__).resolve().parents[2]
-STAGES = {"final", "setup", "services", "mcp", "credentials", "budget", "sandbox-cleanup",
+STAGES = {"final", "setup", "services", "mcp", "credentials", "budget", "collections", "sandbox-cleanup",
           "test_crd_installed", "test_controller_running", "test_controller_metrics_endpoint",
           "test_admission_policies_installed", "test_operator_default_deny_np",
           "test_create_sandbox", "test_sandbox_deployment_exists", "test_sandbox_pod_starts"}
-NAMESPACES = {"kars-system", "kube-system", "kars-e2e-test", "kars-e2e-source",
+NAMESPACES = {"kars-system", "kube-system", "kars-sre", "kars-e2e-test", "kars-e2e-source",
               "kars-e2e-managed-mcp", "e2e-mcp-workspace", "kars-mcp", "budget-provider-fixture"}
 KINDS = {"Namespace", "Node", "KarsTask", "KarsSandbox", "McpServer", "KarsBudgetAccount",
          "Deployment", "ReplicaSet", "Pod"}
