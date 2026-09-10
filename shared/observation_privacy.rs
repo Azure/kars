@@ -352,12 +352,15 @@ mod readiness_tests {
         let output = capture(|| {
             let mut diagnostic = Readiness::new("observer_binding");
             diagnostic.stage("observer_target_read");
-            diagnostic.api(&kube::Error::Api(kube::core::ErrorResponse {
-                status: "Failure".into(),
-                reason: "private-reason-canary".into(),
-                message: "private-body-canary".into(),
-                code: 403,
-            }));
+            diagnostic.api(&kube::Error::Api(Box::new(
+                serde_json::from_value(serde_json::json!({
+                    "status": "Failure",
+                    "reason": "private-reason-canary",
+                    "message": "private-body-canary",
+                    "code": 403,
+                }))
+                .unwrap(),
+            )));
         });
         assert!(output.contains("stage=\"observer_target_read\""));
         assert!(output.contains("http_status=403"));
