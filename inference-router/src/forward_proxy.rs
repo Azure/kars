@@ -240,6 +240,17 @@ async fn handle_connection(
     sandbox: &str,
     blocked_egress: &BlockedBuffer,
 ) -> anyhow::Result<()> {
+    if !blocklist.opaque_proxy_allowed() {
+        // Host-only CONNECT/SNI checks cannot prove encrypted HTTP authority
+        // (domain fronting/coalescing). Finite mode uses mediated router APIs.
+        send_response(
+            &mut stream,
+            403,
+            "Opaque tunnels are unsupported for governed inference; use mediated router APIs",
+        )
+        .await?;
+        return Ok(());
+    }
     // Read the initial request. For TLS ClientHello, we may need multiple reads
     // if the handshake is fragmented across TCP segments (rare, but possible).
     let mut buf = vec![0u8; 16384];

@@ -205,6 +205,7 @@ fn defaults_aliases_and_runtime_precedence_have_one_canonical_digest() {
     explicit.envelope.budget = Some(TaskBudget {
         tokens: Some(0),
         usd_micros: Some(0),
+        ..Default::default()
     });
     assert_eq!(explicit.authorization_digest_with_model(&model()), digest);
     explicit.blueprint.as_mut().unwrap().runtime = Some("MAF".into());
@@ -225,6 +226,7 @@ fn shared_authorization_snapshot_exposes_the_exact_effective_digest_input() {
     task.envelope.budget = Some(TaskBudget {
         tokens: Some(0),
         usd_micros: Some(0),
+        ..Default::default()
     });
     let configuration = task.authorization_configuration_with_model(&model());
     assert_eq!(

@@ -42,8 +42,14 @@ const REQUEUE_OK: Duration = Duration::from_secs(300);
 /// promptly once the parent reconciles, rather than waiting a full cycle.
 const REQUEUE_PENDING: Duration = Duration::from_secs(10);
 
+#[cfg(test)]
+#[path = "kars_task_budget_tests.rs"]
+mod budget_tests;
+
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
+    #[error(transparent)]
+    InferenceBudget(#[from] crate::inference_budget::store::StoreError),
     #[error("Kubernetes API error: {0}")]
     Kube(#[from] kube::Error),
     #[error("JSON serialization error: {0}")]
@@ -53,6 +59,7 @@ enum ReconcileError {
 impl ReconcileError {
     fn class(&self) -> &'static str {
         match self {
+            ReconcileError::InferenceBudget(_) => "inference_budget",
             ReconcileError::Kube(_) => "kube_api",
             ReconcileError::SerdeJson(_) => "serde",
         }
@@ -108,6 +115,7 @@ struct Ctx {
 }
 
 async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
+    let mut task = task;
     let name = task.name_any();
     let ns = task.namespace().unwrap_or_else(|| "default".into());
     let tasks: Api<KarsTask> = Api::namespaced(ctx.client.clone(), &ns);
@@ -115,6 +123,7 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // Keep the finalizer until all owned execution resources are gone.
     if task.metadata.deletion_timestamp.is_some() {
         if has_finalizer(&task) {
+            crate::inference_budget::binding::close_task(&ctx.client, &task).await?;
             if !crate::kars_task_execution::teardown(&ctx.client, &ns, &task).await? {
                 return Ok(Action::requeue(REQUEUE_PENDING));
             }
@@ -167,6 +176,7 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // mints from the parent's ancestry. A root task has no parent and empty
     // lineage. The controller is the *sole* writer of lineage.
     let delegation = resolve_delegation(&tasks, &task).await?;
+    let mut budget_pending = false;
 
     let mut new_status = match check_envelope(&task) {
         EnvelopeCheck::Invalid(why) => degraded_status(
@@ -188,7 +198,11 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                     Vec::new(),
                 )
             }
-            Delegation::ParentNotReady { parent } => {
+            Delegation::ParentNotReady {
+                parent,
+                admission_pending,
+            } => {
+                budget_pending = admission_pending;
                 tracing::info!(karstask = %name, ns = %ns, %parent, "KarsTask parent not yet ready — waiting");
                 pending_status(
                     prior_ready,
@@ -232,11 +246,56 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         );
     }
 
+    if new_status.phase.as_deref() == Some(PHASE_READY) {
+        match crate::inference_budget::binding::prepare_task(&ctx.client, &task).await {
+            Ok(prepared) => task = Arc::new(prepared),
+            Err(error) => {
+                budget_pending = true;
+                new_status = degraded_status(
+                    prior_ready,
+                    generation,
+                    &format!("Governed inference unavailable: {error}"),
+                    new_status.lineage.clone(),
+                );
+                // Preparation can pin an account before a later CAS failure.
+                // Preserve the pin and use the current UID/RV for status only.
+                let live = tasks.get(&name).await?;
+                if live.metadata.uid != task.metadata.uid
+                    || live.metadata.generation != task.metadata.generation
+                {
+                    return Ok(Action::requeue(REQUEUE_PENDING));
+                }
+                task = Arc::new(live);
+            }
+        }
+    }
+    new_status.inference_budget = task
+        .status
+        .as_ref()
+        .and_then(|status| status.inference_budget.clone());
+    if budget_pending {
+        crate::inference_budget::launch::mark_pending(
+            &mut new_status,
+            &task,
+            "Budget admission or ancestor funding availability is pending",
+        );
+    }
+
     // Execution bridge (§20 launch gate). Only a governance-Ready task may
     // execute. Launch materializes a governed sandbox; un-launch tears it down.
     // Any execution error is surfaced (Degraded) but never fails the whole
     // reconcile — the governance status is already durable.
-    reconcile_execution(&ctx.client, &ns, &task, &mut new_status).await;
+    if budget_pending
+        && task
+            .spec
+            .execution
+            .as_ref()
+            .is_some_and(|execution| execution.launch)
+    {
+        crate::inference_budget::launch::retain_execution(&task, &mut new_status);
+    } else {
+        reconcile_execution(&ctx.client, &ns, &task, &mut new_status).await;
+    }
 
     let status_patch = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
@@ -263,7 +322,9 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     reconcile_receipt(&ctx.client, &ns, &task, &new_status, &ctx.signer).await;
 
     // A child still waiting on its parent requeues quickly to converge.
-    let requeue = if new_status.phase.as_deref() == Some(PHASE_PENDING)
+    let requeue = if crate::inference_budget::binding::has_finite(&task.spec.envelope)
+        || new_status.inference_budget.is_some()
+        || new_status.phase.as_deref() == Some(PHASE_PENDING)
         || matches!(
             new_status.execution_phase.as_deref(),
             Some("Stopping" | PHASE_DEGRADED)
@@ -284,7 +345,10 @@ enum Delegation {
     /// `parentRef` resolved but the parent is not yet governance-`Ready` (no
     /// validated envelope digest). A child must not be granted authority
     /// against a parent whose own authority isn't established — it waits.
-    ParentNotReady { parent: String },
+    ParentNotReady {
+        parent: String,
+        admission_pending: bool,
+    },
     /// `parentRef` resolved; carries the minted lineage and any attenuation
     /// violations (empty = valid subset).
     Child {
@@ -328,6 +392,7 @@ async fn resolve_delegation(
     if !task_is_ready(&parent) {
         return Ok(Delegation::ParentNotReady {
             parent: parent_ref.name.clone(),
+            admission_pending: crate::inference_budget::launch::pending_parent(&parent, task),
         });
     }
 

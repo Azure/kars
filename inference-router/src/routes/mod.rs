@@ -84,6 +84,7 @@ pub struct AppState {
     pub client: reqwest::Client,
     pub config: Arc<Config>,
     pub budget: TokenBudgetTracker,
+    pub inference_budget: Option<Arc<crate::inference_budget::Client>>,
     pub governance: Arc<Governance>,
     /// Four-seam policy contract view of `governance`. Today it's the same
     /// `Arc<Governance>` coerced to `Arc<dyn PolicyDecisionProvider>` — the
@@ -319,6 +320,13 @@ impl AppState {
         ));
         let blocked_egress = Arc::new(BlockedBuffer::with_defaults());
         blocked_egress.bind_services(&services);
+        let inference_budget = crate::inference_budget::Client::from_env()?;
+        if let Some(client) = &inference_budget {
+            blocklist.bind_inference_budget(
+                client.clone(),
+                crate::inference_budget::egress::model_hosts(&config),
+            )?;
+        }
         Ok(Self {
             services,
             auth: Arc::new(WorkloadIdentityAuth::new()),
@@ -326,6 +334,7 @@ impl AppState {
             client: client.clone(),
             config: Arc::new(config),
             budget,
+            inference_budget,
             policy_provider: Arc::clone(&governance) as Arc<dyn PolicyDecisionProvider>,
             audit_sink: Arc::clone(&governance) as Arc<dyn AuditSink>,
             signing_provider: Arc::clone(&governance) as Arc<dyn SigningProvider>,
@@ -378,6 +387,7 @@ impl AppState {
             .unwrap_or_else(|| self.config.default_model.clone());
 
         let mut upstream = UpstreamConfig::azure(endpoint, deployment, sandbox_name.to_string());
+        upstream.inference_budget = self.inference_budget.clone();
         if self.services.identity_valid {
             upstream.telemetry = Some(self.services.telemetry.clone());
         }
@@ -522,6 +532,25 @@ async fn healthz() -> &'static str {
 }
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    if state.inference_budget.is_some() {
+        return match crate::inference_budget::readiness::ready(
+            &state,
+            state.upstream_config(&state.sandbox_name),
+        )
+        .await
+        {
+            Ok(()) => (
+                StatusCode::OK,
+                "governed inference authority and model contracts available",
+            )
+                .into_response(),
+            Err(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "not ready — governed inference authority, provider or contracts unavailable",
+            )
+                .into_response(),
+        };
+    }
     // Check that we can acquire a token (validates Workload Identity / IMDS setup)
     let audience = if state
         .config
