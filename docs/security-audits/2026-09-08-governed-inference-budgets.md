@@ -72,6 +72,43 @@ private Bridge publication is authorized by this source sign-off.
 Signed-off-by: pallakatos (maintainer delegation recorded above) <lakatos.toth.pal@gmail.com>
 Signed-off-by: GitHub Copilot (delegated AI audit, not an independent human) <223556219+Copilot@users.noreply.github.com>
 
+## Unsupported finite-route failure contract (2026-09-10)
+
+Published `2a95d02a` passed Rust, CLI, benchmarks and the other gates, but
+native job
+[102935839436](https://github.com/Azure/kars/actions/runs/34493554446/job/102935839436)
+finished with 166 passes and one failure. Four actual owned routers passed
+both health and governed readiness. The later `/v1/embeddings` assertion
+received502 rather than the required503; that result remains failed.
+
+The handler attempted default-provider authentication before classifying an
+unsupported finite-budget operation. Repair `65d0ecaf9bb2aeaaff66021fa6c21c998f45c70c`
+moves only side-effect-free support classification ahead of that credential
+lookup. Unsupported finite requests retain the explicit budget failure rather
+than an unrelated provider-authentication failure. Request authentication,
+governance and final-send funding are not bypassed. Supported and unbounded
+paths retain their existing behavior.
+
+The native503 expectation is preserved and strengthened with error code/type
+checks. Independent focused re-review of the exact production repair reported
+no significant issues. The first Rust attempt stopped at a test initializer
+type error before running tests; `058b79731b1e8a5aa28f9723dd3512ef381f0661`
+corrects only that initializer, without changing production or assertions.
+
+Exact058 qualification passed all four new unsupported-route regressions and
+61 router budget cases including those four, strict router all-target Clippy
+and formatting. Prior JS/CLI qualification passed71 cases and type checking.
+The guarded shared-target Rust batch observed at least8.91GiB free; no floor
+or dependency workaround was used. Controller source was not changed or
+unnecessarily rebuilt for this router-only repair.
+
+Current source `2225fab6f789b9e954221e2686f331b4df2a4448` adds actual
+integration ancestor `af4deba7` with an entire tree identical to qualified058.
+The bounded source approval above applies to this reviewed repair as well.
+Fresh current-base native accounting, cancellation and failure-contract
+acceptance remain mandatory; successful readiness is not substituted for
+those assertions.
+
 ## Summary
 
 Durable token ceilings and operator-configured maximum-price caps for governed
