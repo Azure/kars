@@ -57,6 +57,13 @@ spec:
                     description: Optional resource budget for the whole task subtree.
                     nullable: true
                     properties:
+                      scope:
+                        type: string
+                        enum: [GovernedInference, null]
+                        nullable: true
+                        description: |-
+                          Explicit opt-in to governed-inference tokens/configured maximum prices.
+                          An absent scope retains the foundation's planning-only interpretation.
                       tokens:
                         description: |-
                           Maximum total tokens the task subtree may consume. `0`/absent means

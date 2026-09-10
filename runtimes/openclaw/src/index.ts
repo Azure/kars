@@ -369,6 +369,7 @@ import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _st
 import { processTaskWithTools as _processTaskWithTools } from "./core/agt-task-loop.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
 import { registerHttpFetchTool } from "./core/agt-tools/http-fetch.js";
+import { registerMcpBridgeTools } from "./core/agt-tools/mcp-bridge.js";
 import { registerFoundryTools } from "./core/agt-tools/foundry.js";
 import { registerAgtTools } from "./core/agt-tools/agt.js";
 import { registerOpenClawCommands } from "./core/commands/openclaw.js";
@@ -2937,6 +2938,7 @@ const azureClawPlugin = definePluginEntry({
     // unchanged; the registration helpers receive a Deps bag for late-bound
     // foundryProject + log + config access.
     registerHttpFetchTool(api);
+    registerMcpBridgeTools(api);
     // Skip Foundry tool catalog when running against GH-token providers
     // (`github-models` or `github-copilot`). Foundry tools require an Azure
     // project the GH-token paths don't have, so registering them is pure dead

@@ -1,0 +1,24 @@
+{{- $budget := .Values.inferenceBudget | default dict -}}
+{{- if ($budget.enabled | default false) -}}
+{{- $bundle := (.Files.Get "files/inference-budget-admission.json" | replace "__ACCOUNTING_NAMESPACE__" .Release.Namespace | fromJson) -}}
+{{- range $policy := $bundle.items }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: {{ $policy.name }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: inference-budget
+spec:
+  {{- $policy.spec | toYaml | nindent 2 }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: {{ $policy.name }}
+spec:
+  policyName: {{ $policy.name }}
+  validationActions: [Deny, Audit]
+{{- end }}
+{{- end }}

@@ -65,6 +65,7 @@ fn test_state(sandbox: &str, admin_token: Option<&str>) -> AppState {
             providers: Default::default(),
         }),
         budget: TokenBudgetTracker::new(1_000_000, 100_000),
+        inference_budget: None,
         policy_provider: Arc::clone(&governance) as Arc<dyn PolicyDecisionProvider>,
         audit_sink: Arc::clone(&governance) as Arc<dyn AuditSink>,
         signing_provider: Arc::clone(&governance) as Arc<dyn SigningProvider>,

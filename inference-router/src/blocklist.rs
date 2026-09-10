@@ -62,9 +62,27 @@ pub struct Blocklist {
     /// surface) was removed alongside this slice — see
     /// `docs/internal/crd-well-oiled-machine/slice-5-egress-polish-and-observability.md`.
     allowlist: Arc<RwLock<HashSet<String>>>,
+    inference_budget: Arc<std::sync::OnceLock<crate::inference_budget::egress::Fence>>,
 }
 
 impl Blocklist {
+    pub fn opaque_proxy_allowed(&self) -> bool {
+        self.inference_budget.get().is_none()
+    }
+
+    pub fn bind_inference_budget(
+        &self,
+        client: Arc<crate::inference_budget::Client>,
+        model_hosts: Vec<String>,
+    ) -> anyhow::Result<()> {
+        self.inference_budget
+            .set(crate::inference_budget::egress::Fence {
+                client,
+                model_hosts,
+            })
+            .map_err(|_| anyhow::anyhow!("inference budget egress fence already bound"))
+    }
+
     /// Create a new empty blocklist (disabled mode — passes everything).
     pub fn disabled() -> Self {
         Self {
@@ -75,6 +93,7 @@ impl Blocklist {
             learn_mode: Arc::new(AtomicBool::new(false)),
             learned_domains: Arc::new(RwLock::new(HashSet::new())),
             allowlist: Arc::new(RwLock::new(HashSet::new())),
+            inference_budget: Arc::default(),
         }
     }
 
@@ -107,6 +126,7 @@ impl Blocklist {
             learn_mode: Arc::new(AtomicBool::new(false)),
             learned_domains: Arc::new(RwLock::new(HashSet::new())),
             allowlist: Arc::new(RwLock::new(HashSet::new())),
+            inference_budget: Arc::default(),
         }
     }
 
@@ -325,6 +345,9 @@ impl Blocklist {
     /// `BlockedBuffer` observability surface in `forward_proxy`) can
     /// continue to attribute denials.
     pub async fn check_egress(&self, url: &str, _sandbox: &str) -> Result<(), String> {
+        if let Some(fence) = self.inference_budget.get() {
+            fence.check(extract_domain(url)).await?;
+        }
         // 1. Blocklist: hard deny
         let block_result = self.is_blocked(url).await;
         if block_result.is_blocked() {

@@ -272,6 +272,9 @@ async fn completions(
         Ok((status, _, resp_body)) => (status, Body::from(resp_body)).into_response(),
         Err(e) => {
             tracing::error!("Proxy error: {e:#}");
+            if let Some(response) = crate::inference_budget::response::denial(&e) {
+                return response;
+            }
             StatusCode::BAD_GATEWAY.into_response()
         }
     }
@@ -414,6 +417,9 @@ async fn responses(
         }
         Err(e) => {
             tracing::error!(sandbox = %sandbox_name, "Responses proxy error: {e:#}");
+            if let Some(response) = crate::inference_budget::response::denial(&e) {
+                return response;
+            }
             errors::openai(
                 StatusCode::BAD_GATEWAY,
                 "Failed to reach inference backend",
@@ -464,6 +470,9 @@ async fn embeddings(
         Ok((status, _, resp_body)) => (status, Body::from(resp_body)).into_response(),
         Err(e) => {
             tracing::error!("Proxy error: {e:#}");
+            if let Some(response) = crate::inference_budget::response::denial(&e) {
+                return response;
+            }
             StatusCode::BAD_GATEWAY.into_response()
         }
     }
@@ -544,6 +553,9 @@ async fn images_generations(
         }
         Err(e) => {
             tracing::error!(deployment = %deployment, "Image generation proxy error: {e:#}");
+            if let Some(response) = crate::inference_budget::response::denial(&e) {
+                return response;
+            }
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({"error": {"message": format!("Image generation proxy error: {e}")}})),
@@ -801,6 +813,14 @@ async fn foundry_proxy(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
+    if state.inference_budget.is_some() {
+        return errors::openai_coded(
+            StatusCode::FORBIDDEN,
+            "This Foundry operation is outside the closed governed-inference contract; use a supported inference route",
+            "unsupported_budget_operation",
+            "unsupported_budget_operation",
+        ).into_response();
+    }
     let sandbox_name = resolve_sandbox_name(&headers);
 
     // The raw path is concatenated into the upstream URL below, and

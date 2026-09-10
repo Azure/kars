@@ -129,6 +129,11 @@ pub async fn create_sandbox(
     parent_name: &str,
     req: &SpawnRequest,
 ) -> Result<SpawnResponse, String> {
+    if std::env::var("KARS_INFERENCE_BUDGET_REQUIRED")
+        .is_ok_and(|value| value != "false" && !value.is_empty())
+    {
+        return Err("Governed inference cannot delegate through plain Sandbox spawn; use UID-bound Task delegation".into());
+    }
     // Validate name: must be DNS-safe
     if req.agent_id.is_empty() || req.agent_id.len() > 63 {
         return Err("name must be 1-63 characters".into());

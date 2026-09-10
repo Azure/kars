@@ -28,12 +28,37 @@ spec:
     - Ingress
     - Egress
   ingress:
+    {{- if ((.Values.inferenceBudget | default dict).enabled | default false) }}
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kars.azure.com/inference-budget: v1
+          podSelector:
+            matchLabels:
+              kars.azure.com/component: sandbox
+      ports:
+        - protocol: TCP
+          port: 9447
+    {{- end }}
     # Allow Prometheus / port-forward scrapes of /metrics on :9091.
     - from: []
       ports:
         - protocol: TCP
           port: 9091
   egress:
+    # Controller-only readiness discovery of the reviewed managed presets.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ (.Values.managedMcp | default dict).namespace | default "kars-mcp" | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: mcp-server
+      ports:
+        - protocol: TCP
+          port: 8931
+        - protocol: TCP
+          port: 3001
     # DNS resolution.
     - to:
         - namespaceSelector: {}

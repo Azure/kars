@@ -161,6 +161,7 @@ install_crds() {
     local disable_le="${KARS_E2E_DISABLE_LEADER_ELECTION:-1}"
     local helm_wait_arg=--wait
     local extra_set_args=(
+        --set-string "managedMcp.everythingImage=kars-mcp-everything:e2e"
         --set "controller.replicas=${replicas}"
         --set "inferenceRouter.replicas=${replicas}"
         # Without a fake Foundry endpoint, the KarsSandbox reconciler
@@ -799,6 +800,13 @@ EOF
     else
         dump_cr_diagnostics karseval e2e-karseval-lc kars-system
         fail "KarsEval lifecycle: CronJob not created within 30s"
+    fi
+
+    if PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_DIR" \
+        python3 -m eval_pod_admission --job "$job_name"; then
+        pass "KarsEval lifecycle: actual Job/CronJob Pods admitted under restricted PSS; legacy contexts denied"
+    else
+        fail "KarsEval lifecycle: produced Pod admission proof failed"
     fi
 
     # ---- clearing the schedule deletes the CronJob -------------
@@ -3050,6 +3058,7 @@ EOF
 
 source "$SCRIPT_DIR/sre-authority.sh"
 source "$SCRIPT_DIR/namespace-ownership.sh"
+source "$SCRIPT_DIR/managed-mcp.sh"
 source "$SCRIPT_DIR/credential-sources.sh"
 source "$SCRIPT_DIR/governed-services.sh"
 
@@ -3063,12 +3072,15 @@ main() {
 
     PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_DIR" \
         python3 -m unittest discover -s "$SCRIPT_DIR/sre_authority" -p '*_test.py'
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_DIR" \
+        python3 -m unittest eval_pod_admission_test
     trap teardown EXIT
 
     setup_cluster
     # Validate the public cluster API before any Rust images or private fixtures.
     PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/sre_authority/registration_schema.py"
     build_images
+    prepare_managed_mcp
     prepare_sre_authority_legacy
     install_crds
     # Finish real legacy retirement before unrelated tests can create private
@@ -3165,8 +3177,14 @@ main() {
             ;;
     esac
 
+    test_managed_mcp || fail "Managed MCP lifecycle/protocol gate failed"
     test_sre_namespace_ownership || fail "SRE namespace lifecycle gate failed"
     test_credential_sources || fail "Credential-source lifecycle gate failed"
+    if node "$SCRIPT_DIR/inference-budget-enforcement.mjs"; then
+        pass "Durable governed inference: real broker, sibling caps, route closure and cancellation"
+    else
+        fail "Durable governed-inference enforcement gate failed"
+    fi
 
     echo ""
     echo "═══════════════════════════════════════════════════════"
