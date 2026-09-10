@@ -802,6 +802,13 @@ EOF
         fail "KarsEval lifecycle: CronJob not created within 30s"
     fi
 
+    if PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_DIR" \
+        python3 -m eval_pod_admission --job "$job_name"; then
+        pass "KarsEval lifecycle: actual Job/CronJob Pods admitted under restricted PSS; legacy contexts denied"
+    else
+        fail "KarsEval lifecycle: produced Pod admission proof failed"
+    fi
+
     # ---- clearing the schedule deletes the CronJob -------------
     kubectl patch karseval e2e-karseval-lc -n kars-system --type=json \
         -p '[{"op":"remove","path":"/spec/schedule"}]' >/dev/null 2>&1 \
@@ -3065,6 +3072,8 @@ main() {
 
     PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_DIR" \
         python3 -m unittest discover -s "$SCRIPT_DIR/sre_authority" -p '*_test.py'
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_DIR" \
+        python3 -m unittest eval_pod_admission_test
     trap teardown EXIT
 
     setup_cluster
