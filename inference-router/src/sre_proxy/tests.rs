@@ -12,6 +12,26 @@ mod request_boundary;
 
 const PRIVATE_VALUE: &str = "PRIVATE_OPERATOR_CONTROL_VALUE";
 
+#[test]
+fn readiness_rejection_categories_exclude_error_details() {
+    assert_eq!(
+        readiness_failure_category("SRE authority read failed"),
+        "authority-transport"
+    );
+    assert_eq!(
+        readiness_failure_category("SRE authority read denied"),
+        "authority-denied"
+    );
+    for message in [
+        PRIVATE_VALUE.to_string(),
+        format!("SRE authority read failed: {PRIVATE_VALUE}"),
+        format!("{PRIVATE_VALUE} SRE authority read denied"),
+    ] {
+        assert_eq!(readiness_failure_category(&message), "unclassified");
+        assert!(!readiness_failure_category(&message).contains(PRIVATE_VALUE));
+    }
+}
+
 struct Fixture {
     _upstream: MockServer,
     directory: tempfile::TempDir,
@@ -73,8 +93,18 @@ async fn fixture() -> Fixture {
                 json!({"apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","metadata":{},"items":state.aliases})
             }
             "/api/v1/namespaces/kars-demo/secrets/router-services-admin" => secret(),
-            "/api/v1/secrets" => json!({"apiVersion":"v1","kind":"SecretList","metadata":{},"items":[secret()]}),
-            "/api/v1/namespaces/kars-demo/pods/app/log" => return ResponseTemplate::new(200).set_body_raw("legitimate pod log\n","text/plain"),
+            "/api/v1/secrets" => {
+                let mut item = secret();
+                item.as_object_mut().unwrap().remove("kind");
+                item.as_object_mut().unwrap().remove("apiVersion");
+                json!({"apiVersion":"v1","kind":"SecretList","metadata":{},"items":[item]})
+            }
+            "/api/v1/namespaces/kars-demo/pods/app/log" => {
+                if request.headers.get("accept").and_then(|value|value.to_str().ok()) != Some("*/*") {
+                    return ResponseTemplate::new(406).set_body_json(json!({"kind":"Status","reason":"NotAcceptable"}));
+                }
+                return ResponseTemplate::new(200).set_body_raw("legitimate pod log\n","text/plain");
+            }
             "/apis/metrics.k8s.io/v1beta1/nodes" => json!({"kind":"NodeMetricsList","items":[]}),
             "/apis/kars.azure.com/v1alpha1/namespaces/kars-sre/karssreactions" if request.method=="POST" => {
                 let body:serde_json::Value=request.body_json().unwrap();
@@ -203,6 +233,33 @@ fn secret() -> serde_json::Value {
             "annotations":{"kubectl.kubernetes.io/last-applied-configuration":PRIVATE_VALUE},
             "labels":{"copy":PRIVATE_VALUE},"managedFields":[{"copy":PRIVATE_VALUE}]},
         "data":{"control-token":PRIVATE_VALUE},"stringData":{"copy":PRIVATE_VALUE}})
+}
+
+#[tokio::test]
+async fn upstream_log_negotiation_keeps_api_compatible_accept_and_bounded_plain_text() {
+    let f = fixture().await;
+    let path = "/api/v1/namespaces/kars-demo/pods/app/log";
+    let rejected = reqwest::Client::new()
+        .get(format!("{}{path}", f.backend.config.kube_url))
+        .bearer_auth("private-kubernetes-token")
+        .header("accept", "text/plain")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status(), StatusCode::NOT_ACCEPTABLE);
+    let response = f
+        .client
+        .get(format!("{}{path}?tailLines=20", f.url))
+        .bearer_auth(&f.token)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/plain; charset=utf-8"
+    );
+    assert_eq!(response.text().await.unwrap(), "legitimate pod log\n");
 }
 
 #[tokio::test]

@@ -26,7 +26,8 @@ def failure_site(error):
     frame = error.__traceback__
     while frame:
         name = Path(frame.tb_frame.f_code.co_filename).name
-        if name in ("bootstrap_probe.py", "binding_probe.py"):
+        if name in ("bootstrap_probe.py", "binding_probe.py", "bootstrap_cases.py",
+                    "controller_update_probe.py", "collection_delete_probe.py"):
             result.update(source=name, line=frame.tb_lineno)
         frame = frame.tb_next
     return result
@@ -222,6 +223,15 @@ def main(root, diagnostics_only, candidate=False, retirement=False):
                 CONTEXT, "kube-controller-manager-kars-e2e-control-plane"))
         else:
             try:
+                media = []
+                path = ("/api/v1/namespaces/kube-system/pods/kube-controller-manager-kars-e2e-control-plane/log"
+                        "?container=kube-controller-manager&tailLines=1&limitBytes=4096")
+                for accept in ("text/plain", "application/json", "*/*"):
+                    code, _ = request(port, "GET", path, accept=accept)
+                    media.append({"accept": accept, "httpStatus": code})
+                write_report(root, "bootstrap-log-media.json", {"cases": media})
+                if next(case["httpStatus"] for case in media if case["accept"] == "application/json") != 200:
+                    raise RuntimeError("Actual API log media precondition failed")
                 state = exercise(root, port, objects, policies, wait_seconds=180 if candidate else 90,
                                  retirement=retirement and not candidate)
                 from sre_authority.bootstrap_cases import admission_cases
@@ -233,13 +243,27 @@ def main(root, diagnostics_only, candidate=False, retirement=False):
                     from sre_authority.binding_probe import prove
                     prove(root, port, state, objects,
                           lambda facts: write_report(root, "bootstrap-binding-retirement.json", facts))
-                from sre_authority.bootstrap_cases import deployment_controller_cases, private_controller_chain
+                from sre_authority.bootstrap_cases import deployment_controller_cases, namespace_cleanup_cases, private_controller_chain
                 controller_cases = deployment_controller_cases(port, policies)
                 write_report(root, "bootstrap-workload-controller.json", {"cases": controller_cases})
                 if not all(case["matched"] for case in controller_cases):
                     raise RuntimeError("Built-in Deployment controller cannot create the private SRE ReplicaSet")
-                private_controller_chain(port, policies,
+                parent = private_controller_chain(port, policies,
                     lambda facts: write_report(root, "bootstrap-private-controller-chain.json", facts))
+                from sre_authority.controller_update_probe import cases as update_cases
+                updates = update_cases(port, policies, parent)
+                write_report(root, "bootstrap-controller-update-ownerrefs.json", {"cases": updates})
+                if not all(case["matched"] for case in updates):
+                    raise RuntimeError("Private workload UPDATE/owner-reference boundary failed")
+                cleanup_cases = namespace_cleanup_cases(port, policies, state["consumer"] if state else None)
+                write_report(root, "bootstrap-namespace-cleanup.json", {"cases": cleanup_cases})
+                if not all(case["matched"] for case in cleanup_cases):
+                    raise RuntimeError("Canonical consumer cleanup authority differs from the expected boundary")
+                from sre_authority.collection_delete_probe import cases as collection_cases
+                collections = collection_cases(port, policies)
+                write_report(root, "bootstrap-collection-delete.json", {"cases": collections})
+                if not all(case["matched"] for case in collections):
+                    raise RuntimeError("Collection DELETE must preserve ordinary cleanup and protected-object denial")
             finally:
                 write_report(root, "bootstrap-final.json", collect(port, policies, request))
                 write_report(root, "bootstrap-controller-stack.json", controller_stack(

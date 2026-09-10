@@ -3,6 +3,7 @@
 
 import base64
 import contextlib
+import copy
 import hashlib
 import inspect
 import json
@@ -374,10 +375,11 @@ class Harness:
 
     def diagnostics(self):
         from .bootstrap_diagnostics import failure_facts
-        self.deadline = max(self.deadline, time.monotonic() + 50)
+        self.deadline = max(self.deadline, time.monotonic() + 90)
         # Status and identities only; never dump Secret bodies or whole Pods.
         for kind, name, namespace in [("karssreregistrations.kars.azure.com", "canonical", None),
-                                      ("karssandbox", "sre", SYSTEM), ("deployment", "sre", RUNTIME)]:
+                                      ("karssandbox", "sre", SYSTEM), ("deployment", "sre", RUNTIME),
+                                      ("namespace", RUNTIME, None)]:
             try:
                 obj = self.get(kind, name, namespace)
                 if obj:
@@ -404,11 +406,307 @@ class Harness:
                 print("SRE-DIAG", json.dumps({"kind": "Pod", "name": pod["metadata"]["name"],
                     "uid": pod["metadata"]["uid"], "phase": status.get("phase"),
                     "containers": [{"name": container["name"], "ready": container.get("ready"),
+                        "restartCount": container.get("restartCount"),
                         "state": {kind: {key: value.get(key) for key in ("reason", "exitCode") if key in value}
                                   for kind, value in container.get("state", {}).items()}}
                         for container in containers]}), flush=True)
+                router = next((container for container in status.get("containerStatuses", [])
+                               if container["name"] == "inference-router"), None)
+                if router and not router.get("ready") and "running" in router.get("state", {}):
+                    self.readiness_diagnostics(pod)
+                elif router and router.get("ready"):
+                    from .bootstrap_diagnostics import router_readiness_facts
+                    try:
+                        logs = self.k("logs", "-n", RUNTIME, pod["metadata"]["name"], "-c", "inference-router",
+                                      "--tail=150", timeout=10)
+                        print("SRE-DIAG", json.dumps({"kind": "RouterAuthorityLog", "podUid": pod["metadata"]["uid"],
+                            "authorityChecks": router_readiness_facts(logs)}), flush=True)
+                    except Exception:
+                        print("SRE-DIAG Ready router authority log unavailable", flush=True)
         except Exception:
             print("SRE-DIAG runtime Pod status unavailable", flush=True)
+
+    def readiness_diagnostics(self, pod):
+        from .bootstrap_diagnostics import probe_command_result, router_log_summary, router_readiness_facts
+        facts = {"kind": "RouterReadiness", "podUid": pod["metadata"]["uid"]}
+        router = next(item for item in pod["spec"]["containers"] if item["name"] == "inference-router")
+        facts["privateApiEnabled"] = any(entry.get("name") == "KARS_SRE_API_ENABLED"
+                                        and entry.get("value") == "true" for entry in router.get("env", []))
+        facts["routerUid1001"] = router.get("securityContext", {}).get("runAsUser") == 1001
+        facts["expectedImage"] = router.get("image") == "kars-inference-router:e2e"
+        facts["progressLoggingEnabled"] = any(entry.get("name") == "RUST_LOG"
+                                            and "inference_router=debug" in entry.get("value", "")
+                                            for entry in router.get("env", []))
+        try:
+            facts["apiConnectivity"] = self.connectivity_diagnostics(pod)
+        except Exception as error:
+            facts["connectivityDiagnosticError"] = type(error).__name__
+        try:
+            source = self.get("karssandbox", "sre", SYSTEM)
+            policy = self.get("networkpolicy", "sandbox-policy", RUNTIME)
+            service = self.get("service", "kubernetes", "default")
+            service_ip = service["spec"]["clusterIP"]
+            rules = policy.get("spec", {}).get("egress", []) if policy else []
+            facts["sourceLabelSre"] = source.get("metadata", {}).get("labels", {}).get("kars.azure.com/role") == "sre"
+            facts["explicitApiServiceRule"] = any(
+                any(peer.get("ipBlock", {}).get("cidr") == f"{service_ip}/32" for peer in rule.get("to", []))
+                and any(port.get("port") == 443 and port.get("protocol", "TCP") == "TCP"
+                        for port in rule.get("ports", [])) for rule in rules)
+            agents = json.loads(self.k("get", "daemonsets", "-n", "kube-system", "-o", "json"))["items"]
+            facts["knownNetworkAgents"] = sorted(agent["metadata"]["name"] for agent in agents
+                if agent["metadata"]["name"] in ("kindnet", "cilium", "calico-node", "antrea-agent", "kube-flannel-ds"))
+            facts["minimalKindnetImage"] = any(
+                container.get("image", "").removeprefix("docker.io/").startswith("kindest/kindnetd:")
+                for agent in agents if agent["metadata"]["name"] == "kindnet"
+                for container in agent.get("spec", {}).get("template", {}).get("spec", {}).get("containers", []))
+        except Exception as error:
+            facts["networkPolicyDiagnosticError"] = type(error).__name__
+        try:
+            facts["firewall"] = self.firewall_diagnostics(pod)
+        except Exception as error:
+            facts["firewallDiagnosticError"] = type(error).__name__
+        try:
+            for label, executable in (("configuredCommand", "kars-inference-router"),
+                                      ("absoluteCommand", "/usr/local/bin/kars-inference-router")):
+                result = self.k("exec", "-n", RUNTIME, pod["metadata"]["name"], "-c", "inference-router",
+                                "--", executable, "sre-ready", expected=None, timeout=10)
+                facts[label] = probe_command_result(result.returncode, result.stdout + result.stderr)
+            ca = self.k("exec", "-n", RUNTIME, pod["metadata"]["name"], "-c", "agent",
+                        "--", "cat", "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt", timeout=10)
+            context = ssl.create_default_context(cadata=ca)
+            with self.port_forward(pod["metadata"]["name"]) as port, \
+                    self.httpx.Client(verify=context, timeout=25, trust_env=False) as client:
+                response = client.get(f"https://127.0.0.1:{port}/readyz")
+                facts["verifiedLoopbackTlsStatus"] = response.status_code
+        except Exception as error:
+            facts["diagnosticError"] = type(error).__name__
+        try:
+            logs = self.k("logs", "-n", RUNTIME, pod["metadata"]["name"], "-c", "inference-router",
+                          "--tail=150", timeout=10)
+            facts["authorityChecks"] = router_readiness_facts(logs)
+            facts["logSummary"] = router_log_summary(logs, self.root)
+        except Exception:
+            facts["authorityChecksUnavailable"] = True
+        print("SRE-DIAG", json.dumps(facts), flush=True)
+
+    def firewall_diagnostics(self, pod):
+        from .bootstrap_diagnostics import firewall_summary
+        node = pod["spec"].get("nodeName")
+        require(node in ("kars-e2e-worker", "kars-e2e-control-plane")
+                and not pod["spec"].get("hostNetwork"), "Firewall diagnostic requires the owned Kind Pod network")
+        cluster = self.run(["docker", "inspect", node, "--format",
+                            '{{index .Config.Labels "io.x-k8s.kind.cluster"}}'], timeout=10).strip()
+        require(cluster == "kars-e2e", "Firewall diagnostic refuses a foreign node")
+        items = json.loads(self.run(["docker", "exec", node, "crictl", "pods",
+                                    "--label", f'io.kubernetes.pod.uid={pod["metadata"]["uid"]}',
+                                    "-o", "json"], timeout=10))["items"]
+        matches = [item for item in items if item.get("metadata", {}).get("uid") == pod["metadata"]["uid"]
+                   and item["metadata"].get("namespace") == RUNTIME and item.get("state") == "SANDBOX_READY"]
+        require(len(matches) == 1 and re.fullmatch(r"[0-9a-f]{64}", matches[0]["id"]),
+                "Firewall diagnostic could not identify the exact live Pod sandbox")
+        sandbox = matches[0]["id"]
+        def identity():
+            obj = json.loads(self.run(["docker", "exec", node, "crictl", "inspectp", "-o", "json", sandbox], timeout=10))
+            require(obj.get("status", {}).get("metadata", {}).get("uid") == pod["metadata"]["uid"],
+                    "Firewall diagnostic sandbox UID changed")
+            pid = obj.get("info", {}).get("pid")
+            require(type(pid) is int and 0 < pid < 2**31, "Firewall diagnostic sandbox PID is invalid")
+            return pid
+        pid = identity()
+        facts = {}
+        for backend in ("nft", "legacy"):
+            output = self.run(["docker", "exec", node, "nsenter", "--target", str(pid), "--net", "--",
+                               f"iptables-{backend}-save", "-c"], timeout=10, expected=None)
+            facts[backend] = firewall_summary(output.stdout) if output.returncode == 0 else {"available": False}
+        require(identity() == pid, "Firewall diagnostic sandbox changed during the read")
+        return facts
+
+    def connectivity_diagnostics(self, pod):
+        import ipaddress
+        service = self.get("service", "kubernetes", "default")
+        endpoint = self.get("endpoints", "kubernetes", "default")
+        service_ip = service["spec"]["clusterIP"]
+        service_port = next(port["port"] for port in service["spec"]["ports"] if port["name"] == "https")
+        subset = endpoint["subsets"][0]
+        endpoint_ip = subset["addresses"][0]["ip"]
+        endpoint_port = next(port["port"] for port in subset["ports"] if port["name"] == "https")
+        require(all(ipaddress.ip_address(address).is_private for address in (service_ip, endpoint_ip))
+                and all(type(port) is int and 0 < port < 65536 for port in (service_port, endpoint_port)),
+                "Connectivity diagnostic refuses non-private or invalid API targets")
+        current = self.get("pod", pod["metadata"]["name"], RUNTIME)
+        require(current["metadata"]["uid"] == pod["metadata"]["uid"],
+                "Diagnostic Pod changed before connectivity inspection")
+        require(current["spec"].get("automountServiceAccountToken") is False
+                and current["spec"].get("shareProcessNamespace") is not True,
+                "Connectivity diagnostic requires isolated processes and no ambient token")
+        name = "sre-e2e-network-diagnostic"
+        existing = current["spec"].get("ephemeralContainers", [])
+        require(not any(item["name"] == name for item in existing), "Diagnostic container name is already occupied")
+        script = """
+if ! command -v timeout >/dev/null || ! command -v bash >/dev/null || ! command -v id >/dev/null; then
+  printf '{"available":false}\\n'; exit 0
+fi
+uid=false
+[ "$(id -u)" = 1001 ] && uid=true
+timeout 6 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' sre-tcp "$1" "$2" >/dev/null 2>&1
+service=$?
+timeout 6 bash -c 'exec 3<>/dev/tcp/"$1"/"$2"' sre-tcp "$3" "$4" >/dev/null 2>&1
+endpoint=$?
+printf '{"available":true,"uidMatches1001":%s,"serviceExit":%s,"endpointExit":%s}\\n' "$uid" "$service" "$endpoint"
+"""
+        probe = {"name": name, "image": STANDIN, "imagePullPolicy": "IfNotPresent",
+                 "command": ["/bin/sh", "-c", script, "sre-connectivity", service_ip, str(service_port),
+                             endpoint_ip, str(endpoint_port)],
+                 "securityContext": {"runAsUser": 1001, "runAsNonRoot": True,
+                                     "allowPrivilegeEscalation": False, "readOnlyRootFilesystem": True,
+                                     "capabilities": {"drop": ["ALL"]}}}
+        self.api("PATCH", f"/api/v1/namespaces/{RUNTIME}/pods/{pod['metadata']['name']}/ephemeralcontainers",
+                 body={"metadata": {"uid": current["metadata"]["uid"],
+                                    "resourceVersion": current["metadata"]["resourceVersion"]},
+                       "spec": {"ephemeralContainers": existing + [probe]}}, status=200)
+        def completed():
+            current = self.get("pod", pod["metadata"]["name"], RUNTIME)
+            require(current and current["metadata"]["uid"] == pod["metadata"]["uid"],
+                    "Diagnostic Pod changed during connectivity inspection")
+            return any(item.get("name") == name and "terminated" in item.get("state", {})
+                       for item in current.get("status", {}).get("ephemeralContainerStatuses", []))
+        self.poll("bounded UID-1001 API TCP probes", completed, seconds=20, interval=0.5)
+        result = self.parse_connectivity_result(self.k("logs", "-n", RUNTIME, pod["metadata"]["name"], "-c", name, "--tail=5"))
+        try:
+            result["sameNodeControl"] = self.control_connectivity_diagnostics(pod, probe)
+        except Exception as error:
+            result["controlDiagnosticError"] = type(error).__name__
+        result["guardControls"] = {}
+        for variant in ("full", "filter-only", "legacy-full"):
+            try:
+                result["guardControls"][variant] = self.control_connectivity_diagnostics(pod, probe, variant)
+            except Exception as error:
+                result["guardControls"][variant] = {"diagnosticError": type(error).__name__}
+        try:
+            result["policyControl"] = self.policy_connectivity_diagnostics(pod, probe)
+        except Exception as error:
+            result["policyControl"] = {"diagnosticError": type(error).__name__}
+        try:
+            result["denyAllPolicyControl"] = self.policy_connectivity_diagnostics(pod, probe, deny_all=True)
+        except Exception as error:
+            result["denyAllPolicyControl"] = {"diagnosticError": type(error).__name__}
+        try:
+            result["apiEndpointPolicyControl"] = self.policy_connectivity_diagnostics(pod, probe, api_endpoint=True)
+        except Exception as error:
+            result["apiEndpointPolicyControl"] = {"diagnosticError": type(error).__name__}
+        return result
+
+    @staticmethod
+    def parse_connectivity_result(output, uid=1001):
+        require(uid in (1000, 1001), "Unsupported connectivity probe UID")
+        uid_key = f"uidMatches{uid}"
+        result = json.loads(output)
+        require(isinstance(result, dict) and type(result.get("available")) is bool
+                and set(result) == ({"available", uid_key, "serviceExit", "endpointExit"}
+                                    if result["available"] else {"available"})
+                and (not result["available"] or type(result.get(uid_key)) is bool)
+                and all(type(value) is int and 0 <= value <= 255
+                        for key, value in result.items() if key not in ("available", uid_key)),
+                "Connectivity diagnostic produced an unexpected result")
+        return result
+
+    def control_connectivity_diagnostics(self, pod, container, variant=None, *, policy=False, deny_all=False, api_endpoint=False):
+        from .network_diagnostics import guard_variant
+        suffix = "-endpoint" if api_endpoint else "-deny-all" if deny_all else "-policy" if policy else f"-{variant}" if variant else ""
+        name = "sre-e2e-api-connectivity" + suffix
+        require(pod["spec"].get("nodeName"), "Connectivity comparison requires the actual sandbox node")
+        spec = {"nodeName": pod["spec"]["nodeName"], "automountServiceAccountToken": False,
+                "restartPolicy": "Never", "securityContext": copy.deepcopy(pod["spec"].get("securityContext", {})),
+                "containers": [copy.deepcopy(container)]}
+        if variant or api_endpoint:
+            spec["initContainers"] = [guard_variant(self.root, pod, variant or "full")]
+        if api_endpoint:
+            agent = copy.deepcopy(container)
+            agent["name"] = "agent-network"
+            agent["securityContext"]["runAsUser"] = 1000
+            script = agent["command"][2]
+            require(script.count("= 1001") == 1 and script.count("uidMatches1001") == 1,
+                    "Agent network comparison requires the exact diagnostic script")
+            agent["command"][2] = script.replace("= 1001", "= 1000").replace("uidMatches1001", "uidMatches1000")
+            spec["containers"].append(agent)
+        metadata = {"name": name, "namespace": TENANT}
+        if policy:
+            value = "endpoint" if api_endpoint else "deny-all" if deny_all else "true"
+            metadata["labels"] = {"kars.azure.com/e2e-policy-control": value}
+            for probe in spec["containers"]:
+                probe["command"][2] = "sleep 10\n" + probe["command"][2]
+        created = self.create({"apiVersion": "v1", "kind": "Pod", "metadata": metadata, "spec": spec})
+        uid = created["metadata"]["uid"]
+        try:
+            def completed():
+                current = self.get("pod", name, TENANT)
+                require(current and current["metadata"]["uid"] == uid, "Connectivity control Pod was replaced")
+                status = current.get("status", {})
+                return status.get("phase") in ("Succeeded", "Failed") or any(
+                    item.get("state", {}).get("terminated", {}).get("exitCode", 0) != 0
+                    for item in status.get("initContainerStatuses", []))
+            self.poll("same-node credential-free TCP comparison", completed, seconds=35, interval=0.5)
+            current = self.get("pod", name, TENANT)
+            for item in current.get("status", {}).get("initContainerStatuses", []):
+                code = item.get("state", {}).get("terminated", {}).get("exitCode", 0)
+                if code != 0:
+                    return {"available": False, "initExit": code}
+            result = self.parse_connectivity_result(
+                self.k("logs", "-n", TENANT, name, "-c", container["name"], "--tail=5"))
+            if api_endpoint:
+                result["agentUid1000"] = self.parse_connectivity_result(
+                    self.k("logs", "-n", TENANT, name, "-c", "agent-network", "--tail=5"), uid=1000)
+            return result
+        finally:
+            try:
+                current = self.get("pod", name, TENANT)
+                require(current and current["metadata"]["uid"] == uid, "Connectivity control cleanup identity changed")
+                self.api("DELETE", f"/api/v1/namespaces/{TENANT}/pods/{name}", body={
+                    "apiVersion": "v1", "kind": "DeleteOptions",
+                    "preconditions": {"uid": uid, "resourceVersion": current["metadata"]["resourceVersion"]}},
+                    status=(200, 202))
+            except Exception:
+                print("SRE-DIAG owned connectivity control cleanup unavailable", flush=True)
+
+    def policy_connectivity_diagnostics(self, pod, container, *, deny_all=False, api_endpoint=False):
+        import ipaddress
+        source = self.get("networkpolicy", "sandbox-policy", RUNTIME)
+        require(source is not None, "SRE network policy is unavailable for a read-only comparison")
+        spec = {"policyTypes": ["Egress"], "egress": []} if deny_all else copy.deepcopy(source["spec"])
+        if api_endpoint:
+            endpoint = self.get("endpoints", "kubernetes", "default")
+            rules = []
+            for subset in endpoint.get("subsets", []):
+                for address in subset.get("addresses", []):
+                    ip = ipaddress.ip_address(address["ip"])
+                    require(ip.is_private and not ip.is_loopback, "Unexpected diagnostic API endpoint address")
+                    for port in subset.get("ports", []):
+                        if port.get("name") == "https" and port.get("protocol", "TCP") == "TCP":
+                            require(type(port["port"]) is int and 0 < port["port"] < 65536,
+                                    "Invalid diagnostic API endpoint port")
+                            rules.append({"to": [{"ipBlock": {"cidr": f"{ip}/{ip.max_prefixlen}"}}],
+                                          "ports": [{"protocol": "TCP", "port": port["port"]}]})
+            require(0 < len(rules) <= 16, "Diagnostic API endpoint inventory is empty or unbounded")
+            spec["egress"] = spec.get("egress", []) + rules
+        value = "endpoint" if api_endpoint else "deny-all" if deny_all else "true"
+        spec["podSelector"] = {"matchLabels": {"kars.azure.com/e2e-policy-control": value}}
+        name = "sre-e2e-policy-control" + ("-endpoint" if api_endpoint else "-deny-all" if deny_all else "")
+        created = self.create({"apiVersion": "networking.k8s.io/v1", "kind": "NetworkPolicy",
+                              "metadata": {"name": name, "namespace": TENANT}, "spec": spec})
+        uid = created["metadata"]["uid"]
+        try:
+            return self.control_connectivity_diagnostics(pod, container, policy=True,
+                                                         deny_all=deny_all, api_endpoint=api_endpoint)
+        finally:
+            try:
+                current = self.get("networkpolicy", name, TENANT)
+                require(current and current["metadata"]["uid"] == uid, "Connectivity policy cleanup identity changed")
+                self.api("DELETE", f"/apis/networking.k8s.io/v1/namespaces/{TENANT}/networkpolicies/{name}", body={
+                    "apiVersion": "v1", "kind": "DeleteOptions",
+                    "preconditions": {"uid": uid, "resourceVersion": current["metadata"]["resourceVersion"]}},
+                    status=(200, 202))
+            except Exception:
+                print("SRE-DIAG owned connectivity policy cleanup unavailable", flush=True)
 
     def close(self):
         for process in self.processes:
