@@ -46,6 +46,19 @@ spec:
         - protocol: TCP
           port: 9091
   egress:
+    # Controller-only readiness discovery of the reviewed managed presets.
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: {{ (.Values.managedMcp | default dict).namespace | default "kars-mcp" | quote }}
+          podSelector:
+            matchLabels:
+              app.kubernetes.io/component: mcp-server
+      ports:
+        - protocol: TCP
+          port: 8931
+        - protocol: TCP
+          port: 3001
     # DNS resolution.
     - to:
         - namespaceSelector: {}

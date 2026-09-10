@@ -1030,10 +1030,9 @@ impl PlatformDispatcher {
                 return (
                     None,
                     ToolCallOutput {
-                        content: vec![ToolContent::Text {
-                            text: format!("{tool} body serialise: {e}"),
-                        }],
+                        content: vec![ToolContent::text(format!("{tool} body serialise: {e}"))],
                         is_error: true,
+                        ..Default::default()
                     },
                 );
             }
@@ -1106,18 +1105,20 @@ impl PlatformDispatcher {
                     (
                         Some(code),
                         ToolCallOutput {
-                            content: vec![ToolContent::Text { text }],
+                            content: vec![ToolContent::text(text)],
                             is_error: false,
+                            ..Default::default()
                         },
                     )
                 } else {
                     (
                         Some(code),
                         ToolCallOutput {
-                            content: vec![ToolContent::Text {
-                                text: format!("{tool} upstream returned HTTP {code}: {text}"),
-                            }],
+                            content: vec![ToolContent::text(format!(
+                                "{tool} upstream returned HTTP {code}: {text}"
+                            ))],
                             is_error: true,
+                            ..Default::default()
                         },
                     )
                 }
@@ -1125,10 +1126,9 @@ impl PlatformDispatcher {
             Err(e) => (
                 None,
                 ToolCallOutput {
-                    content: vec![ToolContent::Text {
-                        text: format!("{tool} transport error: {e}"),
-                    }],
+                    content: vec![ToolContent::text(format!("{tool} transport error: {e}"))],
                     is_error: true,
+                    ..Default::default()
                 },
             ),
         }
@@ -1151,10 +1151,11 @@ impl ToolDispatcher for PlatformDispatcher {
             return Err(DispatchError::UnknownTool(name.to_string()));
         }
         Ok(ToolCallOutput {
-            content: vec![ToolContent::Text {
-                text: format!("{SYNC_PATH_NOT_SUPPORTED}\n\nTool: {name}"),
-            }],
+            content: vec![ToolContent::text(format!(
+                "{SYNC_PATH_NOT_SUPPORTED}\n\nTool: {name}"
+            ))],
             is_error: true,
+            ..Default::default()
         })
     }
 }
@@ -1220,7 +1221,9 @@ mod tests {
         let out = ToolDispatcher::invoke(&d, "foundry.web_search", &json!({"query": "x"}))
             .expect("known tool dispatches");
         assert!(out.is_error, "sync path must surface is_error=true");
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(
             text.contains("does not support synchronous"),
             "sync error must mention async path requirement, got: {text}"
@@ -1254,7 +1257,9 @@ mod tests {
 
     async fn assert_ok_text(out: ToolCallOutput, expected_substr: &str) {
         assert!(!out.is_error, "expected success, got error: {out:?}");
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(
             text.contains(expected_substr),
             "missing {expected_substr:?} in {text:?}"
@@ -1835,7 +1840,9 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("403"), "expected status 403 in: {text}");
         assert!(text.contains("forbidden"));
     }
@@ -1853,7 +1860,9 @@ mod tests {
             .await
             .unwrap();
         assert!(out.is_error);
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("503"));
     }
 
@@ -1866,7 +1875,9 @@ mod tests {
                 .await
                 .unwrap();
         assert!(out.is_error);
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(
             text.contains("transport error"),
             "expected transport error in: {text}"
@@ -2046,7 +2057,9 @@ mod tests {
         .await
         .unwrap();
         assert!(out.is_error);
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("HTTP 403"));
     }
 
@@ -2205,7 +2218,9 @@ mod tests {
         .await
         .unwrap();
         assert!(out.is_error);
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("HTTP 404"));
     }
 

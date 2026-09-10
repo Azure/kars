@@ -91,6 +91,9 @@ def register(ctx: Any) -> None:  # noqa: ANN401 — Hermes' ctx is dynamic
     from . import http_fetch  # noqa: PLC0415
 
     http_fetch.register(ctx)
+    from . import mcp_bridge  # noqa: PLC0415
+
+    mcp_bridge.register(ctx)
 
     # Phase A2.1 — real AGT MeshClient (replaces mesh_stubs).
     # SKIPPED in SRE mode per §7.8.6 — the SRE agent is not on the mesh
