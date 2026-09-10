@@ -4,6 +4,7 @@
 import io
 import json
 import tarfile
+from copy import deepcopy
 
 from .common import (
     AGENT, CLAIM_VERSION, CONTEXT, FIELD_MANAGER, NAMESPACE_UID, OPERATORS,
@@ -153,6 +154,12 @@ def prepare_legacy(h):
     create_registration_crd(h, obj)
     h.k("wait", "--for=condition=Established", "crd/karssreregistrations.kars.azure.com", "--timeout=60s", timeout=70)
     before = h.get("clusterrolebinding", "kars-sre-reader")
+    action_before = h.get("crd", "karssreactions.kars.azure.com")
+    action_spec = deepcopy(action_before["spec"])
+    action_params = action_spec["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]["action"]["properties"]["params"]
+    require(action_params.pop("additionalProperties", None) is True,
+            "Historical native action CRD does not exercise the boolean params prerequisite")
+    action_params["x-kubernetes-preserve-unknown-fields"] = True
     h.cli("authority", "stage", "--controller-image", "kars-controller:e2e",
           "--router-image", "kars-inference-router:e2e", "--dry-run", timeout=150)
     after = h.get("clusterrolebinding", "kars-sre-reader")
@@ -160,6 +167,11 @@ def prepare_legacy(h):
             "Authority stage preview changed legacy grants")
     h.cli("authority", "stage", "--controller-image", "kars-controller:e2e",
           "--router-image", "kars-inference-router:e2e", timeout=180)
+    action_after = h.get("crd", "karssreactions.kars.azure.com")
+    require(action_after["metadata"]["uid"] == action_before["metadata"]["uid"]
+            and action_after["spec"] == action_spec,
+            "Native action API staging replaced its identity or changed fields outside the params repair")
+    h.passed("Actual CLI stages the historical action CRD params repair in place before dependent policies")
     h.save()
     h.passed("Legacy source/grants/consumer seeded using real UIDs before new policies; immutable old chart only, no old binary execution")
     h.passed("Actual authority stage preview/apply retains legacy grants without private issuance")
@@ -224,6 +236,8 @@ def delegate_operators(h):
             "metadata": {"name": "e2e-sre-admission-probe", "namespace": namespace}, "rules": [
                 {"apiGroups": [""], "resources": ["pods", "pods/ephemeralcontainers", "pods/exec", "pods/attach", "pods/portforward", "pods/proxy", "serviceaccounts", "serviceaccounts/token", "secrets"], "verbs": ["create", "patch", "update"]},
                 {"apiGroups": [""], "resources": ["pods"], "verbs": ["get", "list"]},
+                {"apiGroups": [""], "resources": ["pods/log"], "verbs": ["get"]},
+                {"apiGroups": [""], "resources": ["replicationcontrollers"], "verbs": ["create", "get", "update"]},
                 {"apiGroups": [""], "resources": ["pods/exec", "pods/attach", "pods/portforward", "pods/proxy"], "verbs": ["get"]},
                 {"apiGroups": ["apps"], "resources": ["deployments", "replicasets", "statefulsets", "daemonsets"], "verbs": ["create", "patch", "update"]},
                 {"apiGroups": ["batch"], "resources": ["jobs", "cronjobs"], "verbs": ["create"]},
