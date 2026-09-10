@@ -109,6 +109,45 @@ Fresh current-base native accounting, cancellation and failure-contract
 acceptance remain mandatory; successful readiness is not substituted for
 those assertions.
 
+## Current MCP composition and cancellation fixture repair
+
+The actual MCP integration landing `12d1f2a3` is composed with the budget
+candidate at `1af895bc98dad70f09d2467bef34a01b7ae6fb45`. Independent focused
+review found no significant issues in the join. Exact combined qualification
+passed2,453 Rust cases: controller binary1,282, router library1,138, router
+binary15, governed telemetry12 and managed MCP6. Both crates independently
+passed all-target/all-feature strict Clippy and formatting. The same source
+passed93 CLI cases, type checking, six Python fixtures, four Helm renders,
+lint and source gates. Minimum guarded free space was8.77GiB.
+
+The preceding4c2 native run `34509062774` remained failed (166 passed, one
+failed). It now confirmed the required unsupported-route503/code/type response,
+then stopped at the accepted-work cancellation command. The fixture used
+`kubectl --patch-file -`, which treats `-` as a literal filename rather than
+stdin. A controlled reproduction with the real kubectl made zero API requests.
+The original native wrapper discarded the cause; no fictitious API409 is
+claimed from that old result.
+
+Fixture-only repair `1ee92de3b1df5ef5349abd90581d956bc07849fa` sends a real
+merge PATCH through the existing loopback Kind API client. Every attempt pins
+the original Task UID/generation/spec, workspace UID and full budget binding,
+then uses a fresh resourceVersion. Only an actual matching Status/Conflict409
+permits a retry, at most three attempts within the unchanged30-second bound.
+Changed identity/intent, malformed responses,403/422, transport loss and a
+lost acknowledgement remain fatal. Diagnostics retain fixed verb/resource/
+status/reason only, never API bodies, messages, headers or tokens.
+
+The settled8/uncertain30/reserved0 accepted-work assertions are unchanged.
+Parent review and validation passed80 budget-related CLI cases including23
+cancellation cases, with the actual kubectl/proxy, plus types, lint and syntax.
+Only real-tool integration tests use bounded30-second test deadlines and
+10/20-second subprocess limits; pure HTTP test and native acceptance deadlines
+were not relaxed. The joined production code is unchanged from qualified1af.
+
+Fresh current-base full native accounting and cancellation acceptance is still
+required. These source and controlled-client results do not relabel either
+historical failed native run or establish a successful final cluster run.
+
 ## Summary
 
 Durable token ceilings and operator-configured maximum-price caps for governed
