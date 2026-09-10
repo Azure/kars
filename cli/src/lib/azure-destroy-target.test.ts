@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { existsSync, readFileSync, statSync } from "node:fs";
+import { closeSync, existsSync, fstatSync, openSync, readFileSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import { withAzureDestroyTarget } from "./azure-destroy-target.js";
@@ -58,9 +58,14 @@ function fixture(names = ["cluster-b"]) {
       if (args.includes("--kubeconfig")) {
         const path = args[args.indexOf("--kubeconfig") + 1];
         files.add(path);
-        expect(statSync(path).mode & 0o777).toBe(0o600);
         expect(statSync(dirname(path)).mode & 0o777).toBe(0o700);
-        expect(JSON.parse(readFileSync(path, "utf8"))["current-context"]).toBe(context);
+        const descriptor = openSync(path, "r");
+        try {
+          expect(fstatSync(descriptor).mode & 0o777).toBe(0o600);
+          expect(JSON.parse(readFileSync(descriptor, "utf8"))["current-context"]).toBe(context);
+        } finally {
+          closeSync(descriptor);
+        }
       }
       const start = args.indexOf("get");
       const [kind, name] = args.slice(start + 1, start + 3);

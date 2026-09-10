@@ -1,8 +1,66 @@
 # Security audit — registered SRE credential authority
 
-Status: candidate under qualification; the local named-reader-bind and
-retirement-preflight repair requires Rust and full controller/migration
-execution. **Not a sign-off.**
+Status: **source audit approved under explicit maintainer delegation**.
+Integration remains conditional on every required exact-head technical check.
+This approval does not authorize a customer deployment or a change to `main`.
+
+## Current approval and review scope (2026-09-10)
+
+The maintainer approved the author audit at
+`203e2322ad22512f0889e1f512ed36ac278b5a42` and explicitly authorized Copilot to
+complete subsequent publication sign-offs after additional focused reviews.
+That instruction is recorded in
+[maintainer authorization](https://github.com/Azure/kars/pull/551#issuecomment-5615522306).
+The second attestation below is **delegated AI review, not a claim that a
+second human reviewed or signed this change**. This is the disclosed
+maintainer-authorized exception for this audit, not a silent change to the
+repository's normal two-person process.
+
+Focused independent-context reviews covered:
+
+- Controller and Helm enrollment, private authority, UID/RV ownership,
+  admission and retirement. The identified ReplicationController template
+  omission is repaired in `a02de2b9`; final security review of the assembled
+  repair reported no remaining vulnerabilities in its assigned delta.
+- Private proxy TLS, bearer authentication, credential renewal, live
+  authorization, routes and response redaction at `203e2322`. No
+  high-confidence exploitable issue was identified in that assigned scope.
+- Installation/staging/removal compatibility. The three identified defects
+  are repaired in `141657f9`: Helm 3/4 staging readiness, the exact historical
+  action-CRD repair before policies, and Azure resource-group teardown bound
+  to its complete, subscription-pinned target inventory. Final focused review
+  found no remaining significant issue after the native fixture correction.
+
+The reviewed source is assembled at
+`3c87deff2bdafac55c1f85db9984f480423e4f17`, with test-only correction
+`b37c91e93b68216876827c2a1e58413b7a112e39`. Kubernetes requires an RC Pod
+template even at zero replicas; the native case now requires the precise
+422/Invalid/spec.template/FieldValueRequired rejection instead of accepting
+arbitrary errors. A final test-only change reads and checks temporary
+kubeconfig permissions through the same open file descriptor, addressing a
+CodeQL filesystem-race warning without suppressing the query or changing
+production behavior.
+
+All 104 Python harness tests and Helm lint passed on the assembled source.
+The five affected CLI suites passed 111 cases with type checking and targeted
+lint using the existing compatible local cache (Vitest 4.1.10); this is not a
+claim of exact-lockfile local installation. Hosted locked CLI qualification
+passed on `3c87deff`. Final hosted native/schema, full Kind, CodeQL, and all
+other required checks must still pass on the final landing head. The earlier
+161-case full Kind success at `203e2322` is prerequisite evidence, not a
+substitute for the changed candidate's qualification.
+
+These were AI-performed static review rounds; the reviewers did not themselves
+rerun the native tests. No universal security, CNI-enforcement or complete
+Bridge-readiness claim is made. Any subsequently identified blocking finding
+reopens this approval; no failed check, timeout or policy is waived.
+
+Signed-off-by: pallakatos (maintainer authorization recorded above) <lakatos.toth.pal@gmail.com>
+Signed-off-by: GitHub Copilot (delegated AI audit, not an independent human) <223556219+Copilot@users.noreply.github.com>
+
+The sections below preserve historical qualification and repair evidence.
+Their earlier pending/not-a-sign-off statements describe those checkpoints,
+not the current scoped approval above.
 
 ## Scope and trust root
 
