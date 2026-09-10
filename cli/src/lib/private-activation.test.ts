@@ -103,6 +103,64 @@ function rootPod(f: ReturnType<typeof fixture>, uid = "old-root") {
   };
 }
 
+function budgetFixture(replicas = 2) {
+  const f = fixture();
+  const root = f.objects.get(f.key("deployment", "kars-controller", "core"));
+  root.spec.replicas = replicas;
+  root.spec.template.spec.containers[0]!.env = [
+    { name: "KARS_INFERENCE_BUDGET_ENABLED", value: "true" },
+    { name: "KARS_INFERENCE_BUDGET_TLS_SECRET", value: "operator-budget-tls" },
+    { name: "POD_NAMESPACE", valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } } },
+  ];
+  const secret = { type: "kubernetes.io/tls",
+    metadata: { name: "operator-budget-tls", namespace: "core", uid: "budget-key", resourceVersion: "1",
+      annotations: { "kars.azure.com/inference-budget-tls": "v1" } },
+    data: { "tls.crt": Buffer.from(rootCertificates[0]!).toString("base64") } };
+  f.objects.set(f.key("secret", "operator-budget-tls", "core"), secret);
+  const old: any = rootPod(f);
+  f.pods.set("core", replicas ? [old] : []);
+  const events: string[] = [];
+  const controls = { terminating: false, rotateOnPause: false };
+  const rotate = (index: number) => {
+    secret.data["tls.crt"] = Buffer.from(rootCertificates[index]!).toString("base64");
+    secret.metadata.resourceVersion = String(Number(secret.metadata.resourceVersion) + 1);
+  };
+  const state = () => JSON.parse(f.objects.get(f.key("namespace", "core")).metadata.annotations[`${PRIVATE_PREFIX}root-retirement`]);
+  let paused = false;
+  const execute = async (args: string[], input?: string) => {
+    if (args[0] === "get" && args[1] === "pods" && args[args.indexOf("-n") + 1] === "core"
+      && paused && !controls.terminating && f.pods.get("core")?.length) {
+      f.pods.set("core", []); events.push("old-uid-absent");
+    }
+    if (args[0] === "patch") {
+      const patch = JSON.parse(args[args.indexOf("-p") + 1]!);
+      if (args[2] === "kars-controller" && patch.spec?.replicas === 0) {
+        expect(state().replicaIntent).toBe(replicas);
+        paused = true; events.push("pause");
+        if (controls.rotateOnPause) { rotate(1); controls.rotateOnPause = false; }
+        if (controls.terminating) old.metadata.deletionTimestamp = "2026-01-01T00:00:00Z";
+      }
+      const receipt = patch.metadata.annotations?.[`${PRIVATE_PREFIX}root-retirement`];
+      if (receipt && JSON.parse(receipt).baseline
+        && receipt !== f.objects.get(f.key("namespace", "core")).metadata.annotations[`${PRIVATE_PREFIX}root-retirement`]) {
+        expect(root.spec.replicas).toBe(0);
+        expect(f.pods.get("core")?.some(pod => pod.metadata.uid === "old-root")).toBe(false);
+        if (JSON.parse(receipt).phase === "retired") events.push("baseline");
+      }
+      if (patch.metadata.annotations?.[`${PRIVATE_PREFIX}epoch`]) events.push("epoch");
+      if (patch.spec?.template) events.push("template");
+      if (args[2] === "kars-controller" && patch.spec?.replicas === replicas && patch.spec?.replicas > 0) {
+        expect(state().phase).toBe("restoring");
+        paused = false; events.push("restore");
+      }
+    }
+    const result = await f.execute(args, input);
+    if (!paused && events.includes("restore") && !f.pods.get("core")?.length) f.pods.set("core", [rootPod(f, "new-root")]);
+    return result;
+  };
+  return { ...f, execute, secret, controls, rotate, events, state };
+}
+
 describe("generic private activation staging", () => {
   it.each(["absent", "false"])("blocks qualification while an old root token UID is terminating with budget=%s and no TLS", async budget => {
     const f = fixture();
@@ -198,35 +256,228 @@ describe("generic private activation staging", () => {
       .some(key => key.startsWith(`${PRIVATE_PREFIX}pod-`))).toBe(false);
   });
 
-  it("reviews configurable budget TLS metadata and requires a genuinely different public key before private enrollment", async () => {
-    const f = fixture();
-    const root = f.objects.get(f.key("deployment", "kars-controller", "core"));
-    root.spec.template.spec.containers[0].env = [
-      { name: "KARS_INFERENCE_BUDGET_ENABLED", value: "true" },
-      { name: "KARS_INFERENCE_BUDGET_TLS_SECRET", value: "operator-budget-tls" },
-      { name: "POD_NAMESPACE", valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } } },
-    ];
-    root.metadata.generation = 1;
-    root.status = { observedGeneration: 1, updatedReplicas: 1, availableReplicas: 1 };
-    const secret = { type: "kubernetes.io/tls",
-      metadata: { name: "operator-budget-tls", namespace: "core", uid: "budget-key", resourceVersion: "1",
-        annotations: { "kars.azure.com/inference-budget-tls": "v1" } },
-      data: { "tls.crt": Buffer.from(rootCertificates[0]!).toString("base64") } };
-    f.objects.set(f.key("secret", "operator-budget-tls", "core"), secret);
+  it.each([0, 2])("keeps reviewed replica intent %s through two-apply post-retirement budget rotation", async replicas => {
+    const f = budgetFixture(replicas);
     const first = await f.preview();
     expect(first.root.budgetTls?.secret.uid).toBe("budget-key");
     await expect(stagePrivateActivation(f.execute, first)).rejects.toThrow("operator rotation");
-    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("public key is unchanged");
-    secret.data["tls.crt"] = Buffer.from(rootCertificates[1]!).toString("base64");
-    secret.metadata.resourceVersion = "2";
-    const staged = await stagePrivateActivation(f.execute, await f.preview());
+    expect(f.deployment.spec.replicas).toBe(0);
+    expect(f.events.indexOf("pause")).toBeLessThan(f.events.indexOf("baseline"));
+    if (replicas) expect(f.events.indexOf("old-uid-absent")).toBeLessThan(f.events.indexOf("baseline"));
+    expect(f.events).not.toContain("epoch");
+    const saved = f.state();
+    expect(saved.replicaIntent).toBe(replicas);
+    expect(saved.baseline.keyDigest).toBe(first.root.budgetTls?.keyDigest);
+    f.rotate(1);
+    const retry = await f.preview();
+    expect(retry.root.replicaIntent).toBe(replicas);
+    const staged = await stagePrivateActivation(f.execute, retry);
+    expect(f.state().attempt).toBe(saved.attempt);
     expect(staged.root.budgetTls?.keyDigest).not.toBe(first.root.budgetTls?.keyDigest);
+    expect(f.deployment.spec.replicas).toBe(replicas);
+    if (replicas) expect(f.events.indexOf("template")).toBeLessThan(f.events.indexOf("restore"));
     await validateQualifiedActivation(f.execute, staged);
     expect(f.calls.some(args => args[0] === "patch" && args[1] === "secret")).toBe(false);
     expect(f.calls.some(args => args.some(arg => arg.includes("tls.key")))).toBe(false);
-    secret.metadata.uid = "replacement-budget-key";
-    secret.metadata.resourceVersion = "3";
+  });
+
+  it("uses a key rotated while old authority was live as the baseline, never as fresh qualification", async () => {
+    const f = budgetFixture();
+    const first = await f.preview();
+    f.controls.rotateOnPause = true;
+    await expect(stagePrivateActivation(f.execute, first)).rejects.toThrow("operator rotation");
+    const baseline = f.state().baseline.keyDigest;
+    expect(baseline).not.toBe(first.root.budgetTls?.keyDigest);
+    expect((await f.preview()).root.budgetTls?.keyDigest).toBe(baseline);
+    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("public key is unchanged");
+    expect(f.state().baseline.keyDigest).toBe(baseline);
+    expect(f.deployment.spec.replicas).toBe(0);
+    f.rotate(2);
+    await stagePrivateActivation(f.execute, await f.preview());
+    expect(f.deployment.spec.replicas).toBe(2);
+  });
+
+  it("ignores legacy bundle/qualified-key markers as post-retirement freshness evidence", async () => {
+    const f = budgetFixture();
+    const review = await f.preview();
+    const annotations = f.objects.get(f.key("namespace", "core")).metadata.annotations;
+    Object.assign(annotations, {
+      [`${PRIVATE_PREFIX}budget-qualified-bundle`]: review.bundleRevision,
+      [`${PRIVATE_PREFIX}budget-qualified-key`]: review.root.budgetTls!.keyDigest,
+      [`${PRIVATE_PREFIX}budget-qualified-secret`]: review.root.budgetTls!.secret.uid,
+      [`${PRIVATE_PREFIX}budget-rotation-bundle`]: review.bundleRevision,
+      [`${PRIVATE_PREFIX}budget-before-key`]: "a".repeat(64),
+    });
+    await expect(stagePrivateActivation(f.execute, review)).rejects.toThrow("operator rotation");
+    expect(f.state().baseline.keyDigest).toBe(review.root.budgetTls!.keyDigest);
+    expect(f.deployment.spec.replicas).toBe(0);
+  });
+
+  it("preserves intent through failed terminating-Pod retirement and requests no key until retry proves absence", async () => {
+    const f = budgetFixture();
+    f.controls.terminating = true;
+    const review = await f.preview();
+    const now = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(120_001);
+    try {
+      await expect(stagePrivateActivation(f.execute, review)).rejects.toThrow("have not finished retirement");
+    } finally { now.mockRestore(); }
+    expect(f.state().baseline).toBeUndefined();
+    expect(f.state().captured["core-uid"]).toEqual(["old-root"]);
+    expect(f.deployment.spec.replicas).toBe(0);
+    expect(f.events).not.toContain("baseline");
+    const retry = await f.preview();
+    expect(retry.root.replicaIntent).toBe(2);
+    f.rotate(1);
+    f.controls.terminating = false;
     await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
+    expect(f.state().baseline.keyDigest).toBe((await f.preview()).root.budgetTls?.keyDigest);
+    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("public key is unchanged");
+  });
+
+  it.each(["missing", "malformed", "intent", "replicas", "namespace", "account", "deployment", "template", "secret"])(
+    "aborts changed %s retirement state without requesting or accepting another key", async fault => {
+      const f = budgetFixture();
+      await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
+      const ns = f.objects.get(f.key("namespace", "core"));
+      if (fault === "missing") delete ns.metadata.annotations[`${PRIVATE_PREFIX}root-retirement`];
+      if (fault === "malformed") ns.metadata.annotations[`${PRIVATE_PREFIX}root-retirement`] = "{}";
+      if (fault === "intent") ns.metadata.annotations[`${PRIVATE_PREFIX}root-retirement`] =
+        JSON.stringify({ ...f.state(), replicaIntent: 0 });
+      if (fault === "replicas") f.deployment.spec.replicas = 3;
+      if (fault === "namespace") ns.metadata.uid = "replacement";
+      if (fault === "account") f.objects.get(f.key("serviceaccount", "kars-controller", "core")).metadata.uid = "replacement";
+      if (fault === "deployment") f.deployment.metadata.uid = "replacement";
+      if (fault === "template") f.deployment.spec.template.spec.containers[0]!.image = "different";
+      if (fault === "secret") f.secret.metadata.uid = "replacement";
+      f.rotate(1);
+      f.calls.length = 0;
+      await expect(f.preview()).rejects.toThrow();
+      expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    });
+
+  it("rejects a changed reviewed replica intent before any mutation", async () => {
+    const f = budgetFixture();
+    const review = await f.preview();
+    review.root.replicaIntent = 0;
+    await expect(stagePrivateActivation(f.execute, review)).rejects.toThrow("intent");
+    expect(f.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
+  });
+
+  it("aborts a live replica-intent change between inventory and the fenced root pause", async () => {
+    const f = budgetFixture();
+    const review = await f.preview();
+    const execute = async (args: string[], input?: string) => {
+      const result = await f.execute(args, input);
+      if (args[0] === "patch" && args[1] === "namespace" && f.state().captured["core-uid"]?.length) {
+        f.deployment.spec.replicas = 3;
+        f.deployment.metadata.resourceVersion = "2";
+      }
+      return result;
+    };
+    await expect(stagePrivateActivation(execute, review)).rejects.toThrow("intent");
+    expect(f.events).not.toContain("pause");
+    expect(f.state().baseline).toBeUndefined();
+  });
+
+  it("does not recapture a retired baseline if an old UID returns as a non-consuming holder", async () => {
+    const f = budgetFixture();
+    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
+    f.rotate(1);
+    f.pods.set("core", [{ ...rootPod(f), spec: { automountServiceAccountToken: false,
+      serviceAccountName: "kars-controller", containers: [{ name: "holder", image: "fixture" }] } }]);
+    f.controls.terminating = true;
+    const review = await f.preview();
+    await expect(stagePrivateActivation(f.execute, review)).rejects.toThrow("authority reappeared");
+    expect(f.events).not.toContain("epoch");
+    expect(f.deployment.spec.replicas).toBe(0);
+  });
+
+  it("retains intent through a failed final grant publication and requires another fresh post-retirement key", async () => {
+    const f = budgetFixture();
+    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
+    f.rotate(1);
+    const saved = f.state();
+    const execute = async (args: string[], input?: string) => {
+      if (args[0] === "create") throw new Error("fixture grant publication conflict");
+      return f.execute(args, input);
+    };
+    await expect(applyReviewedGrant(execute, {
+      apiVersion: "kars.azure.com/v1alpha1", kind: "KarsCredentialGrant",
+      metadata: { name: "workspace", namespace: "work" },
+      spec: { workspaceUid: "work-uid", writers: [{ namespace: "reader", name: "bff", uid: "reader-sa" }],
+        enabled: true, privateActivation: await f.preview() },
+    })).rejects.toThrow("publication conflict");
+    expect(f.deployment.spec.replicas).toBe(2);
+    expect(f.state().replicaIntent).toBe(2);
+    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
+    expect(f.state().attempt).not.toBe(saved.attempt);
+    expect(f.state().baseline.keyDigest).not.toBe(saved.baseline.keyDigest);
+    expect(f.deployment.spec.replicas).toBe(0);
+  });
+
+  it("publishes only the second reviewed apply after retirement and fresh TLS rotation", async () => {
+    const f = budgetFixture();
+    const document = async () => ({
+      apiVersion: "kars.azure.com/v1alpha1", kind: "KarsCredentialGrant",
+      metadata: { name: "workspace", namespace: "work" },
+      spec: { workspaceUid: "work-uid", writers: [{ namespace: "reader", name: "bff", uid: "reader-sa" }],
+        enabled: true, privateActivation: await f.preview() },
+    });
+    await expect(applyReviewedGrant(f.execute, await document())).rejects.toThrow("operator rotation");
+    expect(f.calls.some(args => args[0] === "create")).toBe(false);
+    expect(f.deployment.spec.replicas).toBe(0);
+    f.rotate(1);
+    await applyReviewedGrant(f.execute, await document());
+    const stored = f.objects.get(f.key("karscredentialgrants.kars.azure.com", "workspace", "work"));
+    expect(stored.spec.privateActivation.phase).toBe("qualified");
+    expect(stored.spec.privateActivation.root.replicaIntent).toBe(2);
+    expect(f.deployment.spec.replicas).toBe(2);
+  });
+
+  it("keeps the root paused and the baseline intact when qualified template staging fails", async () => {
+    const f = budgetFixture();
+    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
+    f.rotate(1);
+    const original = f.state();
+    const execute = async (args: string[], input?: string) => {
+      if (args[0] === "patch" && args[2] === "kars-controller"
+        && JSON.parse(args[args.indexOf("-p") + 1]!).spec?.template) throw new Error("fixture template conflict");
+      return f.execute(args, input);
+    };
+    await expect(stagePrivateActivation(execute, await f.preview())).rejects.toThrow("template conflict");
+    expect(f.state()).toEqual(original);
+    expect(f.events).not.toContain("restore");
+    expect(f.deployment.spec.replicas).toBe(0);
+    await stagePrivateActivation(f.execute, await f.preview());
+    expect(f.deployment.spec.replicas).toBe(2);
+    expect(f.state().attempt).toBe(original.attempt);
+  });
+
+  it("fails a changed retirement attempt at the post-retirement baseline CAS without requesting a key", async () => {
+    const f = budgetFixture();
+    const execute = async (args: string[], input?: string) => {
+      if (args[0] === "patch" && args[1] === "namespace") {
+        const receipt = JSON.parse(args[args.indexOf("-p") + 1]!).metadata.annotations?.[`${PRIVATE_PREFIX}root-retirement`];
+        if (receipt && JSON.parse(receipt).phase === "retired") throw new Error("fixture namespace CAS conflict");
+      }
+      return f.execute(args, input);
+    };
+    await expect(stagePrivateActivation(execute, await f.preview())).rejects.toThrow("CAS conflict");
+    expect(f.state().baseline).toBeUndefined();
+    expect(f.events).not.toContain("epoch");
+    expect(f.deployment.spec.replicas).toBe(0);
+  });
+
+  it("rejects a torn public-certificate/Secret metadata read before any mutation", async () => {
+    const f = budgetFixture();
+    const execute = async (args: string[], input?: string) => {
+      const result = await f.execute(args, input);
+      if (args.includes('go-template={{index .data "tls.crt"}}')) f.rotate(1);
+      return result;
+    };
+    await expect(previewPrivateActivation(execute, "work", [{ namespace: "reader" }], [],
+      "core", "kcm-certificate", [])).rejects.toThrow("changed during public-key review");
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
   });
 
   it("treats the governed budget audience as router-private while public CA projection remains non-secret", () => {

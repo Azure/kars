@@ -265,6 +265,7 @@ def namespace_surface_cases(h, namespace, actor, identity, workload_path, worklo
             for key, replacement in [
                 (PREFIX + "enabled", "false"), (PREFIX + "epoch", None),
                 (PREFIX + "namespace-uid", "wrong-namespace-uid"), (PREFIX + "root-uid", identity["uid"]),
+                (PREFIX + "root-retirement", '{"attempt":"unreviewed"}'),
             ]:
                 current = h.api("GET", namespace_path, status=200).json()
                 require(current["metadata"]["uid"] == expected_uid

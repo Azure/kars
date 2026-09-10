@@ -31,6 +31,23 @@ class PrivateConsumptionFixtures(unittest.TestCase):
         self.assertIn("oldObject", policy["spec"]["matchConditions"][0]["expression"])
         self.assertIn("variables.manager || variables.projector", policy["spec"]["validations"][0]["expression"])
 
+    def test_only_operator_can_change_retirement_attempt_and_review_requires_original_replica_intent(self):
+        bundle = json.loads((Path(__file__).resolve().parents[2]
+                             / "deploy/helm/kars/files/private-consumption.json").read_text())
+        policy = next(value for value in bundle["objects"]
+                      if value["kind"] == "ValidatingAdmissionPolicy"
+                      and value["metadata"]["name"] == "kars-private-consumption-namespace")
+        expression = next(value["expression"] for value in policy["spec"]["validations"]
+                          if "root-retirement" in value["expression"])
+        self.assertTrue(expression.startswith("variables.manager || "))
+        self.assertNotIn("variables.projector", expression)
+        self.assertIn("oldObject.metadata", expression)
+        self.assertEqual(expression.count(PREFIX + "root-retirement"), 2)
+        root = bundle["activationSchema"]["properties"]["root"]
+        self.assertIn("replicaIntent", root["required"])
+        self.assertEqual(root["properties"]["replicaIntent"],
+                         {"type": "integer", "minimum": 0, "maximum": 2147483647})
+
     def test_all_native_kinds_have_nonexecuting_bases_and_all_material_forms(self):
         for kind, *_ in KINDS:
             with self.subTest(kind=kind):
@@ -84,9 +101,9 @@ class PrivateConsumptionFixtures(unittest.TestCase):
         self.assertEqual(harness.namespace, before)
         probes = [call for call in harness.calls if call[0] in ("PATCH", "PUT")]
         self.assertTrue(all("?dryRun=All" in call[1] for call in probes))
-        self.assertEqual(sum("/namespaces/work/status?" in call[1] for call in probes), 10)
-        self.assertEqual(sum("/namespaces/work/finalize?" in call[1] for call in probes), 10)
-        self.assertEqual(sum("/deployments/fixture?" in call[1] for call in probes), 16)
+        self.assertEqual(sum("/namespaces/work/status?" in call[1] for call in probes), 12)
+        self.assertEqual(sum("/namespaces/work/finalize?" in call[1] for call in probes), 12)
+        self.assertEqual(sum("/deployments/fixture?" in call[1] for call in probes), 20)
         roles = [body for method, path, body, _ in harness.calls if method == "POST" and path.endswith("/clusterroles")]
         self.assertEqual(roles[0]["rules"][0]["resourceNames"], ["work"])
         self.assertEqual(roles[0]["rules"][0]["resources"], ["namespaces/status", "namespaces/finalize"])

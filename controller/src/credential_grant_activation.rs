@@ -28,6 +28,7 @@ pub struct RootReview {
     pub account: ReviewedObject,
     pub deployment: ReviewedObject,
     pub template_digest: String,
+    pub replica_intent: i32,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub budget_tls: Option<BudgetTlsReview>,
 }
