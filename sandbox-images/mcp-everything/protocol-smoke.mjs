@@ -29,10 +29,13 @@ const client = new Client({ name: "kars-dependency-smoke", version: "1.0.0" });
 const transport = new StreamableHTTPClientTransport(new URL(`http://127.0.0.1:${port}/mcp`));
 let stage = "startup";
 let timer;
+let stopped = false;
+let clientClosed = false;
 
 async function exercise() {
   while (true) {
-    assert.ok(!childFailed && child.exitCode === null, "Everything process exited");
+    assert.ok(!stopped && !childFailed && child.exitCode === null && child.signalCode === null,
+      "Everything process stopped");
     const listening = await new Promise((resolve) => {
       const socket = createConnection({ host: "127.0.0.1", port });
       const done = (ready) => { socket.destroy(); resolve(ready); };
@@ -56,25 +59,48 @@ async function exercise() {
   stage = "session-close";
   await transport.terminateSession();
   await client.close();
+  clientClosed = true;
+  assert.ok(!childFailed && child.exitCode === null && child.signalCode === null,
+    "Everything process exited during the protocol check");
   return { initialized: true, toolsListed: true, echoPassed: true, sessionClosed: true,
     toolCount: catalog.tools.length };
 }
 
+let result;
 try {
-  const result = await Promise.race([
+  result = await Promise.race([
     exercise(),
     new Promise((_, reject) => {
       timer = setTimeout(() => reject(new Error("Protocol smoke deadline exceeded")), 45_000);
     }),
   ]);
-  console.log(JSON.stringify(result));
 } catch {
   console.error(`Everything protocol smoke failed at ${stage}; no server output/body logged`);
   process.exitCode = 1;
 } finally {
+  stopped = true;
   clearTimeout(timer);
+  if (!clientClosed) {
+    try {
+      const closed = await Promise.race([
+        client.close().then(() => true),
+        delay(1_000).then(() => false),
+      ]);
+      assert.ok(closed, "Client cleanup deadline exceeded");
+    } catch {
+      console.error("Everything protocol smoke client cleanup failed; no response/body logged");
+      process.exitCode = 1;
+    }
+  }
   child.kill("SIGTERM");
   await Promise.race([exited, delay(2_000)]);
-  if (!childFailed && child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-  await Promise.race([client.close(), delay(1_000)]).catch(() => {});
+  if (!childFailed && child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await Promise.race([exited, delay(1_000)]);
+  }
+  if (!childFailed && child.exitCode === null && child.signalCode === null) {
+    console.error("Everything protocol smoke child did not stop");
+    process.exitCode = 1;
+  }
 }
+if (!process.exitCode) console.log(JSON.stringify(result));

@@ -55,6 +55,10 @@ export function verifyLock() {
       assert.equal(url.protocol, "https:");
       assert.equal(url.hostname, "registry.npmjs.org");
       assert.equal(url.username + url.password + url.search + url.hash, "");
+      if (Object.hasOwn(fixed, name)) {
+        assert.equal(url.href,
+          `https://registry.npmjs.org/${name}/-/${name.split("/").at(-1)}-${fixed[name]}.tgz`);
+      }
       assert.match(entry.integrity, /^sha512-[A-Za-z0-9+/]+={0,2}$/);
       const encoded = entry.integrity.slice("sha512-".length);
       const digest = Buffer.from(encoded, "base64");

@@ -37,7 +37,25 @@ jobs:
       - name: Verify tarball integrity through a clean script-disabled install
         run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
       - name: Reject remaining advisories at every severity
-        run: npm audit --omit=dev --audit-level=low --json > dependency-audit.json
+        run: |
+          set +e
+          npm audit --omit=dev --audit-level=low --json > dependency-audit.json
+          status=$?
+          set -e
+          node --input-type=module <<'JS'
+          import assert from "node:assert/strict";
+          import { readFileSync } from "node:fs";
+          const audit = JSON.parse(readFileSync("dependency-audit.json", "utf8"));
+          assert.ok(audit.metadata?.vulnerabilities, "Audit vulnerability metadata unavailable");
+          const counts = {};
+          for (const key of ["info", "low", "moderate", "high", "critical", "total"]) {
+            const value = audit.metadata.vulnerabilities[key];
+            assert.ok(Number.isSafeInteger(value) && value >= 0);
+            counts[key] = value;
+          }
+          console.log(JSON.stringify({auditVulnerabilities: counts}));
+          JS
+          exit "$status"
       - name: Exercise the actual Everything Streamable HTTP server
         run: node protocol-smoke.mjs > protocol-smoke.json
       - name: Record bounded artifact provenance
@@ -78,3 +96,13 @@ jobs:
             sandbox-images/mcp-everything/package.json
             sandbox-images/mcp-everything/package-lock.json
             sandbox-images/mcp-everything/lock-provenance.json
+      - name: Retain unverified inputs only when generation fails
+        if: failure()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: mcp-everything-unverified-lock
+          if-no-files-found: error
+          retention-days: 7
+          path: |
+            sandbox-images/mcp-everything/package.json
+            sandbox-images/mcp-everything/package-lock.json
