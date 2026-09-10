@@ -26,6 +26,13 @@ mod projection;
 #[path = "credential_source_workloads.rs"]
 mod workloads;
 
+pub(super) fn refresh_interval(sandbox: &KarsSandbox) -> std::time::Duration {
+    let governed = sandbox.spec.credentials_ref.is_some()
+        || sandbox.spec.credential_bindings.is_some()
+        || sandbox.spec.github_binding.is_some();
+    std::time::Duration::from_secs(if governed { 30 } else { 300 })
+}
+
 pub(crate) async fn pause_owned(
     client: &Client,
     sandbox: &KarsSandbox,

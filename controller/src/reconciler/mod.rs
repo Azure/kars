@@ -3147,12 +3147,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
-    Ok(Action::requeue(Duration::from_secs(
-        if sandbox.spec.credentials_ref.is_some() {
-            30
-        } else {
-            300
-        },
+    Ok(Action::requeue(credential_sources::refresh_interval(
+        &sandbox,
     )))
 }
 

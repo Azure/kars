@@ -192,8 +192,10 @@ async fn fixture() -> (
                 return ResponseTemplate::new(409).set_body_json(json!({
                     "apiVersion":"v1","kind":"Status","status":"Failure","code":409,"reason":"Conflict"}));
             }
+            let original=value.clone();
             let version=value["metadata"]["resourceVersion"].as_str().unwrap().parse::<u64>().unwrap()+1;
             let prior=value["spec"].clone();merge(&mut value,&body);
+            if value==original {return ResponseTemplate::new(200).set_body_json(original);}
             if !prior.is_null() && value["spec"]!=prior {value["metadata"]["generation"]=(value["metadata"]["generation"].as_i64().unwrap_or(1)+1).into();}
             value["metadata"]["resourceVersion"]=version.to_string().into();
             s.objects.insert(key,value.clone());
@@ -392,6 +394,103 @@ async fn credential_rebind_full_task_reconcile_preserves_uids_data_and_regenerat
             .iter()
             .any(|(method, path, _)| method == "DELETE" && path == SANDBOX)
     );
+}
+
+#[tokio::test]
+async fn credential_rebind_acknowledgement_is_stable_but_rechecks_consumers() {
+    let (_server, ctx, state, team) = fixture().await;
+    let api = Api::<KarsTask>::namespaced(ctx.client.clone(), "work");
+    crate::kars_team_reconciler::credential_bindings::reconcile(&ctx.client, &api, &team)
+        .await
+        .unwrap();
+    state.lock().unwrap().pods.clear();
+    super::super::reconcile(Arc::new(current(&state)), ctx.clone())
+        .await
+        .unwrap();
+    let paused = current(&state);
+    assert_eq!(
+        paused.status.as_ref().unwrap().execution_phase.as_deref(),
+        Some(PAUSED)
+    );
+    state.lock().unwrap().calls.clear();
+    for _ in 0..3 {
+        super::super::reconcile(Arc::new(current(&state)), ctx.clone())
+            .await
+            .unwrap();
+    }
+    assert_eq!(
+        current(&state).resource_version(),
+        paused.resource_version()
+    );
+    assert!(
+        state
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .filter(|(method, path, _)| method == "PATCH" && path == &format!("{TASK}/status"))
+            .all(|(_, _, body)| {
+                body["metadata"]["uid"] == json!(paused.uid())
+                    && body["metadata"]["resourceVersion"] == json!(paused.resource_version())
+            })
+    );
+
+    state.lock().unwrap().pods.push(json!({
+        "metadata":{"name":"late-consumer","namespace":"kars-run","uid":"late-pod",
+            "deletionTimestamp":"2026-01-01T00:00:00Z"}
+    }));
+    super::super::reconcile(Arc::new(current(&state)), ctx.clone())
+        .await
+        .unwrap();
+    let waiting = current(&state);
+    assert_eq!(
+        waiting.status.as_ref().unwrap().execution_phase.as_deref(),
+        Some("PausingCredentials")
+    );
+    assert!(waiting.status.as_ref().unwrap().envelope_digest.is_none());
+    assert!(pending(&waiting));
+    assert!(!state.lock().unwrap().objects.contains_key(RECEIPT));
+    super::super::reconcile(Arc::new(current(&state)), ctx.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        current(&state).resource_version(),
+        waiting.resource_version()
+    );
+    crate::kars_team_reconciler::credential_bindings::reconcile(&ctx.client, &api, &team)
+        .await
+        .unwrap();
+    assert!(pending(&current(&state)));
+}
+
+#[tokio::test]
+async fn credential_rebind_stale_acknowledgement_cannot_begin_pause_side_effects() {
+    let (_server, ctx, state, team) = fixture().await;
+    let api = Api::<KarsTask>::namespaced(ctx.client.clone(), "work");
+    crate::kars_team_reconciler::credential_bindings::reconcile(&ctx.client, &api, &team)
+        .await
+        .unwrap();
+    state.lock().unwrap().pods.clear();
+    super::super::reconcile(Arc::new(current(&state)), ctx.clone())
+        .await
+        .unwrap();
+    let stale = current(&state);
+    assert_eq!(
+        stale.status.as_ref().unwrap().execution_phase.as_deref(),
+        Some(PAUSED)
+    );
+    let before = {
+        let mut data = state.lock().unwrap();
+        data.calls.clear();
+        data.objects.get_mut(TASK).unwrap()["metadata"]["resourceVersion"] = "999".into();
+        data.objects.clone()
+    };
+    assert!(super::super::reconcile(Arc::new(stale), ctx).await.is_err());
+    let data = state.lock().unwrap();
+    assert_eq!(data.objects, before);
+    assert_eq!(data.calls.len(), 1);
+    assert_eq!(data.calls[0].0, "PATCH");
+    assert_eq!(data.calls[0].1, format!("{TASK}/status"));
 }
 
 #[tokio::test]

@@ -37,6 +37,51 @@ this repository.
 
 ## Current validation
 
+### Credential lifecycle repair (2026-09-10)
+
+Downstream native acceptance exposed two remaining lifecycle failures at public
+core `2582eade`: a disabled grant could leave its v2 Sandbox consumer running
+beyond the 180-second acceptance window, and a Team credential rebind did not
+resume after old consumers retired within the 240-second window. Neither
+deadline has been raised and neither native failure is declared closed here.
+
+The successful Sandbox reconciliation path previously gave only v1
+`credentialsRef` a 30-second backstop. V2 `credentialBindings` and governed
+`githubBinding` incorrectly used the unbound legacy five-minute interval,
+without a grant-change watch. The shared refresh selector now gives all three
+credential modes the existing 30-second backstop. Unbound legacy Sandboxes
+remain at five minutes. Eight selection combinations cover this distinction;
+reconciliation cadence is not a guaranteed consumer termination deadline.
+
+The Task rebind path also unconditionally published PausingCredentials followed
+by CredentialsPaused on every already-quiescent reconciliation. The new
+controller-binary regression reproduced six unnecessary resourceVersion
+increments across three passes (fixture RV 4 to 10), which can starve the
+Team's independently checked UID/RV-fenced update.
+
+Current, already-retracted PausingCredentials/CredentialsPaused status is now
+stable. Every status patch, including an unchanged one, retains exact UID/RV
+preconditions and explicit nulling of the envelope digest. Kubernetes preserves
+resourceVersion for an unchanged patch; the regression fixture models that
+behavior without bypassing its preconditions. A stale acknowledged snapshot
+must conflict before any pause side effects. Every pass still
+retracts the old receipt and verifies the owned hold, scale-down and all
+remaining Pods, including terminating or unlabelled consumers. A late consumer
+restores PausingCredentials and blocks the Team update; no quiescence,
+attestation, ownership or admission requirement is removed.
+
+The final CAS-preserving repair passed **90 controller-binary credential cases**
+and strict paired all-target Clippy under the existing offline/locked
+shared-target disk guard, with minimum free space **9.01 GiB**. The tests include
+the stale-snapshot rejection, stable paused and
+waiting states, late consumers, existing full Task/Team UID/data/receipt
+continuity, and the refresh selector. Bounded independent review of the final
+five Rust files found no significant issues and confirmed the initial CAS
+remains before pause side effects; that reviewer did not rerun the tests.
+This is local source qualification, not fresh native BFF/lifecycle, active-SRE
+or CNI acceptance. Exact-head hosted qualification and genuine human signoffs
+remain separate gates.
+
 ### Native admission and generated-schema repair
 
 The full hosted run at `80cffb63` exposed additional issues: creation of
