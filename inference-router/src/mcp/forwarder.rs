@@ -943,13 +943,12 @@ async fn post_tools_call(
         // because the agent-facing surface shouldn't distinguish (the audit
         // layer can see both).
         return CallAttempt::Done(ToolCallOutput {
-            content: vec![ToolContent::Text {
-                text: format!(
-                    "upstream JSON-RPC error code={} message={}",
-                    err.code, err.message
-                ),
-            }],
+            content: vec![ToolContent::text(format!(
+                "upstream JSON-RPC error code={} message={}",
+                err.code, err.message
+            ))],
             is_error: true,
+            ..Default::default()
         });
     }
 
@@ -963,10 +962,7 @@ async fn post_tools_call(
         }
     };
 
-    CallAttempt::Done(ToolCallOutput {
-        content: result.content,
-        is_error: result.is_error.unwrap_or(false),
-    })
+    CallAttempt::Done(result)
 }
 
 async fn forward_tools_call(
@@ -1105,17 +1101,9 @@ struct ToolsListResult {
 #[derive(Debug, Deserialize)]
 struct ToolsCallResponse {
     #[serde(default)]
-    result: Option<ToolsCallResult>,
+    result: Option<ToolCallOutput>,
     #[serde(default)]
     error: Option<JsonRpcWireError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolsCallResult {
-    #[serde(default)]
-    content: Vec<ToolContent>,
-    #[serde(default, rename = "isError")]
-    is_error: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1188,14 +1176,39 @@ mod tests {
         force_call_error: Option<(i64, String)>,
         /// If set, the upstream returns this HTTP status for tools/call.
         force_call_http_status: Option<u16>,
+        force_call_result: Option<Value>,
+        call_sse: bool,
         /// Last `Authorization` header value seen by the mock (used by
         /// the bearer-attach test to confirm outbound auth wiring).
         last_auth_header: StdArc<TokioMutex<Option<String>>>,
     }
 
     async fn mock_upstream(state: MockState) -> String {
+        use axum::response::IntoResponse;
+
         let app = Router::new()
-            .route("/", post(mock_handler))
+            .route(
+                "/",
+                post(
+                    |State(state): State<MockState>,
+                     headers: HeaderMap,
+                     Json(body): Json<Value>| async move {
+                        let sse = state.call_sse && body["method"] == "tools/call";
+                        let (status, Json(payload)) =
+                            mock_handler(State(state), headers, Json(body)).await;
+                        if sse {
+                            (
+                                status,
+                                [("content-type", "text/event-stream")],
+                                format!("data: {payload}\n\n"),
+                            )
+                                .into_response()
+                        } else {
+                            (status, Json(payload)).into_response()
+                        }
+                    },
+                ),
+            )
             .route("/", any(method_block))
             .with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1248,6 +1261,12 @@ mod tests {
                             "id": id,
                             "error": {"code": code, "message": msg}
                         })),
+                    );
+                }
+                if let Some(result) = state.force_call_result {
+                    return (
+                        StatusCode::OK,
+                        Json(json!({"jsonrpc":"2.0", "id":id, "result":result})),
                     );
                 }
                 let upstream_tool = body
@@ -1531,9 +1550,136 @@ mod tests {
             .expect("invoke");
         assert!(!out.is_error);
         assert_eq!(out.content.len(), 1);
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("called search"));
         assert!(text.contains("azure"));
+    }
+
+    #[tokio::test]
+    async fn protocol_content_forwards_json_and_sse_results_losslessly() {
+        let fixtures: Vec<Value> =
+            serde_json::from_str(include_str!("../../tests/fixtures/mcp-tool-content.json"))
+                .unwrap();
+        for call_sse in [false, true] {
+            for result in &fixtures {
+                let state = MockState {
+                    tools: vec![tool_def("get_file_contents", "")],
+                    force_call_result: Some(result.clone()),
+                    call_sse,
+                    ..Default::default()
+                };
+                let calls = state.call_count.clone();
+                let url = mock_upstream(state).await;
+                let registry = registry_with(vec![discovered("github-mcp", &url, vec!["*"])]);
+                let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+                    .await
+                    .unwrap();
+                let request = crate::mcp::jsonrpc::Request {
+                    jsonrpc: "2.0".into(),
+                    id: crate::mcp::jsonrpc::Id::Number(7),
+                    method: "tools/call".into(),
+                    params: Some(
+                        json!({"name":"github_mcp.get_file_contents","arguments":{"path":"README.md"}}),
+                    ),
+                };
+                let response =
+                    crate::mcp::tools::handle_tools_call_async(&request, &dispatcher).await;
+                assert!(response.error.is_none(), "{response:?}");
+                assert_eq!(response.result.as_ref(), Some(result), "SSE={call_sse}");
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn protocol_content_rejects_invalid_forwarded_results_without_replay() {
+        for result in [
+            json!({"content":[{"type":"unknown","text":"not a supported block"}]}),
+            json!({"content":[{"type":"resource","resource":{"uri":"file:///example"}}]}),
+            json!({"content":[{"type":"resource","resource":{"uri":"file:///example","blob":"?"}}]}),
+            json!({"content":[],"structuredContent":[]}),
+            json!({"structuredContent":{}}),
+        ] {
+            let state = MockState {
+                tools: vec![tool_def("get_file_contents", "")],
+                force_call_result: Some(result),
+                ..Default::default()
+            };
+            let calls = state.call_count.clone();
+            let url = mock_upstream(state).await;
+            let registry = registry_with(vec![discovered("github-mcp", &url, vec!["*"])]);
+            let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+                .await
+                .unwrap();
+            let error = dispatcher
+                .invoke("github_mcp.get_file_contents", &json!({}))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, DispatchError::ExecutionFailed { ref reason, .. } if reason.contains("parse failed")),
+                "{error}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn protocol_content_does_not_dereference_resource_or_icon_uris() {
+        let resource_server = wiremock::MockServer::start().await;
+        let uri = resource_server.uri();
+        let result = json!({"content":[
+            {"type":"resource","resource":{"uri":uri,"text":"embedded text"}},
+            {"type":"resource_link","uri":uri,"name":"reference","icons":[{"src":uri}]}
+        ],"isError":false});
+        let state = MockState {
+            tools: vec![tool_def("get_file_contents", "")],
+            force_call_result: Some(result.clone()),
+            ..Default::default()
+        };
+        let url = mock_upstream(state).await;
+        let registry = registry_with(vec![discovered("github-mcp", &url, vec!["*"])]);
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let output = dispatcher
+            .invoke("github_mcp.get_file_contents", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(output).unwrap(), result);
+        assert!(
+            resource_server
+                .received_requests()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_content_embedded_resources_still_obey_response_byte_limit() {
+        let state = MockState {
+            tools: vec![tool_def("get_file_contents", "")],
+            force_call_result: Some(json!({"content":[{"type":"resource","resource":{
+                "uri":"file:///large.txt",
+                "text":"x".repeat(super::super::response_body::MAX_RESPONSE_BYTES)
+            }}]})),
+            ..Default::default()
+        };
+        let url = mock_upstream(state).await;
+        let registry = registry_with(vec![discovered("github-mcp", &url, vec!["*"])]);
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let error = dispatcher
+            .invoke("github_mcp.get_file_contents", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, DispatchError::ExecutionFailed { ref reason, .. } if reason.contains("byte limit")),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -1589,7 +1735,9 @@ mod tests {
                 .await
                 .expect("invoke");
             assert!(out.is_error);
-            let ToolContent::Text { text } = &out.content[0];
+            let ToolContent::Text { text, .. } = &out.content[0] else {
+                panic!("expected text content");
+            };
             assert!(text.contains("code=-32000"));
             assert!(text.contains(message));
             assert_eq!(
@@ -1652,14 +1800,18 @@ mod tests {
             .invoke("github_mcp.search", &serde_json::json!({"q": "a"}))
             .await
             .unwrap();
-        let ToolContent::Text { text: t1 } = &out1.content[0];
+        let ToolContent::Text { text: t1, .. } = &out1.content[0] else {
+            panic!("expected text content");
+        };
         assert!(t1.contains("called search"));
 
         let out2 = dispatcher
             .invoke("kb_search.query", &serde_json::json!({"q": "b"}))
             .await
             .unwrap();
-        let ToolContent::Text { text: t2 } = &out2.content[0];
+        let ToolContent::Text { text: t2, .. } = &out2.content[0] else {
+            panic!("expected text content");
+        };
         assert!(t2.contains("called query"));
     }
 
@@ -1862,7 +2014,9 @@ mod tests {
             )
             .await
             .expect("invoke");
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("called browser_navigate"));
         assert!(!out.is_error);
 
@@ -1901,7 +2055,9 @@ mod tests {
             .invoke("github_mcp.search_repos", &serde_json::json!({"q": "kars"}))
             .await
             .expect("invoke");
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("called search_repos"));
     }
 
@@ -1930,7 +2086,9 @@ mod tests {
             .invoke("svc.do_thing", &serde_json::json!({}))
             .await
             .expect("invoke should succeed after transparent re-init + retry");
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("called do_thing"));
 
         // The retry path re-established the session exactly once more.
@@ -1974,7 +2132,9 @@ mod tests {
                 )
                 .await
                 .expect("invoke");
-            let ToolContent::Text { text } = &out.content[0];
+            let ToolContent::Text { text, .. } = &out.content[0] else {
+                panic!("expected text content");
+            };
             assert!(text.contains("sessionStorage"), "result text preserved");
             assert!(!out.is_error);
         }

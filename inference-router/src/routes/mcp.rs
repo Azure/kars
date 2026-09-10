@@ -1084,8 +1084,9 @@ mod tests {
             async fn invoke(&self, _: &str, _: &Value) -> Result<ToolCallOutput, DispatchError> {
                 self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
                 Ok(ToolCallOutput {
-                    content: vec![ToolContent::Text { text: "ok".into() }],
+                    content: vec![ToolContent::text("ok")],
                     is_error: false,
+                    ..Default::default()
                 })
             }
         }

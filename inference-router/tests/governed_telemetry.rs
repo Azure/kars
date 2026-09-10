@@ -524,6 +524,7 @@ async fn mcp_is_error_and_dispatch_transport_failure_are_both_failure_observatio
                 Ok(ToolCallOutput {
                     content: vec![],
                     is_error: true,
+                    ..Default::default()
                 })
             } else {
                 Err(DispatchError::ExecutionFailed {

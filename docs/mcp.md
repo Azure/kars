@@ -107,6 +107,22 @@ The agent calls a **namespaced** tool (`<server>.<tool>`, e.g.
 to the MCP, and returns the result. The agent has no ambient network reach and
 no credentials.
 
+### Tool result compatibility
+
+The forwarder preserves the typed
+[MCP content blocks](https://modelcontextprotocol.io/specification/2025-11-25/schema#contentblock):
+text, images, audio, resource links, and embedded text or base64 blob resources.
+MIME types, annotations, metadata, extension fields, `structuredContent`, and
+`isError` survive forwarding. Ordinary text results retain their existing wire
+format. Unknown content kinds and malformed required fields are protocol errors,
+not silently discarded content.
+
+Resource and icon URIs are references only: the router does not fetch them.
+The existing response byte limit, authentication, governance, and session rules
+are unchanged. Text in embedded resources and structured results remains present
+in serialized output for structured response inspection; binary data is not
+decoded into model text or treated as a successful content-safety scan.
+
 ## Out-of-the-box egress
 
 Because the router is the only path to the MCP, the sandbox's default-deny
