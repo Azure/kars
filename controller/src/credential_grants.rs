@@ -229,6 +229,27 @@ async fn publish(
         grant.metadata.generation,
     );
     crate::status::conditions::set(&mut conditions, writer_condition);
+    let private_condition = crate::status::conditions::preserve_transition_time(
+        crate::status::conditions::find(&conditions, "PrivateConsumptionReady"),
+        "PrivateConsumptionReady",
+        if writer_error.is_none() && !grant.spec.writers.is_empty() {
+            "True"
+        } else {
+            "False"
+        },
+        if writer_error.is_none() && !grant.spec.writers.is_empty() {
+            "Qualified"
+        } else {
+            "Unavailable"
+        },
+        if writer_error.is_none() && !grant.spec.writers.is_empty() {
+            "Private writer activation and enforcing consumption boundary are current"
+        } else {
+            "Private writer authority is unavailable; protection is retained"
+        },
+        grant.metadata.generation,
+    );
+    crate::status::conditions::set(&mut conditions, private_condition);
     let status = CredentialGrantStatus {
         observed_generation: grant.metadata.generation.unwrap_or_default(),
         phase: phase.into(),

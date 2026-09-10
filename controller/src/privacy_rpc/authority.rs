@@ -151,6 +151,12 @@ async fn snapshot(
         .get(crate::service_observer::SECRET)
         .await
         .map_err(|_| DENIED)?;
+    let consumption_epoch = crate::private_activation::namespace_epoch(client, &namespace)
+        .await?
+        .ok_or(DENIED)?;
+    if !crate::private_activation::stamp_matches(&secret, Some(&consumption_epoch)) {
+        return Err(DENIED.into());
+    }
     diagnostic.stage("rpc_credential_current");
     governed_services::credentials::validate(
         &secret,

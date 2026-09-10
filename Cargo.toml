@@ -62,6 +62,7 @@ serde_yaml = "0.9"
 
 # Azure identity (via REST — no SDK dependency)
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+rsa = "0.9.10"
 
 # Observability
 tracing = "0.1"

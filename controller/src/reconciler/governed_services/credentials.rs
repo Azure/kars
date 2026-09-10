@@ -70,6 +70,7 @@ pub(crate) struct Projection {
     pub(crate) version: String,
     pub(crate) epoch: Option<String>,
     purpose: Purpose,
+    consumption_epoch: Option<String>,
 }
 
 impl Projection {
@@ -84,10 +85,23 @@ impl Projection {
             ),
             epoch: None,
             purpose,
+            consumption_epoch: None,
         })
     }
 
     pub(crate) fn decorate(&self, deployment: &mut Deployment) {
+        if let Some(epoch) = &self.consumption_epoch {
+            deployment
+                .spec
+                .as_mut()
+                .expect("controller Deployment spec")
+                .template
+                .metadata
+                .get_or_insert_default()
+                .annotations
+                .get_or_insert_default()
+                .insert(crate::private_activation::EPOCH.into(), epoch.clone());
+        }
         deployment
             .spec
             .as_mut()
@@ -265,6 +279,24 @@ async fn quarantine(
             }))).await.map_err(api_error)?;
     }
     let consumer = review_consumer(client, namespace, name).await?;
+    let fence = Api::<Namespace>::all(client.clone())
+        .get(namespace)
+        .await
+        .map_err(api_error)?;
+    if crate::private_activation::required_in_namespace(client, &fence).await?
+        && consumer.as_ref().is_some_and(|deployment| {
+            fence
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(crate::private_activation::EPOCH))
+                .is_none_or(|epoch| {
+                    !crate::private_activation::approved_deployment(&fence, deployment, epoch)
+                })
+        })
+    {
+        return Err("Unreviewed private consumer preserved; an operator UID/template retirement review is required".into());
+    }
     if let Some(deployment) = consumer
         && deployment
             .spec
@@ -329,6 +361,9 @@ pub(in crate::reconciler) async fn quarantine_on_privacy_loss(
     if crate::sre_authority::privacy_readiness(client, &namespace.name_any())
         .await
         .is_ok()
+        && crate::private_activation::for_sandbox(client, &live, &namespace)
+            .await
+            .is_ok()
     {
         return Ok(());
     }
@@ -399,9 +434,86 @@ pub(crate) async fn ensure_bound(
         review_consumer(client, &namespace_name, &sandbox.name_any()).await?;
     }
     let secrets: Api<Secret> = Api::namespaced(client.clone(), &namespace_name);
-    let existing = secrets.get_opt(purpose.secret).await.map_err(api_error)?;
+    let mut existing = secrets.get_opt(purpose.secret).await.map_err(api_error)?;
     if let Some(secret) = existing.as_ref() {
         validate(secret, source_uid, namespace, purpose)?;
+    }
+    let consumption_epoch =
+        match crate::private_activation::for_sandbox(client, sandbox, namespace).await {
+            Ok(epoch) => epoch,
+            Err(error) => {
+                if let Some(secret) = &existing {
+                    quarantine(
+                        client,
+                        &namespace_name,
+                        &sandbox.name_any(),
+                        secret,
+                        purpose,
+                    )
+                    .await?;
+                }
+                return Err(error.into());
+            }
+        };
+    if let Some(secret) = existing.as_ref()
+        && !crate::private_activation::stamp_matches(secret, consumption_epoch.as_deref())
+    {
+        let fresh_namespace = Api::<Namespace>::all(client.clone())
+            .get(&namespace_name)
+            .await
+            .map_err(api_error)?;
+        if let Some(deployment) =
+            review_consumer(client, &namespace_name, &sandbox.name_any()).await?
+            && !crate::private_activation::approved_deployment(
+                &fresh_namespace,
+                &deployment,
+                consumption_epoch
+                    .as_deref()
+                    .ok_or("Private epoch missing")?,
+            )
+        {
+            return Err("Unreviewed private credential consumer preserved; operator activation review required".into());
+        }
+        quarantine(
+            client,
+            &namespace_name,
+            &sandbox.name_any(),
+            secret,
+            purpose,
+        )
+        .await?;
+        if !crate::private_activation::retired_material_consumers(client, &namespace_name).await? {
+            return Err(
+                "Owned private credential consumers are still retiring; no material was reissued"
+                    .into(),
+            );
+        }
+        if purpose.secret == GITHUB.secret {
+            let old: serde_json::Value = secret
+                .data
+                .as_ref()
+                .and_then(|data| data.get("config.json"))
+                .and_then(|bytes| serde_json::from_slice(&bytes.0).ok())
+                .ok_or("Prior private GitHub configuration is invalid")?;
+            let new: serde_json::Value =
+                serde_json::from_str(configuration.ok_or("Private GitHub configuration missing")?)
+                    .map_err(|_| "Private GitHub configuration is invalid")?;
+            if !crate::private_activation::different_rsa_keys(
+                old["private_key_pem"]
+                    .as_str()
+                    .ok_or("Prior private App key missing")?,
+                new["private_key_pem"]
+                    .as_str()
+                    .ok_or("Private App key missing")?,
+            )? {
+                return Err("Potentially exposed GitHub App key requires operator rotation before private requalification".into());
+            }
+        }
+        let previous_uid = secret.uid();
+        existing = secrets.get_opt(purpose.secret).await.map_err(api_error)?;
+        if existing.as_ref().and_then(ResourceExt::uid) != previous_uid {
+            return Err("Private credential was replaced during retirement".into());
+        }
     }
     let mut epoch = checked_epoch(
         client,
@@ -413,6 +525,7 @@ pub(crate) async fn ensure_bound(
     .await?;
     let secret = if let Some(secret) = existing.as_ref().filter(|secret| {
         current(secret, epoch.as_deref())
+            && crate::private_activation::stamp_matches(secret, consumption_epoch.as_deref())
             && source_revision.is_none_or(|revision| {
                 secret
                     .metadata
@@ -432,6 +545,11 @@ pub(crate) async fn ensure_bound(
     }) {
         secret.clone()
     } else {
+        if crate::private_activation::for_sandbox(client, sandbox, namespace).await?
+            != consumption_epoch
+        {
+            return Err("Private activation changed before material issuance".into());
+        }
         if existing.is_some() {
             review_consumer(client, &namespace_name, &sandbox.name_any()).await?;
             // The ownership inventory awaited API calls. Recheck privacy at
@@ -449,6 +567,9 @@ pub(crate) async fn ensure_bound(
             SOURCE_UID: source_uid, NAMESPACE_UID: namespace.metadata.uid,
             REVISION: crate::sre_privacy::REVISION,
         });
+        if let Some(epoch) = &consumption_epoch {
+            annotations[crate::private_activation::EPOCH] = epoch.clone().into();
+        }
         if let Some(revision) = source_revision {
             annotations[SOURCE_REVISION] = json!(revision);
         }
@@ -492,6 +613,7 @@ pub(crate) async fn ensure_bound(
     };
     validate(&secret, source_uid, namespace, purpose)?;
     if !current(&secret, epoch.as_deref())
+        || !crate::private_activation::stamp_matches(&secret, consumption_epoch.as_deref())
         || source_revision.is_some_and(|revision| {
             secret
                 .metadata
@@ -509,6 +631,7 @@ pub(crate) async fn ensure_bound(
     Ok(Projection {
         purpose,
         epoch,
+        consumption_epoch,
         version: format!(
             "{}:{}",
             secret.metadata.uid.unwrap(),
@@ -576,6 +699,11 @@ pub(crate) async fn existing_configuration(
         &namespace,
         purpose,
     )?;
+    let consumption_epoch =
+        crate::private_activation::for_sandbox(client, sandbox, &namespace).await?;
+    if !crate::private_activation::stamp_matches(&secret, consumption_epoch.as_deref()) {
+        return Ok(None);
+    }
     let epoch = checked_epoch(
         client,
         &namespace.name_any(),

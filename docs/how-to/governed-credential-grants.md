@@ -165,6 +165,97 @@ cache proofs, or replace TLS, network, rotation, and unauthorized-peer tests.
 
 ## Operator workflow
 
+Private writer/observation activation is an additional review in the existing
+`grant preview` / `grant apply` flow. It is not a prerequisite for ordinary
+standalone core installation. The passive consumption policies apply only
+after a namespace is protected for this capability. The agent-visible
+`router-admin-token` is deliberately not private service authority:
+private operator controls use `router-services-admin` through
+`KARS_SERVICES_ADMIN_TOKEN` or `/etc/kars/services/control-token`, and reject
+agent admin credentials.
+
+Upgraded private enrollment requires a `privateActivation` review containing
+the actual root namespace, ServiceAccount and Deployment UIDs, a root template
+digest, an explicit controller identity profile, current admission-bundle
+UID/revisions, and reviewed namespace/consumer identities. Old review files
+are rejected with a re-preview instruction rather than assigned guessed trust.
+The optional historical `--controller` integration setting is not this review.
+
+For example, after installing the upgraded core prerequisites:
+
+```sh
+kars credentials grant preview --namespace workspace \
+  --writer addon/credential-writer --private-root kars-system \
+  --private-controller-profile service-accounts \
+  --observe agent --private-consumer kars-agent/Deployment/agent > reviewed-grant.json
+kars credentials grant apply reviewed-grant.json
+```
+
+`service-accounts` pins the actual Kubernetes controller ServiceAccount UIDs.
+The alternative `kcm-certificate` profile explicitly permits the authenticated
+`system:kube-controller-manager` certificate principal with an absent UID,
+not a similarly named ServiceAccount or arbitrary `pods.create` holder.
+Only the required child-creation stage is permitted; controller UPDATE
+bookkeeping requires unchanged execution templates and ownership. Explicit
+registrar authority retains its existing SRE-runtime scope.
+
+Preview is read-only and exports metadata/digests, never private values or raw
+templates. Review the referenced root and consumer templates before applying.
+Additional `--private-consumer namespace/Kind/name` entries can protect an
+owned runtime without granting observation access to it. An unexplained Pod,
+an ownership change, a different execution template, or an incomplete inventory
+blocks activation; it is not deleted or adopted to make qualification pass.
+Unrelated non-consuming Pods are preserved.
+
+Apply rechecks the complete enforcing policy/binding specifications and their
+current type-check/observation status. Existing writer authority is retired
+first, including absence checks for its owned read Roles/Bindings. Namespace
+protection is then enabled in `Pending`, identities/templates are rechecked,
+and only approved material-consuming controller replicas are paused. All
+actual material-consuming Pods, including unlabelled and terminating Pods,
+must finish retirement before fresh unpredictable namespace-UID-bound epochs
+are generated. Independently verified non-material consumers receive explicit
+Pod UID/spec receipts. Qualified templates are stamped, and the grant is
+published with the resulting receipt using its current UID/resourceVersion.
+Conflicts preserve the protection and require a fresh review; there is no
+unprotected rollback.
+
+The epoch is public freshness metadata, not authorization. Correct epochs do
+not let a writer add, remove, or modify protected consumption. Admission checks
+old **or** new direct/projected Secret references, env/envFrom, init/ephemeral
+containers, image-pull/CSI references, privileged identities, and node-access
+paths across Pod, RC, Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, and
+CronJob templates. Connections into activated private namespaces require
+explicit operator authority; Pod log GET remains separate. Broad SAR checks
+remain defense in depth, not a complete resourceNames-scoped permission proof.
+
+Issuance/reuse and both fresh privacy-RPC snapshots verify the current complete
+bundle, root identities, namespace fence, and actual relevant consumers.
+Potentially exposed service tokens and TLS identities are regenerated, not
+copied. SRE Kubernetes tokens are invalidated by replacing their bound Secret
+UID. A potentially exposed GitHub App key requires an operator-rotated key;
+changing its PEM encoding does not count as rotation. Private
+`Prepared`/consumer availability remains distinct from authorization.
+
+Direct Helm RPC enablement only requests the listener. It does not stage root
+trust or authorize private writers; the listener remains unavailable until
+generic operator activation is qualified. Direct API/Helm grant publication
+must carry the same qualified receipt and live namespace fences. A prior
+`Ready` value without current `WriterReady` and `PrivateConsumptionReady`
+conditions is not private authority. Writer retirement (`writers: []`, or
+grant disablement) retains namespace protection; no automatic deactivation
+path removes it before authority retirement.
+
+For qualification, the canonical artifact is regenerated/checked with
+`python3 tools/private-consumption-bundle.py --check`. CLI tests cover the
+existing preview/apply hook and staged failures. The native
+`tests/e2e/private_consumption.py::named_cases` fixture runs after operator
+activation through the existing API harness: it establishes actual
+resourceNames-scoped RBAC, uses inert zero-replica/suspended/no-eligible-node
+bases and server-side dry-run mutations, and requires the exact intended
+admission denial. It never executes a credential-reading payload. Native
+qualification and independent source review remain required before sign-off.
+
 Install the new CRD, controller and admission policies first. Install the private
 add-on's ServiceAccount without broad Secret or Deployment write permissions.
 The namespaces must already exist.

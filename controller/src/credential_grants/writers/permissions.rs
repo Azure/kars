@@ -145,6 +145,35 @@ fn requests(
             "uid":writer.uid,"groups":["system:authenticated","system:serviceaccounts",
                 format!("system:serviceaccounts:{}",writer.namespace)],
             "resourceAttributes":{"group":"","resource":"serviceaccounts","verb":"impersonate","namespace":namespace,"name":name}}}));
+    let mut principals = vec![(
+        namespace.to_string(),
+        name.to_string(),
+        controller.1.to_string(),
+    )];
+    if let Some(activation) = &grant.spec.private_activation {
+        principals.extend(
+            activation
+                .controller_uids
+                .iter()
+                .map(|(name, uid)| ("kube-system".into(), name.clone(), uid.clone())),
+        );
+    }
+    for (namespace, name, uid) in principals {
+        for attributes in [
+            json!({"group":"","resource":"serviceaccounts","subresource":"token","verb":"create","namespace":namespace,"name":name}),
+            json!({"group":"","resource":"serviceaccounts","verb":"impersonate","namespace":namespace,"name":name}),
+            json!({"group":"","resource":"users","verb":"impersonate","name":format!("system:serviceaccount:{namespace}:{name}")}),
+            json!({"group":"","resource":"uids","verb":"impersonate","name":uid}),
+        ] {
+            requests.push(
+                json!({"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview",
+                "spec":{"user":format!("system:serviceaccount:{}:{}",writer.namespace,writer.name),
+                    "uid":writer.uid,"groups":["system:authenticated","system:serviceaccounts",
+                        format!("system:serviceaccounts:{}",writer.namespace)],
+                    "resourceAttributes":attributes}}),
+            );
+        }
+    }
     Ok(requests)
 }
 

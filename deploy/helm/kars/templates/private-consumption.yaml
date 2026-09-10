@@ -1,0 +1,5 @@
+{{- $bundle := .Files.Get "files/private-consumption.json" | fromJson }}
+{{- range $bundle.objects }}
+---
+{{ toYaml . }}
+{{- end }}

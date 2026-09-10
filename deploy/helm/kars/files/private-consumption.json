@@ -1,0 +1,679 @@
+{
+  "contract": "kars.azure.com/private-consumption/v1",
+  "secrets": [
+    "router-services-admin",
+    "router-services-observer",
+    "router-services-observer-identity",
+    "router-github-app",
+    "kars-observation-privacy-tls",
+    "sre-api-router-identity"
+  ],
+  "controllers": [
+    "deployment-controller",
+    "replicaset-controller",
+    "replication-controller",
+    "statefulset-controller",
+    "daemon-set-controller",
+    "job-controller",
+    "cronjob-controller"
+  ],
+  "activationSchema": {
+    "type": "object",
+    "properties": {
+      "contract": {
+        "type": "string",
+        "enum": [
+          "kars.azure.com/private-consumption/v1"
+        ]
+      },
+      "phase": {
+        "type": "string",
+        "enum": [
+          "reviewed",
+          "qualified"
+        ]
+      },
+      "bundleRevision": {
+        "type": "string",
+        "pattern": "^[a-f0-9]{64}$"
+      },
+      "root": {
+        "type": "object",
+        "properties": {
+          "namespace": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              },
+              "uid": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              },
+              "resourceVersion": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            },
+            "required": [
+              "name",
+              "uid",
+              "resourceVersion"
+            ]
+          },
+          "account": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              },
+              "uid": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              },
+              "resourceVersion": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            },
+            "required": [
+              "name",
+              "uid",
+              "resourceVersion"
+            ]
+          },
+          "deployment": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              },
+              "uid": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              },
+              "resourceVersion": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 253
+              }
+            },
+            "required": [
+              "name",
+              "uid",
+              "resourceVersion"
+            ]
+          },
+          "templateDigest": {
+            "type": "string",
+            "pattern": "^[a-f0-9]{64}$"
+          }
+        },
+        "required": [
+          "namespace",
+          "account",
+          "deployment",
+          "templateDigest"
+        ]
+      },
+      "profile": {
+        "type": "string",
+        "enum": [
+          "service-accounts",
+          "kcm-certificate"
+        ]
+      },
+      "controllerUids": {
+        "type": "object",
+        "additionalProperties": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 253
+        }
+      },
+      "namespaces": {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": 64,
+        "items": {
+          "type": "object",
+          "properties": {
+            "namespace": {
+              "type": "object",
+              "properties": {
+                "name": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                },
+                "uid": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                },
+                "resourceVersion": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 253
+                }
+              },
+              "required": [
+                "name",
+                "uid",
+                "resourceVersion"
+              ]
+            },
+            "consumers": {
+              "type": "array",
+              "maxItems": 64,
+              "items": {
+                "type": "object",
+                "properties": {
+                  "kind": {
+                    "type": "string",
+                    "enum": [
+                      "Deployment",
+                      "ReplicaSet",
+                      "StatefulSet",
+                      "DaemonSet",
+                      "ReplicationController",
+                      "Job",
+                      "CronJob",
+                      "Pod"
+                    ]
+                  },
+                  "object": {
+                    "type": "object",
+                    "properties": {
+                      "name": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253
+                      },
+                      "uid": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253
+                      },
+                      "resourceVersion": {
+                        "type": "string",
+                        "minLength": 1,
+                        "maxLength": 253
+                      }
+                    },
+                    "required": [
+                      "name",
+                      "uid",
+                      "resourceVersion"
+                    ]
+                  },
+                  "templateDigest": {
+                    "type": "string",
+                    "pattern": "^[a-f0-9]{64}$"
+                  }
+                },
+                "required": [
+                  "kind",
+                  "object",
+                  "templateDigest"
+                ]
+              }
+            },
+            "epoch": {
+              "type": "string",
+              "pattern": "^[a-f0-9]{64}$"
+            }
+          },
+          "required": [
+            "namespace",
+            "consumers"
+          ]
+        }
+      }
+    },
+    "required": [
+      "contract",
+      "phase",
+      "bundleRevision",
+      "root",
+      "profile",
+      "controllerUids",
+      "namespaces"
+    ]
+  },
+  "objects": [
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicy",
+      "metadata": {
+        "name": "kars-private-consumption",
+        "annotations": {
+          "helm.sh/resource-policy": "keep"
+        }
+      },
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "namespaceSelector": {},
+          "objectSelector": {},
+          "resourceRules": [
+            {
+              "apiGroups": [
+                ""
+              ],
+              "apiVersions": [
+                "v1"
+              ],
+              "operations": [
+                "CREATE",
+                "UPDATE"
+              ],
+              "resources": [
+                "pods",
+                "pods/ephemeralcontainers",
+                "replicationcontrollers"
+              ],
+              "scope": "Namespaced"
+            },
+            {
+              "apiGroups": [
+                "apps"
+              ],
+              "apiVersions": [
+                "v1"
+              ],
+              "operations": [
+                "CREATE",
+                "UPDATE"
+              ],
+              "resources": [
+                "deployments",
+                "replicasets",
+                "statefulsets",
+                "daemonsets"
+              ],
+              "scope": "Namespaced"
+            },
+            {
+              "apiGroups": [
+                "batch"
+              ],
+              "apiVersions": [
+                "v1"
+              ],
+              "operations": [
+                "CREATE",
+                "UPDATE"
+              ],
+              "resources": [
+                "jobs",
+                "cronjobs"
+              ],
+              "scope": "Namespaced"
+            }
+          ]
+        },
+        "variables": [
+          {
+            "name": "a",
+            "expression": "namespaceObject.metadata.?annotations.orValue({})"
+          },
+          {
+            "name": "objects",
+            "expression": "[object, oldObject].filter(o, o != null).map(o, dyn(o))"
+          },
+          {
+            "name": "templates",
+            "expression": "variables.objects.map(o, o.kind == 'Pod' ? o : o.kind == 'CronJob' ? o.spec.jobTemplate.spec.template : has(o.spec.template) ? o.spec.template : null).filter(t, t != null)"
+          },
+          {
+            "name": "pods",
+            "expression": "variables.templates.map(t, t.spec)"
+          },
+          {
+            "name": "secrets",
+            "expression": "['router-services-admin', 'router-services-observer', 'router-services-observer-identity', 'router-github-app', 'kars-observation-privacy-tls', 'sre-api-router-identity']"
+          },
+          {
+            "name": "controllers",
+            "expression": "['deployment-controller', 'replicaset-controller', 'replication-controller', 'statefulset-controller', 'daemon-set-controller', 'job-controller', 'cronjob-controller']"
+          },
+          {
+            "name": "material",
+            "expression": "variables.pods.exists(p, p.?volumes.orValue([]).exists(v, (has(v.secret) && v.secret.secretName in variables.secrets) || (has(v.projected) && v.projected.sources.exists(s, has(s.secret) && s.secret.name in variables.secrets)) || (has(v.csi) && has(v.csi.nodePublishSecretRef) && v.csi.nodePublishSecretRef.name in variables.secrets) || ['azureFile','cephfs','cinder','flexVolume','iscsi','rbd','scaleIO','storageos'].exists(k, k in v && (('secretName' in v[k] && v[k].secretName in variables.secrets) || ('secretRef' in v[k] && v[k].secretRef.name in variables.secrets)))) || p.?imagePullSecrets.orValue([]).exists(s, s.name in variables.secrets) || (p.?containers.orValue([]) + p.?initContainers.orValue([]) + p.?ephemeralContainers.orValue([])).exists(c, c.?envFrom.orValue([]).exists(e, has(e.secretRef) && e.secretRef.name in variables.secrets) || c.?env.orValue([]).exists(e, has(e.valueFrom) && has(e.valueFrom.secretKeyRef) && e.valueFrom.secretKeyRef.name in variables.secrets)))"
+          },
+          {
+            "name": "privileged",
+            "expression": "variables.pods.exists(p, p.?hostNetwork.orValue(false) || p.?hostPID.orValue(false) || p.?hostIPC.orValue(false) || p.?volumes.orValue([]).exists(v, has(v.hostPath)) || (p.?containers.orValue([]) + p.?initContainers.orValue([]) + p.?ephemeralContainers.orValue([])).exists(c, c.?securityContext.privileged.orValue(false) || c.?securityContext.capabilities.add.orValue([]).exists(k, k in ['ALL','SYS_ADMIN','SYS_PTRACE','SYS_MODULE','SYS_RAWIO','BPF','PERFMON','CHECKPOINT_RESTORE','DAC_READ_SEARCH'])))"
+          },
+          {
+            "name": "identity",
+            "expression": "variables.pods.exists(p, ((request.namespace == variables.a[?'kars.azure.com/private-root-namespace'].orValue('') && p.?serviceAccountName.orValue('') == variables.a[?'kars.azure.com/private-root-account'].orValue('')) || (request.namespace == 'kars-sre' && p.?serviceAccountName.orValue('') == 'sre-api-router') || (request.namespace == 'kube-system' && p.?serviceAccountName.orValue('') in variables.controllers)) && (p.?automountServiceAccountToken.orValue(true) || p.?volumes.orValue([]).exists(v, has(v.projected) && v.projected.sources.exists(s, has(s.serviceAccountToken)))))"
+          },
+          {
+            "name": "marked",
+            "expression": "variables.templates.exists(t, 'kars.azure.com/private-epoch' in t.metadata.?annotations.orValue({}))"
+          },
+          {
+            "name": "owners",
+            "expression": "object.metadata.?ownerReferences.orValue([]).filter(o, o.?controller.orValue(false))"
+          },
+          {
+            "name": "stage",
+            "expression": "variables.owners.size() != 1 ? '' : (request.resource.group == 'apps' && request.resource.resource == 'replicasets' && variables.owners[0].apiVersion == 'apps/v1' && variables.owners[0].kind == 'Deployment') ? 'deployment-controller' : (request.resource.group == 'batch' && request.resource.resource == 'jobs' && variables.owners[0].apiVersion == 'batch/v1' && variables.owners[0].kind == 'CronJob') ? 'cronjob-controller' : (request.resource.group == '' && request.resource.resource == 'pods') ? (variables.owners[0].apiVersion == 'apps/v1' && variables.owners[0].kind == 'ReplicaSet' ? 'replicaset-controller' : variables.owners[0].apiVersion == 'v1' && variables.owners[0].kind == 'ReplicationController' ? 'replication-controller' : variables.owners[0].apiVersion == 'apps/v1' && variables.owners[0].kind == 'StatefulSet' ? 'statefulset-controller' : variables.owners[0].apiVersion == 'apps/v1' && variables.owners[0].kind == 'DaemonSet' ? 'daemon-set-controller' : variables.owners[0].apiVersion == 'batch/v1' && variables.owners[0].kind == 'Job' ? 'job-controller' : '') : ''"
+          },
+          {
+            "name": "manager",
+            "expression": "(authorizer.group('kars.azure.com').resource('karscredentialgrants').name('workspace').check('manage').allowed()) || (request.namespace == 'kars-sre' && authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed())"
+          },
+          {
+            "name": "projector",
+            "expression": "request.userInfo.username == variables.a[?'kars.azure.com/private-root-user'].orValue('') && has(request.userInfo.uid) && request.userInfo.uid != '' && request.userInfo.uid == variables.a[?'kars.azure.com/private-root-uid'].orValue('') && authorizer.group('kars.azure.com').resource('karscredentialgrants').name('workspace').check('project-credentials').allowed()"
+          },
+          {
+            "name": "authenticatedStage",
+            "expression": "variables.stage != '' && ((variables.a[?'kars.azure.com/private-profile'].orValue('') == 'kcm-certificate' && request.userInfo.username == 'system:kube-controller-manager' && (!has(request.userInfo.uid) || request.userInfo.uid == '')) || (variables.a[?'kars.azure.com/private-profile'].orValue('') == 'service-accounts' && request.userInfo.username == 'system:serviceaccount:kube-system:' + variables.stage && has(request.userInfo.uid) && request.userInfo.uid != '' && request.userInfo.uid == variables.a[?('kars.azure.com/private-' + variables.stage + '-uid')].orValue(''))) && authorizer.group(request.resource.group).resource(request.resource.resource).check(request.operation == 'CREATE' ? 'create' : 'update').allowed()"
+          },
+          {
+            "name": "sameTemplate",
+            "expression": "oldObject != null && object.metadata.?ownerReferences.orValue([]) == oldObject.metadata.?ownerReferences.orValue([]) && (object.kind == 'Pod' ? object.spec == oldObject.spec && object.metadata.?annotations.orValue({})[?'kars.azure.com/private-epoch'].orValue('') == oldObject.metadata.?annotations.orValue({})[?'kars.azure.com/private-epoch'].orValue('') : object.kind == 'CronJob' ? object.spec.jobTemplate == oldObject.spec.jobTemplate : dyn(object).spec.?template.orValue(null) == dyn(oldObject).spec.?template.orValue(null))"
+          },
+          {
+            "name": "fresh",
+            "expression": "variables.a[?'kars.azure.com/private-state'].orValue('') == 'Qualified' && variables.a[?'kars.azure.com/private-epoch'].orValue('') != '' && variables.a[?'kars.azure.com/private-namespace-uid'].orValue('') == dyn(namespaceObject.metadata).uid && (variables.templates.all(t, t.metadata.?annotations.orValue({})[?'kars.azure.com/private-epoch'].orValue('') == variables.a[?'kars.azure.com/private-epoch'].orValue('')) || (variables.owners.size() == 1 && variables.a[?('kars.azure.com/private-parent-' + variables.owners[0].uid)].orValue('') == variables.a[?'kars.azure.com/private-epoch'].orValue('')))"
+          },
+          {
+            "name": "retiring",
+            "expression": "request.operation == 'UPDATE' && variables.sameTemplate && ((request.resource.resource == 'replicasets' && object.spec.?replicas.orValue(1) == 0) || (request.resource.resource == 'pods' && has(oldObject.metadata.deletionTimestamp)))"
+          }
+        ],
+        "validations": [
+          {
+            "expression": "!(variables.material || variables.identity || variables.privileged || variables.marked) || variables.manager || variables.projector || (variables.authenticatedStage && request.?subResource.orValue('') != 'ephemeralcontainers' && (variables.retiring || (variables.fresh && (request.operation == 'CREATE' || variables.sameTemplate))))",
+            "message": "Private capability consumption requires qualified actor authority; an epoch alone grants none",
+            "reason": "Forbidden"
+          }
+        ],
+        "matchConditions": [
+          {
+            "name": "activated-private-namespace",
+            "expression": "namespaceObject.metadata.?annotations.orValue({})[?'kars.azure.com/private-enabled'].orValue('') == 'true'"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicyBinding",
+      "metadata": {
+        "name": "kars-private-consumption",
+        "annotations": {
+          "helm.sh/resource-policy": "keep"
+        }
+      },
+      "spec": {
+        "policyName": "kars-private-consumption",
+        "validationActions": [
+          "Deny",
+          "Audit"
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicy",
+      "metadata": {
+        "name": "kars-private-consumption-namespace",
+        "annotations": {
+          "helm.sh/resource-policy": "keep"
+        }
+      },
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "namespaceSelector": {},
+          "objectSelector": {},
+          "resourceRules": [
+            {
+              "apiGroups": [
+                ""
+              ],
+              "apiVersions": [
+                "v1"
+              ],
+              "operations": [
+                "CREATE",
+                "UPDATE"
+              ],
+              "resources": [
+                "namespaces"
+              ],
+              "scope": "Cluster"
+            }
+          ]
+        },
+        "variables": [
+          {
+            "name": "a",
+            "expression": "object.metadata.?annotations.orValue({})"
+          },
+          {
+            "name": "manager",
+            "expression": "authorizer.group('kars.azure.com').resource('karscredentialgrants').name('workspace').check('manage').allowed()"
+          },
+          {
+            "name": "projector",
+            "expression": "request.userInfo.username == variables.a[?'kars.azure.com/private-root-user'].orValue('') && has(request.userInfo.uid) && request.userInfo.uid != '' && request.userInfo.uid == variables.a[?'kars.azure.com/private-root-uid'].orValue('') && authorizer.group('kars.azure.com').resource('karscredentialgrants').name('workspace').check('project-credentials').allowed()"
+          }
+        ],
+        "validations": [
+          {
+            "expression": "request.operation == 'UPDATE' && (variables.manager || variables.projector)",
+            "message": "Only private capability operators and the exact authorized projector may stage namespace fences",
+            "reason": "Forbidden"
+          },
+          {
+            "expression": "oldObject == null || oldObject.metadata.?annotations.orValue({})[?'kars.azure.com/private-enabled'].orValue('') != 'true' || variables.a[?'kars.azure.com/private-enabled'].orValue('') == 'true'",
+            "message": "Private namespace protection is retained during authority retirement",
+            "reason": "Forbidden"
+          },
+          {
+            "expression": "request.operation == 'UPDATE' && variables.a[?'kars.azure.com/private-namespace-uid'].orValue('') == dyn(object.metadata).uid",
+            "message": "Private activation is bound to the actual namespace UID",
+            "reason": "Forbidden"
+          }
+        ],
+        "matchConditions": [
+          {
+            "name": "private-fence-fields",
+            "expression": "oldObject == null ? object.metadata.?annotations.orValue({}).exists(k, k.startsWith('kars.azure.com/private-')) : [object, oldObject].exists(o, o.metadata.?annotations.orValue({}).exists(k, k.startsWith('kars.azure.com/private-') && object.metadata.?annotations.orValue({})[?k].orValue('') != oldObject.metadata.?annotations.orValue({})[?k].orValue('')))"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicyBinding",
+      "metadata": {
+        "name": "kars-private-consumption-namespace",
+        "annotations": {
+          "helm.sh/resource-policy": "keep"
+        }
+      },
+      "spec": {
+        "policyName": "kars-private-consumption-namespace",
+        "validationActions": [
+          "Deny",
+          "Audit"
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicy",
+      "metadata": {
+        "name": "kars-private-consumption-connect",
+        "annotations": {
+          "helm.sh/resource-policy": "keep"
+        }
+      },
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "namespaceSelector": {},
+          "objectSelector": {},
+          "resourceRules": [
+            {
+              "apiGroups": [
+                ""
+              ],
+              "apiVersions": [
+                "v1"
+              ],
+              "operations": [
+                "CONNECT"
+              ],
+              "resources": [
+                "pods/exec",
+                "pods/attach",
+                "pods/portforward",
+                "pods/proxy"
+              ],
+              "scope": "Namespaced"
+            }
+          ]
+        },
+        "variables": [
+          {
+            "name": "a",
+            "expression": "namespaceObject.metadata.?annotations.orValue({})"
+          },
+          {
+            "name": "manager",
+            "expression": "authorizer.group('kars.azure.com').resource('karscredentialgrants').name('workspace').check('manage').allowed()"
+          },
+          {
+            "name": "projector",
+            "expression": "request.userInfo.username == variables.a[?'kars.azure.com/private-root-user'].orValue('') && has(request.userInfo.uid) && request.userInfo.uid != '' && request.userInfo.uid == variables.a[?'kars.azure.com/private-root-uid'].orValue('') && authorizer.group('kars.azure.com').resource('karscredentialgrants').name('workspace').check('project-credentials').allowed()"
+          }
+        ],
+        "validations": [
+          {
+            "expression": "variables.manager || variables.projector || (request.namespace == 'kars-sre' && authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed())",
+            "message": "Private capability namespaces require explicit operator authority for workload connections",
+            "reason": "Forbidden"
+          }
+        ],
+        "matchConditions": [
+          {
+            "name": "activated-private-namespace",
+            "expression": "namespaceObject.metadata.?annotations.orValue({})[?'kars.azure.com/private-enabled'].orValue('') == 'true'"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicyBinding",
+      "metadata": {
+        "name": "kars-private-consumption-connect",
+        "annotations": {
+          "helm.sh/resource-policy": "keep"
+        }
+      },
+      "spec": {
+        "policyName": "kars-private-consumption-connect",
+        "validationActions": [
+          "Deny",
+          "Audit"
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicy",
+      "metadata": {
+        "name": "kars-private-consumption-grant",
+        "annotations": {
+          "helm.sh/resource-policy": "keep"
+        }
+      },
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "namespaceSelector": {},
+          "objectSelector": {},
+          "resourceRules": [
+            {
+              "apiGroups": [
+                "kars.azure.com"
+              ],
+              "apiVersions": [
+                "v1alpha1"
+              ],
+              "operations": [
+                "CREATE",
+                "UPDATE"
+              ],
+              "resources": [
+                "karscredentialgrants",
+                "karscredentialgrants/status"
+              ],
+              "scope": "Namespaced"
+            }
+          ]
+        },
+        "variables": [
+          {
+            "name": "a",
+            "expression": "namespaceObject.metadata.?annotations.orValue({})"
+          }
+        ],
+        "validations": [
+          {
+            "expression": "request.?subResource.orValue('') == 'status' || (request.operation == 'UPDATE' && object.spec == oldObject.spec) || !object.spec.?enabled.orValue(true) || object.spec.writers.size() == 0 || (has(object.spec.privateActivation) && object.spec.privateActivation.contract == 'kars.azure.com/private-consumption/v1' && object.spec.privateActivation.phase == 'qualified' && variables.a[?'kars.azure.com/private-enabled'].orValue('') == 'true' && variables.a[?'kars.azure.com/private-state'].orValue('') == 'Qualified' && object.spec.privateActivation.bundleRevision == variables.a[?'kars.azure.com/private-bundle-revision'].orValue('') && object.spec.privateActivation.namespaces.exists(n, n.namespace.name == request.namespace && n.namespace.uid == dyn(namespaceObject.metadata).uid && n.?epoch.orValue('') == variables.a[?'kars.azure.com/private-epoch'].orValue('')))",
+            "message": "Private writers require upgraded reviewed activation; re-preview and qualify before enrollment",
+            "reason": "Forbidden"
+          },
+          {
+            "expression": "request.?subResource.orValue('') != 'status' || !object.status.?conditions.orValue([]).exists(c, c.type == 'WriterReady' && c.status == 'True') || (has(object.spec.privateActivation) && object.spec.privateActivation.phase == 'qualified' && variables.a[?'kars.azure.com/private-state'].orValue('') == 'Qualified' && object.spec.privateActivation.bundleRevision == variables.a[?'kars.azure.com/private-bundle-revision'].orValue('') && object.status.?conditions.orValue([]).exists(c, c.type == 'PrivateConsumptionReady' && c.status == 'True' && c.observedGeneration == object.metadata.generation))",
+            "message": "Private writer Ready requires the current consumption qualification condition",
+            "reason": "Forbidden"
+          }
+        ]
+      }
+    },
+    {
+      "apiVersion": "admissionregistration.k8s.io/v1",
+      "kind": "ValidatingAdmissionPolicyBinding",
+      "metadata": {
+        "name": "kars-private-consumption-grant",
+        "annotations": {
+          "helm.sh/resource-policy": "keep"
+        }
+      },
+      "spec": {
+        "policyName": "kars-private-consumption-grant",
+        "validationActions": [
+          "Deny",
+          "Audit"
+        ]
+      }
+    }
+  ]
+}

@@ -117,6 +117,7 @@ pub(super) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
             return Err("Writer identity lacks an enforced name-continuity guard".into());
         }
     }
+    crate::private_activation::verify(client, grant).await?;
     permissions::verify(client, grant).await
 }
 
@@ -167,7 +168,14 @@ pub(super) async fn reconcile(
             guards::protect(client, &namespace, &account, &key, &controller).await?;
         }
     }
-    verify(client, &active).await?;
+    if let Err(error) = verify(client, &active).await {
+        crate::private_activation::protect_pending(client, &active)
+            .await
+            .map_err(|_| {
+                format!("{error}; private namespace protection could not be established")
+            })?;
+        return Err(error);
+    }
     Ok(active)
 }
 

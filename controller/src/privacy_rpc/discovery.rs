@@ -70,11 +70,22 @@ pub(super) async fn validate(client: &Client, endpoint: &Endpoint) -> Result<(),
         .get_metadata(wire::SECRET)
         .await
         .map_err(|_| ERROR)?;
+    let consumption_epoch = crate::private_activation::namespace_epoch(client, &ns)
+        .await?
+        .ok_or(ERROR)?;
+    crate::private_activation::inspect_namespace(client, &ns, &consumption_epoch).await?;
     if !owned(
         &secret.metadata,
         &endpoint.namespace_uid,
         &endpoint.controller_uid,
-    ) || secret.metadata.uid.as_deref() != Some(endpoint.tls_uid.as_str())
+    ) || secret
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|a| a.get(crate::private_activation::EPOCH))
+        .map(String::as_str)
+        != Some(consumption_epoch.as_str())
+        || secret.metadata.uid.as_deref() != Some(endpoint.tls_uid.as_str())
         || secret.metadata.resource_version.as_deref() != Some(endpoint.tls_version.as_str())
     {
         return Err(ERROR.into());

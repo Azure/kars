@@ -77,6 +77,7 @@ mod pairing_reconciler;
 mod policy_canonical;
 mod policy_fetcher;
 mod privacy_rpc;
+mod private_activation;
 #[path = "../../shared/private_tls.rs"]
 mod private_tls;
 mod providers;

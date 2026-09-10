@@ -40,6 +40,7 @@ pub(super) async fn access_denial(client: &Client, reviews: Vec<Value>) -> Resul
 }
 
 pub(super) async fn admission(client: &Client) -> Result<(), String> {
+    crate::private_activation::bundle_revision(client).await?;
     for name in [
         "kars-observation-privacy-material",
         "kars-observation-privacy-pods",
@@ -104,6 +105,10 @@ pub(super) async fn prepare(client: &Client, namespace: &str) -> Result<Identity
     }
     let ns_uid = ns.uid().ok_or(ERROR)?;
     let sa_uid = sa.uid().ok_or(ERROR)?;
+    let consumption_epoch = crate::private_activation::namespace_epoch(client, &ns)
+        .await?
+        .ok_or("Private verifier activation requires the reviewed generic capability fence")?;
+    crate::private_activation::inspect_namespace(client, &ns, &consumption_epoch).await?;
     let epoch = crate::sre_authority::privacy_epoch(client, namespace).await?;
     private_key_denial(client, namespace).await?;
     let service = Api::<Service>::namespaced(client.clone(), namespace)
@@ -144,6 +149,10 @@ pub(super) async fn prepare(client: &Client, namespace: &str) -> Result<Identity
         .and_then(|bytes| serde_json::from_slice::<Value>(&bytes.0).ok());
     let reusable = parsed.as_ref().is_some_and(|config| {
         config["serverName"] == server_name
+            && config["consumptionEpoch"] == consumption_epoch
+            && existing.as_ref().is_some_and(|secret| {
+                crate::private_activation::stamp_matches(secret, Some(&consumption_epoch))
+            })
             && config["epoch"] == json!(epoch)
             && config["privacyRevision"] == crate::sre_privacy::REVISION
             && config["expiresAt"]
@@ -156,17 +165,20 @@ pub(super) async fn prepare(client: &Client, namespace: &str) -> Result<Identity
         let issued = crate::providers::sre_tls::issue_for(vec![server_name.clone()])?;
         json!({"serverName":server_name,"caPem":issued.ca,"certificatePem":issued.certificate,
             "privateKeyPem":issued.private_key,"expiresAt":issued.expires_at,"epoch":epoch,
-            "privacyRevision":crate::sre_privacy::REVISION})
+            "privacyRevision":crate::sre_privacy::REVISION,"consumptionEpoch":consumption_epoch})
     };
     let raw = serde_json::to_string(&configuration).map_err(|_| ERROR)?;
     let secret = match existing {
         Some(existing) if reusable => existing,
         Some(existing) => secrets.patch(wire::SECRET, &PatchParams::default(),
-            &Patch::Merge(json!({"metadata":{"uid":existing.metadata.uid,"resourceVersion":existing.metadata.resource_version},
+            &Patch::Merge(json!({"metadata":{"uid":existing.metadata.uid,"resourceVersion":existing.metadata.resource_version,
+                "annotations":{crate::private_activation::EPOCH:consumption_epoch}},
                 "stringData":{"config.json":raw}}))).await.map_err(|_| ERROR)?,
         None => {
+            let mut meta = metadata(namespace,&ns_uid,&sa_uid,wire::SECRET);
+            meta["annotations"][crate::private_activation::EPOCH] = consumption_epoch.clone().into();
             let secret: Secret = serde_json::from_value(json!({"apiVersion":"v1","kind":"Secret","type":"Opaque",
-                "metadata":metadata(namespace,&ns_uid,&sa_uid,wire::SECRET),"stringData":{"config.json":raw}})).map_err(|_| ERROR)?;
+                "metadata":meta,"stringData":{"config.json":raw}})).map_err(|_| ERROR)?;
             secrets.create(&PostParams::default(), &secret).await.map_err(|_| ERROR)?
         }
     };

@@ -56,6 +56,7 @@ fn governed_credentials_keep_legacy_defaults_and_require_explicit_custom_key_gra
         KarsCredentialGrantSpec {
             workspace_uid: "workspace".into(),
             writers: vec![],
+            private_activation: None,
             agent_keys: vec![],
             integration_stores: vec![],
             legacy_imports: vec![],

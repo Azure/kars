@@ -25,7 +25,7 @@ struct State {
 
 async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>, KarsCredentialGrant) {
     let server = MockServer::start().await;
-    let grant: KarsCredentialGrant = serde_json::from_value(json!({
+    let mut grant: KarsCredentialGrant = serde_json::from_value(json!({
         "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant",
         "metadata":{"name":"workspace","namespace":"work","uid":"grant","resourceVersion":"1","generation":1},
         "spec":{"workspaceUid":"workspace","writers":[{"namespace":"bridge","name":"bff","uid":"writer"}]},
@@ -51,6 +51,17 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>, KarsCredentialGran
             }
             state.objects.insert(path.into(), object);
         }
+        let activation = crate::private_activation::test_support::install(
+            &mut state.objects,
+            "work",
+            "workspace",
+            "controller",
+            &[("bridge", "bridge-uid")],
+        );
+        grant.spec.private_activation = Some(serde_json::from_value(activation).unwrap());
+        state
+            .objects
+            .insert(GRANT.into(), serde_json::to_value(&grant).unwrap());
     }
     let captured = state.clone();
     Mock::given(|_: &wiremock::Request| true).respond_with(move |request: &wiremock::Request| {
@@ -76,6 +87,7 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>, KarsCredentialGran
             }
             for (suffix, kind) in [
                 ("/serviceaccounts", "ServiceAccount"), ("/namespaces", "Namespace"),
+                ("/pods", "Pod"),
                 ("/rolebindings", "RoleBinding"), ("/roles", "Role"),
             ] {
                 if path.ends_with(suffix) {
@@ -96,11 +108,14 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>, KarsCredentialGran
         if request.method == "PATCH" && let Some(value) = state.objects.get_mut(path) {
             assert_eq!(value["metadata"]["uid"], body["metadata"]["uid"]);
             assert_eq!(value["metadata"]["resourceVersion"], body["metadata"]["resourceVersion"]);
-            value["metadata"]["finalizers"] = body["metadata"]["finalizers"].clone();
+            if body["metadata"].get("finalizers").is_some() {
+                value["metadata"]["finalizers"] = body["metadata"]["finalizers"].clone();
+            }
             for key in ["annotations", "labels"] {
+                let Some(updates) = body["metadata"][key].as_object() else { continue };
                 let fields = value["metadata"].as_object_mut().unwrap()
                     .entry(key).or_insert_with(|| json!({})).as_object_mut().unwrap();
-                for (name, entry) in body["metadata"][key].as_object().unwrap() {
+                for (name, entry) in updates {
                     if entry.is_null() {
                         fields.remove(name);
                     } else {
