@@ -70,6 +70,12 @@ HTTP calls do not bypass the same router policy check.
 
 The optional `X-Kars-Mcp-Server` header narrows discovery and invocation to one
 mounted server; it never selects a workspace or an arbitrary upstream URL.
+Direct MCP POST clients must advertise
+`Accept: application/json, text/event-stream`; JSON-only requests are rejected
+with HTTP 406 even when the managed server is Ready. The Kind acceptance fixture
+uses this same contract. Catalog timeouts report only the last HTTP status,
+numeric RPC error code, tool count, expected-tool presence and transport state,
+before teardown—not response bodies, headers or credentials.
 The unauthenticated lane requires an actual loopback socket peer; missing
 connection context, network peers and spoofed forwarding/Sandbox/session headers
 are rejected before policy evaluation or invocation. Configured Sandbox identity
