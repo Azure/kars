@@ -281,7 +281,9 @@ update through the existing budget operator workflow. Keep the root paused,
 rotate, and re-preview/apply. A key rotated while the old root was still live
 becomes the baseline, not acceptable evidence of fresh issuance. An unchanged,
 copied, or re-encoded public key cannot qualify. The baseline survives retries;
-old bundle/key qualification markers cannot bypass this post-retirement proof.
+reviewed pre-retirement public keys are retained too, so restoring an earlier
+exposed key with a newer Secret resourceVersion does not count as rotation.
+Old bundle/key qualification markers cannot bypass this post-retirement proof.
 If authority reappears or the pinned Secret UID changes, activation blocks.
 The original replica intent is restored only after fences and templates are
 qualified. Recovery state remains through grant publication; retrying after

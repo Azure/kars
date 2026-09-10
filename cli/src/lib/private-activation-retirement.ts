@@ -20,6 +20,7 @@ export interface RootRetirement {
   pauseRoot: boolean;
   phase: "pausing" | "retired" | "restoring";
   captured: Record<string, string[]>;
+  exposedKeys: string[];
   baseline?: Baseline;
 }
 
@@ -58,7 +59,7 @@ function decode(namespace: unknown): RootRetirement | undefined {
   const hex = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
   const text = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 253;
   if (Object.keys(state).some(k => !["version", "attempt", "binding", "replicaIntent", "originalVersion",
-    "pauseRoot", "phase", "captured", "baseline"].includes(k))
+    "pauseRoot", "phase", "captured", "exposedKeys", "baseline"].includes(k))
     || state.version !== 1 || !hex(state.attempt) || !hex(state.binding)
     || !text(state.originalVersion) || typeof state.pauseRoot !== "boolean"
     || (state.phase !== "pausing" && state.phase !== "retired" && state.phase !== "restoring")
@@ -69,6 +70,7 @@ function decode(namespace: unknown): RootRetirement | undefined {
     if (!text(ns) || !Array.isArray(ids) || !ids.every(text)) throw new Error(failure);
     captured[ns] = ids;
   }
+  if (!Array.isArray(state.exposedKeys) || !state.exposedKeys.every(hex)) throw new Error(failure);
   let baseline: Baseline | undefined;
   if (state.baseline !== undefined) {
     const value = record(state.baseline);
@@ -79,6 +81,7 @@ function decode(namespace: unknown): RootRetirement | undefined {
   }
   return { version: state.version, attempt: state.attempt, binding: state.binding, replicaIntent: state.replicaIntent,
     originalVersion: state.originalVersion, pauseRoot: state.pauseRoot, phase: state.phase, captured,
+    exposedKeys: state.exposedKeys,
     ...(baseline ? { baseline } : {}) };
 }
 
@@ -106,6 +109,8 @@ export function retirementReview(
   }
   if (Object.keys(state.captured).some(uid => !activation.namespaces.some(scope => scope.namespace.uid === uid))
     || (state.phase !== "pausing" && Boolean(state.baseline) !== Boolean(activation.root.budgetTls))
+    || Boolean(state.exposedKeys.length) !== Boolean(activation.root.budgetTls)
+    || (state.baseline && !state.exposedKeys.includes(state.baseline.keyDigest))
     || (state.baseline && state.baseline.secretUid !== activation.root.budgetTls?.secret.uid)) throw new Error(failure);
   return state;
 }
@@ -117,7 +122,9 @@ export function startRetirement(
   return { version: 1, attempt: randomBytes(32).toString("hex"), binding: binding(activation),
     replicaIntent: activation.root.replicaIntent, originalVersion: reviewed(deployment).resourceVersion,
     pauseRoot: consumesPrivateAuthority(deployment, activation.root.namespace.name, activation),
-    phase: "pausing", captured: previous?.captured ?? {} };
+    phase: "pausing", captured: previous?.captured ?? {},
+    exposedKeys: [...new Set([...(previous?.exposedKeys ?? []),
+      ...(activation.root.budgetTls ? [activation.root.budgetTls.keyDigest] : [])])].sort() };
 }
 
 export async function saveRetirement(
@@ -156,14 +163,15 @@ export async function qualifyRetiredBudget(
   if (state.phase === "pausing") {
     const next: RootRetirement = { ...state, phase: "retired", ...(budget ? {
       baseline: { secretUid: budget.secret.uid, resourceVersion: budget.secret.resourceVersion, keyDigest: budget.keyDigest },
+      exposedKeys: [...new Set([...state.exposedKeys, budget.keyDigest])].sort(),
     } : {}) };
     await saveRetirement(execute, scope, state, next);
     if (budget) throw new Error("Retired root requires budget TLS operator rotation and public-CA update; keep it paused and re-preview afterwards");
     return next;
   }
   if (budget && (!state.baseline || state.baseline.secretUid !== budget.secret.uid
-    || state.baseline.keyDigest === budget.keyDigest || state.baseline.resourceVersion === budget.secret.resourceVersion)) {
-    throw new Error("Budget TLS public key is unchanged since verified root retirement; copying or pre-retirement rotation cannot qualify");
+    || state.exposedKeys.includes(budget.keyDigest) || state.baseline.resourceVersion === budget.secret.resourceVersion)) {
+    throw new Error("Budget TLS public key is unchanged or previously exposed; copying or pre-retirement rotation cannot qualify");
   }
   return state;
 }

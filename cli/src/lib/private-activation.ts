@@ -428,7 +428,10 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
       if (!retire.some(item => item.consumer.object.uid === owner.object.uid)) retire.push({ scope, consumer: owner });
     }
   }
-  const capturedState = { ...retirement, captured: Object.fromEntries(staged.namespaces.map(scope =>
+  const capturedState = { ...retirement,
+    exposedKeys: retirement.phase === "pausing" && staged.root.budgetTls
+      ? [...new Set([...retirement.exposedKeys, staged.root.budgetTls.keyDigest])].sort() : retirement.exposedKeys,
+    captured: Object.fromEntries(staged.namespaces.map(scope =>
     [scope.namespace.uid, [...(captured.get(scope.namespace.name) ?? [])].sort()])) };
   await saveRetirement(execute, rootScope, retirement, capturedState);
   retirement = capturedState;
