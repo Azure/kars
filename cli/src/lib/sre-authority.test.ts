@@ -5,6 +5,9 @@ import { describe,expect,it,vi } from "vitest";
 import { assertDestroySafe,assertRollbackSafe,assertSafeMutation,enroll,preview,waitForAuthority,type Execute } from "./sre-authority.js";
 import { stageSource } from "./sre-source.js";
 import { stageAuthority } from "./sre-stage.js";
+import { readFileSync } from "node:fs";
+
+const actionCrd=readFileSync(new URL("../../../deploy/helm/kars/templates/crd-karssreaction.yaml",import.meta.url),"utf8");
 
 function fixture() {
   const objects:Record<string,any>={
@@ -216,6 +219,7 @@ describe("SRE cluster registrar boundary",()=>{
           return {stdout:'[{"name":"kars","namespace":"kars-system","status":"pending-upgrade"}]'};
         }
         if(file==="helm"&&args[0]==="version")return {stdout:version};
+        if(file==="helm"&&args[0]==="template")return {stdout:actionCrd};
         if(file==="helm"&&args[0]==="upgrade")return {stdout:""};
         return f.execute(file,args,options);
       });
@@ -223,8 +227,9 @@ describe("SRE cluster registrar boundary",()=>{
       const upgrade=execute.mock.calls.find(([file,args])=>file==="helm"&&args[0]==="upgrade");
       expect(upgrade?.[1]).toContain("--reset-then-reuse-values");
       expect(upgrade?.[1]).toContain("sre.authorityStage=true");
-      expect(upgrade?.[1]).toContain(dryRun?"--dry-run=server":"--wait");
-      expect(execute.mock.calls.some(([,args])=>["install","template","create","patch"].includes(args[0]))).toBe(false);
+      expect(upgrade?.[1]).toContain(dryRun?"--dry-run=server":version.startsWith("v4.")?"--wait=legacy":"--wait");
+      expect(execute.mock.calls.some(([,args])=>args[0]==="install")).toBe(false);
+      expect(execute.mock.calls.some(([,args])=>args[0]==="create")).toBe(!dryRun);
     } finally { warn.mockRestore(); }
   });
 
@@ -237,7 +242,7 @@ describe("SRE cluster registrar boundary",()=>{
     const execute=vi.fn<Execute>(async(file,args,options)=>{
       if(file==="helm"&&args[0]==="list")return {stdout:"[]"};
       if(file==="helm")return {stdout:JSON.stringify({kind:"CustomResourceDefinition",
-        apiVersion:"apiextensions.k8s.io/v1",metadata:{name:"karssreregistrations.kars.azure.com"},spec:{scope:"Cluster"}})};
+        apiVersion:"apiextensions.k8s.io/v1",metadata:{name:"karssreregistrations.kars.azure.com"},spec:{scope:"Cluster"}})+"\n"+actionCrd};
       return f.execute(file,args,options);
     });
     delete f.objects["crd//karssreregistrations.kars.azure.com"];

@@ -4,23 +4,33 @@
 // Runs only after the existing E2E harness loads its real controller/router
 // images into its disposable Kind cluster. No external provider/model is used.
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { prepareRouterImage } from "./kind-router-image.mjs";
+import { PROVIDER, ENDPOINT, providerSource,
+  budgetStageFacts, routerTemplateFacts, TLS_SERVER_EXTENSIONS, verifyFixtureCertificate } from "./budget-fixture-route.mjs";
+import { ownedRouterResolver, startForward, waitForOwnedRouter } from "./budget-router-readiness.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const context = "kind-kars-e2e";
 const namespace = "kars-system";
 const source = "budget-provider-fixture";
-const endpoint = `http://provider.${source}.svc.cluster.local:8000`;
+const endpoint = ENDPOINT;
 const scratch = join(root, `.budget-kind-${process.pid}`);
 const forwards = [];
+const createdTasks = new Map();
+const secrets = [];
+const runtimes = new Set();
+let verifiedRouterReference;
 
-function execute(binary, args, input) {
+function execute(binary, args, input, deadline = Date.now() + 120_000) {
+  assert(Date.now() < deadline, "Budget fixture command deadline");
   try {
     return execFileSync(binary, args, {
-      cwd: root, encoding: "utf8", input, stdio: ["pipe", "pipe", "pipe"], timeout: 120_000,
+      cwd: root, encoding: "utf8", input, stdio: ["pipe", "pipe", "pipe"],
+      timeout: Math.max(1, Math.min(120_000, deadline - Date.now())),
     });
   } catch {
     // Do not persist/echo argv, API bodies, signing material or bearer tokens.
@@ -28,38 +38,40 @@ function execute(binary, args, input) {
   }
 }
 
-function k(args, value) {
-  return execute("kubectl", ["--context", context, "--request-timeout=30s", ...args],
-    value === undefined ? undefined : JSON.stringify(value));
+function k(args, value, deadline = Date.now() + 120_000) {
+  const timeout = Math.max(1, Math.min(30_000, deadline - Date.now()));
+  return execute("kubectl", ["--context", context, `--request-timeout=${timeout}ms`, ...args],
+    value === undefined ? undefined : JSON.stringify(value), deadline);
 }
-function create(value) { return JSON.parse(k(["create", "-f", "-", "-o", "json"], value)); }
+function create(value) {
+  const result = JSON.parse(k(["create", "-f", "-", "-o", "json"], value));
+  if (value.kind === "Secret") {
+    const { name, namespace, uid } = result.metadata;
+    secrets.push({ name, namespace, uid });
+  }
+  return result;
+}
 function get(kind, name, ns = namespace) { return JSON.parse(k(["get", kind, name, "-n", ns, "-o", "json"])); }
+function optionalResource(kind, name, ns, deadline) {
+  const output = k(["get", kind, name, ...(ns ? ["-n", ns] : []), "--ignore-not-found", "-o", "json"],
+    undefined, deadline);
+  return output.trim() ? JSON.parse(output) : null;
+}
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
 
 async function until(check, message, seconds = 120) {
   const deadline = Date.now() + seconds * 1000;
   while (Date.now() < deadline) {
-    try {
-      const value = await check();
-      if (value) return value;
-    } catch { /* The API resource may not have been materialized yet. */ }
+    const value = await check();
+    if (value) return value;
     await sleep(500);
   }
   throw new Error(`Budget fixture deadline: ${message}`);
 }
 
 async function portForward(ns, target, port) {
-  const process = spawn("kubectl", ["--context", context, "port-forward", "--address", "127.0.0.1",
-    "-n", ns, target, `:${port}`], { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
-  forwards.push(process);
-  let output = "";
-  process.stdout.on("data", (data) => { output = (output + data).slice(-2048); });
-  process.stderr.on("data", () => {}); // Never persist transport/API diagnostics.
-  return until(() => {
-    if (process.exitCode !== null) throw new Error("Port-forward exited");
-    const match = output.match(/Forwarding from 127\.0\.0\.1:(\d+) ->/);
-    return match && `http://127.0.0.1:${match[1]}`;
-  }, "port-forward ready", 30);
+  return (await startForward({ context, cwd: root, namespace: ns, target, port,
+    deadline: Date.now() + 30_000, register: handle => forwards.push(handle) })).url;
 }
 
 async function request(url, path, body, timeout = 30_000) {
@@ -77,11 +89,12 @@ async function request(url, path, body, timeout = 30_000) {
 
 const message = { messages: [{ role: "user", content: "fixture" }] };
 function blueprint() {
-  return { isolation: "standard", model: { provider: "ollama", deployment: "fixture" }, instructions: "Fixture only" };
+  return { isolation: "standard", model: { provider: PROVIDER, deployment: "fixture" }, instructions: "Fixture only" };
 }
 
 function task(name, tokens, usdMicros, parent, launch) {
-  return create({
+  if (launch) runtimes.add(`kars-${name}`);
+  const created = create({
     apiVersion: "kars.azure.com/v1alpha1", kind: "KarsTask", metadata: { name, namespace },
     spec: {
       objective: "Disposable governed inference accounting fixture",
@@ -91,23 +104,62 @@ function task(name, tokens, usdMicros, parent, launch) {
       execution: { launch }, blueprint: blueprint(),
     },
   });
+  createdTasks.set(name, created);
+  return created;
 }
 
 async function router(name) {
-  await until(() => {
-    const current = get("karstask", name);
-    return current.status?.phase === "Ready" && current.status?.inferenceBudget
-      && current.status?.observedGeneration === current.metadata.generation;
-  }, `Task ${name} account bound`);
-  const runtime = `kars-${name}`;
-  const pod = await until(() => {
-    const pods = JSON.parse(k(["get", "pods", "-n", runtime, "-l", `kars.azure.com/sandbox=${name}`, "-o", "json"]));
-    return pods.items.find((pod) => !pod.metadata.deletionTimestamp
-      && pod.status?.containerStatuses?.some((container) => container.name === "inference-router" && container.state?.running));
-  }, `router container ${name}`);
-  const url = await portForward(runtime, `pod/${pod.metadata.name}`, 8443);
-  await until(async () => (await request(url, "/readyz")).status === 200, `private budget readiness ${name}`);
-  return { url, pod, runtime };
+  const deadline = Date.now() + 120_000;
+  const resolve = ownedRouterResolver({
+    task: createdTasks.get(name), image: verifiedRouterReference, deadline, read: optionalResource,
+    pods: (runtime, name, deadline) => JSON.parse(k(["get", "pods", "-n", runtime,
+      "-l", `kars.azure.com/sandbox=${name}`, "-o", "json"], undefined, deadline)).items,
+  });
+  return waitForOwnedRouter({
+    resolve, deadline,
+    openForward: (selected, deadline) => {
+      console.log("BUDGET-TEMPLATE " + JSON.stringify(selected.facts));
+      return startForward({ context, cwd: root, namespace: selected.runtime,
+        target: `pod/${selected.pod.metadata.name}`, port: 8443, deadline,
+        register: handle => forwards.push(handle) });
+    },
+    probe: (url, path, timeout) => request(url, path, undefined, timeout),
+    report: fact => console.log("BUDGET-READINESS " + JSON.stringify(fact)),
+  });
+}
+
+function diagnostics() {
+  const report = { complete: true, sources: [] };
+  const targets = [
+    { runtime: namespace, selector: "app.kubernetes.io/component=controller", container: "controller" },
+    ...[...runtimes].map(runtime => ({ runtime, selector: "kars.azure.com/component=sandbox",
+      container: "inference-router" })),
+  ];
+  for (const { runtime, selector, container } of targets) {
+    try {
+      const pods = JSON.parse(k(["get", "pods", "-n", runtime, "-l", selector, "-o", "json"]));
+      for (const pod of pods.items) {
+        const actualContainer = container === "controller"
+          ? pod.spec.containers.find(c => c.name === "controller" || c.name === "kars-controller")?.name
+          : container;
+        assert(actualContainer, "Diagnostic container identity unavailable");
+        const log = k(["logs", "-n", runtime, pod.metadata.name, "-c", actualContainer,
+          "--tail=256", "--limit-bytes=131072"]);
+        const source = { component: container, podUid: pod.metadata.uid, facts: budgetStageFacts(log) };
+        if (container === "inference-router") {
+          const owner = pod.metadata.ownerReferences.find(o => o.kind === "ReplicaSet" && o.controller);
+          const replica = get("replicaset", owner.name, runtime);
+          const deploymentOwner = replica.metadata.ownerReferences.find(o => o.kind === "Deployment" && o.controller);
+          source.template = routerTemplateFacts(pod, replica, get("deployment", deploymentOwner.name, runtime));
+        }
+        report.sources.push(source);
+      }
+    } catch { report.complete = false; }
+  }
+  const directory = join(root, "e2e-diag", "standalone");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeFileSync(join(directory, "budget-readiness-stages.json"), JSON.stringify(report, null, 2));
+  console.log("BUDGET-STAGES " + JSON.stringify(report));
 }
 
 function accountFor(name) {
@@ -120,19 +172,29 @@ function accountFor(name) {
 async function scenario() {
   const nodes = execute("kind", ["get", "nodes", "--name", "kars-e2e"]).trim().split(/\s+/);
   assert(nodes.length > 0 && nodes.every((node) => node.startsWith("kars-e2e-")));
-  const worker = nodes.find((node) => node.endsWith("-worker")) ?? nodes[0];
-  const images = execute("docker", ["exec", worker, "ctr", "-n", "k8s.io", "images", "list"]);
-  const routerLine = images.split("\n").find((line) => line.split(/\s+/)[0] === "docker.io/library/kars-inference-router:e2e");
-  assert(routerLine, "Existing harness must load the real router image first");
-  const digest = routerLine.split(/\s+/).find((field) => /^sha256:[a-f0-9]{64}$/.test(field));
-  assert(digest, "A manifest digest, not an image-config ID, is required");
+  const values = JSON.parse(execute("helm", ["get", "values", "kars", "--kube-context", context, "-n", namespace, "--all", "-o", "json"]));
+  const imageProofs = [];
+  const imageDirectory = join(root, "e2e-diag", "standalone");
+  mkdirSync(imageDirectory, { recursive: true, mode: 0o700 });
+  const image = await prepareRouterImage({
+    nodes, kube: k, values,
+    report: proof => {
+      imageProofs.push(proof);
+      console.log("BUDGET-IMAGE " + JSON.stringify(proof));
+      writeFileSync(join(imageDirectory, "router-image-preflight.json"), JSON.stringify({ proofs: imageProofs }, null, 2));
+    },
+  });
+  const digest = image.manifestDigest;
+  verifiedRouterReference = image.reference;
 
   mkdirSync(scratch, { mode: 0o700 });
   execute("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
     "-keyout", join(scratch, "tls.key"), "-out", join(scratch, "tls.crt"),
     "-subj", "/CN=kars-inference-budget.kars-system.svc",
-    "-addext", "subjectAltName=DNS:kars-inference-budget.kars-system.svc"]);
+    "-addext", "subjectAltName=DNS:kars-inference-budget.kars-system.svc",
+    ...TLS_SERVER_EXTENSIONS]);
   const certificate = readFileSync(join(scratch, "tls.crt"));
+  verifyFixtureCertificate(certificate);
   create({ apiVersion: "v1", kind: "Secret",
     metadata: { name: "budget-fixture-tls", namespace, annotations: { "kars.azure.com/inference-budget-tls": "v1" } },
     type: "kubernetes.io/tls", data: { "tls.crt": certificate.toString("base64"),
@@ -175,19 +237,19 @@ async function scenario() {
     spec: { selector: { app: "budget-provider" }, ports: [{ port: 8000, targetPort: 8000 }] } });
   k(["rollout", "status", "-n", source, "deployment/provider", "--timeout=90s"]);
   const provider = await portForward(source, "deployment/provider", 8000);
+  // Primary-model provider names select only explicitly registered endpoints.
+  // OLLAMA_ENDPOINT alone does not turn informational model metadata into routing intent.
+  create(providerSource(namespace));
 
-  const values = JSON.parse(execute("helm", ["get", "values", "kars", "--kube-context", context, "-n", namespace, "--all", "-o", "json"]));
   values.inferenceBudget = {
     enabled: true, routerImageDigest: digest, catalogVersion: "fixture-v1",
     tlsSecretName: "budget-fixture-tls", caBundle: certificate.toString("utf8"),
     nonInferenceEgressHosts: [],
     contracts: [{ id: "fixture-chat", version: "v1", validUntil: "2030-01-01T00:00:00Z",
-      providerId: "ollama", endpoint, model: "fixture", operation: "ChatCompletions", outputField: "MaxTokens",
+      providerId: PROVIDER, endpoint, model: "fixture", operation: "ChatCompletions", outputField: "MaxTokens",
       maximumInputTokens: 10, maximumOutputTokens: 20, maximumWireBytes: 4096,
       outputBoundIncludesReasoning: true, maximumPrice: { kind: "perRequest", maximumMicros: 5 } }],
   };
-  values.controller.extraEnv = (values.controller.extraEnv ?? []).filter((entry) => entry.name !== "OLLAMA_ENDPOINT");
-  values.controller.extraEnv.push({ name: "OLLAMA_ENDPOINT", value: endpoint });
   values.localInference = { namespaces: [source], targets: [{ namespace: source, matchLabels: { app: "budget-provider" }, ports: [8000] }] };
   execute("helm", ["upgrade", "kars", "deploy/helm/kars", "--kube-context", context, "-n", namespace,
     "--reuse-values", "-f", "-", "--wait", "--timeout", "90s"], JSON.stringify(values));
@@ -248,8 +310,22 @@ async function scenario() {
 try {
   await scenario();
 } finally {
-  for (const process of forwards) {
-    process.kill("SIGTERM");
+  try {
+    diagnostics();
+  } finally {
+    try {
+      const cleanup = await Promise.allSettled(forwards.map(handle => handle.stop()));
+      const secretCleanup = await Promise.allSettled(secrets.map(async secret => {
+        const current = optionalResource("secret", secret.name, secret.namespace);
+        if (!current) return;
+        assert(current.metadata.uid === secret.uid, "Fixture Secret cleanup refuses a replacement UID");
+        k(["delete", "--raw", `/api/v1/namespaces/${secret.namespace}/secrets/${secret.name}`, "-f", "-"],
+          { apiVersion: "v1", kind: "DeleteOptions", preconditions: { uid: secret.uid } });
+      }));
+      assert(secretCleanup.every(result => result.status === "fulfilled"), "UID-owned fixture Secret cleanup failed");
+      assert(cleanup.every(result => result.status === "fulfilled"), "Owned fixture port-forward cleanup failed");
+    } finally {
+      rmSync(scratch, { recursive: true, force: true });
+    }
   }
-  rmSync(scratch, { recursive: true, force: true });
 }

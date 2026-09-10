@@ -11,6 +11,16 @@ sre_migration_helm_wait_arg() {
     esac
 }
 
+sre_hermes_image_matches() {
+    local image="$1" configured="$2" runtime="$3"
+    [ "$runtime" = "Hermes" ] && [ -n "$image" ] || return 1
+    if [ -n "$configured" ]; then
+        [ "$image" = "$configured" ]
+    else
+        [[ "$image" == *hermes* ]]
+    fi
+}
+
 sre_authority_phase() {
     local phase="$1" output result=0 line
     info "SRE authority acceptance: ${phase}"

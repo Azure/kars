@@ -28,8 +28,36 @@ def snapshot_grants(h, spec):
             for binding in spec["legacyBindings"]}
 
 
+def running_controller_stage(h):
+    controller = h.get("deployment", "kars-controller", SYSTEM)
+    require(controller and controller["spec"].get("replicas", 0) > 0
+            and controller.get("status", {}).get("availableReplicas", 0) > 0,
+            "Staging compatibility requires a real running controller, not replicas=0")
+    require(h.get("karssreregistrations.kars.azure.com", "canonical") is None,
+            "Staging compatibility must run before enrollment")
+    def unenrolled():
+        source = h.get("karssandbox", "sre", SYSTEM)
+        return source if source and any(c.get("type") == "Ready" and c.get("status") == "False"
+            for c in source.get("status", {}).get("conditions", [])) else False
+    source = h.poll("live controller observes unenrolled source as not Ready", unenrolled, seconds=60)
+    before = h.get("clusterrolebinding", "kars-sre-reader")
+    h.cli("authority", "stage", "--controller-image", "kars-controller:e2e",
+          "--router-image", "kars-inference-router:e2e", timeout=180)
+    after = h.get("clusterrolebinding", "kars-sre-reader")
+    require(before["metadata"]["uid"] == after["metadata"]["uid"] and before["subjects"] == after["subjects"],
+            "Running-controller stage changed legacy grants")
+    require(h.get("karssandbox", "sre", SYSTEM)["metadata"]["uid"] == source["metadata"]["uid"],
+            "Running-controller stage replaced the source")
+    require(h.get("karssreregistrations.kars.azure.com", "canonical") is None
+            and h.get("secret", PRIVATE, RUNTIME) is None,
+            "Running-controller stage enrolled or issued private material")
+    policies_ready(h)
+    h.passed("Actual CLI stage returns with a running controller and unenrolled Ready=False source; full migration Ready remains mandatory")
+
+
 def legacy_migration(h):
     policies_ready(h)
+    running_controller_stage(h)
     delegate_operators(h)
     # Group grants were deliberately created before admission, never smuggled
     # through the new deny policies.
