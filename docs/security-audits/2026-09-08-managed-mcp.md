@@ -11,7 +11,8 @@ reviews, recorded in
 The second attestation below is delegated AI review, not an assertion that a
 second human signed this audit.
 
-The current source is `fbd01597ce1cb86fff6df71d21dc2bf07abaf528`, based on
+The approved production source was qualified at
+`fbd01597ce1cb86fff6df71d21dc2bf07abaf528`, based on
 signed governed-services source `6b34d5ea`. A focused AI security review of
 that comparison reported no vulnerabilities in its reviewed scope. The
 earlier caller-identity and lifecycle findings remain repaired as described
@@ -38,6 +39,41 @@ validation establishes encoding only, not the safety of binary contents.
 The focused reviewer did not independently rerun tests. Current-base hosted
 Rust and native lifecycle/protocol acceptance remain mandatory, with no
 technical gate, finding, identity fence or policy denial waived.
+
+## Native client correction and current qualification (2026-09-10)
+
+Published `211d0d4e209924b7cec72cdbfd00b24c96dfeb60` passed its hosted Rust
+and other checks, but native job
+[102915586372](https://github.com/Azure/kars/actions/runs/34487526141/job/102915586372)
+failed with 168 passes and two reports of the same MCP gate failure. Both
+same-named servers reached Ready with distinct UIDs and current generations;
+the actual routed catalog did not converge. Legacy and fresh SRE acceptance
+passed. That native result remains a failure.
+
+The Python fixture advertised only `application/json`, whereas the real
+Streamable HTTP router requires both JSON and `text/event-stream`. The
+JSON-only request is deterministically rejected with 406. The old native
+collector discarded HTTP status, so that original run itself did not retain
+the 406; the exact fixture/header defect was subsequently reproduced.
+
+Test-only repair `c56b90d4963f85df7442e3e6eafb8b99808f443e` corrects the
+client header, retains bounded catalog-stage diagnostics and adds regression
+coverage. Actual guarded execution passed 249 MCP library cases, 18 integration
+cases, six Python cases, strict paired all-target Clippy and formatting.
+The additional integration case executes the actual Python fixture client
+against the real router and retains rejection of the unsupported Accept
+header. Minimum free space was 9.04 GiB above the unchanged 8.5 GiB floor.
+
+Current source `81ee4fe02f0a99f069ce636710e7308d30881a73` also incorporates
+services `920f9f0e` and the actually landed SRE ancestry. That merge changes
+only three CLI test-harness files; the 39 forwarded cases and typecheck pass
+with the existing compatible cache. All production bytes remain identical
+to source-approved `211d0d4e`. No authentication, transport guard, readiness
+requirement, UID fence or native deadline was changed.
+
+Fresh exact-head hosted/native lifecycle convergence is still required.
+The passing Python-to-router regression is not substituted for the complete
+Kind lifecycle, policy, image and cleanup acceptance.
 
 ## Scope
 
