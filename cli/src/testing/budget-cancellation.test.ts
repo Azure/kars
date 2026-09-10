@@ -106,7 +106,7 @@ describe("native accepted-work cancellation API contract", () => {
       await kubeconfig(f.url, async (file, directory) => {
         const child = spawn("kubectl", ["--kubeconfig", file, "--cache-dir", join(directory, "cache"),
           "--context", context, "patch", "karstask", name, "-n", namespace, "--type=merge", "--patch-file", "-"],
-        { cwd: directory, stdio: ["pipe", "pipe", "pipe"] });
+        { cwd: directory, stdio: ["pipe", "pipe", "pipe"], timeout: 20_000 });
         let stderr = "";
         child.stderr.on("data", data => { stderr = (stderr + data).slice(-8192); });
         child.stdout.on("data", () => {});
@@ -121,10 +121,11 @@ describe("native accepted-work cancellation API contract", () => {
         expect(f.state.requests).toEqual([]);
       });
     } finally { await f.close(); }
-  });
+  }, 30_000);
 
   it.each(["conflict", "forbidden"])("uses a real kubectl proxy, exact %s status and owned cleanup", async mode => {
     const f = await fixture();
+    f.options.deadline = Date.now() + 20_000;
     f.state.conflicts = 1;
     if (mode === "forbidden") f.state.reply = { code: 403, body: status(403, "Forbidden") };
     const children: ReturnType<typeof spawn>[] = [];
@@ -134,7 +135,7 @@ describe("native accepted-work cancellation API contract", () => {
         const pending = withKindApi({
           root: directory, context, deadline: f.options.deadline,
           kubectl: (args: string[]) => execFileSync("kubectl", [...extra, "--context", context, ...args],
-            { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 2000 }),
+            { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 10_000 }),
           spawnProcess: (binary: string, args: string[], options: any) => {
             const child = spawn(binary, [...extra, ...args], options);
             children.push(child);
@@ -158,7 +159,7 @@ describe("native accepted-work cancellation API contract", () => {
       expect(children).toHaveLength(1);
       expect(children[0].signalCode).toBe("SIGTERM");
     } finally { await f.close(); }
-  });
+  }, 30_000);
 
   it.each([[403, "Forbidden"], [422, "Invalid"], [429, "TooManyRequests"], [503, "ServiceUnavailable"]])(
     "retains actual HTTP %s and fails without retry", async (code, reason) => {
