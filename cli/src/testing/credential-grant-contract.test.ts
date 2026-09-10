@@ -19,6 +19,19 @@ const specSchema=(name:string)=>resource("CustomResourceDefinition",`${name}.kar
 const source=(path:string)=>readFileSync(new URL(path,root),"utf8");
 
 describe("governed credential public contract",()=>{
+  it("allows ordinary collection cleanup without losing protected old-object names",()=>{
+    for(const name of ["kars-sre-private-identity","kars-sre-role-authority","kars-sre-consumer-authority"]){
+      const policy=resource("ValidatingAdmissionPolicy",name);
+      const match=policy.spec.matchConditions[0].expression;
+      expect(match).toContain("has(request.name)");
+      expect(match).toContain("has(oldObject.metadata.name)");
+      expect(match).toContain("oldObject.metadata.name");
+      expect(match).not.toContain(".exists(");
+      expect(policy.spec.failurePolicy).toBe("Fail");
+      expect(JSON.stringify(policy.spec.validations)).toContain("check('use').allowed()");
+      expect(resource("ValidatingAdmissionPolicyBinding",name).spec.validationActions).toContain("Deny");
+    }
+  });
   it("keeps native CEL key, null and cross-kind checks type-compatible without relaxing guards",()=>{
     const store=resource("ValidatingAdmissionPolicy","kars-credential-enrolled-store-shape");
     const expression=store.spec.validations[0].expression;
