@@ -5,6 +5,7 @@ import copy
 import json
 
 from .common import POLICIES, PRIVATE, REGISTRATION, RUNTIME, STANDIN, TENANT, assert_denial, require
+from .collection_delete_probe import stable_object
 
 
 def policies_ready(h):
@@ -44,6 +45,27 @@ def reserved_source_probe():
         "spec": {"runtime": {"kind": "BYO", "byo": {"image": STANDIN, "contractVersion": "v1"}},
                  "inferenceRef": {"name": "sre-inference"},
                  "sandbox": {"isolation": "standard"}}}
+
+
+def rc_update_preview(h, path, original, candidate):
+    current = h.api("GET", path, status=200).json()
+    require(stable_object(current) == stable_object(original)
+            and not current["metadata"].get("deletionTimestamp"),
+            "ReplicationController update target changed beyond status")
+    for attempt in range(3):
+        body = copy.deepcopy(candidate)
+        body["metadata"] = copy.deepcopy(current["metadata"])
+        response = h.api("PUT", path + "?dryRun=All", body=body, user="tenant")
+        if response.status_code != 409 or response.json().get("reason") != "Conflict" or attempt == 2:
+            return response
+        refreshed = h.api("GET", path, status=200).json()
+        require(stable_object(refreshed) == stable_object(current)
+                and not refreshed["metadata"].get("deletionTimestamp"),
+                "ReplicationController update conflict changed more than status; no retry")
+        if refreshed["metadata"]["resourceVersion"] == current["metadata"]["resourceVersion"]:
+            return response
+        current = refreshed
+    raise AssertionError("ReplicationController preview exceeded its bounded attempts")
 
 
 def replication_controller_cases(h):
@@ -117,10 +139,14 @@ def replication_controller_cases(h):
                 body = copy.deepcopy(candidate)
                 if method == "POST":
                     body["metadata"] = {"name": "e2e-rc-dry-run", "namespace": RUNTIME}
-                response = h.api(method, target + "?dryRun=All", body=body, user="tenant")
+                response = (rc_update_preview(h, target, current, body) if method == "PUT"
+                            else h.api(method, target + "?dryRun=All", body=body, user="tenant"))
+                print("SRE-RC-ADMISSION " + json.dumps({
+                    "variant": variant, "method": method, "httpStatus": response.status_code,
+                }), flush=True)
                 if variant == "ordinary":
                     require(response.status_code == (201 if method == "POST" else 200),
-                            "Ordinary ReplicationController request was not admitted")
+                            f"Ordinary ReplicationController {method} was not admitted: HTTP {response.status_code}")
                 else:
                     assert_denial(response, f"{method} ReplicationController {variant}",
                                   "kars-sre-private-workloads")
