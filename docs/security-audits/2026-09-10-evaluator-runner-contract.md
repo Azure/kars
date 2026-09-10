@@ -82,7 +82,7 @@ An earlier disk-floor interruption was not counted as a passing test or as the
 argument reproduction.
 
 Native Pod admission and final current-base publication qualification are
-still required. No public push, deployment, H100 mutation, new dependency
+still required before merge. No deployment, H100 mutation, new dependency
 installation, source from private SDK/probe ancestry or main promotion is
 authorized by this source approval.
 
@@ -118,7 +118,28 @@ preconditions and observes removal. No namespace adoption, forced finalizers or
 blanket cleanup is used. Output contains only fixed case/status facts, not Pod
 specs, arguments, images, resource UIDs or API error bodies. Fixture tests run in
 the existing schema CI job and E2E preflight; they are not native evidence.
-No native result or new source sign-off is asserted by this preparation.
+No native result is asserted by this preparation.
+
+## Current-base source qualification and review
+
+Exact `0e366bdded6b6240cc9b17bf6685737fb37b17c5` passed an isolated
+controller-binary check,31 controller evaluation tests,47 runner unit tests,
+seven contract/module cases and five runner end-to-end cases. Both crates
+passed all-target/all-feature strict Clippy and formatting. These are90 test
+instances, including the previously disclosed shared parser cases; no native
+Pod admission is inferred. Minimum guarded free space was9.41GiB.
+
+The new probe and existing-CI wiring passed131 Python tests including23
+new fences, the exact74-case CI subset, Helm render/lint and source gates.
+Independent focused re-review reported no significant issues in the live
+template, source/namespace ownership, denial classification and cleanup
+changes. The bounded delegated source approval covers this preparation.
+
+The candidate may now enter its normal draft-PR hosted qualification against
+the actual integration base. Final current-head native admission and all
+required technical/review gates remain mandatory before a guarded merge;
+no deployment, image release, SDK/probe publication or main promotion follows
+from this approval.
 
 Signed-off-by: pallakatos (maintainer delegation recorded above) <lakatos.toth.pal@gmail.com>
 Signed-off-by: GitHub Copilot (delegated AI review, not an independent human) <223556219+Copilot@users.noreply.github.com>
