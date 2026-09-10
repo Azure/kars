@@ -12,6 +12,8 @@ rust-version.workspace = true
 axum.workspace = true
 reqwest.workspace = true
 rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
 tower.workspace = true
 bytes = "1"
 
@@ -76,6 +78,7 @@ flate2 = "1"
 ed25519-dalek.workspace = true
 
 [dev-dependencies]
+rcgen.workspace = true
 # Property-based testing (s5) — inline #[cfg(test)] proptest! blocks exercise
 # parsers/sanitizers with generated inputs. Shrinks counterexamples automatically.
 proptest = "1"

@@ -29,6 +29,7 @@
 /// Governance Receipt signing (kars Bridge Inc 3). Allowlisted crypto
 /// wrapper: Ed25519 over DSSE. See the module docs for the V0 trust model.
 pub mod signing;
+pub mod sre_tls;
 
 #[allow(unused_imports)]
 pub mod field_managers {

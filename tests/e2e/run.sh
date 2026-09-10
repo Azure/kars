@@ -28,6 +28,8 @@ CLUSTER_NAME="kars-e2e"
 RUNTIME="${KARS_E2E_RUNTIME:-openclaw}"
 PASS=0
 FAIL=0
+SRE_LEGACY_PREPARED=0
+E2E_KUBECONFIG="$ROOT_DIR/.e2e-kind-kubeconfig"
 
 # ─── Colors ───────────────────────────────────────────────────────────────────
 RED='\033[0;31m'
@@ -44,12 +46,18 @@ warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
 
 setup_cluster() {
     info "Creating Kind cluster: $CLUSTER_NAME"
-    if kind get clusters 2>/dev/null | grep -q "$CLUSTER_NAME"; then
+    if kind get clusters 2>/dev/null | grep -qx "$CLUSTER_NAME"; then
         info "Cluster already exists, reusing"
+        kind get kubeconfig --name "$CLUSTER_NAME" > "$E2E_KUBECONFIG"
+        chmod 600 "$E2E_KUBECONFIG"
+        export KUBECONFIG="$E2E_KUBECONFIG"
         return
     fi
 
     kind create cluster --name "$CLUSTER_NAME" --config "$SCRIPT_DIR/kind-config.yaml"
+    kind get kubeconfig --name "$CLUSTER_NAME" > "$E2E_KUBECONFIG"
+    chmod 600 "$E2E_KUBECONFIG"
+    export KUBECONFIG="$E2E_KUBECONFIG"
     info "Cluster created"
 }
 
@@ -151,6 +159,7 @@ install_crds() {
     # KARS_E2E_* env vars; the defaults here cover local runs.
     local replicas="${KARS_E2E_CONTROLLER_REPLICAS:-1}"
     local disable_le="${KARS_E2E_DISABLE_LEADER_ELECTION:-1}"
+    local helm_wait_arg=--wait
     local extra_set_args=(
         --set "controller.replicas=${replicas}"
         --set "inferenceRouter.replicas=${replicas}"
@@ -171,6 +180,18 @@ install_crds() {
             --set-string "controller.extraEnv[0].value=false"
         )
     fi
+    if [ "$SRE_LEGACY_PREPARED" = "1" ]; then
+        # Legacy fixtures predate the new admission policies. Explicit CLI
+        # authority staging already installed those APIs with controller=0;
+        # start the qualified controller while retaining the reviewed shapes.
+        extra_set_args+=(--set sre.enabled=true --set sre.authorityStage=true
+            --set-string runtimes.hermes.image=kars-sandbox-e2e:dev)
+        # Consumer policy acknowledgements cannot become Ready before explicit
+        # enrollment below. Wait for built-ins here; migration remains fatal.
+        local helm_version
+        helm_version=$(helm version --template '{{.Version}}') || return 1
+        helm_wait_arg=$(sre_migration_helm_wait_arg "$helm_version") || return 1
+    fi
     if ! helm upgrade --install kars "$ROOT_DIR/deploy/helm/kars" \
         --namespace kars-system \
         --create-namespace \
@@ -183,18 +204,20 @@ install_crds() {
         --set sandbox.image.repository=kars-sandbox-e2e \
         --set sandbox.image.tag=dev \
         "${extra_set_args[@]}" \
-        --wait --timeout 5m; then
+        "$helm_wait_arg" --timeout 5m; then
         warn "Helm install did not converge within 5m — dumping diagnostics"
+        PYTHONPATH="$ROOT_DIR/tests/e2e" python3 -m sre_authority.bootstrap_probe --diagnostics-only \
+            || warn "Bounded controller admission diagnostics were incomplete"
         kubectl get all -n kars-system || true
-        kubectl describe pod -n kars-system -l app.kubernetes.io/component=controller || true
-        kubectl logs -n kars-system -l app.kubernetes.io/component=controller --tail=200 || true
         return 1
     fi
 }
 
 teardown() {
+    sre_authority_cleanup || true
     info "Tearing down Kind cluster"
     kind delete cluster --name "$CLUSTER_NAME" 2>/dev/null || true
+    rm -f "$E2E_KUBECONFIG"
 }
 
 # ─── Tests ────────────────────────────────────────────────────────────────────
@@ -291,7 +314,7 @@ EOF
 }
 
 test_networkpolicy_created() {
-    if kubectl get networkpolicy -n kars-e2e-test sandbox-policy --no-headers 2>/dev/null | grep -q sandbox-policy; then
+    if wait_for_resource networkpolicy sandbox-policy kars-e2e-test 30; then
         pass "NetworkPolicy created in sandbox namespace"
     else
         fail "NetworkPolicy not found"
@@ -299,7 +322,7 @@ test_networkpolicy_created() {
 }
 
 test_serviceaccount_created() {
-    if kubectl get serviceaccount -n kars-e2e-test sandbox --no-headers 2>/dev/null | grep -q sandbox; then
+    if wait_for_resource serviceaccount sandbox kars-e2e-test 30; then
         pass "ServiceAccount created in sandbox namespace"
     else
         fail "ServiceAccount not found"
@@ -1318,8 +1341,8 @@ EOF
 test_runtime_hermes() {
     # KarsSandbox of kind Hermes should be processed by the controller:
     # plan_hermes dispatches, namespace is created, and the agent
-    # container's image carries the hermes runtime tag (kars-runtime-hermes)
-    # rather than the OpenClaw default. Mirrors test_runtime_anthropic and
+    # container uses the configured Hermes image (including the SRE fixture's
+    # explicit stand-in pin), with actual Hermes runtime dispatch. Mirrors test_runtime_anthropic and
     # follows the same tolerance pattern: Deployment may not materialize
     # if there's no real InferencePolicy provider in this lane, so the
     # image-tag assertion is diag-only when no Deployment is present.
@@ -1349,14 +1372,24 @@ EOF
         echo ""
         fail "Hermes runtime: no namespace"
     fi
-    local image
+    local image configured runtime_kind
     image=$(kubectl get deploy -n kars-e2e-hermes e2e-hermes -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
     if [ -n "$image" ]; then
-        if echo "$image" | grep -qE "hermes|kars-runtime-hermes"; then
-            pass "Hermes Deployment uses hermes runtime image ($image)"
+        if ! configured=$(kubectl get deployment kars-controller -n kars-system \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="controller")].env[?(@.name=="HERMES_RUNTIME_IMAGE")].value}'); then
+            fail "Hermes runtime: could not inspect the configured image"
+            return
+        fi
+        if ! runtime_kind=$(kubectl get deployment e2e-hermes -n kars-e2e-hermes \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].env[?(@.name=="KARS_RUNTIME_KIND")].value}'); then
+            fail "Hermes runtime: could not inspect actual runtime dispatch"
+            return
+        fi
+        if sre_hermes_image_matches "$image" "$configured" "$runtime_kind"; then
+            pass "Hermes Deployment preserves the configured image and Hermes runtime dispatch ($image)"
         else
             echo "  [diag] container image: $image"
-            fail "Hermes Deployment image does not reference hermes runtime"
+            fail "Hermes Deployment does not match its configured image or runtime dispatch"
         fi
     else
         echo "  [diag] no Deployment yet (likely no InferencePolicy provider in this lane)"
@@ -3015,21 +3048,31 @@ EOF
 
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
+source "$SCRIPT_DIR/sre-authority.sh"
 source "$SCRIPT_DIR/namespace-ownership.sh"
 source "$SCRIPT_DIR/credential-sources.sh"
 
 main() {
+    umask 077
     echo ""
     echo "═══════════════════════════════════════════════════════"
     echo "  kars E2E Test Suite (runtime: $RUNTIME)"
     echo "═══════════════════════════════════════════════════════"
     echo ""
 
+    PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="$SCRIPT_DIR" \
+        python3 -m unittest discover -s "$SCRIPT_DIR/sre_authority" -p '*_test.py'
     trap teardown EXIT
 
     setup_cluster
+    # Validate the public cluster API before any Rust images or private fixtures.
+    PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/sre_authority/registration_schema.py"
     build_images
+    prepare_sre_authority_legacy
     install_crds
+    # Finish real legacy retirement before unrelated tests can create private
+    # namespaces/credentials. Failure is fatal, not a skipped/false-positive gate.
+    test_sre_authority_migration
 
     echo ""
     info "Running tests..."
