@@ -28,6 +28,16 @@ pub struct RootReview {
     pub account: ReviewedObject,
     pub deployment: ReviewedObject,
     pub template_digest: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub budget_tls: Option<BudgetTlsReview>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct BudgetTlsReview {
+    pub namespace: ReviewedObject,
+    pub secret: ReviewedObject,
+    pub key_digest: String,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, JsonSchema)]

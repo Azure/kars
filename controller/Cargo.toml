@@ -57,6 +57,10 @@ rsa.workspace = true
 
 # HTTP server (controller metrics endpoint)
 axum = "0.8"
+# Existing locked TLS transport/parser packages; broker identity stays behind
+# the signing wrapper and the combined privacy-issuance gate.
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
 
 # Sigstore cosign verification + OCI fetch (S12.b: signed egress allowlist artifacts).
 # Status-only fetcher; actual NetworkPolicy still derives from inline allowedEndpoints.

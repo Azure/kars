@@ -115,6 +115,7 @@ export async function validateGrantDocument(execute:Execute,document:any):Promis
     await validatePrivateActivation(execute,document.spec.privateActivation as PrivateActivation);
     const activation=document.spec.privateActivation as PrivateActivation;
     const required=[...new Set([ns,activation.root.namespace.name,
+      ...(activation.root.budgetTls?[activation.root.budgetTls.namespace.name]:[]),
       ...document.spec.writers.map((writer:any)=>writer.namespace),
       ...(document.spec.observationTargets??[]).map((target:any)=>`kars-${target.name}`)])].sort();
     const selected=activation.namespaces.map(scope=>scope.namespace.name);

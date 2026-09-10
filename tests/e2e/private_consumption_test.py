@@ -26,7 +26,7 @@ class PrivateConsumptionFixtures(unittest.TestCase):
                 self.assertEqual(pod["containers"][0]["imagePullPolicy"], "Never")
                 self.assertEqual(pod["schedulerName"], "private-consumption-never-schedule")
                 self.assertNotIn("volumes", pod)
-                self.assertEqual(len(variants(value)), len(PRIVATE) + 6)
+                self.assertEqual(len(variants(value)), len(PRIVATE) + 7)
                 for invalid in variants(value):
                     self.assertEqual(pod_spec(invalid)["containers"][0]["command"], ["/bin/true"])
                     self.assertNotEqual(invalid, value)

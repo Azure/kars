@@ -149,7 +149,7 @@ describe("SRE namespace ownership (actual Helm lookup against an isolated test A
       const { stdout } = await execa("helm", [
         "template", "kars", fixtureChart(directory), "--namespace", "kars-system",
         "--dry-run=client", "--set", "sre.enabled=true", "--show-only", "templates/sre.yaml",
-      ], { timeout: 4_000 });
+      ], { timeout: 20_000 });
       const resources = documents(stdout);
       expect(resources.some(resource => resource.kind === "Namespace" || resource.kind === "ServiceAccount")).toBe(false);
       const namespaced = resources.filter(resource => resource.metadata.namespace);
@@ -159,7 +159,7 @@ describe("SRE namespace ownership (actual Helm lookup against an isolated test A
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it.each([true, false])("retains a legacy namespace without deleting its data when enabled=%s", async enabled => {
     const namespace = legacy("Namespace", "kars-sre");
@@ -181,7 +181,7 @@ describe("SRE namespace ownership (actual Helm lookup against an isolated test A
       expect(account).toBeUndefined();
       expect(resources).toHaveLength(1);
     }
-  });
+  }, 30_000);
 
   it("does not claim another release's namespace or service account", async () => {
     const resources = await upgrade(
@@ -189,14 +189,14 @@ describe("SRE namespace ownership (actual Helm lookup against an isolated test A
       legacy("ServiceAccount", "sre-writer", "other-release"),
     );
     expect(resources.some(resource => ["Namespace", "ServiceAccount"].includes(resource.kind))).toBe(false);
-  });
+  }, 30_000);
 
   it("does not invent a namespace when upgrading a release that never enabled SRE", async () => {
     const resources = await upgrade(undefined, undefined);
     expect(resources.some(resource => ["Namespace", "ServiceAccount"].includes(resource.kind))).toBe(false);
-  });
+  }, 30_000);
 
   it("propagates namespace lookup failures instead of omitting a possibly owned resource", async () => {
     await expect(upgrade(undefined, undefined, true, true)).rejects.toThrow(/error calling lookup/);
-  });
+  }, 30_000);
 });

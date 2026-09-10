@@ -41,6 +41,7 @@ mod github_services;
 pub(crate) mod governance_mounts;
 pub(crate) mod governed_services;
 mod inference;
+mod mcp_binding;
 mod mcp_egress;
 pub(crate) mod namespace_ownership;
 mod sre_writer;
@@ -65,6 +66,8 @@ fn sandbox_node_selector(default_pool: &str) -> Result<serde_json::Value, Reconc
 
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
+    #[error(transparent)]
+    InferenceBudget(#[from] crate::inference_budget::store::StoreError),
     #[error(transparent)]
     Credentials(#[from] credential_sources::Error),
     #[error(transparent)]
@@ -951,6 +954,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     egress_rules
         .extend(inference::configured_local_egress_rules().map_err(ReconcileError::Configuration)?);
+    egress_rules.extend(crate::inference_budget::pod::egress(&sandbox)?);
 
     // Policy enforcement may observe the API's post-DNAT endpoint IP/port.
     // Only registered routers receive exact targets; UID 1000 stays locked down.
@@ -2351,21 +2355,14 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         //     given the CEL-enforced unique-by-name).
         //   - `MCP_SIGNING_KEY_DIR`: legacy single-dir pointer for the
         //     first entry; namespaced replacement TBD in 4d.3.
-        let mcp_refs = governance_config.effective_mcp_server_refs();
-        if governance_config.uses_singular_mcp_server_ref() {
-            tracing::warn!(
-                sandbox = %name,
-                reason = crate::status::conditions::reason::MCP_SINGULAR_DEPRECATED,
-                "spec.governance.mcpServerRef is deprecated; migrate to \
-                 spec.governance.mcpServerRefs (Slice 4d.1)",
-            );
-        }
-        let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(mcp_refs.len());
-        for (idx, mcp_ref) in mcp_refs.iter().enumerate() {
-            let mcp_name = mcp_ref.name.trim();
-            if mcp_name.is_empty() {
-                continue;
-            }
+        let bindings = mcp_binding::resolve_all(client, &sandbox, &governance_config)
+            .await
+            .map_err(ReconcileError::Configuration)?;
+        let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(bindings.len());
+        let mut mcp_revisions = Vec::new();
+        for (mcp_name, binding) in bindings {
+            let first_mcp = mirrored_mcp_names.is_empty();
+            mcp_revisions.push(binding.revision);
             let jwks_cm = format!("mcp-{mcp_name}-jwks");
             let signing_secret = format!("mcp-{mcp_name}-signing");
             let jwks_volume = format!("mcp-jwks-{mcp_name}");
@@ -2388,7 +2385,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     // First-entry only: keep legacy single-file env var
                     // pointing at this server's jwks.json so the existing
                     // single-JWKS OAuth verifier keeps working unchanged.
-                    let legacy_env = if idx == 0 {
+                    let legacy_env = if first_mcp {
                         Some(("MCP_JWKS_PATH", format!("{jwks_mount}/jwks.json")))
                     } else {
                         None
@@ -2422,6 +2419,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     return Ok(Action::requeue(Duration::from_secs(15)));
                 }
             }
+            if !binding.signing {
+                continue;
+            }
             match governance_mounts::mirror_secret(
                 client,
                 &signing_secret,
@@ -2433,7 +2433,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             .await
             {
                 Ok(governance_mounts::MirrorOutcome::Mirrored) => {
-                    let legacy_env = if idx == 0 {
+                    let legacy_env = if first_mcp {
                         Some(("MCP_SIGNING_KEY_DIR", signing_mount.clone()))
                     } else {
                         None
@@ -2607,42 +2607,33 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
 
         // Mount blocklist seed ConfigMap into the router container
-        if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
-            volumes.push(json!({
-                "name": "blocklist-seed",
-                "configMap": {
-                    "name": &blocklist_cm_name,
-                    "optional": true
-                }
-            }));
-        }
-        if let Some(containers) = pod_spec
-            .get_mut("containers")
-            .and_then(|c| c.as_array_mut())
-        {
-            for container in containers.iter_mut() {
-                if container.get("name").and_then(|n| n.as_str()) == Some("inference-router") {
-                    let mounts = container
-                        .as_object_mut()
-                        .unwrap()
-                        .entry("volumeMounts")
-                        .or_insert(json!([]));
-                    if let Some(mounts_arr) = mounts.as_array_mut() {
-                        mounts_arr.push(json!({
-                            "name": "blocklist-seed",
-                            "mountPath": "/etc/kars/blocklist",
-                            "readOnly": true
-                        }));
-                    }
-                }
-            }
-        }
+        governance_mounts::inject_configmap_mount(
+            &mut pod_spec,
+            "inference-router",
+            &blocklist_cm_name,
+            "blocklist-seed",
+            "/etc/kars/blocklist",
+            None,
+        );
 
         let provider_version =
             inference::mirror_providers(client, &sandbox_self_ns, &sandbox_ns, &name).await?;
         if sre_projection.is_some() {
             crate::sre_authority::pod::project(&mut pod_spec);
         }
+        let mut pod_annotations = crate::inference_budget::pod::decorate(
+            client,
+            &sandbox,
+            owned_namespace.as_ref().ok_or_else(|| {
+                ReconcileError::Configuration("Runtime namespace identity missing".into())
+            })?,
+            &mut pod_spec,
+        )
+        .await?;
+        pod_annotations.insert(
+            "kars.azure.com/inference-providers-version".into(),
+            provider_version.unwrap_or_default(),
+        );
         let mut deployment: Deployment = serde_json::from_value(json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -2663,13 +2654,14 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 },
                 "template": {
                     "metadata": {
-                        "annotations": {"kars.azure.com/inference-providers-version": provider_version.unwrap_or_default()},
+                        "annotations": pod_annotations,
                         "labels": build_pod_labels(&name)
                     },
                     "spec": pod_spec
                 }
             }
         }))?;
+        mcp_binding::decorate(&mut deployment, &mcp_revisions)?;
         if let Some(projection) = sre_projection.as_ref() {
             let annotations =
                 crate::sre_authority::pod::annotations(projection, agent_container_name);
@@ -3145,11 +3137,13 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
-    Ok(Action::requeue(if sre_projection.is_some() {
-        Duration::from_secs(30)
-    } else {
-        credential_sources::refresh_interval(&sandbox)
-    }))
+    Ok(Action::requeue(
+        if sre_projection.is_some() || !governance_config.effective_mcp_server_refs().is_empty() {
+            Duration::from_secs(30)
+        } else {
+            credential_sources::refresh_interval(&sandbox)
+        },
+    ))
 }
 
 /// How long to wait before requeuing a failed reconcile, by error kind.
@@ -3161,6 +3155,7 @@ fn error_requeue_duration(error: &ReconcileError) -> Duration {
         // Transient kube API errors (throttling, connection reset, 5xx):
         // retry soon so we don't starve legitimate work.
         ReconcileError::Kube(_)
+        | ReconcileError::InferenceBudget(_)
         | ReconcileError::NamespaceOwnership(_)
         | ReconcileError::Credentials(_) => 30,
         // Serde errors are deterministic — the same body will fail again.
@@ -3179,6 +3174,7 @@ fn error_policy(sandbox: Arc<KarsSandbox>, error: &ReconcileError, _ctx: Arc<Con
         ReconcileError::Configuration(_) => "configuration",
         ReconcileError::NamespaceOwnership(_) => "namespace_ownership",
         ReconcileError::Credentials(_) => "credentials",
+        ReconcileError::InferenceBudget(_) => "inference_budget",
     };
     crate::metrics::record_reconcile_error("KarsSandbox", class);
     tracing::error!(

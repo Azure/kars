@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { createHash, randomBytes } from "node:crypto";
+import { createHash, randomBytes, X509Certificate } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { requireBundledAsset } from "./repo-assets.js";
 
@@ -11,11 +11,12 @@ type RecordValue = { [key: string]: Json };
 export interface ReviewedObject { name: string; uid: string; resourceVersion: string }
 export interface ReviewedConsumer { kind: string; object: ReviewedObject; templateDigest: string }
 export interface NamespaceReview { namespace: ReviewedObject; consumers: ReviewedConsumer[]; epoch?: string }
+export interface BudgetTlsReview { namespace: ReviewedObject; secret: ReviewedObject; keyDigest: string }
 export interface PrivateActivation {
   contract: string;
   phase: "reviewed" | "qualified";
   bundleRevision: string;
-  root: { namespace: ReviewedObject; account: ReviewedObject; deployment: ReviewedObject; templateDigest: string };
+  root: { namespace: ReviewedObject; account: ReviewedObject; deployment: ReviewedObject; templateDigest: string; budgetTls?: BudgetTlsReview };
   profile: "service-accounts" | "kcm-certificate";
   controllerUids: Record<string, string>;
   namespaces: NamespaceReview[];
@@ -99,6 +100,60 @@ export function templateDigest(value: unknown): string {
   return digest(current);
 }
 
+function rootEnvironment(deployment: unknown, name: string): string | undefined {
+  const container = list(at(deployment, "spec", "template", "spec", "containers")).find(c => at(c, "name") === "controller");
+  if (!container) throw new Error("Reviewed root controller container is missing");
+  const entries = list(at(container, "env") ?? []).filter(e => at(e, "name") === name);
+  if (entries.length > 1 || entries.some(e => at(e, "valueFrom") !== undefined)) {
+    throw new Error("Private root budget inputs must have one explicit reviewed literal value");
+  }
+  const value = entries.length ? at(entries[0], "value") : undefined;
+  if (value !== undefined && typeof value !== "string") throw new Error("Private root environment input is invalid");
+  return value;
+}
+
+async function reviewBudgetTls(execute: Execute, deployment: unknown, rootNamespace: string): Promise<BudgetTlsReview | undefined> {
+  const enabled = rootEnvironment(deployment, "KARS_INFERENCE_BUDGET_ENABLED");
+  if (enabled === undefined || enabled === "" || enabled === "false") return undefined;
+  if (enabled !== "true") throw new Error("Reviewed budget enablement is invalid");
+  const name = rootEnvironment(deployment, "KARS_INFERENCE_BUDGET_TLS_SECRET");
+  if (!name) throw new Error("Enabled budget broker lacks an explicit TLS Secret name");
+  const configured = rootEnvironment(deployment, "KARS_NAMESPACE")?.trim();
+  const controller = list(at(deployment, "spec", "template", "spec", "containers")).find(c => at(c, "name") === "controller");
+  const podNamespace = list(at(controller, "env") ?? []).filter(e => at(e, "name") === "POD_NAMESPACE");
+  if (podNamespace.length > 1) throw new Error("Root Pod namespace input is ambiguous");
+  const value = podNamespace.length ? at(podNamespace[0], "value") : undefined;
+  const downward = podNamespace.length ? at(podNamespace[0], "valueFrom", "fieldRef", "fieldPath") : undefined;
+  if (value !== undefined && typeof value !== "string") throw new Error("Root Pod namespace input is invalid");
+  if (podNamespace.length && value === undefined && downward !== "metadata.namespace") throw new Error("Root Pod namespace input requires explicit review");
+  const namespace = configured || (typeof value === "string" ? value.trim() : downward ? rootNamespace : "") || "kars-system";
+  const ns = reviewed(await read(execute, "namespace", namespace));
+  const metadata = JSON.parse(await execute(["get", "secret", name, "-n", namespace, "-o", "go-template={{json .metadata}}"]));
+  const secret = reviewed({ metadata });
+  if (at(metadata, "annotations", "kars.azure.com/inference-budget-tls") !== "v1") {
+    throw new Error("Budget TLS Secret is not the reviewed budget identity");
+  }
+  if ((await execute(["get", "secret", name, "-n", namespace, "-o", "go-template={{.type}}"])).trim() !== "kubernetes.io/tls") {
+    throw new Error("Budget TLS Secret type is invalid");
+  }
+  const certificate = await execute(["get", "secret", name, "-n", namespace, "-o", 'go-template={{index .data "tls.crt"}}']);
+  const publicKey = new X509Certificate(Buffer.from(certificate.trim(), "base64")).publicKey
+    .export({ format: "der", type: "spki" });
+  return { namespace: ns, secret, keyDigest: createHash("sha256").update(publicKey).digest("hex") };
+}
+
+function sameBudgetTls(a: BudgetTlsReview | undefined, b: BudgetTlsReview | undefined): boolean {
+  const normalized = (value: BudgetTlsReview | undefined) => value ? {
+    ...value, namespace: { name: value.namespace.name, uid: value.namespace.uid },
+  } : null;
+  return canonical(normalized(a)) === canonical(normalized(b));
+}
+
+function materialForNamespace(value: unknown, namespace: string, activation: PrivateActivation): boolean {
+  const extra = activation.root.budgetTls?.namespace.name === namespace ? [activation.root.budgetTls.secret.name] : [];
+  return privateMaterial(value, extra);
+}
+
 export function bundleDefinition(): RecordValue {
   return record(JSON.parse(readFileSync(requireBundledAsset("deploy/helm/kars/files/private-consumption.json"), "utf8")));
 }
@@ -137,6 +192,7 @@ export async function previewPrivateActivation(
   const accountName = at(deployment, "spec", "template", "spec", "serviceAccountName");
   if (accountName !== "kars-controller") throw new Error("Private activation requires the explicitly supported controller identity");
   const account = await read(execute, "serviceaccount", accountName, rootNamespace);
+  const budgetTls = await reviewBudgetTls(execute, deployment, rootNamespace);
   const controllerUids: Record<string, string> = {};
   if (profile === "service-accounts") {
     for (const name of list(bundleDefinition().controllers)) {
@@ -146,6 +202,7 @@ export async function previewPrivateActivation(
   }
   const names = new Set([workspace, rootNamespace, ...writers.map(w => w.namespace),
     ...targets.map(t => `kars-${t.name}`)]);
+  if (budgetTls) names.add(budgetTls.namespace.name);
   const namespaces: NamespaceReview[] = [];
   const requested = [...consumers, `${rootNamespace}/Deployment/kars-controller`];
   for (const raw of requested) {
@@ -171,7 +228,8 @@ export async function previewPrivateActivation(
   }
   return {
     contract: PRIVATE_CONTRACT, phase: "reviewed", bundleRevision,
-    root: { namespace: reviewed(rootNs), account: reviewed(account), deployment: reviewed(deployment), templateDigest: templateDigest(deployment) },
+    root: { namespace: reviewed(rootNs), account: reviewed(account), deployment: reviewed(deployment), templateDigest: templateDigest(deployment),
+      ...(budgetTls ? { budgetTls } : {}) },
     profile: profile as PrivateActivation["profile"], controllerUids, namespaces,
   };
 }
@@ -205,8 +263,14 @@ export async function validatePrivateActivation(execute: Execute, activation: Pr
     }
   };
   exact(activation, ["contract", "phase", "bundleRevision", "root", "profile", "controllerUids", "namespaces"]);
-  exact(activation.root, ["namespace", "account", "deployment", "templateDigest"]);
+  exact(activation.root, ["namespace", "account", "deployment", "templateDigest", "budgetTls"]);
   for (const value of [activation.root.namespace, activation.root.account, activation.root.deployment]) identityShape(value);
+  if (activation.root.budgetTls) {
+    exact(activation.root.budgetTls, ["namespace", "secret", "keyDigest"]);
+    identityShape(activation.root.budgetTls.namespace);
+    identityShape(activation.root.budgetTls.secret);
+    if (!/^[a-f0-9]{64}$/.test(activation.root.budgetTls.keyDigest)) throw new Error("Budget TLS public-key review is malformed");
+  }
   if (!/^[a-f0-9]{64}$/.test(activation.bundleRevision) || !/^[a-f0-9]{64}$/.test(activation.root.templateDigest)) {
     throw new Error("Private activation digest is malformed");
   }
@@ -235,6 +299,9 @@ export async function validatePrivateActivation(execute: Execute, activation: Pr
       || (kind === "deployment" && templateDigest(current) !== root.templateDigest)) {
       throw new Error("Reviewed private root identity or template changed");
     }
+    const rootDeployment = await read(execute, "deployment", root.deployment.name, root.namespace.name);
+    const budgetTls = await reviewBudgetTls(execute, rootDeployment, root.namespace.name);
+    if (!sameBudgetTls(budgetTls, root.budgetTls)) throw new Error("Reviewed budget TLS identity or public key changed");
   }
   if (!["service-accounts", "kcm-certificate"].includes(activation.profile)) throw new Error("Private controller profile is invalid");
   const expectedControllers = activation.profile === "service-accounts" ? list(bundleDefinition().controllers) : [];
@@ -265,6 +332,7 @@ export async function validatePrivateActivation(execute: Execute, activation: Pr
 }
 
 function annotations(activation: PrivateActivation, scope: NamespaceReview, state: string): Record<string, string> {
+  const budget = activation.root.budgetTls;
   return {
     [`${PRIVATE_PREFIX}enabled`]: "true", [`${PRIVATE_PREFIX}state`]: state,
     [`${PRIVATE_PREFIX}namespace-uid`]: scope.namespace.uid,
@@ -278,6 +346,14 @@ function annotations(activation: PrivateActivation, scope: NamespaceReview, stat
     [`${PRIVATE_PREFIX}root-template-digest`]: activation.root.templateDigest,
     [`${PRIVATE_PREFIX}bundle-revision`]: activation.bundleRevision,
     [`${PRIVATE_PREFIX}profile`]: activation.profile,
+    ...(budget ? {
+      [`${PRIVATE_PREFIX}budget-namespace`]: budget.namespace.name,
+      [`${PRIVATE_PREFIX}budget-namespace-uid`]: budget.namespace.uid,
+      [`${PRIVATE_PREFIX}budget-tls-name`]: budget.secret.name,
+      [`${PRIVATE_PREFIX}budget-tls-uid`]: budget.secret.uid,
+      [`${PRIVATE_PREFIX}budget-tls-version`]: budget.secret.resourceVersion,
+      [`${PRIVATE_PREFIX}budget-key`]: budget.keyDigest,
+    } : {}),
     ...Object.fromEntries(Object.entries(activation.controllerUids).map(([name, uid]) => [`${PRIVATE_PREFIX}${name}-uid`, uid])),
   };
 }
@@ -296,6 +372,26 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
   const staged = structuredClone(activation);
   for (const scope of staged.namespaces) await patchNamespace(execute, scope, annotations(staged, scope, "Pending"));
   await validatePrivateActivation(execute, staged);
+  if (staged.root.budgetTls) {
+    const budget = staged.root.budgetTls;
+    const scope = staged.namespaces.find(item => item.namespace.name === budget.namespace.name);
+    if (!scope) throw new Error("Budget TLS namespace is missing from activation review");
+    const current = await read(execute, "namespace", scope.namespace.name);
+    const old = record(at(current, "metadata", "annotations"));
+    const alreadyQualified = old[`${PRIVATE_PREFIX}budget-qualified-bundle`] === staged.bundleRevision
+      && old[`${PRIVATE_PREFIX}budget-qualified-key`] === budget.keyDigest
+      && old[`${PRIVATE_PREFIX}budget-qualified-secret`] === budget.secret.uid;
+    if (!alreadyQualified && old[`${PRIVATE_PREFIX}budget-rotation-bundle`] !== staged.bundleRevision) {
+      await patchNamespace(execute, scope, {
+        [`${PRIVATE_PREFIX}budget-rotation-bundle`]: staged.bundleRevision,
+        [`${PRIVATE_PREFIX}budget-before-key`]: budget.keyDigest,
+      });
+      throw new Error("Budget TLS key requires operator rotation and public-CA update through the existing budget workflow; re-preview afterwards");
+    }
+    if (!alreadyQualified && old[`${PRIVATE_PREFIX}budget-before-key`] === budget.keyDigest) {
+      throw new Error("Budget TLS public key is unchanged; copying or re-encoding the key is not private requalification");
+    }
+  }
   const retire: { scope: NamespaceReview; consumer: ReviewedConsumer }[] = [];
   for (const scope of staged.namespaces) {
     const pods = record(JSON.parse(await execute(["get", "pods", "-n", scope.namespace.name, "--chunk-size=0", "-o", "json"])));
@@ -304,7 +400,7 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
       if (!privateConsumer(pod, scope.namespace.name, staged)) continue;
       const owner = await reviewedOwner(execute, pod, scope);
       if (!owner) throw new Error("Unexplained private consumer preserved; explicitly review its actual owner before activation");
-      if (privateMaterial(template(pod).spec)) {
+      if (materialForNamespace(template(pod).spec, scope.namespace.name, staged)) {
         if (!["Deployment", "ReplicaSet", "StatefulSet", "ReplicationController"].includes(owner.kind)) {
           throw new Error("This reviewed private consumer requires its existing owner-specific retirement before activation; it was preserved");
         }
@@ -332,7 +428,7 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
       for (const pod of list(inventory.items)) {
         if (!privateConsumer(pod, scope.namespace.name, staged)) continue;
         if (!await reviewedOwner(execute, pod, scope)) throw new Error("Unexplained private consumer preserved during retirement");
-        const material = privateMaterial(template(pod).spec);
+        const material = materialForNamespace(template(pod).spec, scope.namespace.name, staged);
         pending ||= material;
         if (!material) {
           const entries = preserved.get(scope.namespace.name) ?? new Map<string, string>();
@@ -350,6 +446,13 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
     scope.epoch = randomBytes(32).toString("hex");
     await patchNamespace(execute, scope, {
       ...annotations(staged, scope, "Qualified"), [`${PRIVATE_PREFIX}epoch`]: scope.epoch,
+      ...(staged.root.budgetTls ? {
+        [`${PRIVATE_PREFIX}budget-qualified-bundle`]: staged.bundleRevision,
+        [`${PRIVATE_PREFIX}budget-qualified-key`]: staged.root.budgetTls.keyDigest,
+        [`${PRIVATE_PREFIX}budget-qualified-secret`]: staged.root.budgetTls.secret.uid,
+        [`${PRIVATE_PREFIX}budget-rotation-bundle`]: "",
+        [`${PRIVATE_PREFIX}budget-before-key`]: "",
+      } : {}),
       ...Object.fromEntries(scope.consumers.map(c => [`${PRIVATE_PREFIX}parent-${c.object.uid}`, scope.epoch!])),
       ...Object.fromEntries([...(preserved.get(scope.namespace.name) ?? [])].flatMap(([uid, spec]) => [
         [`${PRIVATE_PREFIX}pod-${uid}`, scope.epoch!], [`${PRIVATE_PREFIX}pod-spec-${uid}`, spec],
@@ -360,6 +463,26 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
       const current = await read(execute, kinds[consumer.kind]!, consumer.object.name, scope.namespace.name);
       if (reviewed(current).uid !== consumer.object.uid || templateDigest(current) !== consumer.templateDigest) {
         throw new Error("Reviewed consumer changed before template qualification");
+      }
+      if (staged.root.budgetTls) {
+        const oldRootPods = new Set(preserved.get(staged.root.namespace.name)?.keys() ?? []);
+        const deadline = Date.now() + 120_000;
+        for (;;) {
+          const deployment = await read(execute, "deployment", staged.root.deployment.name, staged.root.namespace.name);
+          if (reviewed(deployment).uid !== staged.root.deployment.uid || templateDigest(deployment) !== staged.root.templateDigest) {
+            throw new Error("Reviewed root changed during budget TLS consumer retirement");
+          }
+          const pods = record(JSON.parse(await execute(["get", "pods", "-n", staged.root.namespace.name, "--chunk-size=0", "-o", "json"])));
+          if (at(pods, "metadata", "continue")) throw new Error("Budget TLS consumer retirement inventory is incomplete");
+          const retiring = list(pods.items).some(pod => oldRootPods.has(reviewed(pod, true).uid));
+          const desired = at(deployment, "spec", "replicas") ?? 1;
+          const ready = typeof desired === "number" && desired > 0
+            && at(deployment, "status", "observedGeneration") === at(deployment, "metadata", "generation")
+            && at(deployment, "status", "updatedReplicas") === desired && at(deployment, "status", "availableReplicas") === desired;
+          if (!retiring && ready) break;
+          if (Date.now() >= deadline) throw new Error("Budget TLS root consumers have not completed retirement; no writer activation was published");
+          await new Promise(resolve => setTimeout(resolve, 500));
+        }
       }
       if (!privateConsumer(current, scope.namespace.name, staged)) continue;
       const marker = { metadata: { annotations: { [`${PRIVATE_PREFIX}epoch`]: scope.epoch } } };
@@ -390,6 +513,10 @@ export async function validateQualifiedActivation(execute: Execute, activation: 
     if (reviewed(await read(execute, "serviceaccount", name, "kube-system")).uid !== uid) {
       throw new Error("Controller profile changed before qualified publication");
     }
+    const root = await read(execute, "deployment", activation.root.deployment.name, activation.root.namespace.name);
+    if (!sameBudgetTls(await reviewBudgetTls(execute, root, activation.root.namespace.name), activation.root.budgetTls)) {
+      throw new Error("Budget TLS review changed before grant publication");
+    }
   }
   for (const scope of activation.namespaces) {
     const current = await read(execute, "namespace", scope.namespace.name);
@@ -402,15 +529,17 @@ export async function validateQualifiedActivation(execute: Execute, activation: 
   }
 }
 
-export function privateMaterial(value: unknown): boolean {
+export function privateMaterial(value: unknown, extraSecrets: string[] = []): boolean {
   const pod = record(value);
-  const secrets = list(bundleDefinition().secrets);
+  const definition = bundleDefinition();
+  const secrets = [...list(definition.secrets), ...extraSecrets];
   const volumes = list(pod.volumes ?? []);
   for (const v of volumes) {
     if (secrets.includes(at(v, "secret", "secretName") ?? null)
       || secrets.includes(at(v, "csi", "nodePublishSecretRef", "name") ?? null)) return true;
     for (const source of list(at(v, "projected", "sources") ?? [])) {
       if (secrets.includes(at(source, "secret", "name") ?? null)) return true;
+      if (list(definition.tokenAudiences ?? []).includes(at(source, "serviceAccountToken", "audience") ?? null)) return true;
     }
     for (const kind of ["azureFile", "cephfs", "cinder", "flexVolume", "iscsi", "rbd", "scaleIO", "storageos"]) {
       if (secrets.includes(at(v, kind, "secretName") ?? null) || secrets.includes(at(v, kind, "secretRef", "name") ?? null)) return true;
@@ -427,7 +556,7 @@ export function privateMaterial(value: unknown): boolean {
 export function privateConsumer(value: unknown, namespace: string, activation: PrivateActivation): boolean {
   const pod = record(template(value).spec);
   if (at(template(value), "metadata", "annotations", `${PRIVATE_PREFIX}epoch`) !== undefined) return true;
-  if (privateMaterial(pod)) return true;
+  if (materialForNamespace(pod, namespace, activation)) return true;
   const account = pod.serviceAccountName ?? "";
   const privilegedIdentity = (namespace === activation.root.namespace.name && account === activation.root.account.name)
     || (namespace === "kars-sre" && account === "sre-api-router")

@@ -32,8 +32,81 @@ pub(crate) fn bundle() -> Value {
     .expect("embedded private admission bundle is valid JSON")
 }
 
+fn root_environment<'a>(deployment: &'a Deployment, name: &str) -> Result<Option<&'a str>, String> {
+    let containers = &deployment
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .ok_or(ERROR)?
+        .containers;
+    let controller = containers
+        .iter()
+        .find(|container| container.name == "controller")
+        .ok_or(ERROR)?;
+    let values: Vec<_> = controller
+        .env
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|entry| entry.name == name)
+        .collect();
+    if values.len() > 1 || values.iter().any(|entry| entry.value_from.is_some()) {
+        return Err(ERROR.into());
+    }
+    Ok(values.first().and_then(|entry| entry.value.as_deref()))
+}
+
 fn live(meta: &kube::api::ObjectMeta) -> Result<(&str, &str), String> {
     crate::credential_grants::identity(meta)
+}
+
+fn budget_namespace(deployment: &Deployment, root: &str) -> Result<String, String> {
+    if let Some(value) = root_environment(deployment, "KARS_NAMESPACE")?
+        .map(str::trim)
+        .filter(|v| !v.is_empty())
+    {
+        return Ok(value.into());
+    }
+    let containers = &deployment
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.spec.as_ref())
+        .ok_or(ERROR)?
+        .containers;
+    let controller = containers
+        .iter()
+        .find(|container| container.name == "controller")
+        .ok_or(ERROR)?;
+    let entries: Vec<_> = controller
+        .env
+        .as_deref()
+        .unwrap_or_default()
+        .iter()
+        .filter(|entry| entry.name == "POD_NAMESPACE")
+        .collect();
+    if entries.len() > 1 {
+        return Err(ERROR.into());
+    }
+    let Some(entry) = entries.first() else {
+        return Ok("kars-system".into());
+    };
+    if let Some(value) = entry.value.as_deref() {
+        let value = if value.trim().is_empty() {
+            "kars-system"
+        } else {
+            value.trim()
+        };
+        return Ok(value.into());
+    }
+    if entry
+        .value_from
+        .as_ref()
+        .and_then(|source| source.field_ref.as_ref())
+        .is_some_and(|field| field.field_path == "metadata.namespace")
+    {
+        return Ok(root.into());
+    }
+    Err(ERROR.into())
 }
 
 fn field(namespace: &Namespace, key: &str) -> Result<String, String> {
@@ -165,6 +238,38 @@ pub(crate) async fn namespace_epoch(
     {
         return Err(ERROR.into());
     }
+    match root_environment(&deployment, "KARS_INFERENCE_BUDGET_ENABLED")? {
+        Some("true") => {
+            let secret_name =
+                root_environment(&deployment, "KARS_INFERENCE_BUDGET_TLS_SECRET")?.ok_or(ERROR)?;
+            let accounting = budget_namespace(&deployment, &root_namespace)?;
+            if field(namespace, "budget-namespace")? != accounting
+                || field(namespace, "budget-tls-name")? != secret_name
+            {
+                return Err(
+                    "Enabled budget TLS input lacks the reviewed private activation identity"
+                        .into(),
+                );
+            }
+            let accounting_ns = Api::<Namespace>::all(client.clone())
+                .get(&accounting)
+                .await
+                .map_err(|_| ERROR)?;
+            let secret =
+                Api::<k8s_openapi::api::core::v1::Secret>::namespaced(client.clone(), &accounting)
+                    .get_metadata(secret_name)
+                    .await
+                    .map_err(|_| ERROR)?;
+            if live(&accounting_ns.metadata)?.0 != field(namespace, "budget-namespace-uid")?
+                || live(&secret.metadata)?.0 != field(namespace, "budget-tls-uid")?
+                || live(&secret.metadata)?.1 != field(namespace, "budget-tls-version")?
+            {
+                return Err("Reviewed budget TLS input changed".into());
+            }
+        }
+        None | Some("") | Some("false") => {}
+        _ => return Err(ERROR.into()),
+    }
     let caller =
         Api::<k8s_openapi::api::authentication::v1::SelfSubjectReview>::all(client.clone())
             .create(&kube::api::PostParams::default(), &Default::default())
@@ -237,6 +342,9 @@ pub(crate) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
     }
     let workspace = grant.namespace().ok_or(ERROR)?;
     let mut required = BTreeSet::from([workspace.clone(), activation.root.namespace.name.clone()]);
+    if let Some(budget) = &activation.root.budget_tls {
+        required.insert(budget.namespace.name.clone());
+    }
     required.extend(
         grant
             .spec
@@ -302,8 +410,17 @@ pub(crate) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
             if field(&ns, &format!("{name}-uid"))? != *uid {
                 return Err(ERROR.into());
             }
-            inspect_namespace(client, &ns, &epoch).await?;
         }
+        if let Some(budget) = &activation.root.budget_tls {
+            if field(&ns, "budget-namespace-uid")? != budget.namespace.uid
+                || field(&ns, "budget-tls-uid")? != budget.secret.uid
+                || field(&ns, "budget-tls-version")? != budget.secret.resource_version
+                || field(&ns, "budget-key")? != budget.key_digest
+            {
+                return Err(ERROR.into());
+            }
+        }
+        inspect_namespace(client, &ns, &epoch).await?;
     }
     if !required.is_subset(&seen) {
         return Err(ERROR.into());
@@ -631,14 +748,28 @@ pub(crate) async fn protect_pending(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn private_material(pod: &Pod) -> bool {
+    private_material_in(pod, None)
+}
+
+fn private_material_in(pod: &Pod, namespace: Option<&Namespace>) -> bool {
     let value = serde_json::to_value(pod).expect("Pod serializes");
     let spec = &value["spec"];
     let definition = bundle();
+    let extra = namespace.and_then(|namespace| {
+        (field(namespace, "budget-namespace").ok().as_deref()
+            == Some(namespace.name_any().as_str()))
+        .then(|| field(namespace, "budget-tls-name").ok())
+        .flatten()
+    });
     let protected = |value: &Value| {
         definition["secrets"]
             .as_array()
             .is_some_and(|names| value.is_string() && names.contains(value))
+            || extra
+                .as_deref()
+                .is_some_and(|name| value.as_str() == Some(name))
     };
     if spec["volumes"].as_array().is_some_and(|volumes| {
         volumes.iter().any(|volume| {
@@ -647,9 +778,17 @@ pub(crate) fn private_material(pod: &Pod) -> bool {
                 || volume["projected"]["sources"]
                     .as_array()
                     .is_some_and(|sources| {
-                        sources
-                            .iter()
-                            .any(|source| protected(&source["secret"]["name"]))
+                        sources.iter().any(|source| {
+                            protected(&source["secret"]["name"])
+                                || definition["tokenAudiences"].as_array().is_some_and(
+                                    |audiences| {
+                                        source["serviceAccountToken"]["audience"].is_string()
+                                            && audiences.contains(
+                                                &source["serviceAccountToken"]["audience"],
+                                            )
+                                    },
+                                )
+                        })
                     })
                 || [
                     "azureFile",
@@ -696,6 +835,10 @@ pub(crate) async fn retired_material_consumers(
     client: &Client,
     namespace: &str,
 ) -> Result<bool, String> {
+    let scope = Api::<Namespace>::all(client.clone())
+        .get(namespace)
+        .await
+        .map_err(|_| ERROR)?;
     let pods = Api::<Pod>::namespaced(client.clone(), namespace)
         .list(&ListParams::default())
         .await
@@ -718,161 +861,165 @@ pub(crate) async fn retired_material_consumers(
         return Err(ERROR.into());
     }
 
-    pub(crate) async fn inspect_namespace(
-        client: &Client,
-        namespace: &Namespace,
-        epoch: &str,
-    ) -> Result<(), String> {
-        let pods = Api::<Pod>::namespaced(client.clone(), &namespace.name_any())
-            .list(&ListParams::default())
-            .await
-            .map_err(|_| ERROR)?;
-        if pods
+    Ok(!pods
+        .items
+        .iter()
+        .any(|pod| private_material_in(pod, Some(&scope))))
+}
+
+pub(crate) async fn inspect_namespace(
+    client: &Client,
+    namespace: &Namespace,
+    epoch: &str,
+) -> Result<(), String> {
+    let pods = Api::<Pod>::namespaced(client.clone(), &namespace.name_any())
+        .list(&ListParams::default())
+        .await
+        .map_err(|_| ERROR)?;
+    if pods
+        .metadata
+        .continue_
+        .as_ref()
+        .is_some_and(|v| !v.is_empty())
+    {
+        return Err(ERROR.into());
+    }
+    let annotations = namespace.metadata.annotations.as_ref().ok_or(ERROR)?;
+    for pod in pods {
+        let uid = pod
             .metadata
-            .continue_
-            .as_ref()
-            .is_some_and(|v| !v.is_empty())
-        {
-            return Err(ERROR.into());
-        }
-        let annotations = namespace.metadata.annotations.as_ref().ok_or(ERROR)?;
-        for pod in pods {
-            let uid = pod
-                .metadata
-                .uid
-                .as_deref()
-                .filter(|v| !v.is_empty())
-                .ok_or(ERROR)?;
-            let spec = pod.spec.as_ref().ok_or(ERROR)?;
-            let raw = serde_json::to_value(spec).map_err(|_| ERROR)?;
-            let sa = spec.service_account_name.as_deref().unwrap_or("default");
-            let private_identity = (namespace.name_any() == field(namespace, "root-namespace")?
-                && sa == field(namespace, "root-account")?)
-                || (namespace.name_any() == "kars-sre" && sa == "sre-api-router")
-                || (namespace.name_any() == "kube-system"
-                    && bundle()["controllers"]
-                        .as_array()
-                        .is_some_and(|names| names.contains(&json!(sa))));
-            let projected_token = raw["volumes"].as_array().is_some_and(|volumes| {
-                volumes.iter().any(|volume| {
-                    volume["projected"]["sources"]
-                        .as_array()
-                        .is_some_and(|sources| {
-                            sources
-                                .iter()
-                                .any(|source| source.get("serviceAccountToken").is_some())
-                        })
-                })
-            });
-            let dangerous = ["hostPID", "hostIPC", "hostNetwork"]
-                .iter()
-                .any(|key| raw[*key] == true)
-                || raw["volumes"].as_array().is_some_and(|volumes| {
-                    volumes
-                        .iter()
-                        .any(|volume| volume.get("hostPath").is_some())
-                })
-                || ["containers", "initContainers", "ephemeralContainers"]
+            .uid
+            .as_deref()
+            .filter(|v| !v.is_empty())
+            .ok_or(ERROR)?;
+        let spec = pod.spec.as_ref().ok_or(ERROR)?;
+        let raw = serde_json::to_value(spec).map_err(|_| ERROR)?;
+        let sa = spec.service_account_name.as_deref().unwrap_or("default");
+        let private_identity = (namespace.name_any() == field(namespace, "root-namespace")?
+            && sa == field(namespace, "root-account")?)
+            || (namespace.name_any() == "kars-sre" && sa == "sre-api-router")
+            || (namespace.name_any() == "kube-system"
+                && bundle()["controllers"]
+                    .as_array()
+                    .is_some_and(|names| names.contains(&json!(sa))));
+        let projected_token = raw["volumes"].as_array().is_some_and(|volumes| {
+            volumes.iter().any(|volume| {
+                volume["projected"]["sources"]
+                    .as_array()
+                    .is_some_and(|sources| {
+                        sources
+                            .iter()
+                            .any(|source| source.get("serviceAccountToken").is_some())
+                    })
+            })
+        });
+        let dangerous = ["hostPID", "hostIPC", "hostNetwork"]
+            .iter()
+            .any(|key| raw[*key] == true)
+            || raw["volumes"].as_array().is_some_and(|volumes| {
+                volumes
                     .iter()
-                    .any(|key| {
-                        raw[*key].as_array().is_some_and(|containers| {
-                            containers.iter().any(|container| {
-                                container["securityContext"]["privileged"] == true
-                                    || container["securityContext"]["capabilities"]["add"]
-                                        .as_array()
-                                        .is_some_and(|caps| {
-                                            caps.iter().any(|cap| {
-                                                [
-                                                    "ALL",
-                                                    "SYS_ADMIN",
-                                                    "SYS_PTRACE",
-                                                    "SYS_MODULE",
-                                                    "SYS_RAWIO",
-                                                    "BPF",
-                                                    "PERFMON",
-                                                    "CHECKPOINT_RESTORE",
-                                                    "DAC_READ_SEARCH",
-                                                ]
-                                                .iter()
-                                                .any(|name| cap.as_str() == Some(*name))
-                                            })
+                    .any(|volume| volume.get("hostPath").is_some())
+            })
+            || ["containers", "initContainers", "ephemeralContainers"]
+                .iter()
+                .any(|key| {
+                    raw[*key].as_array().is_some_and(|containers| {
+                        containers.iter().any(|container| {
+                            container["securityContext"]["privileged"] == true
+                                || container["securityContext"]["capabilities"]["add"]
+                                    .as_array()
+                                    .is_some_and(|caps| {
+                                        caps.iter().any(|cap| {
+                                            [
+                                                "ALL",
+                                                "SYS_ADMIN",
+                                                "SYS_PTRACE",
+                                                "SYS_MODULE",
+                                                "SYS_RAWIO",
+                                                "BPF",
+                                                "PERFMON",
+                                                "CHECKPOINT_RESTORE",
+                                                "DAC_READ_SEARCH",
+                                            ]
+                                            .iter()
+                                            .any(|name| cap.as_str() == Some(*name))
                                         })
-                            })
+                                    })
                         })
-                    });
-            let material = private_material(&pod);
-            let marked = pod.metadata.annotations.as_ref().and_then(|a| a.get(EPOCH));
-            if !material
-                && !dangerous
-                && !(private_identity
-                    && (spec.automount_service_account_token != Some(false) || projected_token))
-                && marked.is_none()
-            {
-                continue;
-            }
-            // Current-epoch consumers were admitted under this exact enforcing
-            // bundle. The policy requires authenticated actor authority as well.
-            if marked.map(String::as_str) == Some(epoch) {
-                use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
-                let owners: Vec<_> = pod
-                    .metadata
-                    .owner_references
-                    .as_ref()
-                    .into_iter()
-                    .flatten()
-                    .filter(|owner| owner.controller == Some(true))
-                    .collect();
-                if owners.len() == 1 {
-                    let owner = owners[0];
-                    let group = match (owner.api_version.as_str(), owner.kind.as_str()) {
-                        ("apps/v1", "ReplicaSet" | "Deployment" | "StatefulSet" | "DaemonSet") => {
-                            "apps"
-                        }
-                        ("batch/v1", "Job" | "CronJob") => "batch",
-                        ("v1", "ReplicationController") => "",
-                        _ => return Err(ERROR.into()),
-                    };
-                    let resource =
-                        ApiResource::from_gvk(&GroupVersionKind::gvk(group, "v1", &owner.kind));
-                    let parent = Api::<DynamicObject>::namespaced_with(
-                        client.clone(),
-                        &namespace.name_any(),
-                        &resource,
-                    )
-                    .get(&owner.name)
-                    .await
-                    .map_err(|_| ERROR)?;
-                    if live(&parent.metadata)?.0 != owner.uid {
-                        return Err(ERROR.into());
+                    })
+                });
+        let material = private_material_in(&pod, Some(namespace));
+        let marked = pod.metadata.annotations.as_ref().and_then(|a| a.get(EPOCH));
+        if !material
+            && !dangerous
+            && !(private_identity
+                && (spec.automount_service_account_token != Some(false) || projected_token))
+            && marked.is_none()
+        {
+            continue;
+        }
+        // Current-epoch consumers were admitted under this exact enforcing
+        // bundle. The policy requires authenticated actor authority as well.
+        if marked.map(String::as_str) == Some(epoch) {
+            use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
+            let owners: Vec<_> = pod
+                .metadata
+                .owner_references
+                .as_ref()
+                .into_iter()
+                .flatten()
+                .filter(|owner| owner.controller == Some(true))
+                .collect();
+            if owners.len() == 1 {
+                let owner = owners[0];
+                let group = match (owner.api_version.as_str(), owner.kind.as_str()) {
+                    ("apps/v1", "ReplicaSet" | "Deployment" | "StatefulSet" | "DaemonSet") => {
+                        "apps"
                     }
-                    let template = if owner.kind == "CronJob" {
-                        &parent.data["spec"]["jobTemplate"]["spec"]["template"]
-                    } else {
-                        &parent.data["spec"]["template"]
-                    };
-                    if template["metadata"]["annotations"][EPOCH] == epoch
-                        || annotations
-                            .get(&format!("{PREFIX}parent-{}", owner.uid))
-                            .map(String::as_str)
-                            == Some(epoch)
-                    {
-                        continue;
-                    }
+                    ("batch/v1", "Job" | "CronJob") => "batch",
+                    ("v1", "ReplicationController") => "",
+                    _ => return Err(ERROR.into()),
+                };
+                let resource =
+                    ApiResource::from_gvk(&GroupVersionKind::gvk(group, "v1", &owner.kind));
+                let parent = Api::<DynamicObject>::namespaced_with(
+                    client.clone(),
+                    &namespace.name_any(),
+                    &resource,
+                )
+                .get(&owner.name)
+                .await
+                .map_err(|_| ERROR)?;
+                if live(&parent.metadata)?.0 != owner.uid {
+                    return Err(ERROR.into());
+                }
+                let template = if owner.kind == "CronJob" {
+                    &parent.data["spec"]["jobTemplate"]["spec"]["template"]
+                } else {
+                    &parent.data["spec"]["template"]
+                };
+                if template["metadata"]["annotations"][EPOCH] == epoch
+                    || annotations
+                        .get(&format!("{PREFIX}parent-{}", owner.uid))
+                        .map(String::as_str)
+                        == Some(epoch)
+                {
+                    continue;
                 }
             }
-            if material
-                || annotations
-                    .get(&format!("{PREFIX}pod-{uid}"))
-                    .map(String::as_str)
-                    != Some(epoch)
-                || annotations.get(&format!("{PREFIX}pod-spec-{uid}")) != Some(&hash(&raw))
-            {
-                return Err("Unexplained or prior-epoch private consumer preserved; operator qualification is required".into());
-            }
         }
-        Ok(())
+        if material
+            || annotations
+                .get(&format!("{PREFIX}pod-{uid}"))
+                .map(String::as_str)
+                != Some(epoch)
+            || annotations.get(&format!("{PREFIX}pod-spec-{uid}")) != Some(&hash(&raw))
+        {
+            return Err("Unexplained or prior-epoch private consumer preserved; operator qualification is required".into());
+        }
     }
-    Ok(!pods.items.iter().any(private_material))
+    Ok(())
 }
 
 #[cfg(test)]
@@ -1003,8 +1150,11 @@ mod tests {
                 }
                 assert_eq!(r.method, "GET");
                 if r.url.path().ends_with("/pods") {
+                    let namespace = r.url.path().split('/').nth(4).unwrap();
+                    let items: Vec<_> = captured.lock().unwrap().values().filter(|value|
+                        value["kind"] == "Pod" && value["metadata"]["namespace"] == namespace).cloned().collect();
                     return ResponseTemplate::new(200).set_body_json(json!({
-                        "apiVersion":"v1","kind":"PodList","metadata":{},"items":[]
+                        "apiVersion":"v1","kind":"PodList","metadata":{},"items":items
                     }));
                 }
                 captured.lock().unwrap().get(r.url.path()).map_or_else(
@@ -1017,6 +1167,14 @@ mod tests {
         let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
         let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
         verify(&client, &grant).await.unwrap();
+        objects.lock().unwrap().insert("/api/v1/namespaces/work/pods/unexplained".into(), json!({
+            "apiVersion":"v1","kind":"Pod","metadata":{"name":"unexplained","namespace":"work",
+                "uid":"foreign-pod","resourceVersion":"1"},
+            "spec":{"containers":[{"name":"reader","image":"fixture"}],
+                "volumes":[{"name":"identity","secret":{"secretName":"router-services-observer-identity"}}]}
+        }));
+        assert!(verify(&client, &grant).await.is_err());
+        *objects.lock().unwrap() = baseline.clone();
         for (path, pointer, value) in [
             (
                 "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/kars-private-consumption",

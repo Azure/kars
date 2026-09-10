@@ -17,6 +17,7 @@ SECRETS = (
     "router-services-admin", "router-services-observer", "router-services-observer-identity",
     "router-github-app", "kars-observation-privacy-tls", "sre-api-router-identity",
 )
+TOKEN_AUDIENCES = ("kars.azure.com/governed-inference-budget",)
 
 
 def variable(name, expression):
@@ -65,7 +66,10 @@ def activation_schema():
         "namespace": identity, "consumers": {"type": "array", "maxItems": 64, "items": consumer}, "epoch": digest,
     }, ["namespace", "consumers"])
     root = object_schema({"namespace": identity, "account": identity, "deployment": identity,
-                          "templateDigest": digest}, ["namespace", "account", "deployment", "templateDigest"])
+                          "templateDigest": digest,
+                          "budgetTls": object_schema({"namespace": identity, "secret": identity, "keyDigest": digest},
+                                                     ["namespace", "secret", "keyDigest"])},
+                         ["namespace", "account", "deployment", "templateDigest"])
     return object_schema({
         "contract": {"type": "string", "enum": ["kars.azure.com/private-consumption/v1"]},
         "phase": {"type": "string", "enum": ["reviewed", "qualified"]},
@@ -94,7 +98,8 @@ def bundle():
         "p.?volumes.orValue([]).exists(v, "
         "(has(v.secret) && v.secret.secretName in variables.secrets) || "
         "(has(v.projected) && v.projected.sources.exists(s, "
-        "has(s.secret) && s.secret.name in variables.secrets)) || "
+        "(has(s.secret) && s.secret.name in variables.secrets) || "
+        "(has(s.serviceAccountToken) && s.serviceAccountToken.?audience.orValue('') in variables.tokenAudiences))) || "
         "(has(v.csi) && has(v.csi.nodePublishSecretRef) && v.csi.nodePublishSecretRef.name in variables.secrets) || "
         "['azureFile','cephfs','cinder','flexVolume','iscsi','rbd','scaleIO','storageos'].exists(k, "
         "k in v && (('secretName' in v[k] && v[k].secretName in variables.secrets) || "
@@ -142,7 +147,10 @@ def bundle():
                  "o.kind == 'CronJob' ? o.spec.jobTemplate.spec.template : "
                  "has(o.spec.template) ? o.spec.template : null).filter(t, t != null)"),
         variable("pods", "variables.templates.map(t, t.spec)"),
-        variable("secrets", repr(list(SECRETS))),
+        variable("secrets", repr(list(SECRETS)) +
+                 f" + (request.namespace == {a}[?'{PREFIX}budget-namespace'].orValue('') ? "
+                 f"[{a}[?'{PREFIX}budget-tls-name'].orValue('')].filter(n, n != '') : [])"),
+        variable("tokenAudiences", repr(list(TOKEN_AUDIENCES))),
         variable("controllers", repr(list(CONTROLLERS))),
         variable("material", material),
         variable("privileged", privileged),
@@ -242,7 +250,7 @@ def bundle():
           "c.observedGeneration == object.metadata.generation))",
           "Private writer Ready requires the current consumption qualification condition")],
     )
-    return {"contract": "kars.azure.com/private-consumption/v1", "secrets": list(SECRETS),
+    return {"contract": "kars.azure.com/private-consumption/v1", "secrets": list(SECRETS), "tokenAudiences": list(TOKEN_AUDIENCES),
             "controllers": list(CONTROLLERS), "activationSchema": activation_schema(), "objects": output}
 
 

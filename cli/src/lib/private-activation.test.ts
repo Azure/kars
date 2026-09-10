@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { describe, expect, it, vi } from "vitest";
+import { rootCertificates } from "node:tls";
 import { applyReviewedGrant } from "../commands/credential-grants.js";
 import {
   bundleDefinition, previewPrivateActivation, stagePrivateActivation, validatePrivateActivation,
@@ -61,6 +62,12 @@ function fixture() {
     const value = objects.get(key(args[1]!, args[2]!, namespace));
     if (!value && args.includes("--ignore-not-found")) return "";
     if (!value) throw new Error("fixture object unavailable");
+    if (args[0] === "get" && args[1] === "secret") {
+      const format = args[args.indexOf("-o") + 1];
+      if (format === "go-template={{json .metadata}}") return JSON.stringify(value.metadata);
+      if (format === "go-template={{.type}}") return value.type;
+      if (format === 'go-template={{index .data "tls.crt"}}') return value.data["tls.crt"];
+    }
     if (args[0] === "get") return JSON.stringify(value);
     if (args[0] !== "patch") throw new Error("Unexpected fixture mutation");
     const patch = JSON.parse(args[args.indexOf("-p") + 1]!);
@@ -75,6 +82,44 @@ function fixture() {
 }
 
 describe("generic private activation staging", () => {
+  it("reviews configurable budget TLS metadata and requires a genuinely different public key before private enrollment", async () => {
+    const f = fixture();
+    const root = f.objects.get(f.key("deployment", "kars-controller", "core"));
+    root.spec.template.spec.containers[0].env = [
+      { name: "KARS_INFERENCE_BUDGET_ENABLED", value: "true" },
+      { name: "KARS_INFERENCE_BUDGET_TLS_SECRET", value: "operator-budget-tls" },
+      { name: "POD_NAMESPACE", valueFrom: { fieldRef: { fieldPath: "metadata.namespace" } } },
+    ];
+    root.metadata.generation = 1;
+    root.status = { observedGeneration: 1, updatedReplicas: 1, availableReplicas: 1 };
+    const secret = { type: "kubernetes.io/tls",
+      metadata: { name: "operator-budget-tls", namespace: "core", uid: "budget-key", resourceVersion: "1",
+        annotations: { "kars.azure.com/inference-budget-tls": "v1" } },
+      data: { "tls.crt": Buffer.from(rootCertificates[0]!).toString("base64") } };
+    f.objects.set(f.key("secret", "operator-budget-tls", "core"), secret);
+    const first = await f.preview();
+    expect(first.root.budgetTls?.secret.uid).toBe("budget-key");
+    await expect(stagePrivateActivation(f.execute, first)).rejects.toThrow("operator rotation");
+    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("public key is unchanged");
+    secret.data["tls.crt"] = Buffer.from(rootCertificates[1]!).toString("base64");
+    secret.metadata.resourceVersion = "2";
+    const staged = await stagePrivateActivation(f.execute, await f.preview());
+    expect(staged.root.budgetTls?.keyDigest).not.toBe(first.root.budgetTls?.keyDigest);
+    await validateQualifiedActivation(f.execute, staged);
+    expect(f.calls.some(args => args[0] === "patch" && args[1] === "secret")).toBe(false);
+    expect(f.calls.some(args => args.some(arg => arg.includes("tls.key")))).toBe(false);
+    secret.metadata.uid = "replacement-budget-key";
+    secret.metadata.resourceVersion = "3";
+    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
+  });
+
+  it("treats the governed budget audience as router-private while public CA projection remains non-secret", () => {
+    expect(privateMaterial({ containers: [], volumes: [{ projected: { sources: [
+      { serviceAccountToken: { audience: "kars.azure.com/governed-inference-budget", path: "token" } },
+    ] } }] })).toBe(true);
+    expect(privateMaterial({ containers: [], volumes: [{ configMap: { name: "kars-inference-budget-ca" } }] })).toBe(false);
+  });
+
   it("applies a qualified receipt through the existing grant command rather than a separate activation command", async () => {
     const f = fixture();
     const review = await f.preview();
