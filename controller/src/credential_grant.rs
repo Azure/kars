@@ -19,6 +19,8 @@ pub const GRANT_OWNER: &str = "kars.azure.com/credential-grant-owner";
 pub const INPUT_STATE: &str = "kars.azure.com/credential-input-state";
 pub const REMOVED_KEYS: &str = "kars.azure.com/credential-removed-keys";
 
+#[path = "credential_grant_activation.rs"]
+pub(crate) mod activation;
 #[path = "credential_grant_schema.rs"]
 pub(crate) mod schema;
 
@@ -160,6 +162,8 @@ pub struct LegacyImport {
 pub struct KarsCredentialGrantSpec {
     pub workspace_uid: String,
     pub writers: Vec<CredentialWriter>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub private_activation: Option<activation::PrivateActivation>,
     #[serde(default)]
     pub agent_keys: Vec<String>,
     #[serde(default)]

@@ -5,6 +5,11 @@ import { Command } from "commander";
 import { readFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execa } from "execa";
+import {
+  previewPrivateActivation, stagePrivateActivation, validatePrivateActivation,
+  validateQualifiedActivation, canonical, type PrivateActivation,
+  verifyOwnedRuntimeNamespace,
+} from "../lib/private-activation.js";
 
 type Execute=(args:string[],input?:string)=>Promise<string>;
 const resource="karscredentialgrants.kars.azure.com";
@@ -44,7 +49,7 @@ function storeKey(purpose:string,name:string,key:string):boolean {
 export async function validateGrantDocument(execute:Execute,document:any):Promise<void>{
   if(document.apiVersion!=="kars.azure.com/v1alpha1"||document.kind!=="KarsCredentialGrant"
     ||document.metadata?.name!=="workspace"||!document.metadata.namespace||!document.spec
-    ||Object.keys(document.spec).some(key=>!["workspaceUid","writers","agentKeys","integrationStores","legacyImports","controller","bridgeConsumers","observationTargets","githubConnections","enabled"].includes(key)))
+    ||Object.keys(document.spec).some(key=>!["workspaceUid","writers","privateActivation","agentKeys","integrationStores","legacyImports","controller","bridgeConsumers","observationTargets","githubConnections","enabled"].includes(key)))
     throw new Error("Only a metadata-only workspace credential grant is accepted");
   const ns=document.metadata.namespace;
   if((await execute(["auth","can-i","manage",`${resource}/workspace`,"-n",ns])).trim()!=="yes")
@@ -106,6 +111,68 @@ export async function validateGrantDocument(execute:Execute,document:any):Promis
     for(const key of review.keys)if(!(key==="TEAMS_ENABLED"&&!review.target)&&!standard.includes(key)&&!document.spec.agentKeys?.includes(key))
       throw new Error(`Legacy key ${key} is not granted; existing values are preserved`);
   }
+  if(document.spec.enabled!==false&&document.spec.writers.length){
+    await validatePrivateActivation(execute,document.spec.privateActivation as PrivateActivation);
+    const activation=document.spec.privateActivation as PrivateActivation;
+    const required=[...new Set([ns,activation.root.namespace.name,
+      ...document.spec.writers.map((writer:any)=>writer.namespace),
+      ...(document.spec.observationTargets??[]).map((target:any)=>`kars-${target.name}`)])].sort();
+    const selected=activation.namespaces.map(scope=>scope.namespace.name);
+    if(required.some(name=>!selected.includes(name)))
+      throw new Error("Private activation must cover this grant's protected namespaces");
+    for(const name of selected.filter(name=>!required.includes(name)))
+      await verifyOwnedRuntimeNamespace(execute,ns,name);
+  }
+}
+
+export async function applyReviewedGrant(run:Execute,document:any):Promise<void> {
+  await validateGrantDocument(run,document);
+  let existing=await get(run,resource,"workspace",document.metadata.namespace);
+  if(existing&&(existing.metadata.uid!==document.metadata.uid||existing.metadata.resourceVersion!==document.metadata.resourceVersion))
+    throw new Error("Grant changed since review; regenerate the metadata-only preview");
+  if(!existing&&(document.metadata.uid||document.metadata.resourceVersion))throw new Error("Reviewed grant disappeared");
+  let stagedSpec=structuredClone(document.spec);
+  let quiescentSpec:unknown;
+  if(document.spec.enabled!==false&&document.spec.writers.length){
+    if(existing&&existing.spec.writers.length){
+      quiescentSpec={...existing.spec,writers:[]};
+      await run(["patch",resource,"workspace","-n",document.metadata.namespace,"--type=merge","-p",JSON.stringify({
+        metadata:{uid:existing.metadata.uid,resourceVersion:existing.metadata.resourceVersion},spec:quiescentSpec,
+      })]);
+      const deadline=Date.now()+120_000;
+      for(;;){
+        const current=await get(run,resource,"workspace",document.metadata.namespace);
+        if(!current||current.metadata.uid!==existing.metadata.uid||canonical(current.spec)!==canonical(quiescentSpec))
+          throw new Error("Grant changed while retiring prior private writer authority");
+        if(current.status?.observedGeneration===current.metadata.generation
+          &&current.status?.conditions?.some((c:any)=>c.type==="WriterReady"&&c.status==="False")){
+          const inventory=JSON.parse(await run(["get","roles,rolebindings,clusterroles,clusterrolebindings",
+            "--all-namespaces","--chunk-size=0","-o","json"]));
+          if(!Array.isArray(inventory.items)||inventory.metadata?.continue)
+            throw new Error("Private authority retirement inventory is incomplete");
+          if(!inventory.items.some((object:any)=>
+            object.metadata?.annotations?.["kars.azure.com/credential-grant-owner"]===existing.metadata.uid)){
+            existing=current;break;
+          }
+        }
+        if(Date.now()>=deadline)throw new Error("Prior writer authority retirement is still pending; no new activation was published");
+        await new Promise(resolve=>setTimeout(resolve,500));
+      }
+    }
+    stagedSpec.privateActivation=await stagePrivateActivation(run,document.spec.privateActivation);
+    await validateQualifiedActivation(run,stagedSpec.privateActivation);
+  }
+  if(existing){
+    const current=await get(run,resource,"workspace",document.metadata.namespace);
+    if(!current||current.metadata.uid!==existing.metadata.uid
+      ||canonical(current.spec)!==canonical(quiescentSpec??existing.spec))
+      throw new Error("Grant changed before qualified publication");
+    await run(["patch",resource,"workspace","-n",document.metadata.namespace,"--type=merge","-p",JSON.stringify({
+      metadata:{uid:current.metadata.uid,resourceVersion:current.metadata.resourceVersion},spec:stagedSpec,
+    })]);
+  }else{
+    await run(["create","-f","-"],JSON.stringify({...document,spec:stagedSpec}));
+  }
 }
 
 export function credentialGrantsCommand():Command {
@@ -122,6 +189,9 @@ export function credentialGrantsCommand():Command {
     .option("--controller","Enroll this workspace's controller Deployment")
     .option("--bridge-consumers","Enroll the existing BFF and Teams gateway Deployments")
     .option("--observe <sandbox>","Explicit Sandbox target for private read-only observations",repeat,[])
+    .option("--private-root <namespace>","Explicit installed controller namespace for private capability activation")
+    .option("--private-controller-profile <profile>","service-accounts or kcm-certificate")
+    .option("--private-consumer <namespace/Kind/name>","Explicit reviewed existing private consumer",repeat,[])
     .option("--github-review <file>","Reviewed metadata-only GitHub connection/App/repository enrollments")
     .option("--legacy-review <file>","Reviewed legacySources metadata from the grant status")
     .option("--context <context>")
@@ -167,25 +237,17 @@ export function credentialGrantsCommand():Command {
         (document.spec.observationTargets as Array<{kind:string;namespace:string;name:string;uid:string}>).push({
           kind:"KarsSandbox",namespace:options.namespace,name,uid:target.metadata.uid});
       }
-      await validateGrantDocument(run,document);
-      console.log(JSON.stringify(document,null,2));
+      const reviewedDocument={...document,spec:{...document.spec,privateActivation:await previewPrivateActivation(
+        run,options.namespace,writers,document.spec.observationTargets,options.privateRoot,
+        options.privateControllerProfile,options.privateConsumer)}};
+      await validateGrantDocument(run,reviewedDocument);
+      console.log(JSON.stringify(reviewedDocument,null,2));
     });
   command.command("apply").argument("<reviewed-file>").option("--context <context>")
     .action(async(file,options)=>{
       const run=execute(options.context);
       const document=JSON.parse(readFileSync(file,"utf8"));
-      await validateGrantDocument(run,document);
-      const existing=await get(run,resource,"workspace",document.metadata.namespace);
-      if(existing){
-        if(existing.metadata.uid!==document.metadata.uid||existing.metadata.resourceVersion!==document.metadata.resourceVersion)
-          throw new Error("Grant changed since review; regenerate the metadata-only preview");
-        await run(["patch",resource,"workspace","-n",document.metadata.namespace,"--type=merge","-p",JSON.stringify({
-          metadata:{uid:document.metadata.uid,resourceVersion:document.metadata.resourceVersion},spec:document.spec,
-        })]);
-      } else {
-        if(document.metadata.uid||document.metadata.resourceVersion)throw new Error("Reviewed grant disappeared");
-        await run(["create","-f","-"],JSON.stringify(document));
-      }
+      await applyReviewedGrant(run,document);
       console.log("Reviewed credential grant recorded; wait for its current Ready condition before using the private adapter.");
     });
   command.command("bootstrap-store").requiredOption("--namespace <namespace>").requiredOption("--name <name>")

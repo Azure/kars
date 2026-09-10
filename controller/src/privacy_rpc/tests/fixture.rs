@@ -65,7 +65,8 @@ pub fn enroll(data: &mut Data) -> String {
     data.objects
         .insert(REG.into(), serde_json::to_value(registration).unwrap());
     data.objects.insert("/apis/apps/v1/namespaces/kars-system/deployments/kars-controller".into(),json!({
-        "metadata":{"name":"kars-controller","namespace":"kars-system","uid":"controller-deploy","resourceVersion":"1"}
+        "metadata":{"name":"kars-controller","namespace":"kars-system","uid":"controller-deploy","resourceVersion":"1"},
+        "spec":{"template":{"spec":{"serviceAccountName":"kars-controller"}}}
     }));
     data.objects.insert("/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/sre".into(),json!({
         "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsSandbox",
@@ -106,7 +107,8 @@ pub fn bind(data: &mut Data, request: &wire::Request) {
     data.objects.insert(SOURCE.into(),json!({"apiVersion":"v1","kind":"Secret","type":"Opaque",
         "metadata":{"name":crate::service_observer::SECRET,"namespace":"kars-agent","uid":"observer-secret","resourceVersion":"1",
             "labels":{"app.kubernetes.io/managed-by":"kars-controller"},"annotations":{"kars.azure.com/sandbox-uid":"target-uid",
-                "kars.azure.com/namespace-uid":"runtime-uid","kars.azure.com/services-privacy-revision":crate::sre_privacy::REVISION}},
+                "kars.azure.com/namespace-uid":"runtime-uid","kars.azure.com/services-privacy-revision":crate::sre_privacy::REVISION,
+                crate::private_activation::EPOCH:"a".repeat(64)}},
         "data":{"observation-token":ByteString(TOKEN.as_bytes().to_vec()),
             "config.json":ByteString(serde_json::to_vec(&binding).unwrap())}}));
     if let Some(epoch) = &request.epoch {
@@ -202,6 +204,18 @@ pub async fn fixture() -> (
             d.objects.insert(format!("/api/v1/namespaces/{ns}/serviceaccounts/{name}"),json!({
                 "apiVersion":"v1","kind":"ServiceAccount","metadata":{"name":name,"namespace":ns,"uid":uid,"resourceVersion":"1"}}));
         }
+        let activation = crate::private_activation::test_support::install(
+            &mut d.objects,
+            "kars-system",
+            "system",
+            "controller-sa",
+            &[
+                ("workspace", "workspace-uid"),
+                ("bridge", "bridge-uid"),
+                ("kars-agent", "runtime-uid"),
+            ],
+        );
+        d.objects.get_mut(GRANT).unwrap()["spec"]["privateActivation"] = activation;
         for path in [
             "/api/v1/namespaces/bridge",
             "/api/v1/namespaces/bridge/serviceaccounts/bff",
@@ -213,7 +227,8 @@ pub async fn fixture() -> (
         }
         let meta = |name: &str, uid: &str| {
             json!({"name":name,"namespace":"kars-system","uid":uid,"resourceVersion":"1",
-            "annotations":{wire::CONTROLLER_UID:"controller-sa",wire::NAMESPACE_UID:"system"}})
+            "annotations":{wire::CONTROLLER_UID:"controller-sa",wire::NAMESPACE_UID:"system",
+                crate::private_activation::EPOCH:"a".repeat(64)}})
         };
         d.objects.insert(format!("/api/v1/namespaces/kars-system/secrets/{}",wire::SECRET),
             json!({"apiVersion":"v1","kind":"Secret","metadata":meta(wire::SECRET,"tls"),"type":"Opaque"}));
@@ -265,6 +280,14 @@ pub async fn fixture() -> (
         }
         if r.method=="GET" {
             if let Some(value)=d.objects.get(path) { return ResponseTemplate::new(200).set_body_json(value); }
+            if path.ends_with("/pods") {
+                let namespace = path.split('/').nth(4).unwrap();
+                let items: Vec<_> = d.objects.values().filter(|value|
+                    value["kind"] == "Pod" && value["metadata"]["namespace"] == namespace).cloned().collect();
+                return ResponseTemplate::new(200).set_body_json(json!({
+                    "apiVersion":"v1","kind":"PodList","metadata":{},"items":items
+                }));
+            }
             if path.contains("/validatingadmissionpolicies/") { return ResponseTemplate::new(200).set_body_json(json!({
                 "metadata":{"name":path.rsplit('/').next().unwrap(),"generation":1},"spec":{"failurePolicy":if d.policy {"Ignore"}else{"Fail"}},
                 "status":{"observedGeneration":1,"typeChecking":{}}})); }

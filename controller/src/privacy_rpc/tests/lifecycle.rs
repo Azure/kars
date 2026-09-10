@@ -10,6 +10,15 @@ fn prepare_environment(data: &mut Data) {
             "resourceVersion":"1","labels":{"app.kubernetes.io/name":"kars","app.kubernetes.io/component":"controller"}},
         "spec":{"serviceAccountName":"kars-controller","containers":[{"name":"controller","image":"test:latest"}]}
     }));
+    let digest = crate::private_activation::test_support::pod_spec_digest(
+        &data.objects["/api/v1/namespaces/kars-system/pods/controller"]["spec"],
+    );
+    let annotations = &mut data
+        .objects
+        .get_mut("/api/v1/namespaces/kars-system")
+        .unwrap()["metadata"]["annotations"];
+    annotations["kars.azure.com/private-pod-controller-pod"] = "a".repeat(64).into();
+    annotations["kars.azure.com/private-pod-spec-controller-pod"] = digest.into();
     data.objects.insert(
         "/apis/networking.k8s.io/v1/namespaces/kars-system/networkpolicies".into(),
         json!({

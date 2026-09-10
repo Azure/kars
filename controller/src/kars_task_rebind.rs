@@ -332,6 +332,9 @@ pub(crate) async fn apply_deployment(
     identity: &serde_json::Value,
 ) -> Result<(), String> {
     fence_deployment(client, sandbox, &mut deployment, identity).await?;
+    if crate::private_activation::apply_deployment(client, sandbox, &mut deployment).await? {
+        return Ok(());
+    }
     Api::<k8s_openapi::api::apps::v1::Deployment>::namespaced(
         client.clone(),
         &format!("kars-{}", sandbox.name_any()),
