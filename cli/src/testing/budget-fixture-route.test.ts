@@ -2,10 +2,42 @@
 // Licensed under the MIT License.
 
 import { describe, expect, it } from "vitest";
-import { readFileSync } from "node:fs";
+import { readFileSync, mkdirSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 const route = await import(new URL("../../../tests/e2e/budget-fixture-route.mjs", import.meta.url).href);
 
 describe("budget named-provider fixture and private readiness diagnostics", () => {
+  it("issues a real server leaf and rejects a CA used as the server certificate", () => {
+    const evidence = new URL("../../../.standalone-ci-evidence/", import.meta.url);
+    mkdirSync(evidence, { recursive: true, mode: 0o700 });
+    const directory = fileURLToPath(new URL(`tls-profile-test-${process.pid}-${Date.now()}/`, evidence));
+    mkdirSync(directory, { mode: 0o700 });
+    try {
+      const generate = (extensions: string[], host = "kars-inference-budget.kars-system.svc") => {
+        try {
+          execFileSync("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
+            "-keyout", `${directory}/tls.key`, "-out", `${directory}/tls.crt`,
+            "-subj", `/CN=${host}`, "-addext", `subjectAltName=DNS:${host}`, ...extensions],
+          { stdio: "ignore", timeout: 30_000 });
+        } catch { throw new Error("Budget fixture certificate generation failed"); }
+        return readFileSync(`${directory}/tls.crt`);
+      };
+      expect(() => route.verifyFixtureCertificate(generate(route.TLS_SERVER_EXTENSIONS))).not.toThrow();
+      expect(() => route.verifyFixtureCertificate(generate([
+        "-addext", "basicConstraints=critical,CA:TRUE",
+        "-addext", "extendedKeyUsage=serverAuth",
+      ]))).toThrow("end entity, not a CA");
+      expect(() => route.verifyFixtureCertificate(generate(route.TLS_SERVER_EXTENSIONS, "wrong.invalid")))
+        .toThrow("SAN must match");
+      const harness = readFileSync(new URL("../../../tests/e2e/inference-budget-enforcement.mjs", import.meta.url), "utf8");
+      expect(harness).toContain("...TLS_SERVER_EXTENSIONS");
+      expect(harness.indexOf("verifyFixtureCertificate(certificate)")).toBeLessThan(
+        harness.indexOf('type: "kubernetes.io/tls"'));
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  });
   it("registers the exact anonymous local endpoint, without credentials or a native-provider fallback", () => {
     const source = route.providerSource("kars-system");
     expect(source.metadata).toEqual({ name: "kars-inference-providers", namespace: "kars-system" });

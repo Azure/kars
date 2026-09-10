@@ -2,9 +2,25 @@
 // Licensed under the MIT License.
 
 import assert from "node:assert/strict";
+import { X509Certificate } from "node:crypto";
 
 export const PROVIDER = "budget-fixture";
 export const ENDPOINT = "http://provider.budget-provider-fixture.svc.cluster.local:8000/v1";
+export const TLS_SERVER_EXTENSIONS = [
+  "-addext", "basicConstraints=critical,CA:FALSE",
+  "-addext", "keyUsage=critical,digitalSignature,keyEncipherment",
+  "-addext", "extendedKeyUsage=serverAuth",
+];
+
+export function verifyFixtureCertificate(certificate) {
+  const leaf = new X509Certificate(certificate);
+  assert(!leaf.ca, "Budget fixture TLS server certificate must be an end entity, not a CA");
+  assert(leaf.checkHost("kars-inference-budget.kars-system.svc", { subject: "never" }),
+    "Budget fixture TLS server SAN must match the private broker hostname");
+  assert(leaf.keyUsage?.includes("1.3.6.1.5.5.7.3.1"),
+    "Budget fixture TLS certificate must explicitly authorize server authentication");
+}
+
 export function providerSource(namespace) {
   return { apiVersion: "v1", kind: "Secret", type: "Opaque",
     metadata: { name: "kars-inference-providers", namespace },

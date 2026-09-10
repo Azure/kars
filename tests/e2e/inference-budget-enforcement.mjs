@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { prepareRouterImage } from "./kind-router-image.mjs";
 import { PROVIDER, ENDPOINT, providerSource, verifyFixturePolicy, readinessFact,
-  budgetStageFacts, routerTemplateFacts } from "./budget-fixture-route.mjs";
+  budgetStageFacts, routerTemplateFacts, TLS_SERVER_EXTENSIONS, verifyFixtureCertificate } from "./budget-fixture-route.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const context = "kind-kars-e2e";
@@ -203,8 +203,10 @@ async function scenario() {
   execute("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
     "-keyout", join(scratch, "tls.key"), "-out", join(scratch, "tls.crt"),
     "-subj", "/CN=kars-inference-budget.kars-system.svc",
-    "-addext", "subjectAltName=DNS:kars-inference-budget.kars-system.svc"]);
+    "-addext", "subjectAltName=DNS:kars-inference-budget.kars-system.svc",
+    ...TLS_SERVER_EXTENSIONS]);
   const certificate = readFileSync(join(scratch, "tls.crt"));
+  verifyFixtureCertificate(certificate);
   create({ apiVersion: "v1", kind: "Secret",
     metadata: { name: "budget-fixture-tls", namespace, annotations: { "kars.azure.com/inference-budget-tls": "v1" } },
     type: "kubernetes.io/tls", data: { "tls.crt": certificate.toString("base64"),
