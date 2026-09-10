@@ -11,6 +11,29 @@ Only explicitly delegated registrars can author it; the controller can read,
 use, and reconcile status. Namespace occupancy, SRE labels, account names, and
 Helm-looking metadata are not privilege delegation.
 
+## ReplicationController template boundary repair
+
+A focused source review found that the private workload-template policy omitted
+core/v1 ReplicationControllers. The candidate adds their CREATE/UPDATE operations
+to the existing policy without broadening its authority exemptions. The
+ReplicaSet-controller exception remains specific to `apps/replicasets`.
+Selector-only ReplicationControllers without a Pod template are excluded from
+template inspection; any supplied template remains checked.
+
+Regression coverage extends the image-free admission cases and the actual
+enrolled-SRE lane. The latter checks a tenant with namespaced ReplicationController
+creation/update and Pod-log access, but no cluster-wide Pod-create or Secret-get
+authority. Ordinary requests must succeed; private Secret volumes, projected
+Secrets, environment references, init-container references and the private
+ServiceAccount must receive the intended policy denial on CREATE and UPDATE.
+Only a zero-replica ordinary fixture is stored. Private variants are dry runs;
+all templates are nonexecuting, and no credential-reading or exfiltration
+payload is used. Cleanup retains UID/resourceVersion fences.
+
+The 99 Python harness tests and Helm lint pass locally. Native compilation and
+admission results plus focused security re-review remain required before this
+finding can be considered closed. This record is not a sign-off.
+
 ## Kubernetes 1.31 controller-manager compatibility
 
 Real Kubernetes v1.31.0 evidence showed that the controller Pod was not rejected:
