@@ -8,6 +8,7 @@ import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
+import { runWorkloadProof } from "./budget-workload-cases.mjs";
 
 const require = createRequire(new URL("../../cli/package.json", import.meta.url));
 const { parseAllDocuments } = require("yaml");
@@ -173,4 +174,8 @@ assert.equal(review.status.authenticated, true);
 assert.deepEqual(review.status.audiences, [audience]);
 assert.deepEqual(review.status.user.extra["authentication.kubernetes.io/pod-uid"], [pod.metadata.uid]);
 assert.deepEqual(review.status.user.extra["authentication.kubernetes.io/pod-name"], ["identity"]);
+await runWorkloadProof({
+  root, context, kubectl, until, namespace, controller, principal,
+  policy: shared.items.find(policy => policy.name === "kars-inference-budget-workloads"),
+});
 console.log("Budget public CRDs/CEL, controller-only accounting/CA, private audience issuance and UID claims passed on disposable Kubernetes v1.31");
