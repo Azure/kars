@@ -15,6 +15,20 @@ POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
 
 
 class BootstrapProofTests(unittest.TestCase):
+    def test_policy_compile_diagnostics_keep_only_known_fields_and_token_categories(self):
+        body = {"kind": "Status", "reason": "Invalid", "details": {
+            "group": "admissionregistration.k8s.io", "kind": "ValidatingAdmissionPolicy",
+            "name": "kars-sre-private-mounts", "causes": [
+                {"field": "spec.matchConditions[0].expression",
+                 "message": "compilation failed: undefined field 'metadata'; optional overload do-not-publish"},
+                {"field": "spec.arbitrary", "message": "do-not-publish"},
+            ]}}
+        facts = api_result(422, body, POLICIES)
+        self.assertEqual(facts["compilationCauses"][0]["knownTokens"], ["metadata"])
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+        body["details"]["name"] = "unrelated"
+        self.assertNotIn("compilationCauses", api_result(422, body, POLICIES))
+
     def test_namespace_cleanup_proof_retains_guard_and_fences_all_deletes(self):
         from sre_authority.bootstrap_cases import namespace_cleanup_cases
         deployment = {"metadata": {"uid": "owned", "resourceVersion": "2"}}
