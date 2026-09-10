@@ -229,8 +229,38 @@ def api_result(code, body, policies):
     report = {"httpStatus": code}
     if isinstance(body, dict) and body.get("kind") == "Status":
         reason = body.get("reason")
-        report["reason"] = reason if reason in REASONS else "unclassified"
+        report["reason"] = reason if isinstance(reason, str) and reason in REASONS else "unclassified"
         report.update(failure_facts(body.get("message"), policies))
+        details = body.get("details", {})
+        if (code == 422 and reason == "Invalid" and isinstance(details, dict)
+                and details.get("group") == "admissionregistration.k8s.io"
+                and details.get("kind") == "ValidatingAdmissionPolicy"
+                and isinstance(details.get("name"), str)
+                and details.get("name") in policies):
+            causes = []
+            supplied = details.get("causes", [])
+            if not isinstance(supplied, list):
+                return report
+            for cause in supplied[:32]:
+                if not isinstance(cause, dict):
+                    continue
+                field, message = cause.get("field"), cause.get("message")
+                if not isinstance(field, str) or len(field) > 128 or not re.fullmatch(
+                        r"spec\.(matchConditions|variables|validations)\[\d+\]\.expression", field):
+                    continue
+                if not isinstance(message, str):
+                    continue
+                allowed = FIELDS | {"metadata", "request", "object", "oldObject", "orValue", "has", "exists"}
+                tokens = sorted(set(re.findall(
+                    r"(?:undefined field|undeclared reference to) ['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
+                    message)) & allowed)
+                causes.append({"field": field, "knownTokens": tokens,
+                    "categories": [category for category, needle in [
+                        ("overload", "matching overload"), ("syntax", "Syntax error"),
+                        ("undefined-field", "undefined field"), ("undeclared-reference", "undeclared reference"),
+                        ("optional", "optional"), ("cost", "cost"),
+                    ] if needle.lower() in message.lower()]})
+            report["compilationCauses"] = causes
     return report
 
 
