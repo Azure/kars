@@ -214,6 +214,10 @@ pub(super) async fn reconcile(
             status.phase = "Ready".into();
             status.reason = "PrivateVerifierQualified".into();
         }
+        if !rolled_out {
+            let _diagnostic =
+                crate::observation_privacy::Readiness::new("consumer_rollout_pending");
+        }
         ready &= status.phase == "Ready";
         publish(client, &sandbox, Some(status)).await?;
     }

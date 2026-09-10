@@ -46,14 +46,19 @@ pub(super) async fn probe(
     binding: &Binding,
     version: &str,
 ) -> Result<bool, String> {
+    let mut diagnostic = crate::observation_privacy::Readiness::new("consumer_namespace");
     crate::reconciler::namespace_ownership::recheck(client, sandbox, namespace)
         .await
         .map_err(|_| "Observation probe namespace changed")?;
     let runtime = namespace.name_any();
+    diagnostic.stage("consumer_credential");
     let secret = Api::<Secret>::namespaced(client.clone(), &runtime)
         .get(crate::service_observer::SECRET)
         .await
-        .map_err(|e| api_error("Read exact observation probe credential", e))?;
+        .map_err(|error| {
+            diagnostic.api(&error);
+            api_error("Read exact observation probe credential", error)
+        })?;
     governed_services::credentials::validate(
         &secret,
         sandbox
@@ -84,15 +89,20 @@ pub(super) async fn probe(
             .0,
     )
     .map_err(|_| "Observation token invalid")?;
+    diagnostic.stage("consumer_pods");
     let pods = Api::<Pod>::namespaced(client.clone(), &runtime)
         .list(
             &ListParams::default()
                 .labels(&format!("kars.azure.com/sandbox={}", sandbox.name_any())),
         )
         .await
-        .map_err(|e| api_error("Read current observation consumers", e))?;
+        .map_err(|error| {
+            diagnostic.api(&error);
+            api_error("Read current observation consumers", error)
+        })?;
     let mut seen = false;
     for pod in pods {
+        diagnostic.stage("consumer_rollout");
         if pod.metadata.deletion_timestamp.is_some() {
             return Ok(false);
         }
@@ -107,6 +117,7 @@ pub(super) async fn probe(
         {
             return Ok(false);
         }
+        diagnostic.stage("consumer_lineage");
         let owner = pod
             .metadata
             .owner_references
@@ -122,7 +133,10 @@ pub(super) async fn probe(
         let set = Api::<ReplicaSet>::namespaced(client.clone(), &runtime)
             .get(&owner.name)
             .await
-            .map_err(|e| api_error("Read observation consumer lineage", e))?;
+            .map_err(|error| {
+                diagnostic.api(&error);
+                api_error("Read observation consumer lineage", error)
+            })?;
         if set.uid().as_deref() != Some(owner.uid.as_str())
             || set.metadata.deletion_timestamp.is_some()
             || set.metadata.owner_references.as_ref().is_none_or(|owners| {
@@ -136,6 +150,7 @@ pub(super) async fn probe(
         {
             return Err("Observation consumer lineage changed".into());
         }
+        diagnostic.stage("consumer_address");
         let Some(ip) = pod
             .status
             .as_ref()
@@ -144,6 +159,7 @@ pub(super) async fn probe(
         else {
             return Ok(false);
         };
+        diagnostic.stage("observer_tls_client");
         let ca = reqwest::Certificate::from_pem(binding.ca_pem.as_bytes())
             .map_err(|_| "Observation CA invalid")?;
         let http = reqwest::Client::builder()
@@ -159,7 +175,8 @@ pub(super) async fn probe(
             .timeout(std::time::Duration::from_secs(12))
             .build()
             .map_err(|_| "Observation probe TLS unavailable")?;
-        let Ok(response) = http
+        diagnostic.stage("observer_transport");
+        let response = match http
             .get(format!(
                 "https://{}:{}/internal/observations/scope",
                 binding.server_name,
@@ -168,15 +185,23 @@ pub(super) async fn probe(
             .bearer_auth(token)
             .send()
             .await
-        else {
-            return Ok(false);
+        {
+            Ok(response) => response,
+            Err(error) => {
+                diagnostic.transport(&error);
+                return Ok(false);
+            }
         };
+        diagnostic.stage("observer_http");
+        diagnostic.status(response.status().as_u16());
         if response.status() != reqwest::StatusCode::OK {
             return Ok(false);
         }
+        diagnostic.stage("observer_body");
         let Ok(value) = read_body(response).await else {
             return Ok(false);
         };
+        diagnostic.stage("observer_scope_binding");
         if value["capability"] != crate::service_observer::CAPABILITY
             || value["privacy_verifier"] != crate::observation_privacy::CAPABILITY
             || value["identity"] != binding.identity
@@ -185,6 +210,11 @@ pub(super) async fn probe(
             return Ok(false);
         }
         seen = true;
+    }
+    if seen {
+        diagnostic.finish();
+    } else {
+        diagnostic.stage("consumer_absent");
     }
     Ok(seen)
 }

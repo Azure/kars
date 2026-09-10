@@ -18,6 +18,72 @@ pub const REVISION_LABEL: &str = "kars.azure.com/observation-privacy-revision";
 pub const CONTROLLER_UID: &str = "kars.azure.com/privacy-controller-uid";
 pub const NAMESPACE_UID: &str = "kars.azure.com/privacy-namespace-uid";
 
+/// Failure-only local diagnostics. Dropping an unfinished check also records
+/// its last stage when an enclosing deadline cancels an in-flight API request.
+pub(crate) struct Readiness {
+    stage: &'static str,
+    complete: bool,
+    http_status: u16,
+    timeout: bool,
+    connect: bool,
+}
+
+impl Readiness {
+    pub(crate) fn new(stage: &'static str) -> Self {
+        Self {
+            stage,
+            complete: false,
+            http_status: 0,
+            timeout: false,
+            connect: false,
+        }
+    }
+
+    pub(crate) fn stage(&mut self, stage: &'static str) {
+        self.stage = stage;
+        self.http_status = 0;
+        self.timeout = false;
+        self.connect = false;
+    }
+
+    pub(crate) fn finish(&mut self) {
+        self.complete = true;
+    }
+
+    pub(crate) fn status(&mut self, status: u16) {
+        self.http_status = status;
+    }
+
+    pub(crate) fn transport(&mut self, error: &reqwest::Error) {
+        self.timeout = error.is_timeout();
+        self.connect = error.is_connect();
+    }
+
+    pub(crate) fn deadline(&mut self) {
+        self.timeout = true;
+    }
+
+    pub(crate) fn api(&mut self, error: &kube::Error) {
+        if let kube::Error::Api(response) = error {
+            self.http_status = response.code;
+        }
+    }
+}
+
+impl Drop for Readiness {
+    fn drop(&mut self) {
+        if !self.complete {
+            tracing::warn!(
+                stage = self.stage,
+                http_status = self.http_status,
+                timeout = self.timeout,
+                connect = self.connect,
+                "Private observation readiness pending"
+            );
+        }
+    }
+}
+
 pub fn name(value: &str, max: usize) -> bool {
     !value.is_empty()
         && value.len() <= max
@@ -245,4 +311,102 @@ pub fn audience_tls_reviews(
         }
     }
     reviews
+}
+
+#[cfg(test)]
+mod readiness_tests {
+    use super::Readiness;
+    use std::{
+        io::{self, Write},
+        sync::{Arc, Mutex},
+    };
+
+    struct Output(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for Output {
+        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(bytes);
+            Ok(bytes.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    fn capture(operation: impl FnOnce()) -> String {
+        let bytes = Arc::new(Mutex::new(Vec::new()));
+        let output = bytes.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .without_time()
+            .with_ansi(false)
+            .with_target(false)
+            .with_writer(move || Output(output.clone()))
+            .finish();
+        tracing::subscriber::with_default(subscriber, operation);
+        String::from_utf8(bytes.lock().unwrap().clone()).unwrap()
+    }
+
+    #[test]
+    fn observation_readiness_diagnostics_emit_only_the_last_static_stage_and_http_code() {
+        let output = capture(|| {
+            let mut diagnostic = Readiness::new("observer_binding");
+            diagnostic.stage("observer_target_read");
+            diagnostic.api(&kube::Error::Api(kube::core::ErrorResponse {
+                status: "Failure".into(),
+                reason: "private-reason-canary".into(),
+                message: "private-body-canary".into(),
+                code: 403,
+            }));
+        });
+        assert!(output.contains("stage=\"observer_target_read\""));
+        assert!(output.contains("http_status=403"));
+        assert!(!output.contains("observer_binding"));
+        assert!(!output.contains("canary"));
+        assert_eq!(output.lines().count(), 1);
+    }
+
+    #[test]
+    fn observation_readiness_diagnostics_distinguish_deadlines_and_suppress_success() {
+        let output = capture(|| {
+            let mut diagnostic = Readiness::new("rpc_authority");
+            diagnostic.deadline();
+        });
+        assert!(output.contains("timeout=true"));
+        assert!(output.contains("connect=false"));
+        assert!(
+            capture(|| {
+                let mut diagnostic = Readiness::new("rpc_authority");
+                diagnostic.finish();
+            })
+            .is_empty()
+        );
+    }
+
+    #[test]
+    fn observation_readiness_diagnostics_retain_the_cancelled_stage_without_false_status() {
+        use std::{
+            future::{Future, pending},
+            task::{Context, Waker},
+        };
+        let output = capture(|| {
+            let mut check = Box::pin(async {
+                let mut diagnostic = Readiness::new("verifier_http");
+                diagnostic.status(200);
+                diagnostic.stage("verifier_body");
+                pending::<()>().await;
+                diagnostic.finish();
+            });
+            assert!(
+                check
+                    .as_mut()
+                    .poll(&mut Context::from_waker(Waker::noop()))
+                    .is_pending()
+            );
+            drop(check);
+        });
+        assert!(output.contains("stage=\"verifier_body\""));
+        assert!(output.contains("http_status=0"));
+        assert!(output.contains("timeout=false"));
+    }
 }

@@ -137,6 +137,22 @@ controller verifies current Pod→ReplicaSet→Deployment lineage and the live T
 scope response declares the new verifier. Failed/Pending probes preserve the
 unfinished rollout rather than destroying it.
 
+When readiness remains `Prepared`, the controller and router emit failure-only
+`Private observation readiness pending` events. These contain a fixed `stage`,
+numeric `http_status` (`0` means no HTTP status recorded), and `timeout`/`connect`
+classification booleans. No error text, credential, endpoint, identity, scope,
+request, or proof is included. An interrupted check records its last stage;
+the enclosing route/RPC event separately marks an elapsed deadline. A `false`
+transport flag alone is not proof of connectivity.
+
+Use `consumer_*` stages for rollout/lineage, `observer_transport` and
+`observer_http` for the controller-to-9447 path, `observer_*_read` for router
+metadata access, `verifier_*` for live endpoint discovery and pinned 9448
+exchange, and `rpc_*` for the controller's current authority/privacy proof.
+An HTTP 403 does not alone distinguish bearer rejection from a failed live
+proof. Diagnostics do not make `Prepared` ready, change denial responses,
+cache proofs, or replace TLS, network, rotation, and unauthorized-peer tests.
+
 ## Operator workflow
 
 Install the new CRD, controller and admission policies first. Install the private

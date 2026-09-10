@@ -50,10 +50,12 @@ fn app(state: Arc<ServerState>) -> Router {
 }
 
 async fn verify(State(state): State<Arc<ServerState>>, request: Request) -> Response {
+    let mut diagnostic = wire::Readiness::new("rpc_capacity");
     let Ok(_permit) = state.capacity.clone().try_acquire_owned() else {
         return deny();
     };
     let operation = async {
+        diagnostic.stage("rpc_headers");
         if request.method() != Method::POST
             || request.uri().query().is_some()
             || request.headers().get_all("authorization").iter().count() != 1
@@ -65,6 +67,7 @@ async fn verify(State(state): State<Arc<ServerState>>, request: Request) -> Resp
         {
             return None;
         }
+        diagnostic.stage("rpc_authorization");
         let token = request
             .headers()
             .get("authorization")?
@@ -75,20 +78,32 @@ async fn verify(State(state): State<Arc<ServerState>>, request: Request) -> Resp
             return None;
         }
         let token = token.to_string();
+        diagnostic.stage("rpc_endpoint_available");
         let endpoint = state.endpoint.read().await.clone()?;
+        diagnostic.stage("rpc_body");
         let bytes = to_bytes(request.into_body(), wire::MAX_BODY).await.ok()?;
+        diagnostic.stage("rpc_request_json");
         let request: wire::Request = serde_json::from_slice(&bytes).ok()?;
+        diagnostic.stage("rpc_authority");
         let proof = authority::verify(&state.client, &request, &token, &endpoint)
             .await
             .ok()?;
+        diagnostic.stage("rpc_proof_current");
         if !proof.matches(&request) || state.endpoint.read().await.as_ref() != Some(&endpoint) {
             return None;
         }
         Some(proof)
     };
     match tokio::time::timeout(Duration::from_secs(wire::DEADLINE_SECONDS), operation).await {
-        Ok(Some(proof)) => Json(proof).into_response(),
-        _ => deny(),
+        Ok(Some(proof)) => {
+            diagnostic.finish();
+            Json(proof).into_response()
+        }
+        Ok(None) => deny(),
+        Err(_) => {
+            diagnostic.deadline();
+            deny()
+        }
     }
 }
 
