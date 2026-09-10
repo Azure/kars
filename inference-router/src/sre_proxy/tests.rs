@@ -12,6 +12,26 @@ mod request_boundary;
 
 const PRIVATE_VALUE: &str = "PRIVATE_OPERATOR_CONTROL_VALUE";
 
+#[test]
+fn readiness_rejection_categories_exclude_error_details() {
+    assert_eq!(
+        readiness_failure_category("SRE authority read failed"),
+        "authority-transport"
+    );
+    assert_eq!(
+        readiness_failure_category("SRE authority read denied"),
+        "authority-denied"
+    );
+    for message in [
+        PRIVATE_VALUE.to_string(),
+        format!("SRE authority read failed: {PRIVATE_VALUE}"),
+        format!("{PRIVATE_VALUE} SRE authority read denied"),
+    ] {
+        assert_eq!(readiness_failure_category(&message), "unclassified");
+        assert!(!readiness_failure_category(&message).contains(PRIVATE_VALUE));
+    }
+}
+
 struct Fixture {
     _upstream: MockServer,
     directory: tempfile::TempDir,

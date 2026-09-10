@@ -374,7 +374,9 @@ class Harness:
 
     def diagnostics(self):
         from .bootstrap_diagnostics import failure_facts
+        from .readiness_diagnostics import collect
         self.deadline = max(self.deadline, time.monotonic() + 50)
+        collect(self)
         # Status and identities only; never dump Secret bodies or whole Pods.
         for kind, name, namespace in [("karssreregistrations.kars.azure.com", "canonical", None),
                                       ("karssandbox", "sre", SYSTEM), ("deployment", "sre", RUNTIME)]:
