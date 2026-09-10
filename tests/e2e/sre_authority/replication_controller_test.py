@@ -59,6 +59,13 @@ class Harness:
                 self.object = None
                 response = Response(200, {})
         elif "?dryRun=All" in path:
+            if "template" not in body["spec"]:
+                response = Response(422, {"kind": "Status", "reason": "Invalid", "details": {"causes": [
+                    {"field": "spec.template", "reason": "FieldValueRequired"},
+                ]}})
+                if status is not None:
+                    assert response.status_code in (status if isinstance(status, tuple) else (status,))
+                return response
             pod = body["spec"].get("template", {}).get("spec", {})
             private = bool(pod.get("volumes")) or pod.get("serviceAccountName") == "sre-api-router"
             containers = pod.get("containers", []) + pod.get("initContainers", [])
