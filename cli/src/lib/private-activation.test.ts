@@ -292,6 +292,11 @@ describe("generic private activation staging", () => {
     await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("public key is unchanged");
     expect(f.state().baseline.keyDigest).toBe(baseline);
     expect(f.deployment.spec.replicas).toBe(0);
+    f.rotate(0);
+    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("previously exposed");
+    expect(f.state().exposedKeys).toContain(first.root.budgetTls?.keyDigest);
+    expect(f.state().exposedKeys).toContain(baseline);
+    expect(f.deployment.spec.replicas).toBe(0);
     f.rotate(2);
     await stagePrivateActivation(f.execute, await f.preview());
     expect(f.deployment.spec.replicas).toBe(2);
