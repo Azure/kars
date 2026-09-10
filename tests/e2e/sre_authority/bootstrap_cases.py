@@ -42,6 +42,7 @@ def admission_cases(port, policies):
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
          "metadata": {"name": "e2e-bootstrap-probe", "namespace": "kars-sre"},
          "rules": [{"apiGroups": [""], "resources": ["pods"], "verbs": ["create"]},
+                   {"apiGroups": [""], "resources": ["replicationcontrollers"], "verbs": ["create", "update"]},
                    {"apiGroups": ["apps"], "resources": ["deployments", "replicasets"], "verbs": ["create", "update"]},
                    {"apiGroups": ["kars.azure.com"], "resources": ["karssreactions"], "verbs": ["create"]}]},
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
@@ -64,16 +65,31 @@ def admission_cases(port, policies):
     env = copy.deepcopy(pod)
     env["spec"]["containers"][0]["envFrom"] = [{"secretRef": {"name": "sre-api-router-identity"}}]
     cases.append(("private-env", "/api/v1/namespaces/kars-sre/pods", env, 403, "kars-sre-private-mounts"))
-    for kind, plural in (("Deployment", "deployments"), ("ReplicaSet", "replicasets")):
+    for kind, plural in (("Deployment", "deployments"), ("ReplicaSet", "replicasets"),
+                         ("ReplicationController", "replicationcontrollers")):
         for is_private in (False, True):
-            obj = {"apiVersion": "apps/v1", "kind": kind,
+            replication_controller = kind == "ReplicationController"
+            obj = {"apiVersion": "v1" if replication_controller else "apps/v1", "kind": kind,
                    "metadata": {"name": "e2e-template", "namespace": "kars-sre"},
                    "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "e2e-probe"}},
                             "template": {"metadata": {"labels": {"app": "e2e-probe"}},
                                          "spec": copy.deepcopy((private if is_private else pod)["spec"])}}}
+            if replication_controller:
+                obj["spec"]["selector"] = {"app": "e2e-probe"}
+                obj["spec"]["replicas"] = 0
             cases.append((f"{kind}-{'private' if is_private else 'ordinary'}",
-                          f"/apis/apps/v1/namespaces/kars-sre/{plural}", obj,
+                          f"{'/api/v1' if replication_controller else '/apis/apps/v1'}/namespaces/kars-sre/{plural}", obj,
                           403 if is_private else 201, "kars-sre-private-workloads" if is_private else None))
+            if replication_controller and not is_private:
+                no_template = copy.deepcopy(obj)
+                no_template["spec"].pop("template")
+                cases.append(("ReplicationController-no-template",
+                              "/api/v1/namespaces/kars-sre/replicationcontrollers", no_template, 201, None))
+                private_account = copy.deepcopy(obj)
+                private_account["spec"]["template"]["spec"]["serviceAccountName"] = "sre-api-router"
+                cases.append(("ReplicationController-private-account",
+                              "/api/v1/namespaces/kars-sre/replicationcontrollers",
+                              private_account, 403, "kars-sre-private-workloads"))
     params = {"namespace": "example", "name": "demo", "replicas": 1,
               "nested": {"array": [True, None, 1, "text"], "object": {"key": "value"}}}
     action = {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSREAction",
