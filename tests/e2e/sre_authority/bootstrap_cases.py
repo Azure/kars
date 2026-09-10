@@ -17,8 +17,8 @@ USER = "system:serviceaccount:e2e-sre-bootstrap:tenant"
 DEPLOYMENT_CONTROLLER = "system:serviceaccount:kube-system:deployment-controller"
 
 
-def as_tenant(port, path, obj, *, user=USER):
-    req = Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(obj).encode(), method="POST",
+def as_tenant(port, path, obj, *, user=USER, method="POST"):
+    req = Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(obj).encode(), method=method,
                   headers={"Content-Type": "application/json", "Accept": "application/json",
                            "Impersonate-User": user})
     try:
