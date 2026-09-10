@@ -34,6 +34,25 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_hermes_runtime_assertion_verifies_exact_pin_and_runtime_without_blanket_standin_acceptance(self):
+        helper = Path(__file__).resolve().parents[1] / "sre-authority.sh"
+        cases = [
+            ("kars-sandbox-e2e:dev", "kars-sandbox-e2e:dev", "Hermes", 0),
+            ("wrong:latest", "kars-sandbox-e2e:dev", "Hermes", 1),
+            ("kars-sandbox-e2e:dev", "", "Hermes", 1),
+            ("custom/runtime:latest", "custom/runtime:latest", "Hermes", 0),
+            ("kars-runtime-hermes:latest", "", "Hermes", 0),
+            ("kars-runtime-hermes:latest", "", "BYO", 1),
+            ("", "", "Hermes", 1),
+        ]
+        for image, configured, runtime, expected in cases:
+            result = subprocess.run(
+                ["bash", "-c", 'source "$1"; sre_hermes_image_matches "$2" "$3" "$4"',
+                 "hermes-image-test", str(helper), image, configured, runtime],
+                capture_output=True, text=True, timeout=5, check=False)
+            with self.subTest(image=image, configured=configured, runtime=runtime):
+                self.assertEqual(result.returncode, expected)
+
     def test_log_reader_diagnostics_never_echo_log_text_or_error_body(self):
         root = Path(__file__).resolve().parents[3]
         facts = log_reader_facts(root, {"error": "406 Not Acceptable",

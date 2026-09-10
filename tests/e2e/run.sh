@@ -1341,8 +1341,8 @@ EOF
 test_runtime_hermes() {
     # KarsSandbox of kind Hermes should be processed by the controller:
     # plan_hermes dispatches, namespace is created, and the agent
-    # container's image carries the hermes runtime tag (kars-runtime-hermes)
-    # rather than the OpenClaw default. Mirrors test_runtime_anthropic and
+    # container uses the configured Hermes image (including the SRE fixture's
+    # explicit stand-in pin), with actual Hermes runtime dispatch. Mirrors test_runtime_anthropic and
     # follows the same tolerance pattern: Deployment may not materialize
     # if there's no real InferencePolicy provider in this lane, so the
     # image-tag assertion is diag-only when no Deployment is present.
@@ -1372,14 +1372,24 @@ EOF
         echo ""
         fail "Hermes runtime: no namespace"
     fi
-    local image
+    local image configured runtime_kind
     image=$(kubectl get deploy -n kars-e2e-hermes e2e-hermes -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].image}' 2>/dev/null || true)
     if [ -n "$image" ]; then
-        if echo "$image" | grep -qE "hermes|kars-runtime-hermes"; then
-            pass "Hermes Deployment uses hermes runtime image ($image)"
+        if ! configured=$(kubectl get deployment kars-controller -n kars-system \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="controller")].env[?(@.name=="HERMES_RUNTIME_IMAGE")].value}'); then
+            fail "Hermes runtime: could not inspect the configured image"
+            return
+        fi
+        if ! runtime_kind=$(kubectl get deployment e2e-hermes -n kars-e2e-hermes \
+            -o jsonpath='{.spec.template.spec.containers[?(@.name=="agent")].env[?(@.name=="KARS_RUNTIME_KIND")].value}'); then
+            fail "Hermes runtime: could not inspect actual runtime dispatch"
+            return
+        fi
+        if sre_hermes_image_matches "$image" "$configured" "$runtime_kind"; then
+            pass "Hermes Deployment preserves the configured image and Hermes runtime dispatch ($image)"
         else
             echo "  [diag] container image: $image"
-            fail "Hermes Deployment image does not reference hermes runtime"
+            fail "Hermes Deployment does not match its configured image or runtime dispatch"
         fi
     else
         echo "  [diag] no Deployment yet (likely no InferencePolicy provider in this lane)"
