@@ -1,6 +1,43 @@
 # Managed MCP capability audit — 2026-09-08
 
-Status: **PENDING — not qualified for deployment or merge**
+Status: **Source audit approved under explicit maintainer delegation**.
+Exact-head hosted and native qualification remain required before merge.
+
+## Current delegated review and qualification
+
+The maintainer authorized publication sign-offs after additional focused
+reviews, recorded in
+[comment 5615522306](https://github.com/Azure/kars/pull/551#issuecomment-5615522306).
+The second attestation below is delegated AI review, not an assertion that a
+second human signed this audit.
+
+The current source is `fbd01597ce1cb86fff6df71d21dc2bf07abaf528`, based on
+signed governed-services source `6b34d5ea`. A focused AI security review of
+that comparison reported no vulnerabilities in its reviewed scope. The
+earlier caller-identity and lifecycle findings remain repaired as described
+below. No source branch containing private SDK/security probes is included.
+
+The additional tool-result compatibility fix preserves all five standard MCP
+content kinds, embedded text/blob resources, metadata, annotations, structured
+results and `isError`. Resource/icon URIs are not fetched. Unknown kinds and
+malformed required fields remain protocol errors, and existing byte limits,
+authentication, session isolation and policy checks are unchanged.
+
+Actual local qualification at `fbd01597` passed 249 router MCP library cases,
+17 managed-MCP/governed-telemetry integration cases, strict paired all-target
+Clippy and formatting. The guarded shared target observed at least 10.01 GiB
+free. Controller runtime tests were not rerun in this content-focused batch.
+Earlier restack checks passed Helm, 108 Python cases, 22 CLI cases and type
+checking with compatible cached tooling; these are not exact-lockfile or
+native H100 deployment claims.
+
+This branch has no MCP output Content Safety hook, and none is introduced or
+claimed by the fix. Scanner regressions exercise existing AGT `scan_value`
+visibility of serialized text, metadata and structured fields. Base64
+validation establishes encoding only, not the safety of binary contents.
+The focused reviewer did not independently rerun tests. Current-base hosted
+Rust and native lifecycle/protocol acceptance remain mandatory, with no
+technical gate, finding, identity fence or policy denial waived.
 
 ## Scope
 
@@ -68,10 +105,10 @@ revocation is not instantaneous cancellation of already accepted upstream work.
 
 ## Signatures
 
-| Role | Sign-off |
-|---|---|
-| Maintainer / owner | **PENDING** |
-| Independent reviewer | **PENDING** |
+Signed-off-by: pallakatos (maintainer delegation recorded above) <lakatos.toth.pal@gmail.com>
+Signed-off-by: GitHub Copilot (delegated AI audit, not an independent human) <223556219+Copilot@users.noreply.github.com>
 
 The limited human-review waivers for earlier qualified publication slices do
-not apply to this candidate.
+not apply to this candidate. The separate, explicit delegation above supplies
+the current source approval; it does not approve an unqualified integration
+merge, customer/H100 deployment, image release or `main` promotion.
