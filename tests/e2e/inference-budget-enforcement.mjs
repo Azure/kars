@@ -9,12 +9,13 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { prepareRouterImage } from "./kind-router-image.mjs";
+import { PROVIDER, ENDPOINT, providerSource, verifyFixturePolicy, readinessFact } from "./budget-fixture-route.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const context = "kind-kars-e2e";
 const namespace = "kars-system";
 const source = "budget-provider-fixture";
-const endpoint = `http://provider.${source}.svc.cluster.local:8000`;
+const endpoint = ENDPOINT;
 const scratch = join(root, `.budget-kind-${process.pid}`);
 const forwards = [];
 let verifiedRouterReference;
@@ -79,7 +80,7 @@ async function request(url, path, body, timeout = 30_000) {
 
 const message = { messages: [{ role: "user", content: "fixture" }] };
 function blueprint() {
-  return { isolation: "standard", model: { provider: "ollama", deployment: "fixture" }, instructions: "Fixture only" };
+  return { isolation: "standard", model: { provider: PROVIDER, deployment: "fixture" }, instructions: "Fixture only" };
 }
 
 function task(name, tokens, usdMicros, parent, launch) {
@@ -101,6 +102,9 @@ async function router(name) {
     return current.status?.phase === "Ready" && current.status?.inferenceBudget
       && current.status?.observedGeneration === current.metadata.generation;
   }, `Task ${name} account bound`);
+  const policy = await until(() => get("inferencepolicy", `${name}-inference`), "fixture policy materialization");
+  verifyFixturePolicy(policy);
+  console.log("BUDGET-ROUTE " + JSON.stringify({ stage: "registered-named-provider", provider: PROVIDER, endpoint }));
   const runtime = `kars-${name}`;
   const pod = await until(() => {
     const pods = JSON.parse(k(["get", "pods", "-n", runtime, "-l", `kars.azure.com/sandbox=${name}`, "-o", "json"]));
@@ -110,7 +114,22 @@ async function router(name) {
   assert(pod.spec.containers.find(container => container.name === "inference-router")?.image
     === verifiedRouterReference, "Budget router must use the exact CRI-verified digest reference");
   const url = await portForward(runtime, `pod/${pod.metadata.name}`, 8443);
-  await until(async () => (await request(url, "/readyz")).status === 200, `private budget readiness ${name}`);
+  let lastReadiness;
+  await until(async () => {
+    for (const path of ["/healthz", "/readyz"]) {
+      let response, error;
+      const started = Date.now();
+      try { response = await request(url, path); } catch (caught) { error = caught; }
+      const fact = readinessFact(path, response, error);
+      const key = JSON.stringify(fact);
+      if (key !== lastReadiness) {
+        console.log("BUDGET-READINESS " + JSON.stringify({ ...fact, elapsedMs: Date.now() - started }));
+        lastReadiness = key;
+      }
+      if (!fact.ready) return false;
+    }
+    return true;
+  }, `private budget readiness ${name}`);
   return { url, pod, runtime };
 }
 
@@ -187,18 +206,19 @@ async function scenario() {
     spec: { selector: { app: "budget-provider" }, ports: [{ port: 8000, targetPort: 8000 }] } });
   k(["rollout", "status", "-n", source, "deployment/provider", "--timeout=90s"]);
   const provider = await portForward(source, "deployment/provider", 8000);
+  // Primary-model provider names select only explicitly registered endpoints.
+  // OLLAMA_ENDPOINT alone does not turn informational model metadata into routing intent.
+  create(providerSource(namespace));
 
   values.inferenceBudget = {
     enabled: true, routerImageDigest: digest, catalogVersion: "fixture-v1",
     tlsSecretName: "budget-fixture-tls", caBundle: certificate.toString("utf8"),
     nonInferenceEgressHosts: [],
     contracts: [{ id: "fixture-chat", version: "v1", validUntil: "2030-01-01T00:00:00Z",
-      providerId: "ollama", endpoint, model: "fixture", operation: "ChatCompletions", outputField: "MaxTokens",
+      providerId: PROVIDER, endpoint, model: "fixture", operation: "ChatCompletions", outputField: "MaxTokens",
       maximumInputTokens: 10, maximumOutputTokens: 20, maximumWireBytes: 4096,
       outputBoundIncludesReasoning: true, maximumPrice: { kind: "perRequest", maximumMicros: 5 } }],
   };
-  values.controller.extraEnv = (values.controller.extraEnv ?? []).filter((entry) => entry.name !== "OLLAMA_ENDPOINT");
-  values.controller.extraEnv.push({ name: "OLLAMA_ENDPOINT", value: endpoint });
   values.localInference = { namespaces: [source], targets: [{ namespace: source, matchLabels: { app: "budget-provider" }, ports: [8000] }] };
   execute("helm", ["upgrade", "kars", "deploy/helm/kars", "--kube-context", context, "-n", namespace,
     "--reuse-values", "-f", "-", "--wait", "--timeout", "90s"], JSON.stringify(values));
