@@ -179,6 +179,62 @@ async fn privacy_rpc_has_no_positive_cache_after_alias_admission_or_legacy_denia
 }
 
 #[tokio::test]
+async fn privacy_rpc_fresh_writer_template_permission_or_evaluation_failure_revokes_prior_proof() {
+    let rig = Rig::new(false).await;
+    assert_eq!(
+        rig.call(&rig.request, TOKEN).await.0,
+        reqwest::StatusCode::OK
+    );
+    for status in [
+        json!({"allowed":true}),
+        json!({"allowed":false,"evaluationError":"PRIVATE_REVIEW_ERROR"}),
+    ] {
+        for (group, resource) in [
+            ("", "replicationcontrollers"),
+            ("batch", "jobs"),
+            ("batch", "cronjobs"),
+        ] {
+            for verb in ["create", "update", "patch"] {
+                let attributes = json!({
+                    "group":group,"resource":resource,"verb":verb,"namespace":"kars-agent"
+                });
+                {
+                    let mut data = rig.data.lock().unwrap();
+                    data.writer_review = Some((attributes.clone(), status.clone()));
+                    data.calls.clear();
+                }
+                let (status, value) = rig.call(&rig.request, TOKEN).await;
+                assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+                assert_eq!(
+                    value,
+                    json!({"capability":wire::CAPABILITY,"allowed":false})
+                );
+                assert!(
+                    rig.data
+                        .lock()
+                        .unwrap()
+                        .calls
+                        .iter()
+                        .any(|(_, path, request)| {
+                            path.ends_with("/subjectaccessreviews")
+                                && request["spec"]["user"] == "system:serviceaccount:bridge:bff"
+                                && request["spec"]["resourceAttributes"] == attributes
+                        })
+                );
+            }
+        }
+    }
+    rig.data.lock().unwrap().writer_review = None;
+    let (status, value) = rig.call(&rig.request, TOKEN).await;
+    assert_eq!(status, reqwest::StatusCode::OK);
+    assert!(
+        serde_json::from_value::<wire::Proof>(value)
+            .unwrap()
+            .matches(&rig.request)
+    );
+}
+
+#[tokio::test]
 async fn privacy_rpc_current_uid_generation_epoch_version_and_recipient_loss_deny() {
     for (path, pointer, value) in [
         (SANDBOX, "/metadata/uid", json!("replacement")),

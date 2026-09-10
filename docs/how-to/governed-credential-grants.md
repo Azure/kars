@@ -43,6 +43,16 @@ Only enrolled identities are held; this is not a tenant-wide ServiceAccount
 deletion ban. Effective permission reviews include the ServiceAccount UID and
 all three standard authentication groups, and reject broad Secret, workload,
 RBAC and impersonation side channels before issuing writer rights.
+The workload checks include create/update/patch on core ReplicationControllers,
+apps Deployments/ReplicaSets/StatefulSets/DaemonSets, and batch Jobs/CronJobs.
+They apply in every existing protected scope: workspace, writer and controller
+namespaces, each observation runtime, and the namespace-omitted review.
+Fresh observation privacy RPC verification reuses the same effective-permission
+check, so previously issued credentials and Ready status cannot bypass a newly
+granted workload permission. A failed or indeterminate review denies authority;
+no additional Secret or workload permissions are granted. A writer that needs
+these template-writing privileges requires a separately reviewed admission
+boundary, not an exception to this isolation proof.
 New writer authority requires the default controller leadership barrier;
 disabling leader election does not enable a parallel unfenced issuer.
 

@@ -22,6 +22,7 @@ pub struct Data {
     pub alias: bool,
     pub policy: bool,
     pub allowed: bool,
+    pub writer_review: Option<(serde_json::Value, serde_json::Value)>,
     pub delay: bool,
     pub writes: bool,
 }
@@ -250,8 +251,13 @@ pub async fn fixture() -> (
             return ResponseTemplate::new(if r.method=="POST" {201}else{200}).set_body_json(value);
         }
         if r.method=="POST" && path.ends_with("/subjectaccessreviews") {
+            let spec = r.body_json::<serde_json::Value>().unwrap()["spec"].clone();
+            let status = d.writer_review.as_ref()
+                .filter(|(attributes, _)| spec["user"] == "system:serviceaccount:bridge:bff"
+                    && spec["resourceAttributes"] == *attributes)
+                .map_or_else(|| json!({"allowed":d.allowed}), |(_, status)| status.clone());
             return ResponseTemplate::new(201).set_body_json(json!({"apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview",
-                "spec":r.body_json::<serde_json::Value>().unwrap()["spec"],"status":{"allowed":d.allowed}}));
+                "spec":spec,"status":status}));
         }
         if r.method=="POST" && path.ends_with("/selfsubjectreviews") {
             return ResponseTemplate::new(201).set_body_json(json!({"apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview",

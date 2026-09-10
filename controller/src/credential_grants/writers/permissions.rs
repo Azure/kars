@@ -74,9 +74,17 @@ fn requests(
                 Some(NAME),
             ),
         ];
-        for resource in ["deployments", "replicasets", "statefulsets", "daemonsets"] {
+        for (group, resource) in [
+            ("", "replicationcontrollers"),
+            ("apps", "deployments"),
+            ("apps", "replicasets"),
+            ("apps", "statefulsets"),
+            ("apps", "daemonsets"),
+            ("batch", "jobs"),
+            ("batch", "cronjobs"),
+        ] {
             for verb in ["create", "patch", "update"] {
-                checks.push(("apps", resource, verb, None));
+                checks.push((group, resource, verb, None));
             }
         }
         for resource in [
@@ -171,6 +179,162 @@ pub(super) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const SCOPES: [Option<&str>; 6] = [
+        None,
+        Some("work"),
+        Some("bridge"),
+        Some("core"),
+        Some("kars-agent"),
+        Some("kars-second"),
+    ];
+    const TEMPLATES: [(&str, &str); 3] = [
+        ("", "replicationcontrollers"),
+        ("batch", "jobs"),
+        ("batch", "cronjobs"),
+    ];
+
+    fn template_grant() -> KarsCredentialGrant {
+        serde_json::from_value(json!({
+            "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant",
+            "metadata":{"name":"workspace","namespace":"work","uid":"grant"},
+            "spec":{"workspaceUid":"workspace","writers":[{"namespace":"bridge","name":"bff","uid":"writer"}],
+                "observationTargets":[
+                    {"kind":"KarsSandbox","namespace":"work","name":"agent","uid":"agent-uid"},
+                    {"kind":"KarsSandbox","namespace":"work","name":"second","uid":"second-uid"}
+                ]}
+        }))
+        .unwrap()
+    }
+
+    fn attributes(namespace: Option<&str>, group: &str, resource: &str, verb: &str) -> Value {
+        let mut value = json!({"group":group,"resource":resource,"verb":verb});
+        if let Some(namespace) = namespace {
+            value["namespace"] = namespace.into();
+        }
+        value
+    }
+
+    #[derive(Default)]
+    struct Reviews {
+        fault: Option<(Value, Value)>,
+        calls: Vec<Value>,
+    }
+
+    async fn review_fixture() -> (MockServer, Client, Arc<Mutex<Reviews>>) {
+        let server = MockServer::start().await;
+        let reviews = Arc::new(Mutex::new(Reviews::default()));
+        let captured = reviews.clone();
+        Mock::given(|_: &wiremock::Request| true)
+            .respond_with(move |request: &wiremock::Request| {
+                if request.method == "POST" && request.url.path().ends_with("/selfsubjectreviews") {
+                    return ResponseTemplate::new(201).set_body_json(json!({
+                        "apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview",
+                        "status":{"userInfo":{"username":"system:serviceaccount:core:kars-controller","uid":"controller"}}
+                    }));
+                }
+                assert_eq!(request.method, "POST");
+                assert!(request.url.path().ends_with("/subjectaccessreviews"));
+                let body: Value = request.body_json().unwrap();
+                let mut reviews = captured.lock().unwrap();
+                let status = reviews
+                    .fault
+                    .as_ref()
+                    .filter(|(attributes, _)| body["spec"]["resourceAttributes"] == *attributes)
+                    .map_or_else(|| json!({"allowed":false}), |(_, status)| status.clone());
+                reviews.calls.push(body.clone());
+                ResponseTemplate::new(201).set_body_json(json!({
+                    "apiVersion":"authorization.k8s.io/v1","kind":"SubjectAccessReview",
+                    "spec":body["spec"],"status":status
+                }))
+            })
+            .mount(&server)
+            .await;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        (server, client, reviews)
+    }
+
+    #[tokio::test]
+    async fn credential_writer_template_denials_cover_every_protected_namespace_and_effective_identity()
+     {
+        let (_server, client, reviews) = review_fixture().await;
+        verify(&client, &template_grant()).await.unwrap();
+        let reviews = reviews.lock().unwrap();
+        for namespace in SCOPES {
+            for (group, resource) in TEMPLATES {
+                for verb in ["create", "update", "patch"] {
+                    let expected = attributes(namespace, group, resource, verb);
+                    assert_eq!(
+                        reviews
+                            .calls
+                            .iter()
+                            .filter(|request| request["spec"]["resourceAttributes"] == expected)
+                            .count(),
+                        1,
+                        "Each protected scope requires exactly one unnamed template permission review"
+                    );
+                }
+            }
+        }
+        assert!(reviews.calls.iter().all(|request| {
+            request["spec"]["user"] == "system:serviceaccount:bridge:bff"
+                && request["spec"]["uid"] == "writer"
+                && request["spec"]["groups"]
+                    == json!([
+                        "system:authenticated",
+                        "system:serviceaccounts",
+                        "system:serviceaccounts:bridge"
+                    ])
+        }));
+    }
+
+    #[tokio::test]
+    async fn credential_writer_each_template_permission_or_evaluation_error_fails_closed_in_each_scope()
+     {
+        let (_server, client, reviews) = review_fixture().await;
+        let grant = template_grant();
+        for status in [
+            json!({"allowed":true}),
+            json!({"allowed":false,"evaluationError":"PRIVATE_REVIEW_ERROR"}),
+        ] {
+            for namespace in SCOPES {
+                for (group, resource) in TEMPLATES {
+                    for verb in ["create", "update", "patch"] {
+                        let expected = attributes(namespace, group, resource, verb);
+                        {
+                            let mut reviews = reviews.lock().unwrap();
+                            reviews.fault = Some((expected.clone(), status.clone()));
+                            reviews.calls.clear();
+                        }
+                        let error = verify(&client, &grant).await.unwrap_err();
+                        assert!(error.contains("workload"));
+                        assert!(!error.contains("PRIVATE_REVIEW_ERROR"));
+                        let reviews = reviews.lock().unwrap();
+                        assert_eq!(
+                            reviews.calls.last().unwrap()["spec"]["resourceAttributes"],
+                            expected
+                        );
+                    }
+                }
+            }
+        }
+        reviews.lock().unwrap().fault = None;
+        verify(&client, &grant).await.unwrap();
+    }
+
+    #[tokio::test]
+    async fn credential_writer_template_review_malformed_allowance_fails_closed() {
+        let (_server, client, reviews) = review_fixture().await;
+        reviews.lock().unwrap().fault = Some((
+            attributes(Some("kars-agent"), "batch", "jobs", "create"),
+            json!({"allowed":"PRIVATE_REVIEW_ERROR"}),
+        ));
+        let error = verify(&client, &template_grant()).await.unwrap_err();
+        assert!(!error.contains("PRIVATE_REVIEW_ERROR"));
+    }
 
     #[test]
     fn credential_writer_reviews_include_effective_groups_and_no_name_only_identity_assumption() {
