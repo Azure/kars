@@ -314,7 +314,7 @@ EOF
 }
 
 test_networkpolicy_created() {
-    if kubectl get networkpolicy -n kars-e2e-test sandbox-policy --no-headers 2>/dev/null | grep -q sandbox-policy; then
+    if wait_for_resource networkpolicy sandbox-policy kars-e2e-test 30; then
         pass "NetworkPolicy created in sandbox namespace"
     else
         fail "NetworkPolicy not found"
@@ -322,7 +322,7 @@ test_networkpolicy_created() {
 }
 
 test_serviceaccount_created() {
-    if kubectl get serviceaccount -n kars-e2e-test sandbox --no-headers 2>/dev/null | grep -q sandbox; then
+    if wait_for_resource serviceaccount sandbox kars-e2e-test 30; then
         pass "ServiceAccount created in sandbox namespace"
     else
         fail "ServiceAccount not found"
