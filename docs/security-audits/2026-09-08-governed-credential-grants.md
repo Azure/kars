@@ -37,7 +37,94 @@ this repository.
 
 ## Current validation
 
+### Credential lifecycle repair (2026-09-10)
+
+Downstream native acceptance exposed two remaining lifecycle failures at public
+core `2582eade`: a disabled grant could leave its v2 Sandbox consumer running
+beyond the 180-second acceptance window, and a Team credential rebind did not
+resume after old consumers retired within the 240-second window. Neither
+deadline has been raised and neither native failure is declared closed here.
+
+The successful Sandbox reconciliation path previously gave only v1
+`credentialsRef` a 30-second backstop. V2 `credentialBindings` and governed
+`githubBinding` incorrectly used the unbound legacy five-minute interval,
+without a grant-change watch. The shared refresh selector now gives all three
+credential modes the existing 30-second backstop. Unbound legacy Sandboxes
+remain at five minutes. Eight selection combinations cover this distinction;
+reconciliation cadence is not a guaranteed consumer termination deadline.
+
+The Task rebind path also unconditionally published PausingCredentials followed
+by CredentialsPaused on every already-quiescent reconciliation. The new
+controller-binary regression reproduced six unnecessary resourceVersion
+increments across three passes (fixture RV 4 to 10), which can starve the
+Team's independently checked UID/RV-fenced update.
+
+Current, already-retracted PausingCredentials/CredentialsPaused status is now
+stable. Every status patch, including an unchanged one, retains exact UID/RV
+preconditions and explicit nulling of the envelope digest. Kubernetes preserves
+resourceVersion for an unchanged patch; the regression fixture models that
+behavior without bypassing its preconditions. A stale acknowledged snapshot
+must conflict before any pause side effects. Every pass still
+retracts the old receipt and verifies the owned hold, scale-down and all
+remaining Pods, including terminating or unlabelled consumers. A late consumer
+restores PausingCredentials and blocks the Team update; no quiescence,
+attestation, ownership or admission requirement is removed.
+
+The final CAS-preserving repair passed **90 controller-binary credential cases**
+and strict paired all-target Clippy under the existing offline/locked
+shared-target disk guard, with minimum free space **9.01 GiB**. The tests include
+the stale-snapshot rejection, stable paused and
+waiting states, late consumers, existing full Task/Team UID/data/receipt
+continuity, and the refresh selector. Bounded independent review of the final
+five Rust files found no significant issues and confirmed the initial CAS
+remains before pause side effects; that reviewer did not rerun the tests.
+This is local source qualification, not fresh native BFF/lifecycle, active-SRE
+or CNI acceptance. Exact-head hosted qualification and genuine human signoffs
+remain separate gates.
+
+### Observation network baseline label consistency
+
+A subsequent downstream native case reached Running Task/Sandbox state but
+could not issue private observations: its existing-isolation preflight supplied
+only the Sandbox-name label, while the actual baseline NetworkPolicy selects
+`kars.azure.com/component=sandbox`. The generated runtime Pod already has that
+label and its Workload Identity label.
+
+The unchanged three runtime Pod labels now come from one pure helper shared by
+Pod generation, verifier baseline checks and approved sender-egress evaluation.
+No actual Pod label, NetworkPolicy rule, namespace selector, port, grant,
+privacy proof or identity boundary is changed. Observer-created policies still
+cannot establish their own baseline, and foreign selectors remain rejected.
+
+The follow-up passes **92 controller-binary credential cases** and strict paired
+all-target Clippy under the existing guard, with minimum free space **8.95 GiB**.
+New cases cover the real component selector, incomplete/foreign labels,
+observer-only policy exclusion and component-plus-name sender selection.
+Bounded independent review of the three Rust files found no significant issues
+and confirmed the generated labels and policy restrictions are unchanged;
+the reviewer did not rerun the tests.
+This is source-level consistency evidence, not native observation issuance,
+TLS/authentication or CNI-traffic qualification. Fresh downstream acceptance
+and genuine human approvals remain required.
+
 ### Native admission and generated-schema repair
+
+The composed SRE bootstrap separately demonstrated that the built-in Deployment
+controller could create ordinary ReplicaSets (201) but was denied private SRE
+ReplicaSets (403): it has cluster-wide ReplicaSet-create authority, not
+cluster-wide Pod-create or SRE registrar authority. The missing handoff repair
+is forwarded exactly from `c08465a5f7e3957b3594c5b37088c56d00290449`.
+Only the `apps/replicasets` workload predicate recognizes that existing
+cluster-wide capability. No RBAC grant, Pod/CronJob permission, tenant bypass
+or other workload-kind exception is introduced.
+
+The resulting entire SRE consumer-policy template is byte-identical to
+`203e2322ad22512f0889e1f512ed36ac278b5a42`, whose full native Kind run passed
+161 cases. The same forward includes actual private Deployment-to-ReplicaSet-
+to-unscheduled-Pod UID-chain assertions and tenant-denial coverage. All 67
+Python harness tests and Helm lint pass on this target. That prerequisite
+evidence does not by itself prove this composed stack's readiness; fresh
+exact-head native acceptance and genuine audit signatures remain required.
 
 The full hosted run at `80cffb63` exposed additional issues: creation of
 `kars-credential-source-writes` failed CEL compilation; the new grant lacked
