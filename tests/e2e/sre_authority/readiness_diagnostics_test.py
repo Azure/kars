@@ -7,6 +7,7 @@ import contextlib
 import io
 import json
 from pathlib import Path
+import subprocess
 import time
 import unittest
 from unittest.mock import patch
@@ -43,6 +44,7 @@ class FixtureHarness:
         self.deadline = time.monotonic() + 120
         self.calls, self.log_reads = [], 0
         self.after_log = None
+        self.command_failure = None
         self.log = event("SRE authority transport failure", stage="registration",
                          timed_out=True, connect_error=False) + "\n" + PRIVATE
         pod = {"metadata": {"name": "sre-abc-def", "namespace": diag.RUNTIME, "uid": "pod-uid",
@@ -68,9 +70,10 @@ class FixtureHarness:
             ("namespace", diag.SYSTEM, None): {"metadata": {"uid": "system-uid"}},
             ("deployment", "sre", diag.RUNTIME): {"metadata": {"uid": "deployment-uid"},
                 "spec": {"template": {"metadata": {"annotations": annotations()}}}},
-            ("pods", None, diag.RUNTIME): {"items": [pod]},
+            ("pods", None, diag.RUNTIME): {"apiVersion": "v1", "kind": "PodList", "items": [pod]},
             ("pod", "sre-abc-def", diag.RUNTIME): pod,
             ("replicaset", "sre-abc", diag.RUNTIME): {"metadata": {"uid": "replica-uid",
+                "name": "sre-abc", "namespace": diag.RUNTIME,
                 "ownerReferences": [owner("Deployment", "sre", "deployment-uid")]}},
             ("networkpolicy", "sandbox-policy", diag.RUNTIME): {"spec": {"egress": [{
                 "to": [{"ipBlock": {"cidr": "10.96.0.1/32"}}], "ports": [{"port": 443, "protocol": "TCP"}]}]}},
@@ -84,18 +87,22 @@ class FixtureHarness:
 
     def k(self, *args, **kwargs):
         self.calls.append((args, kwargs))
+        if self.command_failure and args[0] == "get" and args[1] == self.command_failure[0]:
+            return subprocess.CompletedProcess(args, 1, PRIVATE, self.command_failure[1])
         if args[0] == "logs":
             self.log_reads += 1
             if self.after_log:
                 self.after_log()
-            return self.log
+            raw = self.log
+            return subprocess.CompletedProcess(args, 0, raw, "") if kwargs.get("expected") is None else raw
         if args[0] != "get":
             raise AssertionError("Diagnostic attempted a non-read-only command")
         kind = args[1]
         name = args[2] if len(args) > 2 and not args[2].startswith("-") else None
         namespace = args[args.index("-n") + 1] if "-n" in args else None
         obj = self.objects.get((kind, name, namespace))
-        return json.dumps(obj) if obj else ""
+        raw = json.dumps(obj) if obj else ""
+        return subprocess.CompletedProcess(args, 0, raw, "") if kwargs.get("expected") is None else raw
 
 
 def collect(h):
@@ -240,11 +247,11 @@ class ReadinessDiagnosticsTests(unittest.TestCase):
         with patch.object(diag.time, "monotonic", side_effect=[0, 41]):
             report, _, _ = collect(h)
         self.assertEqual(h.calls, [])
-        self.assertEqual(report["facts"][-1], diag.fact("collection", "deadline"))
+        self.assertEqual(report["facts"][-1], diag.fact("registration", "deadline"))
         h = FixtureHarness()
         h.k = lambda *_a, **_k: (_ for _ in ()).throw(AssertionError(PRIVATE))
         report, output, saved = collect(h)
-        self.assertEqual(report["facts"][-1], diag.fact("collection", "unavailable"))
+        self.assertEqual(report["facts"][-1], diag.fact("registration", "command-error"))
         self.assertNotIn(PRIVATE, output + saved)
 
     def test_same_uid_with_changed_image_is_rejected_after_log_read(self):
@@ -253,6 +260,80 @@ class ReadinessDiagnosticsTests(unittest.TestCase):
         report, output, saved = collect(h)
         self.assertEqual(report["facts"][-1], diag.fact("pod-fence", "refused"))
         self.assertNotIn(diag.fact("registration", "transport-timeout"), report["facts"])
+        self.assertNotIn(PRIVATE, output + saved)
+
+    def test_native_null_empty_items_reproducer_keeps_the_failed_stage(self):
+        # At c375 this input produced exactly the four facts in artifact 10136231282,
+        # ending in generic collection/unavailable. It is a source-level reproducer,
+        # not a claim that the lost native response has been recovered.
+        for items in (None, []):
+            h = FixtureHarness()
+            h.objects[("pods", None, diag.RUNTIME)]["items"] = items
+            report, output, saved = collect(h)
+            self.assertEqual(report["facts"][-1], diag.fact("pod-list", "empty-list"))
+            self.assertEqual(h.log_reads, 0)
+            self.assertNotIn(PRIVATE, output + saved)
+
+    def test_native_per_item_typemeta_omission_does_not_relax_identity_fences(self):
+        h = FixtureHarness()
+        pod = h.objects[("pod", "sre-abc-def", diag.RUNTIME)]
+        self.assertNotIn("kind", pod)
+        self.assertNotIn("apiVersion", pod)
+        report, _, _ = collect(h)
+        self.assertEqual(report["facts"][-1], diag.fact("collection", "complete"))
+        pod["kind"] = "Secret"
+        report, _, _ = collect(h)
+        self.assertEqual(report["facts"][-1], diag.fact("pod-list", "invalid-shape"))
+        del pod["kind"]
+        del pod["metadata"]["ownerReferences"][0]["apiVersion"]
+        report, _, _ = collect(h)
+        self.assertEqual(report["facts"][-1], diag.fact("pod-fence", "refused"))
+
+    def test_list_envelope_errors_and_missing_response_are_not_empty_success(self):
+        for value in ({"apiVersion": "v1", "kind": "Status", "items": []},
+                      {"apiVersion": "v1", "kind": "List"},
+                      {"apiVersion": "v1", "kind": "PodList", "items": PRIVATE},
+                      {"apiVersion": "v1", "kind": "List", "items": [], "metadata": {"continue": PRIVATE}}):
+            with self.assertRaises(diag.Unavailable) as error:
+                diag.pod_items(value)
+            self.assertEqual(error.exception.category, "invalid-shape")
+        with self.assertRaises(diag.Unavailable) as error:
+            diag.pod_items(None)
+        self.assertEqual(error.exception.category, "empty-response")
+
+    def test_pod_list_and_replica_set_command_errors_keep_fixed_stage_and_category(self):
+        for kind, stage, text, category in (
+            ("pods", "pod-list", f"Error from server (Forbidden): {PRIVATE}", "command-forbidden"),
+            ("replicaset", "replica-set", f"timed out waiting for {PRIVATE}", "command-timeout"),
+            ("pods", "pod-list", PRIVATE, "command-error"),
+        ):
+            h = FixtureHarness()
+            h.command_failure = (kind, text)
+            report, output, saved = collect(h)
+            self.assertEqual(report["facts"][-1],
+                             diag.fact(stage, category, durationSeconds=0))
+            self.assertEqual(h.log_reads, 0)
+            self.assertNotIn(PRIVATE, output + saved)
+
+    def test_replica_name_namespace_and_owner_uid_remain_exact(self):
+        for change in ({"name": "other"}, {"namespace": "other"}, {"uid": "other"}):
+            h = FixtureHarness()
+            h.objects[("replicaset", "sre-abc", diag.RUNTIME)]["metadata"].update(change)
+            report, _, _ = collect(h)
+            self.assertEqual(report["facts"][-1], diag.fact("pod-fence", "identity-changed"))
+            self.assertEqual(h.log_reads, 0)
+
+    def test_deployment_admission_failure_is_visible_even_without_a_pod(self):
+        h = FixtureHarness()
+        h.objects[("deployment", "sre", diag.RUNTIME)]["status"] = {"conditions": [{
+            "type": "Progressing", "status": "False", "reason": "ReplicaSetCreateError",
+            "message": f'replicasets.apps "{PRIVATE}" is forbidden: '
+                       "ValidatingAdmissionPolicy 'kars-sre-private-workloads' denied request: " + PRIVATE}]}
+        h.objects[("pods", None, diag.RUNTIME)]["items"] = None
+        report, output, saved = collect(h)
+        self.assertIn(diag.fact("deployment", "replicaset-create-error"), report["facts"])
+        self.assertIn(diag.fact("deployment", "private-workload-admission-denied"), report["facts"])
+        self.assertEqual(report["facts"][-1], diag.fact("pod-list", "empty-list"))
         self.assertNotIn(PRIVATE, output + saved)
 
     def test_runtime_failures_still_propagate_and_collection_precedes_teardown(self):

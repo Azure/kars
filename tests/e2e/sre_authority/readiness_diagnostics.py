@@ -14,7 +14,7 @@ import re
 import time
 from urllib.parse import urlsplit
 
-from .common import CONTEXT, EPOCH, OWNER, RUNTIME, SYSTEM, assert_claim
+from .common import CONTEXT, EPOCH, OWNER, RUNTIME, SYSTEM, assert_claim, command_error_category
 
 MAX_LOG_BYTES = 32768
 MAX_FACTS = 64
@@ -31,6 +31,8 @@ STAGES = BACKEND_STAGES | {
     "readiness", "collection", "fixture-identity", "deployment", "pod-selection",
     "pod-router", "pod-lifecycle", "pod-epoch", "pod-template", "pod-fence", "tracing",
     "policy-api-service", "policy-api-endpoint",
+    "core-namespace", "pod-list", "replica-set", "pod-log", "policy-read",
+    "service-read", "endpoint-read",
 }
 CATEGORIES = REJECTIONS | {
     "transport-timeout", "transport-connect", "transport-error", "http-denied",
@@ -40,12 +42,28 @@ CATEGORIES = REJECTIONS | {
     "terminated", "stable", "restarting", "no-known-events", "known-events",
     "exact-rule-present", "exact-rule-absent", "exact-rules-present",
     "exact-rules-partial", "exact-rules-absent",
+    "empty-list", "empty-response", "invalid-json", "invalid-shape", "command-timeout",
+    "command-forbidden", "command-unauthorized", "command-not-found", "command-conflict",
+    "command-service-unavailable", "command-invalid", "command-error",
+    "replicaset-create-error", "private-workload-admission-denied",
+}
+GET_STAGES = {
+    "karssreregistrations.kars.azure.com": "registration",
+    "karssandbox": "source", "namespace": "namespace", "deployment": "deployment",
+    "pods": "pod-list", "pod": "pod-fence", "replicaset": "replica-set",
+    "networkpolicy": "policy-read", "service": "service-read", "endpoints": "endpoint-read",
+}
+COMMAND_CATEGORIES = {
+    "wait-timeout": "command-timeout", "Forbidden": "command-forbidden",
+    "Unauthorized": "command-unauthorized", "NotFound": "command-not-found",
+    "Conflict": "command-conflict", "ServiceUnavailable": "command-service-unavailable",
+    "Invalid": "command-invalid",
 }
 
 
 class Unavailable(RuntimeError):
-    def __init__(self, stage, category="unavailable"):
-        self.stage, self.category = stage, category
+    def __init__(self, stage, category="unavailable", **values):
+        self.stage, self.category, self.values = stage, category, values
         super().__init__("Bounded SRE readiness diagnostic unavailable")
 
 
@@ -143,6 +161,42 @@ def pod_identity(pod):
             controller_owner(pod, "ReplicaSet"), routers[0]["image"])
 
 
+def pod_items(value):
+    if value is None:
+        raise Unavailable("pod-list", "empty-response")
+    if (not isinstance(value, dict) or value.get("apiVersion") != "v1"
+            or value.get("kind") not in ("List", "PodList") or "items" not in value
+            or value.get("metadata", {}).get("continue")):
+        raise Unavailable("pod-list", "invalid-shape")
+    # Native/CLI list envelopes may serialize a zero-length slice as null.
+    # Empty means no Pod evidence, never a successful workload/identity proof.
+    items = [] if value["items"] is None else value["items"]
+    if not isinstance(items, list) or any(
+        not isinstance(item, dict)
+        or ("kind" in item and item["kind"] != "Pod")
+        or ("apiVersion" in item and item["apiVersion"] != "v1")
+        for item in items
+    ):
+        raise Unavailable("pod-list", "invalid-shape")
+    if not items:
+        raise Unavailable("pod-list", "empty-list")
+    return items
+
+
+def deployment_failures(deployment):
+    result = []
+    for condition in deployment.get("status", {}).get("conditions", [])[:8]:
+        if (condition.get("type") == "Progressing" and condition.get("status") == "False"
+                and condition.get("reason") == "ReplicaSetCreateError"):
+            result.append(fact("deployment", "replicaset-create-error"))
+            message = condition.get("message", "")
+            if (isinstance(message, str) and len(message) <= 65536
+                    and "forbidden" in message.lower()
+                    and "ValidatingAdmissionPolicy 'kars-sre-private-workloads'" in message):
+                result.append(fact("deployment", "private-workload-admission-denied"))
+    return result
+
+
 def exact_api_rules(policy, service, endpoints):
     """Observe only exact API targets; no guesses about selector/CNI semantics."""
     if not all(isinstance(obj, dict) for obj in (policy, service, endpoints)):
@@ -188,29 +242,51 @@ class Reader:
         context_guard(h)
         self.h = h
         self.end = min(h.deadline, time.monotonic() + 40)
+        self.stage = "collection"
 
     def timeout(self, seconds=3):
         remaining = self.end - time.monotonic()
         if remaining < 2:
-            raise Unavailable("collection", "deadline")
+            raise Unavailable(self.stage, "deadline")
         return min(seconds, remaining)
 
+    def read(self, stage, args, seconds=3):
+        self.stage = stage
+        timeout = self.timeout(seconds)
+        started = time.monotonic()
+        try:
+            result = self.h.k(*args, timeout=timeout, expected=None)
+        except AssertionError as error:
+            category = ("command-timeout" if str(error).startswith(
+                "Command exceeded its bounded timeout at ") else "command-error")
+            raise Unavailable(stage, category) from None
+        duration = min(999, max(0, int(time.monotonic() - started)))
+        if result.returncode:
+            category = COMMAND_CATEGORIES.get(command_error_category(result.stderr), "command-error")
+            raise Unavailable(stage, category, durationSeconds=duration)
+        return result.stdout
+
     def get(self, kind, name=None, namespace=None):
+        stage = GET_STAGES[kind]
+        if kind == "namespace" and name == SYSTEM:
+            stage = "core-namespace"
         args = ["get", kind]
         if name:
             args.append(name)
         if namespace:
             args += ["-n", namespace]
         args += ["--ignore-not-found", "-o", "json"]
-        raw = self.h.k(*args, timeout=self.timeout())
-        return json.loads(raw) if raw.strip() else None
+        raw = self.read(stage, args)
+        try:
+            return json.loads(raw) if raw.strip() else None
+        except (ValueError, TypeError):
+            raise Unavailable(stage, "invalid-json") from None
 
     def logs(self, pod):
         meta = pod["metadata"]
         identity = pod_identity(pod)
-        raw = self.h.k("logs", "-n", RUNTIME, meta["name"], "-c", "inference-router",
-                       "--tail=150", f"--limit-bytes={MAX_LOG_BYTES}", "--since=120s",
-                       timeout=self.timeout(8))
+        raw = self.read("pod-log", ["logs", "-n", RUNTIME, meta["name"], "-c", "inference-router",
+                        "--tail=150", f"--limit-bytes={MAX_LOG_BYTES}", "--since=120s"], seconds=8)
         current = self.get("pod", meta["name"], RUNTIME)
         if not current or pod_identity(current) != identity:
             raise Unavailable("pod-fence", "identity-changed")
@@ -223,6 +299,7 @@ def collect(h, sample="failure"):
     if phase not in ("prepare", "legacy", "fresh") or sample not in ("failure", "ready"):
         raise Unavailable("collection", "refused")
     facts = []
+    reader = None
     try:
         reader = Reader(h)
         registration = reader.get("karssreregistrations.kars.azure.com", "canonical")
@@ -246,7 +323,8 @@ def collect(h, sample="failure"):
         if template.get(OWNER) != registration["metadata"]["uid"] or not template.get(PRIVATE_UID):
             raise Unavailable("deployment", "refused")
         facts.append(fact("deployment", "current" if template.get(EPOCH) == status.get("privacyEpoch") else "stale"))
-        pods = reader.get("pods", namespace=RUNTIME)["items"]
+        facts += deployment_failures(deployment)
+        pods = pod_items(reader.get("pods", namespace=RUNTIME))
         eligible = [pod for pod in pods if
             pod.get("metadata", {}).get("namespace") == RUNTIME
             and pod["metadata"].get("annotations", {}).get(OWNER) == registration["metadata"]["uid"]
@@ -263,6 +341,10 @@ def collect(h, sample="failure"):
             raise Unavailable("pod-fence", "refused")
         replica = reader.get("replicaset", owner["name"], RUNTIME)
         if (not replica or replica["metadata"]["uid"] != owner["uid"]
+                or replica["metadata"].get("name") != owner["name"]
+                or replica["metadata"].get("namespace") != RUNTIME
+                or ("kind" in replica and replica["kind"] != "ReplicaSet")
+                or ("apiVersion" in replica and replica["apiVersion"] != "apps/v1")
                 or controller_owner(replica, "Deployment", "sre")["uid"] != deployment["metadata"]["uid"]):
             raise Unavailable("pod-fence", "identity-changed")
         pod_identity(pod)
@@ -286,9 +368,9 @@ def collect(h, sample="failure"):
         facts += exact_api_rules(policy, service, endpoints)
         facts.append(fact("collection", "complete"))
     except Unavailable as error:
-        facts.append(fact(error.stage, error.category))
+        facts.append(fact(error.stage, error.category, **error.values))
     except (AssertionError, OSError, ValueError, TypeError, KeyError, AttributeError, RuntimeError):
-        facts.append(fact("collection", "unavailable"))
+        facts.append(fact(reader.stage if reader else "fixture-identity", "unavailable"))
     report = {"phase": phase, "sample": sample, "facts": facts[:MAX_FACTS]}
     for item in report["facts"]:
         fact(item["stage"], item["category"], **{k: v for k, v in item.items() if k not in ("stage", "category")})
