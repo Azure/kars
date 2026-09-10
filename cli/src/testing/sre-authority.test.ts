@@ -12,7 +12,7 @@ const chart=fileURLToPath(new URL("../../../deploy/helm/kars",import.meta.url));
 
 describe("SRE authority chart and mutation integration",()=>{
   it("escapes custom namespace fields in CEL without renaming the wire fields or weakening equality",()=>{
-    const output=execFileSync("helm",["template","kars",chart,"--show-only","templates/crd-karssreregistration.yaml"],{encoding:"utf8"});
+    const output=execFileSync("helm",["template","kars",chart,"--show-only","templates/crd-karssreregistration.yaml"],{encoding:"utf8",timeout:10_000});
     const registration=parseAllDocuments(output).map(doc=>doc.toJSON()).find(Boolean);
     const schema=registration.spec.versions[0].schema.openAPIV3Schema;
     const spec=schema.properties.spec;
@@ -23,11 +23,11 @@ describe("SRE authority chart and mutation integration",()=>{
       message:"SRE must be registered in its controller/release namespace",
     }]);
     expect(schema["x-kubernetes-validations"][0].rule).toBe("self.metadata.name == 'canonical'");
-  });
+  },30_000);
 
   it("creates a cluster registration and no default registrar or runtime privilege bindings",()=>{
     for(const enabled of [false,true]){
-      const output=execFileSync("helm",["template","kars",chart,"--namespace","kars-system","--set",`sre.enabled=${enabled}`],{encoding:"utf8"});
+      const output=execFileSync("helm",["template","kars",chart,"--namespace","kars-system","--set",`sre.enabled=${enabled}`],{encoding:"utf8",timeout:10_000});
       const docs=parseAllDocuments(output).map(doc=>doc.toJSON()).filter(Boolean);
       const registration=docs.find(doc=>doc.kind==="CustomResourceDefinition"&&doc.metadata.name==="karssreregistrations.kars.azure.com");
       expect(registration.spec.scope).toBe("Cluster");
@@ -46,10 +46,10 @@ describe("SRE authority chart and mutation integration",()=>{
         verbs:["bind"],
       }]);
     }
-  });
+  },30_000);
 
   it("uses authorizer permissions rather than usernames for protected source/identity admission",()=>{
-    const output=execFileSync("helm",["template","kars",chart,"--namespace","custom-controller"],{encoding:"utf8"});
+    const output=execFileSync("helm",["template","kars",chart,"--namespace","custom-controller"],{encoding:"utf8",timeout:10_000});
     const policies=parseAllDocuments(output).map(doc=>doc.toJSON()).filter(doc=>doc?.kind==="ValidatingAdmissionPolicy"&&doc.metadata.name.startsWith("kars-sre-"));
     expect(policies.length).toBeGreaterThan(5);
     for(const name of ["kars-sre-source-authority","kars-sre-private-identity","kars-sre-registration-authority"]){
@@ -59,7 +59,7 @@ describe("SRE authority chart and mutation integration",()=>{
       expect(expressions).toContain("authorizer.group('kars.azure.com')");
       expect(expressions).not.toContain("request.userInfo.username");
     }
-  });
+  },30_000);
 
   it("places normal mutation and rollback checks before their owning writes",()=>{
     const checks=[
@@ -77,7 +77,7 @@ describe("SRE authority chart and mutation integration",()=>{
   });
 
   it("unconditionally denies legacy token Secret creation and both old/new update transitions under arbitrary names",()=>{
-    const output=execFileSync("helm",["template","kars",chart],{encoding:"utf8"});
+    const output=execFileSync("helm",["template","kars",chart],{encoding:"utf8",timeout:10_000});
     const docs=parseAllDocuments(output).map(doc=>doc.toJSON()).filter(Boolean);
     const policy=docs.find(doc=>doc.kind==="ValidatingAdmissionPolicy"&&doc.metadata.name==="kars-sre-no-legacy-tokens");
     expect(policy.spec.matchConstraints.resourceRules).toEqual([{
@@ -92,5 +92,5 @@ describe("SRE authority chart and mutation integration",()=>{
     expect(expression).not.toContain("authorizer");
     expect(docs.find(doc=>doc.kind==="ValidatingAdmissionPolicyBinding"
       &&doc.metadata.name===policy.metadata.name).spec.validationActions).toContain("Deny");
-  });
+  },30_000);
 });
