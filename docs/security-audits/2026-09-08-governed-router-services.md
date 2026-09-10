@@ -1,16 +1,55 @@
 # Capability audit — Scoped router governed services
 
 Date: 2026-09-08
-Status: Implementation candidate; independent review and sign-offs pending.
+Status: **Source audit approved under explicit maintainer delegation**;
+current-base build and native integration qualification remain mandatory.
 
-## Known blocking finding
+## Current delegated approval (2026-09-10)
+
+The maintainer explicitly authorized publication sign-offs after additional
+focused review rounds. The authorization is recorded in
+[comment 5615522306](https://github.com/Azure/kars/pull/551#issuecomment-5615522306).
+The AI attestation below is disclosed as delegated review, not a claim that a
+second human reviewed or signed this change.
+
+The earlier cancellation and semantic-failure findings were repaired and
+source-reviewed as described below. A fresh focused AI review was requested
+for `e711cb69e5462d351e5f24e46eed062bf6cd5980` against SRE prerequisite
+`8618e9f45d71f3223f35788c6233ebcf56ca5587`, covering scoped router services,
+private control-credential issuance, current-scope reset/wait boundaries and
+privacy/consumer-retirement behavior. It reported no security vulnerabilities
+in the reviewed changes. The later `fd7e646e` forward changes test ordering
+and its evidence only; its production controller, router, shared and Helm
+sources are unchanged from `e711cb69`.
+
+The restack preserves the services layer's stronger Pending/current-epoch/
+control-version checks. It does not restore the weaker prerequisite-only
+availability behavior, disable governed services, or authorize credentials
+while privacy is pending. The SRE dependency now contains the reviewed
+ReplicationController boundary and staging/retirement compatibility repairs.
+Its actual legacy/fresh SRE acceptance passed in the 164-pass run whose single
+remaining failure was the independently repaired asynchronous smoke lookup.
+That scoped evidence is not success of this services composition.
+
+The fresh review was static AI review, not an independent native test run.
+Local restack checks passed Rustfmt, Helm lint, 107 Python harness cases and
+source gates. Current exact-head Rust, private service and full Kind acceptance
+must still succeed; no unsuccessful check or new finding is waived. Actual PR
+merges target `kars-bridge` only after the prerequisite lands, never its
+intermediate feature branch. No `main` or customer/H100 deployment is approved.
+
+Signed-off-by: pallakatos (maintainer delegation recorded above) <lakatos.toth.pal@gmail.com>
+Signed-off-by: GitHub Copilot (delegated AI audit, not an independent human) <223556219+Copilot@users.noreply.github.com>
+
+## Original blocking finding and dependency requirement
 
 The supported legacy SRE installation grants its agent-held Kubernetes
 credential cluster-wide Secret reads. It can therefore obtain the purportedly
 operator-only service token through the API. Router-only mounts do not close
-that path. The HIGH remains unresolved in this candidate; a separately reviewed
-operator-controlled UID registration/migration and SRE credential boundary is
-required before deployment or merge. Legacy grants cannot be retired merely by
+that path. The separately reviewed operator-controlled UID registration,
+migration and SRE credential boundary is now included as a prerequisite;
+its full composed acceptance remains required
+before deployment or merge. Legacy grants cannot be retired merely by
 trusting names, labels or ownership-looking annotations.
 
 ## Scope
@@ -101,5 +140,7 @@ remain the parent publication process's responsibility.
 
 ## Verdict
 
-Pending. No reviewer approval or signature is claimed. Genuine author and
-independent reviewer sign-offs are required by the publication process.
+Source approval is recorded above under the maintainer's explicit delegation.
+Publication remains pending exact-head technical and native qualification;
+historical results in this document must not be represented as a passing
+current-base composition.

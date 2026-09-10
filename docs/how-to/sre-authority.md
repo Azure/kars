@@ -54,6 +54,25 @@ CLI retries without it only after that exact flag error and a confirmed Helm 4
 version. Other discovery failures remain errors, not an absent release or
 permission to install over existing resources.
 
+Staging uses Helm 3's built-in waiter (`--wait`) or Helm 4's explicit
+`--wait=legacy`, with the same eight-minute bound. It waits for built-in
+workloads and established APIs, **not** custom-resource `Ready`: an existing
+unenrolled SRE source cannot become Ready until the subsequent enrollment.
+This is not a readiness bypass. `authority migrate` and normal installation
+still require the fully observed, policy-type-checked authority Ready gate.
+
+Before installing dependent policies, staging also checks the action CRD.
+The immutable BASE365 action schema's `params.additionalProperties: true`
+is incompatible with Kubernetes 1.31 CEL type checking. For that exact
+recognized schema only, staging uses UID/resourceVersion-tested JSON Patch
+to replace the boolean with `x-kubernetes-preserve-unknown-fields: true`.
+It does not adopt the old object or rewrite its other fields or metadata.
+Known API defaults are tolerated; foreign installation ownership,
+custom schemas/versions/validators, replacements, and API failures stop
+staging. Resolve those conflicts through explicit installation/schema review,
+not force adoption. Both registration and action APIs must be established
+before their dependent policies can be used.
+
 ```sh
 kars sre authority preview --namespace kars-system --release kars
 kars sre authority enroll --namespace kars-system --release kars \
@@ -185,6 +204,29 @@ and router image configuration, retaining unrelated settings. Different
 unowned authority objects require explicit operator resolution, not force
 adoption. Standard install/upgrade commands are not a migration bypass.
 
+### Azure resource-group teardown
+
+`kars destroy --all --yes --resource-group <group> [--subscription <id>]`
+captures one Azure subscription ID and pins every inventory, credential,
+delete, and purge command to it. It checks **every** AKS cluster in the actual
+resource group, using that cluster's ARM-issued credentials, not the global
+current Kubernetes context. Credentials are written only to exclusively
+created private files (0700 directory, 0600 files) in the current directory
+and removed afterward; the global kubeconfig is never changed.
+
+An explicit `--context` must match one of those clusters by the ARM-provided
+TLS endpoint/CA and live `kube-system` UID. This does not exempt other clusters
+from retirement checks. ARM IDs and immutable AKS `resourceUid` values are
+inventoried again before deletion; changed/ambiguous inventory, missing
+identity evidence, inaccessible APIs, and unretired authority all block
+deletion. A proven empty AKS inventory is allowed. `--all --local` is rejected
+because `--all` deletes Azure resources, irrespective of the sandbox name.
+
+Preflight and Azure group deletion are not an atomic transaction. As with
+other administrative teardown, stop concurrent provisioning or re-enrollment
+in the group while performing teardown. No missing API access is interpreted
+as retirement or absence.
+
 ## Existing Hermes images remain compatible
 
 The Pod still uses ServiceAccount `sandbox`, preserving its Azure Workload
@@ -216,10 +258,21 @@ and requires cluster-wide `apps/replicasets` CREATE authority; namespaced
 workload permissions are insufficient. It does not grant the Deployment
 controller Pod CREATE or registrar authority.
 
+The registered router's API egress includes the canonical Service IP and its
+ready HTTPS endpoint IP/port pairs, since policy enforcement can see the
+post-DNAT destination rather than the Service VIP. These are exact `/32` or
+`/128` targets, not private-subnet allowances; malformed, missing, terminating,
+or oversized endpoint inventories fail closed. The controller fetches
+`default/kubernetes`, with only named `kubernetes` Endpoints GET added to its
+authority role, and refreshes registered SRE reconciliation every 30 seconds.
+The UID-1000 egress guard and opaque agent credential are unchanged.
+
 The proxy checks current registration and live UID/claim authority. It permits
 the bounded first-party diagnostic read/log/metrics paths and Pending-only
 `KarsSREAction` creation in `kars-sre`. Secret responses retain key names but
 exclude values, `stringData`, annotations, labels, and managed-field copies.
+The typed `SecretList` envelope supplies item types when Kubernetes omits item
+`kind`/`apiVersion`; conflicting explicit type metadata is still rejected.
 Encoded/noncanonical paths, watches, streaming log follow, token requests,
 exec/proxy subresources, arbitrary writes, and non-JSON media escapes are denied.
 The existing Hermes proposal builder's two diagnostic labels are accepted;
@@ -240,6 +293,14 @@ kars sre uninstall --namespace kars-system --release kars
 ```
 
 Retirement revokes owned private grants and credentials before source cleanup.
+The registrar-authorized controller first quiesces and UID/resourceVersion-
+fences deletion of its owned SRE Deployment; it does not leave that protected
+object for the unprivileged namespace controller. Foreign/replaced consumers
+and external finalizers are preserved, not adopted or forced. Retained Retired
+records can finish this owned cleanup without reissuing authority.
+Name-sensitive admission also inspects the actual object/oldObject name when
+collection DELETE omits `request.name`: ordinary collection cleanup remains
+valid, while protected items still require registrar authority.
 Uninstall/destroy refuse an active enrollment or unretired legacy grants.
 Retired registrations remain audit records; recreating the source requires
 explicit enrollment of the new UIDs (`authority stage-source` can atomically

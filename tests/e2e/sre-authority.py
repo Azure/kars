@@ -3,6 +3,7 @@
 # Licensed under the MIT License.
 
 import argparse
+import json
 from pathlib import Path
 
 
@@ -54,6 +55,11 @@ def main():
         # command output, JWTs and TLS private keys never become failure logs.
         print(f"SRE-FAIL {options.phase}: {str(error) if isinstance(error, AssertionError) else type(error).__name__}", flush=True)
         if harness:
+            from sre_authority.bootstrap_diagnostics import exception_summary
+            try:
+                print("SRE-ERROR", json.dumps(exception_summary(error, harness.root)), flush=True)
+            except Exception:
+                print("SRE-ERROR sanitized exception summary unavailable", flush=True)
             harness.diagnostics()
         return 1
     finally:
