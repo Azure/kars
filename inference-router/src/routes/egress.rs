@@ -113,10 +113,30 @@ async fn egress_fetch(
     State(state): State<AppState>,
     Json(req): Json<serde_json::Value>,
 ) -> impl IntoResponse {
+    let started = std::time::Instant::now();
+    let telemetry_scope = state.services.telemetry.cursor().0;
     let url = req.get("url").and_then(|v| v.as_str()).unwrap_or("");
     let method = req.get("method").and_then(|v| v.as_str()).unwrap_or("GET");
     let req_body = req.get("body").and_then(|v| v.as_str()).unwrap_or("");
     let req_headers = req.get("headers").and_then(|v| v.as_object());
+    let wait_ms = req
+        .get("wait_for_approval_ms")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(0);
+    if req
+        .get("wait_for_approval_ms")
+        .is_some_and(|value| value.as_u64().is_none())
+    {
+        return super::access_request::error(crate::access_request::Error::Invalid);
+    }
+    if wait_ms > 300_000 {
+        return super::access_request::error(crate::access_request::Error::Invalid);
+    }
+    if wait_ms > 0
+        && req.get("scope_id").and_then(serde_json::Value::as_str) != Some(telemetry_scope.as_str())
+    {
+        return super::access_request::error(crate::access_request::Error::StaleScope);
+    }
 
     if url.is_empty() {
         return errors::flat(StatusCode::BAD_REQUEST, "Missing 'url' field").into_response();
@@ -134,7 +154,15 @@ async fn egress_fetch(
                 }
             };
             if is_private {
-                tracing::warn!(url = %url, "Egress fetch blocked: private/internal target");
+                tracing::warn!("Egress fetch blocked: private/internal target");
+                state.services.telemetry.record_router_tool(
+                    &telemetry_scope,
+                    "http_fetch",
+                    Some(false),
+                    Some(403),
+                    0,
+                    true,
+                );
                 return (
                     StatusCode::FORBIDDEN,
                     Json(serde_json::json!({
@@ -148,21 +176,93 @@ async fn egress_fetch(
     }
 
     let sandbox: &str = &state.sandbox_name;
+    let mut dispatch_request = None;
 
     // Check egress access: blocklist → allowlist (Strict denies the rest).
     if let Err(reason) = state.blocklist.check_egress(url, sandbox).await {
-        tracing::warn!(url = %url, reason = %reason, "Egress fetch denied");
-        return (StatusCode::FORBIDDEN, Json(serde_json::json!({
+        tracing::warn!("Egress fetch denied by policy");
+        let target = reqwest::Url::parse(url).ok().and_then(|url| {
+            url.host_str()
+                .zip(url.port_or_known_default())
+                .map(|(host, port)| (host.to_string(), port))
+        });
+        let entry = target.as_ref().and_then(|(host, port)| {
+            let now = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            state
+                .blocked_egress
+                .record_at(std::time::Instant::now(), now, sandbox, host, *port);
+            state
+                .services
+                .record_egress_in_scope(&telemetry_scope, host, *port)
+                .ok()
+        });
+        state
+            .services
+            .telemetry
+            .record_policy(&telemetry_scope, "egress", false);
+        if wait_ms > 0 {
+            let Some(entry) = entry else {
+                return super::access_request::error(crate::access_request::Error::Full);
+            };
+            if let Err(error) = state
+                .services
+                .wait_for_egress(
+                    &state.blocklist,
+                    &telemetry_scope,
+                    &entry.request_id,
+                    url,
+                    sandbox,
+                    std::time::Duration::from_millis(wait_ms),
+                )
+                .await
+            {
+                state.services.telemetry.record_router_tool(
+                    &telemetry_scope,
+                    "http_fetch",
+                    Some(false),
+                    Some(403),
+                    started.elapsed().as_millis() as u64,
+                    false,
+                );
+                return super::access_request::error(error);
+            }
+            dispatch_request = Some(entry.request_id);
+        } else {
+            state.services.telemetry.record_router_tool(
+                &telemetry_scope,
+                "http_fetch",
+                Some(false),
+                Some(403),
+                0,
+                true,
+            );
+            return (StatusCode::FORBIDDEN, Json(serde_json::json!({
             "error": reason,
             "url": url,
             "action": "If legitimate, an operator can add the host to the baseline allowlist ('kars egress <name> --approve <host>', which re-signs) or grant it temporarily ('kars egress allow-extra <name> --host <host> --ttl <dur> --reason <why>').",
-        }))).into_response();
+            }))).into_response();
+        }
+    }
+    if wait_ms > 0
+        && state
+            .services
+            .requests
+            .scope()
+            .map(|scope| scope.id)
+            .ok()
+            .as_deref()
+            != Some(telemetry_scope.as_str())
+    {
+        return super::access_request::error(crate::access_request::Error::StaleScope);
     }
 
     // Record in learn mode
     state.blocklist.record_learned(url).await;
 
-    tracing::info!(url = %url, method = %method, "Egress fetch proxied");
+    tracing::info!("Egress fetch proxied");
 
     // Build and send the request
     let http_method = match method.to_uppercase().as_str() {
@@ -204,6 +304,27 @@ async fn egress_fetch(
 
     const MAX_RESPONSE_BYTES: usize = 2 * 1024 * 1024; // 2 MB
 
+    // No await separates this atomic claim from starting the send. A successful
+    // cancel/reset before the claim wins; afterwards prevention is not promised.
+    let _dispatch_claim = if wait_ms > 0 {
+        if state.blocklist.check_egress(url, sandbox).await.is_err() {
+            return errors::flat(
+                StatusCode::FORBIDDEN,
+                "Egress policy no longer permits this operation",
+            )
+            .into_response();
+        }
+        match state
+            .services
+            .claim_egress_dispatch(&telemetry_scope, dispatch_request.as_deref())
+        {
+            Ok(claim) => Some(claim),
+            Err(error) => return super::access_request::error(error),
+        }
+    } else {
+        None
+    };
+
     match request
         .timeout(std::time::Duration::from_secs(30))
         .send()
@@ -236,32 +357,79 @@ async fn egress_fetch(
                 })
                 .collect();
             // Cap response body to prevent OOM
-            let body_bytes = resp.bytes().await.unwrap_or_default();
-            let body = if body_bytes.len() > MAX_RESPONSE_BYTES {
-                let truncated = String::from_utf8_lossy(&body_bytes[..MAX_RESPONSE_BYTES]);
-                format!(
-                    "{}... [truncated at {} bytes]",
-                    truncated, MAX_RESPONSE_BYTES
-                )
-            } else {
-                String::from_utf8_lossy(&body_bytes).into_owned()
-            };
+            use futures::StreamExt;
+            let mut stream = resp.bytes_stream();
+            let mut body_bytes = Vec::new();
+            let mut truncated = false;
+            while let Some(chunk) = stream.next().await {
+                let chunk = match chunk {
+                    Ok(chunk) => chunk,
+                    Err(_) => {
+                        state.services.telemetry.record_router_tool(
+                            &telemetry_scope,
+                            "http_fetch",
+                            Some(false),
+                            Some(status),
+                            started.elapsed().as_millis() as u64,
+                            false,
+                        );
+                        return errors::flat(
+                            StatusCode::BAD_GATEWAY,
+                            "Upstream response body failed",
+                        )
+                        .into_response();
+                    }
+                };
+                let available = MAX_RESPONSE_BYTES - body_bytes.len();
+                body_bytes.extend_from_slice(&chunk[..chunk.len().min(available)]);
+                if chunk.len() > available {
+                    truncated = true;
+                    break;
+                }
+            }
+            let mut body = String::from_utf8_lossy(&body_bytes).into_owned();
+            if truncated {
+                body.push_str(&format!("... [truncated at {MAX_RESPONSE_BYTES} bytes]"));
+            }
+            state.services.telemetry.record_router_tool(
+                &telemetry_scope,
+                "http_fetch",
+                if status >= 400 {
+                    Some(false)
+                } else if truncated {
+                    None
+                } else {
+                    Some(true)
+                },
+                Some(status),
+                started.elapsed().as_millis() as u64,
+                !truncated,
+            );
             (
                 StatusCode::OK,
                 Json(serde_json::json!({
                     "status": status,
                     "headers": resp_headers,
                     "body": body,
+                    "truncated": truncated,
                 })),
             )
                 .into_response()
         }
-        Err(e) => {
-            tracing::warn!(url = %url, error = %e, "Egress fetch failed");
+        Err(_) => {
+            tracing::warn!("Egress fetch failed");
+            state.services.telemetry.record_router_tool(
+                &telemetry_scope,
+                "http_fetch",
+                Some(false),
+                None,
+                started.elapsed().as_millis() as u64,
+                false,
+            );
             (
                 StatusCode::BAD_GATEWAY,
                 Json(serde_json::json!({
-                    "error": format!("Request failed: {}", e),
+                    "error": "Upstream request failed",
                     "url": url,
                 })),
             )

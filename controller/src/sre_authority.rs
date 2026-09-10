@@ -25,7 +25,10 @@ use kube::{
     api::{Patch, PatchParams},
 };
 
-pub(crate) use live::{api_error, check_secret_denial, privacy_epoch};
+pub(crate) use live::{
+    PrivacyReadiness, api_error, check_secret_denial, privacy_epoch, privacy_readiness,
+};
+pub(crate) use migration::controller_managed;
 
 fn registration_conditions(
     prior: &[Condition],

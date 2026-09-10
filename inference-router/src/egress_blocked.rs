@@ -9,7 +9,7 @@
 //! paths, headers, query strings, or payload data are ever stored.
 
 use std::collections::{HashMap, VecDeque};
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex, Weak};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 /// Default capacity when the operator does not override.
@@ -51,6 +51,7 @@ pub enum RecordOutcome {
 
 /// Bounded ring buffer of blocked-attempt records.
 pub struct BlockedBuffer {
+    services: Mutex<Option<Weak<crate::governed_services::GovernedServices>>>,
     inner: Mutex<Inner>,
     capacity: usize,
     rate_limit_window: Duration,
@@ -71,6 +72,7 @@ struct RateState {
 impl BlockedBuffer {
     pub fn new(capacity: usize, rate_limit_window: Duration, rate_limit_per_source: u32) -> Self {
         Self {
+            services: Mutex::new(None),
             inner: Mutex::new(Inner {
                 by_key: HashMap::new(),
                 order: VecDeque::new(),
@@ -96,7 +98,42 @@ impl BlockedBuffer {
     /// possible results. Hostname-only — never store paths, headers, or
     /// payload data.
     pub fn record(&self, source_sandbox: &str, host: &str, port: u16) -> RecordOutcome {
-        self.record_at(Instant::now(), unix_now(), source_sandbox, host, port)
+        let result = self.record_at(Instant::now(), unix_now(), source_sandbox, host, port);
+        if matches!(
+            result,
+            RecordOutcome::Recorded | RecordOutcome::Deduplicated
+        ) && let Some(services) = self
+            .services
+            .lock()
+            .ok()
+            .and_then(|services| services.as_ref().and_then(Weak::upgrade))
+            && let Ok(scope) = services.requests.scope()
+            && scope.identity.sandbox.name == source_sandbox
+        {
+            let suffix = format!(":{port}");
+            let host = host.strip_suffix(&suffix).unwrap_or(host);
+            let _ = services.record_egress_in_scope(&scope.id, host, port);
+            services.telemetry.record_policy(&scope.id, "egress", false);
+        }
+        result
+    }
+
+    pub fn bind_services(&self, services: &Arc<crate::governed_services::GovernedServices>) {
+        if let Ok(mut target) = self.services.lock() {
+            *target = Some(Arc::downgrade(services));
+        }
+    }
+    pub fn observe_allowed(&self, source_sandbox: &str) {
+        if let Some(services) = self
+            .services
+            .lock()
+            .ok()
+            .and_then(|services| services.as_ref().and_then(Weak::upgrade))
+            && let Ok(scope) = services.requests.scope()
+            && scope.identity.sandbox.name == source_sandbox
+        {
+            services.telemetry.record_policy(&scope.id, "egress", true);
+        }
     }
 
     /// Testable record entry point — accepts an injected clock pair.
@@ -269,7 +306,7 @@ fn unix_now() -> u64 {
 }
 
 /// Lowercase ASCII, strip a single trailing dot, reject empty / IP literal.
-fn normalize_host(host: &str) -> Option<String> {
+pub(crate) fn normalize_host(host: &str) -> Option<String> {
     let trimmed = host.trim();
     if trimmed.is_empty() {
         return None;

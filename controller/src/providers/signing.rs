@@ -168,6 +168,7 @@ pub fn sha256_hex(bytes: &[u8]) -> String {
         use std::fmt::Write;
         let _ = write!(out, "{b:02x}");
     }
+
     out
 }
 

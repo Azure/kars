@@ -42,6 +42,15 @@ function legacy(kind: string, name: string, release = "kars"): Resource {
   };
 }
 
+function fixtureChart(directory: string): string {
+  const target = join(directory, "chart");
+  mkdirSync(join(target, "templates"), { recursive: true });
+  for (const file of ["Chart.yaml", "values.yaml", "templates/sre.yaml"]) {
+    copyFileSync(join(chart, file), join(target, file));
+  }
+  return target;
+}
+
 async function upgrade(
   namespace: Resource | undefined, writer: Resource | undefined, enabled = true, forbidden = false,
 ): Promise<Resource[]> {
@@ -110,11 +119,7 @@ async function upgrade(
     const address = server.address();
     if (!address || typeof address === "string") throw new Error("Expected TCP test API address");
     const kubeconfig = join(directory, "config");
-    const fixtureChart = join(directory, "chart");
-    mkdirSync(join(fixtureChart, "templates"), { recursive: true });
-    for (const file of ["Chart.yaml", "values.yaml", "templates/sre.yaml"]) {
-      copyFileSync(join(chart, file), join(fixtureChart, file));
-    }
+    const renderedChart = fixtureChart(directory);
     writeFileSync(kubeconfig, JSON.stringify({
       apiVersion: "v1", kind: "Config",
       clusters: [{ name: "fixture", cluster: { server: `http://127.0.0.1:${address.port}` } }],
@@ -123,7 +128,7 @@ async function upgrade(
       "current-context": "fixture",
     }), { mode: 0o600 });
     const { stdout } = await execa("helm", [
-      "template", "kars", fixtureChart, "--namespace", "kars-system",
+      "template", "kars", renderedChart, "--namespace", "kars-system",
       "--kubeconfig", kubeconfig, "--dry-run=server", "--is-upgrade",
       // The fixture serves discovery and live lookup, not an OpenAPI schema.
       "--disable-openapi-validation",
@@ -139,17 +144,22 @@ async function upgrade(
 
 describe("SRE namespace ownership (actual Helm lookup against an isolated test API)", () => {
   it("leaves fresh runtime namespaces and writer accounts to the controller", async () => {
-    const { stdout } = await execa("helm", [
-      "template", "kars", chart, "--namespace", "kars-system",
-      "--set", "sre.enabled=true", "--show-only", "templates/sre.yaml",
-    ]);
-    const resources = documents(stdout);
-    expect(resources.some(resource => resource.kind === "Namespace" || resource.kind === "ServiceAccount")).toBe(false);
-    const namespaced = resources.filter(resource => resource.metadata.namespace);
-    expect(namespaced).toHaveLength(3);
-    expect(namespaced.every(resource => resource.metadata.namespace === "kars-system")).toBe(true);
-    expect(resources.some(resource => resource.kind === "KarsSandbox" && resource.metadata.name === "sre")).toBe(true);
-  });
+    const directory = mkdtempSync(join(tmpdir(), "kars-sre-fresh-"));
+    try {
+      const { stdout } = await execa("helm", [
+        "template", "kars", fixtureChart(directory), "--namespace", "kars-system",
+        "--dry-run=client", "--set", "sre.enabled=true", "--show-only", "templates/sre.yaml",
+      ], { timeout: 20_000 });
+      const resources = documents(stdout);
+      expect(resources.some(resource => resource.kind === "Namespace" || resource.kind === "ServiceAccount")).toBe(false);
+      const namespaced = resources.filter(resource => resource.metadata.namespace);
+      expect(namespaced).toHaveLength(3);
+      expect(namespaced.every(resource => resource.metadata.namespace === "kars-system")).toBe(true);
+      expect(resources.some(resource => resource.kind === "KarsSandbox" && resource.metadata.name === "sre")).toBe(true);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it.each([true, false])("retains a legacy namespace without deleting its data when enabled=%s", async enabled => {
     const namespace = legacy("Namespace", "kars-sre");
@@ -171,7 +181,7 @@ describe("SRE namespace ownership (actual Helm lookup against an isolated test A
       expect(account).toBeUndefined();
       expect(resources).toHaveLength(1);
     }
-  });
+  }, 30_000);
 
   it("does not claim another release's namespace or service account", async () => {
     const resources = await upgrade(
@@ -179,14 +189,14 @@ describe("SRE namespace ownership (actual Helm lookup against an isolated test A
       legacy("ServiceAccount", "sre-writer", "other-release"),
     );
     expect(resources.some(resource => ["Namespace", "ServiceAccount"].includes(resource.kind))).toBe(false);
-  });
+  }, 30_000);
 
   it("does not invent a namespace when upgrading a release that never enabled SRE", async () => {
     const resources = await upgrade(undefined, undefined);
     expect(resources.some(resource => ["Namespace", "ServiceAccount"].includes(resource.kind))).toBe(false);
-  });
+  }, 30_000);
 
   it("propagates namespace lookup failures instead of omitting a possibly owned resource", async () => {
     await expect(upgrade(undefined, undefined, true, true)).rejects.toThrow(/error calling lookup/);
-  });
+  }, 30_000);
 });
