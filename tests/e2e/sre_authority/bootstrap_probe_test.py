@@ -7,7 +7,7 @@ from pathlib import Path
 import unittest
 from unittest.mock import patch
 
-from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, failure_facts, object_status, policy_status, public_stack_facts
+from sre_authority.bootstrap_diagnostics import api_result, collect, control_plane_status, exception_summary, failure_facts, firewall_summary, object_status, policy_status, probe_command_result, public_stack_facts, router_log_summary, router_readiness_facts
 from sre_authority.bootstrap_probe import builtin_documents, converted_objects, exercise, preserved_json_candidate, safe_controller
 
 POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
@@ -15,6 +15,153 @@ POLICIES = {"kars-sre-private-mounts": {"spec": {"validations": [
 
 
 class BootstrapProofTests(unittest.TestCase):
+    def test_policy_compile_diagnostics_keep_only_known_fields_and_token_categories(self):
+        body = {"kind": "Status", "reason": "Invalid", "details": {
+            "group": "admissionregistration.k8s.io", "kind": "ValidatingAdmissionPolicy",
+            "name": "kars-sre-private-mounts", "causes": [
+                {"field": "spec.matchConditions[0].expression",
+                 "message": "compilation failed: undefined field 'metadata'; optional overload do-not-publish"},
+                {"field": "spec.arbitrary", "message": "do-not-publish"},
+            ]}}
+        facts = api_result(422, body, POLICIES)
+        self.assertEqual(facts["compilationCauses"][0]["knownTokens"], ["metadata"])
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+        body["details"]["name"] = "unrelated"
+        self.assertNotIn("compilationCauses", api_result(422, body, POLICIES))
+
+    def test_namespace_cleanup_proof_retains_guard_and_fences_all_deletes(self):
+        from sre_authority.bootstrap_cases import namespace_cleanup_cases
+        deployment = {"metadata": {"uid": "owned", "resourceVersion": "2"}}
+        responses = [(404, {}), (201, deployment), (200, {"metadata": {"uid": "namespace-controller"}}),
+                     (200, deployment), (200, {"metadata": {"uid": "kars-controller"}}),
+                     (200, deployment), (200, deployment), (200, {})]
+        with patch("sre_authority.bootstrap_cases.request", side_effect=responses) as api, \
+                patch("sre_authority.bootstrap_cases.as_tenant", side_effect=[
+                    (403, {"kind": "Status", "reason": "Forbidden",
+                           "message": "kars-sre-consumer-authority denied do-not-publish"}),
+                    (200, {"kind": "Status", "status": "Success"})]) as actor:
+            cases = namespace_cleanup_cases(1, {"kars-sre-consumer-authority": {}})
+        self.assertTrue(all(case["matched"] for case in cases))
+        self.assertNotIn("do-not-publish", json.dumps(cases))
+        for call in actor.call_args_list:
+            self.assertEqual(call.kwargs["method"], "DELETE")
+            self.assertNotIn("?", call.args[1])
+            self.assertEqual(call.args[2]["dryRun"], ["All"])
+            self.assertEqual(call.args[2]["preconditions"], {"uid": "owned", "resourceVersion": "2"})
+        self.assertEqual(api.call_args_list[-1].args[1], "DELETE")
+        self.assertEqual(api.call_args_list[-1].args[3]["preconditions"], {"uid": "owned", "resourceVersion": "2"})
+
+    def test_cleanup_proof_never_adopts_an_unexpected_existing_consumer(self):
+        from sre_authority.bootstrap_cases import namespace_cleanup_cases
+        owned = {"metadata": {"uid": "owned"}, "spec": {"replicas": 0}}
+        for current, expected in ((owned, None),
+                                  ({"metadata": {"uid": "other"}, "spec": owned["spec"]}, owned),
+                                  ({"metadata": owned["metadata"], "spec": {"replicas": 1}}, owned)):
+            with patch("sre_authority.bootstrap_cases.request", return_value=(200, current)) as api, \
+                    self.assertRaises(RuntimeError):
+                namespace_cleanup_cases(1, {}, expected)
+            api.assert_called_once()
+
+    def test_http_failure_summary_reports_status_and_checked_source_not_body_url_or_headers(self):
+        root = Path(__file__).resolve().parents[3]
+        class Response:
+            status_code = 401
+            def json(self):
+                return {"kind": "Status", "reason": "SREProxyDenied",
+                        "message": "An SRE proxy credential is required", "data": "do-not-publish"}
+        error = RuntimeError("do-not-publish URL/header/credential")
+        error.response = Response()
+        facts = exception_summary(error, root)
+        self.assertEqual(facts["httpStatus"], 401)
+        self.assertTrue(facts["responseSite"]["source"].endswith("sre_proxy/mod.rs"))
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+        error.response.json = lambda: {"kind": "Status", "message": "do-not-publish"}
+        self.assertNotIn("responseSite", exception_summary(error, root))
+        self.assertNotIn("do-not-publish", json.dumps(exception_summary(error, root)))
+
+    def test_firewall_summary_does_not_publish_rules_comments_addresses_or_unknown_chains(self):
+        text = """*filter
+:OUTPUT ACCEPT [12:640]
+[4:240] -A OUTPUT -m owner --uid-owner 1000 -j DROP
+[3:120] -A OUTPUT -m owner ! --uid-owner 1001 -o lo -j ACCEPT
+[2:80] -A do-not-publish -s do-not-publish -m comment --comment do-not-publish -j DROP
+COMMIT
+"""
+        value = firewall_summary(text)
+        self.assertEqual(value["policies"], [{"table": "filter", "chain": "OUTPUT", "policy": "ACCEPT", "packets": 12}])
+        self.assertEqual(value["rules"][0]["owner"], 1000)
+        self.assertTrue(value["rules"][1]["ownerNegated"])
+        self.assertEqual(value["rules"][2]["chain"], "custom")
+        self.assertNotIn("do-not-publish", json.dumps(value))
+
+    def test_router_startup_summary_reports_only_verified_source_coordinates(self):
+        root = Path(__file__).resolve().parents[3]
+        text = "\n".join([
+            json.dumps({"fields": {"message": "kars Inference Router starting", "token": "do-not-publish"}}),
+            json.dumps({"fields": {"message": "do-not-publish"}}),
+            "do-not-publish plaintext",
+        ])
+        result = router_log_summary(text, root)
+        self.assertEqual(result["lines"], 3)
+        self.assertEqual(result["jsonEvents"], 2)
+        self.assertEqual(len(result["sourceSites"]), 1)
+        self.assertEqual(result["sourceSites"][0]["source"], "inference-router/src/main.rs")
+        self.assertNotIn("do-not-publish", json.dumps(result))
+
+    def test_actual_json_tracing_format_is_parsed_without_publishing_other_fields(self):
+        events = [
+            {"message": "SRE authority transport failure", "stage": "registration",
+             "timed_out": True, "connect_error": False, "token": "do-not-publish"},
+            {"message": "SRE authority request denied", "stage": "privacy-review", "http_status": 403},
+            {"message": "SRE readiness authority slow", "authorized": True, "elapsed_seconds": 8},
+            {"message": "SRE transport progress", "stage": "tls-accepted", "peer": "do-not-publish"},
+            {"message": "SRE authority progress", "stage": "registration",
+             "step": "request", "url": "do-not-publish"},
+            {"message": "unrelated do-not-publish", "stage": "namespace"},
+            {"message": "SRE authority request denied", "stage": "do-not-publish", "http_status": True},
+        ]
+        text = "\n".join(json.dumps({"fields": fields, "span": {"token": "do-not-publish"}}) for fields in events)
+        facts = router_readiness_facts(text)
+        self.assertEqual(facts, [
+            {"stage": "registration", "timed_out": True, "connect_error": False},
+            {"stage": "privacy-review", "httpStatus": 403},
+            {"authorized": True, "elapsedSeconds": 8},
+            {"stage": "tls-accepted"},
+            {"stage": "registration", "step": "request"},
+        ])
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+        self.assertEqual(router_readiness_facts(json.dumps(events[0])), [facts[0]])
+
+    def test_router_readiness_logs_expose_only_fixed_stage_status_and_timeout_facts(self):
+        text = (
+            '\x1b[33mSRE authority transport failure\x1b[0m stage="registration" timed_out=true connect_error=false token=do-not-publish\n'
+            'SRE authority request denied stage="privacy-review" http_status=403 body=do-not-publish\n'
+            'SRE readiness authority rejected category="authority-transport" do-not-publish\n'
+            'SRE readiness authority slow elapsed_seconds=20 authorized=false do-not-publish\n'
+            'unrelated log stage="source" do-not-publish\n'
+            'SRE authority request denied stage="do-not-publish" http_status=999\n'
+        )
+        facts = router_readiness_facts(text)
+        self.assertEqual(facts, [
+            {"stage": "registration", "timed_out": True, "connect_error": False},
+            {"stage": "privacy-review", "httpStatus": 403},
+            {"category": "authority-transport"},
+            {"authorized": False, "elapsedSeconds": 20},
+        ])
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+
+    def test_probe_diagnostics_never_publish_executable_output(self):
+        for code, output, category in (
+            (127, "exec: executable file not found in $PATH do-not-publish", "executable-not-found"),
+            (1, "", "probe-not-ready"),
+            (1, "command terminated with exit code 1\n", "probe-not-ready"),
+            (0, "do-not-publish", "succeeded"),
+            (1, "do-not-publish", "unclassified"),
+        ):
+            facts = probe_command_result(code, output)
+            self.assertEqual(facts, {"exitCode": code, "category": category})
+            self.assertNotIn("do-not-publish", json.dumps(facts))
+
     def test_failure_metadata_keeps_public_cause_not_body_or_credentials(self):
         message = ('Error creating Pod: kars-sre-private-mounts evaluation failed: no such key: namespace; '
                    'token=do-not-publish argv=do-not-publish')

@@ -180,8 +180,14 @@ fn validate_query(query: Option<&str>, route: Route) -> Result<(), &'static str>
     Ok(())
 }
 
-fn secret(value: &Value) -> Result<Value, &'static str> {
-    if value["kind"] != "Secret" || !value["metadata"].is_object() {
+fn secret(value: &Value, list_item: bool) -> Result<Value, &'static str> {
+    let kind_matches = value.get("kind").map_or(list_item, |kind| kind == "Secret");
+    if !kind_matches
+        || !value["metadata"].is_object()
+        || value
+            .get("apiVersion")
+            .is_some_and(|version| version != "v1")
+    {
         return Err("Malformed Secret response");
     }
     let mut metadata = serde_json::Map::new();
@@ -212,13 +218,21 @@ fn secret(value: &Value) -> Result<Value, &'static str> {
 
 pub(super) fn secret_projection(value: &Value) -> Result<Value, &'static str> {
     if value["kind"] == "Secret" {
-        return secret(value);
+        return secret(value, false);
     }
-    if value["kind"] != "SecretList" {
+    if value["kind"] != "SecretList"
+        || value
+            .get("apiVersion")
+            .is_some_and(|version| version != "v1")
+    {
         return Err("Unexpected Secret response kind");
     }
     let items = value["items"].as_array().ok_or("Malformed Secret list")?;
-    let items = items.iter().map(secret).collect::<Result<Vec<_>, _>>()?;
+    // Kubernetes omits TypeMeta on items inside its typed list envelope.
+    let items = items
+        .iter()
+        .map(|item| secret(item, true))
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(json!({"apiVersion":"v1","kind":"SecretList",
         "metadata":{"resourceVersion":value["metadata"]["resourceVersion"],"continue":value["metadata"]["continue"]},
         "items":items}))
@@ -376,6 +390,41 @@ mod tests {
             assert!(!encoded.contains("managedFields"));
             assert!(encoded.contains("control-token"));
         }
+    }
+
+    #[test]
+    fn native_secret_list_items_may_omit_typemeta_but_not_conflict_with_the_envelope() {
+        let item = json!({"metadata":{"name":"test","namespace":"kars-test","uid":"uid","resourceVersion":"7",
+            "annotations":{"copy":"PRIVATE_VALUE"},"labels":{"copy":"PRIVATE_VALUE"}},
+            "type":"Opaque","data":{"key":"PRIVATE_VALUE"},"stringData":{"copy":"PRIVATE_VALUE"}});
+        let list = json!({"apiVersion":"v1","kind":"SecretList",
+            "metadata":{"resourceVersion":"9","continue":"cursor"},"items":[item.clone()]});
+        let output = secret_projection(&list).unwrap();
+        assert_eq!(output["items"][0]["kind"], "Secret");
+        assert_eq!(output["items"][0]["apiVersion"], "v1");
+        assert_eq!(output["items"][0]["data"], json!({"key":""}));
+        assert_eq!(output["metadata"], list["metadata"]);
+        assert!(!output.to_string().contains("PRIVATE_VALUE"));
+        assert!(
+            !output["items"][0]["metadata"]
+                .as_object()
+                .unwrap()
+                .contains_key("annotations")
+        );
+        assert!(secret_projection(&item).is_err());
+        for (key, value) in [
+            ("kind", json!("ConfigMap")),
+            ("kind", Value::Null),
+            ("apiVersion", json!("other/v1")),
+            ("metadata", Value::Null),
+        ] {
+            let mut invalid = list.clone();
+            invalid["items"][0][key] = value;
+            assert!(secret_projection(&invalid).is_err());
+        }
+        let mut invalid = list;
+        invalid["kind"] = "List".into();
+        assert!(secret_projection(&invalid).is_err());
     }
 
     #[test]

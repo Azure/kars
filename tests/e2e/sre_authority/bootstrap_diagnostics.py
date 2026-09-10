@@ -3,6 +3,7 @@
 
 """Allowlisted public admission evidence; never dump Pod specs, argv or bodies."""
 
+import json
 import re
 import subprocess
 
@@ -19,6 +20,181 @@ FIELDS = {
     "enabled", "serviceAccountName", "containers", "initContainers", "ephemeralContainers",
     "securityContext", "operation", "subResource", "container", "kind", "apiVersion",
 }
+
+
+def probe_command_result(code, output):
+    category = "unclassified"
+    if code == 0:
+        category = "succeeded"
+    elif "executable file not found" in output:
+        category = "executable-not-found"
+    elif code == 1 and output.strip() in ("", "command terminated with exit code 1"):
+        category = "probe-not-ready"
+    return {"exitCode": code, "category": category}
+
+
+def router_readiness_facts(text):
+    facts = []
+    stages = ("registration", "namespace", "source", "service-account", "privacy-review", "credential-metadata",
+              "enabled", "loaded", "bound", "serving", "tcp-accepted", "tls-accepted", "tls-rejected",
+              "tls-timeout", "readiness-entered", "authority-entered")
+    steps = ("token", "request", "headers", "complete")
+    categories = ("authority-transport", "authority-denied", "registration-stale", "namespace-claim",
+                  "source-identity", "service-account", "privacy-transport", "privacy-denied",
+                  "privacy-not-denied", "metadata-transport", "metadata-denied", "legacy-alias",
+                  "credential-expired", "unclassified")
+    messages = ("SRE authority transport failure", "SRE authority request denied",
+                "SRE readiness authority rejected", "SRE readiness authority slow",
+                "SRE transport progress", "SRE authority progress")
+    for line in text.splitlines()[-150:]:
+        line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+        try:
+            event = json.loads(line)
+        except ValueError:
+            event = None
+        if isinstance(event, dict):
+            fields = event.get("fields", event)
+            if not isinstance(fields, dict) or fields.get("message") not in messages:
+                continue
+            value = {}
+            for key, allowed in (("stage", stages), ("category", categories), ("step", steps)):
+                if fields.get(key) in allowed:
+                    value[key] = fields[key]
+            for key in ("timed_out", "connect_error", "authorized"):
+                if isinstance(fields.get(key), bool):
+                    value[key] = fields[key]
+            if type(fields.get("http_status")) is int and 100 <= fields["http_status"] <= 599:
+                value["httpStatus"] = fields["http_status"]
+            if type(fields.get("elapsed_seconds")) is int and 0 <= fields["elapsed_seconds"] <= 999:
+                value["elapsedSeconds"] = fields["elapsed_seconds"]
+            if value and value not in facts:
+                facts.append(value)
+            continue
+        if not any(message in line for message in messages):
+            continue
+        value = {}
+        for key, allowed in (("stage", stages), ("category", categories), ("step", steps)):
+            match = re.search(rf'\b{key}="?({"|".join(allowed)})"?(?:\s|$)', line)
+            if match:
+                value[key] = match[1]
+        for key in ("timed_out", "connect_error", "authorized"):
+            match = re.search(rf"\b{key}=(true|false)(?:\s|$)", line)
+            if match:
+                value[key] = match[1] == "true"
+        status = re.search(r"\bhttp_status=([1-5][0-9]{2})(?:\s|$)", line)
+        if status:
+            value["httpStatus"] = int(status[1])
+        elapsed = re.search(r"\belapsed_seconds=([0-9]{1,3})(?:\s|$)", line)
+        if elapsed:
+            value["elapsedSeconds"] = int(elapsed[1])
+        if value and value not in facts:
+            facts.append(value)
+    return facts[:32]
+
+
+def router_log_summary(text, root):
+    paths = [
+        root / "inference-router/src/main.rs",
+        root / "inference-router/src/routes/mod.rs",
+        root / "inference-router/src/sre_proxy/mod.rs",
+        root / "inference-router/src/sre_proxy/backend.rs",
+    ]
+    sources = [(path, path.read_text().splitlines()) for path in paths]
+    summary = {"lines": len(text.splitlines()), "jsonEvents": 0, "sourceSites": []}
+    for line in text.splitlines()[-150:]:
+        try:
+            obj = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(obj, dict):
+            continue
+        summary["jsonEvents"] += 1
+        fields = obj.get("fields", obj)
+        if not isinstance(fields, dict) or not isinstance(fields.get("message"), str):
+            continue
+        literal = json.dumps(fields["message"], ensure_ascii=False)
+        for path, lines in sources:
+            match = next((number for number, source in enumerate(lines, 1) if literal in source), None)
+            if match:
+                site = {"source": str(path.relative_to(root)), "line": match}
+                if site not in summary["sourceSites"]:
+                    summary["sourceSites"].append(site)
+                break
+    summary["sourceSites"] = summary["sourceSites"][:32]
+    return summary
+
+
+def firewall_summary(text):
+    result = {"policies": [], "rules": []}
+    table = None
+    for line in text.splitlines():
+        if line.startswith("*"):
+            table = line[1:] if line[1:] in ("filter", "nat", "raw", "mangle", "security") else None
+        if not table:
+            continue
+        policy = re.fullmatch(r":(INPUT|OUTPUT|FORWARD) (ACCEPT|DROP) \[([0-9]+):[0-9]+\]", line)
+        if policy:
+            result["policies"].append({"table": table, "chain": policy[1],
+                                       "policy": policy[2], "packets": int(policy[3])})
+        match = re.match(r"(?:\[([0-9]+):[0-9]+\] )?-A ([A-Za-z0-9_-]+) ", line)
+        if not match:
+            continue
+        owner = re.search(r"(! )?--uid-owner (1000|1001)(?:\s|$)", line)
+        action = re.search(r" -j (ACCEPT|DROP|REJECT|REDIRECT|RETURN)(?:\s|$)", line)
+        result["rules"].append({
+            "table": table, "chain": match[2] if match[2] in ("INPUT", "OUTPUT", "FORWARD") else "custom",
+            "packets": int(match[1]) if match[1] else None,
+            "action": action[1] if action else "jump-or-other",
+            "owner": int(owner[2]) if owner else None,
+            "ownerNegated": bool(owner and owner[1]),
+            "loopback": bool(re.search(r"(?: -[io] lo)(?:\s|$)", line)),
+            "established": "--ctstate" in line and "ESTABLISHED" in line,
+        })
+    result["rules"] = result["rules"][:40]
+    return result
+
+
+def exception_summary(error, root):
+    result = {"category": type(error).__name__}
+    frame = error.__traceback__
+    while frame:
+        source = str(frame.tb_frame.f_code.co_filename)
+        prefix = str(root / "tests/e2e/sre_authority") + "/"
+        if source.startswith(prefix):
+            result["callSite"] = {"source": source[len(str(root)) + 1:],
+                                  "function": frame.tb_frame.f_code.co_name, "line": frame.tb_lineno}
+        frame = frame.tb_next
+    response = getattr(error, "response", None)
+    status = getattr(response, "status_code", None)
+    if type(status) is not int or not 100 <= status <= 599:
+        return result
+    result["httpStatus"] = status
+    try:
+        body = response.json()
+    except (ValueError, TypeError):
+        return result
+    result.update(response_summary(status, body, root))
+    return result
+
+
+def response_summary(status, body, root):
+    result = {"httpStatus": status}
+    if not isinstance(body, dict) or body.get("kind") != "Status":
+        return result
+    reason = body.get("reason")
+    if isinstance(reason, str) and (reason in REASONS or reason == "SREProxyDenied"):
+        result["reason"] = reason
+    message = body.get("message")
+    if not isinstance(message, str) or not 0 < len(message) <= 4096:
+        return result
+    literal = json.dumps(message, ensure_ascii=False)
+    for name in ("mod.rs", "policy.rs", "backend.rs"):
+        path = root / "inference-router/src/sre_proxy" / name
+        for number, source in enumerate(path.read_text().splitlines(), 1):
+            if literal in source:
+                result["responseSite"] = {"source": str(path.relative_to(root)), "line": number}
+                return result
+    return result
 
 
 def identifier(value):
@@ -53,8 +229,59 @@ def api_result(code, body, policies):
     report = {"httpStatus": code}
     if isinstance(body, dict) and body.get("kind") == "Status":
         reason = body.get("reason")
-        report["reason"] = reason if reason in REASONS else "unclassified"
+        report["reason"] = reason if isinstance(reason, str) and reason in REASONS else "unclassified"
         report.update(failure_facts(body.get("message"), policies))
+        details = body.get("details", {})
+        if (code == 422 and reason == "Invalid" and isinstance(details, dict)
+                and details.get("group") == "admissionregistration.k8s.io"
+                and details.get("kind") == "ValidatingAdmissionPolicy"
+                and isinstance(details.get("name"), str)
+                and details.get("name") in policies):
+            causes = []
+            supplied = details.get("causes", [])
+            if not isinstance(supplied, list):
+                return report
+            for cause in supplied[:32]:
+                if not isinstance(cause, dict):
+                    continue
+                field, message = cause.get("field"), cause.get("message")
+                location = re.fullmatch(
+                    r"spec\.(matchConditions|variables|validations)\[(\d+)\]\.expression", field
+                ) if isinstance(field, str) and len(field) <= 128 else None
+                if not location:
+                    continue
+                if not isinstance(message, str):
+                    continue
+                allowed = FIELDS | {"metadata", "request", "object", "oldObject", "orValue", "has", "exists"}
+                tokens = sorted(set(re.findall(
+                    r"(?:undefined field|undeclared reference to) ['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
+                    message)) & allowed)
+                entry = {"field": field, "knownTokens": tokens,
+                    "categories": [category for category, needle in [
+                        ("overload", "matching overload"), ("syntax", "Syntax error"),
+                        ("undefined-field", "undefined field"), ("undeclared-reference", "undeclared reference"),
+                        ("optional", "optional"), ("cost", "cost"),
+                    ] if needle.lower() in message.lower()]}
+                definitions = policies[details["name"]].get("spec", {}).get(location[1], [])
+                index = int(location[2])
+                expression = definitions[index].get("expression", "") if index < len(definitions) else ""
+                vocabulary = allowed | set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expression)) | {
+                    "error", "input", "expression", "must", "evaluate", "evaluates", "return", "returns",
+                    "type", "bool", "boolean", "string", "int", "list", "map", "dyn", "invalid", "argument",
+                    "macro", "expected", "found", "no", "matching", "overload", "applied", "to", "in",
+                    "not", "a", "an", "is", "of", "undeclared", "reference", "undefined", "field",
+                    "mismatched", "extraneous", "syntax", "token", "reserved", "identifier", "unsupported",
+                    "supported", "allowed", "size", "exceeds", "maximum", "limit", "cost", "compilation",
+                }
+                headline = message.partition("compilation failed:")[2].splitlines()
+                if headline:
+                    entry["compilerDescription"] = re.sub(
+                        r"[A-Za-z0-9_]+",
+                        lambda match: match[0] if match[0] in vocabulary or match[0].lower() in vocabulary else "[redacted]",
+                        re.sub(r"[\x00-\x1f\x7f]", "?", headline[0].strip())[:512],
+                    )
+                causes.append(entry)
+            report["compilationCauses"] = causes
     return report
 
 

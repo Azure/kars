@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execa } from "execa";
 import type { Execute } from "./sre-authority.js";
-import { listSreHelmReleases } from "./sre-helm.js";
+import { listSreHelmReleases, sreHelmStageWait } from "./sre-helm.js";
 
 const inventory = JSON.stringify([{ name: "kars", namespace: "workspace", status: "pending-upgrade" }]);
 const unsupported = () => Object.assign(new Error("Helm flag rejected"), {
@@ -66,7 +66,7 @@ describe("SRE Helm release inventory compatibility", () => {
     "does not assume default all-status semantics for %j", async version => {
       const execute = vi.fn<Execute>().mockRejectedValueOnce(unsupported())
         .mockResolvedValueOnce({ stdout: version });
-      await expect(listSreHelmReleases(execute, "workspace")).rejects.toThrow("only Helm 4");
+      await expect(listSreHelmReleases(execute, "workspace")).rejects.toThrow(/only Helm 4|Unsupported Helm version/);
       expect(execute).toHaveBeenCalledTimes(2);
     },
   );
@@ -78,5 +78,30 @@ describe("SRE Helm release inventory compatibility", () => {
       .mockResolvedValueOnce({ stdout: "v4.2.4" }).mockRejectedValueOnce(denied);
     await expect(listSreHelmReleases(execute, "workspace")).rejects.toBe(denied);
     expect(execute).toHaveBeenCalledTimes(3);
+  });
+
+  describe("SRE staging waits only for built-ins before explicit enrollment", () => {
+    it.each([["v3.16.4", "--wait"], ["v4.2.4", "--wait=legacy"], ["v4.0.0-rc.1", "--wait=legacy"]])(
+      "selects %s's bounded built-in waiter", async (version, expected) => {
+        const execute = vi.fn<Execute>().mockResolvedValue({ stdout: version });
+        expect(await sreHelmStageWait(execute)).toBe(expected);
+        expect(execute.mock.calls).toEqual([
+          ["helm", ["version", "--template", "{{.Version}}"], { stdio: "pipe" }],
+        ]);
+      },
+    );
+    it.each(["", "v5.0.0", "v4.2", "v3.16.4\nwarning", "unknown"])("fails closed for %j", async version => {
+      await expect(sreHelmStageWait(vi.fn<Execute>().mockResolvedValue({ stdout: version })))
+        .rejects.toThrow("Unsupported Helm");
+    });
+    it("does not replace version errors with a default waiter", async () => {
+      const error = new Error("Helm unavailable");
+      await expect(sreHelmStageWait(vi.fn<Execute>().mockRejectedValue(error))).rejects.toBe(error);
+    });
+    it("passes the real installed Helm upgrade parser without a Kubernetes connection", async () => {
+      const wait = await sreHelmStageWait(execa);
+      const { stdout } = await execa("helm", ["upgrade", "kars", "chart", wait, "--timeout", "8m", "--help"], { stdio: "pipe" });
+      expect(stdout).toContain("helm upgrade");
+    });
   });
 });

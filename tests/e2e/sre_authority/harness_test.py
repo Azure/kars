@@ -20,7 +20,7 @@ from sre_authority.common import (
 )
 from sre_authority.fixtures import seed_control_consumer
 from sre_authority.admission import reserved_source_probe
-from sre_authority.proxy import MARKER, assert_filtered
+from sre_authority.proxy import MARKER, assert_filtered, log_reader_facts, secret_list_wire_facts
 from sre_authority.credential_paths import assert_token_type_immutable, assert_watch_result
 
 
@@ -34,6 +34,199 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_hermes_runtime_assertion_verifies_exact_pin_and_runtime_without_blanket_standin_acceptance(self):
+        helper = Path(__file__).resolve().parents[1] / "sre-authority.sh"
+        cases = [
+            ("kars-sandbox-e2e:dev", "kars-sandbox-e2e:dev", "Hermes", 0),
+            ("wrong:latest", "kars-sandbox-e2e:dev", "Hermes", 1),
+            ("kars-sandbox-e2e:dev", "", "Hermes", 1),
+            ("custom/runtime:latest", "custom/runtime:latest", "Hermes", 0),
+            ("kars-runtime-hermes:latest", "", "Hermes", 0),
+            ("kars-runtime-hermes:latest", "", "BYO", 1),
+            ("", "", "Hermes", 1),
+        ]
+        for image, configured, runtime, expected in cases:
+            result = subprocess.run(
+                ["bash", "-c", 'source "$1"; sre_hermes_image_matches "$2" "$3" "$4"',
+                 "hermes-image-test", str(helper), image, configured, runtime],
+                capture_output=True, text=True, timeout=5, check=False)
+            with self.subTest(image=image, configured=configured, runtime=runtime):
+                self.assertEqual(result.returncode, expected)
+
+    def test_log_reader_diagnostics_never_echo_log_text_or_error_body(self):
+        root = Path(__file__).resolve().parents[3]
+        facts = log_reader_facts(root, {"error": "406 Not Acceptable",
+            "body": json.dumps({"kind": "Status", "reason": "SREProxyDenied",
+                               "message": "Kubernetes rejected the diagnostic/proposal request", "data": MARKER})})
+        self.assertEqual(facts["httpStatus"], 406)
+        self.assertTrue(facts["hasError"])
+        self.assertIn("responseSite", facts)
+        self.assertNotIn(MARKER, json.dumps(facts))
+        facts = log_reader_facts(root, {"logs": "sre-standin-alive " + MARKER})
+        self.assertTrue(facts["standinMarker"])
+        self.assertNotIn(MARKER, json.dumps(facts))
+
+    def test_native_secret_list_wire_facts_publish_no_synthetic_secret_fields(self):
+        value = {"kind": "SecretList", "items": [{"metadata": {"uid": "fixture", "annotations": {"copy": MARKER}},
+                                                "data": {"token": MARKER}}]}
+        facts = secret_list_wire_facts(value, "fixture")
+        self.assertEqual(facts, {"envelopeKind": "SecretList", "itemHasKind": False,
+                                 "itemHasApiVersion": False, "itemMetadataObject": True})
+        self.assertNotIn(MARKER, json.dumps(facts))
+        with self.assertRaises(AssertionError):
+            secret_list_wire_facts(value, "other")
+        with self.assertRaises(AssertionError):
+            secret_list_wire_facts({"kind": "List", "items": []}, "fixture")
+
+    def test_firewall_diagnostic_requires_owned_node_before_readonly_namespace_entry(self):
+        h = Harness.__new__(Harness)
+        calls = []
+        h.run = lambda args, **_kwargs: calls.append(args) or "foreign-cluster"
+        pod = {"metadata": {"uid": "pod-uid"}, "spec": {"nodeName": "kars-e2e-worker"}}
+        with self.assertRaises(AssertionError):
+            h.firewall_diagnostics(pod)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][:3], ["docker", "inspect", "kars-e2e-worker"])
+        pod["spec"]["hostNetwork"] = True
+        with self.assertRaises(AssertionError):
+            h.firewall_diagnostics(pod)
+        self.assertEqual(len(calls), 1)
+
+    def test_connectivity_diagnostic_is_uid_fenced_nonprivileged_and_has_no_credentials(self):
+        h = Harness.__new__(Harness)
+        pod = {"metadata": {"name": "sre-probe", "uid": "pod-uid", "resourceVersion": "17"},
+               "spec": {"automountServiceAccountToken": False},
+               "status": {"ephemeralContainerStatuses": [{"name": "sre-e2e-network-diagnostic",
+                                                          "state": {"terminated": {"exitCode": 0}}}]}}
+        def get(kind, _name, _namespace):
+            if kind == "service":
+                return {"spec": {"clusterIP": "10.96.0.1", "ports": [{"name": "https", "port": 443}]}}
+            if kind == "endpoints":
+                return {"subsets": [{"addresses": [{"ip": "172.18.0.2"}],
+                                     "ports": [{"name": "https", "port": 6443}]}]}
+            return pod
+        writes = []
+        h.get = get
+        h.api = lambda method, path, **kwargs: writes.append((method, path, kwargs))
+        h.poll = lambda _label, predicate, **_kwargs: self.assertTrue(predicate())
+        h.k = lambda *_args: '{"available":true,"uidMatches1001":true,"serviceExit":0,"endpointExit":0}'
+        h.control_connectivity_diagnostics = lambda *_args: {"available": False}
+        h.policy_connectivity_diagnostics = lambda *_args, **_kwargs: {"available": False}
+        self.assertEqual(h.connectivity_diagnostics(pod), {
+            "available": True, "uidMatches1001": True, "serviceExit": 0, "endpointExit": 0,
+            "sameNodeControl": {"available": False},
+            "guardControls": {variant: {"available": False} for variant in ("full", "filter-only", "legacy-full")},
+            "policyControl": {"available": False}, "denyAllPolicyControl": {"available": False},
+            "apiEndpointPolicyControl": {"available": False}})
+        self.assertEqual(len(writes), 1)
+        method, path, args = writes[0]
+        self.assertEqual(method, "PATCH")
+        self.assertTrue(path.endswith("/ephemeralcontainers"))
+        body = args["body"]
+        self.assertEqual(body["metadata"], {"uid": "pod-uid", "resourceVersion": "17"})
+        probe = body["spec"]["ephemeralContainers"][0]
+        self.assertEqual(probe["securityContext"]["runAsUser"], 1001)
+        self.assertFalse(probe["securityContext"]["allowPrivilegeEscalation"])
+        self.assertEqual(probe["securityContext"]["capabilities"], {"drop": ["ALL"]})
+        for field in ("targetContainerName", "volumeMounts", "env", "envFrom"):
+            self.assertNotIn(field, probe)
+        for key, value in (("automountServiceAccountToken", True), ("shareProcessNamespace", True)):
+            old = copy.deepcopy(pod["spec"])
+            pod["spec"][key] = value
+            with self.assertRaises(AssertionError):
+                h.connectivity_diagnostics(pod)
+            pod["spec"] = old
+        self.assertEqual(len(writes), 1)
+
+    def test_connectivity_result_rejects_arbitrary_output_or_untyped_fields(self):
+        for value in ({"available": True}, {"available": 1},
+                      {"available": False, "data": MARKER},
+                      {"available": True, "uidMatches1001": True, "serviceExit": "0", "endpointExit": 0}):
+            with self.assertRaises(AssertionError):
+                Harness.parse_connectivity_result(json.dumps(value))
+        self.assertEqual(Harness.parse_connectivity_result('{"available":false}'), {"available": False})
+
+    def test_same_node_control_creates_only_unprivileged_owned_pod_and_uid_fenced_cleanup(self):
+        h = Harness.__new__(Harness)
+        pod = {"spec": {"nodeName": "sandbox-worker", "securityContext": {"runAsNonRoot": True}}}
+        container = {"name": "network", "image": "kars-sandbox-e2e:dev",
+                     "securityContext": {"runAsUser": 1001, "capabilities": {"drop": ["ALL"]}}}
+        seen, deleted = [], []
+        current = {"metadata": {"uid": "control-uid", "resourceVersion": "7"}, "status": {"phase": "Succeeded"}}
+        h.create = lambda obj: seen.append(obj) or current
+        h.get = lambda *_args: current
+        h.poll = lambda _label, predicate, **_kwargs: self.assertTrue(predicate())
+        h.k = lambda *_args: '{"available":true,"uidMatches1001":true,"serviceExit":0,"endpointExit":0}'
+        h.api = lambda method, path, **kwargs: deleted.append((method, path, kwargs))
+        h.control_connectivity_diagnostics(pod, container)
+        self.assertEqual(len(seen), 1)
+        self.assertEqual(seen[0]["spec"]["nodeName"], "sandbox-worker")
+        self.assertFalse(seen[0]["spec"]["automountServiceAccountToken"])
+        self.assertNotIn("shareProcessNamespace", seen[0]["spec"])
+        self.assertNotIn("volumes", seen[0]["spec"])
+        self.assertEqual(deleted[0][0], "DELETE")
+        self.assertEqual(deleted[0][2]["body"]["preconditions"], {"uid": "control-uid", "resourceVersion": "7"})
+
+    def test_endpoint_candidate_keeps_full_guard_and_tests_separate_agent_uid(self):
+        h = Harness.__new__(Harness)
+        h.root = Path(__file__).resolve().parents[3]
+        pod = {"spec": {"nodeName": "sandbox-worker"}}
+        container = {"name": "network", "image": "kars-sandbox-e2e:dev",
+                     "command": ["sh", "-c", "uid test = 1001 uidMatches1001"],
+                     "securityContext": {"runAsUser": 1001, "capabilities": {"drop": ["ALL"]}}}
+        seen = []
+        current = {"metadata": {"uid": "control", "resourceVersion": "1"}, "status": {"phase": "Succeeded"}}
+        h.create = lambda obj: seen.append(obj) or current
+        h.get = lambda *_args: current
+        h.poll = lambda _label, predicate, **_kwargs: self.assertTrue(predicate())
+        h.k = lambda *args: (
+            '{"available":true,"uidMatches1000":true,"serviceExit":1,"endpointExit":124}'
+            if "agent-network" in args else '{"available":true,"uidMatches1001":true,"serviceExit":0,"endpointExit":0}')
+        h.api = lambda *_args, **_kwargs: None
+        with patch("sre_authority.network_diagnostics.guard_variant", return_value={"name": "guard"}) as guard:
+            result = h.control_connectivity_diagnostics(pod, container, policy=True, api_endpoint=True)
+        guard.assert_called_once_with(h.root, pod, "full")
+        actual = seen[0]["spec"]["containers"]
+        self.assertEqual([obj["securityContext"]["runAsUser"] for obj in actual], [1001, 1000])
+        self.assertIn("= 1000", actual[1]["command"][2])
+        self.assertIn("uidMatches1000", actual[1]["command"][2])
+        self.assertTrue(actual[0]["command"][2].startswith("sleep 10\n"))
+        self.assertTrue(result["agentUid1000"]["uidMatches1000"])
+        self.assertNotEqual(result["agentUid1000"]["endpointExit"], 0)
+        for obj in actual:
+            self.assertNotIn("volumeMounts", obj)
+            self.assertNotIn("envFrom", obj)
+
+    def test_policy_comparison_targets_only_owned_control_and_never_changes_source_policy(self):
+        h = Harness.__new__(Harness)
+        source = {"spec": {"podSelector": {}, "policyTypes": ["Egress"],
+                          "egress": [{"to": [{"ipBlock": {"cidr": "10.96.0.1/32"}}],
+                                      "ports": [{"port": 443, "protocol": "TCP"}]}]}}
+        before = copy.deepcopy(source)
+        seen, deleted = [], []
+        own = {"metadata": {"uid": "policy-uid", "resourceVersion": "3"}}
+        h.get = lambda kind, name, namespace: source if name == "sandbox-policy" else own
+        h.create = lambda obj: seen.append(obj) or own
+        h.control_connectivity_diagnostics = lambda *_args, **kwargs: {"policy": kwargs["policy"]}
+        h.api = lambda method, path, **kwargs: deleted.append((method, path, kwargs))
+        self.assertEqual(h.policy_connectivity_diagnostics({}, {}), {"policy": True})
+        self.assertEqual(source, before)
+        h.get = lambda kind, name, namespace: (
+            {"subsets": [{"addresses": [{"ip": "172.18.0.2"}], "ports": [{"name": "https", "port": 6443}]}]}
+            if kind == "endpoints" else source if name == "sandbox-policy" else own)
+        h.policy_connectivity_diagnostics({}, {}, api_endpoint=True)
+        self.assertEqual(seen[1]["spec"]["egress"], source["spec"]["egress"] + [
+            {"to": [{"ipBlock": {"cidr": "172.18.0.2/32"}}], "ports": [{"protocol": "TCP", "port": 6443}]}])
+        self.assertEqual(source, before)
+        self.assertEqual(seen[0]["spec"]["egress"], source["spec"]["egress"])
+        self.assertEqual(seen[0]["spec"]["podSelector"],
+                         {"matchLabels": {"kars.azure.com/e2e-policy-control": "true"}})
+        self.assertEqual(deleted[0][2]["body"]["preconditions"], {"uid": "policy-uid", "resourceVersion": "3"})
+        h.policy_connectivity_diagnostics({}, {}, deny_all=True)
+        self.assertEqual(seen[2]["spec"], {"policyTypes": ["Egress"], "egress": [],
+            "podSelector": {"matchLabels": {"kars.azure.com/e2e-policy-control": "deny-all"}}})
+        self.assertEqual(source, before)
+
     def test_blocked_authority_diagnostics_report_source_coordinates_not_status_detail(self):
         root = Path(__file__).resolve().parents[3]
         cases = [

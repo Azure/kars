@@ -3,7 +3,8 @@
 
 import { parseAllDocuments } from "yaml";
 import { get, requireRegistrar, type ApiObject, type Execute } from "./sre-authority.js";
-import { listSreHelmReleases } from "./sre-helm.js";
+import { listSreHelmReleases, sreHelmStageWait } from "./sre-helm.js";
+import { ACTION_CRD, planActionCrd } from "./sre-action-crd.js";
 
 function parts(image: string): [string,string] {
   const index=image.lastIndexOf(":");
@@ -34,35 +35,49 @@ export async function stageAuthority(
   }
   const [controllerRepository,controllerTag]=parts(controllerImage);
   const [routerRepository,routerTag]=parts(routerImage);
-  if(releases.some(item=>item.name===release)) {
+  const helm=releases.some(item=>item.name===release);
+  const rendered=await execute("helm",["template",release,chart,"--namespace",namespace,
+    "--set","sre.enabled=false","--set","azure.workloadIdentity.clientId=dummy"],{stdio:"pipe"});
+  const documents=parseAllDocuments(rendered.stdout).map(doc=>{
+    if(doc.errors.length)throw new Error(`Invalid staged chart YAML: ${doc.errors[0].message}`);
+    return doc.toJSON() as ApiObject|null;
+  }).filter((obj):obj is ApiObject=>!!obj);
+  const actions=documents.filter(obj=>obj.kind==="CustomResourceDefinition"&&obj.metadata.name===ACTION_CRD);
+  if(actions.length!==1)throw new Error("Exactly one compatible action CRD is required before staging authority policies");
+  const stageAction=await planActionCrd(execute,actions[0],namespace,release,helm);
+  if(helm) {
+    const wait=await sreHelmStageWait(execute);
+    if(!dryRun)await stageAction();
     await execute("helm",["upgrade",release,chart,"--namespace",namespace,"--reset-then-reuse-values",
       "--set","sre.authorityStage=true",
       "--set-string",`controller.image.repository=${controllerRepository}`,
       "--set-string",`controller.image.tag=${controllerTag}`,
       "--set-string",`inferenceRouter.image.repository=${routerRepository}`,
       "--set-string",`inferenceRouter.image.tag=${routerTag}`,
-      ...(dryRun?["--dry-run=server"]:["--wait","--timeout","8m"])],{stdio:"pipe"});
+      ...(dryRun?["--dry-run=server"]:[wait,"--timeout","8m"])],{stdio:"pipe"});
     return;
   }
   if(controller.metadata.annotations?.["meta.helm.sh/release-name"]) {
     throw new Error("Controller reports Helm ownership that was not found; no template-mode adoption is allowed");
   }
-  const rendered=await execute("helm",["template",release,chart,"--namespace",namespace,
-    "--set","sre.enabled=false","--set","azure.workloadIdentity.clientId=dummy"],{stdio:"pipe"});
   const allowedRoles=["kars-sre-registrar","kars-sre-router-renew","kars-sre-private-diagnostics","kars-sre-retired-agent","kars-sre-authority-controller"];
-  const objects=parseAllDocuments(rendered.stdout).map(doc=>doc.toJSON() as ApiObject|null).filter((obj):obj is ApiObject=>!!obj)
+  const objects=documents
     .filter(obj=>(obj.kind==="CustomResourceDefinition"&&obj.metadata.name==="karssreregistrations.kars.azure.com")
       || (["ValidatingAdmissionPolicy","ValidatingAdmissionPolicyBinding"].includes(obj.kind!)&&obj.metadata.name?.startsWith("kars-sre-"))
       || (obj.kind==="ClusterRole"&&allowedRoles.includes(obj.metadata.name!))
       || (obj.kind==="ClusterRoleBinding"&&obj.metadata.name==="kars-sre-authority-controller"));
   if(!objects.some(obj=>obj.kind==="CustomResourceDefinition"))throw new Error("Authority CRD is absent from the staged chart");
   const writes:Array<{object:ApiObject;existing?:ApiObject}>=[];
+  const unchangedCrds:string[]=[];
   for(const object of objects) {
     const existing=await get(execute,object.kind!.toLowerCase(),object.metadata.name!);
     if(existing) {
       const desired=object.spec??object.rules??{roleRef:object.roleRef,subjects:object.subjects};
       const current=existing.spec??existing.rules??{roleRef:existing.roleRef,subjects:existing.subjects};
-      if(canonical(desired)===canonical(current))continue;
+      if(canonical(desired)===canonical(current)) {
+        if(object.kind==="CustomResourceDefinition")unchangedCrds.push(object.metadata.name!);
+        continue;
+      }
       if(existing.metadata.annotations?.["kars.azure.com/sre-authority-staged"]!==namespace
           || existing.metadata.annotations?.["kars.azure.com/sre-authority-release"]!==release) {
         throw new Error(`Unowned authority object ${object.kind}/${object.metadata.name} differs; no objects were adopted`);
@@ -78,8 +93,12 @@ export async function stageAuthority(
   main.env=(main.env??[]).filter((entry:{name:string})=>entry.name!=="INFERENCE_ROUTER_IMAGE");
   main.env.push({name:"INFERENCE_ROUTER_IMAGE",value:routerImage});
   if(dryRun) {
-    console.log(`Would stage ${writes.length} authority objects and CAS-update controller ${controller.metadata.uid}@${controller.metadata.resourceVersion}`);
+    console.log(`Would verify/CAS-repair the action API prerequisite, stage ${writes.length} authority objects and CAS-update controller ${controller.metadata.uid}@${controller.metadata.resourceVersion}`);
     return;
+  }
+  await stageAction();
+  for(const name of unchangedCrds) {
+    await execute("kubectl",["wait","--for=condition=Established",`crd/${name}`,"--timeout=60s"],{stdio:"pipe"});
   }
   for(const {object,existing} of writes.sort((a,b)=>Number(b.object.kind==="CustomResourceDefinition")-Number(a.object.kind==="CustomResourceDefinition"))) {
     const annotations={...object.metadata.annotations,

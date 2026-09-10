@@ -254,3 +254,28 @@ An effective authorization snapshot is capped at 64 KiB. These are deliberate
 fail-closed lifetime/capacity limits, including for long-running Teams: this
 version does not promise unlimited cadence history. Capacity exhaustion requires
 operator planning; there is no automatic balance reset or replay-fence eviction.
+
+## Native enforcement fixture
+
+The existing full E2E harness runs `tests/e2e/inference-budget-enforcement.mjs`
+against real routers and the private broker in its disposable Kind cluster.
+It verifies the built router's manifest and platform content on **every** Kind
+node, adds only a missing same-image canonical containerd alias, and checks both
+canonical and literal `image:tag@manifest` references through CRI. It never
+force-tags, substitutes a config ID for a manifest, or changes production image
+pins or pull policies. The fixture registers its named local provider before
+launch, and uses an ephemeral `CA:FALSE`, `serverAuth` TLS leaf with the exact
+private broker DNS SAN. Certificate files and UID-owned fixture Secrets are
+removed during cleanup; diagnostics contain only bounded, fixed stage facts.
+
+Readiness pins the fixture-created Task UID, its account binding, Sandbox UID,
+claimed Namespace UID, and Deployment UID. Only nonterminating, Running Pods
+owned through that Deployment's current ReplicaSet template, using the exact
+verified image and private budget binding, can be forwarded. A legitimate Pod
+roll or exited owned tunnel permits at most three reconnections within the
+original 120-second deadline. Both `/healthz` and the private `/readyz` contract
+must pass, followed by another ownership check. A 503 or transport error alone
+does not authorize a new target, and replaced parent identities fail immediately.
+This is test-harness lifecycle handling, not a production readiness bypass:
+provider-attempt, sibling denial, pending/settled spending, and conservatively
+funded cancellation assertions remain unchanged.
