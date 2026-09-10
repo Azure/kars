@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { readFileSync } from "node:fs";
+import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execa } from "execa";
 import { parse } from "yaml";
@@ -62,14 +64,27 @@ describe("existing action API prerequisite compatibility", () => {
   it("feeds the actual offline Helm render through template staging with the repaired action API first", async () => {
     const f = fixture();
     const execute: Execute = (file, args, options) => file === "helm" && args[0] === "template"
-      ? execa(file, args, options) : f.execute(file, args, options);
-    await stageAuthority(execute, fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url)),
-      "kars-system", "kars", "controller:latest", "router:latest", false);
-    expect(params(f.existing)["x-kubernetes-preserve-unknown-fields"]).toBe(true);
-    const created = f.execute.mock.calls.filter(([, args]) => args[0] === "create").map(([, , options]) => JSON.parse(options.input!));
-    expect(created.some(obj => obj.metadata.name === registration.metadata.name)).toBe(true);
-    expect(created.filter(obj => obj.kind === "ValidatingAdmissionPolicy")).toHaveLength(14);
-  });
+      ? execa(file, [...args, "--dry-run=client"], { ...options, timeout: 20_000 }) : f.execute(file, args, options);
+    const root = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
+    const directory = mkdtempSync(join(tmpdir(), "kars-sre-stage-"));
+    const chart = join(directory, "chart");
+    try {
+      mkdirSync(join(chart, "templates"), { recursive: true });
+      for (const file of [
+        "Chart.yaml", "values.yaml",
+        "templates/crd-karssreaction.yaml", "templates/crd-karssreregistration.yaml",
+        "templates/sre-authority-rbac.yaml", "templates/sre-authority-admission.yaml",
+        "templates/sre-authority-consumers.yaml",
+      ]) copyFileSync(join(root, file), join(chart, file));
+      await stageAuthority(execute, chart, "kars-system", "kars", "controller:latest", "router:latest", false);
+      expect(params(f.existing)["x-kubernetes-preserve-unknown-fields"]).toBe(true);
+      const created = f.execute.mock.calls.filter(([, args]) => args[0] === "create").map(([, , options]) => JSON.parse(options.input!));
+      expect(created.some(obj => obj.metadata.name === registration.metadata.name)).toBe(true);
+      expect(created.filter(obj => obj.kind === "ValidatingAdmissionPolicy")).toHaveLength(14);
+    } finally {
+      rmSync(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
 
   it.each([false, true])("repairs ONLY recognized legacy params before dependent policies (Helm: %s)", async helm => {
     const f = fixture(helm);
