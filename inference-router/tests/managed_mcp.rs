@@ -41,8 +41,9 @@ impl AsyncToolDispatcher for Dispatcher {
     ) -> Result<ToolCallOutput, DispatchError> {
         self.calls.fetch_add(1, Ordering::SeqCst);
         Ok(ToolCallOutput {
-            content: vec![ToolContent::Text { text: "ok".into() }],
+            content: vec![ToolContent::text("ok")],
             is_error: false,
+            ..Default::default()
         })
     }
 }

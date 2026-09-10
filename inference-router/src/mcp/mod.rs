@@ -45,6 +45,7 @@
 //! oversize frame, missing `Accept` content types, `alg=none`, `alg`
 //! confusion, kid mismatch, expired token, replayed token.
 
+pub mod content;
 pub mod error;
 pub mod forwarder;
 pub mod governed;
