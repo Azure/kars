@@ -7,7 +7,7 @@ use super::{
     store::{Store, StoreError},
 };
 use crate::{
-    inference_budget_contract::{BudgetError, RootKind},
+    inference_budget_contract::{BudgetError, RootKind, ledger::Mutation},
     kars_task::KarsTask,
     kars_team::KarsTeam,
 };
@@ -178,6 +178,20 @@ async fn recover(
         }) {
             store
                 .transact(root, &uid, |ledger| {
+                    let current = ledger
+                        .nodes
+                        .get(&node.authority.task.uid)
+                        .ok_or(BudgetError::Identity)?;
+                    if current.authority != node.authority {
+                        // A newer enrollment may already have funded sessions.
+                        // Defer its live-source check to the next recovery scan,
+                        // including when the authority changed during CAS retry.
+                        return Ok(Mutation {
+                            next: ledger.clone(),
+                            value: (),
+                            changed: false,
+                        });
+                    }
                     ledger.close_subtree(&node.authority.task.uid)
                 })
                 .await?;

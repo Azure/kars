@@ -511,3 +511,6 @@ async fn replacement_between_read_and_commit_cannot_receive_a_grant() {
 
 #[path = "status_tests.rs"]
 mod status_tests;
+
+#[path = "recovery_tests.rs"]
+mod recovery_tests;
