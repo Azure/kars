@@ -5,10 +5,11 @@
 
 import copy
 import json
+import time
 from urllib.error import HTTPError
 from urllib.request import Request, build_opener, ProxyHandler
 
-from .bootstrap_diagnostics import api_result
+from .bootstrap_diagnostics import api_result, object_status
 from .bootstrap_probe import upsert
 from .registration_schema import request
 
@@ -139,3 +140,70 @@ def deployment_controller_cases(port, policies):
                        "identityMode": "admin-impersonation-of-built-in-controller"})
         reports.append(result)
     return reports
+
+
+def private_controller_chain(port, policies, report):
+    namespace, name = "kars-sre", "e2e-private-controller-chain"
+    selector = {"app": name}
+    deployment = {"apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": {"name": name, "namespace": namespace},
+        "spec": {"replicas": 1, "selector": {"matchLabels": selector},
+                 "template": {"metadata": {"labels": selector}, "spec": {
+                     "serviceAccountName": "sandbox", "automountServiceAccountToken": False,
+                     "schedulerName": "kars-e2e-admission-never-schedule",
+                     "containers": [{"name": "probe", "image": "registry.invalid/kars-admission-proof:never",
+                                     "imagePullPolicy": "Never",
+                                     "volumeMounts": [{"name": "private", "mountPath": "/private", "readOnly": True}]}],
+                     "volumes": [{"name": "private", "secret": {"secretName": "sre-api-router-identity"}}],
+                 }}}}
+    path = f"/apis/apps/v1/namespaces/{namespace}/deployments"
+    code, created = request(port, "POST", path, deployment)
+    if code != 201 or not created.get("metadata", {}).get("uid"):
+        report({"deploymentCreate": api_result(code, created, policies)})
+        raise RuntimeError("Registrar-authorized private Deployment CREATE failed")
+    uid = created["metadata"]["uid"]
+    deadline = time.monotonic() + 45
+    snapshot = {}
+    while time.monotonic() < deadline:
+        code, current = request(port, "GET", f"{path}/{name}")
+        if code != 200 or current.get("metadata", {}).get("uid") != uid:
+            raise RuntimeError("Private controller-chain Deployment disappeared or was replaced")
+        code, replicasets = request(port, "GET",
+            f"/apis/apps/v1/namespaces/{namespace}/replicasets?labelSelector=app%3D{name}")
+        if code != 200 or not isinstance(replicasets.get("items"), list):
+            raise RuntimeError("Private controller-chain ReplicaSet inspection failed")
+        owned = [obj for obj in replicasets["items"] if any(
+            owner.get("uid") == uid and owner.get("controller") is True
+            for owner in obj.get("metadata", {}).get("ownerReferences", []))]
+        owners = {obj["metadata"]["uid"] for obj in owned}
+        code, pods = request(port, "GET", f"/api/v1/namespaces/{namespace}/pods?labelSelector=app%3D{name}")
+        if code != 200 or not isinstance(pods.get("items"), list):
+            raise RuntimeError("Private controller-chain Pod inspection failed")
+        children = [obj for obj in pods["items"] if any(
+            owner.get("uid") in owners and owner.get("controller") is True
+            for owner in obj.get("metadata", {}).get("ownerReferences", []))]
+        snapshot = {"deployment": object_status(current, policies),
+                    "replicaSets": [object_status(dict(obj, kind="ReplicaSet"), policies) for obj in owned],
+                    "pods": [object_status(dict(obj, kind="Pod"), policies) for obj in children],
+                    "privateMountPreserved": False, "noWorkloadExecution": False}
+        if children:
+            snapshot["privateMountPreserved"] = all(
+                obj["spec"].get("volumes") and any(
+                    volume.get("secret", {}).get("secretName") == "sre-api-router-identity"
+                    for volume in obj["spec"]["volumes"])
+                and any(mount.get("name") == "private" and mount.get("mountPath") == "/private"
+                        and mount.get("readOnly") is True
+                        for container in obj["spec"].get("containers", [])
+                        for mount in container.get("volumeMounts", []))
+                for obj in children)
+            snapshot["noWorkloadExecution"] = all(
+                obj["spec"].get("schedulerName") == "kars-e2e-admission-never-schedule"
+                and not obj["spec"].get("nodeName") and not obj.get("status", {}).get("containerStatuses")
+                for obj in children)
+            report(snapshot)
+            if not snapshot["privateMountPreserved"] or not snapshot["noWorkloadExecution"]:
+                raise RuntimeError("Private controller-chain proof changed its protected template or executed a workload")
+            return
+        time.sleep(0.5)
+    report(snapshot)
+    raise RuntimeError("Actual private Deployment/ReplicaSet controllers did not create the admission-only Pod")

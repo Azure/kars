@@ -322,8 +322,12 @@ data. A changed controller ServiceAccount UID or a foreign/legacy reader Role
 without controller provenance requires operator review rather than adoption.
 Do not force-remove a guard to bypass a failed revocation.
 
-Kubernetes reconciliation is asynchronous. Permission, node or API failures
-can delay consumer termination and revocation; this does not revoke a token at
+Kubernetes reconciliation is asynchronous. Sandboxes with v1 credential
+references, v2 credential bindings or governed GitHub bindings use a 30-second
+successful-reconciliation backstop to recheck delivery authority even when no
+owned-resource event arrives. Unbound legacy Sandboxes retain their five-minute
+backstop. This is not a termination deadline: permission, node or API failures
+can delay consumer termination and revocation. It does not revoke a token at
 its external provider or erase values an agent already observed.
 
 This candidate still requires coordinated Rust and real API/admission lifecycle

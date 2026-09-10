@@ -17,16 +17,51 @@ pub(crate) fn pending(task: &KarsTask) -> bool {
         .is_some_and(|value| value == "true")
 }
 
+async fn publish_pause_status(
+    api: &Api<KarsTask>,
+    task: &KarsTask,
+    status: &KarsTaskStatus,
+) -> Result<KarsTask, ReconcileError> {
+    let mut serialized = serde_json::to_value(status)?;
+    serialized["envelopeDigest"] = serde_json::Value::Null;
+    Ok(api
+        .patch_status(
+            &task.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(json!({
+                "metadata":{"uid":task.metadata.uid,"resourceVersion":task.metadata.resource_version},
+                "status":serialized,
+            })),
+        )
+        .await?)
+}
+
 pub(super) async fn reconcile(task: &KarsTask, ctx: &Ctx) -> Result<(), ReconcileError> {
     let namespace = task.namespace().unwrap_or_else(|| "default".into());
     let api = Api::<KarsTask>::namespaced(ctx.client.clone(), &namespace);
     let mut status = task.status.clone().unwrap_or_default();
+    let current_pause = status.phase.as_deref() == Some(PHASE_PENDING)
+        && matches!(
+            status.execution_phase.as_deref(),
+            Some("PausingCredentials" | PAUSED)
+        )
+        && status.observed_generation == task.metadata.generation
+        && status.envelope_digest.is_none()
+        && status.conditions.as_ref().is_some_and(|values| {
+            values.iter().any(|condition| {
+                condition.type_ == TYPE_READY && condition.status == cond_status::FALSE
+            })
+        });
     status.phase = Some(PHASE_PENDING.into());
     status.observed_generation = task.metadata.generation;
     status.envelope_digest = None;
-    status.execution_phase = Some("PausingCredentials".into());
-    status.execution_detail =
-        Some("Credential rebind requested; preserving owned runtime state".into());
+    // Keep a current pause stable so status events cannot starve the
+    // Team's UID/RV-fenced binding update. Consumers are still rechecked below.
+    if !current_pause {
+        status.execution_phase = Some("PausingCredentials".into());
+        status.execution_detail =
+            Some("Credential rebind requested; preserving owned runtime state".into());
+    }
     let condition = conditions::preserve_transition_time(
         status
             .conditions
@@ -39,11 +74,7 @@ pub(super) async fn reconcile(task: &KarsTask, ctx: &Ctx) -> Result<(), Reconcil
         task.metadata.generation,
     );
     conditions::set(status.conditions.get_or_insert_with(Vec::new), condition);
-    let mut serialized = serde_json::to_value(&status)?;
-    serialized["envelopeDigest"] = serde_json::Value::Null;
-    let paused=api.patch_status(&task.name_any(),&PatchParams::default(),&Patch::Merge(json!({
-        "metadata":{"uid":task.metadata.uid,"resourceVersion":task.metadata.resource_version},"status":serialized,
-    }))).await?;
+    let paused = publish_pause_status(&api, task, &status).await?;
     // Retract the old attestation before replacing credential authority.
     reconcile_receipt(&ctx.client, &namespace, &paused, &status, &ctx.signer).await;
     let stopped = async {
@@ -60,18 +91,16 @@ pub(super) async fn reconcile(task: &KarsTask, ctx: &Ctx) -> Result<(), Reconcil
             );
         }
         Ok(false) => {
+            status.execution_phase = Some("PausingCredentials".into());
             status.execution_detail =
                 Some("Waiting for old credential consumers, including terminating Pods".into())
         }
         Err(error) => {
+            status.execution_phase = Some("PausingCredentials".into());
             status.execution_detail = Some(format!("Owned credential pause is blocked: {error}"))
         }
     }
-    let mut serialized = serde_json::to_value(&status)?;
-    serialized["envelopeDigest"] = serde_json::Value::Null;
-    api.patch_status(&task.name_any(),&PatchParams::default(),&Patch::Merge(json!({
-        "metadata":{"uid":paused.metadata.uid,"resourceVersion":paused.metadata.resource_version},"status":serialized,
-    }))).await?;
+    publish_pause_status(&api, &paused, &status).await?;
     Ok(())
 }
 
