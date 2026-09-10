@@ -1,9 +1,11 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+import copy
 import json
 
 from .common import POLICIES, PRIVATE, REGISTRATION, RUNTIME, STANDIN, TENANT, assert_denial, require
+from .collection_delete_probe import stable_object
 
 
 def policies_ready(h):
@@ -43,6 +45,148 @@ def reserved_source_probe():
         "spec": {"runtime": {"kind": "BYO", "byo": {"image": STANDIN, "contractVersion": "v1"}},
                  "inferenceRef": {"name": "sre-inference"},
                  "sandbox": {"isolation": "standard"}}}
+
+
+def rc_update_preview(h, path, original, candidate):
+    current = h.api("GET", path, status=200).json()
+    require(stable_object(current) == stable_object(original)
+            and not current["metadata"].get("deletionTimestamp"),
+            "ReplicationController update target changed beyond status")
+    for attempt in range(3):
+        body = copy.deepcopy(candidate)
+        body["metadata"] = copy.deepcopy(current["metadata"])
+        response = h.api("PUT", path + "?dryRun=All", body=body, user="tenant")
+        if response.status_code != 409 or response.json().get("reason") != "Conflict" or attempt == 2:
+            return response
+        refreshed = h.api("GET", path, status=200).json()
+        require(stable_object(refreshed) == stable_object(current)
+                and not refreshed["metadata"].get("deletionTimestamp"),
+                "ReplicationController update conflict changed more than status; no retry")
+        if refreshed["metadata"]["resourceVersion"] == current["metadata"]["resourceVersion"]:
+            return response
+        current = refreshed
+    raise AssertionError("ReplicationController preview exceeded its bounded attempts")
+
+
+def replication_controller_cases(h):
+    collection = f"/api/v1/namespaces/{RUNTIME}/replicationcontrollers"
+    for resource, verb, namespace, subresource, expected in [
+        ("replicationcontrollers", "create", RUNTIME, "", True),
+        ("replicationcontrollers", "update", RUNTIME, "", True),
+        ("pods", "get", RUNTIME, "log", True),
+        ("pods", "create", "", "", False),
+        ("secrets", "get", RUNTIME, "", False),
+    ]:
+        response = h.api("POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+                         user="tenant", status=201, body={
+            "apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
+            "spec": {"resourceAttributes": {
+                "group": "", "resource": resource, "verb": verb, "namespace": namespace,
+                **({"subresource": subresource} if subresource else {})}},
+        }).json()["status"]
+        require(response.get("allowed") is expected and not response.get("evaluationError"),
+                "ReplicationController probe does not have the intended limited authority")
+
+    pod = pod_spec(False)
+    pod["schedulerName"] = "kars-e2e-admission-never-schedule"
+    pod["containers"][0]["command"] = ["/bin/true"]
+    pod["containers"][0]["imagePullPolicy"] = "Never"
+    ordinary = {
+        "apiVersion": "v1", "kind": "ReplicationController",
+        "metadata": {"name": "e2e-rc-boundary", "namespace": RUNTIME},
+        "spec": {"replicas": 0, "selector": {"app": "e2e-rc-boundary"},
+                 "template": {"metadata": {"labels": {"app": "e2e-rc-boundary"}}, "spec": pod}},
+    }
+    without_template = copy.deepcopy(ordinary)
+    without_template["spec"].pop("template")
+    invalid = h.api("POST", collection + "?dryRun=All", body=without_template,
+                    user="tenant", status=422).json()
+    require(invalid.get("reason") == "Invalid" and any(
+        cause.get("field") == "spec.template" and cause.get("reason") == "FieldValueRequired"
+        for cause in invalid.get("details", {}).get("causes", [])),
+        "Template-less ReplicationController did not receive the native required-field rejection")
+    created = h.api("POST", collection, body=ordinary, user="tenant", status=201).json()
+    identity = created["metadata"]["uid"]
+    path = collection + "/" + created["metadata"]["name"]
+    primary_failure = False
+    try:
+        for variant in ["ordinary", "secret-volume", "projected-secret", "env", "env-key",
+                        "init-env", "service-account"]:
+            current = h.api("GET", path, status=200).json()
+            require(current["metadata"]["uid"] == identity and current["spec"] == created["spec"],
+                    "ReplicationController fixture identity or template changed")
+            candidate = copy.deepcopy(current)
+            candidate.pop("status", None)
+            spec = candidate["spec"]["template"]["spec"]
+            if variant == "secret-volume":
+                spec["volumes"] = [{"name": "private", "secret": {"secretName": PRIVATE}}]
+            elif variant == "projected-secret":
+                spec["volumes"] = [{"name": "private", "projected": {"sources": [{"secret": {
+                    "name": PRIVATE}}]}}]
+            elif variant == "env":
+                spec["containers"][0]["envFrom"] = [{"secretRef": {"name": PRIVATE}}]
+            elif variant == "env-key":
+                spec["containers"][0]["env"] = [{"name": "PRIVATE_TOKEN", "valueFrom": {
+                    "secretKeyRef": {"name": PRIVATE, "key": "kube-token"}}}]
+            elif variant == "init-env":
+                initializer = copy.deepcopy(spec["containers"][0])
+                initializer["name"] = "private-init"
+                initializer["envFrom"] = [{"secretRef": {"name": PRIVATE}}]
+                spec["initContainers"] = [initializer]
+            elif variant == "service-account":
+                spec["serviceAccountName"] = "sre-api-router"
+            for method, target in [("POST", collection), ("PUT", path)]:
+                body = copy.deepcopy(candidate)
+                if method == "POST":
+                    body["metadata"] = {"name": "e2e-rc-dry-run", "namespace": RUNTIME}
+                response = (rc_update_preview(h, target, current, body) if method == "PUT"
+                            else h.api(method, target + "?dryRun=All", body=body, user="tenant"))
+                print("SRE-RC-ADMISSION " + json.dumps({
+                    "variant": variant, "method": method, "httpStatus": response.status_code,
+                }), flush=True)
+                if variant == "ordinary":
+                    require(response.status_code == (201 if method == "POST" else 200),
+                            f"Ordinary ReplicationController {method} was not admitted: HTTP {response.status_code}")
+                else:
+                    assert_denial(response, f"{method} ReplicationController {variant}",
+                                  "kars-sre-private-workloads")
+    except BaseException:
+        primary_failure = True
+        raise
+    finally:
+        try:
+            removed = False
+            for _ in range(3):
+                current = h.api("GET", path, status=(200, 404))
+                if current.status_code == 404:
+                    removed = True
+                    break
+                current = current.json()
+                require(current["metadata"]["uid"] == identity and current["spec"] == created["spec"],
+                        "ReplicationController cleanup refuses changed fixture ownership or template")
+                response = h.api("DELETE", path, body={
+                    "apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {
+                        "uid": identity, "resourceVersion": current["metadata"]["resourceVersion"]},
+                })
+                if response.status_code == 409:
+                    continue
+                require(response.status_code in (200, 202), "Owned ReplicationController cleanup failed")
+                removed = True
+                break
+            require(removed, "Owned ReplicationController cleanup contention exceeded its bound")
+            def gone():
+                response = h.api("GET", path, status=(200, 404))
+                if response.status_code == 404:
+                    return True
+                require(response.json()["metadata"]["uid"] == identity,
+                        "ReplicationController was replaced during cleanup")
+                return False
+            h.poll("owned ReplicationController fixture deletion", gone, seconds=30)
+        except Exception:
+            if not primary_failure:
+                raise
+            print("SRE-DIAG owned ReplicationController fixture cleanup failed", flush=True)
+    h.passed("Real ReplicationController CREATE/UPDATE deny private mounts and identities under namespaced-only authority")
 
 
 def admission_cases(h, enrollment):
@@ -107,6 +251,7 @@ def admission_cases(h, enrollment):
         assert_denial(h.api("POST", f"/apis/{group}/namespaces/{RUNTIME}/{plural}?dryRun=All",
                            body=obj, user="tenant"), f"{kind} private template", policy)
         h.passed(f"Real {kind} admission prevents private-material laundering through workload controllers")
+    replication_controller_cases(h)
 
 
 def runtime_denials(h, pod):

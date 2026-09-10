@@ -49,6 +49,29 @@ fn error(status: StatusCode, message: &str) -> Response {
         .into_response()
 }
 
+fn readiness_failure_category(reason: &str) -> &'static str {
+    match reason {
+        "SRE authority read failed" => "authority-transport",
+        "SRE authority read denied" => "authority-denied",
+        "SRE authority is no longer current" => "registration-stale",
+        "SRE runtime namespace ownership changed" => "namespace-claim",
+        "SRE source identity changed" => "source-identity",
+        "Private SRE ServiceAccount was replaced" => "service-account",
+        "SRE privacy authorization transport failure" => "privacy-transport",
+        "SRE privacy authorization review denied" => "privacy-denied",
+        "Legacy SRE Secret get/list/watch authorization is allowed or indeterminate" => {
+            "privacy-not-denied"
+        }
+        "SRE credential metadata inventory failed" => "metadata-transport",
+        "SRE credential metadata inventory denied" => "metadata-denied",
+        "Unsafe legacy SRE token Secret alias exists; operator review required, no Secret adopted or deleted" => {
+            "legacy-alias"
+        }
+        "Private SRE Kubernetes credential expired; no ambient fallback" => "credential-expired",
+        _ => "unclassified",
+    }
+}
+
 async fn ready(State(proxy): State<Proxy>) -> Response {
     let Ok(_permit) = proxy.capacity.try_acquire() else {
         return error(
@@ -56,16 +79,32 @@ async fn ready(State(proxy): State<Proxy>) -> Response {
             "SRE proxy capacity is exhausted",
         );
     };
-    match proxy.backend.authorize().await {
+    let started = std::time::Instant::now();
+    let authorization = proxy.backend.authorize().await;
+    let elapsed_seconds = started.elapsed().as_secs();
+    if elapsed_seconds >= 2 {
+        tracing::warn!(
+            elapsed_seconds,
+            authorized = authorization.is_ok(),
+            "SRE readiness authority slow"
+        );
+    }
+    match authorization {
         Ok(()) => (
             StatusCode::OK,
             axum::Json(serde_json::json!({"ready":true})),
         )
             .into_response(),
-        Err(_) => error(
-            StatusCode::SERVICE_UNAVAILABLE,
-            "SRE authority is not ready",
-        ),
+        Err(reason) => {
+            tracing::warn!(
+                category = readiness_failure_category(&reason),
+                "SRE readiness authority rejected"
+            );
+            error(
+                StatusCode::SERVICE_UNAVAILABLE,
+                "SRE authority is not ready",
+            )
+        }
     }
 }
 

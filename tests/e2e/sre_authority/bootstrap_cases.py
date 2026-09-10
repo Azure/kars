@@ -17,8 +17,8 @@ USER = "system:serviceaccount:e2e-sre-bootstrap:tenant"
 DEPLOYMENT_CONTROLLER = "system:serviceaccount:kube-system:deployment-controller"
 
 
-def as_tenant(port, path, obj, *, user=USER):
-    req = Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(obj).encode(), method="POST",
+def as_tenant(port, path, obj, *, user=USER, method="POST"):
+    req = Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(obj).encode(), method=method,
                   headers={"Content-Type": "application/json", "Accept": "application/json",
                            "Impersonate-User": user})
     try:
@@ -42,7 +42,8 @@ def admission_cases(port, policies):
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
          "metadata": {"name": "e2e-bootstrap-probe", "namespace": "kars-sre"},
          "rules": [{"apiGroups": [""], "resources": ["pods"], "verbs": ["create"]},
-                   {"apiGroups": ["apps"], "resources": ["deployments", "replicasets"], "verbs": ["create"]},
+                   {"apiGroups": [""], "resources": ["replicationcontrollers"], "verbs": ["create", "update"]},
+                   {"apiGroups": ["apps"], "resources": ["deployments", "replicasets"], "verbs": ["create", "update"]},
                    {"apiGroups": ["kars.azure.com"], "resources": ["karssreactions"], "verbs": ["create"]}]},
         {"apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
          "metadata": {"name": "e2e-bootstrap-probe", "namespace": "kars-sre"},
@@ -64,16 +65,31 @@ def admission_cases(port, policies):
     env = copy.deepcopy(pod)
     env["spec"]["containers"][0]["envFrom"] = [{"secretRef": {"name": "sre-api-router-identity"}}]
     cases.append(("private-env", "/api/v1/namespaces/kars-sre/pods", env, 403, "kars-sre-private-mounts"))
-    for kind, plural in (("Deployment", "deployments"), ("ReplicaSet", "replicasets")):
+    for kind, plural in (("Deployment", "deployments"), ("ReplicaSet", "replicasets"),
+                         ("ReplicationController", "replicationcontrollers")):
         for is_private in (False, True):
-            obj = {"apiVersion": "apps/v1", "kind": kind,
+            replication_controller = kind == "ReplicationController"
+            obj = {"apiVersion": "v1" if replication_controller else "apps/v1", "kind": kind,
                    "metadata": {"name": "e2e-template", "namespace": "kars-sre"},
                    "spec": {"replicas": 1, "selector": {"matchLabels": {"app": "e2e-probe"}},
                             "template": {"metadata": {"labels": {"app": "e2e-probe"}},
                                          "spec": copy.deepcopy((private if is_private else pod)["spec"])}}}
+            if replication_controller:
+                obj["spec"]["selector"] = {"app": "e2e-probe"}
+                obj["spec"]["replicas"] = 0
             cases.append((f"{kind}-{'private' if is_private else 'ordinary'}",
-                          f"/apis/apps/v1/namespaces/kars-sre/{plural}", obj,
+                          f"{'/api/v1' if replication_controller else '/apis/apps/v1'}/namespaces/kars-sre/{plural}", obj,
                           403 if is_private else 201, "kars-sre-private-workloads" if is_private else None))
+            if replication_controller and not is_private:
+                no_template = copy.deepcopy(obj)
+                no_template["spec"].pop("template")
+                cases.append(("ReplicationController-no-template",
+                              "/api/v1/namespaces/kars-sre/replicationcontrollers", no_template, 422, None))
+                private_account = copy.deepcopy(obj)
+                private_account["spec"]["template"]["spec"]["serviceAccountName"] = "sre-api-router"
+                cases.append(("ReplicationController-private-account",
+                              "/api/v1/namespaces/kars-sre/replicationcontrollers",
+                              private_account, 403, "kars-sre-private-workloads"))
     params = {"namespace": "example", "name": "demo", "replicas": 1,
               "nested": {"array": [True, None, 1, "text"], "object": {"key": "value"}}}
     action = {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSREAction",
@@ -95,6 +111,11 @@ def admission_cases(port, policies):
         if name == "pending-json-params-preserved":
             result["paramsPreserved"] = response.get("spec", {}).get("action", {}).get("params") == params
             result["matched"] = result["matched"] and result["paramsPreserved"]
+        if name == "ReplicationController-no-template":
+            result["nativeTemplateRequired"] = response.get("reason") == "Invalid" and any(
+                cause.get("field") == "spec.template" and cause.get("reason") == "FieldValueRequired"
+                for cause in response.get("details", {}).get("causes", []))
+            result["matched"] = result["matched"] and result["nativeTemplateRequired"]
         reports.append(result)
     return reports
 
@@ -203,7 +224,69 @@ def private_controller_chain(port, policies, report):
             report(snapshot)
             if not snapshot["privateMountPreserved"] or not snapshot["noWorkloadExecution"]:
                 raise RuntimeError("Private controller-chain proof changed its protected template or executed a workload")
-            return
+            return created
         time.sleep(0.5)
     report(snapshot)
     raise RuntimeError("Actual private Deployment/ReplicaSet controllers did not create the admission-only Pod")
+
+
+def namespace_cleanup_cases(port, policies, owned_consumer=None):
+    path = "/apis/apps/v1/namespaces/kars-sre/deployments/sre"
+    code, current = request(port, "GET", path)
+    if owned_consumer is not None:
+        if (code != 200 or current.get("metadata", {}).get("uid") != owned_consumer["metadata"]["uid"]
+                or current.get("spec") != owned_consumer.get("spec")):
+            raise RuntimeError("Earlier owned cleanup fixture changed; no adoption permitted")
+        created = current
+    elif code != 404:
+        raise RuntimeError("Namespace cleanup proof refuses an existing canonical Deployment")
+    obj = {"apiVersion": "apps/v1", "kind": "Deployment",
+           "metadata": {"name": "sre", "namespace": "kars-sre"},
+           "spec": {"replicas": 0, "selector": {"matchLabels": {"app": "e2e-retired-consumer"}},
+                    "template": {"metadata": {"labels": {"app": "e2e-retired-consumer"}}, "spec": {
+                        "automountServiceAccountToken": False, "schedulerName": "kars-e2e-admission-never-schedule",
+                        "containers": [{"name": "probe", "image": "registry.invalid/kars-admission-proof:never",
+                                        "imagePullPolicy": "Never"}]}}}}
+    if owned_consumer is None:
+        code, created = request(port, "POST", path.rsplit("/", 1)[0], obj)
+        if code != 201 or not created.get("metadata", {}).get("uid"):
+            raise RuntimeError("Canonical no-execution cleanup fixture CREATE failed")
+    uid = created["metadata"]["uid"]
+    reports = []
+    primary_failure = False
+    try:
+        for account, namespace, expected in (("namespace-controller", "kube-system", 403),
+                                               ("kars-controller", "kars-system", 200)):
+            principal = f"system:serviceaccount:{namespace}:{account}"
+            code, sa = request(port, "GET", f"/api/v1/namespaces/{namespace}/serviceaccounts/{account}")
+            if code != 200 or not sa.get("metadata", {}).get("uid"):
+                raise RuntimeError("Cleanup proof principal does not exist")
+            code, current = request(port, "GET", path)
+            if code != 200 or current.get("metadata", {}).get("uid") != uid:
+                raise RuntimeError("Cleanup proof Deployment was replaced before its dry-run")
+            code, response = as_tenant(port, path, {
+                "apiVersion": "v1", "kind": "DeleteOptions", "dryRun": ["All"],
+                "preconditions": {"uid": uid, "resourceVersion": current["metadata"]["resourceVersion"]}},
+                user=principal, method="DELETE")
+            result = api_result(code, response, policies)
+            result.update({"case": f"{account}-canonical-consumer-delete", "expectedStatus": expected,
+                           "matched": code == expected and (code != 403
+                               or "kars-sre-consumer-authority" in result.get("policies", []))})
+            reports.append(result)
+        return reports
+    except BaseException:
+        primary_failure = True
+        raise
+    finally:
+        try:
+            code, current = request(port, "GET", path)
+            if code != 200 or current.get("metadata", {}).get("uid") != uid:
+                raise RuntimeError("Cleanup proof Deployment identity changed")
+            code, _ = request(port, "DELETE", path, {"apiVersion": "v1", "kind": "DeleteOptions",
+                "preconditions": {"uid": uid, "resourceVersion": current["metadata"]["resourceVersion"]}})
+            if code not in (200, 202):
+                raise RuntimeError("Cleanup proof could not remove its owned Deployment")
+        except Exception:
+            if not primary_failure:
+                raise
+            print("SRE-DIAG owned canonical cleanup fixture removal unavailable", flush=True)
