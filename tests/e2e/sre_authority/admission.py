@@ -77,7 +77,12 @@ def replication_controller_cases(h):
     }
     without_template = copy.deepcopy(ordinary)
     without_template["spec"].pop("template")
-    h.api("POST", collection + "?dryRun=All", body=without_template, user="tenant", status=201)
+    invalid = h.api("POST", collection + "?dryRun=All", body=without_template,
+                    user="tenant", status=422).json()
+    require(invalid.get("reason") == "Invalid" and any(
+        cause.get("field") == "spec.template" and cause.get("reason") == "FieldValueRequired"
+        for cause in invalid.get("details", {}).get("causes", [])),
+        "Template-less ReplicationController did not receive the native required-field rejection")
     created = h.api("POST", collection, body=ordinary, user="tenant", status=201).json()
     identity = created["metadata"]["uid"]
     path = collection + "/" + created["metadata"]["name"]

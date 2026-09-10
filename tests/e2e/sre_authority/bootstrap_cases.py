@@ -84,7 +84,7 @@ def admission_cases(port, policies):
                 no_template = copy.deepcopy(obj)
                 no_template["spec"].pop("template")
                 cases.append(("ReplicationController-no-template",
-                              "/api/v1/namespaces/kars-sre/replicationcontrollers", no_template, 201, None))
+                              "/api/v1/namespaces/kars-sre/replicationcontrollers", no_template, 422, None))
                 private_account = copy.deepcopy(obj)
                 private_account["spec"]["template"]["spec"]["serviceAccountName"] = "sre-api-router"
                 cases.append(("ReplicationController-private-account",
@@ -111,6 +111,11 @@ def admission_cases(port, policies):
         if name == "pending-json-params-preserved":
             result["paramsPreserved"] = response.get("spec", {}).get("action", {}).get("params") == params
             result["matched"] = result["matched"] and result["paramsPreserved"]
+        if name == "ReplicationController-no-template":
+            result["nativeTemplateRequired"] = response.get("reason") == "Invalid" and any(
+                cause.get("field") == "spec.template" and cause.get("reason") == "FieldValueRequired"
+                for cause in response.get("details", {}).get("causes", []))
+            result["matched"] = result["matched"] and result["nativeTemplateRequired"]
         reports.append(result)
     return reports
 
