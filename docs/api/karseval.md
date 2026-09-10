@@ -37,6 +37,18 @@ corpus `ConfigMap`. The runner image is pinned globally via the Helm
 chart (`KARS_CONFORMANCE_RUNNER_IMAGE`); per-CR override exists
 for in-cluster dev only.
 
+Scheduled and run-now Jobs use the same runner Pod contract. The command
+passes the mounted corpus path, router URL and output path accepted by the
+packaged runner. The corpus source label remains in ConfigMap annotations
+and evaluation status; it is not an additional runner CLI option.
+
+Runner Pods require a non-root user, RuntimeDefault seccomp, no privilege
+escalation and dropped capabilities for namespaces enforcing the restricted
+Pod Security Standard. The shipped image declares UID 1000; custom images
+retain their declared numeric non-root user rather than being forced to that
+UID. This does not grant Kubernetes API access or weaken namespace admission
+policies.
+
 ---
 
 ## Builtin corpora
