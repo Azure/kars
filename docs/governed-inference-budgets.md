@@ -148,6 +148,12 @@ remains unchanged. Neither a Phase value nor `Ready=True` is spend authority:
 every send still requires live Pod/Task authority, the sealed validated ledger,
 an operator contract, and an atomic reservation/begin transition.
 
+Recovery revokes a stale Task authority only while that exact captured authority
+is still current inside the account CAS, including after resourceVersion retries.
+If concurrent enrollment installed a newer authority, recovery leaves its sessions
+and funded work intact and checks its live Task source on the next scan. Old
+accepted work remains conservatively charged; deferral never refunds liabilities.
+
 ## Operator contracts and unavoidable configuration
 
 Enable the optional Helm `inferenceBudget` section only after supplying:
