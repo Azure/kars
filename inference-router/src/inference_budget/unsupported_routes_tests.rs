@@ -91,7 +91,7 @@ async fn endpoint_router(fixture: &Fixture, governed: bool) -> Router {
         per_request_tokens: None,
         daily_tokens: None,
         monthly_tokens: None,
-        content_safety: None,
+        content_safety: Default::default(),
         model_preference: Some(ModelPreference {
             primary: ModelRef {
                 provider: "budget-fixture".into(),
