@@ -88,6 +88,6 @@ pub(crate) fn install(
         "root":{"namespace":{"name":root,"uid":root_uid,"resourceVersion":"1"},
             "account":{"name":"kars-controller","uid":account_uid,"resourceVersion":"1"},
             "deployment":{"name":"kars-controller","uid":"controller-deploy","resourceVersion":"1"},
-            "templateDigest":"b".repeat(64)},
+            "templateDigest":"b".repeat(64),"replicaIntent":1},
         "profile":"kcm-certificate","controllerUids":{},"namespaces":namespaces})
 }

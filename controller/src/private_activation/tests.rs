@@ -57,6 +57,15 @@ async fn private_activation_checks_exact_policy_binding_epoch_and_root_incarnati
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
     verify(&client, &grant).await.unwrap();
+    let mut invalid_intent = grant.clone();
+    invalid_intent
+        .spec
+        .private_activation
+        .as_mut()
+        .unwrap()
+        .root
+        .replica_intent = -1;
+    assert!(verify(&client, &invalid_intent).await.is_err());
     objects.lock().unwrap().insert("/api/v1/namespaces/work/pods/unexplained".into(), json!({
         "apiVersion":"v1","kind":"Pod","metadata":{"name":"unexplained","namespace":"work",
             "uid":"foreign-pod","resourceVersion":"1"},
@@ -85,6 +94,11 @@ async fn private_activation_checks_exact_policy_binding_epoch_and_root_incarnati
             "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicybindings/kars-private-consumption",
             "/spec/validationActions",
             json!(["Audit"]),
+        ),
+        (
+            "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/kars-private-consumption-namespace",
+            "/spec/validations/3/expression",
+            json!("true"),
         ),
         (
             "/api/v1/namespaces/work",
@@ -125,6 +139,24 @@ async fn private_activation_checks_exact_policy_binding_epoch_and_root_incarnati
     let mut retired = grant.clone();
     retired.spec.writers.clear();
     verify(&client, &retired).await.unwrap();
+}
+
+#[test]
+fn private_activation_requires_explicit_replica_intent_including_zero() {
+    let mut objects = BTreeMap::new();
+    let mut review = test_support::install(&mut objects, "core", "core-uid", "controller", &[]);
+    review["root"]["replicaIntent"] = json!(0);
+    let decoded: crate::credential_grant_activation::PrivateActivation =
+        serde_json::from_value(review.clone()).unwrap();
+    assert_eq!(decoded.root.replica_intent, 0);
+    review["root"]
+        .as_object_mut()
+        .unwrap()
+        .remove("replicaIntent");
+    assert!(
+        serde_json::from_value::<crate::credential_grant_activation::PrivateActivation>(review)
+            .is_err()
+    );
 }
 
 #[test]

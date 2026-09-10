@@ -282,7 +282,8 @@ pub(crate) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
     {
         return Err(ERROR.into());
     }
-    if activation.root.template_digest.len() != 64
+    if activation.root.replica_intent < 0
+        || activation.root.template_digest.len() != 64
         || !activation
             .root
             .template_digest

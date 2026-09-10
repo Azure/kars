@@ -265,12 +265,27 @@ digest. Only metadata and `tls.crt` are read for this review, never `tls.key`.
 The namespace fence protects that exact configured Secret name, rather than
 guessing a default name or making every TLS Secret private.
 
-For an unqualified budget TLS input, the first apply records a protected
-public-key baseline and stops before minting an activation epoch. Rotate the
-TLS key and update the public CA through the existing budget operator workflow,
-then re-preview/apply. An unchanged public key, including a copied or re-encoded
-key, cannot complete this qualification. A previously qualified, continuously
-protected key may be reused only with the same Secret UID and bundle revision.
+The review includes `root.replicaIntent`, including an explicit zero. Before
+pausing the root, apply persists this intent and an attempt bound to the reviewed
+namespace, ServiceAccount, Deployment, template, consumers, and bundle in
+protected namespace metadata. Re-preview recovers that original intent, never
+the staging-induced zero. Missing, malformed, or changed attempt/identity/intent
+fails explicitly; an old insufficient review must be regenerated.
+Only the credential operator, not the retiring root projector, can advance that
+record. Its attempt identifier is recovery metadata, not consumption authority.
+
+Only after the root is paused and all captured and actual authority-consuming
+Pod UIDs are absent does apply reread the budget certificate and persist its
+public-key baseline. It then stops and requests TLS key rotation and public-CA
+update through the existing budget operator workflow. Keep the root paused,
+rotate, and re-preview/apply. A key rotated while the old root was still live
+becomes the baseline, not acceptable evidence of fresh issuance. An unchanged,
+copied, or re-encoded public key cannot qualify. The baseline survives retries;
+old bundle/key qualification markers cannot bypass this post-retirement proof.
+If authority reappears or the pinned Secret UID changes, activation blocks.
+The original replica intent is restored only after fences and templates are
+qualified. Recovery state remains through grant publication; retrying after
+restoration starts a new retirement attempt and requires another fresh key.
 As for activation without budget TLS, apply waits for the reviewed root rollout and
 retirement of its captured old Pod UIDs, including terminating Pods, so the
 broker cannot silently keep its old startup-cached TLS identity. No budget

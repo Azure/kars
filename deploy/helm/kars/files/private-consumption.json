@@ -122,6 +122,11 @@
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
           },
+          "replicaIntent": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 2147483647
+          },
           "budgetTls": {
             "type": "object",
             "properties": {
@@ -191,7 +196,8 @@
           "namespace",
           "account",
           "deployment",
-          "templateDigest"
+          "templateDigest",
+          "replicaIntent"
         ]
       },
       "profile": {
@@ -566,6 +572,11 @@
           {
             "expression": "request.operation == 'UPDATE' && variables.a[?'kars.azure.com/private-namespace-uid'].orValue('') == dyn(object.metadata).uid",
             "message": "Private activation is bound to the actual namespace UID",
+            "reason": "Forbidden"
+          },
+          {
+            "expression": "variables.manager || variables.a[?'kars.azure.com/private-root-retirement'].orValue('') == oldObject.metadata.?annotations.orValue({})[?'kars.azure.com/private-root-retirement'].orValue('')",
+            "message": "Only the reviewed operator may record or advance private root retirement",
             "reason": "Forbidden"
           }
         ],

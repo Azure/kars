@@ -66,10 +66,10 @@ def activation_schema():
         "namespace": identity, "consumers": {"type": "array", "maxItems": 64, "items": consumer}, "epoch": digest,
     }, ["namespace", "consumers"])
     root = object_schema({"namespace": identity, "account": identity, "deployment": identity,
-                          "templateDigest": digest,
+                          "templateDigest": digest, "replicaIntent": {"type": "integer", "minimum": 0, "maximum": 2147483647},
                           "budgetTls": object_schema({"namespace": identity, "secret": identity, "keyDigest": digest},
                                                      ["namespace", "secret", "keyDigest"])},
-                         ["namespace", "account", "deployment", "templateDigest"])
+                         ["namespace", "account", "deployment", "templateDigest", "replicaIntent"])
     return object_schema({
         "contract": {"type": "string", "enum": ["kars.azure.com/private-consumption/v1"]},
         "phase": {"type": "string", "enum": ["reviewed", "qualified"]},
@@ -211,7 +211,10 @@ def bundle():
           f"{a}[?'{PREFIX}enabled'].orValue('') == 'true'",
           "Private namespace protection is retained during authority retirement"),
          (f"request.operation == 'UPDATE' && {a}[?'{PREFIX}namespace-uid'].orValue('') == dyn(object.metadata).uid",
-          "Private activation is bound to the actual namespace UID")],
+          "Private activation is bound to the actual namespace UID"),
+         (f"variables.manager || {a}[?'{PREFIX}root-retirement'].orValue('') == "
+          f"oldObject.metadata.?annotations.orValue({{}})[?'{PREFIX}root-retirement'].orValue('')",
+          "Only the reviewed operator may record or advance private root retirement")],
         [{"name": "private-fence-fields",
           "expression": f"oldObject == null ? object.metadata.?annotations.orValue({{}}).exists(k, k.startsWith('{PREFIX}')) : "
           f"[object, oldObject].exists(o, o.metadata.?annotations.orValue({{}}).exists(k, k.startsWith('{PREFIX}') && "
