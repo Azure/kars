@@ -82,6 +82,31 @@ This is local source qualification, not fresh native BFF/lifecycle, active-SRE
 or CNI acceptance. Exact-head hosted qualification and genuine human signoffs
 remain separate gates.
 
+### Observation network baseline label consistency
+
+A subsequent downstream native case reached Running Task/Sandbox state but
+could not issue private observations: its existing-isolation preflight supplied
+only the Sandbox-name label, while the actual baseline NetworkPolicy selects
+`kars.azure.com/component=sandbox`. The generated runtime Pod already has that
+label and its Workload Identity label.
+
+The unchanged three runtime Pod labels now come from one pure helper shared by
+Pod generation, verifier baseline checks and approved sender-egress evaluation.
+No actual Pod label, NetworkPolicy rule, namespace selector, port, grant,
+privacy proof or identity boundary is changed. Observer-created policies still
+cannot establish their own baseline, and foreign selectors remain rejected.
+
+The follow-up passes **92 controller-binary credential cases** and strict paired
+all-target Clippy under the existing guard, with minimum free space **8.95 GiB**.
+New cases cover the real component selector, incomplete/foreign labels,
+observer-only policy exclusion and component-plus-name sender selection.
+Bounded independent review of the three Rust files found no significant issues
+and confirmed the generated labels and policy restrictions are unchanged;
+the reviewer did not rerun the tests.
+This is source-level consistency evidence, not native observation issuance,
+TLS/authentication or CNI-traffic qualification. Fresh downstream acceptance
+and genuine human approvals remain required.
+
 ### Native admission and generated-schema repair
 
 The full hosted run at `80cffb63` exposed additional issues: creation of

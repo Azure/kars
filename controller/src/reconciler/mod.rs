@@ -50,7 +50,7 @@ use mcp_egress::mcp_egress_rule;
 
 mod pod_spec;
 pub(crate) use pod_spec::{
-    build_egress_guard_command, build_pod_security_context, isolation_scheduling,
+    build_egress_guard_command, build_pod_labels, build_pod_security_context, isolation_scheduling,
     sandbox_node_selector_from,
 };
 
@@ -2662,11 +2662,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "template": {
                     "metadata": {
                         "annotations": {"kars.azure.com/inference-providers-version": provider_version.unwrap_or_default()},
-                        "labels": {
-                            "kars.azure.com/sandbox": name,
-                            "kars.azure.com/component": "sandbox",
-                            "azure.workload.identity/use": "true"
-                        }
+                        "labels": build_pod_labels(&name)
                     },
                     "spec": pod_spec
                 }
