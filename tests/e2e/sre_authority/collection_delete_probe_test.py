@@ -7,10 +7,44 @@ import unittest
 from urllib.parse import parse_qs, urlsplit
 from unittest.mock import patch
 
-from sre_authority.collection_delete_probe import NAMESPACE_CONTROLLER, cases
+from sre_authority.collection_delete_probe import NAMESPACE_CONTROLLER, cases, dry_run_delete
 
 
 class CollectionDeleteProofTests(unittest.TestCase):
+    def test_dry_run_retries_only_status_only_rv_conflicts_and_keeps_both_preconditions(self):
+        original = {"metadata": {"uid": "owned", "resourceVersion": "1"}, "spec": {"replicas": 0}}
+        updated = copy.deepcopy(original)
+        updated["metadata"]["resourceVersion"] = "2"
+        updated["status"] = {"observedGeneration": 1}
+        with patch("sre_authority.collection_delete_probe.request", return_value=(200, updated)), \
+                patch("sre_authority.collection_delete_probe.as_tenant",
+                      side_effect=[(409, {"reason": "Conflict"}), (200, {"kind": "Status"})]) as actor, \
+                patch("sre_authority.collection_delete_probe.time.sleep"):
+            code, _ = dry_run_delete(1, "/collection?fieldSelector=name", "/item", original, False)
+        self.assertEqual(code, 200)
+        self.assertEqual([call.args[2]["preconditions"] for call in actor.call_args_list], [
+            {"uid": "owned", "resourceVersion": "1"}, {"uid": "owned", "resourceVersion": "2"}])
+        self.assertTrue(all(call.args[2]["dryRun"] == ["All"] for call in actor.call_args_list))
+        self.assertEqual(original["metadata"]["resourceVersion"], "1")
+
+    def test_dry_run_does_not_retry_replacement_content_change_or_authorization_failure(self):
+        original = {"metadata": {"uid": "owned", "resourceVersion": "1"}, "spec": {"replicas": 0}}
+        for refreshed in (
+            {"metadata": {"uid": "other", "resourceVersion": "2"}, "spec": {"replicas": 0}},
+            {"metadata": {"uid": "owned", "resourceVersion": "2"}, "spec": {"replicas": 1}},
+        ):
+            with patch("sre_authority.collection_delete_probe.request", return_value=(200, refreshed)), \
+                    patch("sre_authority.collection_delete_probe.as_tenant",
+                          return_value=(409, {"reason": "Conflict"})) as actor, self.assertRaises(AssertionError):
+                dry_run_delete(1, "/collection", "/item", original, False)
+            actor.assert_called_once()
+        with patch("sre_authority.collection_delete_probe.request") as read, \
+                patch("sre_authority.collection_delete_probe.as_tenant",
+                      return_value=(403, {"reason": "Forbidden"})) as actor:
+            self.assertEqual(dry_run_delete(1, "/collection", "/item", original, False)[0], 403)
+        actor.assert_called_once()
+        read.assert_not_called()
+
     def fixture(self):
         objects, deletes, probes = {}, [], []
         def api(_port, method, path, obj=None):
