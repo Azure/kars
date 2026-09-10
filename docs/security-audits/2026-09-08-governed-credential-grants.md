@@ -109,6 +109,23 @@ and genuine human approvals remain required.
 
 ### Native admission and generated-schema repair
 
+The composed SRE bootstrap separately demonstrated that the built-in Deployment
+controller could create ordinary ReplicaSets (201) but was denied private SRE
+ReplicaSets (403): it has cluster-wide ReplicaSet-create authority, not
+cluster-wide Pod-create or SRE registrar authority. The missing handoff repair
+is forwarded exactly from `c08465a5f7e3957b3594c5b37088c56d00290449`.
+Only the `apps/replicasets` workload predicate recognizes that existing
+cluster-wide capability. No RBAC grant, Pod/CronJob permission, tenant bypass
+or other workload-kind exception is introduced.
+
+The resulting entire SRE consumer-policy template is byte-identical to
+`203e2322ad22512f0889e1f512ed36ac278b5a42`, whose full native Kind run passed
+161 cases. The same forward includes actual private Deployment-to-ReplicaSet-
+to-unscheduled-Pod UID-chain assertions and tenant-denial coverage. All 67
+Python harness tests and Helm lint pass on this target. That prerequisite
+evidence does not by itself prove this composed stack's readiness; fresh
+exact-head native acceptance and genuine audit signatures remain required.
+
 The full hosted run at `80cffb63` exposed additional issues: creation of
 `kars-credential-source-writes` failed CEL compilation; the new grant lacked
 its standard CRD label/CEL coverage; Task/Team drift checks parsed unrendered
