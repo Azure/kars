@@ -173,6 +173,24 @@ describe("governed credential public contract",()=>{
     expect(source("controller/src/credential_grants/operator.rs")).toContain("privacy_epoch");
   });
 
+  it("grants only the core controller ReplicaSet GET for observation ownership verification",()=>{
+    const controller=resource("ClusterRole","kars-credential-grant-controller");
+    expect(controller.rules.filter((rule:{apiGroups:string[];resources:string[]})=>
+      rule.apiGroups.includes("apps")&&rule.resources.includes("replicasets")))
+      .toEqual([{apiGroups:["apps"],resources:["replicasets"],verbs:["get"]}]);
+    const binding=resource("ClusterRoleBinding","kars-credential-grant-controller");
+    expect(binding.roleRef).toEqual({
+      apiGroup:"rbac.authorization.k8s.io",kind:"ClusterRole",name:"kars-credential-grant-controller",
+    });
+    expect(binding.subjects).toEqual([{kind:"ServiceAccount",namespace:"kars-system",name:"kars-controller"}]);
+    expect(resource("ClusterRole","kars-credential-grant-operator").rules
+      .some((rule:{resources:string[]})=>rule.resources.includes("replicasets"))).toBe(false);
+    const runtime=source("controller/src/credential_grants/observer_runtime.rs");
+    expect(runtime).toContain("Api::<ReplicaSet>::namespaced");
+    expect(runtime).toContain(".get(&owner.name)");
+    expect(runtime).toContain("set.uid().as_deref() != Some(owner.uid.as_str())");
+  });
+
   it("gates ordinary Task readiness before execution and preserves state during credential failure",()=>{
     const task=source("controller/src/kars_task_reconciler.rs");
     expect(task.indexOf("readiness::enforce(")).toBeLessThan(task.indexOf("reconcile_execution(&ctx.client"));
