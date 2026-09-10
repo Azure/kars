@@ -7,18 +7,18 @@ fn prepare_environment(data: &mut Data) {
     data.writes = true;
     data.objects.insert("/api/v1/namespaces/kars-system/pods/controller".into(),json!({
         "apiVersion":"v1","kind":"Pod","metadata":{"name":"controller","namespace":"kars-system","uid":"controller-pod",
-            "resourceVersion":"1","labels":{"app.kubernetes.io/name":"kars","app.kubernetes.io/component":"controller"}},
+            "resourceVersion":"1","labels":{"app.kubernetes.io/name":"kars","app.kubernetes.io/component":"controller"},
+            "annotations":{crate::private_activation::EPOCH:"a".repeat(64)},
+            "ownerReferences":[{"apiVersion":"apps/v1","kind":"ReplicaSet","name":"qualified-controller",
+                "uid":"qualified-controller-rs","controller":true}]},
         "spec":{"serviceAccountName":"kars-controller","containers":[{"name":"controller","image":"test:latest"}]}
     }));
-    let digest = crate::private_activation::test_support::pod_spec_digest(
-        &data.objects["/api/v1/namespaces/kars-system/pods/controller"]["spec"],
-    );
-    let annotations = &mut data
-        .objects
-        .get_mut("/api/v1/namespaces/kars-system")
-        .unwrap()["metadata"]["annotations"];
-    annotations["kars.azure.com/private-pod-controller-pod"] = "a".repeat(64).into();
-    annotations["kars.azure.com/private-pod-spec-controller-pod"] = digest.into();
+    data.objects.insert("/apis/apps/v1/namespaces/kars-system/replicasets/qualified-controller".into(), json!({
+        "apiVersion":"apps/v1","kind":"ReplicaSet",
+        "metadata":{"name":"qualified-controller","namespace":"kars-system",
+            "uid":"qualified-controller-rs","resourceVersion":"1"},
+        "spec":{"template":{"metadata":{"annotations":{crate::private_activation::EPOCH:"a".repeat(64)}}}}
+    }));
     data.objects.insert(
         "/apis/networking.k8s.io/v1/namespaces/kars-system/networkpolicies".into(),
         json!({

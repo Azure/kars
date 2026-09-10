@@ -530,7 +530,9 @@
                 "UPDATE"
               ],
               "resources": [
-                "namespaces"
+                "namespaces",
+                "namespaces/status",
+                "namespaces/finalize"
               ],
               "scope": "Cluster"
             }

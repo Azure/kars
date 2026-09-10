@@ -3,7 +3,7 @@
 
 //! Complete Pod inventory and private-material consumption classification.
 
-use super::{EPOCH, ERROR, PREFIX, bundle, field, hash, live};
+use super::{EPOCH, ERROR, PREFIX, bundle, field, live};
 use k8s_openapi::api::core::v1::{Namespace, Pod};
 use kube::{Api, Client, ResourceExt, api::ListParams};
 use serde_json::{Value, json};
@@ -91,6 +91,72 @@ fn private_material_in(pod: &Pod, namespace: Option<&Namespace>) -> bool {
         })
 }
 
+fn consumes_private_authority(pod: &Pod, namespace: &Namespace) -> Result<bool, String> {
+    if private_material_in(pod, Some(namespace)) {
+        return Ok(true);
+    }
+    let spec = pod.spec.as_ref().ok_or(ERROR)?;
+    let raw = serde_json::to_value(spec).map_err(|_| ERROR)?;
+    let sa = spec.service_account_name.as_deref().unwrap_or("default");
+    let private_identity = (namespace.name_any() == field(namespace, "root-namespace")?
+        && sa == field(namespace, "root-account")?)
+        || (namespace.name_any() == "kars-sre" && sa == "sre-api-router")
+        || (namespace.name_any() == "kube-system"
+            && bundle()["controllers"]
+                .as_array()
+                .is_some_and(|names| names.contains(&json!(sa))));
+    let projected_token = raw["volumes"].as_array().is_some_and(|volumes| {
+        volumes.iter().any(|volume| {
+            volume["projected"]["sources"]
+                .as_array()
+                .is_some_and(|sources| {
+                    sources
+                        .iter()
+                        .any(|source| source.get("serviceAccountToken").is_some())
+                })
+        })
+    });
+    let dangerous = ["hostPID", "hostIPC", "hostNetwork"]
+        .iter()
+        .any(|key| raw[*key] == true)
+        || raw["volumes"].as_array().is_some_and(|volumes| {
+            volumes
+                .iter()
+                .any(|volume| volume.get("hostPath").is_some())
+        })
+        || ["containers", "initContainers", "ephemeralContainers"]
+            .iter()
+            .any(|key| {
+                raw[*key].as_array().is_some_and(|containers| {
+                    containers.iter().any(|container| {
+                        container["securityContext"]["privileged"] == true
+                            || container["securityContext"]["capabilities"]["add"]
+                                .as_array()
+                                .is_some_and(|caps| {
+                                    caps.iter().any(|cap| {
+                                        [
+                                            "ALL",
+                                            "SYS_ADMIN",
+                                            "SYS_PTRACE",
+                                            "SYS_MODULE",
+                                            "SYS_RAWIO",
+                                            "BPF",
+                                            "PERFMON",
+                                            "CHECKPOINT_RESTORE",
+                                            "DAC_READ_SEARCH",
+                                        ]
+                                        .iter()
+                                        .any(|name| cap.as_str() == Some(*name))
+                                    })
+                                })
+                    })
+                })
+            });
+    Ok(dangerous
+        || (private_identity
+            && (spec.automount_service_account_token != Some(false) || projected_token)))
+}
+
 pub(crate) async fn retired_material_consumers(
     client: &Client,
     namespace: &str,
@@ -121,10 +187,12 @@ pub(crate) async fn retired_material_consumers(
         return Err(ERROR.into());
     }
 
-    Ok(!pods
-        .items
-        .iter()
-        .any(|pod| private_material_in(pod, Some(&scope))))
+    for pod in &pods.items {
+        if consumes_private_authority(pod, &scope)? {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 pub(crate) async fn inspect_namespace(
@@ -146,77 +214,13 @@ pub(crate) async fn inspect_namespace(
     }
     let annotations = namespace.metadata.annotations.as_ref().ok_or(ERROR)?;
     for pod in pods {
-        let uid = pod
-            .metadata
+        pod.metadata
             .uid
             .as_deref()
             .filter(|v| !v.is_empty())
             .ok_or(ERROR)?;
-        let spec = pod.spec.as_ref().ok_or(ERROR)?;
-        let raw = serde_json::to_value(spec).map_err(|_| ERROR)?;
-        let sa = spec.service_account_name.as_deref().unwrap_or("default");
-        let private_identity = (namespace.name_any() == field(namespace, "root-namespace")?
-            && sa == field(namespace, "root-account")?)
-            || (namespace.name_any() == "kars-sre" && sa == "sre-api-router")
-            || (namespace.name_any() == "kube-system"
-                && bundle()["controllers"]
-                    .as_array()
-                    .is_some_and(|names| names.contains(&json!(sa))));
-        let projected_token = raw["volumes"].as_array().is_some_and(|volumes| {
-            volumes.iter().any(|volume| {
-                volume["projected"]["sources"]
-                    .as_array()
-                    .is_some_and(|sources| {
-                        sources
-                            .iter()
-                            .any(|source| source.get("serviceAccountToken").is_some())
-                    })
-            })
-        });
-        let dangerous = ["hostPID", "hostIPC", "hostNetwork"]
-            .iter()
-            .any(|key| raw[*key] == true)
-            || raw["volumes"].as_array().is_some_and(|volumes| {
-                volumes
-                    .iter()
-                    .any(|volume| volume.get("hostPath").is_some())
-            })
-            || ["containers", "initContainers", "ephemeralContainers"]
-                .iter()
-                .any(|key| {
-                    raw[*key].as_array().is_some_and(|containers| {
-                        containers.iter().any(|container| {
-                            container["securityContext"]["privileged"] == true
-                                || container["securityContext"]["capabilities"]["add"]
-                                    .as_array()
-                                    .is_some_and(|caps| {
-                                        caps.iter().any(|cap| {
-                                            [
-                                                "ALL",
-                                                "SYS_ADMIN",
-                                                "SYS_PTRACE",
-                                                "SYS_MODULE",
-                                                "SYS_RAWIO",
-                                                "BPF",
-                                                "PERFMON",
-                                                "CHECKPOINT_RESTORE",
-                                                "DAC_READ_SEARCH",
-                                            ]
-                                            .iter()
-                                            .any(|name| cap.as_str() == Some(*name))
-                                        })
-                                    })
-                        })
-                    })
-                });
-        let material = private_material_in(&pod, Some(namespace));
         let marked = pod.metadata.annotations.as_ref().and_then(|a| a.get(EPOCH));
-        if !material
-            && !dangerous
-            && !(private_identity
-                && (spec.automount_service_account_token != Some(false) || projected_token))
-            && marked.is_none()
-        {
+        if !consumes_private_authority(&pod, namespace)? {
             continue;
         }
         // Current-epoch consumers were admitted under this exact enforcing
@@ -269,15 +273,124 @@ pub(crate) async fn inspect_namespace(
                 }
             }
         }
-        if material
-            || annotations
-                .get(&format!("{PREFIX}pod-{uid}"))
-                .map(String::as_str)
-                != Some(epoch)
-            || annotations.get(&format!("{PREFIX}pod-spec-{uid}")) != Some(&hash(&raw))
-        {
-            return Err("Unexplained or prior-epoch private consumer preserved; operator qualification is required".into());
-        }
+        return Err("Unexplained or prior-epoch private consumer preserved; operator qualification is required".into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    fn namespace() -> Namespace {
+        serde_json::from_value(
+            json!({"metadata":{"name":"core","uid":"namespace","resourceVersion":"1",
+            "annotations":{"kars.azure.com/private-root-namespace":"core",
+                "kars.azure.com/private-root-account":"kars-controller"}}}),
+        )
+        .unwrap()
+    }
+
+    fn old_pod() -> Value {
+        json!({"apiVersion":"v1","kind":"Pod","metadata":{"name":"old-root","namespace":"core",
+            "uid":"old-root-uid","resourceVersion":"1","annotations":{EPOCH:"old-epoch"}},
+            "spec":{"serviceAccountName":"kars-controller",
+                "containers":[{"name":"controller","image":"fixture"}]}})
+    }
+
+    async fn check(pod: Pod, mut namespace: Namespace, consuming: bool) {
+        let epoch = "a".repeat(64);
+        let raw = serde_json::to_value(pod.spec.as_ref().unwrap()).unwrap();
+        let annotations = namespace.metadata.annotations.as_mut().unwrap();
+        annotations.insert(format!("{PREFIX}pod-old-root-uid"), epoch.clone());
+        annotations.insert(
+            format!("{PREFIX}pod-spec-old-root-uid"),
+            crate::private_activation::test_support::pod_spec_digest(&raw),
+        );
+        let server = MockServer::start().await;
+        let response_namespace = namespace.clone();
+        Mock::given(|_: &wiremock::Request| true)
+            .respond_with(move |request: &wiremock::Request| {
+                assert_eq!(request.method, "GET");
+                if request.url.path().ends_with("/pods") {
+                    ResponseTemplate::new(200).set_body_json(json!({
+                        "apiVersion":"v1","kind":"PodList","metadata":{},"items":[pod]
+                    }))
+                } else {
+                    ResponseTemplate::new(200).set_body_json(&response_namespace)
+                }
+            })
+            .mount(&server)
+            .await;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        assert_eq!(
+            inspect_namespace(&client, &namespace, &epoch)
+                .await
+                .is_err(),
+            consuming
+        );
+        assert_eq!(
+            retired_material_consumers(&client, "core").await.unwrap(),
+            !consuming
+        );
+    }
+
+    #[tokio::test]
+    async fn old_privileged_authority_cannot_be_grandfathered_without_budget_or_tls() {
+        for mode in [
+            "automount",
+            "explicit-automount",
+            "projected",
+            "host",
+            "privileged",
+            "secret",
+        ] {
+            for terminating in [false, true] {
+                let mut value = old_pod();
+                if mode != "automount" {
+                    value["spec"]["automountServiceAccountToken"] =
+                        json!(mode == "explicit-automount");
+                }
+                match mode {
+                    "projected" => {
+                        value["spec"]["volumes"] = json!([{"name":"identity",
+                        "projected":{"sources":[{"serviceAccountToken":{"path":"token","audience":"api"}}]}}])
+                    }
+                    "host" => {
+                        value["spec"]["volumes"] =
+                            json!([{"name":"host","hostPath":{"path":"/var/run"}}])
+                    }
+                    "privileged" => {
+                        value["spec"]["containers"][0]["securityContext"] =
+                            json!({"privileged":true})
+                    }
+                    "secret" => {
+                        value["spec"]["containers"][0]["envFrom"] =
+                            json!([{"secretRef":{"name":"router-services-admin"}}])
+                    }
+                    _ => {}
+                }
+                if terminating {
+                    value["metadata"]["deletionTimestamp"] = "2026-01-01T00:00:00Z".into();
+                }
+                check(serde_json::from_value(value).unwrap(), namespace(), true).await;
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn genuinely_nonconsuming_holder_is_preserved_even_with_a_stale_marker() {
+        let mut value = old_pod();
+        value["spec"]["automountServiceAccountToken"] = false.into();
+        check(serde_json::from_value(value).unwrap(), namespace(), false).await;
+    }
+
+    #[tokio::test]
+    async fn public_epoch_and_legacy_uid_receipt_do_not_replace_consuming_pod_authority() {
+        let mut value = old_pod();
+        value["metadata"]["annotations"][EPOCH] = "a".repeat(64).into();
+        check(serde_json::from_value(value).unwrap(), namespace(), true).await;
+    }
 }

@@ -201,7 +201,8 @@ def bundle():
           "expression": f"{metadata}[?'{PREFIX}enabled'].orValue('') == 'true'"}],
     )
     output += pair(
-        "kars-private-consumption-namespace", [rule("", "v1", ["namespaces"], "Cluster")],
+        "kars-private-consumption-namespace",
+        [rule("", "v1", ["namespaces", "namespaces/status", "namespaces/finalize"], "Cluster")],
         [variable("a", "object.metadata.?annotations.orValue({})"), variable("manager", manager),
          variable("projector", projector)],
         [("request.operation == 'UPDATE' && (variables.manager || variables.projector)",

@@ -211,12 +211,21 @@ Apply rechecks the complete enforcing policy/binding specifications and their
 current type-check/observation status. Existing writer authority is retired
 first, including absence checks for its owned read Roles/Bindings. Namespace
 protection is then enabled in `Pending`, identities/templates are rechecked,
-and only approved material-consuming controller replicas are paused. All
-actual material-consuming Pods, including unlabelled and terminating Pods,
-must finish retirement before fresh unpredictable namespace-UID-bound epochs
-are generated. Independently verified non-material consumers receive explicit
-Pod UID/spec receipts. Qualified templates are stamped, and the grant is
-published with the resulting receipt using its current UID/resourceVersion.
+and only approved authority-consuming controller replicas are paused. This
+includes private material, privileged ServiceAccount automount/projected tokens,
+and host-access authority, not just Secret references. All captured consuming
+Pod UIDs, including unlabelled and terminating Pods, must disappear before fresh
+unpredictable namespace-UID-bound epochs are generated. A UID/spec receipt cannot
+grandfather an old credential-bearing consumer into a new epoch.
+
+Truly non-consuming holders (no privileged token, private material, or host
+access) are preserved, even if they carry stale public markers. The reviewed
+root is paused and its old token-bearing Pods are awaited regardless of budget
+or TLS enablement. Only after their absence is verified are namespace epochs
+created, qualified templates stamped, and the root's captured replica intent
+restored with UID/resourceVersion fences. Replacement readiness is checked
+after restoration, not while the root remains at zero replicas. The grant is
+then published with the resulting receipt and current UID/resourceVersion.
 Conflicts preserve the protection and require a fresh review; there is no
 unprotected rollback.
 
@@ -225,7 +234,10 @@ not let a writer add, remove, or modify protected consumption. Admission checks
 old **or** new direct/projected Secret references, env/envFrom, init/ephemeral
 containers, image-pull/CSI references, privileged identities, and node-access
 paths across Pod, RC, Deployment, ReplicaSet, StatefulSet, DaemonSet, Job, and
-CronJob templates. Connections into activated private namespaces require
+CronJob templates. Namespace metadata protection covers the parent resource,
+`namespaces/status`, and `namespaces/finalize`; it checks old and new private
+fields with the same actor and namespace-UID fences. Normal status/finalizer
+maintenance that leaves those fields unchanged remains allowed. Connections into activated private namespaces require
 explicit operator authority; Pod log GET remains separate. Broad SAR checks
 remain defense in depth, not a complete resourceNames-scoped permission proof.
 
@@ -259,7 +271,7 @@ TLS key and update the public CA through the existing budget operator workflow,
 then re-preview/apply. An unchanged public key, including a copied or re-encoded
 key, cannot complete this qualification. A previously qualified, continuously
 protected key may be reused only with the same Secret UID and bundle revision.
-Before publishing writers, apply waits for the reviewed root rollout and
+As for activation without budget TLS, apply waits for the reviewed root rollout and
 retirement of its captured old Pod UIDs, including terminating Pods, so the
 broker cannot silently keep its old startup-cached TLS identity. No budget
 ledger, cancellation, settlement, pricing, or dispatch logic is changed by this
@@ -284,6 +296,14 @@ resourceNames-scoped RBAC, uses inert zero-replica/suspended/no-eligible-node
 bases and server-side dry-run mutations, and requires the exact intended
 admission denial. It never executes a credential-reading payload. Native
 qualification and independent source review remain required before sign-off.
+The namespace-surface regression first proves named status/finalize RBAC,
+requires exact namespace-fence denials for metadata changes, and then requires
+the named workload consumption denial with the actual fence still intact.
+`root_token_retirement_case` uses a short-lived API-issued token bound to the
+reviewed old root Pod and TokenReview booleans before/after the existing
+activation callback. It reads no mounted token, emits no credential, and cannot
+pass while that Pod UID remains (including terminating) or while its API
+authority remains authenticated.
 
 Install the new CRD, controller and admission policies first. Install the private
 add-on's ServiceAccount without broad Secret or Deployment write permissions.
