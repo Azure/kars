@@ -27,6 +27,8 @@
 //! Webhook delivery + the `kars eval run` CLI surface ship in
 //! slice 6.4.
 
+mod runner;
+
 use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::{CronJob, Job};
@@ -37,6 +39,7 @@ use kube::{
     api::{Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams},
     runtime::controller::{Action, Controller},
 };
+use runner::runner_pod_spec_json;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -89,8 +92,8 @@ impl ReconcileError {
 struct ResolvedCorpus {
     bytes: Vec<u8>,
     digest: String,
-    /// Human-friendly identifier the runner echoes in its `RunReport`:
-    /// either `builtin:<name>` or `<registry>/<repository>@<digest>`.
+    /// Operator-facing source identifier retained in corpus annotations and
+    /// evaluation status, separate from the runner's corpus name.
     label: String,
 }
 
@@ -540,46 +543,6 @@ fn short_hash(s: &str) -> String {
     let digest = h.finalize();
     // 10 hex chars is plenty for K8s name uniqueness within one CR.
     digest.iter().take(5).map(|b| format!("{b:02x}")).collect()
-}
-
-fn runner_pod_spec_json(
-    eval_name: &str,
-    cm_name: &str,
-    runner_image: &str,
-    target_url: &str,
-    corpus_label: &str,
-) -> serde_json::Value {
-    json!({
-        "restartPolicy": "Never",
-        "containers": [{
-            "name": "runner",
-            "image": runner_image,
-            "imagePullPolicy": "IfNotPresent",
-            "args": [
-                "--corpus", "/etc/kars/eval-corpus/corpus.json",
-                "--corpus-label", corpus_label,
-                "--router-base", target_url,
-                "--output", "/dev/stdout",
-            ],
-            "env": [
-                {"name": "RUST_LOG", "value": "info"},
-                {"name": "KARS_EVAL_NAME", "value": eval_name},
-            ],
-            "volumeMounts": [{
-                "name": "corpus",
-                "mountPath": "/etc/kars/eval-corpus",
-                "readOnly": true,
-            }],
-            "resources": {
-                "requests": {"cpu": "50m", "memory": "64Mi"},
-                "limits": {"cpu": "500m", "memory": "256Mi"},
-            },
-        }],
-        "volumes": [{
-            "name": "corpus",
-            "configMap": {"name": cm_name},
-        }],
-    })
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1599,8 +1562,8 @@ mod tests {
         assert!(args.contains(&"/etc/kars/eval-corpus/corpus.json"));
         assert!(args.contains(&"--router-base"));
         assert!(args.contains(&"http://agent-1.kars-agent-1.svc.cluster.local:8443"));
-        assert!(args.contains(&"--corpus-label"));
-        assert!(args.contains(&"builtin:jailbreak-baseline"));
+        assert!(!args.contains(&"--corpus-label"));
+        assert!(!args.contains(&"builtin:jailbreak-baseline"));
         let vol = &spec["volumes"][0];
         assert_eq!(vol["name"], "corpus");
         assert_eq!(vol["configMap"]["name"], "karseval-my-eval-corpus");
