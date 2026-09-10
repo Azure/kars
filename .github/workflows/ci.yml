@@ -773,6 +773,15 @@ jobs:
           kubectl logs -n kars-system -l app.kubernetes.io/component=controller --tail=500 > e2e-diag/controller.log 2>&1 || true
           kubectl logs -n kars-system -l app.kubernetes.io/component=inference-router --tail=500 > e2e-diag/router.log 2>&1 || true
 
+      - name: Upload bounded composed SRE readiness evidence
+        if: always() && steps.paths.outputs.run == 'true'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: composed-sre-readiness-${{ github.run_id }}
+          path: e2e-sre-schema-diag/sre-readiness-*.json
+          if-no-files-found: warn
+          retention-days: 7
+
       - name: Upload diagnostics
         if: failure() && steps.paths.outputs.run == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4

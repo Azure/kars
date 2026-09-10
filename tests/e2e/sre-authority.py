@@ -27,6 +27,7 @@ def main():
     from sre_authority.fixtures import CONTROL, CONTROL_NS, prepare_legacy
     from sre_authority.migration import fresh_reenrollment, legacy_migration, retire_and_uninstall
     from sre_authority.proxy import proxy_acceptance
+    from sre_authority.readiness_diagnostics import collect
     harness = None
     try:
         harness = Harness(options.phase)
@@ -34,6 +35,7 @@ def main():
             prepare_legacy(harness)
         elif options.phase == "legacy":
             legacy_migration(harness)
+            collect(harness, "ready")
             proxy_acceptance(harness)
             retire_and_uninstall(harness)
             source = harness.get("karssandbox", CONTROL, SYSTEM)
@@ -45,6 +47,7 @@ def main():
                 harness.poll("owned control fixture cleanup", lambda: harness.get("namespace", CONTROL_NS) is None, seconds=120)
         else:
             fresh_reenrollment(harness)
+            collect(harness, "ready")
             proxy_acceptance(harness)
             retire_and_uninstall(harness)
         harness.save()
