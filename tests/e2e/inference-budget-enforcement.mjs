@@ -5,9 +5,10 @@
 // images into its disposable Kind cluster. No external provider/model is used.
 import assert from "node:assert/strict";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdirSync, readFileSync, rmSync } from "node:fs";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
+import { prepareRouterImage } from "./kind-router-image.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const context = "kind-kars-e2e";
@@ -16,6 +17,7 @@ const source = "budget-provider-fixture";
 const endpoint = `http://provider.${source}.svc.cluster.local:8000`;
 const scratch = join(root, `.budget-kind-${process.pid}`);
 const forwards = [];
+let verifiedRouterReference;
 
 function execute(binary, args, input) {
   try {
@@ -105,6 +107,8 @@ async function router(name) {
     return pods.items.find((pod) => !pod.metadata.deletionTimestamp
       && pod.status?.containerStatuses?.some((container) => container.name === "inference-router" && container.state?.running));
   }, `router container ${name}`);
+  assert(pod.spec.containers.find(container => container.name === "inference-router")?.image
+    === verifiedRouterReference, "Budget router must use the exact CRI-verified digest reference");
   const url = await portForward(runtime, `pod/${pod.metadata.name}`, 8443);
   await until(async () => (await request(url, "/readyz")).status === 200, `private budget readiness ${name}`);
   return { url, pod, runtime };
@@ -120,12 +124,20 @@ function accountFor(name) {
 async function scenario() {
   const nodes = execute("kind", ["get", "nodes", "--name", "kars-e2e"]).trim().split(/\s+/);
   assert(nodes.length > 0 && nodes.every((node) => node.startsWith("kars-e2e-")));
-  const worker = nodes.find((node) => node.endsWith("-worker")) ?? nodes[0];
-  const images = execute("docker", ["exec", worker, "ctr", "-n", "k8s.io", "images", "list"]);
-  const routerLine = images.split("\n").find((line) => line.split(/\s+/)[0] === "docker.io/library/kars-inference-router:e2e");
-  assert(routerLine, "Existing harness must load the real router image first");
-  const digest = routerLine.split(/\s+/).find((field) => /^sha256:[a-f0-9]{64}$/.test(field));
-  assert(digest, "A manifest digest, not an image-config ID, is required");
+  const values = JSON.parse(execute("helm", ["get", "values", "kars", "--kube-context", context, "-n", namespace, "--all", "-o", "json"]));
+  const imageProofs = [];
+  const imageDirectory = join(root, "e2e-diag", "standalone");
+  mkdirSync(imageDirectory, { recursive: true, mode: 0o700 });
+  const image = await prepareRouterImage({
+    nodes, kube: k, values,
+    report: proof => {
+      imageProofs.push(proof);
+      console.log("BUDGET-IMAGE " + JSON.stringify(proof));
+      writeFileSync(join(imageDirectory, "router-image-preflight.json"), JSON.stringify({ proofs: imageProofs }, null, 2));
+    },
+  });
+  const digest = image.manifestDigest;
+  verifiedRouterReference = image.reference;
 
   mkdirSync(scratch, { mode: 0o700 });
   execute("openssl", ["req", "-x509", "-newkey", "rsa:2048", "-nodes", "-days", "1",
@@ -176,7 +188,6 @@ async function scenario() {
   k(["rollout", "status", "-n", source, "deployment/provider", "--timeout=90s"]);
   const provider = await portForward(source, "deployment/provider", 8000);
 
-  const values = JSON.parse(execute("helm", ["get", "values", "kars", "--kube-context", context, "-n", namespace, "--all", "-o", "json"]));
   values.inferenceBudget = {
     enabled: true, routerImageDigest: digest, catalogVersion: "fixture-v1",
     tlsSecretName: "budget-fixture-tls", caBundle: certificate.toString("utf8"),
