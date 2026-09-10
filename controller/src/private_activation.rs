@@ -61,13 +61,13 @@ fn hash(value: &Value) -> String {
             Value::Array(values) => Value::Array(values.iter().map(ordered).collect()),
             _ => value.clone(),
         }
-
-        #[cfg(test)]
-        pub(crate) mod test_support;
-        #[cfg(test)]
-        mod tests;
     }
     crate::providers::signing::sha256_hex(
         &serde_json::to_vec(&ordered(value)).expect("JSON serializes"),
     )
 }
+
+#[cfg(test)]
+pub(crate) mod test_support;
+#[cfg(test)]
+mod tests;
