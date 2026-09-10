@@ -8,6 +8,9 @@
     "kars-observation-privacy-tls",
     "sre-api-router-identity"
   ],
+  "tokenAudiences": [
+    "kars.azure.com/governed-inference-budget"
+  ],
   "controllers": [
     "deployment-controller",
     "replicaset-controller",
@@ -118,6 +121,70 @@
           "templateDigest": {
             "type": "string",
             "pattern": "^[a-f0-9]{64}$"
+          },
+          "budgetTls": {
+            "type": "object",
+            "properties": {
+              "namespace": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253
+                  },
+                  "uid": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253
+                  },
+                  "resourceVersion": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253
+                  }
+                },
+                "required": [
+                  "name",
+                  "uid",
+                  "resourceVersion"
+                ]
+              },
+              "secret": {
+                "type": "object",
+                "properties": {
+                  "name": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253
+                  },
+                  "uid": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253
+                  },
+                  "resourceVersion": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 253
+                  }
+                },
+                "required": [
+                  "name",
+                  "uid",
+                  "resourceVersion"
+                ]
+              },
+              "keyDigest": {
+                "type": "string",
+                "pattern": "^[a-f0-9]{64}$"
+              }
+            },
+            "required": [
+              "namespace",
+              "secret",
+              "keyDigest"
+            ]
           }
         },
         "required": [
@@ -344,7 +411,11 @@
           },
           {
             "name": "secrets",
-            "expression": "['router-services-admin', 'router-services-observer', 'router-services-observer-identity', 'router-github-app', 'kars-observation-privacy-tls', 'sre-api-router-identity']"
+            "expression": "['router-services-admin', 'router-services-observer', 'router-services-observer-identity', 'router-github-app', 'kars-observation-privacy-tls', 'sre-api-router-identity'] + (request.namespace == variables.a[?'kars.azure.com/private-budget-namespace'].orValue('') ? [variables.a[?'kars.azure.com/private-budget-tls-name'].orValue('')].filter(n, n != '') : [])"
+          },
+          {
+            "name": "tokenAudiences",
+            "expression": "['kars.azure.com/governed-inference-budget']"
           },
           {
             "name": "controllers",
@@ -352,7 +423,7 @@
           },
           {
             "name": "material",
-            "expression": "variables.pods.exists(p, p.?volumes.orValue([]).exists(v, (has(v.secret) && v.secret.secretName in variables.secrets) || (has(v.projected) && v.projected.sources.exists(s, has(s.secret) && s.secret.name in variables.secrets)) || (has(v.csi) && has(v.csi.nodePublishSecretRef) && v.csi.nodePublishSecretRef.name in variables.secrets) || ['azureFile','cephfs','cinder','flexVolume','iscsi','rbd','scaleIO','storageos'].exists(k, k in v && (('secretName' in v[k] && v[k].secretName in variables.secrets) || ('secretRef' in v[k] && v[k].secretRef.name in variables.secrets)))) || p.?imagePullSecrets.orValue([]).exists(s, s.name in variables.secrets) || (p.?containers.orValue([]) + p.?initContainers.orValue([]) + p.?ephemeralContainers.orValue([])).exists(c, c.?envFrom.orValue([]).exists(e, has(e.secretRef) && e.secretRef.name in variables.secrets) || c.?env.orValue([]).exists(e, has(e.valueFrom) && has(e.valueFrom.secretKeyRef) && e.valueFrom.secretKeyRef.name in variables.secrets)))"
+            "expression": "variables.pods.exists(p, p.?volumes.orValue([]).exists(v, (has(v.secret) && v.secret.secretName in variables.secrets) || (has(v.projected) && v.projected.sources.exists(s, (has(s.secret) && s.secret.name in variables.secrets) || (has(s.serviceAccountToken) && s.serviceAccountToken.?audience.orValue('') in variables.tokenAudiences))) || (has(v.csi) && has(v.csi.nodePublishSecretRef) && v.csi.nodePublishSecretRef.name in variables.secrets) || ['azureFile','cephfs','cinder','flexVolume','iscsi','rbd','scaleIO','storageos'].exists(k, k in v && (('secretName' in v[k] && v[k].secretName in variables.secrets) || ('secretRef' in v[k] && v[k].secretRef.name in variables.secrets)))) || p.?imagePullSecrets.orValue([]).exists(s, s.name in variables.secrets) || (p.?containers.orValue([]) + p.?initContainers.orValue([]) + p.?ephemeralContainers.orValue([])).exists(c, c.?envFrom.orValue([]).exists(e, has(e.secretRef) && e.secretRef.name in variables.secrets) || c.?env.orValue([]).exists(e, has(e.valueFrom) && has(e.valueFrom.secretKeyRef) && e.valueFrom.secretKeyRef.name in variables.secrets)))"
           },
           {
             "name": "privileged",

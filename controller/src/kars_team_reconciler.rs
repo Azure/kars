@@ -216,7 +216,16 @@ async fn reconcile_valid(
         .cadence
         .as_ref()
         .and_then(|cadence| cadence.every_minutes);
-    let bounded_plan = specs::has_positive_budget(&team.spec.envelope);
+    let finite = specs::has_positive_budget(&team.spec.envelope);
+    let unsupported = specs::unsupported_budget(&team.spec.envelope);
+    let budget_error = if finite && !unsupported {
+        crate::inference_budget::team::ready(client, team, &principal_name)
+            .await
+            .err()
+    } else {
+        None
+    };
+    let bounded_plan = unsupported || budget_error.is_some();
     let cadence_blocked = bounded_plan && every.is_some() && !team.spec.paused;
     let mut generated = prior.generated_task_count;
     let mut last_generated = prior.last_generated_task.clone();
@@ -311,8 +320,16 @@ async fn reconcile_valid(
     }
     let detail = if team.spec.paused {
         "Team hibernating — members and runs governed-but-idle; charter loop paused.".into()
-    } else if bounded_plan {
+    } else if let Some(error) = &budget_error {
+        format!(
+            "Governed inference admissions paused: {error}. No new cadence or launch is admitted; existing Task UIDs and funded work are retained."
+        )
+    } else if unsupported {
         "UnsupportedLaunchBudget: Team and member plans are governed-but-idle. Finite total/subtree token or monetary budgets require durable enforcement; cadence and bounded execution are unavailable.".into()
+    } else if finite {
+        format!(
+            "Governed inference account bound to Team UID for its lifetime. Standing operation {health}; compute, tool, storage and invoice costs are excluded."
+        )
     } else {
         format!(
             "Standing operation {health}: {generated} run(s), {} delivered, {entries} knowledge entries.",
@@ -351,6 +368,7 @@ async fn reconcile_valid(
             commons_entry_count: Some(entries),
             last_success_at,
             last_digest_at,
+            inference_budget_account: prior.inference_budget_account.clone(),
             ..Default::default()
         },
     )

@@ -1,0 +1,96 @@
+[
+  {
+    "content": [{"type": "text", "text": "ordinary tool result"}],
+    "isError": false
+  },
+  {
+    "content": [
+      {"type": "text", "text": "successfully downloaded text file (SHA: example)"},
+      {
+        "type": "resource",
+        "resource": {
+          "uri": "repo://example/project/refs/heads/main/README.md",
+          "mimeType": "text/plain; charset=utf-8",
+          "text": "# Example\n\nRepository contents: café 🦀\n"
+        }
+      }
+    ],
+    "isError": false
+  },
+  {
+    "content": [
+      {
+        "type": "resource",
+        "resource": {
+          "uri": "file:///assets/logo.bin",
+          "mimeType": "application/octet-stream",
+          "blob": "AAECAwQ=",
+          "_meta": {"sha": "example", "nested": {"retained": true}}
+        },
+        "annotations": {"audience": ["user", "assistant"], "priority": 0.75, "lastModified": "2025-06-18T10:00:00Z"},
+        "_meta": {"source": "fixture"}
+      }
+    ],
+    "isError": false
+  },
+  {
+    "content": [
+      {
+        "type": "text",
+        "text": "annotated text",
+        "annotations": {"audience": [], "priority": 0},
+        "_meta": {"retained": [null, 42, "text"]},
+        "example.com/extension": {"note": "retained"}
+      },
+      {
+        "type": "image",
+        "data": "AAECAwQ=",
+        "mimeType": "image/png",
+        "annotations": {"audience": ["user"], "priority": 1},
+        "_meta": {"alt": "image description"}
+      },
+      {
+        "type": "audio",
+        "data": "UklGRg==",
+        "mimeType": "audio/wav",
+        "annotations": {"priority": 0.5},
+        "_meta": {"transcript": "audio description"}
+      },
+      {
+        "type": "resource_link",
+        "uri": "https://example.invalid/guide",
+        "name": "guide",
+        "title": "Guide",
+        "description": "Reference documentation",
+        "mimeType": "text/markdown",
+        "size": 123,
+        "icons": [
+          {"src": "https://example.invalid/icon.png", "mimeType": "image/png", "sizes": ["48x48"], "theme": "light"},
+          {"src": "data:image/svg+xml;base64,PHN2Zy8+", "sizes": ["any"], "theme": "dark"}
+        ],
+        "annotations": {"audience": ["assistant"]},
+        "_meta": {"retained": true}
+      }
+    ],
+    "isError": false
+  },
+  {
+    "content": [{"type": "text", "text": "Not found"}],
+    "isError": true,
+    "structuredContent": {"status": "missing", "details": [{"path": "README.md", "retry": false}]},
+    "_meta": {"requestId": "fixture"},
+    "example.com/extension": {"retained": true}
+  },
+  {
+    "content": [],
+    "isError": false,
+    "structuredContent": {"items": [], "count": 0}
+  },
+  {
+    "content": [
+      {"type": "resource", "resource": {"uri": "urn:example:empty", "text": "", "blob": "", "_meta": {}}},
+      {"type": "resource", "resource": {"uri": "custom:example", "blob": ""}}
+    ],
+    "isError": false
+  }
+]

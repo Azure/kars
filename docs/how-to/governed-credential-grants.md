@@ -237,6 +237,35 @@ UID. A potentially exposed GitHub App key requires an operator-rotated key;
 changing its PEM encoding does not count as rotation. Private
 `Prepared`/consumer availability remains distinct from authorization.
 
+The public integration foundation also supplies managed MCP and governed
+inference budgets. Managed MCP's non-consuming, no-automount workload remains
+outside this private material classification; its existing local registry-pull
+Secret validation is unchanged. A projected
+`kars.azure.com/governed-inference-budget` audience token is router-private and
+is included in consumption/retirement checks; the budget CA ConfigMap is public,
+not a private credential.
+
+When the reviewed root enables the budget broker, activation discovers its
+explicit `KARS_INFERENCE_BUDGET_TLS_SECRET` and accounting namespace from the
+reviewed root configuration. The additive `root.budgetTls` review contains
+namespace/Secret UID and resourceVersion plus the certificate's public-key
+digest. Only metadata and `tls.crt` are read for this review, never `tls.key`.
+The namespace fence protects that exact configured Secret name, rather than
+guessing a default name or making every TLS Secret private.
+
+For an unqualified budget TLS input, the first apply records a protected
+public-key baseline and stops before minting an activation epoch. Rotate the
+TLS key and update the public CA through the existing budget operator workflow,
+then re-preview/apply. An unchanged public key, including a copied or re-encoded
+key, cannot complete this qualification. A previously qualified, continuously
+protected key may be reused only with the same Secret UID and bundle revision.
+Before publishing writers, apply waits for the reviewed root rollout and
+retirement of its captured old Pod UIDs, including terminating Pods, so the
+broker cannot silently keep its old startup-cached TLS identity. No budget
+ledger, cancellation, settlement, pricing, or dispatch logic is changed by this
+private-capability activation check. Budget operation without this capability
+still has no additional activation/bootstrap requirement.
+
 Direct Helm RPC enablement only requests the listener. It does not stage root
 trust or authorize private writers; the listener remains unavailable until
 generic operator activation is qualified. Direct API/Helm grant publication

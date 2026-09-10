@@ -40,6 +40,12 @@ mod fedcred;
 mod fedcred_reaper;
 mod field_managers;
 mod helm_drift;
+mod inference_budget;
+#[path = "../../shared/inference_budget/mod.rs"]
+mod inference_budget_contract;
+#[cfg(test)]
+#[path = "../../shared/inference_budget/dispatch.rs"]
+mod inference_budget_dispatch;
 mod inference_policy;
 mod inference_policy_compile;
 mod inference_policy_reconciler;
@@ -90,6 +96,7 @@ mod sre_authority;
 mod sre_privacy;
 mod sre_registration;
 mod status;
+pub(crate) mod task_identity;
 mod task_models;
 mod team_commons;
 mod team_digest;
@@ -150,6 +157,7 @@ async fn main() -> Result<()> {
 
     let client = Client::try_default().await?;
     privacy_rpc::start(client.clone());
+    inference_budget::start(client.clone());
 
     // S7.E: Prometheus + health server. Default ON; opt out via
     // `CONTROLLER_METRICS_ADDR=disabled` (or empty). Failures here are

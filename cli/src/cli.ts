@@ -11,6 +11,7 @@ import { upgradeCommand } from "./commands/upgrade.js";
 import { devCommand } from "./commands/dev.js";
 import { addCommand } from "./commands/add.js";
 import { credentialsCommand } from "./commands/credentials.js";
+import { budgetCommand } from "./commands/budget.js";
 import { namespaceCommand } from "./commands/namespace.js";
 import { configCommand } from "./commands/config.js";
 import { connectCommand } from "./commands/connect.js";
@@ -73,6 +74,7 @@ export function createCli(): Command {
   // Configuration
   program.addCommand(credentialsCommand());
   program.addCommand(namespaceCommand());
+  program.addCommand(budgetCommand());
   program.addCommand(configCommand());
   program.addCommand(modelCommand());
   program.addCommand(policyCommand());
@@ -116,7 +118,7 @@ export function createCli(): Command {
 Command groups:
   Lifecycle       up, dev, add, push, destroy
   Operations      connect, status, list, logs, inspect
-  Configuration   credentials, model, policy, egress, config
+  Configuration   credentials, budget, model, policy, egress, config
   Observability   trace, eval, operator, audit, headlamp
   Agent mobility  handoff, mesh, pair
   Interop         convert, a2a, a2a-agent, migrate

@@ -222,6 +222,13 @@ spec:
                     description: Optional resource budget for the whole task subtree.
                     nullable: true
                     properties:
+                      scope:
+                        type: string
+                        enum: [GovernedInference, null]
+                        nullable: true
+                        description: |-
+                          Explicit opt-in to governed-inference tokens/configured maximum prices.
+                          An absent scope retains the foundation's planning-only interpretation.
                       tokens:
                         description: |-
                           Maximum total tokens the task subtree may consume. `0`/absent means
@@ -468,6 +475,13 @@ spec:
                           description: Optional resource budget for the whole task subtree.
                           nullable: true
                           properties:
+                            scope:
+                              type: string
+                              enum: [GovernedInference, null]
+                              nullable: true
+                              description: |-
+                                Explicit opt-in to governed-inference tokens/configured maximum prices.
+                                An absent scope retains the foundation's planning-only interpretation.
                             tokens:
                               description: |-
                                 Maximum total tokens the task subtree may consume. `0`/absent means
@@ -572,10 +586,27 @@ spec:
             - message: spec.cadence.everyMinutes, when set, must be >= 1
               reason: FieldValueInvalid
               rule: '!has(self.cadence) || !has(self.cadence.everyMinutes) || self.cadence.everyMinutes >= 1'
+            - message: First finite GovernedInference opt-in requires a new Task/Team UID; an existing unbounded runtime cannot be silently converted
+              reason: FieldValueForbidden
+              rule: >-
+                !has(self.envelope.budget) || !has(self.envelope.budget.scope) || self.envelope.budget.scope != 'GovernedInference' || ((!has(self.envelope.budget.tokens) || self.envelope.budget.tokens == 0) && (!has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros == 0)) || (has(oldSelf.envelope.budget) && has(oldSelf.envelope.budget.scope) && oldSelf.envelope.budget.scope == 'GovernedInference' && ((has(oldSelf.envelope.budget.tokens) && oldSelf.envelope.budget.tokens > 0) || (has(oldSelf.envelope.budget.usdMicros) && oldSelf.envelope.budget.usdMicros > 0)))
+            - message: GovernedInference scope cannot be removed or changed for an existing UID
+              reason: FieldValueForbidden
+              rule: >-
+                !has(oldSelf.envelope.budget) || !has(oldSelf.envelope.budget.scope) || oldSelf.envelope.budget.scope != 'GovernedInference' || (has(self.envelope.budget) && has(self.envelope.budget.scope) && self.envelope.budget.scope == 'GovernedInference')
           status:
             description: '`KarsTeam.status` — the controller is the sole writer.'
             nullable: true
             properties:
+              inferenceBudgetAccount:
+                type: object
+                nullable: true
+                description: Lifetime Team-UID inference account; cadence runs never reset its balance.
+                required: [name, namespace, uid]
+                properties:
+                  namespace: {type: string}
+                  name: {type: string}
+                  uid: {type: string}
               commonsEntryCount:
                 description: Number of entries in the team's knowledge commons (shared memory size).
                 format: int64

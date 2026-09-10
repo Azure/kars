@@ -70,13 +70,13 @@ def pod_spec(value):
             if value["kind"] == "CronJob" else value["spec"]["template"]["spec"])
 
 
-def variants(value):
+def variants(value, additional=()):
     values = []
-    for name in PRIVATE:
+    for name in (*PRIVATE, *additional):
         current = copy.deepcopy(value)
         pod_spec(current)["volumes"] = [{"name": "private", "secret": {"secretName": name, "optional": True}}]
         values.append(current)
-    for form in ("projected", "env", "envFrom", "init", "csi", "imagePull"):
+    for form in ("projected", "env", "envFrom", "init", "csi", "imagePull", "budgetToken"):
         current = copy.deepcopy(value)
         pod = pod_spec(current)
         name = "router-services-observer-identity"
@@ -94,8 +94,12 @@ def variants(value):
         elif form == "csi":
             pod["volumes"] = [{"name": "private", "csi": {"driver": "private-consumption.test",
                                                         "nodePublishSecretRef": {"name": name}}}]
-        else:
+        elif form == "imagePull":
             pod["imagePullSecrets"] = [{"name": name}]
+        else:
+            pod["volumes"] = [{"name": "budget-token", "projected": {"sources": [
+                {"serviceAccountToken": {"audience": "kars.azure.com/governed-inference-budget", "path": "token"}},
+            ]}}]
         values.append(current)
     return values
 
@@ -110,6 +114,7 @@ def denied(response):
 def named_cases(h, namespace):
     current = h.api("GET", f"/api/v1/namespaces/{namespace}", status=200).json()
     annotations = current["metadata"].get("annotations", {})
+    additional = (annotations[PREFIX + "budget-tls-name"],) if annotations.get(PREFIX + "budget-namespace") == namespace else ()
     require(annotations.get(PREFIX + "enabled") == "true"
             and annotations.get(PREFIX + "state") == "Qualified",
             "The existing operator activation flow must qualify this namespace first")
@@ -146,7 +151,7 @@ def named_cases(h, namespace):
             collection = path(namespace, plural, group)
             require(h.api("POST", collection + "?dryRun=All", body=base, user=actor).status_code == 201,
                     "Ordinary non-consuming workload CREATE was not preserved")
-            for invalid in variants(base):
+            for invalid in variants(base, additional):
                 denied(h.api("POST", collection + "?dryRun=All", body=invalid, user=actor))
             nodes = h.api("GET", "/api/v1/nodes?labelSelector=private-consumption.test%2Fnever-schedule%3D" + name,
                           status=200).json()
@@ -173,7 +178,7 @@ def named_cases(h, namespace):
             ordinary["metadata"].setdefault("annotations", {})["private-consumption.test/ordinary"] = "reviewed"
             require(h.api("PUT", object_path + "?dryRun=All", body=ordinary, user=actor).status_code == 200,
                     "Ordinary named UPDATE was not preserved")
-            updates = variants(live)
+            updates = variants(live, additional)
             if kind == "Job":
                 # Job pod templates are immutable. Exercise its mutable
                 # metadata with old protected consumption instead of counting
@@ -232,7 +237,8 @@ def pod_and_controller_cases(h, namespace, actor, identity, annotations, created
     collection = path(namespace, "pods")
     require(h.api("POST", collection + "?dryRun=All", body=pod, user=actor).status_code == 201,
             "Ordinary Pod dry-run CREATE was not preserved")
-    for invalid in variants(base):
+    additional = (annotations[PREFIX + "budget-tls-name"],) if annotations.get(PREFIX + "budget-namespace") == namespace else ()
+    for invalid in variants(base, additional):
         private_pod = copy.deepcopy(pod)
         private_pod["spec"] = pod_spec(invalid)
         private_pod["metadata"]["annotations"] = {PREFIX + "epoch": annotations[PREFIX + "epoch"]}

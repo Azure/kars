@@ -62,6 +62,7 @@ async fn ollama_provider_forwards_openai_compat_without_auth() {
 
     let upstream = UpstreamConfig {
         telemetry: None,
+        inference_budget: None,
         endpoint: server.uri(),
         deployment: "llama3.1".into(),
         sandbox_name: "test-sandbox".into(),
@@ -120,6 +121,7 @@ async fn anthropic_provider_forwards_messages_with_router_held_key() {
 
     let upstream = UpstreamConfig {
         telemetry: None,
+        inference_budget: None,
         endpoint: server.uri(),
         deployment: "claude-sonnet-4-5".into(),
         sandbox_name: "test-sandbox".into(),

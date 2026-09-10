@@ -70,6 +70,7 @@ pub(super) fn team() -> KarsTeam {
                 budget: Some(TaskBudget {
                     tokens: Some(1_000),
                     usd_micros: Some(2_000),
+                    ..Default::default()
                 }),
                 ..Default::default()
             },
@@ -407,6 +408,7 @@ fn only_finite_positive_budgets_block_execution_not_planning() {
     team.spec.envelope.budget = Some(TaskBudget {
         tokens: Some(0),
         usd_micros: None,
+        ..Default::default()
     });
     assert!(!specs::has_positive_budget(&team.spec.envelope));
     team.spec.envelope.budget.as_mut().unwrap().usd_micros = Some(1);

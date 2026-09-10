@@ -185,6 +185,9 @@ pub struct TeamCadence {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KarsTeamStatus {
+    /// Lifetime Team-UID inference account; cadence runs never reset its balance.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_budget_account: Option<crate::inference_budget_contract::AccountReference>,
     /// Lifecycle phase: `Forming` (validating + materializing), `Active`
     /// (running, cadence ticking), `Hibernating` (paused/idle), `Degraded`
     /// (envelope invalid — no authority to operate), `Retired`.
@@ -370,6 +373,7 @@ mod tests {
             budget: Some(TaskBudget {
                 tokens: Some(1_000_000),
                 usd_micros: None,
+                ..Default::default()
             }),
             tool_policy_ref: None,
             egress_allowlist_ref: None,
@@ -413,6 +417,7 @@ mod tests {
                 budget: Some(TaskBudget {
                     tokens: Some(100_000),
                     usd_micros: None,
+                    ..Default::default()
                 }),
                 tool_policy_ref: None,
                 egress_allowlist_ref: None,
