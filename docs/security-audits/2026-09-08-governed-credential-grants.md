@@ -107,6 +107,31 @@ This is source-level consistency evidence, not native observation issuance,
 TLS/authentication or CNI-traffic qualification. Fresh downstream acceptance
 and genuine human approvals remain required.
 
+### Existing workspace contract and observer lineage permission
+
+The publication scope is the existing product: `/sandbox` remains an
+`emptyDir`, not a newly introduced persistent workspace. The corrected native
+acceptance explicitly verifies that volume mode and preserves the existing
+Task/Sandbox/namespace identity, namespace-owned data, receipt, credential and
+old-consumer retirement assertions. The historical filesystem-persistence
+failure is not relabeled; the corrected contract passed in a fresh run.
+
+The next native run also completed the normal UID-fenced unlaunch of the
+finished Team fixture, releasing its CPU reservation without relaxing
+scheduling or policy. The independent observer then scheduled, exposing the
+actual controller failure: GET requests for its ReplicaSet lineage returned
+403. Existing `observer_runtime.rs` already requires that read to verify the
+ReplicaSet UID and Deployment owner.
+
+The credential controller ClusterRole now adds only `get` on
+`apps/replicasets`. Its binding remains solely the core `kars-controller`
+ServiceAccount; no agent/operator/BFF binding or list/watch/write verb is
+added. The lineage and privacy checks are unchanged. Helm lint passes and a
+focused rendered-role contract is added. The locked local Vitest runner is
+unavailable, so the existing hosted CLI job must supply that result; a nearby
+cache with a different locked version was not silently substituted.
+Fresh observer issuance/TLS/CNI acceptance remains required.
+
 ### Native admission and generated-schema repair
 
 The composed SRE bootstrap separately demonstrated that the built-in Deployment
