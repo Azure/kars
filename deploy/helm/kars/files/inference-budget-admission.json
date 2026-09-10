@@ -112,7 +112,7 @@
           }]
         },
         "validations": [{
-          "expression": "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller' || (request.resource.resource != 'deployments' && request.subResource != 'ephemeralcontainers' && request.userInfo.username in ['system:kube-controller-manager', 'system:serviceaccount:kube-system:deployment-controller', 'system:serviceaccount:kube-system:replicaset-controller'])",
+          "expression": "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller' || (request.resource.resource != 'deployments' && request.?subResource.orValue('') != 'ephemeralcontainers' && request.userInfo.username in ['system:kube-controller-manager', 'system:serviceaccount:kube-system:deployment-controller', 'system:serviceaccount:kube-system:replicaset-controller'])",
           "message": "Budget runtime workloads may be produced only by the core controller and Kubernetes Deployment/ReplicaSet controllers"
         }]
       }
