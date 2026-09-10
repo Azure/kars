@@ -37,6 +37,11 @@ use std::sync::LazyLock;
 /// Adding/removing entries from this list is itself a config-hash
 /// change and should be called out in the audit trail.
 pub const CONFIG_HASH_INPUTS: &[&str] = &[
+    "KARS_INFERENCE_BUDGET_ENABLED",
+    "KARS_INFERENCE_BUDGET_CATALOG",
+    "KARS_INFERENCE_BUDGET_TLS_SECRET",
+    "KARS_INFERENCE_BUDGET_ROUTER_DIGEST",
+    "KARS_INFERENCE_BUDGET_ADDR",
     "KARS_DISABLE_ENTRA_AUTH",
     // Multi-provider endpoints (never secrets — matches the
     // AZURE_OPENAI_API_KEY precedent).

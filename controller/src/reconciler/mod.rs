@@ -66,6 +66,8 @@ fn sandbox_node_selector(default_pool: &str) -> Result<serde_json::Value, Reconc
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
     #[error(transparent)]
+    InferenceBudget(#[from] crate::inference_budget::store::StoreError),
+    #[error(transparent)]
     Credentials(#[from] credential_sources::Error),
     #[error(transparent)]
     NamespaceOwnership(#[from] namespace_ownership::Error),
@@ -951,6 +953,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     egress_rules
         .extend(inference::configured_local_egress_rules().map_err(ReconcileError::Configuration)?);
+    egress_rules.extend(crate::inference_budget::pod::egress(&sandbox)?);
 
     // Policy enforcement may observe the API's post-DNAT endpoint IP/port.
     // Only registered routers receive exact targets; UID 1000 stays locked down.
@@ -2605,42 +2608,33 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
 
         // Mount blocklist seed ConfigMap into the router container
-        if let Some(volumes) = pod_spec.get_mut("volumes").and_then(|v| v.as_array_mut()) {
-            volumes.push(json!({
-                "name": "blocklist-seed",
-                "configMap": {
-                    "name": &blocklist_cm_name,
-                    "optional": true
-                }
-            }));
-        }
-        if let Some(containers) = pod_spec
-            .get_mut("containers")
-            .and_then(|c| c.as_array_mut())
-        {
-            for container in containers.iter_mut() {
-                if container.get("name").and_then(|n| n.as_str()) == Some("inference-router") {
-                    let mounts = container
-                        .as_object_mut()
-                        .unwrap()
-                        .entry("volumeMounts")
-                        .or_insert(json!([]));
-                    if let Some(mounts_arr) = mounts.as_array_mut() {
-                        mounts_arr.push(json!({
-                            "name": "blocklist-seed",
-                            "mountPath": "/etc/kars/blocklist",
-                            "readOnly": true
-                        }));
-                    }
-                }
-            }
-        }
+        governance_mounts::inject_configmap_mount(
+            &mut pod_spec,
+            "inference-router",
+            &blocklist_cm_name,
+            "blocklist-seed",
+            "/etc/kars/blocklist",
+            None,
+        );
 
         let provider_version =
             inference::mirror_providers(client, &sandbox_self_ns, &sandbox_ns, &name).await?;
         if sre_projection.is_some() {
             crate::sre_authority::pod::project(&mut pod_spec);
         }
+        let mut pod_annotations = crate::inference_budget::pod::decorate(
+            client,
+            &sandbox,
+            owned_namespace.as_ref().ok_or_else(|| {
+                ReconcileError::Configuration("Runtime namespace identity missing".into())
+            })?,
+            &mut pod_spec,
+        )
+        .await?;
+        pod_annotations.insert(
+            "kars.azure.com/inference-providers-version".into(),
+            provider_version.unwrap_or_default(),
+        );
         let mut deployment: Deployment = serde_json::from_value(json!({
             "apiVersion": "apps/v1",
             "kind": "Deployment",
@@ -2661,7 +2655,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 },
                 "template": {
                     "metadata": {
-                        "annotations": {"kars.azure.com/inference-providers-version": provider_version.unwrap_or_default()},
+                        "annotations": pod_annotations,
                         "labels": {
                             "kars.azure.com/sandbox": name,
                             "kars.azure.com/component": "sandbox",
@@ -3167,6 +3161,7 @@ fn error_requeue_duration(error: &ReconcileError) -> Duration {
         // Transient kube API errors (throttling, connection reset, 5xx):
         // retry soon so we don't starve legitimate work.
         ReconcileError::Kube(_)
+        | ReconcileError::InferenceBudget(_)
         | ReconcileError::NamespaceOwnership(_)
         | ReconcileError::Credentials(_) => 30,
         // Serde errors are deterministic — the same body will fail again.
@@ -3185,6 +3180,7 @@ fn error_policy(sandbox: Arc<KarsSandbox>, error: &ReconcileError, _ctx: Arc<Con
         ReconcileError::Configuration(_) => "configuration",
         ReconcileError::NamespaceOwnership(_) => "namespace_ownership",
         ReconcileError::Credentials(_) => "credentials",
+        ReconcileError::InferenceBudget(_) => "inference_budget",
     };
     crate::metrics::record_reconcile_error("KarsSandbox", class);
     tracing::error!(

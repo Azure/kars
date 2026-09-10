@@ -37,6 +37,18 @@ spec:
           env:
             - name: RUST_LOG
               value: "info,kars_controller=debug"
+            {{- if ((.Values.inferenceBudget | default dict).enabled | default false) }}
+            - name: KARS_INFERENCE_BUDGET_ENABLED
+              value: "true"
+            - name: KARS_INFERENCE_BUDGET_CATALOG
+              value: "kars-inference-budget-contracts"
+            - name: KARS_INFERENCE_BUDGET_TLS_SECRET
+              value: {{ required "inferenceBudget.tlsSecretName is required" .Values.inferenceBudget.tlsSecretName | quote }}
+            - name: KARS_INFERENCE_BUDGET_ROUTER_DIGEST
+              value: {{ required "inferenceBudget.routerImageDigest is required" .Values.inferenceBudget.routerImageDigest | quote }}
+            - name: KARS_INFERENCE_BUDGET_ADDR
+              value: "0.0.0.0:9447"
+            {{- end }}
             # Downward API — used by leader-election + S12.d
             # SignerPolicy watcher to scope to the controller's own
             # namespace without cluster-wide watch RBAC.

@@ -491,6 +491,37 @@ jobs:
             --config "$GITHUB_WORKSPACE/cli/vitest.config.ts" \
             --root deploy/helm/kars/tests
 
+  inference-budget-api:
+    name: Governed inference API and CEL (Kind v1.31)
+    needs: changes
+    if: needs.changes.outputs.code == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: azure/setup-kubectl@829323503d1be3d00ca8346e5391ca0b07a9ab0d # v4
+        with:
+          version: v1.30.5
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          install_only: true
+          version: v0.24.0
+      - name: Restore existing YAML and test dependencies
+        run: npm ci --prefix cli
+      - name: Create disposable supported apiserver before any Rust image build
+        run: kind create cluster --name kars-budget-api --image kindest/node:v1.31.0 --config tests/e2e/kind-config.yaml
+      - name: Validate real CRD/CEL and Pod audience identity
+        run: node tests/e2e/inference-budget-api.mjs
+      - name: Remove only the disposable API fixture cluster
+        if: always()
+        run: kind delete cluster --name kars-budget-api
+
   security-scan:
     name: Security Scan
     runs-on: ubuntu-latest
@@ -636,7 +667,7 @@ jobs:
           # Fetch enough history to diff.
           git fetch --no-tags --depth=50 origin "$base" "$head" 2>/dev/null || true
           if git diff --name-only "$base" "$head" 2>/dev/null \
-             | grep -E '^(controller/|inference-router/|a2a-gateway/|kars-a2a-core/|deploy/helm/|sandbox-images/|tests/e2e/|shared/|runtimes/hermes/src/kars_runtime_hermes/plugin/sre|cli/src/(commands/sre|lib/sre|lib/namespace-ownership)|Cargo\.toml|Cargo\.lock|Makefile)' >/dev/null; then
+             | grep -E '^(controller/|inference-router/|a2a-gateway/|kars-a2a-core/|deploy/helm/|sandbox-images/|tests/e2e/|shared/|runtimes/hermes/src/kars_runtime_hermes/plugin/sre|cli/src/(commands/(sre|budget)|lib/sre|lib/namespace-ownership)|Cargo\.toml|Cargo\.lock|Makefile)' >/dev/null; then
             echo "run=true" >> "$GITHUB_OUTPUT"
           else
             echo "run=false" >> "$GITHUB_OUTPUT"

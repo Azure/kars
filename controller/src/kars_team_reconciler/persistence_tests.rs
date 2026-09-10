@@ -10,6 +10,9 @@ use serde_json::Value;
 use std::{collections::BTreeMap, sync::Mutex};
 use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
+#[path = "budget_interleaving_tests.rs"]
+mod budget_interleavings;
+
 const TASKS_PATH: &str = "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karstasks";
 const CMS_PATH: &str = "/api/v1/namespaces/tenant-a/configmaps";
 const TEAM_STATUS_PATH: &str =
@@ -139,7 +142,7 @@ impl Respond for KubeServer {
                 return failure(409);
             }
             store.version += 1;
-            body["metadata"]["uid"] = json!(format!("uid-{name}"));
+            body["metadata"]["uid"] = json!(format!("uid-{name}-{}", store.version));
             body["metadata"]["resourceVersion"] = json!(store.version.to_string());
             body["metadata"]["generation"] = json!(1);
             body["metadata"]["creationTimestamp"] = json!(Utc::now().to_rfc3339());

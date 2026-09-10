@@ -1,0 +1,156 @@
+{
+  "items": [
+    {
+      "name": "kars-inference-budget-public-ca",
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "resourceRules": [{
+            "apiGroups": [""], "apiVersions": ["v1"],
+            "operations": ["CREATE", "UPDATE"], "resources": ["configmaps"]
+          }]
+        },
+        "validations": [{
+          "expression": "request.name != 'kars-inference-budget-ca' || request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller'",
+          "message": "The router's budget CA projection is controller-owned; replacing it could forge broker grants"
+        }]
+      }
+    },
+    {
+      "name": "kars-inference-budget-store",
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "resourceRules": [{
+            "apiGroups": ["kars.azure.com"], "apiVersions": ["v1alpha1"],
+            "operations": ["CREATE", "UPDATE", "DELETE"],
+            "resources": ["karsbudgetaccounts", "karsbudgetaccounts/status"]
+          }]
+        },
+        "validations": [{
+          "expression": "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller' || (request.operation == 'DELETE' && request.userInfo.username in ['system:kube-controller-manager', 'system:serviceaccount:kube-system:namespace-controller'])",
+          "message": "Governed inference ledgers are controller-owned and cannot be reset, deleted or rewritten by routers or agents"
+        }]
+      }
+    },
+    {
+      "name": "kars-inference-budget-status",
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "resourceRules": [{
+            "apiGroups": ["kars.azure.com"], "apiVersions": ["v1alpha1"],
+            "operations": ["UPDATE"], "resources": ["karstasks/status", "karsteams/status"]
+          }]
+        },
+        "validations": [{
+          "expression": "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller'",
+          "message": "Only the controller may publish UID-bound budget and task authority"
+        }]
+      }
+    },
+    {
+      "name": "kars-inference-budget-runtime-binding",
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "resourceRules": [{
+            "apiGroups": ["kars.azure.com"], "apiVersions": ["v1alpha1"],
+            "operations": ["CREATE", "UPDATE"], "resources": ["karssandboxes"]
+          }]
+        },
+        "validations": [{
+          "expression": "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller' || (!has(object.spec.inferenceBudgetRef) && (oldObject == null || !has(oldObject.spec.inferenceBudgetRef)))",
+          "message": "Finite runtime authority and pod configuration are controller-only; edit the owning Task instead"
+        }]
+      }
+    },
+    {
+      "name": "kars-inference-budget-namespace",
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "resourceRules": [{
+            "apiGroups": [""], "apiVersions": ["v1"],
+            "operations": ["CREATE", "UPDATE"], "resources": ["namespaces"]
+          }]
+        },
+        "variables": [{
+          "name": "oldBound",
+          "expression": "oldObject != null && has(oldObject.metadata.labels) && 'kars.azure.com/inference-budget' in oldObject.metadata.labels"
+        }, {
+          "name": "newBound",
+          "expression": "has(object.metadata.labels) && 'kars.azure.com/inference-budget' in object.metadata.labels"
+        }],
+        "validations": [{
+          "expression": "!variables.oldBound || (variables.newBound && object.metadata.labels['kars.azure.com/inference-budget'] == oldObject.metadata.labels['kars.azure.com/inference-budget'])",
+          "message": "An enforced runtime namespace cannot lose its private-budget admission fence"
+        }, {
+          "expression": "!variables.newBound || variables.oldBound || request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller'",
+          "message": "Only the core controller can activate the budget namespace fence"
+        }]
+      }
+    },
+    {
+      "name": "kars-inference-budget-workloads",
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "namespaceSelector": {"matchLabels": {"kars.azure.com/inference-budget": "v1"}},
+          "resourceRules": [{
+            "apiGroups": [""], "apiVersions": ["v1"],
+            "operations": ["CREATE", "UPDATE"], "resources": ["pods", "pods/ephemeralcontainers"]
+          }, {
+            "apiGroups": ["apps"], "apiVersions": ["v1"],
+            "operations": ["CREATE", "UPDATE"], "resources": ["deployments", "replicasets"]
+          }]
+        },
+        "validations": [{
+          "expression": "request.userInfo.username == 'system:serviceaccount:__ACCOUNTING_NAMESPACE__:kars-controller' || (request.resource.resource != 'deployments' && request.?subResource.orValue('') != 'ephemeralcontainers' && request.userInfo.username in ['system:kube-controller-manager', 'system:serviceaccount:kube-system:deployment-controller', 'system:serviceaccount:kube-system:replicaset-controller'])",
+          "message": "Budget runtime workloads may be produced only by the core controller and Kubernetes Deployment/ReplicaSet controllers"
+        }]
+      }
+    },
+    {
+      "name": "kars-inference-budget-token",
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "resourceRules": [{
+            "apiGroups": [""], "apiVersions": ["v1"],
+            "operations": ["CREATE"], "resources": ["serviceaccounts/token"]
+          }]
+        },
+        "validations": [{
+          "expression": "!object.spec.audiences.exists(a, a == 'kars.azure.com/governed-inference-budget') || ('system:nodes' in request.userInfo.groups && has(object.spec.boundObjectRef) && object.spec.boundObjectRef.kind == 'Pod' && has(object.spec.boundObjectRef.uid))",
+          "message": "Only kubelet node identities may obtain a Pod-bound governed-inference audience token"
+        }]
+      }
+    },
+    {
+      "name": "kars-inference-budget-private-connect",
+      "spec": {
+        "failurePolicy": "Fail",
+        "matchConstraints": {
+          "matchPolicy": "Equivalent",
+          "namespaceSelector": {"matchLabels": {"kars.azure.com/inference-budget": "v1"}},
+          "resourceRules": [{
+            "apiGroups": [""], "apiVersions": ["v1"],
+            "operations": ["CONNECT"], "resources": ["pods/exec", "pods/attach"]
+          }]
+        },
+        "validations": [{
+          "expression": "false",
+          "message": "Exec/attach would expose the private budget audience token; use authenticated router APIs or port-forward"
+        }]
+      }
+    }
+  ]
+}

@@ -130,6 +130,7 @@ mod tests {
                     budget: Some(TaskBudget {
                         tokens: Some(1000),
                         usd_micros: Some(2000),
+                        ..Default::default()
                     }),
                     tool_policy_ref: Some(LocalObjectRef {
                         name: "bounded-tools".into(),

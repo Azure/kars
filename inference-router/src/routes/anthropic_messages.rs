@@ -562,6 +562,9 @@ pub(super) async fn anthropic_messages(
         }
         Err(e) => {
             tracing::warn!(sandbox = %sandbox_name, error = %e, "Anthropic upstream call failed");
+            if let Some(response) = crate::inference_budget::response::denial(&e) {
+                return response;
+            }
             deny_response(
                 StatusCode::BAD_GATEWAY,
                 &format!("Upstream error: {e}"),
@@ -842,6 +845,9 @@ async fn forward_anthropic_passthrough(
             }
             Err(e) => {
                 tracing::warn!(sandbox = %sandbox_name, error = %e, "Copilot Anthropic stream failed");
+                if let Some(response) = crate::inference_budget::response::denial(&e) {
+                    return response;
+                }
                 deny_response(
                     StatusCode::BAD_GATEWAY,
                     &format!("Upstream error: {e}"),
@@ -956,6 +962,9 @@ async fn forward_anthropic_passthrough(
             }
             Err(e) => {
                 tracing::warn!(sandbox = %sandbox_name, error = %e, "Copilot Anthropic call failed");
+                if let Some(response) = crate::inference_budget::response::denial(&e) {
+                    return response;
+                }
                 deny_response(
                     StatusCode::BAD_GATEWAY,
                     &format!("Upstream error: {e}"),

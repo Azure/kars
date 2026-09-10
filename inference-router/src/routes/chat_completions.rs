@@ -115,6 +115,12 @@ pub(super) fn build_guardrail_pipeline(
     if policy.guardrails.is_empty() {
         return Ok(None);
     }
+    if state.inference_budget.is_some() {
+        return Err(GuardrailError::Config {
+            provider: "governed-inference".into(),
+            reason: "Mandatory standalone moderation has no bounded inference contract in v1; the request is blocked, not sent unmetered or without its guardrail".into(),
+        });
+    }
     GuardrailPipeline::from_stages(&policy.guardrails, &state.config, &state.client)
         .map(|p| Some(Arc::new(p)))
 }
@@ -966,6 +972,9 @@ pub(super) async fn chat_completions(
             }
             Err(e) => {
                 tracing::error!(sandbox = %sandbox_name, "Stream proxy error: {e:#}");
+                if let Some(response) = crate::inference_budget::response::denial(&e) {
+                    return response;
+                }
                 errors::openai(
                     StatusCode::BAD_GATEWAY,
                     "Failed to reach inference backend",
@@ -1046,6 +1055,9 @@ pub(super) async fn chat_completions(
                     }
                     Err(e) => {
                         tracing::error!(sandbox = %sandbox_name, "Responses fallback proxy error: {e:#}");
+                        if let Some(response) = crate::inference_budget::response::denial(&e) {
+                            return response;
+                        }
                         errors::openai(
                             StatusCode::BAD_GATEWAY,
                             "Failed to reach inference backend",
@@ -1330,6 +1342,9 @@ pub(super) async fn chat_completions(
             }
             Err(e) => {
                 tracing::error!(sandbox = %sandbox_name, "Proxy error: {e:#}");
+                if let Some(response) = crate::inference_budget::response::denial(&e) {
+                    return response;
+                }
                 (
                     StatusCode::BAD_GATEWAY,
                     Json(serde_json::json!({
