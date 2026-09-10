@@ -199,6 +199,7 @@ fn respond(request: &Request, shared: &Arc<Mutex<Store>>) -> ResponseTemplate {
 }
 
 async fn fixture(maps: Vec<ConfigMap>) -> (MockServer, Client, Arc<Mutex<Store>>) {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let server = MockServer::start().await;
     let state = Arc::new(Mutex::new(Store {
         maps: maps.into_iter().map(|map| (map.name_any(), map)).collect(),
