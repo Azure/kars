@@ -10,6 +10,45 @@ mod server;
 use server::*;
 
 #[test]
+fn credential_refresh_bounds_v1_v2_and_github_without_speeding_up_legacy_sandboxes() {
+    let original = sandbox();
+    let bindings = serde_json::from_value::<crate::credential_grant::CredentialBindings>(json!({
+        "grant":{"name":"workspace","uid":"grant"},"sources":[]
+    }))
+    .unwrap();
+    let github = serde_json::from_value::<crate::credential_grant::GitHubBinding>(json!({
+        "grant":{"name":"workspace","uid":"grant"},
+        "connection":{"name":"repository","uid":"connection"},
+        "repositories":["owner/repository"]
+    }))
+    .unwrap();
+    assert!(original.spec.credentials_ref.is_some());
+    for v1 in [false, true] {
+        for v2 in [false, true] {
+            for github_selected in [false, true] {
+                let mut sandbox = original.clone();
+                sandbox.spec.credentials_ref = if v1 {
+                    original.spec.credentials_ref.clone()
+                } else {
+                    None
+                };
+                sandbox.spec.credential_bindings = v2.then(|| bindings.clone());
+                sandbox.spec.github_binding = github_selected.then(|| github.clone());
+                assert_eq!(
+                    refresh_interval(&sandbox),
+                    std::time::Duration::from_secs(if v1 || v2 || github_selected {
+                        30
+                    } else {
+                        300
+                    }),
+                    "v1={v1}, v2={v2}, github={github_selected}",
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn provider_control_plane_and_process_environment_keys_are_not_credential_sources() {
     for key in [
         "OPENAI_API_KEY",
