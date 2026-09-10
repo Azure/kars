@@ -416,7 +416,7 @@ jobs:
           version: v1.30.5
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Check public-schema diagnostic privacy
-        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test credential_schema_test credential_policy_schema_test
+        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test credential_schema_test credential_policy_schema_test eval_pod_admission_test
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
       - name: Prove native historical Helm wait orders CRDs before hooks and permits schema upgrades
