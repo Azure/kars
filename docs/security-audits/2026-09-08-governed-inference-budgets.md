@@ -1,7 +1,8 @@
 # Security Audit — Governed inference budgets (v1)
 
 Date: **2026-09-08 UTC**
-Status: **Implementation/integration candidate — publication not approved**
+Status: **Source audit approved under explicit maintainer delegation**;
+exact-head combined native qualification remains mandatory before publication.
 
 Scope: `shared/inference_budget/`, `controller/src/inference_budget/`,
 `controller/src/task_identity.rs`, `inference-router/src/inference_budget/`,
@@ -9,6 +10,67 @@ controller Task/Team/runtime wiring, router dispatch/route wiring, CLI and Helm.
 
 Gated paths: controller CRDs, router providers/routes, CLI commands,
 `deploy/helm/kars/files/`, `shared/inference_budget/`.
+
+## Current delegated approval (2026-09-10)
+
+The maintainer explicitly authorized publication sign-offs after additional
+focused review rounds, recorded in
+[comment 5615522306](https://github.com/Azure/kars/pull/551#issuecomment-5615522306).
+The AI attestation below is delegated review, not a claim that a second human
+personally reviewed or signed this capability. Earlier, separately limited
+signature waivers are not extended, and no technical check is waived.
+
+A fresh focused review of `c4291b0f3808747d7fe221af99f47b37e17d16a9`
+identified a recovery race: after capturing authority A, recovery could observe
+that A was no longer live, then close replacement authority B and its new Pod
+session inside a transaction against the latest ledger. The repair at
+`e89040dfa76ae3e3b015f2ec7bc39b7c3b24ffc3` compares the captured authority
+inside every store CAS attempt. Changed authority is deferred for a fresh
+live check; genuinely invalid unchanged authority is still revoked.
+
+Deterministic regressions cover replacement before the transaction, replacement
+during a 409 CAS retry, and unchanged-A revocation. They check the replacement
+Pod session and InFlight work, plus conservative maximum liabilities for old
+accepted work. Independent re-review of the exact repair against `5ae7b99a`
+reported no significant issues. This is bounded source-review closure, not
+an independent native execution or financial certification.
+
+Actual guarded qualification at `e89040df` passed:
+
+- Controller binary: 82 budget cases, including the five selected recovery
+  cases and all three new interleaving/revocation regressions. These selectors
+  overlap and are not added together.
+- Router library: 40 inference-budget cases.
+- Strict paired controller/router all-target Clippy and workspace formatting.
+
+The existing offline/locked shared target was used, with two jobs, incremental
+compilation disabled and an 8.5 GiB stop floor; minimum observed free space was
+9.38 GiB. No dependency installation or target cleanup was needed.
+
+The current source `66c4ce3a674317d9329ba1d7dda7b8763d0834ae` additionally
+merges services `920f9f0e` and its actual landed SRE ancestry. Every tracked
+byte outside three CLI test-harness files is identical to qualified `e89040df`.
+The forwarded 39 CLI cases and typecheck passed using the existing compatible
+cache (Vitest 4.1.10 versus lockfile 4.1.8). The services head's actual hosted
+CLI also passed; that result does not qualify this budget composition.
+
+The same candidate retains the reviewed native fixture repairs: verified
+same-image digest aliases, consistent named-provider routing, a proper
+CA:false/serverAuth/SAN server leaf and negative TLS checks, and bounded
+UID/generation/image/budget-binding checks when reconnecting a port-forward
+after legitimate Pod replacement. A genuine 503 or identity/authorization
+failure cannot become success. Spending/cancellation assertions and the
+native readiness deadline remain unchanged.
+
+**Exact-head hosted Rust/CLI/security and complete native budget/SRE lifecycle
+qualification remain required.** Earlier image, TLS-profile and stale
+port-forward failures remain failed historical results, not proof of current
+spending or cancellation enforcement. Shared credential/MCP composition is a
+separate gate. No main promotion, customer/H100 deployment, public image or
+private Bridge publication is authorized by this source sign-off.
+
+Signed-off-by: pallakatos (maintainer delegation recorded above) <lakatos.toth.pal@gmail.com>
+Signed-off-by: GitHub Copilot (delegated AI audit, not an independent human) <223556219+Copilot@users.noreply.github.com>
 
 ## Summary
 
@@ -49,7 +111,7 @@ all-in task spend, invoice accuracy, taxes, or exchange rates.
 
 ## Verification
 
-### Native primary-workload repair (2026-09-10)
+### Historical native primary-workload repair (2026-09-10)
 
 Standalone qualification found a real ReplicaSet admission failure:
 `AdmissionRequest.subResource` is absent on primary operations. The shared
@@ -121,7 +183,11 @@ The existing `security-audit-required` script now discovers this correctly place
 record and fails specifically for **0 of 2 required genuine signer emails**.
 That failure is intentional until human review, not a waived or fabricated pass.
 
-## Remaining release decisions/gates
+## Original release checklist (historical)
+
+The following records the initial requirements, not the current approval or
+Rust execution status. The current delegated approval and still-open native
+gates are stated above.
 
 1. Qualify against the real, now-forwarded privacy issuer prerequisite; no
    fallback implementation. Parent re-review and full SRE Kind remain separate
@@ -136,7 +202,7 @@ That failure is intentional until human review, not a waived or fabricated pass.
    accessibility, and conservative uncertainty/capacity behavior.
 5. Obtain genuine required human audit signoffs before protected publication.
 
-## Bounded reviewer repair candidate
+## Earlier bounded reviewer repair candidate (historical)
 
 The source-only independent review identified five blockers. This repair:
 
@@ -157,7 +223,7 @@ and settlement path. **These Rust tests have not run**: the shared Cargo lease
 remains with the credential integration owner until the parent directly grants it.
 Formatting/source checks do not establish compilation or technical closure.
 
-## Signoffs
+## Original unsigned authoring state (historical)
 
 - Implementation author: changes under active development; not a signoff.
 - Independent technical reviewer: **pending**.
@@ -170,8 +236,8 @@ fabricated. Prior feature waivers do not apply to this capability.
 
 ## Verdict
 
-**Pending — not approved for publication or Ready.** Budget Rust/Clippy, actual
-Kind enforcement, independent review and two genuine human signoffs remain
-required. No `Signed-off-by` identity is supplied until those people actually
-review and approve; the existing security-audit gate is expected to remain red
-for missing signatures, without a waiver or altered rule.
+Source approval is recorded above under the maintainer's explicit delegation.
+Publication and Ready remain pending exact-head technical and native
+qualification. Historical unsigned states and failed runs in this document
+must not be represented as current blockers already repaired or as successful
+runtime acceptance. The existing audit gate is unchanged.
