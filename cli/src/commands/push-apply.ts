@@ -11,6 +11,7 @@ import {
 import { coreImageValues, imageValueArgs, PUSH_COMPONENTS, resolvePushedArtifacts, type PushedImage } from "../lib/image-targets.js";
 import { inspectCoreInstallation, recheckCoreOwnership, requireHealthyDeployment, updateLegacyCore, verifyCoreConfiguration } from "../lib/core-image-apply.js";
 import { inspectSandboxPlans, refreshSandboxImages } from "../lib/sandbox-image-apply.js";
+import { inspectManagedMcpPlans, refreshManagedMcpImages } from "../lib/managed-mcp-image-apply.js";
 import { assertSafeMutation } from "../lib/sre-authority.js";
 
 export interface PushApplyResult {
@@ -18,6 +19,7 @@ export interface PushApplyResult {
   buildOnly: string[];
   updatedSandboxes: number;
   preservedOverrides: number;
+  updatedManagedMcp?: number;
 }
 
 /** Update owning defaults, prove their selected artifact references, then ask
@@ -48,6 +50,7 @@ export async function applyPushedImages(
   const meshImages: MeshImages = {};
   for (const item of artifacts) if (item.name === "relay" || item.name === "registry") meshImages[item.name] = item.image;
   const plans = await inspectSandboxPlans(execute, coreImages);
+  const managedPlans = await inspectManagedMcpPlans(execute, coreImages);
   if (core) await recheckCoreOwnership(execute, core);
   if (mesh && (selectedMesh || core?.kind === "helm")) await recheckMeshOwnership(execute, mesh);
 
@@ -82,6 +85,8 @@ export async function applyPushedImages(
     requireHealthyDeployment(await verifyCoreConfiguration(execute, core, coreImages));
   }
   const updatedSandboxes = await refreshSandboxImages(execute, plans);
+  const updatedManagedMcp = await refreshManagedMcpImages(execute, managedPlans, core?.deployment.metadata.namespace ?? "kars-system");
   return { applied: artifacts.map(item => item.name), buildOnly, updatedSandboxes,
+    ...(coreImages.some(image => image.name === "mcp-everything") ? { updatedManagedMcp } : {}),
     preservedOverrides: plans.filter(plan => plan.pinned).length };
 }

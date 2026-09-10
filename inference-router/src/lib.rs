@@ -36,6 +36,11 @@ pub mod governance;
 pub mod governed_services;
 pub mod guardrails;
 pub mod handoff;
+pub mod inference_budget;
+#[path = "../../shared/inference_budget/mod.rs"]
+pub mod inference_budget_contract;
+#[path = "../../shared/inference_budget/dispatch.rs"]
+mod inference_budget_dispatch;
 pub mod inference_policy_loader;
 pub mod mcp;
 pub mod memory_binding_loader;

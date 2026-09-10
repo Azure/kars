@@ -42,18 +42,20 @@
 use axum::{
     Router,
     body::Bytes,
-    extract::State,
+    extract::{ConnectInfo, Extension, State},
     http::{HeaderMap, HeaderValue, StatusCode, header},
     response::{IntoResponse, Response},
     routing::post,
 };
-use std::sync::Arc;
+use std::{collections::BTreeSet, net::SocketAddr, sync::Arc};
 
 use crate::mcp::initialize::{InitializeConfig, OsRngSessionMinter, SessionMinter};
-use crate::mcp::oauth::OAuthVerifierConfig;
+use crate::mcp::oauth::{OAuthVerifierConfig, VerifiedToken};
 use crate::mcp::oauth_layer::OAuthLayer;
 use crate::mcp::pipeline::{ProcessOutcome, process_request_async};
 use crate::mcp::tools::{AsyncToolDispatcher, EchoDispatcher, SyncToAsync};
+
+mod scoped;
 
 /// HTTP header name carrying the MCP session id on a successful
 /// `initialize` response and on subsequent client requests.
@@ -66,6 +68,15 @@ pub struct McpRouteState {
     pub config: Arc<InitializeConfig>,
     pub minter: Arc<dyn SessionMinter + Send + Sync>,
     pub tools: Arc<dyn AsyncToolDispatcher>,
+    pub caller_policy: Option<Arc<McpCallerPolicy>>,
+    pub oauth_required: bool,
+    pub managed_prefixes: BTreeSet<String>,
+}
+
+pub struct McpCallerPolicy {
+    governance: Arc<crate::governance::Governance>,
+    services: Arc<crate::governed_services::GovernedServices>,
+    sandbox: String,
 }
 
 impl McpRouteState {
@@ -81,6 +92,9 @@ impl McpRouteState {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(OsRngSessionMinter),
             tools: Arc::new(SyncToAsync::new(EchoDispatcher::standard())),
+            caller_policy: None,
+            oauth_required: false,
+            managed_prefixes: BTreeSet::new(),
         }
     }
 
@@ -88,6 +102,20 @@ impl McpRouteState {
     /// namespaced upstream forwarder when the registry is non-empty).
     pub fn with_tools(mut self, tools: Arc<dyn AsyncToolDispatcher>) -> Self {
         self.tools = tools;
+        self
+    }
+
+    pub fn with_governance(
+        mut self,
+        governance: Arc<crate::governance::Governance>,
+        services: Arc<crate::governed_services::GovernedServices>,
+        sandbox: String,
+    ) -> Self {
+        self.caller_policy = Some(Arc::new(McpCallerPolicy {
+            governance,
+            services,
+            sandbox,
+        }));
         self
     }
 
@@ -126,6 +154,9 @@ impl McpRouteState {
             minter: Arc::new(OsRngSessionMinter),
             tools: Arc::new(dispatcher),
             task_telemetry: None,
+            caller_policy: None,
+            oauth_required: false,
+            managed_prefixes: BTreeSet::new(),
         }
     }
 }
@@ -178,7 +209,8 @@ pub fn platform_mcp_route() -> Router<McpRouteState> {
 /// `request.extensions_mut()`, available to downstream handlers via an
 /// `axum::Extension<VerifiedToken>` extractor (consumed by the
 /// upcoming per-tool scope check in `pipeline::process_request`).
-pub fn protected_mcp_route(state: McpRouteState, oauth: Arc<OAuthVerifierConfig>) -> Router {
+pub fn protected_mcp_route(mut state: McpRouteState, oauth: Arc<OAuthVerifierConfig>) -> Router {
+    state.oauth_required = true;
     mcp_route().with_state(state).layer(OAuthLayer::new(oauth))
 }
 
@@ -190,7 +222,65 @@ async fn method_not_allowed() -> impl IntoResponse {
     )
 }
 
-async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: Bytes) -> Response {
+async fn post_mcp(
+    State(state): State<McpRouteState>,
+    peer: Option<Extension<ConnectInfo<SocketAddr>>>,
+    verified: Option<Extension<VerifiedToken>>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let local = peer
+        .as_ref()
+        .is_some_and(|peer| peer.0.0.ip().is_loopback());
+    let principal = if state.oauth_required {
+        let Some(Extension(token)) = verified else {
+            return (StatusCode::UNAUTHORIZED, "Verified MCP caller required").into_response();
+        };
+        serde_json::json!(["oauth", token.issuer, token.subject]).to_string()
+    } else {
+        if !local {
+            return (
+                StatusCode::FORBIDDEN,
+                "Same-router socket peer required for local MCP",
+            )
+                .into_response();
+        }
+        state
+            .caller_policy
+            .as_ref()
+            .map(|policy| policy.sandbox.clone())
+            .unwrap_or_default()
+    };
+    let base_tools: Arc<dyn AsyncToolDispatcher> = if state.oauth_required && !local {
+        match scoped::ScopedDispatcher::exclude(state.tools.clone(), &state.managed_prefixes) {
+            Ok(tools) => Arc::new(tools),
+            Err(error) => return (StatusCode::SERVICE_UNAVAILABLE, error).into_response(),
+        }
+    } else {
+        state.tools.clone()
+    };
+    let tools: Arc<dyn AsyncToolDispatcher> = if let Some(server) = headers.get("x-kars-mcp-server")
+    {
+        let Ok(server) = server.to_str() else {
+            return (StatusCode::BAD_REQUEST, "Invalid MCP server scope").into_response();
+        };
+        match scoped::ScopedDispatcher::new(base_tools, server) {
+            Ok(scoped) => Arc::new(scoped),
+            Err(error) => return (StatusCode::NOT_FOUND, error).into_response(),
+        }
+    } else {
+        base_tools
+    };
+    let tools = if let Some(policy) = state.caller_policy.as_ref() {
+        Arc::new(crate::mcp::governed::GovernedDispatcher::new(
+            tools,
+            policy.governance.clone(),
+            policy.services.clone(),
+            principal,
+        )) as Arc<dyn AsyncToolDispatcher>
+    } else {
+        tools
+    };
     let telemetry_scope = state
         .task_telemetry
         .as_ref()
@@ -208,7 +298,7 @@ async fn post_mcp(State(state): State<McpRouteState>, headers: HeaderMap, body: 
         accept.as_deref(),
         state.config.as_ref(),
         state.minter.as_ref(),
-        Some(state.tools.as_ref()),
+        Some(tools.as_ref()),
     )
     .await;
     if let (Some(telemetry), Some(scope)) = (&state.task_telemetry, telemetry_scope) {
@@ -324,6 +414,7 @@ mod tests {
             config: Arc::new(InitializeConfig::default()),
             minter: Arc::new(FixedMinter("test-session-001")),
             tools: Arc::new(SyncToAsync::new(EchoDispatcher::standard())),
+            ..McpRouteState::standard()
         }
     }
 
@@ -336,7 +427,11 @@ mod tests {
         if let Some(a) = accept {
             req = req.header("accept", a);
         }
-        req.body(Body::from(body.to_vec())).unwrap()
+        let mut request = req.body(Body::from(body.to_vec())).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        request
     }
 
     async fn body_text(resp: Response) -> (StatusCode, HeaderMap, String) {
@@ -514,6 +609,7 @@ mod tests {
             tools: Arc::new(crate::mcp::PlatformDispatcher::with_base_url(
                 "http://127.0.0.1:1",
             )),
+            ..McpRouteState::standard()
         }
     }
 
@@ -526,7 +622,11 @@ mod tests {
         if let Some(a) = accept {
             req = req.header("accept", a);
         }
-        req.body(Body::from(body.to_vec())).unwrap()
+        let mut request = req.body(Body::from(body.to_vec())).unwrap();
+        request
+            .extensions_mut()
+            .insert(ConnectInfo(SocketAddr::from(([127, 0, 0, 1], 12345))));
+        request
     }
 
     #[tokio::test]
@@ -703,6 +803,7 @@ mod tests {
             tools: Arc::new(crate::mcp::PlatformDispatcher::with_base_url(
                 upstream.uri(),
             )),
+            ..McpRouteState::standard()
         };
         let app = platform_mcp_route().with_state(state);
 
@@ -967,6 +1068,94 @@ mod tests {
         assert_eq!(v["jsonrpc"], "2.0");
         assert_eq!(v["id"], 1);
         assert!(v["result"]["protocolVersion"].is_string());
+    }
+
+    #[tokio::test]
+    async fn remote_oauth_uses_verified_caller_and_cannot_borrow_managed_sessions() {
+        use crate::mcp::tools::{
+            DispatchError, ToolCallOutput, ToolCatalog, ToolContent, ToolDefinition,
+        };
+        struct Tools(ToolCatalog, Arc<std::sync::atomic::AtomicUsize>);
+        #[async_trait::async_trait]
+        impl AsyncToolDispatcher for Tools {
+            fn catalog(&self) -> &ToolCatalog {
+                &self.0
+            }
+            async fn invoke(&self, _: &str, _: &Value) -> Result<ToolCallOutput, DispatchError> {
+                self.1.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                Ok(ToolCallOutput {
+                    content: vec![ToolContent::text("ok")],
+                    is_error: false,
+                    ..Default::default()
+                })
+            }
+        }
+        let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        let tools = ToolCatalog::new(
+            ["legacy.echo", "managed.echo"]
+                .into_iter()
+                .map(|name| ToolDefinition {
+                    name: name.into(),
+                    description: "test".into(),
+                    input_schema: json!({"type":"object"}),
+                })
+                .collect(),
+        )
+        .unwrap();
+        let governance = Arc::new(crate::governance::Governance::new("victim"));
+        let policy = tempfile::tempdir_in(".").unwrap();
+        let path = policy.path().join("allow.yaml");
+        std::fs::write(&path,"version: '1.0'\nagent: test\npolicies:\n  - name: allow\n    type: capability\n    allowed_actions: ['tool:*']\n    priority: 100\n").unwrap();
+        governance
+            .policy
+            .load_from_file(path.to_str().unwrap())
+            .unwrap();
+        let services = Arc::new(crate::governed_services::GovernedServices::new(
+            crate::access_request::Identity::standalone("victim"),
+            None,
+        ));
+        let mut state = McpRouteState::standard()
+            .with_tools(Arc::new(Tools(tools, calls.clone())))
+            .with_governance(governance.clone(), services, "victim".into());
+        state.managed_prefixes.insert("managed.".into());
+        let (sk, vk) = route_keypair_seeded(15);
+        let app = protected_mcp_route(state, route_oauth_cfg(route_jwks_with(&vk, ROUTE_TEST_KID)));
+        let token = route_issue_token(&sk, ROUTE_TEST_KID);
+        for (id, name) in [(1, "legacy.echo"), (2, "managed.echo")] {
+            let mut request = Request::post("/mcp")
+                .header("accept", "application/json, text/event-stream")
+                .header(header::AUTHORIZATION, format!("Bearer {token}"))
+                .header("x-forwarded-for", "127.0.0.1")
+                .header("mcp-session-id", "victim-session")
+                .body(Body::from(
+                    json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
+                    "params":{"name":name,"arguments":{}}})
+                    .to_string(),
+                ))
+                .unwrap();
+            request
+                .extensions_mut()
+                .insert(ConnectInfo(SocketAddr::from(([10, 2, 3, 4], 12345))));
+            let (_, _, body) = body_text(app.clone().oneshot(request).await.unwrap()).await;
+            let body: Value = serde_json::from_str(&body).unwrap();
+            if id == 1 {
+                assert_eq!(body["result"]["content"][0]["text"], "ok");
+            } else {
+                assert!(body.get("error").is_some() || body["result"]["isError"] == true);
+            }
+        }
+        assert_eq!(calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+        let entries = governance.audit_json()["entries"].clone();
+        let actor = entries
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|entry| entry["action"] == "tool:legacy.echo")
+            .unwrap();
+        assert_eq!(
+            actor["agent_id"],
+            json!(["oauth", ROUTE_TEST_ISS, "route-sub"]).to_string()
+        );
     }
 
     #[tokio::test]

@@ -70,6 +70,10 @@ spec:
                           maxLength: 253
                     aiConformanceReference:
                       type: boolean
+                inferenceBudgetRef:
+                  type: object
+                  x-kubernetes-preserve-unknown-fields: true
+                  description: "Controller-generated Task/account UID binding; validated against live task authority before private routing"
                 credentialsRef:
                   type: object
                   description: "Explicit agent credential collection in this Sandbox's workspace; replaces legacy credentials while set. Missing/replaced sources fail closed."

@@ -1,5 +1,10 @@
 # MCP servers in kars
 
+For controller-owned Playwright/Everything workloads, see
+[Managed MCP workloads](tutorials/managed-mcp.md). That path requires the
+qualified controller/chart, exact UID ownership and a successful protocol probe;
+it does not turn a capability request into an automatic resource grant.
+
 The [Model Context Protocol](https://modelcontextprotocol.io) (MCP) is how a
 kars agent reaches tools it doesn't ship with — a hosted search API, a wiki
 reader, a headless browser, your internal services. kars treats every MCP
@@ -101,6 +106,22 @@ The agent calls a **namespaced** tool (`<server>.<tool>`, e.g.
 `playwright.browser_navigate`) on loopback. The router authorises it, dispatches
 to the MCP, and returns the result. The agent has no ambient network reach and
 no credentials.
+
+### Tool result compatibility
+
+The forwarder preserves the typed
+[MCP content blocks](https://modelcontextprotocol.io/specification/2025-11-25/schema#contentblock):
+text, images, audio, resource links, and embedded text or base64 blob resources.
+MIME types, annotations, metadata, extension fields, `structuredContent`, and
+`isError` survive forwarding. Ordinary text results retain their existing wire
+format. Unknown content kinds and malformed required fields are protocol errors,
+not silently discarded content.
+
+Resource and icon URIs are references only: the router does not fetch them.
+The existing response byte limit, authentication, governance, and session rules
+are unchanged. Text in embedded resources and structured results remains present
+in serialized output for structured response inspection; binary data is not
+decoded into model text or treated as a successful content-safety scan.
 
 ## Out-of-the-box egress
 

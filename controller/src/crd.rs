@@ -77,6 +77,11 @@ pub struct KarsSandboxSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_ref: Option<crate::credential_source::CredentialSourceRef>,
 
+    /// Controller-generated governed-inference account binding. A task-owned
+    /// finite Sandbox cannot omit, repoint, or fall back around this binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_budget_ref: Option<crate::inference_budget_contract::TaskBudgetBinding>,
+
     /// Network policy
     pub network_policy: Option<NetworkPolicyConfig>,
 

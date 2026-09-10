@@ -132,6 +132,7 @@ async fn primary_503_falls_through_to_fallback_200() {
 
     let upstream = UpstreamConfig {
         telemetry: None,
+        inference_budget: None,
         endpoint: base,
         deployment: "fallback-up".into(),
         sandbox_name: "sbx".into(),
@@ -200,6 +201,7 @@ async fn unhealthy_primary_is_skipped_in_second_pass() {
 
     let upstream = UpstreamConfig {
         telemetry: None,
+        inference_budget: None,
         endpoint: base,
         deployment: "fallback-up".into(),
         sandbox_name: "sbx".into(),
@@ -260,6 +262,7 @@ async fn all_unhealthy_still_punches_primary_for_last_resort() {
 
     let upstream = UpstreamConfig {
         telemetry: None,
+        inference_budget: None,
         endpoint: base,
         deployment: "primary-down".into(),
         sandbox_name: "sbx".into(),

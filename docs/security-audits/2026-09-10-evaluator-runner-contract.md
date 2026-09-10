@@ -86,5 +86,39 @@ still required. No public push, deployment, H100 mutation, new dependency
 installation, source from private SDK/probe ancestry or main promotion is
 authorized by this source approval.
 
+## Native admission proof preparation (not yet executed)
+
+Prepared on actual public integration
+`ac9f1b96f79c1e0f78bd042a3faec58a6049b9f5`; the reviewed evaluator Rust producer
+and parser-contract test remain byte-identical to source `64c4c717`.
+
+The existing `test_crd_kars_eval_lifecycle` now invokes
+`tests/e2e/eval_pod_admission.py` while its real Job and CronJob still exist,
+before clearing the schedule. The probe reads those exact API-produced
+templates, checks their KarsEval UID ownership and matching Pod specs/runner
+arguments, and rechecks source UID, generation, owner and spec continuity
+around admission. Status-only resourceVersion changes do not invalidate the
+source snapshot. The existing compiled producer-to-Clap test remains the
+parser compatibility proof.
+
+Only the existing `kind-kars-e2e` loopback API is accepted. In a fresh,
+uniquely named namespace enforcing `restricted:v1.31`, the probe waits for
+the default ServiceAccount and submits both actual Pod specs using
+`dryRun=All`. Both must return their matching Pod with HTTP 201. Removing only
+the old missing Pod/container security contexts must instead produce HTTP 403
+with the exact PodSecurity policy and all four expected restricted violations;
+RBAC denials, unrelated policy failures and malformed responses do not count.
+The positive specs retain the actual custom image and its numeric non-root
+USER compatibility; no UID or other spec override is injected.
+
+The probe never creates a Pod, starts inference, changes a producer or waits
+for the original Job to complete. Cleanup verifies the namespace creation UID,
+proof label and spec, then deletes only that namespace with current UID/RV
+preconditions and observes removal. No namespace adoption, forced finalizers or
+blanket cleanup is used. Output contains only fixed case/status facts, not Pod
+specs, arguments, images, resource UIDs or API error bodies. Fixture tests run in
+the existing schema CI job and E2E preflight; they are not native evidence.
+No native result or new source sign-off is asserted by this preparation.
+
 Signed-off-by: pallakatos (maintainer delegation recorded above) <lakatos.toth.pal@gmail.com>
 Signed-off-by: GitHub Copilot (delegated AI review, not an independent human) <223556219+Copilot@users.noreply.github.com>

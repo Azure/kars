@@ -27,28 +27,22 @@ pub(crate) async fn derive_mcp_egress_rules(
     refs: &[&crate::mcp_server::LocalObjectRef],
     sandbox_name: &str,
     existing: &[serde_json::Value],
-) -> Result<Vec<serde_json::Value>, kube::Error> {
+) -> Result<Vec<serde_json::Value>, String> {
     use kube::api::Api;
-    let mcp_api: Api<crate::mcp_server::McpServer> =
-        Api::namespaced(client.clone(), sandbox_self_ns);
+    let sandbox = Api::<crate::crd::KarsSandbox>::namespaced(client.clone(), sandbox_self_ns)
+        .get(sandbox_name)
+        .await
+        .map_err(super::mcp_binding::api_error)?;
     let mut out: Vec<serde_json::Value> = Vec::new();
     for mcp_ref in refs {
         let ref_name = mcp_ref.name.trim();
         if ref_name.is_empty() {
             continue;
         }
-        let url = match mcp_api.get(ref_name).await {
-            Ok(mcp) => mcp.spec.url.unwrap_or_default(),
-            Err(kube::Error::Api(ae)) if ae.code == 404 => {
-                tracing::warn!(
-                    sandbox = %sandbox_name,
-                    mcp = %ref_name,
-                    "referenced McpServer not found; egress not auto-derived",
-                );
-                continue;
-            }
-            Err(e) => return Err(e),
+        let Some(binding) = super::mcp_binding::resolve(client, &sandbox, ref_name).await? else {
+            continue;
         };
+        let url = binding.endpoint.unwrap_or_default();
         if url.is_empty() {
             continue;
         }
@@ -56,7 +50,6 @@ pub(crate) async fn derive_mcp_egress_rules(
             tracing::warn!(
                 sandbox = %sandbox_name,
                 mcp = %ref_name,
-                url = %url,
                 "McpServer url not parseable for egress derivation; skipping",
             );
             continue;

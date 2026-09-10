@@ -2,10 +2,6 @@
 // Licensed under the MIT License.
 
 //! handoff route handlers and router builders.
-//!
-//! Extracted from `routes/mod.rs` as part of the Q1 split.
-//! Function bodies are byte-identical to the originals (verified by
-//! `item-manifest` drift-check).
 
 use axum::Json;
 use axum::Router;
@@ -151,6 +147,10 @@ async fn handoff_init_handler(
     State(state): State<AppState>,
     Json(body): Json<serde_json::Value>,
 ) -> axum::response::Response {
+    if state.inference_budget.is_some() {
+        return errors::flat(StatusCode::FORBIDDEN,
+            "Governed inference account lineage is not transferable by handoff; retry the same Task UID through the controller").into_response();
+    }
     // ── Registry mode guard ──────────────────────────────────────────────────
     // Handoff requires a global registry — both agents must be in the same
     // registry for identity succession to work.

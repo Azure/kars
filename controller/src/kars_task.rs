@@ -646,8 +646,10 @@ pub fn validate_execution_contract(spec: &KarsTaskSpec) -> Result<(), String> {
         }
         if spec.execution.as_ref().is_some_and(|e| e.launch)
             && (budget.tokens.is_some_and(|n| n > 0) || budget.usd_micros.is_some_and(|n| n > 0))
+            && budget.scope
+                != Some(crate::inference_budget_contract::BudgetScope::GovernedInference)
         {
-            return Err("UnsupportedLaunchBudget: total/subtree token and usdMicros ceilings are not enforced by this foundation; bounded tasks may be planned but cannot launch".into());
+            return Err("UnsupportedLaunchBudget: legacy total/subtree budgets are planning-only; a new GovernedInference-scoped task requires the configured durable broker before materialization".into());
         }
     }
     Ok(())
@@ -702,6 +704,10 @@ pub fn spec_attenuation_violations(
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct TaskBudget {
+    /// Explicit opt-in to governed-inference tokens/configured maximum prices.
+    /// An absent scope retains the foundation's planning-only interpretation.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scope: Option<crate::inference_budget_contract::BudgetScope>,
     /// Maximum total tokens the task subtree may consume. `0`/absent means
     /// "no token cap declared". Positive ceilings are planning declarations:
     /// launch is rejected until durable total/subtree enforcement is available.
@@ -719,6 +725,10 @@ pub struct TaskBudget {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KarsTaskStatus {
+    /// Controller-owned immutable account/UID ancestry binding. Not a task-name
+    /// metering label and never supplied by an agent header.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub inference_budget: Option<crate::inference_budget_contract::TaskBudgetBinding>,
     /// One of: `Pending`, `Ready`, `Degraded`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,
