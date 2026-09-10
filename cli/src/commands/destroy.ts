@@ -5,6 +5,7 @@ import { Command } from "commander";
 import chalk from "chalk";
 import ora from "ora";
 import { assertDestroySafe } from "../lib/sre-authority.js";
+import { withAzureDestroyTarget } from "../lib/azure-destroy-target.js";
 
 export function destroyCommand(): Command {
   const cmd = new Command("destroy");
@@ -17,13 +18,15 @@ export function destroyCommand(): Command {
     .option("--cloud", "Destroy AKS cloud sandbox only (skip Docker)", false)
     .option("--all", "Destroy ALL resources (AKS, ACR, KV, AOAI — deletes the resource group)", false)
     .option("-g, --resource-group <name>", "Resource group name")
+    .option("--subscription <id>", "Azure subscription for --all (defaults to the selected Azure account)")
     .option("--region <region>", "Azure region (used to derive resource group)", "eastus2")
-    .option("--context <name>", "Kubernetes context to use (defaults to current)")
+    .option("--context <name>", "Kubernetes context (current for sandbox teardown; verified against Azure target for --all)")
     .action(async (name: string | undefined, options) => {
       const rg = options.resourceGroup || `kars-${options.region}`;
       // Propagate --context to every kubectl invocation in this command.
       const kctlCtx = options.context ? ["--context", options.context] : [];
-      if ((!options.local || options.cloud) && (!name || name === "sre" || options.all)) {
+      if (options.all && options.local) throw new Error("--all deletes Azure resources and cannot be combined with --local");
+      if (!options.all && (!options.local || options.cloud) && (!name || name === "sre")) {
         const { execa } = await import("execa");
         await assertDestroySafe((file,args,commandOptions) =>
           execa(file,[...kctlCtx,...args],commandOptions));
@@ -47,25 +50,27 @@ export function destroyCommand(): Command {
           const { execa } = await import("execa");
           const baseName = "kars";
 
-          // Delete the resource group (async)
-          await execa("az", [
-            "group", "delete", "--name", rg, "--yes", "--no-wait", "--output", "none",
-          ], { stdio: "pipe" });
+          await withAzureDestroyTarget(execa, rg, options.subscription, options.context, async azure => {
+            // Delete the resource group (async)
+            await azure("az", [
+              "group", "delete", "--name", rg, "--yes", "--no-wait", "--output", "none",
+            ], { stdio: "pipe" });
 
-          // Purge soft-deleted resources so a fresh 'up' works without conflicts
-          spinner.text = "Purging soft-deleted Azure OpenAI account...";
-          await execa("az", [
-            "cognitiveservices", "account", "purge",
-            "--name", `${baseName}-aoai`,
-            "--resource-group", rg,
-            "--location", options.region,
-            "--output", "none",
-          ], { stdio: "pipe" }).catch(() => {});
+            // Purge soft-deleted resources so a fresh 'up' works without conflicts
+            spinner.text = "Purging soft-deleted Azure OpenAI account...";
+            await azure("az", [
+              "cognitiveservices", "account", "purge",
+              "--name", `${baseName}-aoai`,
+              "--resource-group", rg,
+              "--location", options.region,
+              "--output", "none",
+            ], { stdio: "pipe" }).catch(() => {});
 
-          spinner.text = "Purging soft-deleted Key Vault...";
-          await execa("az", [
-            "keyvault", "purge", "--name", `${baseName}-kv`,
-          ], { stdio: "pipe" }).catch(() => {});
+            spinner.text = "Purging soft-deleted Key Vault...";
+            await azure("az", [
+              "keyvault", "purge", "--name", `${baseName}-kv`,
+            ], { stdio: "pipe" }).catch(() => {});
+          });
 
           spinner.succeed(`Resource group '${rg}' deletion initiated + soft-deleted resources purged`);
         } catch (error) {
