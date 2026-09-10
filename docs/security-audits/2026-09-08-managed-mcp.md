@@ -75,6 +75,53 @@ Fresh exact-head hosted/native lifecycle convergence is still required.
 The passing Python-to-router regression is not substituted for the complete
 Kind lifecycle, policy, image and cleanup acceptance.
 
+## Transitive dependency repair after the guarded landing check
+
+Current-base source `6f513c49d0be1b38b6464dbc6f5959b561d65a41` subsequently
+passed full CI `34497050687`, including native lifecycle/protocol acceptance.
+The landing guard still stopped before any temporary review allowance or
+merge: ten unresolved GHAS/Trivy conversations identified genuinely unpatched
+Everything image dependencies. Green high/critical gates were not treated as
+permission to waive medium/low findings.
+
+The compatible exact replacements are:
+
+| Package | Previous | Patched |
+|---|---|---|
+| `@hono/node-server` | 1.19.14 | 1.19.15 |
+| `hono` | 4.12.29 | 4.13.5 |
+| `qs` | 6.15.3 | 6.16.0 |
+
+These address alert743, alerts791-797 and alerts801-802. The server package
+remains2026.7.4, fast-uri3.1.6 and ip-address10.3.1 remain pinned, and all
+unrelated lock entries and dependency edges are byte-for-byte unchanged.
+Only the version, canonical registry URL and integrity value changed in each
+of the three reviewed lock entries.
+
+The local offline cache lacked the required Hono metadata. No local network
+workaround or manually invented integrity hash was used. A temporary,
+read-only, fixed-branch workflow generated the lock normally on GitHub:
+[run34506209770](https://github.com/Azure/kars/actions/runs/34506209770),
+exact source `30d89dc23ddadf2afc9805251e7f74593ea92814`.
+Node22.23.2/npm10.9.8 generated it, a clean script-disabled npm install
+verified package integrity, npm audit reported zero vulnerabilities across
+all severities, and the actual Everything Streamable HTTP server passed
+initialization, listing13tools, echo and session-close/owned-process cleanup.
+
+The importer independently verified source/run identity, the unchanged
+reviewed manifest, all version pins, the three-entry-only diff and both file
+hashes. Artifact10163921178's ZIP SHA256 is
+`867fcda1f48c929a97f18a4977adad3009547717884c8b1947beb26c2d1394f9`;
+the imported lock SHA256 is
+`9f5fe73ea91d98215b8377ae4bd9ba0d30fc87d42b8f42b760a832718ba83f8c`.
+Only manifest, lock and bounded provenance were present in the artifact.
+
+The temporary generator and its one-off scripts are removed from the final
+candidate. Their immutable generation commit and run retain the evidence.
+No private source, SDK probe, credentials, deployment or image release was
+involved. A fresh final-head pipeline and truthful resolution of the specific
+review conversations remain required before the guarded integration merge.
+
 ## Scope
 
 Closed managed Playwright/Everything presets; UID-bound namespace and resource
