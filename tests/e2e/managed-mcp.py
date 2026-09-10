@@ -98,7 +98,7 @@ def ready(namespace):
 
 
 def rpc(port, method, params, server=None):
-    headers = {"Content-Type": "application/json", "Accept": "application/json"}
+    headers = {"Content-Type": "application/json", "Accept": "application/json, text/event-stream"}
     if server:
         headers["X-Kars-Mcp-Server"] = server
     request = urllib.request.Request(f"http://127.0.0.1:{port}/mcp",
@@ -110,6 +110,46 @@ def rpc(port, method, params, server=None):
             return response.status, json.loads(response.read(2 * 1024 * 1024))
     except urllib.error.HTTPError as error:
         return error.code, None
+
+
+def catalog_facts(code, body):
+    envelope = body if isinstance(body, dict) else {}
+    result = envelope.get("result")
+    tools = result.get("tools") if isinstance(result, dict) else None
+    error = envelope.get("error")
+    error_code = error.get("code") if isinstance(error, dict) else None
+    return {
+        "stage": "router_catalog",
+        "httpStatus": code if type(code) is int and 100 <= code <= 599 else None,
+        "rpcError": "error" in envelope,
+        "rpcErrorCode": error_code if type(error_code) is int else None,
+        "toolCount": len(tools) if isinstance(tools, list) else None,
+        "expectedToolPresent": isinstance(tools, list) and any(
+            isinstance(tool, dict) and tool.get("name") == "e2e_tools.echo" for tool in tools),
+    }
+
+
+def wait_for_catalog(port, process):
+    last = catalog_facts(None, None)
+
+    def catalog():
+        nonlocal last
+        require(process.poll() is None, "MCP port-forward exited")
+        try:
+            code, body = rpc(port, "tools/list", {}, SERVER)
+        except (OSError, ValueError) as error:
+            last = catalog_facts(None, None)
+            last["transportError"] = "io" if isinstance(error, OSError) else "invalid_json"
+            return False
+        last = catalog_facts(code, body)
+        return body if code == 200 and last["expectedToolPresent"] and not last["rpcError"] else False
+
+    try:
+        return wait("actual routed MCP catalog after reconciliation", catalog, seconds=120)
+    except AssertionError:
+        last["portForwardAlive"] = process.poll() is None
+        print("MCP-DIAG", json.dumps(last), flush=True)
+        raise
 
 
 def build_image():
@@ -172,15 +212,7 @@ def test():
         cwd=ROOT, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     PROCESSES.append(process)
     try:
-        def catalog():
-            require(process.poll() is None, "MCP port-forward exited")
-            try:
-                code, body = rpc(port, "tools/list", {}, SERVER)
-                return body if code == 200 and any(tool.get("name") == "e2e_tools.echo"
-                    for tool in (body or {}).get("result", {}).get("tools", [])) else False
-            except (OSError, ValueError):
-                return False
-        wait("actual routed MCP catalog after reconciliation", catalog, seconds=120)
+        wait_for_catalog(port, process)
         code, body = rpc(port, "tools/call", {"name": "e2e_tools.echo", "arguments": {"message": "mcp-kind-proof"}}, SERVER)
         require(code == 200 and "error" not in body and not body["result"].get("isError")
                 and "mcp-kind-proof" in json.dumps(body["result"]), "Real MCP echo did not execute through the router")

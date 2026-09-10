@@ -209,6 +209,84 @@ async fn missing_peer_network_peer_and_forged_local_headers_never_evaluate_or_in
 }
 
 #[tokio::test]
+async fn actual_kind_rpc_client_negotiates_the_scoped_router_without_weakening_accept_checks() {
+    let (inner, calls) = dispatcher();
+    let state = McpRouteState::standard().with_tools(inner);
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(async move {
+        axum::serve(
+            listener,
+            routes::mcp_route()
+                .with_state(state)
+                .into_make_service_with_connect_info::<SocketAddr>(),
+        )
+        .await
+        .unwrap();
+    });
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let rejected = http
+        .post(format!("http://{address}/mcp"))
+        .header("accept", "application/json")
+        .header("x-kars-mcp-server", "one")
+        .json(&json!({"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rejected.status().as_u16(), 406);
+    assert_eq!(calls.load(Ordering::SeqCst), 0);
+
+    // Execute the actual native fixture helper, not a second client with
+    // independently correct headers that could leave the Kind fixture broken.
+    let script = r#"
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("managed_mcp_fixture", sys.argv[1])
+fixture = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(fixture)
+port = int(sys.argv[2])
+status, body = fixture.rpc(port, "tools/list", {}, "one")
+assert status == 200, "actual Kind catalog client was rejected"
+assert [tool["name"] for tool in body["result"]["tools"]] == ["one.echo"]
+status, body = fixture.rpc(port, "tools/call", {"name":"one.echo","arguments":{}}, "one")
+assert status == 200 and body["result"]["content"][0]["text"] == "ok"
+status, body = fixture.rpc(port, "tools/call", {"name":"two.echo","arguments":{}}, "one")
+assert status == 200 and ("error" in body or body["result"].get("isError"))
+status, _ = fixture.rpc(port, "tools/list", {}, "unmounted")
+assert status == 404, "unknown scope must remain rejected"
+"#;
+    let fixture =
+        std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../tests/e2e/managed-mcp.py");
+    let output = tokio::time::timeout(
+        std::time::Duration::from_secs(20),
+        tokio::process::Command::new("python3")
+            .args(["-B", "-c", script])
+            .arg(fixture)
+            .arg(address.port().to_string())
+            .kill_on_drop(true)
+            .output(),
+    )
+    .await;
+    server.abort();
+    let _ = server.await;
+    let output = output
+        .expect("actual Kind RPC client exceeded its bounded local test deadline")
+        .expect("python3 must be available for the native fixture regression");
+    assert!(
+        output.status.success(),
+        "actual Kind RPC client failed; status {}",
+        output.status
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+}
+
+#[tokio::test]
 async fn real_http_loopback_can_initialize_scope_catalog_and_invoke_only_its_server() {
     let (inner, calls) = dispatcher();
     let state = McpRouteState::standard().with_tools(inner);
