@@ -9,7 +9,8 @@ import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { prepareRouterImage } from "./kind-router-image.mjs";
-import { PROVIDER, ENDPOINT, providerSource, verifyFixturePolicy, readinessFact } from "./budget-fixture-route.mjs";
+import { PROVIDER, ENDPOINT, providerSource, verifyFixturePolicy, readinessFact,
+  budgetStageFacts, routerTemplateFacts } from "./budget-fixture-route.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const context = "kind-kars-e2e";
@@ -18,6 +19,7 @@ const source = "budget-provider-fixture";
 const endpoint = ENDPOINT;
 const scratch = join(root, `.budget-kind-${process.pid}`);
 const forwards = [];
+const runtimes = new Set();
 let verifiedRouterReference;
 
 function execute(binary, args, input) {
@@ -84,6 +86,7 @@ function blueprint() {
 }
 
 function task(name, tokens, usdMicros, parent, launch) {
+  if (launch) runtimes.add(`kars-${name}`);
   return create({
     apiVersion: "kars.azure.com/v1alpha1", kind: "KarsTask", metadata: { name, namespace },
     spec: {
@@ -111,10 +114,13 @@ async function router(name) {
     return pods.items.find((pod) => !pod.metadata.deletionTimestamp
       && pod.status?.containerStatuses?.some((container) => container.name === "inference-router" && container.state?.running));
   }, `router container ${name}`);
+  const owner = pod.metadata.ownerReferences.find(owner => owner.kind === "ReplicaSet" && owner.controller);
+  console.log("BUDGET-TEMPLATE " + JSON.stringify(routerTemplateFacts(
+    pod, get("replicaset", owner.name, runtime), get("deployment", name, runtime))));
   assert(pod.spec.containers.find(container => container.name === "inference-router")?.image
     === verifiedRouterReference, "Budget router must use the exact CRI-verified digest reference");
   const url = await portForward(runtime, `pod/${pod.metadata.name}`, 8443);
-  let lastReadiness;
+  const lastReadiness = new Map();
   await until(async () => {
     for (const path of ["/healthz", "/readyz"]) {
       let response, error;
@@ -122,15 +128,50 @@ async function router(name) {
       try { response = await request(url, path); } catch (caught) { error = caught; }
       const fact = readinessFact(path, response, error);
       const key = JSON.stringify(fact);
-      if (key !== lastReadiness) {
+      if (key !== lastReadiness.get(path)) {
         console.log("BUDGET-READINESS " + JSON.stringify({ ...fact, elapsedMs: Date.now() - started }));
-        lastReadiness = key;
+        lastReadiness.set(path, key);
       }
+
       if (!fact.ready) return false;
     }
     return true;
   }, `private budget readiness ${name}`);
   return { url, pod, runtime };
+}
+
+function diagnostics() {
+  const report = { complete: true, sources: [] };
+  const targets = [
+    { runtime: namespace, selector: "app.kubernetes.io/component=controller", container: "controller" },
+    ...[...runtimes].map(runtime => ({ runtime, selector: "kars.azure.com/component=sandbox",
+      container: "inference-router" })),
+  ];
+  for (const { runtime, selector, container } of targets) {
+    try {
+      const pods = JSON.parse(k(["get", "pods", "-n", runtime, "-l", selector, "-o", "json"]));
+      for (const pod of pods.items) {
+        const actualContainer = container === "controller"
+          ? pod.spec.containers.find(c => c.name === "controller" || c.name === "kars-controller")?.name
+          : container;
+        assert(actualContainer, "Diagnostic container identity unavailable");
+        const log = k(["logs", "-n", runtime, pod.metadata.name, "-c", actualContainer,
+          "--tail=256", "--limit-bytes=131072"]);
+        const source = { component: container, podUid: pod.metadata.uid, facts: budgetStageFacts(log) };
+        if (container === "inference-router") {
+          const owner = pod.metadata.ownerReferences.find(o => o.kind === "ReplicaSet" && o.controller);
+          const replica = get("replicaset", owner.name, runtime);
+          const deploymentOwner = replica.metadata.ownerReferences.find(o => o.kind === "Deployment" && o.controller);
+          source.template = routerTemplateFacts(pod, replica, get("deployment", deploymentOwner.name, runtime));
+        }
+        report.sources.push(source);
+      }
+    } catch { report.complete = false; }
+  }
+  const directory = join(root, "e2e-diag", "standalone");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  writeFileSync(join(directory, "budget-readiness-stages.json"), JSON.stringify(report, null, 2));
+  console.log("BUDGET-STAGES " + JSON.stringify(report));
 }
 
 function accountFor(name) {
@@ -279,8 +320,12 @@ async function scenario() {
 try {
   await scenario();
 } finally {
-  for (const process of forwards) {
-    process.kill("SIGTERM");
+  try {
+    diagnostics();
+  } finally {
+    for (const process of forwards) {
+      process.kill("SIGTERM");
+    }
+    rmSync(scratch, { recursive: true, force: true });
   }
-  rmSync(scratch, { recursive: true, force: true });
 }

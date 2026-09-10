@@ -31,17 +31,28 @@ use crate::{
     kars_task::KarsTask,
 };
 
+#[track_caller]
 fn api_error(stage: &'static str, error: kube::Error) -> StoreError {
-    StoreError::Api {
-        stage,
-        code: match error {
-            kube::Error::Api(status) => Some(status.code),
-            _ => None,
-        },
-    }
+    let code = match error {
+        kube::Error::Api(status) => Some(status.code),
+        _ => None,
+    };
+    tracing::warn!(
+        budget_stage = "broker-authorization-api",
+        source_line = std::panic::Location::caller().line(),
+        http_status = code.unwrap_or(0),
+        "Governed inference authorization API unavailable"
+    );
+    StoreError::Api { stage, code }
 }
 
+#[track_caller]
 fn denied() -> StoreError {
+    tracing::warn!(
+        budget_stage = "broker-authorization",
+        source_line = std::panic::Location::caller().line(),
+        "Governed inference authorization denied"
+    );
     BudgetError::Authorization.into()
 }
 

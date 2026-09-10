@@ -33,7 +33,13 @@ pub struct Error {
     pub status: Option<u16>,
 }
 
+#[track_caller]
 fn failure(stage: &'static str) -> Error {
+    tracing::warn!(
+        budget_stage = "router-budget-client",
+        source_line = std::panic::Location::caller().line(),
+        "Governed inference client operation unavailable"
+    );
     Error {
         stage,
         status: None,
@@ -137,6 +143,11 @@ impl Client {
             .map_err(|_| failure(path))?;
         let status = response.status();
         if !status.is_success() {
+            tracing::warn!(
+                budget_stage = "router-broker-http",
+                http_status = status.as_u16(),
+                "Governed inference broker rejected request"
+            );
             return Err(Error {
                 stage: path,
                 status: Some(status.as_u16()),
@@ -180,6 +191,18 @@ impl Client {
                 && (!response.money_required || contract.maximum_price.is_some())
         });
         if !applicable {
+            for contract in &response.catalog.contracts {
+                tracing::warn!(
+                    budget_stage = "router-contract-match",
+                    provider_matches = contract.provider_id == upstream.telemetry_provider(),
+                    endpoint_matches = contract.endpoint.trim_end_matches('/')
+                        == upstream.endpoint.trim_end_matches('/'),
+                    model_matches = contract.model == upstream.deployment,
+                    bounds_valid = contract.validate(now).is_ok(),
+                    price_available = !response.money_required || contract.maximum_price.is_some(),
+                    "Governed inference selected contract mismatch"
+                );
+            }
             return Err(failure("selected model bounds/maximum prices"));
         }
         Ok(())
