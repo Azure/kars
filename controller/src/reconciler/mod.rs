@@ -49,6 +49,7 @@ pub(crate) mod trustgraph_mount;
 use mcp_egress::mcp_egress_rule;
 
 mod pod_spec;
+mod sre_egress;
 pub(crate) use pod_spec::{
     build_egress_guard_command, build_pod_security_context, isolation_scheduling,
     sandbox_node_selector_from,
@@ -951,13 +952,14 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     egress_rules
         .extend(inference::configured_local_egress_rules().map_err(ReconcileError::Configuration)?);
 
-    // Registered SRE routers need apiserver egress; UID 1000 still cannot use
-    // it directly. The generic HTTPS rule excludes private Service ranges.
-    if is_sre_sandbox {
-        egress_rules.push(json!({
-            "to": [{"ipBlock": {"cidr": format!("{}/32", apiserver_ip)}}],
-            "ports": [{"protocol": "TCP", "port": apiserver_port.parse::<u16>().unwrap_or(443)}]
-        }));
+    // Policy enforcement may observe the API's post-DNAT endpoint IP/port.
+    // Only registered routers receive exact targets; UID 1000 stays locked down.
+    if sre_projection.is_some() {
+        egress_rules.extend(
+            sre_egress::rules(client, &apiserver_ip, &apiserver_port)
+                .await
+                .map_err(ReconcileError::Configuration)?,
+        );
     }
 
     // Add user-defined allowed endpoints (for the inference-router to reach
@@ -3146,6 +3148,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     tracing::info!("KarsSandbox {name} reconciled successfully");
     Ok(Action::requeue(Duration::from_secs(
         if sandbox.spec.credentials_ref.is_some()
+            || sre_projection.is_some()
             || !governance_config.effective_mcp_server_refs().is_empty()
         {
             30

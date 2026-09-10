@@ -249,7 +249,15 @@ def prove(root, port, state, objects, report):
     facts["authorization"] = {"patchReaderBinding": True, "useCanonical": True, "bindReader": baseline_bind,
         "bindCustom": api.allowed("rbac.authorization.k8s.io", "clusterroles", "bind", CUSTOM),
         "getCustomLimitRanges": api.allowed("", "limitranges", "get"),
-        "getReaderNodeMetrics": api.allowed("metrics.k8s.io", "nodes", "get")}
+        "getReaderNodeMetrics": api.allowed("metrics.k8s.io", "nodes", "get"),
+        "getApiEndpoints": api.allowed("", "endpoints", "get", "kubernetes"),
+        "getOtherEndpoints": api.allowed("", "endpoints", "get", "unrelated"),
+        "listEndpoints": api.allowed("", "endpoints", "list")}
+    report(facts)
+    require(facts["authorization"]["getApiEndpoints"]
+            and not facts["authorization"]["getOtherEndpoints"]
+            and not facts["authorization"]["listEndpoints"],
+            "API endpoint discovery is missing or broader than the exact named GET")
     require(baseline_bind, "Shipped controller lacks the exact named legacy reader bind permission")
     facts["shippedReaderBindVerified"] = True
     # The historical 403/200/403 experiment is retained in its immutable CI
