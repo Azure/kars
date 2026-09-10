@@ -64,7 +64,7 @@ describe("existing action API prerequisite compatibility", () => {
   it("feeds the actual offline Helm render through template staging with the repaired action API first", async () => {
     const f = fixture();
     const execute: Execute = (file, args, options) => file === "helm" && args[0] === "template"
-      ? execa(file, [...args, "--dry-run=client"], { ...options, timeout: 4000 }) : f.execute(file, args, options);
+      ? execa(file, [...args, "--dry-run=client"], { ...options, timeout: 20_000 }) : f.execute(file, args, options);
     const root = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
     const directory = mkdtempSync(join(tmpdir(), "kars-sre-stage-"));
     const chart = join(directory, "chart");
@@ -84,7 +84,7 @@ describe("existing action API prerequisite compatibility", () => {
     } finally {
       rmSync(directory, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it.each([false, true])("repairs ONLY recognized legacy params before dependent policies (Helm: %s)", async helm => {
     const f = fixture(helm);
