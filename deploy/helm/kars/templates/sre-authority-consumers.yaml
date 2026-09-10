@@ -1,0 +1,249 @@
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-consumer-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["deployments", "deployments/scale"]
+  matchConditions:
+    - name: canonical-runtime-consumer
+      expression: >-
+        has(request.namespace) && request.namespace == 'kars-sre' &&
+        ((has(request.name) && request.name == 'sre') ||
+         (object != null && has(object.metadata) && has(object.metadata.name) && object.metadata.name == 'sre') ||
+         (oldObject != null && has(oldObject.metadata) && has(oldObject.metadata.name) && oldObject.metadata.name == 'sre'))
+  validations:
+    - expression: >-
+        authorizer.group('kars.azure.com').resource('karssreregistrations')
+          .name('canonical').check('use').allowed()
+      message: "Canonical SRE runtime changes require registrar authority"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-consumer-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-consumer-authority
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-role-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: ["rbac.authorization.k8s.io"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["roles", "clusterroles"]
+  matchConditions:
+    - name: reserved-sre-role
+      expression: >-
+        (has(request.name) && request.name in
+          ['kars-sre-reader', 'kars-sre-action-author', 'kars-sre-router-renew',
+           'kars-sre-private-diagnostics', 'kars-sre-registrar', 'kars-sre-retired-agent']) ||
+        (object != null && has(object.metadata) && has(object.metadata.name) && object.metadata.name in
+          ['kars-sre-reader', 'kars-sre-action-author', 'kars-sre-router-renew',
+           'kars-sre-private-diagnostics', 'kars-sre-registrar', 'kars-sre-retired-agent']) ||
+        (oldObject != null && has(oldObject.metadata) && has(oldObject.metadata.name) && oldObject.metadata.name in
+          ['kars-sre-reader', 'kars-sre-action-author', 'kars-sre-router-renew',
+           'kars-sre-private-diagnostics', 'kars-sre-registrar', 'kars-sre-retired-agent']) ||
+        (has(request.namespace) && request.namespace == 'kars-sre' &&
+          ((has(request.name) && request.name == 'sre-api-self-renew') ||
+           (object != null && has(object.metadata) && has(object.metadata.name) &&
+             object.metadata.name == 'sre-api-self-renew') ||
+           (oldObject != null && has(oldObject.metadata) && has(oldObject.metadata.name) &&
+             oldObject.metadata.name == 'sre-api-self-renew')))
+  validations:
+    - expression: >-
+        authorizer.group('kars.azure.com').resource('karssreregistrations')
+          .name('canonical').check('use').allowed()
+      message: "Reserved SRE authority roles require explicit registrar use permission"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-role-authority
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-role-authority
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-private-mounts
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods", "pods/ephemeralcontainers"]
+  matchConditions:
+    - name: sre-runtime
+      expression: "request.namespace == 'kars-sre'"
+  variables:
+    - name: containers
+      expression: >-
+        object.spec.containers + object.spec.?initContainers.orValue([]) +
+        object.spec.?ephemeralContainers.orValue([])
+    - name: privateMaterial
+      expression: >-
+        object.spec.?volumes.orValue([]).exists(v,
+          (has(v.secret) && v.secret.secretName == 'sre-api-router-identity') ||
+          (has(v.projected) && v.projected.sources.exists(s,
+            has(s.secret) && s.secret.name == 'sre-api-router-identity'))) ||
+        variables.containers.exists(c,
+          c.?envFrom.orValue([]).exists(e, has(e.secretRef) && e.secretRef.name == 'sre-api-router-identity') ||
+          c.?env.orValue([]).exists(e, has(e.valueFrom) && has(e.valueFrom.secretKeyRef) &&
+            e.valueFrom.secretKeyRef.name == 'sre-api-router-identity')) ||
+        object.spec.?serviceAccountName.orValue('') == 'sre-api-router'
+  validations:
+    - expression: >-
+        !variables.privateMaterial ||
+        authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed() ||
+        authorizer.group('').resource('pods').check('create').allowed()
+      message: "Private SRE material may only be mounted by registrars or cluster-wide workload controllers"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-private-mounts
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-private-mounts
+  validationActions: [Deny, Audit]
+---
+# Pod admission must also validate parent templates: otherwise a namespaced
+# caller could launder a private mount through a privileged workload controller.
+{{ range $kind := list "workloads" "cronjobs" }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-private-{{ $kind }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      {{- if eq $kind "workloads" }}
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["replicationcontrollers"]
+      - apiGroups: ["apps"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["jobs"]
+      {{- else }}
+      - apiGroups: ["batch"]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["cronjobs"]
+      {{- end }}
+  matchConditions:
+    - name: sre-runtime
+      expression: "request.namespace == 'kars-sre'"
+    {{- if eq $kind "workloads" }}
+    - name: replication-controller-template-present
+      expression: "object.kind != 'ReplicationController' || has(object.spec.template)"
+    {{- end }}
+  variables:
+    - name: pod
+      expression: {{ if eq $kind "cronjobs" }}"object.spec.jobTemplate.spec.template.spec"{{ else }}"object.spec.template.spec"{{ end }}
+    - name: containers
+      expression: "variables.pod.containers + variables.pod.?initContainers.orValue([])"
+    - name: privateMaterial
+      expression: >-
+        variables.pod.?volumes.orValue([]).exists(v,
+          (has(v.secret) && v.secret.secretName == 'sre-api-router-identity') ||
+          (has(v.projected) && v.projected.sources.exists(s,
+            has(s.secret) && s.secret.name == 'sre-api-router-identity'))) ||
+        variables.containers.exists(c,
+          c.?envFrom.orValue([]).exists(e, has(e.secretRef) && e.secretRef.name == 'sre-api-router-identity') ||
+          c.?env.orValue([]).exists(e, has(e.valueFrom) && has(e.valueFrom.secretKeyRef) &&
+            e.valueFrom.secretKeyRef.name == 'sre-api-router-identity')) ||
+        variables.pod.?serviceAccountName.orValue('') == 'sre-api-router'
+  validations:
+    - expression: >-
+        !variables.privateMaterial ||
+        authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed() ||
+        authorizer.group('').resource('pods').check('create').allowed()
+        {{- if eq $kind "workloads" }}
+        || (request.resource.group == 'apps' && request.resource.resource == 'replicasets' &&
+          authorizer.group('apps').resource('replicasets').check('create').allowed())
+        {{- end }}
+      message: "Private SRE workload templates require registrar or cluster-wide workload-controller authority"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-private-{{ $kind }}
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-private-{{ $kind }}
+  validationActions: [Deny, Audit]
+{{ end }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-sre-private-connect
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CONNECT"]
+        resources: ["pods/exec", "pods/attach", "pods/portforward", "pods/proxy"]
+  matchConditions:
+    - name: sre-runtime
+      expression: "request.namespace == 'kars-sre'"
+  validations:
+    - expression: >-
+        authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed()
+      message: "Connecting into the SRE private-identity runtime requires registrar authority"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-sre-private-connect
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-sre-private-connect
+  validationActions: [Deny, Audit]

@@ -1,0 +1,142 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-registrar
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre-authority
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreregistrations"]
+    verbs: ["create", "get", "list", "watch"]
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreregistrations"]
+    resourceNames: ["canonical"]
+    verbs: ["use", "update", "patch", "delete"]
+---
+# Deliberately unbound. Only a cluster administrator delegates registrar power.
+# Controller read/status/use permissions do not permit it to enroll a tenant.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-router-renew
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre-authority
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreregistrations"]
+    resourceNames: ["canonical"]
+    verbs: ["get", "renew"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-retired-agent
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre-authority
+rules: []
+---
+# Unbound in the chart. The registration controller grants this only to the
+# exact claimed runtime namespace's protected, UID-owned router identity.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-private-diagnostics
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre-authority
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssandboxes", "inferencepolicies", "toolpolicies", "egressapprovals",
+      "karsmemories", "karsevals", "trustgraphs", "karspairings", "a2aagents", "mcpservers",
+      "karsauthconfigs", "karstasks", "karsteams", "karsprofiles", "karsskills", "karsreceipts", "karsapprovals"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods", "pods/log", "services", "configmaps", "events", "namespaces",
+      "serviceaccounts", "nodes", "endpoints", "resourcequotas", "limitranges", "secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets", "statefulsets", "daemonsets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["batch"]
+    resources: ["jobs", "cronjobs"]
+    verbs: ["get", "list"]
+  - apiGroups: ["networking.k8s.io"]
+    resources: ["networkpolicies", "ingresses"]
+    verbs: ["get", "list"]
+  - apiGroups: ["discovery.k8s.io"]
+    resources: ["endpointslices"]
+    verbs: ["get", "list"]
+  - apiGroups: ["events.k8s.io"]
+    resources: ["events"]
+    verbs: ["get", "list"]
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["pods", "nodes"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
+    verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-sre-authority-controller
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre-authority
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreregistrations"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreregistrations"]
+    resourceNames: ["canonical"]
+    verbs: ["use"]
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssreregistrations/status"]
+    resourceNames: ["canonical"]
+    verbs: ["get", "patch", "update"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles", "roles", "rolebindings"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["create", "patch", "update", "delete"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["clusterroles"]
+    resourceNames: ["kars-sre-private-diagnostics", "kars-sre-action-author", "kars-sre-router-renew", "kars-sre-reader"]
+    verbs: ["bind"]
+  - apiGroups: ["authorization.k8s.io"]
+    resources: ["subjectaccessreviews"]
+    verbs: ["create"]
+  - apiGroups: [""]
+    resources: ["endpoints"]
+    resourceNames: ["kubernetes"]
+    verbs: ["get"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kars-sre-authority-controller
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: sre-authority
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kars-sre-authority-controller
+subjects:
+  - kind: ServiceAccount
+    name: kars-controller
+    namespace: {{ .Release.Namespace }}

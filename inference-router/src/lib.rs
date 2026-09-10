@@ -49,6 +49,9 @@ pub mod routes;
 pub mod safety;
 pub mod sidecar_client;
 pub mod spawn;
+#[path = "../../shared/sre_privacy.rs"]
+mod sre_privacy;
+pub mod sre_proxy;
 pub mod telemetry;
 
 /// Select RustCrypto for JWT signing and verification. Workspace builds also

@@ -1,0 +1,272 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+import copy
+import json
+
+from .common import POLICIES, PRIVATE, REGISTRATION, RUNTIME, STANDIN, TENANT, assert_denial, require
+from .collection_delete_probe import stable_object
+
+
+def policies_ready(h):
+    def checked():
+        for suffix in POLICIES:
+            name = f"kars-sre-{suffix}"
+            policy = h.get("validatingadmissionpolicy", name)
+            binding = h.get("validatingadmissionpolicybinding", name)
+            if not policy or not binding:
+                return False
+            status = policy.get("status", {})
+            if status.get("observedGeneration") != policy["metadata"]["generation"] or "typeChecking" not in status:
+                return False
+            require(not status["typeChecking"].get("expressionWarnings"), f"CEL type warnings in {name}")
+            require(policy["spec"].get("failurePolicy") == "Fail", f"{name} does not fail closed")
+            require(binding["spec"]["policyName"] == name and "Deny" in binding["spec"]["validationActions"],
+                    f"{name} lacks a matching enforcing binding")
+        return True
+    h.poll("all observed/enforcing SRE CEL policies", checked, seconds=90)
+    h.passed(f"All {len(POLICIES)} real API admission policies are observed, CEL-type-checked without warnings, and Deny-bound")
+
+
+def pod_spec(private=True):
+    spec = {"serviceAccountName": "sandbox", "automountServiceAccountToken": False,
+        "securityContext": {"runAsNonRoot": True, "runAsUser": 1000, "seccompProfile": {"type": "RuntimeDefault"}},
+        "containers": [{"name": "probe", "image": STANDIN, "command": ["/bin/sh", "-c", "sleep infinity"],
+            "securityContext": {"allowPrivilegeEscalation": False, "capabilities": {"drop": ["ALL"]}}}]}
+    if private:
+        spec["volumes"] = [{"name": "private", "secret": {"secretName": PRIVATE}}]
+        spec["containers"][0]["volumeMounts"] = [{"name": "private", "mountPath": "/private", "readOnly": True}]
+    return spec
+
+
+def reserved_source_probe():
+    return {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSandbox",
+        "metadata": {"name": "sre", "namespace": TENANT},
+        "spec": {"runtime": {"kind": "BYO", "byo": {"image": STANDIN, "contractVersion": "v1"}},
+                 "inferenceRef": {"name": "sre-inference"},
+                 "sandbox": {"isolation": "standard"}}}
+
+
+def rc_update_preview(h, path, original, candidate):
+    current = h.api("GET", path, status=200).json()
+    require(stable_object(current) == stable_object(original)
+            and not current["metadata"].get("deletionTimestamp"),
+            "ReplicationController update target changed beyond status")
+    for attempt in range(3):
+        body = copy.deepcopy(candidate)
+        body["metadata"] = copy.deepcopy(current["metadata"])
+        response = h.api("PUT", path + "?dryRun=All", body=body, user="tenant")
+        if response.status_code != 409 or response.json().get("reason") != "Conflict" or attempt == 2:
+            return response
+        refreshed = h.api("GET", path, status=200).json()
+        require(stable_object(refreshed) == stable_object(current)
+                and not refreshed["metadata"].get("deletionTimestamp"),
+                "ReplicationController update conflict changed more than status; no retry")
+        if refreshed["metadata"]["resourceVersion"] == current["metadata"]["resourceVersion"]:
+            return response
+        current = refreshed
+    raise AssertionError("ReplicationController preview exceeded its bounded attempts")
+
+
+def replication_controller_cases(h):
+    collection = f"/api/v1/namespaces/{RUNTIME}/replicationcontrollers"
+    for resource, verb, namespace, subresource, expected in [
+        ("replicationcontrollers", "create", RUNTIME, "", True),
+        ("replicationcontrollers", "update", RUNTIME, "", True),
+        ("pods", "get", RUNTIME, "log", True),
+        ("pods", "create", "", "", False),
+        ("secrets", "get", RUNTIME, "", False),
+    ]:
+        response = h.api("POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews",
+                         user="tenant", status=201, body={
+            "apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
+            "spec": {"resourceAttributes": {
+                "group": "", "resource": resource, "verb": verb, "namespace": namespace,
+                **({"subresource": subresource} if subresource else {})}},
+        }).json()["status"]
+        require(response.get("allowed") is expected and not response.get("evaluationError"),
+                "ReplicationController probe does not have the intended limited authority")
+
+    pod = pod_spec(False)
+    pod["schedulerName"] = "kars-e2e-admission-never-schedule"
+    pod["containers"][0]["command"] = ["/bin/true"]
+    pod["containers"][0]["imagePullPolicy"] = "Never"
+    ordinary = {
+        "apiVersion": "v1", "kind": "ReplicationController",
+        "metadata": {"name": "e2e-rc-boundary", "namespace": RUNTIME},
+        "spec": {"replicas": 0, "selector": {"app": "e2e-rc-boundary"},
+                 "template": {"metadata": {"labels": {"app": "e2e-rc-boundary"}}, "spec": pod}},
+    }
+    without_template = copy.deepcopy(ordinary)
+    without_template["spec"].pop("template")
+    invalid = h.api("POST", collection + "?dryRun=All", body=without_template,
+                    user="tenant", status=422).json()
+    require(invalid.get("reason") == "Invalid" and any(
+        cause.get("field") == "spec.template" and cause.get("reason") == "FieldValueRequired"
+        for cause in invalid.get("details", {}).get("causes", [])),
+        "Template-less ReplicationController did not receive the native required-field rejection")
+    created = h.api("POST", collection, body=ordinary, user="tenant", status=201).json()
+    identity = created["metadata"]["uid"]
+    path = collection + "/" + created["metadata"]["name"]
+    primary_failure = False
+    try:
+        for variant in ["ordinary", "secret-volume", "projected-secret", "env", "env-key",
+                        "init-env", "service-account"]:
+            current = h.api("GET", path, status=200).json()
+            require(current["metadata"]["uid"] == identity and current["spec"] == created["spec"],
+                    "ReplicationController fixture identity or template changed")
+            candidate = copy.deepcopy(current)
+            candidate.pop("status", None)
+            spec = candidate["spec"]["template"]["spec"]
+            if variant == "secret-volume":
+                spec["volumes"] = [{"name": "private", "secret": {"secretName": PRIVATE}}]
+            elif variant == "projected-secret":
+                spec["volumes"] = [{"name": "private", "projected": {"sources": [{"secret": {
+                    "name": PRIVATE}}]}}]
+            elif variant == "env":
+                spec["containers"][0]["envFrom"] = [{"secretRef": {"name": PRIVATE}}]
+            elif variant == "env-key":
+                spec["containers"][0]["env"] = [{"name": "PRIVATE_TOKEN", "valueFrom": {
+                    "secretKeyRef": {"name": PRIVATE, "key": "kube-token"}}}]
+            elif variant == "init-env":
+                initializer = copy.deepcopy(spec["containers"][0])
+                initializer["name"] = "private-init"
+                initializer["envFrom"] = [{"secretRef": {"name": PRIVATE}}]
+                spec["initContainers"] = [initializer]
+            elif variant == "service-account":
+                spec["serviceAccountName"] = "sre-api-router"
+            for method, target in [("POST", collection), ("PUT", path)]:
+                body = copy.deepcopy(candidate)
+                if method == "POST":
+                    body["metadata"] = {"name": "e2e-rc-dry-run", "namespace": RUNTIME}
+                response = (rc_update_preview(h, target, current, body) if method == "PUT"
+                            else h.api(method, target + "?dryRun=All", body=body, user="tenant"))
+                print("SRE-RC-ADMISSION " + json.dumps({
+                    "variant": variant, "method": method, "httpStatus": response.status_code,
+                }), flush=True)
+                if variant == "ordinary":
+                    require(response.status_code == (201 if method == "POST" else 200),
+                            f"Ordinary ReplicationController {method} was not admitted: HTTP {response.status_code}")
+                else:
+                    assert_denial(response, f"{method} ReplicationController {variant}",
+                                  "kars-sre-private-workloads")
+    except BaseException:
+        primary_failure = True
+        raise
+    finally:
+        try:
+            removed = False
+            for _ in range(3):
+                current = h.api("GET", path, status=(200, 404))
+                if current.status_code == 404:
+                    removed = True
+                    break
+                current = current.json()
+                require(current["metadata"]["uid"] == identity and current["spec"] == created["spec"],
+                        "ReplicationController cleanup refuses changed fixture ownership or template")
+                response = h.api("DELETE", path, body={
+                    "apiVersion": "v1", "kind": "DeleteOptions", "preconditions": {
+                        "uid": identity, "resourceVersion": current["metadata"]["resourceVersion"]},
+                })
+                if response.status_code == 409:
+                    continue
+                require(response.status_code in (200, 202), "Owned ReplicationController cleanup failed")
+                removed = True
+                break
+            require(removed, "Owned ReplicationController cleanup contention exceeded its bound")
+            def gone():
+                response = h.api("GET", path, status=(200, 404))
+                if response.status_code == 404:
+                    return True
+                require(response.json()["metadata"]["uid"] == identity,
+                        "ReplicationController was replaced during cleanup")
+                return False
+            h.poll("owned ReplicationController fixture deletion", gone, seconds=30)
+        except Exception:
+            if not primary_failure:
+                raise
+            print("SRE-DIAG owned ReplicationController fixture cleanup failed", flush=True)
+    h.passed("Real ReplicationController CREATE/UPDATE deny private mounts and identities under namespaced-only authority")
+
+
+def admission_cases(h, enrollment):
+    registration = {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsSRERegistration",
+                    "metadata": {"name": "canonical"}, "spec": enrollment}
+    # Normal SA has no cluster enrollment permission. Tenant probe has CREATE
+    # but deliberately lacks USE, so the second check exercises actual CEL.
+    assert_denial(h.api("POST", REGISTRATION.rsplit("/", 1)[0] + "?dryRun=All",
+                       body=registration, user="normal"), "ordinary registration RBAC")
+    assert_denial(h.api("POST", REGISTRATION.rsplit("/", 1)[0] + "?dryRun=All",
+                       body=registration, user="tenant"), "registration CEL", "kars-sre-registration-authority")
+    review = h.api("POST", "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", user="normal", body={
+        "apiVersion": "authorization.k8s.io/v1", "kind": "SelfSubjectAccessReview",
+        "spec": {"resourceAttributes": {"group": "kars.azure.com", "resource": "karssreregistrations",
+                                      "name": "canonical", "verb": "use"}}}, status=201).json()
+    require(review["status"]["allowed"] is False, "Ordinary SA unexpectedly has registrar use")
+    h.passed("Real RBAC and CEL independently deny ordinary/tenant registration and registrar use")
+
+    source = reserved_source_probe()
+    assert_denial(h.api("POST", f"/apis/kars.azure.com/v1alpha1/namespaces/{TENANT}/karssandboxes?dryRun=All",
+                       body=source, user="tenant"), "reserved source", "kars-sre-source-authority")
+    source["metadata"]["name"] = "not-canonical"
+    source["metadata"]["labels"] = {"kars.azure.com/role": "sre"}
+    assert_denial(h.api("POST", f"/apis/kars.azure.com/v1alpha1/namespaces/{TENANT}/karssandboxes?dryRun=All",
+                       body=source, user="tenant"), "reserved SRE role", "kars-sre-source-authority")
+    h.passed("Namespace authority cannot create a reserved-name or SRE-labelled source")
+
+    sa = {"apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": "sre-api-router", "namespace": TENANT}}
+    assert_denial(h.api("POST", f"/api/v1/namespaces/{TENANT}/serviceaccounts?dryRun=All",
+                       body=sa, user="tenant"), "reserved ServiceAccount", "kars-sre-private-identity")
+    secret = {"apiVersion": "v1", "kind": "Secret", "metadata": {"name": PRIVATE, "namespace": RUNTIME},
+              "stringData": {"kube-token": "not-a-credential"}}
+    assert_denial(h.api("POST", f"/api/v1/namespaces/{RUNTIME}/secrets?dryRun=All",
+                       body=secret, user="tenant"), "reserved material", "kars-sre-private-material")
+    h.passed("Real admission denies reserved identities and private material despite namespaced create permission")
+
+    # An otherwise valid ordinary Pod is admitted in server-side dry-run;
+    # private variants must be denied by the intended policy, not schema/RBAC.
+    ordinary = {"apiVersion": "v1", "kind": "Pod", "metadata": {"name": "e2e-ordinary", "namespace": RUNTIME}, "spec": pod_spec(False)}
+    h.api("POST", f"/api/v1/namespaces/{RUNTIME}/pods?dryRun=All", body=ordinary, user="tenant", status=201)
+    private = {**ordinary, "metadata": {"name": "e2e-private", "namespace": RUNTIME}, "spec": pod_spec()}
+    assert_denial(h.api("POST", f"/api/v1/namespaces/{RUNTIME}/pods?dryRun=All",
+                       body=private, user="tenant"), "private Pod mount", "kars-sre-private-mounts")
+    env_only = pod_spec(False)
+    env_only["containers"][0]["envFrom"] = [{"secretRef": {"name": PRIVATE}}]
+    assert_denial(h.api("POST", f"/api/v1/namespaces/{RUNTIME}/pods?dryRun=All",
+                       body={**private, "spec": env_only}, user="tenant"), "private envFrom", "kars-sre-private-mounts")
+    h.passed("A valid ordinary Pod is accepted; private volume/envFrom laundering is denied")
+
+    for kind, group, plural in [("Deployment", "apps/v1", "deployments"), ("ReplicaSet", "apps/v1", "replicasets"),
+                                 ("Job", "batch/v1", "jobs"), ("CronJob", "batch/v1", "cronjobs")]:
+        template = {"metadata": {"labels": {"app": "e2e-private-template"}}, "spec": pod_spec()}
+        if kind in ("Job", "CronJob"):
+            template["spec"]["restartPolicy"] = "Never"
+        spec = {"template": template}
+        if kind in ("Deployment", "ReplicaSet"):
+            spec.update({"replicas": 1, "selector": {"matchLabels": template["metadata"]["labels"]}})
+        if kind == "CronJob":
+            spec = {"schedule": "0 * * * *", "jobTemplate": {"spec": spec}}
+        obj = {"apiVersion": group, "kind": kind, "metadata": {"name": "e2e-private-template", "namespace": RUNTIME}, "spec": spec}
+        policy = "kars-sre-private-cronjobs" if kind == "CronJob" else "kars-sre-private-workloads"
+        assert_denial(h.api("POST", f"/apis/{group}/namespaces/{RUNTIME}/{plural}?dryRun=All",
+                           body=obj, user="tenant"), f"{kind} private template", policy)
+        h.passed(f"Real {kind} admission prevents private-material laundering through workload controllers")
+    replication_controller_cases(h)
+
+
+def runtime_denials(h, pod):
+    response = h.api("POST", f"/api/v1/namespaces/{RUNTIME}/serviceaccounts/sre-api-router/token",
+                    body={"apiVersion": "authentication.k8s.io/v1", "kind": "TokenRequest",
+                          "spec": {"audiences": [], "expirationSeconds": 600}}, user="tenant")
+    assert_denial(response, "private TokenRequest", "kars-sre-private-identity")
+    for subresource, args in [
+        ("exec", ["exec", "-n", RUNTIME, pod, "-c", "agent", "--", "/bin/true"]),
+        ("attach", ["attach", "-n", RUNTIME, pod, "-c", "agent"]),
+        ("portforward", ["port-forward", "-n", RUNTIME, f"pod/{pod}", "19446:9446"]),
+    ]:
+        result = h.k(*args, user="tenant", expected=None, timeout=25)
+        require(result.returncode != 0 and "kars-sre-private-connect" in result.stderr
+                and "forbidden" in result.stderr.lower(), f"{subresource} did not receive the intended connect-admission denial")
+    assert_denial(h.api("GET", f"/api/v1/namespaces/{RUNTIME}/pods/{pod}:9446/proxy/api/v1/namespaces",
+                       user="tenant"), "Pod proxy connect", "kars-sre-private-connect")
+    h.passed("Tenant TokenRequests and actual exec/attach/port-forward/proxy attempts receive intended admission denials")
