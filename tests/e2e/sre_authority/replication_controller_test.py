@@ -5,8 +5,10 @@
 
 import copy
 import unittest
+from types import SimpleNamespace
+from unittest.mock import Mock
 
-from sre_authority.admission import replication_controller_cases
+from sre_authority.admission import rc_update_preview, replication_controller_cases
 from sre_authority.common import PRIVATE, RUNTIME
 
 
@@ -20,7 +22,8 @@ class Response:
 
 
 class Harness:
-    def __init__(self, *, allow_private=False, wrong_denial=False, conflict=False, replace=False):
+    def __init__(self, *, allow_private=False, wrong_denial=False, conflict=False, replace=False,
+                 update_conflict=False):
         self.calls = []
         self.object = None
         self.completed = []
@@ -28,6 +31,7 @@ class Harness:
         self.wrong_denial = wrong_denial
         self.conflict = conflict
         self.replace = replace
+        self.update_conflict = update_conflict
 
     def passed(self, message):
         self.completed.append(message)
@@ -59,6 +63,10 @@ class Harness:
                 self.object = None
                 response = Response(200, {})
         elif "?dryRun=All" in path:
+            if method == "PUT" and self.update_conflict:
+                self.update_conflict = False
+                self.object["metadata"]["resourceVersion"] = "2"
+                return Response(409, {"kind": "Status", "reason": "Conflict"})
             if "template" not in body["spec"]:
                 response = Response(422, {"kind": "Status", "reason": "Invalid", "details": {"causes": [
                     {"field": "spec.template", "reason": "FieldValueRequired"},
@@ -131,6 +139,42 @@ class ReplicationControllerProofTests(unittest.TestCase):
             {"uid": "owned-rc", "resourceVersion": "1"},
             {"uid": "owned-rc", "resourceVersion": "2"},
         ])
+
+    def test_update_status_conflict_retries_with_the_same_uid_and_fresh_version(self):
+        harness = Harness(update_conflict=True)
+        replication_controller_cases(harness)
+        updates = [body for method, _, body, _ in harness.calls if method == "PUT"]
+        self.assertEqual(updates[0]["metadata"]["uid"], "owned-rc")
+        self.assertEqual(updates[1]["metadata"]["uid"], "owned-rc")
+        self.assertEqual(updates[0]["metadata"]["resourceVersion"], "1")
+        self.assertEqual(updates[1]["metadata"]["resourceVersion"], "2")
+        self.assertEqual(len(harness.completed), 1)
+
+    def test_update_preview_never_retries_identity_or_content_changes(self):
+        original = {"metadata": {"name": "fixture", "uid": "owned", "resourceVersion": "1"},
+                    "spec": {"replicas": 0}}
+        for change in ["uid", "spec", "deletionTimestamp"]:
+            refreshed = copy.deepcopy(original)
+            refreshed["metadata"]["resourceVersion"] = "2"
+            if change == "uid":
+                refreshed["metadata"]["uid"] = "foreign"
+            elif change == "spec":
+                refreshed["spec"]["replicas"] = 1
+            else:
+                refreshed["metadata"]["deletionTimestamp"] = "2026-09-10T12:00:00Z"
+            api = Mock(side_effect=[Response(200, original), Response(409, {"reason": "Conflict"}),
+                                    Response(200, refreshed)])
+            with self.assertRaises(AssertionError):
+                rc_update_preview(SimpleNamespace(api=api), "/fixture", original, original)
+            self.assertEqual(api.call_count, 3)
+
+    def test_update_preview_returns_other_denials_without_retry(self):
+        original = {"metadata": {"uid": "owned", "resourceVersion": "1"}, "spec": {}}
+        for code in [403, 422, 500]:
+            denial = Response(code, {"reason": "Forbidden"})
+            api = Mock(side_effect=[Response(200, original), denial])
+            self.assertIs(rc_update_preview(SimpleNamespace(api=api), "/fixture", original, original), denial)
+            self.assertEqual(api.call_count, 2)
 
     def test_replacement_refuses_update_and_cleanup_of_the_foreign_object(self):
         harness = Harness(replace=True)
