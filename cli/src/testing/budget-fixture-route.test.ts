@@ -101,6 +101,28 @@ describe("budget named-provider fixture and private readiness diagnostics", () =
     }))).toEqual([{ stage: "router-contract-match", provider_matches: false,
       endpoint_matches: false, model_matches: true, bounds_valid: true, count: 1 }]);
   });
+  it("requires the unsupported-operation 503 contract without exporting arbitrary error bodies", () => {
+    const secret = "DO-NOT-EXPORT-PRIVATE-ERROR-CODE-OR-BODY";
+    const error = { code: "inference_budget_unavailable", type: "inference_budget_unavailable", message: secret };
+    expect(route.unsupportedOperationFact({ status: 503, value: { error } })).toEqual({
+      stage: "unsupported-inference-operation", httpStatus: 503,
+      category: "inference-budget-unavailable", matchesContract: true,
+    });
+    for (const response of [
+      { status: 502, value: { error } },
+      { status: 503, value: { error: { code: secret, type: secret, message: secret } } },
+      { status: secret, value: secret },
+      { status: 503, value: { error: { code: error.code, type: secret } } },
+    ]) {
+      const fact = route.unsupportedOperationFact(response);
+      expect(fact.matchesContract).toBe(false);
+      expect(JSON.stringify(fact)).not.toContain(secret);
+    }
+    const harness = readFileSync(new URL("../../../tests/e2e/inference-budget-enforcement.mjs", import.meta.url), "utf8");
+    expect(harness).toContain("assert.equal(unsupported.status, 503)");
+    expect(harness).toContain("assert(denial.matchesContract");
+    expect(harness).toContain('assert.equal((await request(provider, "/count")).value.count, count)');
+  });
   it("reports actual UID and live-template mismatches as booleans without workload inputs", () => {
     const router = { name: "inference-router", image: "router@sha256:fixture",
       env: [{ name: "KARS_INFERENCE_BUDGET_BINDING", value: "PRIVATE-BINDING" }], args: ["PRIVATE-ARGV"] };

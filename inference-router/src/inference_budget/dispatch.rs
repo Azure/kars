@@ -5,10 +5,36 @@ use super::{
     client::{AttemptGuard, Error},
     usage,
 };
-use crate::{inference_budget_dispatch, proxy::UpstreamConfig};
+use crate::{
+    inference_budget_contract::tariffs::Operation, inference_budget_dispatch, proxy::UpstreamConfig,
+};
 use axum::http::{Method, StatusCode};
 use bytes::Bytes;
 use futures::{StreamExt, stream::BoxStream};
+
+fn operation(method: &Method, path: &str) -> Result<Operation, Error> {
+    let denied = || Error {
+        stage: "unsupported inference operation",
+        status: None,
+    };
+    if method != Method::POST {
+        return Err(denied());
+    }
+    inference_budget_dispatch::operation(path).ok_or_else(denied)
+}
+
+/// Classify only: unsupported finite routes must not consult unrelated provider
+/// credentials first. Supported sends still acquire their grant at final dispatch.
+pub(crate) fn preflight(
+    upstream: &UpstreamConfig,
+    method: &Method,
+    path: &str,
+) -> Result<(), Error> {
+    if upstream.inference_budget.is_some() {
+        operation(method, path)?;
+    }
+    Ok(())
+}
 
 /// Runs after provider resolution and all wire transformations, immediately
 /// before the actual transport send. Each retry needs a separate grant.
@@ -21,14 +47,7 @@ pub async fn begin(
     let Some(client) = &upstream.inference_budget else {
         return Ok((body, None));
     };
-    let denied = || Error {
-        stage: "unsupported inference operation",
-        status: None,
-    };
-    if method != Method::POST {
-        return Err(denied().into());
-    }
-    let operation = inference_budget_dispatch::operation(path).ok_or_else(denied)?;
+    let operation = operation(method, path)?;
     let (wire, guard) = client
         .begin(
             upstream.telemetry_provider(),

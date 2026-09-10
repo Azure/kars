@@ -17,6 +17,9 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 
 static NEXT: AtomicUsize = AtomicUsize::new(0);
 
+#[path = "unsupported_routes_tests.rs"]
+mod unsupported_routes_tests;
+
 #[tokio::test]
 async fn native_stream_settlement_never_refunds_missing_or_inconsistent_final_usage() {
     for (name, wire) in super::super::anthropic_cases::incomplete() {
@@ -274,7 +277,13 @@ impl Fixture {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir(&directory).unwrap();
+        let mut builder = std::fs::DirBuilder::new();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::DirBuilderExt;
+            builder.mode(0o700);
+        }
+        builder.create(&directory).unwrap();
         let token_path = directory.join("token");
         std::fs::write(&token_path, "private-test-token").unwrap();
         let client = Arc::new(Client {
