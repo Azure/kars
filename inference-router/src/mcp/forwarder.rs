@@ -114,6 +114,7 @@ struct ForwarderEntry {
     /// the task's [`AbortHandle`] so it can be cancelled when the session is
     /// re-initialized (replaced) or the dispatcher is dropped.
     keepalive: Arc<Mutex<Option<tokio::task::AbortHandle>>>,
+    call_gate: Arc<Mutex<()>>,
 }
 
 /// Namespaced MCP forwarder — the production-mode `AsyncToolDispatcher`
@@ -178,6 +179,7 @@ impl RouterToolDispatcher {
     ) -> Result<Self, String> {
         let http = reqwest::Client::builder()
             .timeout(per_call_timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .map_err(|e| format!("reqwest client init: {e}"))?;
         Self::discover_with_client(registry, http).await
@@ -235,6 +237,9 @@ impl AsyncToolDispatcher for RouterToolDispatcher {
         if !entry.tools.contains_key(suffix) {
             return Err(DispatchError::UnknownTool(name.to_string()));
         }
+        let _call = entry.call_gate.try_lock().map_err(|_| DispatchError::ExecutionFailed {
+            tool: name.into(), reason: "MCP server has an active invocation; no concurrent session mutation was attempted".into(),
+        })?;
         forward_tools_call(&self.http, entry, suffix, arguments).await
     }
 }
@@ -373,6 +378,7 @@ async fn build_entry_for(
             bearer_token,
             session: Arc::new(Mutex::new(session)),
             keepalive,
+            call_gate: Arc::new(Mutex::new(())),
         },
         namespaced_defs,
     ))
@@ -467,8 +473,8 @@ async fn initialize_session(http: &reqwest::Client, url: &str, bearer: Option<&s
 
     let resp = match req.send().await {
         Ok(r) => r,
-        Err(e) => {
-            tracing::debug!(url = %url, error = %e, "MCP initialize POST failed; treating upstream as stateless");
+        Err(_) => {
+            tracing::debug!("MCP initialize transport failed; trying the legacy stateless path");
             return McpSession::stateless();
         }
     };
@@ -489,7 +495,7 @@ async fn initialize_session(http: &reqwest::Client, url: &str, bearer: Option<&s
     // body may be plain JSON or an SSE event stream (official TS-SDK servers
     // reply with SSE); `extract_jsonrpc_payload` handles both. If anything is
     // missing we fall back to the version we proposed.
-    let protocol_version = match resp.text().await {
+    let protocol_version = match super::response_body::text(resp).await {
         Ok(body) => extract_jsonrpc_payload(&content_type, &body)
             .ok()
             .and_then(|v| {
@@ -529,11 +535,11 @@ async fn initialize_session(http: &reqwest::Client, url: &str, bearer: Option<&s
     if let Some(token) = bearer {
         nreq = nreq.bearer_auth(token);
     }
-    if let Err(e) = nreq.send().await {
-        tracing::debug!(url = %url, error = %e, "MCP notifications/initialized POST failed");
+    if nreq.send().await.is_err() {
+        tracing::debug!("MCP notifications/initialized transport failed");
     }
 
-    tracing::debug!(url = %url, protocol = %session.protocol_version, "Established MCP session with stateful upstream");
+    tracing::debug!(protocol = %session.protocol_version, "Established MCP session with stateful upstream");
     session
 }
 
@@ -613,8 +619,8 @@ async fn run_session_keepalive(
 
         let resp = match req.send().await {
             Ok(r) => r,
-            Err(e) => {
-                tracing::debug!(url = %url, error = %e, "MCP keepalive GET failed; retrying");
+            Err(_) => {
+                tracing::debug!("MCP keepalive transport failed; retrying");
                 tokio::time::sleep(KEEPALIVE_RECONNECT_BACKOFF).await;
                 continue;
             }
@@ -625,7 +631,6 @@ async fn run_session_keepalive(
             // stream (so it can't be heartbeating us either). Either way, stop:
             // there is nothing this task can keep alive.
             tracing::debug!(
-                url = %url,
                 status = %resp.status(),
                 "MCP keepalive GET not available; stopping keepalive for this session"
             );
@@ -637,11 +642,15 @@ async fn run_session_keepalive(
         while let Some(chunk) = stream.next().await {
             let bytes = match chunk {
                 Ok(b) => b,
-                Err(e) => {
-                    tracing::debug!(url = %url, error = %e, "MCP keepalive SSE read error; reconnecting");
+                Err(_) => {
+                    tracing::debug!("MCP keepalive stream transport failed; reconnecting");
                     break;
                 }
             };
+            if buf.len().saturating_add(bytes.len()) > 64 * 1024 {
+                tracing::warn!("MCP keepalive frame exceeded its byte limit");
+                return;
+            }
             buf.push_str(&String::from_utf8_lossy(&bytes));
             // SSE frames are newline-delimited; pull complete lines and act on
             // `data:` lines that carry a server→client `ping` request.
@@ -661,6 +670,9 @@ async fn run_session_keepalive(
                     // A ping *notification* (no id) needs no response.
                     continue;
                 };
+                if !id.is_number() && id.as_str().is_none_or(|id| id.len() > 128) {
+                    continue;
+                }
                 let pong = json!({ "jsonrpc": "2.0", "id": id, "result": {} });
                 let mut preq = http
                     .post(&url)
@@ -671,8 +683,8 @@ async fn run_session_keepalive(
                 if let Some(token) = bearer.as_deref() {
                     preq = preq.bearer_auth(token);
                 }
-                if let Err(e) = preq.send().await {
-                    tracing::debug!(url = %url, error = %e, "MCP keepalive pong POST failed");
+                if preq.send().await.is_err() {
+                    tracing::debug!("MCP keepalive pong transport failed");
                 }
             }
         }
@@ -683,81 +695,67 @@ async fn run_session_keepalive(
     }
 }
 
-/// pagination — Slice 4d.4 caps at one page; multi-page upstreams are
-/// truncated with a recorded warning. Multi-page support lands when
-/// we have a real consumer that hits the cap (principles §5).
+/// Bounded upstream catalog response.
 async fn fetch_upstream_tools(
     http: &reqwest::Client,
     url: &str,
     bearer: Option<&str>,
     session: &McpSession,
 ) -> Result<Vec<ToolDefinition>, String> {
-    let body = json!({
-        "jsonrpc": "2.0",
-        "id": 1,
-        "method": "tools/list",
-    });
-
-    let mut req = http
-        .post(url)
-        .header("content-type", "application/json")
-        .header("accept", "application/json, text/event-stream")
-        .json(&body);
-    if let Some(token) = bearer {
-        req = req.bearer_auth(token);
+    let mut cursor = None;
+    let mut cursors = std::collections::BTreeSet::new();
+    let mut tools = BTreeMap::new();
+    for _ in 0..8 {
+        let body = json!({"jsonrpc":"2.0","id":1,"method":"tools/list",
+            "params":cursor.as_ref().map(|cursor: &String| json!({"cursor":cursor})).unwrap_or_else(||json!({}))});
+        let mut req = http
+            .post(url)
+            .header("content-type", "application/json")
+            .header("accept", "application/json, text/event-stream")
+            .json(&body);
+        if let Some(token) = bearer {
+            req = req.bearer_auth(token);
+        }
+        let resp = session
+            .apply(req)
+            .send()
+            .await
+            .map_err(|_| "tools/list transport failed")?;
+        let status = resp.status();
+        let content_type = resp
+            .headers()
+            .get("content-type")
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("")
+            .to_string();
+        let body = super::response_body::text(resp).await?;
+        if !status.is_success() {
+            return Err(format!("tools/list HTTP {}", status.as_u16()));
+        }
+        let value = extract_jsonrpc_payload(&content_type, &body)
+            .map_err(|_| "tools/list response decode failed")?;
+        let parsed: ToolsListResponse =
+            serde_json::from_value(value).map_err(|_| "tools/list response is invalid")?;
+        if let Some(error) = parsed.error {
+            return Err(format!("tools/list RPC error {}", error.code));
+        }
+        let result = parsed.result.ok_or("tools/list missing result")?;
+        for tool in result.tools {
+            if tools.insert(tool.name.clone(), tool).is_some() || tools.len() > 256 {
+                return Err("tools/list contains duplicate tools or exceeds its tool limit".into());
+            }
+        }
+        match result.next_cursor {
+            None => return Ok(tools.into_values().collect()),
+            Some(next) => {
+                if next.is_empty() || next.len() > 1024 || !cursors.insert(next.clone()) {
+                    return Err("tools/list cursor is invalid or repeated".into());
+                }
+                cursor = Some(next);
+            }
+        }
     }
-    req = session.apply(req);
-    let resp = req
-        .send()
-        .await
-        .map_err(|e| format!("tools/list POST failed: {e}"))?;
-
-    let status = resp.status();
-    let content_type = resp
-        .headers()
-        .get("content-type")
-        .and_then(|v| v.to_str().ok())
-        .unwrap_or("")
-        .to_string();
-    let body_text = resp
-        .text()
-        .await
-        .map_err(|e| format!("tools/list body read failed: {e}"))?;
-
-    if !status.is_success() {
-        return Err(format!(
-            "tools/list non-2xx: {} (body trimmed: {})",
-            status,
-            body_text.chars().take(120).collect::<String>()
-        ));
-    }
-
-    let json_payload = extract_jsonrpc_payload(&content_type, &body_text)
-        .map_err(|e| format!("tools/list response decode failed: {e}"))?;
-    let parsed: ToolsListResponse = serde_json::from_value(json_payload)
-        .map_err(|e| format!("tools/list parse failed: {e}"))?;
-
-    if let Some(err) = parsed.error {
-        return Err(format!(
-            "tools/list returned JSON-RPC error: code={} message={}",
-            err.code, err.message
-        ));
-    }
-
-    let result = parsed
-        .result
-        .ok_or_else(|| "tools/list missing result".to_string())?;
-
-    if result.next_cursor.is_some() {
-        tracing::warn!(
-            url = %url,
-            "Upstream advertised tools/list pagination (nextCursor present); \
-             Slice 4d.4 only consumes the first page — additional tools will \
-             not be advertised until pagination support lands"
-        );
-    }
-
-    Ok(result.tools)
+    Err("tools/list exceeds its page limit".into())
 }
 
 fn filter_by_allowlist(upstream: &[ToolDefinition], allow: &[String]) -> Vec<ToolDefinition> {
@@ -874,7 +872,12 @@ async fn post_tools_call(
         Err(e) => {
             return CallAttempt::Fatal(DispatchError::ExecutionFailed {
                 tool: tool_label,
-                reason: format!("upstream POST failed: {e}"),
+                reason: if e.is_timeout() {
+                    "upstream POST timed out"
+                } else {
+                    "upstream POST transport failed"
+                }
+                .into(),
             });
         }
     };
@@ -886,12 +889,12 @@ async fn post_tools_call(
         .and_then(|v| v.to_str().ok())
         .unwrap_or("")
         .to_string();
-    let body_text = match resp.text().await {
+    let body_text = match super::response_body::text(resp).await {
         Ok(t) => t,
         Err(e) => {
             return CallAttempt::Fatal(DispatchError::ExecutionFailed {
                 tool: tool_label,
-                reason: format!("upstream body read failed: {e}"),
+                reason: e.into(),
             });
         }
     };
@@ -900,19 +903,14 @@ async fn post_tools_call(
         if is_session_lost(status, &body_text) {
             return CallAttempt::SessionLost {
                 reason: format!(
-                    "http {} body: {}",
-                    status,
-                    body_text.chars().take(160).collect::<String>()
+                    "MCP session rejected before HTTP acceptance ({})",
+                    status.as_u16()
                 ),
             };
         }
         return CallAttempt::Fatal(DispatchError::ExecutionFailed {
             tool: tool_label,
-            reason: format!(
-                "upstream non-2xx: {} (body trimmed: {})",
-                status,
-                body_text.chars().take(120).collect::<String>()
-            ),
+            reason: format!("upstream HTTP {}", status.as_u16()),
         });
     }
 
@@ -936,16 +934,8 @@ async fn post_tools_call(
     };
 
     if let Some(err) = parsed.error {
-        // A JSON-RPC session error (code -32000/-32001 with an explicit
-        // session-loss message) also means the session is gone — retry once.
-        // We reuse the same conservative body classifier so an ordinary
-        // tool-level error whose message merely mentions "session" is NOT
-        // mistaken for a lost session.
-        if (err.code == -32000 || err.code == -32001) && body_signals_session_loss(&err.message) {
-            return CallAttempt::SessionLost {
-                reason: format!("jsonrpc error code={} message={}", err.code, err.message),
-            };
-        }
+        // HTTP acceptance is not proof that no side effect occurred. Even an
+        // RPC error mentioning a session must not cause tools/call replay.
         // Other upstream protocol error → surface as an isError content
         // entry, not a DispatchError. Per MCP spec, JSON-RPC errors from
         // `tools/call` indicate the *protocol* failed; the semantic "tool
@@ -953,13 +943,12 @@ async fn post_tools_call(
         // because the agent-facing surface shouldn't distinguish (the audit
         // layer can see both).
         return CallAttempt::Done(ToolCallOutput {
-            content: vec![ToolContent::Text {
-                text: format!(
-                    "upstream JSON-RPC error code={} message={}",
-                    err.code, err.message
-                ),
-            }],
+            content: vec![ToolContent::text(format!(
+                "upstream JSON-RPC error code={} message={}",
+                err.code, err.message
+            ))],
             is_error: true,
+            ..Default::default()
         });
     }
 
@@ -973,10 +962,7 @@ async fn post_tools_call(
         }
     };
 
-    CallAttempt::Done(ToolCallOutput {
-        content: result.content,
-        is_error: result.is_error.unwrap_or(false),
-    })
+    CallAttempt::Done(result)
 }
 
 async fn forward_tools_call(
@@ -1115,17 +1101,9 @@ struct ToolsListResult {
 #[derive(Debug, Deserialize)]
 struct ToolsCallResponse {
     #[serde(default)]
-    result: Option<ToolsCallResult>,
+    result: Option<ToolCallOutput>,
     #[serde(default)]
     error: Option<JsonRpcWireError>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ToolsCallResult {
-    #[serde(default)]
-    content: Vec<ToolContent>,
-    #[serde(default, rename = "isError")]
-    is_error: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -1173,6 +1151,7 @@ mod tests {
                 url: url.to_string(),
                 allowed_tools: allowed.into_iter().map(String::from).collect(),
                 bearer_from_env: String::new(),
+                source_uid: None,
             }),
         }
     }
@@ -1197,14 +1176,39 @@ mod tests {
         force_call_error: Option<(i64, String)>,
         /// If set, the upstream returns this HTTP status for tools/call.
         force_call_http_status: Option<u16>,
+        force_call_result: Option<Value>,
+        call_sse: bool,
         /// Last `Authorization` header value seen by the mock (used by
         /// the bearer-attach test to confirm outbound auth wiring).
         last_auth_header: StdArc<TokioMutex<Option<String>>>,
     }
 
     async fn mock_upstream(state: MockState) -> String {
+        use axum::response::IntoResponse;
+
         let app = Router::new()
-            .route("/", post(mock_handler))
+            .route(
+                "/",
+                post(
+                    |State(state): State<MockState>,
+                     headers: HeaderMap,
+                     Json(body): Json<Value>| async move {
+                        let sse = state.call_sse && body["method"] == "tools/call";
+                        let (status, Json(payload)) =
+                            mock_handler(State(state), headers, Json(body)).await;
+                        if sse {
+                            (
+                                status,
+                                [("content-type", "text/event-stream")],
+                                format!("data: {payload}\n\n"),
+                            )
+                                .into_response()
+                        } else {
+                            (status, Json(payload)).into_response()
+                        }
+                    },
+                ),
+            )
             .route("/", any(method_block))
             .with_state(state);
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -1257,6 +1261,12 @@ mod tests {
                             "id": id,
                             "error": {"code": code, "message": msg}
                         })),
+                    );
+                }
+                if let Some(result) = state.force_call_result {
+                    return (
+                        StatusCode::OK,
+                        Json(json!({"jsonrpc":"2.0", "id":id, "result":result})),
                     );
                 }
                 let upstream_tool = body
@@ -1540,9 +1550,136 @@ mod tests {
             .expect("invoke");
         assert!(!out.is_error);
         assert_eq!(out.content.len(), 1);
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("called search"));
         assert!(text.contains("azure"));
+    }
+
+    #[tokio::test]
+    async fn protocol_content_forwards_json_and_sse_results_losslessly() {
+        let fixtures: Vec<Value> =
+            serde_json::from_str(include_str!("../../tests/fixtures/mcp-tool-content.json"))
+                .unwrap();
+        for call_sse in [false, true] {
+            for result in &fixtures {
+                let state = MockState {
+                    tools: vec![tool_def("get_file_contents", "")],
+                    force_call_result: Some(result.clone()),
+                    call_sse,
+                    ..Default::default()
+                };
+                let calls = state.call_count.clone();
+                let url = mock_upstream(state).await;
+                let registry = registry_with(vec![discovered("github-mcp", &url, vec!["*"])]);
+                let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+                    .await
+                    .unwrap();
+                let request = crate::mcp::jsonrpc::Request {
+                    jsonrpc: "2.0".into(),
+                    id: crate::mcp::jsonrpc::Id::Number(7),
+                    method: "tools/call".into(),
+                    params: Some(
+                        json!({"name":"github_mcp.get_file_contents","arguments":{"path":"README.md"}}),
+                    ),
+                };
+                let response =
+                    crate::mcp::tools::handle_tools_call_async(&request, &dispatcher).await;
+                assert!(response.error.is_none(), "{response:?}");
+                assert_eq!(response.result.as_ref(), Some(result), "SSE={call_sse}");
+                assert_eq!(calls.load(Ordering::SeqCst), 1);
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn protocol_content_rejects_invalid_forwarded_results_without_replay() {
+        for result in [
+            json!({"content":[{"type":"unknown","text":"not a supported block"}]}),
+            json!({"content":[{"type":"resource","resource":{"uri":"file:///example"}}]}),
+            json!({"content":[{"type":"resource","resource":{"uri":"file:///example","blob":"?"}}]}),
+            json!({"content":[],"structuredContent":[]}),
+            json!({"structuredContent":{}}),
+        ] {
+            let state = MockState {
+                tools: vec![tool_def("get_file_contents", "")],
+                force_call_result: Some(result),
+                ..Default::default()
+            };
+            let calls = state.call_count.clone();
+            let url = mock_upstream(state).await;
+            let registry = registry_with(vec![discovered("github-mcp", &url, vec!["*"])]);
+            let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+                .await
+                .unwrap();
+            let error = dispatcher
+                .invoke("github_mcp.get_file_contents", &json!({}))
+                .await
+                .unwrap_err();
+            assert!(
+                matches!(error, DispatchError::ExecutionFailed { ref reason, .. } if reason.contains("parse failed")),
+                "{error}"
+            );
+            assert_eq!(calls.load(Ordering::SeqCst), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn protocol_content_does_not_dereference_resource_or_icon_uris() {
+        let resource_server = wiremock::MockServer::start().await;
+        let uri = resource_server.uri();
+        let result = json!({"content":[
+            {"type":"resource","resource":{"uri":uri,"text":"embedded text"}},
+            {"type":"resource_link","uri":uri,"name":"reference","icons":[{"src":uri}]}
+        ],"isError":false});
+        let state = MockState {
+            tools: vec![tool_def("get_file_contents", "")],
+            force_call_result: Some(result.clone()),
+            ..Default::default()
+        };
+        let url = mock_upstream(state).await;
+        let registry = registry_with(vec![discovered("github-mcp", &url, vec!["*"])]);
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let output = dispatcher
+            .invoke("github_mcp.get_file_contents", &json!({}))
+            .await
+            .unwrap();
+        assert_eq!(serde_json::to_value(output).unwrap(), result);
+        assert!(
+            resource_server
+                .received_requests()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn protocol_content_embedded_resources_still_obey_response_byte_limit() {
+        let state = MockState {
+            tools: vec![tool_def("get_file_contents", "")],
+            force_call_result: Some(json!({"content":[{"type":"resource","resource":{
+                "uri":"file:///large.txt",
+                "text":"x".repeat(super::super::response_body::MAX_RESPONSE_BYTES)
+            }}]})),
+            ..Default::default()
+        };
+        let url = mock_upstream(state).await;
+        let registry = registry_with(vec![discovered("github-mcp", &url, vec!["*"])]);
+        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+            .await
+            .unwrap();
+        let error = dispatcher
+            .invoke("github_mcp.get_file_contents", &json!({}))
+            .await
+            .unwrap_err();
+        assert!(
+            matches!(error, DispatchError::ExecutionFailed { ref reason, .. } if reason.contains("byte limit")),
+            "{error}"
+        );
     }
 
     #[tokio::test]
@@ -1581,25 +1718,34 @@ mod tests {
 
     #[tokio::test]
     async fn invoke_surfaces_upstream_json_rpc_error_as_is_error() {
-        let state = MockState {
-            tools: vec![tool_def("flaky", "")],
-            force_call_error: Some((-32000, "boom".to_string())),
-            ..Default::default()
-        };
-        let url = mock_upstream(state).await;
-        let registry = registry_with(vec![discovered("svc", &url, vec!["*"])]);
-        let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
-            .await
-            .unwrap();
-
-        let out = dispatcher
-            .invoke("svc.flaky", &serde_json::json!({}))
-            .await
-            .expect("invoke");
-        assert!(out.is_error);
-        let ToolContent::Text { text } = &out.content[0];
-        assert!(text.contains("code=-32000"));
-        assert!(text.contains("boom"));
+        for message in ["boom", "session expired", "Server not initialized"] {
+            let state = MockState {
+                tools: vec![tool_def("flaky", "")],
+                force_call_error: Some((-32000, message.to_string())),
+                ..Default::default()
+            };
+            let calls = state.call_count.clone();
+            let url = mock_upstream(state).await;
+            let registry = registry_with(vec![discovered("svc", &url, vec!["*"])]);
+            let dispatcher = RouterToolDispatcher::discover(registry, Duration::from_secs(5))
+                .await
+                .unwrap();
+            let out = dispatcher
+                .invoke("svc.flaky", &serde_json::json!({}))
+                .await
+                .expect("invoke");
+            assert!(out.is_error);
+            let ToolContent::Text { text, .. } = &out.content[0] else {
+                panic!("expected text content");
+            };
+            assert!(text.contains("code=-32000"));
+            assert!(text.contains(message));
+            assert_eq!(
+                calls.load(Ordering::SeqCst),
+                1,
+                "accepted errors must not replay tools/call"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1654,14 +1800,18 @@ mod tests {
             .invoke("github_mcp.search", &serde_json::json!({"q": "a"}))
             .await
             .unwrap();
-        let ToolContent::Text { text: t1 } = &out1.content[0];
+        let ToolContent::Text { text: t1, .. } = &out1.content[0] else {
+            panic!("expected text content");
+        };
         assert!(t1.contains("called search"));
 
         let out2 = dispatcher
             .invoke("kb_search.query", &serde_json::json!({"q": "b"}))
             .await
             .unwrap();
-        let ToolContent::Text { text: t2 } = &out2.content[0];
+        let ToolContent::Text { text: t2, .. } = &out2.content[0] else {
+            panic!("expected text content");
+        };
         assert!(t2.contains("called query"));
     }
 
@@ -1864,7 +2014,9 @@ mod tests {
             )
             .await
             .expect("invoke");
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("called browser_navigate"));
         assert!(!out.is_error);
 
@@ -1903,7 +2055,9 @@ mod tests {
             .invoke("github_mcp.search_repos", &serde_json::json!({"q": "kars"}))
             .await
             .expect("invoke");
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("called search_repos"));
     }
 
@@ -1932,7 +2086,9 @@ mod tests {
             .invoke("svc.do_thing", &serde_json::json!({}))
             .await
             .expect("invoke should succeed after transparent re-init + retry");
-        let ToolContent::Text { text } = &out.content[0];
+        let ToolContent::Text { text, .. } = &out.content[0] else {
+            panic!("expected text content");
+        };
         assert!(text.contains("called do_thing"));
 
         // The retry path re-established the session exactly once more.
@@ -1976,7 +2132,9 @@ mod tests {
                 )
                 .await
                 .expect("invoke");
-            let ToolContent::Text { text } = &out.content[0];
+            let ToolContent::Text { text, .. } = &out.content[0] else {
+                panic!("expected text content");
+            };
             assert!(text.contains("sessionStorage"), "result text preserved");
             assert!(!out.is_error);
         }

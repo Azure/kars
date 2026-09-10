@@ -161,6 +161,7 @@ install_crds() {
     local disable_le="${KARS_E2E_DISABLE_LEADER_ELECTION:-1}"
     local helm_wait_arg=--wait
     local extra_set_args=(
+        --set-string "managedMcp.everythingImage=kars-mcp-everything:e2e"
         --set "controller.replicas=${replicas}"
         --set "inferenceRouter.replicas=${replicas}"
         # Without a fake Foundry endpoint, the KarsSandbox reconciler
@@ -3050,6 +3051,7 @@ EOF
 
 source "$SCRIPT_DIR/sre-authority.sh"
 source "$SCRIPT_DIR/namespace-ownership.sh"
+source "$SCRIPT_DIR/managed-mcp.sh"
 source "$SCRIPT_DIR/credential-sources.sh"
 source "$SCRIPT_DIR/governed-services.sh"
 
@@ -3069,6 +3071,7 @@ main() {
     # Validate the public cluster API before any Rust images or private fixtures.
     PYTHONDONTWRITEBYTECODE=1 python3 "$SCRIPT_DIR/sre_authority/registration_schema.py"
     build_images
+    prepare_managed_mcp
     prepare_sre_authority_legacy
     install_crds
     # Finish real legacy retirement before unrelated tests can create private
@@ -3165,6 +3168,7 @@ main() {
             ;;
     esac
 
+    test_managed_mcp || fail "Managed MCP lifecycle/protocol gate failed"
     test_sre_namespace_ownership || fail "SRE namespace lifecycle gate failed"
     test_credential_sources || fail "Credential-source lifecycle gate failed"
 

@@ -33,6 +33,7 @@
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+pub use super::content::ToolContent;
 use super::error::{ErrorCode, JsonRpcError};
 use super::jsonrpc::{Request, Response};
 
@@ -113,21 +114,30 @@ pub enum CatalogError {
     DuplicateName(String),
 }
 
-/// One content item returned by a tool call. Spec §tools/call result.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(tag = "type", rename_all = "lowercase")]
-pub enum ToolContent {
-    Text { text: String },
-}
-
 /// Successful tool-call result. `is_error: true` indicates the tool
 /// ran but returned an error result (per spec — this is distinct from
 /// the JSON-RPC error path which is for protocol-level failures).
-#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]
 pub struct ToolCallOutput {
     pub content: Vec<ToolContent>,
+    #[serde(default)]
     pub is_error: bool,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::content::present"
+    )]
+    pub structured_content: Option<serde_json::Map<String, Value>>,
+    #[serde(
+        default,
+        rename = "_meta",
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "super::content::present"
+    )]
+    pub meta: Option<serde_json::Map<String, Value>>,
+    #[serde(flatten)]
+    pub extensions: serde_json::Map<String, Value>,
 }
 
 /// Errors a dispatcher can raise. These map to JSON-RPC errors —
@@ -272,10 +282,9 @@ impl ToolDispatcher for EchoDispatcher {
                 reason: "missing required string property `text`".to_string(),
             })?;
         Ok(ToolCallOutput {
-            content: vec![ToolContent::Text {
-                text: text.to_string(),
-            }],
+            content: vec![ToolContent::text(text)],
             is_error: false,
+            ..Default::default()
         })
     }
 }
@@ -550,7 +559,8 @@ mod tests {
         assert!(!out.is_error);
         assert_eq!(out.content.len(), 1);
         match &out.content[0] {
-            ToolContent::Text { text } => assert_eq!(text, "hello"),
+            ToolContent::Text { text, .. } => assert_eq!(text, "hello"),
+            other => panic!("expected text content, got {other:?}"),
         }
     }
 
