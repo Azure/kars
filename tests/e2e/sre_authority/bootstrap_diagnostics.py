@@ -245,8 +245,10 @@ def api_result(code, body, policies):
                 if not isinstance(cause, dict):
                     continue
                 field, message = cause.get("field"), cause.get("message")
-                if not isinstance(field, str) or len(field) > 128 or not re.fullmatch(
-                        r"spec\.(matchConditions|variables|validations)\[\d+\]\.expression", field):
+                location = re.fullmatch(
+                    r"spec\.(matchConditions|variables|validations)\[(\d+)\]\.expression", field
+                ) if isinstance(field, str) and len(field) <= 128 else None
+                if not location:
                     continue
                 if not isinstance(message, str):
                     continue
@@ -254,12 +256,31 @@ def api_result(code, body, policies):
                 tokens = sorted(set(re.findall(
                     r"(?:undefined field|undeclared reference to) ['\"]([A-Za-z_][A-Za-z0-9_]*)['\"]",
                     message)) & allowed)
-                causes.append({"field": field, "knownTokens": tokens,
+                entry = {"field": field, "knownTokens": tokens,
                     "categories": [category for category, needle in [
                         ("overload", "matching overload"), ("syntax", "Syntax error"),
                         ("undefined-field", "undefined field"), ("undeclared-reference", "undeclared reference"),
                         ("optional", "optional"), ("cost", "cost"),
-                    ] if needle.lower() in message.lower()]})
+                    ] if needle.lower() in message.lower()]}
+                definitions = policies[details["name"]].get("spec", {}).get(location[1], [])
+                index = int(location[2])
+                expression = definitions[index].get("expression", "") if index < len(definitions) else ""
+                vocabulary = allowed | set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", expression)) | {
+                    "error", "input", "expression", "must", "evaluate", "evaluates", "return", "returns",
+                    "type", "bool", "boolean", "string", "int", "list", "map", "dyn", "invalid", "argument",
+                    "macro", "expected", "found", "no", "matching", "overload", "applied", "to", "in",
+                    "not", "a", "an", "is", "of", "undeclared", "reference", "undefined", "field",
+                    "mismatched", "extraneous", "syntax", "token", "reserved", "identifier", "unsupported",
+                    "supported", "allowed", "size", "exceeds", "maximum", "limit", "cost", "compilation",
+                }
+                headline = message.partition("compilation failed:")[2].splitlines()
+                if headline:
+                    entry["compilerDescription"] = re.sub(
+                        r"[A-Za-z0-9_]+",
+                        lambda match: match[0] if match[0] in vocabulary or match[0].lower() in vocabulary else "[redacted]",
+                        re.sub(r"[\x00-\x1f\x7f]", "?", headline[0].strip())[:512],
+                    )
+                causes.append(entry)
             report["compilationCauses"] = causes
     return report
 
