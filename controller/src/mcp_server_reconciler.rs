@@ -41,7 +41,7 @@ use k8s_openapi::api::core::v1::{ConfigMap, Secret};
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{
     Client, ResourceExt,
-    api::{Api, ListParams, ObjectMeta, Patch, PatchParams},
+    api::{Api, ListParams, ObjectMeta, Patch, PatchParams, PostParams},
     runtime::controller::{Action, Controller},
 };
 use rand::RngCore;
@@ -52,12 +52,24 @@ use std::time::Duration;
 
 use crate::mcp_server::{LocalObjectRef, McpServer, McpServerStatus};
 use crate::status::conditions::{self, reason, status as cond_status};
-use crate::status::phase::{PHASE_DEGRADED, PHASE_READY};
+use crate::status::phase::{PHASE_DEGRADED, PHASE_PENDING, PHASE_READY};
+
+mod auxiliary;
+mod events;
+mod jwks;
+pub(crate) mod managed;
+mod source;
+use auxiliary::{ensure_aux_owner, finalize};
+#[cfg(test)]
+use jwks::{FetchError, FetchedJwks, parse_jwks_key_count};
+use jwks::{HttpJwksFetcher, JwksFetcher};
+use source::resolve_mcp_source;
 
 /// Field manager for SSA patches emitted by this reconciler. A unique
 /// suffix per reconciler is the §10.4 #1 craftsmanship requirement —
 /// detects out-of-band tampering.
 const FIELD_MANAGER: &str = crate::field_managers::MCP_SERVER;
+const SOURCE_UID: &str = "kars.azure.com/mcp-source-uid";
 
 /// Finalizer name (DNS subdomain). Mirrors
 /// `crate::reconciler::FINALIZER` shape.
@@ -71,13 +83,6 @@ const SECRET_TYPE: &str = "kars.azure.com/mcp-signing-key";
 /// router will see in the matching `verifying-key`. Useful for
 /// operator-side rotation work and audit-log correlation.
 const KID_ANNOTATION: &str = "kars.azure.com/mcp-signing-kid";
-
-/// Maximum size of a JWKS document we will accept. Issuers serve
-/// well-formed JWKS responses in the low-kilobytes; anything past 256 KiB
-/// is almost certainly an attack or a misconfigured edge that returned
-/// HTML. Matches the upper bound used by `mcp/oauth.rs::JwkSet` parsing
-/// before deserialization rejects huge inputs anyway.
-const MAX_JWKS_BYTES: usize = 256 * 1024;
 
 /// Timeout for the issuer discovery + JWKS HTTP GETs. Bounded — the
 /// reconciler should never hang on a slow issuer.
@@ -95,153 +100,15 @@ enum ReconcileError {
     Kube(#[from] kube::Error),
     #[error("JSON serialization error: {0}")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("MCP configuration: {0}")]
+    Configuration(String),
 }
 
 struct Ctx {
     client: Client,
     /// Override hook for tests — swap the JWKS fetcher with a mock.
     jwks_fetcher: Arc<dyn JwksFetcher>,
-}
-
-/// Pluggable JWKS fetcher — production uses [`HttpJwksFetcher`], tests
-/// provide deterministic fixtures.
-#[async_trait::async_trait]
-trait JwksFetcher: Send + Sync + std::fmt::Debug {
-    /// Return `(jwks_uri, raw_jwks_bytes)`. `error_class` strings on
-    /// failure: `"dns" | "tls" | "timeout" | "http_status" | "invalid_jwks_format"`.
-    async fn fetch(&self, issuer: &str) -> Result<FetchedJwks, FetchError>;
-}
-
-#[derive(Debug, Clone)]
-struct FetchedJwks {
-    jwks_uri: String,
-    raw: Vec<u8>,
-    /// Number of keys parsed from `raw`. Audit-event payload only.
-    key_count: usize,
-}
-
-#[derive(Debug, thiserror::Error)]
-enum FetchError {
-    #[error("issuer discovery: {class}: {detail}")]
-    Discovery { class: &'static str, detail: String },
-    #[error("JWKS fetch: {class}: {detail}")]
-    Jwks { class: &'static str, detail: String },
-    #[error("JWKS payload not a JWKSet: {0}")]
-    InvalidJwks(String),
-}
-
-impl FetchError {
-    fn class(&self) -> &'static str {
-        match self {
-            FetchError::Discovery { class, .. } => class,
-            FetchError::Jwks { class, .. } => class,
-            FetchError::InvalidJwks(_) => "invalid_jwks_format",
-        }
-    }
-}
-
-#[derive(Debug)]
-struct HttpJwksFetcher {
-    client: reqwest::Client,
-}
-
-impl HttpJwksFetcher {
-    fn new() -> Self {
-        let client = reqwest::Client::builder()
-            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
-            .https_only(true)
-            .build()
-            .expect("reqwest client builder");
-        Self { client }
-    }
-}
-
-#[async_trait::async_trait]
-impl JwksFetcher for HttpJwksFetcher {
-    async fn fetch(&self, issuer: &str) -> Result<FetchedJwks, FetchError> {
-        let trimmed = issuer.trim_end_matches('/');
-        let discovery_url = format!("{trimmed}/.well-known/openid-configuration");
-        let resp = self.client.get(&discovery_url).send().await.map_err(|e| {
-            let class = if e.is_timeout() {
-                "timeout"
-            } else if e.is_connect() {
-                "dns"
-            } else {
-                "tls"
-            };
-            FetchError::Discovery {
-                class,
-                detail: e.to_string(),
-            }
-        })?;
-        if !resp.status().is_success() {
-            return Err(FetchError::Discovery {
-                class: "http_status",
-                detail: resp.status().to_string(),
-            });
-        }
-        let discovery: serde_json::Value =
-            resp.json().await.map_err(|e| FetchError::Discovery {
-                class: "invalid_jwks_format",
-                detail: e.to_string(),
-            })?;
-        let jwks_uri = discovery
-            .get("jwks_uri")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| FetchError::Discovery {
-                class: "invalid_jwks_format",
-                detail: "discovery document missing jwks_uri".into(),
-            })?
-            .to_string();
-
-        let resp = self.client.get(&jwks_uri).send().await.map_err(|e| {
-            let class = if e.is_timeout() {
-                "timeout"
-            } else if e.is_connect() {
-                "dns"
-            } else {
-                "tls"
-            };
-            FetchError::Jwks {
-                class,
-                detail: e.to_string(),
-            }
-        })?;
-        if !resp.status().is_success() {
-            return Err(FetchError::Jwks {
-                class: "http_status",
-                detail: resp.status().to_string(),
-            });
-        }
-        let bytes = resp.bytes().await.map_err(|e| FetchError::Jwks {
-            class: "tls",
-            detail: e.to_string(),
-        })?;
-        if bytes.len() > MAX_JWKS_BYTES {
-            return Err(FetchError::InvalidJwks(format!(
-                "JWKS exceeds {MAX_JWKS_BYTES} bytes"
-            )));
-        }
-        let raw = bytes.to_vec();
-        let key_count = parse_jwks_key_count(&raw)?;
-        Ok(FetchedJwks {
-            jwks_uri,
-            raw,
-            key_count,
-        })
-    }
-}
-
-/// Parse `keys` array length from a raw JWKSet payload. Used both by the
-/// production fetcher and by the audit-event emitter.
-fn parse_jwks_key_count(raw: &[u8]) -> Result<usize, FetchError> {
-    let v: serde_json::Value = serde_json::from_slice(raw)
-        .map_err(|e| FetchError::InvalidJwks(format!("not JSON: {e}")))?;
-    let keys = v
-        .get("keys")
-        .and_then(|k| k.as_array())
-        .ok_or_else(|| FetchError::InvalidJwks("missing or non-array `keys`".into()))?;
-    Ok(keys.len())
+    probe_client: reqwest::Client,
 }
 
 async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
@@ -255,6 +122,12 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     // Deletion path — finalizer-cascading cleanup.
     if mcp.metadata.deletion_timestamp.is_some() {
+        if !managed::cleanup(&ctx.client, &mcp)
+            .await
+            .map_err(ReconcileError::Configuration)?
+        {
+            return Ok(Action::requeue(Duration::from_secs(5)));
+        }
         return finalize(&api, &secrets, &configmaps, &mcp, &name).await;
     }
 
@@ -266,13 +139,11 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .map(|f| f.iter().any(|s| s == FINALIZER))
         .unwrap_or(false)
     {
-        let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"McpServer","metadata":{"finalizers":[FINALIZER]}});
-        api.patch(
-            &name,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(patch),
-        )
-        .await?;
+        let mut finalizers = mcp.metadata.finalizers.clone().unwrap_or_default();
+        finalizers.push(FINALIZER.into());
+        let patch = json!({"metadata":{"uid":mcp.metadata.uid,"resourceVersion":mcp.metadata.resource_version,"finalizers":finalizers}});
+        api.patch(&name, &PatchParams::default(), &Patch::Merge(patch))
+            .await?;
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
 
@@ -287,11 +158,50 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // path) or fetch + cosign-verify the referenced OCI bundle and
     // merge its content onto the CR's `allowedSandboxes` selector
     // (signed path). See [`resolve_mcp_source`] doc-comment.
-    let (effective_spec, bundle_ref_digest, source_degraded) = resolve_mcp_source(&mcp).await;
+    let (mut effective_spec, bundle_ref_digest, source_degraded) = resolve_mcp_source(&mcp).await;
+    let managed_mode = mcp.spec.managed.is_some();
+    let mut managed_outcome = None;
+    let mut pending = None;
+    let mut degraded = source_degraded;
+    if !managed_mode
+        && mcp
+            .status
+            .as_ref()
+            .and_then(|status| status.workload_ref.as_ref())
+            .is_some()
+        && !managed::cleanup(&ctx.client, &mcp)
+            .await
+            .map_err(ReconcileError::Configuration)?
+    {
+        return Ok(Action::requeue(Duration::from_secs(5)));
+    }
+    if managed_mode && degraded.is_none() {
+        match managed::reconcile(&ctx.client, &mcp, &ctx.probe_client).await {
+            Ok(outcome) => {
+                effective_spec.url = outcome.endpoint.clone();
+                pending = outcome.pending.clone();
+                managed_outcome = Some(outcome);
+            }
+            Err(error) => degraded = Some(("ManagedMcpUnqualified", error)),
+        }
+    }
+    if managed_mode {
+        effective_spec.url = managed_outcome
+            .as_ref()
+            .and_then(|outcome| outcome.endpoint.clone());
+        effective_spec.oauth = None;
+        effective_spec.production_mode = None;
+        effective_spec.scopes = None;
+        effective_spec.bearer_from_env = None;
+    }
 
-    // 1. Ensure signing keypair Secret.
+    // Managed private upstreams need no new signer or endpoint credentials.
     let secret_name = format!("mcp-{name}-signing");
-    let signing_kid = ensure_signing_secret(&secrets, &secret_name, &name).await?;
+    let signing_kid = if managed_mode {
+        None
+    } else {
+        Some(ensure_signing_secret(&secrets, &secret_name, &mcp).await?)
+    };
 
     // 2. Ensure metadata/JWKS ConfigMap. The CM (`mcp-{name}-jwks`) is
     // ALWAYS created — its `meta.json` carries the upstream `url` +
@@ -305,18 +215,27 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     // outbound forwarding works. When `productionMode=true` the JWKS
     // is fetched from `oauth.issuer` and replaces the default.
     let cm_name = format!("mcp-{name}-jwks");
-    let meta = McpServerMeta::from_spec(&effective_spec);
+    let mut meta = McpServerMeta::from_spec(&effective_spec);
+    if managed_mode {
+        meta.source_uid = mcp.uid();
+        meta.source_generation = mcp.metadata.generation;
+        meta.binding_revision = managed_outcome
+            .as_ref()
+            .map(|outcome| outcome.revision.clone());
+        if degraded.is_some() || pending.is_some() {
+            meta.url.clear();
+        }
+    }
     let mut jwks_ref: Option<LocalObjectRef> = None;
-    let mut degraded: Option<(&'static str, String)> = source_degraded;
     let production = effective_spec.production_mode.unwrap_or(false);
 
-    if degraded.is_none() && !production {
+    if (degraded.is_none() && !production) || managed_mode {
         // Dev mode: write metadata + empty JWKS default so the
         // router can discover the upstream URL even without inbound
         // OAuth. The router's `/mcp` route is mounted in dev mode
         // (no OAuth) when no `productionMode=true` McpServer is bound.
         let empty_jwks = b"{\"keys\":[]}";
-        ensure_jwks_configmap(&configmaps, &cm_name, &name, empty_jwks, &meta).await?;
+        ensure_jwks_configmap(&configmaps, &cm_name, &mcp, empty_jwks, &meta).await?;
         jwks_ref = Some(LocalObjectRef {
             name: cm_name.clone(),
         });
@@ -330,14 +249,13 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                 match ctx.jwks_fetcher.fetch(&issuer).await {
                     Ok(fetched) => {
                         let meta = McpServerMeta::from_spec(&effective_spec);
-                        ensure_jwks_configmap(&configmaps, &cm_name, &name, &fetched.raw, &meta)
+                        ensure_jwks_configmap(&configmaps, &cm_name, &mcp, &fetched.raw, &meta)
                             .await?;
                         jwks_ref = Some(LocalObjectRef {
                             name: cm_name.clone(),
                         });
                         tracing::info!(
                             mcp = %name,
-                            jwks_uri = %fetched.jwks_uri,
                             key_count = fetched.key_count,
                             "McpServerJwksFetched"
                         );
@@ -367,16 +285,24 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     }
 
     // 3. Build & write status.
-    let signing_ref = LocalObjectRef { name: secret_name };
-    let new_conditions = build_conditions(
+    let signing_ref = signing_kid
+        .as_ref()
+        .map(|_| LocalObjectRef { name: secret_name });
+    let mut new_conditions = build_conditions(
         &prior_conditions,
         observed_generation,
         degraded
             .as_ref()
             .map(|(reason, msg)| (*reason, msg.as_str())),
     );
+    if let Some(message) = pending.as_ref() {
+        new_conditions =
+            managed::pending_conditions(&prior_conditions, observed_generation, message);
+    }
     let phase = if degraded.is_some() {
         PHASE_DEGRADED
+    } else if pending.is_some() {
+        PHASE_PENDING
     } else {
         // Slice 0 honesty: McpServer reconciler today binds exactly
         // one server per KarsSandbox via `spec.mcp:` (singular).
@@ -392,29 +318,39 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
 
     // SSA requires apiVersion + kind in the patch body — without
     // them, the API server returns "invalid object type: /, Kind=".
-    let status_patch = json!({
+    let mut status_patch = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "McpServer",
+        "metadata": {"uid":mcp.metadata.uid,"resourceVersion":mcp.metadata.resource_version},
         "status": McpServerStatus {
             phase: Some(phase.into()),
             observed_generation,
             conditions: Some(new_conditions),
             last_probed_at: Some(rfc3339_now()),
-            signing_key_ref: Some(signing_ref),
+            signing_key_ref: signing_ref,
             jwks_config_map_ref: jwks_ref,
             bundle_ref_digest: bundle_ref_digest.clone(),
+            mode: Some(if managed_mode {"Managed"} else {"External"}.into()),
+            endpoint: if degraded.is_none() && pending.is_none() {effective_spec.url.clone()} else {None},
+            workload_ref: managed_outcome.as_ref().map(|outcome| outcome.workload_ref.clone())
+                .or_else(|| managed_mode.then(|| mcp.status.as_ref()?.workload_ref.clone()).flatten()),
+            managed_namespace_uid: managed_outcome.as_ref().map(|outcome| outcome.namespace_uid.clone())
+                .or_else(|| managed_mode.then(|| mcp.status.as_ref()?.managed_namespace_uid.clone()).flatten()),
+            workload_generation: managed_outcome.as_ref().and_then(|outcome| outcome.workload_generation),
+            workload_image: managed_outcome.as_ref().and_then(|outcome| outcome.workload_image.clone()),
+            discovered_tools: managed_outcome.as_ref().and_then(|outcome| outcome.tools.clone()),
+            tool_schema_digest: managed_outcome.as_ref().and_then(|outcome| outcome.schema_digest.clone()),
         }
     });
-    api.patch_status(
-        &name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(status_patch),
-    )
-    .await?;
+    status_patch["status"]["bundleRefDigest"] = json!(bundle_ref_digest);
+    api.patch_status(&name, &PatchParams::default(), &Patch::Merge(status_patch))
+        .await?;
 
-    tracing::info!(mcp = %name, phase = phase, kid = %signing_kid, "McpServerReconciled");
+    tracing::info!(mcp = %name, phase = phase, "McpServerReconciled");
 
-    if degraded.is_some() {
+    if pending.is_some() {
+        Ok(Action::requeue(Duration::from_secs(5)))
+    } else if degraded.is_some() {
         Ok(Action::requeue(REQUEUE_FAIL))
     } else {
         // (Removed) Per-reconcile `LimitedSupport` event explaining
@@ -427,7 +363,11 @@ async fn reconcile(mcp: Arc<McpServer>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         //   • docs/blueprints/crd-well-oiled-machine.md (Slice 4 roadmap)
         // K8s Events should carry actionable per-incident signal,
         // not static design notes.
-        Ok(Action::requeue(REQUEUE_OK))
+        Ok(Action::requeue(if managed_mode {
+            Duration::from_secs(30)
+        } else {
+            REQUEUE_OK
+        }))
     }
 }
 
@@ -512,9 +452,10 @@ fn build_conditions(
 async fn ensure_signing_secret(
     api: &Api<Secret>,
     secret_name: &str,
-    owner: &str,
+    owner: &McpServer,
 ) -> Result<String, ReconcileError> {
-    if let Ok(existing) = api.get(secret_name).await {
+    if let Some(existing) = api.get_opt(secret_name).await? {
+        ensure_aux_owner(&existing.metadata, owner, false)?;
         if let Some(kid) = existing
             .metadata
             .annotations
@@ -555,6 +496,12 @@ async fn ensure_signing_secret(
     data.insert("signing-key.public".into(), ByteString(public_raw.to_vec()));
     let mut annotations: BTreeMap<String, String> = BTreeMap::new();
     annotations.insert(KID_ANNOTATION.into(), kid.clone());
+    annotations.insert(
+        SOURCE_UID.into(),
+        owner
+            .uid()
+            .ok_or_else(|| ReconcileError::Configuration("McpServer UID is missing".into()))?,
+    );
 
     let secret = Secret {
         metadata: ObjectMeta {
@@ -565,7 +512,7 @@ async fn ensure_signing_secret(
                     "app.kubernetes.io/managed-by".into(),
                     "kars-controller".into(),
                 ),
-                ("kars.azure.com/mcp-server".into(), owner.into()),
+                ("kars.azure.com/mcp-server".into(), owner.name_any()),
             ])),
             ..Default::default()
         },
@@ -573,10 +520,12 @@ async fn ensure_signing_secret(
         data: Some(data),
         ..Default::default()
     };
-    api.patch(
-        secret_name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(&secret),
+    api.create(
+        &PostParams {
+            field_manager: Some(FIELD_MANAGER.into()),
+            ..Default::default()
+        },
+        &secret,
     )
     .await?;
     tracing::info!(secret = secret_name, kid = %kid, "McpServerSigningKeyCreated");
@@ -639,6 +588,12 @@ pub struct McpServerMeta {
     /// to this server. Empty (default) = no outbound auth.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub bearer_from_env: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_uid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub source_generation: Option<i64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub binding_revision: Option<String>,
 }
 
 impl McpServerMeta {
@@ -658,6 +613,9 @@ impl McpServerMeta {
             url: spec.url.clone().unwrap_or_default(),
             allowed_tools: spec.allowed_tools.clone().unwrap_or_default(),
             bearer_from_env: spec.bearer_from_env.clone().unwrap_or_default(),
+            source_uid: None,
+            source_generation: None,
+            binding_revision: None,
         }
     }
 }
@@ -665,7 +623,7 @@ impl McpServerMeta {
 async fn ensure_jwks_configmap(
     api: &Api<ConfigMap>,
     cm_name: &str,
-    owner: &str,
+    owner: &McpServer,
     raw_jwks: &[u8],
     meta: &McpServerMeta,
 ) -> Result<(), ReconcileError> {
@@ -682,6 +640,10 @@ async fn ensure_jwks_configmap(
     // mirrored ConfigMaps so each McpServer's tokens are validated
     // against that server's JWKS + audience.
     data.insert("meta.json".into(), meta_json);
+    let existing = api.get_opt(cm_name).await?;
+    if let Some(existing) = existing.as_ref() {
+        ensure_aux_owner(&existing.metadata, owner, owner.spec.managed.is_some())?;
+    }
     let cm = ConfigMap {
         metadata: ObjectMeta {
             name: Some(cm_name.into()),
@@ -690,74 +652,45 @@ async fn ensure_jwks_configmap(
                     "app.kubernetes.io/managed-by".into(),
                     "kars-controller".into(),
                 ),
-                ("kars.azure.com/mcp-server".into(), owner.into()),
+                ("kars.azure.com/mcp-server".into(), owner.name_any()),
             ])),
             ..Default::default()
         },
         data: Some(data),
         ..Default::default()
     };
-    api.patch(
-        cm_name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(&cm),
-    )
-    .await?;
+    if let Some(existing) = existing {
+        if existing.data != cm.data {
+            api.patch(cm_name, &PatchParams::default(), &Patch::Merge(json!({
+                "metadata":{"uid":existing.metadata.uid,"resourceVersion":existing.metadata.resource_version},
+                "data":cm.data,
+            }))).await?;
+        }
+    } else {
+        let mut cm = cm;
+        cm.metadata.annotations = Some(BTreeMap::from([(
+            SOURCE_UID.into(),
+            owner
+                .uid()
+                .ok_or_else(|| ReconcileError::Configuration("McpServer UID is missing".into()))?,
+        )]));
+        api.create(
+            &PostParams {
+                field_manager: Some(FIELD_MANAGER.into()),
+                ..Default::default()
+            },
+            &cm,
+        )
+        .await?;
+    }
     Ok(())
-}
-
-async fn finalize(
-    api: &Api<McpServer>,
-    secrets: &Api<Secret>,
-    configmaps: &Api<ConfigMap>,
-    mcp: &McpServer,
-    name: &str,
-) -> Result<Action, ReconcileError> {
-    let secret_name = format!("mcp-{name}-signing");
-    let cm_name = format!("mcp-{name}-jwks");
-    let _ = secrets
-        .delete(&secret_name, &Default::default())
-        .await
-        .map(|_| ())
-        .or_else(|e: kube::Error| -> Result<(), kube::Error> {
-            if matches!(e, kube::Error::Api(ref ae) if ae.code == 404) {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        });
-    let _ = configmaps
-        .delete(&cm_name, &Default::default())
-        .await
-        .map(|_| ())
-        .or_else(|e: kube::Error| -> Result<(), kube::Error> {
-            if matches!(e, kube::Error::Api(ref ae) if ae.code == 404) {
-                Ok(())
-            } else {
-                Err(e)
-            }
-        });
-
-    let finalizers: Vec<String> = mcp
-        .metadata
-        .finalizers
-        .as_ref()
-        .map(|v| v.iter().filter(|f| *f != FINALIZER).cloned().collect())
-        .unwrap_or_default();
-    let patch = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"McpServer","metadata":{"finalizers": finalizers}});
-    api.patch(
-        name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(patch),
-    )
-    .await?;
-    Ok(Action::await_change())
 }
 
 fn error_policy(mcp: Arc<McpServer>, error: &ReconcileError, _ctx: Arc<Ctx>) -> Action {
     let class = match error {
         ReconcileError::Kube(_) => "kube_api",
         ReconcileError::SerdeJson(_) => "serde",
+        ReconcileError::Configuration(_) => "configuration",
     };
     crate::metrics::record_reconcile_error("McpServer", class);
     tracing::warn!(
@@ -789,8 +722,23 @@ pub async fn run(client: Client) -> Result<()> {
     let ctx = Arc::new(Ctx {
         client: client.clone(),
         jwks_fetcher: Arc::new(HttpJwksFetcher::new()),
+        probe_client: reqwest::Client::builder()
+            .timeout(Duration::from_secs(HTTP_TIMEOUT_SECS))
+            .redirect(reqwest::redirect::Policy::none())
+            .build()
+            .map_err(|_| anyhow::anyhow!("MCP probe client initialization failed"))?,
     });
     Controller::new(mcps, crate::watch_config::bounded())
+        .watches(
+            Api::<crate::crd::KarsSandbox>::all(client.clone()),
+            crate::watch_config::bounded(),
+            events::sandbox_references,
+        )
+        .watches(
+            Api::<k8s_openapi::api::apps::v1::Deployment>::all(client),
+            crate::watch_config::bounded(),
+            events::workload_reference,
+        )
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("McpServer", reconcile(x, ctx)).await
@@ -808,322 +756,5 @@ pub async fn run(client: Client) -> Result<()> {
     Ok(())
 }
 
-/// Resolve the effective spec the reconciler will operate on.
-///
-/// Slice 1c.5 of `crd-well-oiled-machine` introduces a signed
-/// `bundleRef` authoring path for `McpServer`. This helper closes the
-/// inline-vs-bundle authoring choice with a single normalised
-/// `McpServerSpec` returned to the reconcile loop:
-///
-/// - **Inline (back-compat, no signature)**: any of `url`, `oauth`,
-///   `productionMode`, `scopes`, `allowedTools`, `displayName` set; no
-///   `bundleRef`. Returns the spec verbatim. `bundle_ref_digest = None`.
-/// - **Signed bundle**: `bundleRef` set, content fields all `None`.
-///   Fetches + verifies the OCI artifact via
-///   [`crate::policy_fetcher::fetch_and_verify_generic`] parameterised
-///   by [`crate::policy_canonical::mcp_server::McpServerKind`]. The
-///   bundle's content fields are merged onto the CR's
-///   `allowedSandboxes` selector. `bundle_ref_digest = Some(<digest>)`.
-/// - **Selector-only**: no `bundleRef` and no content fields set.
-///   Acceptable shape (the CR carries only a selector) but
-///   `productionMode` defaults to `false` and `url` resolves to empty
-///   — the reconciler treats this as a degraded `SpecInvalid` only
-///   when `productionMode` would also be `true`; selector-only
-///   prod-mode-false is intentionally allowed for in-progress
-///   authoring drafts.
-/// - **Both inline + bundleRef** *(rejected at runtime as
-///   defense-in-depth — admission CEL already rejects)*: returns
-///   `(InvalidSpec, msg)` without performing the fetch.
-async fn resolve_mcp_source(
-    mcp: &crate::mcp_server::McpServer,
-) -> (
-    crate::mcp_server::McpServerSpec,
-    Option<String>,
-    Option<(&'static str, String)>,
-) {
-    let spec = &mcp.spec;
-    let inline_any = spec.url.is_some()
-        || spec.oauth.is_some()
-        || spec.production_mode.is_some()
-        || spec.scopes.is_some()
-        || spec.allowed_tools.is_some()
-        || spec.display_name.is_some();
-    let bundle_set = spec.bundle_ref.is_some();
-
-    if inline_any && bundle_set {
-        return (
-            // selector-only synthesis; we won't compile this branch
-            crate::mcp_server::McpServerSpec {
-                allowed_sandboxes: spec.allowed_sandboxes.clone(),
-                ..Default::default()
-            },
-            None,
-            Some((
-                "InvalidSpec",
-                "spec.bundleRef is mutually exclusive with spec.url, spec.oauth, \
-                 spec.productionMode, spec.scopes, spec.allowedTools, and \
-                 spec.displayName"
-                    .into(),
-            )),
-        );
-    }
-
-    if !bundle_set {
-        return (spec.clone(), None, None);
-    }
-
-    let bundle_ref = spec
-        .bundle_ref
-        .as_ref()
-        .expect("bundle_set implies Some")
-        .clone();
-
-    let signer_policy_handle = crate::signer_policy::global();
-    let verify_result = match signer_policy_handle.snapshot() {
-        crate::signer_policy::SignerPolicyState::FromConfigMap(p) => {
-            let cfg: crate::policy_fetcher::SignerPolicyConfig = p.into();
-            crate::policy_fetcher::fetch_and_verify_generic::<
-                crate::policy_canonical::mcp_server::McpServerKind,
-            >(&bundle_ref, &cfg)
-            .await
-        }
-        crate::signer_policy::SignerPolicyState::Malformed(msg) => Err(
-            crate::policy_fetcher::FetchError::SignerPolicyMalformed(msg),
-        ),
-        crate::signer_policy::SignerPolicyState::Absent => {
-            let cfg = crate::policy_fetcher::SignerPolicyConfig::from_env();
-            crate::policy_fetcher::fetch_and_verify_generic::<
-                crate::policy_canonical::mcp_server::McpServerKind,
-            >(&bundle_ref, &cfg)
-            .await
-        }
-    };
-
-    match verify_result {
-        Ok(verified) => {
-            let effective = merge_bundle_with_selector(spec, &verified);
-            (effective, Some(verified.digest), None)
-        }
-        Err(e) => {
-            let (reason, msg) = fetch_error_to_degraded(&e);
-            tracing::warn!(
-                mcpserver = %mcp.name_any(),
-                registry = %bundle_ref.registry,
-                repository = %bundle_ref.repository,
-                digest = %bundle_ref.digest,
-                reason,
-                "McpServer bundleRef fetch/verify failed: {msg}"
-            );
-            (
-                crate::mcp_server::McpServerSpec {
-                    allowed_sandboxes: spec.allowed_sandboxes.clone(),
-                    ..Default::default()
-                },
-                None,
-                Some((reason, msg)),
-            )
-        }
-    }
-}
-
-/// Merge the verified bundle's content fields onto the CR's
-/// `allowedSandboxes` selector. The bundle owns the content; the CR
-/// owns the selector — same pattern as InferencePolicy + KarsMemory.
-fn merge_bundle_with_selector(
-    cr_spec: &crate::mcp_server::McpServerSpec,
-    verified: &crate::policy_canonical::mcp_server::VerifiedMcpServerBundle,
-) -> crate::mcp_server::McpServerSpec {
-    use crate::mcp_server::{McpOAuthConfig, McpServerSpec};
-
-    let oauth = verified.oauth.as_ref().map(|o| McpOAuthConfig {
-        issuer: o.issuer.clone(),
-        audience: o.audience.clone(),
-        resource: o.resource.clone(),
-        pkce: o.pkce.clone().unwrap_or_else(|| "S256".to_string()),
-    });
-
-    McpServerSpec {
-        url: verified.url.clone(),
-        oauth,
-        production_mode: verified.production_mode,
-        scopes: verified.scopes.clone(),
-        allowed_tools: verified.allowed_tools.clone(),
-        allowed_sandboxes: cr_spec.allowed_sandboxes.clone(),
-        display_name: verified.display_name.clone(),
-        bundle_ref: None,
-        // Bundle-sourced spec does not carry outbound bearer config —
-        // bearer hookup is a CR-level concern (per-deployment), not
-        // part of the signed policy bundle.
-        bearer_from_env: cr_spec.bearer_from_env.clone(),
-    }
-}
-
-/// Map [`crate::policy_fetcher::FetchError`] to the `(reason, message)`
-/// degraded pair. Mirrors the same helper in the other 1c.x reconcilers
-/// — the controller's class table stays closed.
-fn fetch_error_to_degraded(e: &crate::policy_fetcher::FetchError) -> (&'static str, String) {
-    let reason = crate::policy_fetcher::reason_for_error(e).unwrap_or("Transient");
-    (reason, e.to_string())
-}
-
 #[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// Mock fetcher returning a known JWKS.
-    #[derive(Debug)]
-    struct MockOk;
-    #[async_trait::async_trait]
-    impl JwksFetcher for MockOk {
-        async fn fetch(&self, _: &str) -> Result<FetchedJwks, FetchError> {
-            let raw = br#"{"keys":[{"kty":"OKP","crv":"Ed25519","kid":"k1","x":"AAA"}]}"#.to_vec();
-            Ok(FetchedJwks {
-                jwks_uri: "https://example/.well-known/jwks.json".into(),
-                raw,
-                key_count: 1,
-            })
-        }
-    }
-
-    /// Mock fetcher always failing with a discovery error.
-    #[derive(Debug)]
-    struct MockFailDns;
-    #[async_trait::async_trait]
-    impl JwksFetcher for MockFailDns {
-        async fn fetch(&self, _: &str) -> Result<FetchedJwks, FetchError> {
-            Err(FetchError::Discovery {
-                class: "dns",
-                detail: "name resolution failed".into(),
-            })
-        }
-    }
-
-    #[test]
-    fn parse_jwks_key_count_works() {
-        let raw = br#"{"keys":[{"kid":"a"},{"kid":"b"}]}"#;
-        assert_eq!(parse_jwks_key_count(raw).unwrap(), 2);
-
-        let bad = br#"{"foo":"bar"}"#;
-        assert!(parse_jwks_key_count(bad).is_err());
-    }
-
-    #[test]
-    fn kid_from_public_is_deterministic_and_short() {
-        let pub_bytes = [0u8; 32];
-        let kid = kid_from_public_bytes(&pub_bytes);
-        // 16 bytes -> URL-safe-no-pad b64 is 22 chars
-        assert_eq!(kid.len(), 22);
-        assert_eq!(kid, kid_from_public_bytes(&pub_bytes));
-        assert!(!kid.contains('='));
-    }
-
-    #[test]
-    fn build_conditions_emits_three_types_on_success() {
-        let conds = build_conditions(&[], Some(7), None);
-        assert_eq!(conds.len(), 3);
-        let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
-        assert_eq!(ready.status, "True");
-        let progressing = conds.iter().find(|c| c.type_ == "Progressing").unwrap();
-        assert_eq!(progressing.status, "False");
-        let degraded = conds.iter().find(|c| c.type_ == "Degraded").unwrap();
-        assert_eq!(degraded.status, "False");
-        for c in &conds {
-            assert_eq!(c.observed_generation, Some(7));
-        }
-    }
-
-    #[test]
-    fn build_conditions_emits_degraded_true_on_failure() {
-        let conds = build_conditions(&[], Some(2), Some(("JwksFetchFailed", "boom")));
-        let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
-        assert_eq!(ready.status, "False");
-        assert_eq!(ready.reason, "JwksFetchFailed");
-        let degraded = conds.iter().find(|c| c.type_ == "Degraded").unwrap();
-        assert_eq!(degraded.status, "True");
-        assert_eq!(degraded.message, "boom");
-    }
-
-    #[test]
-    fn build_conditions_preserves_transition_time_on_repeat_success() {
-        let prior = build_conditions(&[], Some(1), None);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let next = build_conditions(&prior, Some(1), None);
-        let p_ready = prior.iter().find(|c| c.type_ == "Ready").unwrap();
-        let n_ready = next.iter().find(|c| c.type_ == "Ready").unwrap();
-        assert_eq!(p_ready.last_transition_time, n_ready.last_transition_time);
-    }
-
-    #[test]
-    fn build_conditions_stamps_new_time_on_status_flip() {
-        let prior = build_conditions(&[], Some(1), None);
-        std::thread::sleep(std::time::Duration::from_millis(5));
-        let next = build_conditions(&prior, Some(1), Some(("JwksFetchFailed", "x")));
-        let p_ready = prior.iter().find(|c| c.type_ == "Ready").unwrap();
-        let n_ready = next.iter().find(|c| c.type_ == "Ready").unwrap();
-        assert_ne!(p_ready.last_transition_time, n_ready.last_transition_time);
-    }
-
-    #[test]
-    fn fetch_error_class_buckets_are_safe_strings() {
-        // Audit-event policy: error_class is always a fixed bucket,
-        // never a raw error message. Verify the enum's `class()` method
-        // only ever yields one of the documented strings.
-        for class in [
-            FetchError::Discovery {
-                class: "dns",
-                detail: "x".into(),
-            }
-            .class(),
-            FetchError::Discovery {
-                class: "tls",
-                detail: "x".into(),
-            }
-            .class(),
-            FetchError::Discovery {
-                class: "timeout",
-                detail: "x".into(),
-            }
-            .class(),
-            FetchError::Discovery {
-                class: "http_status",
-                detail: "x".into(),
-            }
-            .class(),
-            FetchError::Jwks {
-                class: "tls",
-                detail: "x".into(),
-            }
-            .class(),
-            FetchError::InvalidJwks("x".into()).class(),
-        ] {
-            assert!(
-                matches!(
-                    class,
-                    "dns" | "tls" | "timeout" | "http_status" | "invalid_jwks_format"
-                ),
-                "class={class:?}"
-            );
-        }
-    }
-
-    #[test]
-    fn mock_fetchers_compile_and_do_not_panic() {
-        // Tokio-free smoke: the trait object is constructable.
-        let _ok: Arc<dyn JwksFetcher> = Arc::new(MockOk);
-        let _fail: Arc<dyn JwksFetcher> = Arc::new(MockFailDns);
-    }
-
-    #[tokio::test]
-    async fn mock_ok_returns_one_key() {
-        let m = MockOk;
-        let f = m.fetch("https://example").await.unwrap();
-        assert_eq!(f.key_count, 1);
-    }
-
-    #[tokio::test]
-    async fn mock_fail_dns_classifies() {
-        let m = MockFailDns;
-        let e = m.fetch("https://example").await.unwrap_err();
-        assert_eq!(e.class(), "dns");
-    }
-}
+mod tests;

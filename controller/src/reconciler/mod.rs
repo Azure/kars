@@ -40,6 +40,7 @@ mod dev_env;
 pub(crate) mod governance_mounts;
 mod governed_services;
 mod inference;
+mod mcp_binding;
 mod mcp_egress;
 pub(crate) mod namespace_ownership;
 mod sre_writer;
@@ -2355,21 +2356,14 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         //     given the CEL-enforced unique-by-name).
         //   - `MCP_SIGNING_KEY_DIR`: legacy single-dir pointer for the
         //     first entry; namespaced replacement TBD in 4d.3.
-        let mcp_refs = governance_config.effective_mcp_server_refs();
-        if governance_config.uses_singular_mcp_server_ref() {
-            tracing::warn!(
-                sandbox = %name,
-                reason = crate::status::conditions::reason::MCP_SINGULAR_DEPRECATED,
-                "spec.governance.mcpServerRef is deprecated; migrate to \
-                 spec.governance.mcpServerRefs (Slice 4d.1)",
-            );
-        }
-        let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(mcp_refs.len());
-        for (idx, mcp_ref) in mcp_refs.iter().enumerate() {
-            let mcp_name = mcp_ref.name.trim();
-            if mcp_name.is_empty() {
-                continue;
-            }
+        let bindings = mcp_binding::resolve_all(client, &sandbox, &governance_config)
+            .await
+            .map_err(ReconcileError::Configuration)?;
+        let mut mirrored_mcp_names: Vec<String> = Vec::with_capacity(bindings.len());
+        let mut mcp_revisions = Vec::new();
+        for (mcp_name, binding) in bindings {
+            let first_mcp = mirrored_mcp_names.is_empty();
+            mcp_revisions.push(binding.revision);
             let jwks_cm = format!("mcp-{mcp_name}-jwks");
             let signing_secret = format!("mcp-{mcp_name}-signing");
             let jwks_volume = format!("mcp-jwks-{mcp_name}");
@@ -2392,7 +2386,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     // First-entry only: keep legacy single-file env var
                     // pointing at this server's jwks.json so the existing
                     // single-JWKS OAuth verifier keeps working unchanged.
-                    let legacy_env = if idx == 0 {
+                    let legacy_env = if first_mcp {
                         Some(("MCP_JWKS_PATH", format!("{jwks_mount}/jwks.json")))
                     } else {
                         None
@@ -2426,6 +2420,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     return Ok(Action::requeue(Duration::from_secs(15)));
                 }
             }
+            if !binding.signing {
+                continue;
+            }
             match governance_mounts::mirror_secret(
                 client,
                 &signing_secret,
@@ -2437,7 +2434,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             .await
             {
                 Ok(governance_mounts::MirrorOutcome::Mirrored) => {
-                    let legacy_env = if idx == 0 {
+                    let legacy_env = if first_mcp {
                         Some(("MCP_SIGNING_KEY_DIR", signing_mount.clone()))
                     } else {
                         None
@@ -2669,6 +2666,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 }
             }
         }))?;
+        mcp_binding::decorate(&mut deployment, &mcp_revisions)?;
         if let Some(projection) = sre_projection.as_ref() {
             let annotations =
                 crate::sre_authority::pod::annotations(projection, agent_container_name);
@@ -3143,7 +3141,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
     Ok(Action::requeue(Duration::from_secs(
-        if sandbox.spec.credentials_ref.is_some() || sre_projection.is_some() {
+        if sandbox.spec.credentials_ref.is_some()
+            || sre_projection.is_some()
+            || !governance_config.effective_mcp_server_refs().is_empty()
+        {
             30
         } else {
             300
