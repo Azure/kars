@@ -55,6 +55,18 @@ rerun the native tests. No universal security, CNI-enforcement or complete
 Bridge-readiness claim is made. Any subsequently identified blocking finding
 reopens this approval; no failed check, timeout or policy is waived.
 
+The full native run at `8618e9f45d71f3223f35788c6233ebcf56ca5587`
+([job 102880906111](https://github.com/Azure/kars/actions/runs/34478247382/job/102880906111))
+completed legacy and fresh SRE migration, the RC CREATE/UPDATE denial matrix,
+diagnostic compatibility and retirement. Its final result was 164 passed and
+one failed: an unrelated smoke assertion read the NetworkPolicy immediately
+after namespace creation, before asynchronous reconciliation reached that
+resource. The same run subsequently observed its required ingress policy.
+Both initial NetworkPolicy/ServiceAccount smoke checks now use the existing
+30-second exact-resource wait helper; missing resources still fail, and policy
+content checks remain unchanged. This fixture correction requires a new
+exact-head run; the prior failed job is not reclassified.
+
 Signed-off-by: pallakatos (maintainer authorization recorded above) <lakatos.toth.pal@gmail.com>
 Signed-off-by: GitHub Copilot (delegated AI audit, not an independent human) <223556219+Copilot@users.noreply.github.com>
 
