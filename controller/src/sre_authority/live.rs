@@ -126,10 +126,37 @@ pub(crate) async fn check_secret_denial(client: &Client, namespace: &str) -> Res
 
 /// Later private-credential issuers must call this immediately before issuance.
 /// An absent registration is safe only when the old SRE subject has no access.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) enum PrivacyReadiness {
+    Qualified(Option<String>),
+    Pending,
+}
+
+pub(crate) fn currently_qualified(reg: &KarsSRERegistration) -> bool {
+    reg.spec.enabled
+        && reg.status.as_ref().is_some_and(|status| {
+            status.phase == "Ready"
+                && status.observed_generation == reg.metadata.generation.unwrap_or_default()
+                && status.legacy_secret_access_denied
+                && status.privacy_revision.as_deref() == Some(crate::sre_privacy::REVISION)
+                && status.privacy_epoch.as_deref() == Some(reg.epoch().as_str())
+        })
+}
+
 pub(crate) async fn privacy_epoch(
     client: &Client,
     target_namespace: &str,
 ) -> Result<Option<String>, String> {
+    match privacy_readiness(client, target_namespace).await? {
+        PrivacyReadiness::Qualified(epoch) => Ok(epoch),
+        PrivacyReadiness::Pending => Err("SRE privacy migration is not Ready".into()),
+    }
+}
+
+pub(crate) async fn privacy_readiness(
+    client: &Client,
+    target_namespace: &str,
+) -> Result<PrivacyReadiness, String> {
     check_secret_denial(client, target_namespace).await?;
     let registrations: Api<KarsSRERegistration> = Api::all(client.clone());
     let Some(reg) = registrations
@@ -137,7 +164,7 @@ pub(crate) async fn privacy_epoch(
         .await
         .map_err(|e| api_error("Read SRE privacy epoch", e))?
     else {
-        return Ok(None);
+        return Ok(PrivacyReadiness::Qualified(None));
     };
     if !reg.spec.enabled
         && reg.status.as_ref().is_some_and(|status| {
@@ -145,22 +172,32 @@ pub(crate) async fn privacy_epoch(
                 && status.observed_generation == reg.metadata.generation.unwrap_or_default()
         })
     {
-        return Ok(None);
+        if reg.status.as_ref().is_none_or(|status| {
+            !status.legacy_secret_access_denied
+                || status.privacy_revision.as_deref() != Some(crate::sre_privacy::REVISION)
+        }) {
+            return Err(
+                "Retired SRE privacy authority lacks current verified credential denial".into(),
+            );
+        }
+        return Ok(PrivacyReadiness::Qualified(None));
     }
     verify(client, &reg).await?;
     super::admission::verify(client).await?;
     super::credential_guard::scan(client, &reg).await?;
-    let status = reg
-        .status
-        .as_ref()
-        .ok_or("SRE authority has not been reconciled")?;
-    if status.phase != "Ready"
-        || status.observed_generation != reg.metadata.generation.unwrap_or_default()
-        || !status.legacy_secret_access_denied
-        || status.privacy_revision.as_deref() != Some(crate::sre_privacy::REVISION)
-        || status.privacy_epoch.as_deref() != Some(reg.epoch().as_str())
-    {
-        return Err("SRE privacy migration is not Ready".into());
+    if currently_qualified(&reg) {
+        return Ok(PrivacyReadiness::Qualified(Some(reg.epoch())));
     }
-    Ok(status.privacy_epoch.clone())
+    // This state is not authority to issue or reuse a credential. It only
+    // distinguishes ordinary migration progress from a failed live privacy
+    // check, so a controller cannot stop the very rollout it is waiting for.
+    if reg.spec.enabled
+        && reg.status.as_ref().is_none_or(|status| {
+            matches!(status.phase.as_str(), "Provisioning" | "Migrating")
+                && status.observed_generation == reg.metadata.generation.unwrap_or_default()
+        })
+    {
+        return Ok(PrivacyReadiness::Pending);
+    }
+    Err("SRE privacy authority is stale or unqualified".into())
 }

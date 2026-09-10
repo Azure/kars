@@ -4,7 +4,7 @@
 use super::{api_error, check_secret_denial};
 use crate::{
     crd::KarsSandbox,
-    sre_registration::{EPOCH, KarsSRERegistration, OWNER, RUNTIME_NAMESPACE},
+    sre_registration::{CONTROL_VERSION, EPOCH, KarsSRERegistration, OWNER, RUNTIME_NAMESPACE},
 };
 use k8s_openapi::api::{
     apps::v1::Deployment,
@@ -22,7 +22,7 @@ pub(super) const WAITING_FOR_CONSUMERS: &str =
 const WAITING_FOR_ROTATION: &str =
     "Waiting for owned control credential consumers to restart on the new privacy epoch";
 const WAITING_FOR_ROLLOUT: &str =
-    "Owned control credential consumer has not completed its privacy-epoch rollout";
+    "Waiting for prior-epoch or prior-control-version consumers to terminate";
 const WAITING_FOR_CONSUMER_REMOVAL: &str =
     "Waiting for the owned SRE consumer Deployment to be removed";
 
@@ -248,7 +248,7 @@ pub(super) async fn stop_legacy_consumer(
     Ok(())
 }
 
-fn controller_managed(deployment: &Deployment, sandbox: &str) -> bool {
+pub(crate) fn controller_managed(deployment: &Deployment, sandbox: &str) -> bool {
     deployment
         .metadata
         .labels
@@ -366,40 +366,48 @@ pub(super) async fn rotate_owned_control_credentials(
             return Err("Control credential consumer is not controller-owned".into());
         }
         let epoch = reg.epoch();
-        if annotations.and_then(|a| a.get(EPOCH)) != Some(&epoch) {
+        let rotated = annotations.and_then(|a| a.get(EPOCH)) != Some(&epoch);
+        let secret = if rotated {
             let secrets: Api<Secret> = Api::namespaced(client.clone(), &namespace_name);
             secrets.patch("router-services-admin",&PatchParams::default(),&Patch::Merge(json!({
                 "metadata":{"uid":secret.metadata.uid,"resourceVersion":secret.metadata.resource_version,
                     "annotations":{EPOCH:epoch}},
                 "stringData":{"control-token":crate::providers::signing::generate_service_token()},
-            }))).await.map_err(|e|api_error("Rotate owned control credential",e))?;
-        }
-        if deployment
+            }))).await.map_err(|e|api_error("Rotate owned control credential",e))?
+        } else {
+            secret
+        };
+        let version = format!(
+            "{}:{}",
+            secret
+                .metadata
+                .uid
+                .as_deref()
+                .ok_or("Control credential UID missing")?,
+            secret
+                .metadata
+                .resource_version
+                .as_deref()
+                .ok_or("Control credential version missing")?
+        );
+        let template_annotations = deployment
             .spec
             .as_ref()
             .and_then(|spec| spec.template.metadata.as_ref())
-            .and_then(|meta| meta.annotations.as_ref())
-            .and_then(|a| a.get(EPOCH))
-            != Some(&epoch)
+            .and_then(|meta| meta.annotations.as_ref());
+        let require_version = rotated
+            || !super::live::currently_qualified(reg)
+            || template_annotations
+                .is_some_and(|annotations| annotations.contains_key(CONTROL_VERSION));
+        if template_annotations.and_then(|a| a.get(EPOCH)) != Some(&epoch)
+            || (require_version
+                && template_annotations.and_then(|a| a.get(CONTROL_VERSION)) != Some(&version))
         {
             deployments.patch(name,&PatchParams::default(),&Patch::Merge(json!({
                 "metadata":{"uid":deployment.metadata.uid,"resourceVersion":deployment.metadata.resource_version},
-                "spec":{"template":{"metadata":{"annotations":{EPOCH:epoch}}}},
+                "spec":{"template":{"metadata":{"annotations":{EPOCH:epoch,CONTROL_VERSION:version}}}},
             }))).await.map_err(|e|api_error("Restart owned control credential consumer",e))?;
             return Err(WAITING_FOR_ROTATION.into());
-        }
-        let desired = deployment
-            .spec
-            .as_ref()
-            .and_then(|spec| spec.replicas)
-            .unwrap_or(1);
-        let ready = deployment.status.as_ref().is_some_and(|status| {
-            status.observed_generation == deployment.metadata.generation
-                && status.updated_replicas.unwrap_or(0) == desired
-                && status.available_replicas.unwrap_or(0) == desired
-        });
-        if !ready {
-            return Err(WAITING_FOR_ROLLOUT.into());
         }
         let selector = deployment
             .spec
@@ -416,16 +424,19 @@ pub(super) async fn rotate_owned_control_credentials(
             .await
             .map_err(|e| api_error("Verify old control credential consumers have terminated", e))?;
         if pods.iter().any(|pod| {
-            pod.metadata
-                .annotations
-                .as_ref()
-                .and_then(|annotations| annotations.get(EPOCH))
-                != Some(&epoch)
+            let annotations = pod.metadata.annotations.as_ref();
+            annotations.and_then(|annotations| annotations.get(EPOCH)) != Some(&epoch)
+                || (require_version
+                    && annotations.and_then(|annotations| annotations.get(CONTROL_VERSION))
+                        != Some(&version))
         }) {
             // Rollout availability alone can exclude a still-terminating old
             // router which continues accepting its startup-cached control token.
             return Err(WAITING_FOR_ROLLOUT.into());
         }
+        // Privacy completion is credential/template identity plus termination
+        // of old caches, not workload availability. In particular, the SRE
+        // readiness endpoint itself requires this authority to become Ready.
     }
     Ok(())
 }

@@ -38,6 +38,7 @@ pub(crate) mod byo_contract;
 mod credential_sources;
 mod dev_env;
 pub(crate) mod governance_mounts;
+mod governed_services;
 mod inference;
 mod mcp_egress;
 pub(crate) mod namespace_ownership;
@@ -310,6 +311,18 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     {
         Ok(projection) => projection,
         Err(detail) => {
+            let detail = match governed_services::quarantine_on_privacy_loss(
+                client,
+                &sandbox,
+                owned_namespace.as_ref().ok_or_else(|| {
+                    ReconcileError::Configuration("Sandbox namespace is absent".into())
+                })?,
+            )
+            .await
+            {
+                Ok(()) => detail,
+                Err(error) => format!("{detail}; owned control quarantine failed: {error}"),
+            };
             crate::status::stamp_degraded(client, &sandbox, &name, "SREAuthorityNotReady", &detail)
                 .await;
             return Ok(Action::requeue(Duration::from_secs(20)));
@@ -1286,6 +1299,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // (governance ConfigMap + mesh ingress NetworkPolicy) intentionally
     // still run — they form the *overlay* that kars layers on top
     // of the upstream Pod.
+    let mut service_projection = None;
     'deployment_block: {
         if overlay_mode {
             break 'deployment_block;
@@ -1599,6 +1613,18 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         agent_env::merge(&mut openclaw_env, &runtime_plan);
 
         // Build the inference-router env array
+        let service_identity = match governed_services::ensure(
+            client,
+            &sandbox,
+            owned_namespace.as_ref().ok_or_else(|| {
+                ReconcileError::Configuration("Governed service namespace is absent".into())
+            })?,
+        )
+        .await
+        {
+            Ok(projection) => projection,
+            Err(detail) => degrade!("GovernedServicePrivacyNotReady", detail),
+        };
         let mut router_env = vec![
             json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
             json!({"name": "FOUNDRY_ENDPOINT", "value": &ctx.foundry_endpoint}),
@@ -1612,6 +1638,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             json!({"name": "TOKEN_BUDGET_DAILY", "value": token_budget_daily.to_string()}),
             json!({"name": "TOKEN_BUDGET_PER_REQUEST", "value": token_budget_per_request.to_string()}),
             json!({"name": "SANDBOX_NAME", "value": &name}),
+            json!({"name": "KARS_SERVICE_IDENTITY_JSON", "value": service_identity.identity.to_string()}),
             json!({"name": "SANDBOX_ISOLATION", "value": &sandbox_config.isolation}),
             json!({"name": "RUST_LOG", "value": "info,inference_router=debug"}),
         ];
@@ -2013,6 +2040,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         }],
                         "nodeSelector": node_selector
         });
+
+        governed_services::mount(&mut pod_spec);
 
         // Set runtimeClassName for Kata (confidential) isolation
         if let Some(rc) = runtime_class {
@@ -2666,6 +2695,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         if let Some(namespace) = owned_namespace.as_ref() {
             credentials.decorate(&mut deployment, &sandbox, namespace);
         }
+        service_identity.decorate(&mut deployment);
         deploy_api
             .patch(
                 &name,
@@ -2673,6 +2703,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 &Patch::Apply(deployment),
             )
             .await?;
+        service_projection = Some(service_identity);
     } // end 'deployment_block
 
     // ── Step 4b: Azure Services RBAC annotations ─────────────────────────
@@ -2972,6 +3003,18 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             configmap = %blocklist_cm_name,
             cronjob = %cronjob_name,
             "Blocklist infrastructure created (seed ConfigMap + 6h refresh CronJob)"
+        );
+    }
+
+    if let Some(projection) = service_projection.as_ref()
+        && !projection
+            .consumers_current(client, &sandbox_ns, &name)
+            .await
+            .map_err(ReconcileError::Configuration)?
+    {
+        degrade!(
+            "ControlCredentialRolloutPending",
+            "Waiting for startup-cached governed control credential consumers to terminate"
         );
     }
 

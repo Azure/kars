@@ -17,6 +17,7 @@ pub const PRIVATE_SECRET: &str = "sre-api-router-identity";
 pub const AGENT_SECRET: &str = "sre-api-agent";
 pub const OWNER: &str = "kars.azure.com/sre-registration-uid";
 pub const EPOCH: &str = "kars.azure.com/sre-privacy-epoch";
+pub const CONTROL_VERSION: &str = "kars.azure.com/services-credential-version";
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema, PartialEq, Eq)]
 #[serde(rename_all = "camelCase")]

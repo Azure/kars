@@ -570,7 +570,7 @@ async fn old_control_token_consumers_must_disappear_even_after_rollout_counters_
             "labels":{"kars.azure.com/sandbox":"sre"},
             "managedFields":[{"manager":crate::field_managers::CLAWSANDBOX,"operation":"Apply","apiVersion":"apps/v1",
                 "fieldsType":"FieldsV1","fieldsV1":{"f:spec":{}}}]},
-        "spec":{"replicas":0,"selector":{"matchLabels":{"app":"sre"}},"template":{"metadata":{"annotations":{EPOCH:epoch}},
+        "spec":{"replicas":0,"selector":{"matchLabels":{"app":"sre"}},"template":{"metadata":{"annotations":{EPOCH:epoch,CONTROL_VERSION:"control:1"}},
             "spec":{"containers":[]}}},
         "status":{"observedGeneration":2,"updatedReplicas":0,"availableReplicas":0}}));
         locked.objects.insert(

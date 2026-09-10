@@ -3051,6 +3051,7 @@ EOF
 source "$SCRIPT_DIR/sre-authority.sh"
 source "$SCRIPT_DIR/namespace-ownership.sh"
 source "$SCRIPT_DIR/credential-sources.sh"
+source "$SCRIPT_DIR/governed-services.sh"
 
 main() {
     umask 077
@@ -3089,6 +3090,11 @@ main() {
     test_sandbox_namespace_labels || true
     test_sandbox_deployment_exists || true
     test_sandbox_pod_starts || true
+    if test_governed_services; then
+        pass "Service API smoke: router-only token mount, credential checks, and scope reset"
+    else
+        fail "Governed service authentication and scope lifecycle gate failed"
+    fi
     test_sandbox_networkpolicy_denies_ingress || true
     test_sandbox_suspended_lifecycle || true
     test_secondary_resource_watch || true
