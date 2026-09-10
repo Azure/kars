@@ -85,7 +85,7 @@ pub(super) async fn rpc_baseline(
     for (namespace, labels) in [
         (
             runtime.name_any(),
-            BTreeMap::from([("kars.azure.com/sandbox".into(), sandbox.name_any())]),
+            crate::reconciler::build_pod_labels(&sandbox.name_any()),
         ),
         (
             endpoint.namespace.clone(),
@@ -193,7 +193,7 @@ pub(super) async fn verify(
     sandbox: &crate::crd::KarsSandbox,
     runtime: &Namespace,
 ) -> Result<(), String> {
-    let target = BTreeMap::from([("kars.azure.com/sandbox".into(), sandbox.name_any())]);
+    let target = crate::reconciler::build_pod_labels(&sandbox.name_any());
     for writer in &grant.spec.writers {
         let pods = Api::<Pod>::namespaced(client.clone(), &writer.namespace)
             .list(
@@ -239,11 +239,88 @@ mod tests {
     use super::*;
 
     #[test]
+    fn observation_baseline_uses_the_generated_runtime_labels_without_accepting_other_selectors() {
+        let labels = crate::reconciler::build_pod_labels("agent");
+        assert_eq!(
+            labels,
+            BTreeMap::from([
+                ("kars.azure.com/sandbox".into(), "agent".into()),
+                ("kars.azure.com/component".into(), "sandbox".into()),
+                ("azure.workload.identity/use".into(), "true".into()),
+            ])
+        );
+        let policy: NetworkPolicy = serde_json::from_value(json!({
+            "metadata":{"name":"sandbox-policy","namespace":"kars-agent"},
+            "spec":{"podSelector":{"matchLabels":{"kars.azure.com/component":"sandbox"}},
+                "policyTypes":["Ingress","Egress"],"ingress":[],"egress":[]}
+        }))
+        .unwrap();
+        for direction in ["Ingress", "Egress"] {
+            assert!(isolated(std::slice::from_ref(&policy), &labels, direction));
+            let incomplete = BTreeMap::from([("kars.azure.com/sandbox".into(), "agent".into())]);
+            assert!(!isolated(
+                std::slice::from_ref(&policy),
+                &incomplete,
+                direction
+            ));
+        }
+        let mut foreign = policy.clone();
+        foreign
+            .spec
+            .as_mut()
+            .unwrap()
+            .pod_selector
+            .as_mut()
+            .unwrap()
+            .match_labels = Some(BTreeMap::from([(
+            "kars.azure.com/sandbox".into(),
+            "other".into(),
+        )]));
+        assert!(!isolated(&[foreign], &labels, "Ingress"));
+        let mut observer_only = policy;
+        observer_only.metadata.labels = Some(BTreeMap::from([(
+            "kars.azure.com/observer-metadata-grant".into(),
+            "grant".into(),
+        )]));
+        assert!(!isolated(&[observer_only], &labels, "Egress"));
+    }
+
+    #[test]
+    fn observation_sender_egress_can_select_the_actual_runtime_component_and_name() {
+        let runtime: Namespace = serde_json::from_value(json!({"metadata":{"name":"kars-agent",
+            "labels":{"kubernetes.io/metadata.name":"kars-agent"}}}))
+        .unwrap();
+        let sender = BTreeMap::from([("app".into(), "bff".into())]);
+        let policy: NetworkPolicy = serde_json::from_value(json!({"metadata":{},"spec":{
+            "podSelector":{"matchLabels":{"app":"bff"}},"policyTypes":["Egress"],"egress":[{
+                "to":[{"namespaceSelector":{"matchLabels":{"kubernetes.io/metadata.name":"kars-agent"}},
+                    "podSelector":{"matchLabels":{"kars.azure.com/component":"sandbox",
+                        "kars.azure.com/sandbox":"agent"}}}],
+                "ports":[{"port":9447,"protocol":"TCP"}]
+            }]
+        }})).unwrap();
+        assert!(approved(
+            std::slice::from_ref(&policy),
+            "bridge",
+            &sender,
+            &runtime,
+            &crate::reconciler::build_pod_labels("agent")
+        ));
+        assert!(!approved(
+            &[policy],
+            "bridge",
+            &sender,
+            &runtime,
+            &crate::reconciler::build_pod_labels("other")
+        ));
+    }
+
+    #[test]
     fn observation_egress_preflight_does_not_require_or_create_isolation() {
         let runtime: Namespace = serde_json::from_value(json!({"metadata":{"name":"kars-agent",
             "labels":{"kubernetes.io/metadata.name":"kars-agent"}}}))
         .unwrap();
-        let target = BTreeMap::from([("kars.azure.com/sandbox".into(), "agent".into())]);
+        let target = crate::reconciler::build_pod_labels("agent");
         let labels = BTreeMap::from([("app".into(), "bff".into())]);
         assert!(approved(&[], "bridge", &labels, &runtime, &target));
         let mut policy: NetworkPolicy = serde_json::from_value(json!({"metadata":{},"spec":{
