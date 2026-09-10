@@ -49,6 +49,44 @@ all-in task spend, invoice accuracy, taxes, or exchange rates.
 
 ## Verification
 
+### Native primary-workload repair (2026-09-10)
+
+Standalone qualification found a real ReplicaSet admission failure:
+`AdmissionRequest.subResource` is absent on primary operations. The shared
+`kars-inference-budget-workloads` expression now uses
+`request.?subResource.orValue('')` rather than a raw field access. The exact
+controller usernames, core-only Deployment restriction, namespace selector,
+ephemeral-container restriction, failure policy and all other predicates remain
+unchanged. Helm and Rust consume the same JSON; no second policy copy was added.
+
+The isolated repair and native regressions originate at
+`63c9a06403e6ae9264fefd3c3074bd7c55338d99`. Actual Kubernetes qualification at
+composed head `c8f7a143a3242484ea782d5c3170ae00295074f6` passed all **19 workload
+records**, including the real Deployment/ReplicaSet/Pod owner-UID chain, allowed
+primary controller creation, and exact intended tenant/Deployment/ephemeral
+denials. The probe proves each principal has the necessary RBAC rather than
+mistaking an unrelated authorization error for admission enforcement. The
+tokenless, deliberately unscheduled fixtures do not claim runtime readiness.
+
+Evidence: [native API job 102719417174](https://github.com/Azure/kars/actions/runs/34428691641/job/102719417174).
+The same composed run passed hosted Rust, CLI, schema and benchmark jobs.
+Its separate [standalone job](https://github.com/Azure/kars/actions/runs/34428691641/job/102725472891)
+finished **23 passed / 1 failed**: budget Pods are created, but the router reports
+`ErrImagePull` / `ImagePullBackOff`. Spending and cancellation assertions were
+not reached. No image-resolution cause, full SRE or CNI enforcement is inferred.
+
+Forwarding the exact repair to this budget branch passed 12 focused CLI/probe
+tests, TypeScript checking, native JavaScript syntax, Helm lint and diff checks.
+No local Cargo build was used for this forward. This is bounded admission
+closure, not complete budget enforcement or new-head hosted qualification.
+Required human signatures, exact composed-runtime qualification and publication
+approval remain outstanding.
+
+### Initial authoring snapshot (historical)
+
+The table and initial local-build statements below record the earlier authoring
+state. They are not the current result of the native workload repair above.
+
 | Area | Evidence | Status |
 |---|---|---|
 | Shared arithmetic/state engine | UID ancestry, ancestor reservation, BeginDispatch, settlement, cancellation, replay and breach tests written | Rust execution pending |
