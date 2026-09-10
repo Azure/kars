@@ -137,7 +137,7 @@ spec:
   validationActions: [Deny, Audit]
 ---
 # Pod admission must also validate parent templates: otherwise a namespaced
-# caller could launder a private mount through the privileged ReplicaSet/Job controller.
+# caller could launder a private mount through a privileged workload controller.
 {{ range $kind := list "workloads" "cronjobs" }}
 ---
 apiVersion: admissionregistration.k8s.io/v1
@@ -151,6 +151,10 @@ spec:
   matchConstraints:
     resourceRules:
       {{- if eq $kind "workloads" }}
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["replicationcontrollers"]
       - apiGroups: ["apps"]
         apiVersions: ["v1"]
         operations: ["CREATE", "UPDATE"]
@@ -168,6 +172,10 @@ spec:
   matchConditions:
     - name: sre-runtime
       expression: "request.namespace == 'kars-sre'"
+    {{- if eq $kind "workloads" }}
+    - name: replication-controller-template-present
+      expression: "object.kind != 'ReplicationController' || has(object.spec.template)"
+    {{- end }}
   variables:
     - name: pod
       expression: {{ if eq $kind "cronjobs" }}"object.spec.jobTemplate.spec.template.spec"{{ else }}"object.spec.template.spec"{{ end }}
