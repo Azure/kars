@@ -10,7 +10,8 @@ import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { prepareRouterImage } from "./kind-router-image.mjs";
 import { PROVIDER, ENDPOINT, providerSource,
-  budgetStageFacts, routerTemplateFacts, TLS_SERVER_EXTENSIONS, verifyFixtureCertificate } from "./budget-fixture-route.mjs";
+  budgetStageFacts, routerTemplateFacts, TLS_SERVER_EXTENSIONS, verifyFixtureCertificate,
+  unsupportedOperationFact } from "./budget-fixture-route.mjs";
 import { ownedRouterResolver, startForward, waitForOwnedRouter } from "./budget-router-readiness.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
@@ -283,7 +284,11 @@ async function scenario() {
   assert.equal(accountFor("budget-token-left").status.ledger.meters.settled.tokens, 8);
 
   const count = (await request(provider, "/count")).value.count;
-  assert.equal((await request(tokenRight.url, "/v1/embeddings", { input: "fixture" })).status, 503);
+  const unsupported = await request(tokenRight.url, "/v1/embeddings", { input: "fixture" });
+  const denial = unsupportedOperationFact(unsupported);
+  console.log("BUDGET-FAILURE-CONTRACT " + JSON.stringify(denial));
+  assert.equal(unsupported.status, 503);
+  assert(denial.matchesContract, "Unsupported inference must return the coded budget denial");
   assert.equal((await request(tokenRight.url, "/agents", {})).status, 403);
   assert.equal((await request(provider, "/count")).value.count, count);
   const binding = get("karstask", "budget-token-left").status.inferenceBudget;

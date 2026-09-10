@@ -264,6 +264,7 @@ pub async fn forward(
     request_headers: &HeaderMap,
     request_body: Bytes,
 ) -> Result<(StatusCode, HeaderMap, Bytes)> {
+    crate::inference_budget::dispatch::preflight(upstream, &method, path)?;
     let start = Instant::now();
     let mut observation = upstream.telemetry.as_ref().and_then(|telemetry| {
         telemetry.begin(
@@ -538,6 +539,7 @@ pub async fn forward_stream(
     HeaderMap,
     futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
 )> {
+    crate::inference_budget::dispatch::preflight(&upstream, &Method::POST, path)?;
     let mut observation = upstream.telemetry.as_ref().and_then(|telemetry| {
         telemetry.begin(
             path,

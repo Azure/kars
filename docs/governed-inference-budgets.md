@@ -191,6 +191,13 @@ unknown request options, and incompatible output-limit fields. Embeddings,
 legacy completions, image/audio/video generation, Foundry internal generation,
 fine-tuning, agent runs, evaluations, memory generation, and generic Foundry
 proxy operations are not authorized by these text contracts.
+At the proxy's finite-budget gate, unsupported inference operations return HTTP
+503 with the OpenAI error code/type `inference_budget_unavailable`. The operation check
+runs before unrelated default-provider credential acquisition, so a missing
+credential cannot mask this budget denial as a generic 502. Supported operations
+still resolve credentials before the final normalized-wire reservation/begin
+boundary; this early rejection does not grant authority, contact the broker,
+refund work, or change legacy unbounded error handling or preceding policy denials.
 Standalone moderation API stages also lack a v1 bounded contract: when a policy
 requires one, the entire finite request is rejected before that API call.
 The stage is never silently disabled or asserted to have zero cost. Native

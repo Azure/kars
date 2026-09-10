@@ -45,6 +45,16 @@ export function readinessFact(endpoint, response, error) {
           ? "budget-authority-provider-contract" : "unexpected-readiness-response" };
 }
 
+export function unsupportedOperationFact(response) {
+  const httpStatus = Number.isInteger(response?.status) && response.status >= 100 && response.status <= 599
+    ? response.status : 0;
+  const coded = response?.value?.error?.code === "inference_budget_unavailable"
+    && response.value.error.type === "inference_budget_unavailable";
+  return { stage: "unsupported-inference-operation", httpStatus,
+    category: coded ? "inference-budget-unavailable" : "unexpected-error-contract",
+    matchesContract: httpStatus === 503 && coded };
+}
+
 const STAGES = {
   kars_inference_router: {
     readiness: ["router-binding", "router-guardrails", "router-provider", "router-candidate",
