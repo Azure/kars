@@ -13,6 +13,8 @@ import { PROVIDER, ENDPOINT, providerSource,
   budgetStageFacts, routerTemplateFacts, TLS_SERVER_EXTENSIONS, verifyFixtureCertificate,
   unsupportedOperationFact } from "./budget-fixture-route.mjs";
 import { ownedRouterResolver, startForward, waitForOwnedRouter } from "./budget-router-readiness.mjs";
+import { withKindApi } from "./budget-api-client.mjs";
+import { cancelAcceptedTask } from "./budget-cancellation.mjs";
 
 const root = fileURLToPath(new URL("../../", import.meta.url));
 const context = "kind-kars-e2e";
@@ -295,9 +297,12 @@ async function scenario() {
   await request(provider, "/hold");
   const accepted = request(tokenLeft.url, "/v1/chat/completions", message, 90_000).catch(() => ({ status: 0 }));
   await until(async () => (await request(provider, "/count")).value.count === count + 1, "accepted work before cancellation");
-  const current = get("karstask", "budget-token-left");
-  k(["patch", "karstask", current.metadata.name, "-n", namespace, "--type=merge", "--patch-file", "-"],
-    { metadata: { uid: current.metadata.uid, resourceVersion: current.metadata.resourceVersion }, spec: { execution: { launch: false } } });
+  const cancellationDeadline = Date.now() + 30_000;
+  await withKindApi({ root, context, deadline: cancellationDeadline,
+    kubectl: args => k(args, undefined, cancellationDeadline) }, request => cancelAcceptedTask({
+    created: createdTasks.get("budget-token-left"), binding, request, deadline: cancellationDeadline,
+    report: fact => console.log("BUDGET-CANCELLATION " + JSON.stringify(fact)),
+  }));
   await until(() => {
     const account = get("karsbudgetaccount", binding.account.name, binding.account.namespace);
     assert.equal(account.metadata.uid, binding.account.uid);

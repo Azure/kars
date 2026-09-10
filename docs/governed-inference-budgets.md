@@ -292,3 +292,15 @@ does not authorize a new target, and replaced parent identities fail immediately
 This is test-harness lifecycle handling, not a production readiness bypass:
 provider-attempt, sibling denial, pending/settled spending, and conservatively
 funded cancellation assertions remain unchanged.
+
+Accepted-work cancellation uses the same loopback `kubectl proxy` API client as
+the native workload proof. The pinned kubectl v1.30.5 reads `--patch-file -` as a
+literal filename, not stdin; cancellation therefore sends a real merge-patch
+request instead. Only an HTTP 409 with a matching Kubernetes `Status/Conflict`
+permits another attempt (at most three, within 30 seconds). Every attempt rereads
+the workspace and Task, retaining the created Task UID, generation, complete spec,
+budget binding, workspace UID, and fresh resourceVersion. Changed intent or
+identity, 403/422, malformed responses, and transport failures remain fatal.
+`BUDGET-CANCELLATION` prints only fixed verb/resource/status/reason facts, not API
+messages, headers, or bodies. These client checks do not replace the subsequent
+real uncertain-liability and settled/reserved accounting assertions.
