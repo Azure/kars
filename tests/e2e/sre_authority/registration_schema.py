@@ -129,8 +129,20 @@ def request(port, method, path, obj=None, *, accept="application/json"):
         return code, None
 
 
+def connection_proxy_arguments(namespaces):
+    if (len(namespaces) != 2 or not isinstance(namespaces[0], str)
+            or re.fullmatch(r"kars-cel-[a-f0-9]{32}", namespaces[0]) is None
+            or namespaces[1] != namespaces[0] + "-ordinary"):
+        raise RuntimeError("Connection admission proxy requires the two owned fixture namespaces")
+    names = "|".join(re.escape(name) for name in namespaces)
+    paths = (rf"^/version$|^/api/v1/namespaces/({names})/pods/phase-connect-absent/"
+             r"(exec|attach|portforward|proxy)$")
+    return ["--accept-paths", paths, "--reject-paths", "^$",
+            "--reject-methods", "^(POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)$"]
+
+
 @contextlib.contextmanager
-def kind_proxy(root):
+def kind_proxy(root, *, connection_namespaces=()):
     # Read only redacted config to verify the exact disposable context/server.
     config = json.loads(command("context", ["kubectl", "--context", CONTEXT, "config", "view",
                                           "--minify", "-o", "json"], root=root))
@@ -142,9 +154,10 @@ def kind_proxy(root):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
+    connection_args = connection_proxy_arguments(connection_namespaces) if connection_namespaces else []
     process = subprocess.Popen(
         ["kubectl", "--context", CONTEXT, "--request-timeout=15s", "proxy",
-         "--address=127.0.0.1", f"--port={port}"],
+         "--address=127.0.0.1", f"--port={port}", *connection_args],
         cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:

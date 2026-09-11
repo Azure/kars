@@ -4,6 +4,7 @@
 """Real namespace-aware admission, not runtime enrollment or credential proof."""
 
 import copy
+from contextlib import ExitStack
 import json
 from pathlib import Path
 import uuid
@@ -11,7 +12,7 @@ import uuid
 import credential_schema as shared
 from private_consumption import KINDS, POLICY, PREFIX, variants, workload
 from .bootstrap_cases import as_tenant
-from .registration_schema import request
+from .registration_schema import kind_proxy, request
 
 STAGES = (
     ("deployment-controller", "ReplicaSet", "Deployment"),
@@ -89,6 +90,8 @@ def cases(port, objects, emit):
     token = uuid.uuid4().hex
     epoch = uuid.uuid4().hex + uuid.uuid4().hex
     owned = shared.Owned(port)
+    connection_proxies = ExitStack()
+    connection_port = None
     reports = []
 
     def missing_metadata(code, body, name):
@@ -124,8 +127,9 @@ def cases(port, objects, emit):
         require(request(port, "GET", path)[0] == 404)
         # No command, stream, port or target Pod exists. Admission precedes the
         # connector's Pod lookup; a matched 404 is not a working connection.
-        code, body = (as_tenant(port, path + "/" + subresource, {}, user=actor[0], uid=actor[1], method="GET")
-                      if actor else request(port, "GET", path + "/" + subresource))
+        require(connection_port is not None)
+        code, body = (as_tenant(connection_port, path + "/" + subresource, {}, user=actor[0], uid=actor[1], method="GET")
+                      if actor else request(connection_port, "GET", path + "/" + subresource))
         require(request(port, "GET", path)[0] == 404)
         if fault:
             matched = missing_metadata(code, body, fault)
@@ -144,6 +148,11 @@ def cases(port, objects, emit):
         ordinary_namespace = namespace + "-ordinary"
         owned.create("/api/v1/namespaces", {"apiVersion": "v1", "kind": "Namespace",
                      "metadata": {"name": ordinary_namespace, "labels": {shared.LABEL: token}}})
+        # The default kubectl proxy intentionally rejects exec/attach. A separate
+        # proxy permits only these absent-Pod fixture paths, never existing Pods.
+        connection_port, _ = connection_proxies.enter_context(kind_proxy(
+            Path(__file__).resolve().parents[3],
+            connection_namespaces=(namespace, ordinary_namespace)))
         owned.create(f"/api/v1/namespaces/{ordinary_namespace}/serviceaccounts", {
             "apiVersion": "v1", "kind": "ServiceAccount", "metadata": {"name": "sandbox", "namespace": ordinary_namespace}})
         accounts = {}
@@ -241,7 +250,7 @@ def cases(port, objects, emit):
             if label == "workloads":
                 pending = lambda: request(port, "POST", collection(warmup) + "?dryRun=All", warmup)
             else:
-                pending = lambda: request(port, "GET", f"/api/v1/namespaces/{ordinary_namespace}/pods/{ABSENT_POD}/proxy")
+                pending = lambda: request(connection_port, "GET", f"/api/v1/namespaces/{ordinary_namespace}/pods/{ABSENT_POD}/proxy")
             shared.wait_for(pending, lambda code, body: missing_metadata(code, body, fault["metadata"]["name"]), "fixtures")
             for active, ns_name in (("active", namespace), ("inactive", ordinary_namespace)):
                 if label == "workloads":
@@ -255,5 +264,8 @@ def cases(port, objects, emit):
                         connect(active + "-" + subresource + "-missing-metadata", ns_name, subresource, 422,
                                 fault=fault["metadata"]["name"])
     finally:
-        owned.cleanup()
+        try:
+            connection_proxies.close()
+        finally:
+            owned.cleanup()
     return reports
