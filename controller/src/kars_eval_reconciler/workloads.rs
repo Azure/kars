@@ -124,6 +124,7 @@ pub(super) struct Intent {
     target_digest: Option<String>,
     pub router: String,
     pub request_marker: Option<String>,
+    pub request_job: Option<String>,
     pub pod_spec: Value,
 }
 
@@ -142,6 +143,31 @@ impl Intent {
             .filter(|g| *g > 0)
             .context("Eval generation missing")?;
         let (target_uid, target_digest) = target_identity(client, eval).await?;
+        let (request_marker, request_job) = if eval
+            .annotations()
+            .get(crate::kars_eval::ANNOTATION_RUN_NOW)
+            .map(String::as_str)
+            == Some("true")
+        {
+            let token = eval
+                .annotations()
+                .get(RUN_TOKEN)
+                .context("run request not claimed")?;
+            (
+                Some(token.clone()),
+                Some(super::run_now_job_name(&eval.name_any(), Some(token))),
+            )
+        } else {
+            (
+                eval.annotations().get(LAST_TOKEN).cloned(),
+                eval.annotations().get(LAST_RUN).cloned(),
+            )
+        };
+        ensure!(
+            matches!((&request_marker, &request_job), (None, None))
+                || matches!((&request_marker, &request_job), (Some(token), Some(job)) if !token.is_empty() && !job.is_empty()),
+            "incomplete evaluation request identity"
+        );
         let pod_spec = super::runner::runner_pod_spec_json(
             &eval.name_any(),
             &format!("karseval-{}-corpus", eval.name_any()),
@@ -169,19 +195,28 @@ impl Intent {
             target_uid,
             target_digest,
             router: router.into(),
-            request_marker: eval.annotations().get(LAST_TOKEN).cloned(),
+            request_marker,
+            request_job,
             pod_spec,
         })
     }
 
     pub fn annotations(&self) -> Value {
-        json!({INTENT: self.digest, CORPUS: self.corpus_digest})
+        // Request identity is separate from spec intent and survives the claim/ack handoff.
+        let mut annotations = json!({INTENT: self.digest, CORPUS: self.corpus_digest});
+        if let (Some(token), Some(job)) = (&self.request_marker, &self.request_job) {
+            annotations[LAST_TOKEN] = json!(token);
+            annotations[LAST_RUN] = json!(job);
+        }
+        annotations
     }
 
     pub fn matches(&self, meta: &ObjectMeta) -> bool {
         meta.annotations.as_ref().is_some_and(|annotations| {
             annotations.get(INTENT) == Some(&self.digest)
                 && annotations.get(CORPUS) == Some(&self.corpus_digest)
+                && annotations.get(LAST_TOKEN) == self.request_marker.as_ref()
+                && annotations.get(LAST_RUN) == self.request_job.as_ref()
         })
     }
 

@@ -68,6 +68,7 @@ pub(super) async fn observe(
         .context("list evaluator Jobs")?;
     let mut candidates = Vec::new();
     for job in list {
+        verify_retained_source(&job, retained.as_ref(), cache_authorized, intent)?;
         let Some(template) = job.spec.as_ref().map(|spec| &spec.template) else {
             continue;
         };
@@ -92,7 +93,7 @@ pub(super) async fn observe(
         a.0.cmp(&b.0)
             .then_with(|| a.1.metadata.uid.cmp(&b.1.metadata.uid))
     });
-    if let Some(requested) = eval.annotations().get(workloads::LAST_RUN)
+    if let Some(requested) = &intent.request_job
         && !candidates
             .iter()
             .any(|(_, job)| job.name_any() == *requested)
@@ -100,40 +101,54 @@ pub(super) async fn observe(
             .get_opt(requested)
             .await
             .context("read last explicitly requested Job")?
-        && job
+    {
+        verify_retained_source(&job, retained.as_ref(), cache_authorized, intent)?;
+        if job
             .spec
             .as_ref()
             .and_then(|spec| spec.template.metadata.as_ref())
             .is_some_and(|meta| intent.matches(meta))
-    {
-        verify_job(&job, &cronjobs, eval, intent).await?;
-        let created = job
-            .metadata
-            .creation_timestamp
-            .as_ref()
-            .context("Job creation timestamp missing")?
-            .0
-            .to_string();
-        candidates.push((created, job));
-        candidates.sort_by(|a, b| {
-            a.0.cmp(&b.0)
-                .then_with(|| a.1.metadata.uid.cmp(&b.1.metadata.uid))
-        });
+        {
+            verify_job(&job, &cronjobs, eval, intent).await?;
+            let created = job
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .context("Job creation timestamp missing")?
+                .0
+                .to_string();
+            candidates.push((created, job));
+            candidates.sort_by(|a, b| {
+                a.0.cmp(&b.0)
+                    .then_with(|| a.1.metadata.uid.cmp(&b.1.metadata.uid))
+            });
+        }
     }
     let latest = candidates.last();
-    if let (Some((_, job)), Some(old)) = (latest, retained.as_ref()) {
-        ensure!(
-            job.name_any() != old.job_name
-                || job.metadata.uid.as_deref() == Some(old.job_uid.as_str()),
-            "previously observed Job name was replaced"
-        );
-    }
     let explicit_pending = eval
         .annotations()
         .get(crate::kars_eval::ANNOTATION_RUN_NOW)
         .map(String::as_str)
         == Some("true");
-    let selected = if let Some((_, job)) = latest {
+    let retained = retained.filter(|evidence| cache_authorized && evidence.current(intent));
+    // A missing request is not permission to fall back to an older success. A protected
+    // receipt is the only evidence that may outlive the requested Job's TTL.
+    let missing_request = intent.request_job.as_ref().is_some_and(|requested| {
+        !candidates
+            .iter()
+            .any(|(_, job)| job.name_any() == *requested)
+    }) && retained.is_none();
+    let requested_running = if let Some((_, job)) = candidates
+        .iter()
+        .find(|(_, job)| intent.request_job.as_deref() == Some(job.name_any().as_str()))
+    {
+        workloads::terminal(job)?.is_none()
+    } else {
+        false
+    };
+    let selected = if explicit_pending || missing_request || requested_running {
+        None
+    } else if let Some((_, job)) = latest {
         if let Some((complete, at)) = workloads::terminal(job)? {
             Some(
                 read_evidence(
@@ -158,9 +173,22 @@ pub(super) async fn observe(
     } else {
         None
     };
-    let pending = explicit_pending || (latest.is_some() && selected.is_none());
-    let retained = retained.filter(|evidence| cache_authorized && evidence.current(intent));
+    let pending = explicit_pending
+        || missing_request
+        || requested_running
+        || (latest.is_some() && selected.is_none());
     let selected = match (selected, retained) {
+        (Some(new), Some(old))
+            if new.job_uid == old.job_uid
+                && new.job_name == old.job_name
+                && new.job_generation == old.job_generation
+                && new.at == old.at
+                && new.created_at == old.created_at
+                && new.report.is_none()
+                && new.error.as_deref() == Some("RunnerTerminatedWithoutReport") =>
+        {
+            Some(old)
+        }
         (Some(new), Some(old)) if old.created_at > new.created_at => Some(old),
         (Some(new), _) => Some(new),
         (None, old) => old,
@@ -217,6 +245,30 @@ pub(super) async fn observe(
     })
 }
 
+fn verify_retained_source(
+    job: &Job,
+    retained: Option<&Evidence>,
+    authorized: bool,
+    intent: &Intent,
+) -> anyhow::Result<()> {
+    if let Some(old) = retained.filter(|old| old.job_name == job.name_any()) {
+        ensure!(
+            job.metadata.uid.as_deref() == Some(old.job_uid.as_str()),
+            "previously observed Job name was replaced"
+        );
+        if authorized && old.current(intent) {
+            ensure!(
+                job.spec
+                    .as_ref()
+                    .and_then(|spec| spec.template.metadata.as_ref())
+                    .is_some_and(|meta| intent.matches(meta)),
+                "retained Job request/spec intent changed"
+            );
+        }
+    }
+    Ok(())
+}
+
 async fn verify_job(
     job: &Job,
     cronjobs: &Api<CronJob>,
@@ -239,8 +291,20 @@ async fn verify_job(
         "Job Pod template differs from the actual current producer"
     );
     if workloads::require_owner(&job.metadata, eval).is_ok() {
+        ensure!(
+            job.annotations().get(workloads::RUN_TOKEN) == intent.request_marker.as_ref()
+                && intent
+                    .request_job
+                    .as_ref()
+                    .is_none_or(|name| *name == job.name_any()),
+            "one-shot Job does not match the current request"
+        );
         return Ok(());
     }
+    ensure!(
+        eval.spec.schedule.is_some(),
+        "scheduled Job without a current schedule"
+    );
     let name = super::cron_job_name(&eval.name_any());
     let cron = cronjobs
         .get(&name)
@@ -259,6 +323,17 @@ async fn verify_job(
         .and_then(|spec| spec.template.metadata.as_ref())
         .context("CronJob template missing")?;
     ensure!(intent.matches(meta), "CronJob intent changed");
+    let job_meta = cron
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.job_template.metadata.as_ref())
+        .context("CronJob Job metadata missing")?;
+    ensure!(
+        intent.matches(job_meta)
+            && job.annotations().get(workloads::LAST_TOKEN) == intent.request_marker.as_ref()
+            && job.annotations().get(workloads::LAST_RUN) == intent.request_job.as_ref(),
+        "scheduled Job request stamp differs from its current producer"
+    );
     let spec = cron
         .spec
         .as_ref()
@@ -288,6 +363,12 @@ async fn read_evidence(
         corpus,
     } = reader;
     let (job_uid, _) = workloads::identity(&job.metadata)?;
+    let stamps = job
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.metadata.as_ref())
+        .and_then(|meta| meta.annotations.as_ref())
+        .context("Job request stamps missing")?;
     let mut evidence = Evidence {
         eval_uid: intent.eval_uid.clone(),
         eval_generation: intent.generation,
@@ -308,7 +389,8 @@ async fn read_evidence(
         report: None,
         error: Some("RunnerTerminatedWithoutReport".into()),
         digest: String::new(),
-        request_marker: eval.annotations().get(workloads::LAST_TOKEN).cloned(),
+        request_marker: stamps.get(workloads::LAST_TOKEN).cloned(),
+        request_job: stamps.get(workloads::LAST_RUN).cloned(),
     };
     let pod_list = pods
         .list(&ListParams::default().labels(&format!("job-name={}", job.name_any())))
@@ -384,6 +466,7 @@ async fn read_evidence(
                 && before.metadata.generation == pod.metadata.generation
                 && before.metadata.owner_references == pod.metadata.owner_references
                 && before.metadata.deletion_timestamp.is_none()
+                && intent.matches(&before.metadata)
                 && serde_json::to_value(&before.status)? == serde_json::to_value(&pod.status)?
                 && serde_json::to_value(&before.spec)? == serde_json::to_value(&pod.spec)?,
             "Pod replaced before log read"
@@ -408,6 +491,7 @@ async fn read_evidence(
                 && after.metadata.generation == pod.metadata.generation
                 && after.metadata.owner_references == pod.metadata.owner_references
                 && after.metadata.deletion_timestamp.is_none()
+                && intent.matches(&after.metadata)
                 && serde_json::to_value(&after.status)? == serde_json::to_value(&pod.status)?
                 && serde_json::to_value(&after.spec)? == serde_json::to_value(&pod.spec)?,
             "Pod changed during log read"
@@ -430,7 +514,11 @@ async fn read_evidence(
                 )?;
                 let job_created = chrono::DateTime::parse_from_rfc3339(&evidence.created_at)?;
                 let pod_finished = chrono::DateTime::parse_from_rfc3339(finished)?;
-                evidence.error = if started < job_created || completed > pod_finished {
+                // metav1.Time is serialized at whole-second precision. Only the finish
+                // second is uncertain: the following second is already out of bounds.
+                evidence.error = if started < job_created
+                    || completed.timestamp() > pod_finished.timestamp()
+                {
                     Some("ReportTimeAttributionMismatch".into())
                 } else if (report.exit_code() == *exit_code) && (complete == (*exit_code == 0)) {
                     None
