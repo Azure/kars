@@ -228,8 +228,6 @@ pub(crate) async fn verify_receipt_with_pins(
     Path((ns, name)): Path<(String, String)>,
     pins: Result<AnchorPins, &'static str>,
 ) -> AppResult<Json<VerifyResult>> {
-    use base64::engine::general_purpose::STANDARD as B64;
-
     let cluster = require_cluster(&state)?;
     require_task_evidence_access(cluster, &ns, &name, &principal).await?;
     let receipt = cluster
