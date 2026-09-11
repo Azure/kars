@@ -85,6 +85,14 @@ describe("Monorepo native prerequisite", () => {
     expect(enrollment).toContain('setup.ready_grant(namespace)');
     expect(enrollment).not.toContain("admin.create(");
     expect(enrollment).not.toMatch(/failurePolicy|patch.*conditions|break-glass/);
+    const continuity = read("tests/native-credentials/grant_continuity_case.py");
+    expect(read("tests/native-credentials/run.py"))
+      .toContain('case("shared-workspace-and-active-grant-update-continuity"');
+    expect(continuity).toContain("previous=reviewed");
+    expect(continuity).toContain("other[\"spec\"] == original_spec");
+    expect(continuity).toContain("scope_snapshot(setup, scopes) == before_update");
+    expect(continuity).toContain('"verb": "use-agent-credentials"');
+    expect(continuity).toContain("expected=(403,)");
   });
 
   it("qualifies actual CNI traffic and never treats API existence as enforcement", () => {

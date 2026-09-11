@@ -26,6 +26,13 @@ key scope, stores its metadata-only review privately, and waits for actual
 controller readiness. Local orchestration fixtures are not native authority
 evidence.
 
+The native continuity case updates the sole active grant through the real
+operator CLI, adds another workspace, and then updates that grant. It verifies
+unchanged existing grant identities/specifications and private scope
+receipts/epochs, actual writer capability reviews, and continued denial of
+broad Secret listing. Ready conditions still come only from the controller;
+fixture state changes are not substituted for these live checks.
+
 Set `core.namespace` independently from the chart's `namespace`. BFF/web
 default workspace and provider operations use the configured core namespace;
 the optional Teams Secret remains in the dedicated Bridge integration namespace.

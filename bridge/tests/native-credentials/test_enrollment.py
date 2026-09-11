@@ -73,12 +73,13 @@ class EnrollmentTests(unittest.TestCase):
         self.review_files.append(path)
         return path
 
-    def enroll(self):
+    def enroll(self, *, previous=None, keys=None):
         with patch.object(enrollment, "ROOT", self.root), \
              patch.object(enrollment, "CLI", self.cli), \
              patch.object(operator_diagnostics, "command", side_effect=self.command), \
              patch.object(enrollment, "private_file", side_effect=self.private_file):
-            return enrollment.enroll(self.setup, self.namespace, self.writer, self.keys)
+            return enrollment.enroll(self.setup, self.namespace, self.writer,
+                                     self.keys if keys is None else keys, previous=previous)
 
     def test_uses_real_public_preview_apply_and_then_controller_readiness(self):
         self.assertEqual(self.enroll(), self.grant)
@@ -99,6 +100,42 @@ class EnrollmentTests(unittest.TestCase):
         self.admin.optional = lambda _path: self.grant
         with self.assertRaises(Failure):
             self.enroll()
+        self.assertEqual(self.commands, [])
+
+    def test_explicit_existing_grant_key_update_uses_reviewed_uid_and_version(self):
+        self.grant["metadata"]["resourceVersion"] = "7"
+        previous = copy.deepcopy(self.grant)
+        self.review["metadata"].update(uid="grant", resourceVersion="7")
+        keys = [*self.keys, "DISCORD_BOT_TOKEN"]
+        self.review["spec"]["agentKeys"] = keys
+        self.admin.optional = lambda _path: self.grant
+        original = self.command
+        def command(*args, **kwargs):
+            result = original(*args, **kwargs)
+            if args[4] == "apply":
+                self.grant["spec"]["agentKeys"] = keys
+                self.grant["metadata"]["resourceVersion"] = "8"
+            return result
+        self.command = command
+        result = self.enroll(previous=previous, keys=keys)
+        self.assertEqual(result["metadata"]["uid"], previous["metadata"]["uid"])
+        self.assertEqual(result["spec"]["agentKeys"], keys)
+        self.assertEqual(previous["spec"]["agentKeys"], ["SLACK_BOT_TOKEN"])
+        self.assertEqual(len(self.commands), 2)
+
+    def test_existing_update_rejects_changed_incarnations_and_non_key_authority(self):
+        self.grant["metadata"]["resourceVersion"] = "7"
+        previous = copy.deepcopy(self.grant)
+        self.admin.optional = lambda _path: self.grant
+        for field, value in (("uid", "replacement"), ("resourceVersion", "changed")):
+            before = copy.deepcopy(self.grant)
+            self.grant["metadata"][field] = value
+            with self.subTest(field=field), self.assertRaises(Failure):
+                self.enroll(previous=previous)
+            self.grant = before
+        self.grant["spec"]["integrationStores"] = [{"secret": {"name": "private"}}]
+        with self.assertRaisesRegex(Failure, "only an agent-key grant"):
+            self.enroll(previous=copy.deepcopy(self.grant))
         self.assertEqual(self.commands, [])
 
     def test_operator_apply_failure_cannot_become_ready_or_a_direct_create_fallback(self):
