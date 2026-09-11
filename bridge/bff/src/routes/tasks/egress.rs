@@ -4,7 +4,6 @@ use serde::Deserialize;
 
 use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
-use crate::kars::task::KarsTask;
 use crate::routes::ownership::require_owned_task;
 use crate::state::AppState;
 

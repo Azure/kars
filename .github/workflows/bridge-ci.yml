@@ -33,6 +33,17 @@ jobs:
           workspaces: bridge/bff
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Require receipt trust regression registration
+        run: |
+          cargo test --locked -- --list > /tmp/kars-bridge-bff-tests.txt
+          for name in \
+            routes::receipts::anchor::tests::pins_follow_the_controller_raw_key_fingerprint_contract \
+            routes::receipts::anchor::tests::copied_key_id_cannot_substitute_another_public_key \
+            routes::receipts::anchor::tests::malformed_empty_mismatched_or_missing_pins_fail_closed \
+            kars::receipt_log::tests::receipt_endpoint_still_requires_signed_payload_binding_and_full_overflow_inclusion
+          do
+            grep -Fx "$name: test" /tmp/kars-bridge-bff-tests.txt
+          done
       - run: cargo test --locked
       - name: Check explicit credential review orchestration
         run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../tests/native-credentials python3 -m unittest discover -s ../tests/native-credentials -p test_credential_review.py
