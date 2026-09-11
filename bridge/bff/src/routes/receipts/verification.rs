@@ -218,7 +218,7 @@ pub(crate) fn verify_log_integrity_with_pins(
 /// DSSE Pre-Authentication Encoding — byte-for-byte the same framing the
 /// controller signs (`controller/src/providers/signing.rs::pae`):
 /// `"DSSEv1" SP len(type) SP type SP len(body) SP body`.
-fn pae(payload_type: &str, body: &[u8]) -> Vec<u8> {
+pub(super) fn pae(payload_type: &str, body: &[u8]) -> Vec<u8> {
     let mut out = Vec::with_capacity(payload_type.len() + body.len() + 32);
     out.extend_from_slice(b"DSSEv1 ");
     out.extend_from_slice(payload_type.len().to_string().as_bytes());

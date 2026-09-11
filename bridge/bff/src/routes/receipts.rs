@@ -24,6 +24,8 @@ mod statement;
 mod verification;
 
 pub(crate) use anchor::AnchorPins;
+#[cfg(test)]
+use verification::pae;
 use verification::sha256_hex;
 pub(crate) use verification::verify_log_integrity;
 pub use verification::{
