@@ -37,6 +37,28 @@ this repository.
 
 ## Current validation
 
+### Shared-root workspace continuity candidate
+
+Public Bridge native run 34638188545 passed the first actual operator-reviewed
+enrollment and writer readiness, then rejected each additional workspace because
+the persisted root-retirement binding included the first workspace's scope.
+Ignoring that mismatch would not be a repair: rotating shared namespace epochs
+would also invalidate prior grants.
+
+The continuity candidate adds operator-owned root/scope qualification records
+while retaining the original v1 retirement binding and recovery history. It
+preserves existing qualified scope epochs and limits new enrollment to separately
+verified scopes. Controller pending protection retains only independently
+verified shared qualification. Existing private consumers, changed or deleted
+shared evidence, and live multi-grant key rotation require explicit recovery
+rather than silently resetting shared authority.
+
+Ninety-eight provisional TypeScript cases, typecheck, scoped lint and Rust
+formatting passed locally. The shared runner/parser cache differs from the
+lockfile, and new Rust transport cases have not run locally. Exact hosted locked
+CI, real multi-workspace native acceptance and an independent focused source
+review are required; this record grants no approval or gate waiver.
+
 ### Native integration and source-gate follow-up (2026-09-11)
 
 Core candidate `c73506bb` passed complete public technical CI. Downstream

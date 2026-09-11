@@ -8,9 +8,13 @@ import {
   assertRetiredRoot, capturedRetirement, qualifyRetiredBudget, replicaIntent, retirementReview,
   saveRetirement, startRetirement,
 } from "./private-activation-retirement.js";
+import {
+  completePrivateQualification, reviewPrivateContinuity, stageSharedActivation,
+  verifySharedPublication,
+} from "./private-activation-continuity.js";
 
 export type Execute = (args: string[], input?: string) => Promise<string>;
-type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
+export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
 type RecordValue = { [key: string]: Json };
 export interface ReviewedObject { name: string; uid: string; resourceVersion: string }
 export interface ReviewedConsumer { kind: string; object: ReviewedObject; templateDigest: string }
@@ -30,7 +34,7 @@ export interface PrivateActivation {
 export const PRIVATE_PREFIX = "kars.azure.com/private-";
 export const PRIVATE_CONTRACT = "kars.azure.com/private-consumption/v1";
 const grantResource = "karscredentialgrants.kars.azure.com";
-const kinds: Record<string, string> = {
+export const kinds: Record<string, string> = {
   Deployment: "deployments.apps", ReplicaSet: "replicasets.apps",
   StatefulSet: "statefulsets.apps", DaemonSet: "daemonsets.apps",
   ReplicationController: "replicationcontrollers", Job: "jobs.batch", CronJob: "cronjobs.batch", Pod: "pods",
@@ -117,7 +121,7 @@ function rootEnvironment(deployment: unknown, name: string): string | undefined 
   return value;
 }
 
-async function reviewBudgetTls(execute: Execute, deployment: unknown, rootNamespace: string): Promise<BudgetTlsReview | undefined> {
+export async function reviewBudgetTls(execute: Execute, deployment: unknown, rootNamespace: string): Promise<BudgetTlsReview | undefined> {
   const enabled = rootEnvironment(deployment, "KARS_INFERENCE_BUDGET_ENABLED");
   if (enabled === undefined || enabled === "" || enabled === "false") return undefined;
   if (enabled !== "true") throw new Error("Reviewed budget enablement is invalid");
@@ -243,7 +247,7 @@ export async function previewPrivateActivation(
       ...(budgetTls ? { budgetTls } : {}) },
     profile: profile as PrivateActivation["profile"], controllerUids, namespaces,
   };
-  retirementReview(activation, rootNs, deployment, true);
+  await reviewPrivateContinuity(execute, activation, true);
   return activation;
 }
 
@@ -260,8 +264,8 @@ export async function verifyOwnedRuntimeNamespace(execute: Execute, workspace: s
   }
 }
 
-export async function validatePrivateActivation(execute: Execute, activation: PrivateActivation): Promise<void> {
-  if (activation?.contract !== PRIVATE_CONTRACT || activation.phase !== "reviewed"
+export function validateActivationShape(activation: PrivateActivation, phase: PrivateActivation["phase"]): void {
+  if (activation?.contract !== PRIVATE_CONTRACT || activation.phase !== phase
     || !Array.isArray(activation.namespaces) || !activation.namespaces.length || activation.namespaces.length > 64) {
     throw new Error("A reviewed private activation is required; regenerate grant preview with --private-root");
   }
@@ -289,9 +293,18 @@ export async function validatePrivateActivation(execute: Execute, activation: Pr
   if (!/^[a-f0-9]{64}$/.test(activation.bundleRevision) || !/^[a-f0-9]{64}$/.test(activation.root.templateDigest)) {
     throw new Error("Private activation digest is malformed");
   }
+  if (!["service-accounts", "kcm-certificate"].includes(activation.profile)) throw new Error("Private controller profile is invalid");
+  const controllers = activation.profile === "service-accounts" ? list(bundleDefinition().controllers) : [];
+  if (canonical(Object.keys(record(activation.controllerUids)).sort()) !== canonical([...controllers].sort())
+    || Object.values(activation.controllerUids).some(uid => typeof uid !== "string" || !uid || uid.length > 253)) {
+    throw new Error("Private controller profile is incomplete");
+  }
+  const names = new Set<string>();
   for (const scope of activation.namespaces) {
     exact(scope, ["namespace", "consumers", "epoch"]);
     identityShape(scope.namespace);
+    if (names.has(scope.namespace.name)) throw new Error("Private namespace review is duplicated");
+    names.add(scope.namespace.name);
     if (!Array.isArray(scope.consumers) || scope.consumers.length > 64
       || (scope.epoch !== undefined && !/^[a-f0-9]{64}$/.test(scope.epoch))) throw new Error("Private consumer review is malformed");
     for (const consumer of scope.consumers) {
@@ -300,6 +313,14 @@ export async function validatePrivateActivation(execute: Execute, activation: Pr
       if (!/^[a-f0-9]{64}$/.test(consumer.templateDigest)) throw new Error("Private consumer digest is malformed");
     }
   }
+  if (!names.has(activation.root.namespace.name)
+    || (activation.root.budgetTls && !names.has(activation.root.budgetTls.namespace.name))) {
+    throw new Error("Private activation is missing its root or budget namespace");
+  }
+}
+
+export async function validatePrivateActivation(execute: Execute, activation: PrivateActivation): Promise<void> {
+  validateActivationShape(activation, "reviewed");
   if ((await execute(["auth", "can-i", "manage", `${grantResource}/workspace`, "--all-namespaces"])).trim() !== "yes") {
     throw new Error("Private activation staging requires the existing cluster-scoped credential operator authority");
   }
@@ -344,11 +365,10 @@ export async function validatePrivateActivation(execute: Execute, activation: Pr
       }
     }
   }
-  retirementReview(activation, await read(execute, "namespace", root.namespace.name),
-    await read(execute, "deployment", root.deployment.name, root.namespace.name));
+  await reviewPrivateContinuity(execute, activation);
 }
 
-function annotations(activation: PrivateActivation, scope: NamespaceReview, state: string): Record<string, string> {
+export function annotations(activation: PrivateActivation, scope: NamespaceReview, state: string): Record<string, string> {
   const budget = activation.root.budgetTls;
   return {
     [`${PRIVATE_PREFIX}enabled`]: "true", [`${PRIVATE_PREFIX}state`]: state,
@@ -377,11 +397,16 @@ function annotations(activation: PrivateActivation, scope: NamespaceReview, stat
 
 export async function patchNamespace(
   execute: Execute, scope: NamespaceReview, fields: Record<string, string>, expected?: Record<string, string | undefined>,
+  strictVersion = false,
 ): Promise<void> {
   const current = await read(execute, "namespace", scope.namespace.name);
   if (reviewed(current).uid !== scope.namespace.uid) throw new Error("Private namespace was replaced before staging");
+  if (strictVersion && reviewed(current).resourceVersion !== scope.namespace.resourceVersion) {
+    throw new Error("Private namespace changed before its reviewed continuity update; re-preview");
+  }
   if (expected && Object.entries(expected).some(([key, value]) => at(current, "metadata", "annotations", key) !== value)) {
-    throw new Error("Private retirement attempt changed before its fenced update");
+    const changed = Object.entries(expected).filter(([key, value]) => at(current, "metadata", "annotations", key) !== value).map(([key]) => key);
+    throw new Error(`Private retirement attempt changed before its fenced update: ${changed.join(", ")}`);
   }
   const result = record(JSON.parse(await execute(["patch", "namespace", scope.namespace.name, "--type=merge", "-p",
     JSON.stringify({ metadata: { uid: scope.namespace.uid, resourceVersion: reviewed(current).resourceVersion, annotations: fields } }), "-o", "json"])));
@@ -392,6 +417,8 @@ export async function patchNamespace(
 export async function stagePrivateActivation(execute: Execute, activation: PrivateActivation): Promise<PrivateActivation> {
   await validatePrivateActivation(execute, activation);
   const staged = structuredClone(activation);
+  const continuity = await reviewPrivateContinuity(execute, staged);
+  if (continuity) return stageSharedActivation(execute, staged, continuity);
   const rootScope = staged.namespaces.find(scope => scope.namespace.name === staged.root.namespace.name);
   if (!rootScope) throw new Error("Reviewed root namespace is absent from activation");
   const rootBefore = await read(execute, "deployment", staged.root.deployment.name, staged.root.namespace.name);
@@ -534,10 +561,17 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
     }
   }
   staged.phase = "qualified";
+  await completePrivateQualification(execute, staged, restoring);
   return staged;
 }
 
 export async function validateQualifiedActivation(execute: Execute, activation: PrivateActivation): Promise<void> {
+  await validateQualifiedMetadata(execute, activation);
+  await verifySharedPublication(execute, activation);
+}
+
+export async function validateQualifiedMetadata(execute: Execute, activation: PrivateActivation): Promise<void> {
+  validateActivationShape(activation, "qualified");
   if (activation.contract !== PRIVATE_CONTRACT || activation.phase !== "qualified"
     || await verifyPrivateBundle(execute) !== activation.bundleRevision) throw new Error("Private qualification changed");
   for (const [kind, identity, namespace] of [
@@ -617,7 +651,7 @@ export function consumesPrivateAuthority(value: unknown, namespace: string, acti
           ["ALL", "SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE", "SYS_RAWIO", "BPF", "PERFMON", "CHECKPOINT_RESTORE", "DAC_READ_SEARCH"].includes(String(k))));
 }
 
-async function reviewedOwner(execute: Execute, pod: Json, scope: NamespaceReview): Promise<ReviewedConsumer | undefined> {
+export async function reviewedOwner(execute: Execute, pod: Json, scope: NamespaceReview): Promise<ReviewedConsumer | undefined> {
   let current = record(pod);
   if (!current.kind) current = { ...current, kind: "Pod" };
   for (let depth = 0; depth < 4; depth++) {

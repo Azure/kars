@@ -309,6 +309,13 @@ pub(crate) async fn protect_pending(
         if name == workspace && namespace_uid != grant.spec.workspace_uid {
             return Err(ERROR.into());
         }
+        // A failed grant still fails verification and receives no authority.
+        // Do not revoke another workspace's independently qualified shared scope.
+        if let Ok(Some(epoch)) = namespace_epoch(client, &namespace).await
+            && inspect_namespace(client, &namespace, &epoch).await.is_ok()
+        {
+            continue;
+        }
         let fields = BTreeMap::from([
             (format!("{PREFIX}enabled"), "true".to_string()),
             (format!("{PREFIX}state"), "Pending".to_string()),
@@ -331,4 +338,139 @@ pub(crate) async fn protect_pending(
         }))).await.map_err(|_| ERROR)?;
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::private_activation::{test_support, verify};
+    use std::sync::{Arc, Mutex};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn pending_grant_preserves_only_independently_verified_shared_scopes() {
+        for fault in ["none", "epoch", "consumer"] {
+            let mut objects = BTreeMap::new();
+            let activation = test_support::install(
+                &mut objects,
+                "core",
+                "core-uid",
+                "controller",
+                &[("reader", "reader-uid"), ("original", "original-uid")],
+            );
+            objects.insert(
+                "/api/v1/namespaces/work".into(),
+                json!({"apiVersion":"v1","kind":"Namespace",
+                    "metadata":{"name":"work","uid":"work-uid","resourceVersion":"1"}}),
+            );
+            let original: KarsCredentialGrant = serde_json::from_value(json!({
+                "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant",
+                "metadata":{"name":"workspace","namespace":"original","uid":"old-grant","resourceVersion":"1"},
+                "spec":{"workspaceUid":"original-uid","writers":[{"namespace":"reader","name":"bff","uid":"writer"}],
+                    "privateActivation":activation}
+            })).unwrap();
+            let pending: KarsCredentialGrant = serde_json::from_value(json!({
+                "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant",
+                "metadata":{"name":"workspace","namespace":"work","uid":"new-grant","resourceVersion":"1"},
+                "spec":{"workspaceUid":"work-uid","writers":[{"namespace":"reader","name":"bff","uid":"writer"}]}
+            })).unwrap();
+            let core = objects["/api/v1/namespaces/core"].clone();
+            let reader = objects["/api/v1/namespaces/reader"].clone();
+            if fault == "epoch" {
+                objects.get_mut("/api/v1/namespaces/reader").unwrap()["metadata"]["annotations"]
+                    [EPOCH] = "stale".into();
+            }
+            if fault == "consumer" {
+                objects.insert(
+                    "/api/v1/namespaces/reader/pods/foreign".into(),
+                    json!({"apiVersion":"v1","kind":"Pod",
+                        "metadata":{"name":"foreign","namespace":"reader","uid":"foreign","resourceVersion":"1"},
+                        "spec":{"containers":[{"name":"reader","image":"fixture"}],
+                            "volumes":[{"name":"identity","secret":{"secretName":"router-services-observer-identity"}}]}}),
+                );
+            }
+            let objects = Arc::new(Mutex::new(objects));
+            let mutations = Arc::new(Mutex::new(Vec::<String>::new()));
+            let captured = objects.clone();
+            let writes = mutations.clone();
+            let server = MockServer::start().await;
+            Mock::given(|_: &wiremock::Request| true)
+                .respond_with(move |request: &wiremock::Request| {
+                    let path = request.url.path();
+                    if request.method == "POST" && path.ends_with("/selfsubjectreviews") {
+                        return ResponseTemplate::new(201).set_body_json(json!({
+                            "apiVersion":"authentication.k8s.io/v1","kind":"SelfSubjectReview",
+                            "status":{"userInfo":{"username":"system:serviceaccount:core:kars-controller","uid":"controller"}}
+                        }));
+                    }
+                    if request.method == "PATCH" {
+                        assert!(path.starts_with("/api/v1/namespaces/"));
+                        let patch: serde_json::Value =
+                            serde_json::from_slice(&request.body).unwrap();
+                        let mut locked = captured.lock().unwrap();
+                        let current = locked.get_mut(path).unwrap();
+                        assert_eq!(patch["metadata"]["uid"], current["metadata"]["uid"]);
+                        assert_eq!(
+                            patch["metadata"]["resourceVersion"],
+                            current["metadata"]["resourceVersion"]
+                        );
+                        for (key, value) in patch["metadata"]["annotations"].as_object().unwrap() {
+                            current["metadata"]["annotations"][key] = value.clone();
+                        }
+                        current["metadata"]["resourceVersion"] = "2".into();
+                        writes.lock().unwrap().push(path.to_string());
+                        return ResponseTemplate::new(200).set_body_json(current.clone());
+                    }
+                    assert_eq!(request.method, "GET");
+                    if path.ends_with("/pods") {
+                        let namespace = path.split('/').nth(4).unwrap();
+                        let items: Vec<_> = captured
+                            .lock()
+                            .unwrap()
+                            .values()
+                            .filter(|value| {
+                                value["kind"] == "Pod"
+                                    && value["metadata"]["namespace"] == namespace
+                            })
+                            .cloned()
+                            .collect();
+                        return ResponseTemplate::new(200).set_body_json(json!({
+                            "apiVersion":"v1","kind":"PodList","metadata":{},"items":items
+                        }));
+                    }
+                    captured.lock().unwrap().get(path).map_or_else(
+                        || ResponseTemplate::new(404),
+                        |value| ResponseTemplate::new(200).set_body_json(value),
+                    )
+                })
+                .mount(&server)
+                .await;
+            let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+            let client =
+                Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+            assert!(verify(&client, &pending).await.is_err());
+            protect_pending(&client, &pending).await.unwrap();
+            assert!(verify(&client, &pending).await.is_err());
+            if fault == "none" {
+                verify(&client, &original).await.unwrap();
+                assert_eq!(objects.lock().unwrap()["/api/v1/namespaces/reader"], reader);
+                assert_eq!(mutations.lock().unwrap().len(), 1);
+            } else {
+                assert!(verify(&client, &original).await.is_err());
+                assert_eq!(mutations.lock().unwrap().len(), 2);
+            }
+            let locked = objects.lock().unwrap();
+            assert_eq!(locked["/api/v1/namespaces/core"], core);
+            assert_eq!(
+                locked["/api/v1/namespaces/work"]["metadata"]["annotations"]
+                    [format!("{PREFIX}state")],
+                "Pending"
+            );
+            assert!(
+                locked["/api/v1/namespaces/work"]["metadata"]["annotations"]
+                    .get(EPOCH)
+                    .is_none()
+            );
+        }
+    }
 }
