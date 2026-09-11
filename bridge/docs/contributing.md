@@ -39,6 +39,13 @@ kubeconfig.
 
 ## Permanent core/Bridge CI boundary
 
+The web DTO surface remains available from `@/lib/types`. Domain files under
+`web/src/lib/types/` use type-only cross-imports; the public barrel re-exports
+their complete API. They mirror BFF DTOs rather than owning server contracts.
+The only runtime values are the existing `TIER_LABELS` and `WIRING_LABELS`
+literal objects. The Node contract test checks the locked compiler, complete
+barrel exports, erased imports, inert runtime values and per-file bounds.
+
 The integration candidate's core Rust, CLI and Kind jobs check out the repository
 with `bridge/` physically absent. Core builds and runtime acceptance must not
 acquire a mandatory dependency on the add-on.
