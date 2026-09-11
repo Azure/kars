@@ -102,8 +102,24 @@ tenant/bot credentials do not block the web surface. Enable the gateway only
 after its dedicated credentials and role mapping are configured; web OIDC
 authentication is a separate requirement.
 
-## Private-preview Dex
+## Receipt trust anchors
 
+For independently pinned receipt verification, configure the BFF with
+`BRIDGE_RECEIPT_ANCHOR_PUBKEY` (standard base64 of the 32-byte Ed25519 public key)
+and/or `BRIDGE_RECEIPT_ANCHOR_KEY_ID` (the full lowercase SHA-256 fingerprint
+of those raw public-key bytes). Obtain these values through a trusted channel
+separate from the cluster's receipt ConfigMaps. Both pins must match when both
+are set; a key-ID pin is checked against the key itself, not merely its label.
+Empty, malformed or mismatched configured pins reject verification.
+
+Without either variable, verification remains available against the
+cluster-published anchor, but does not prove integrity against an actor who can
+replace both the log and that anchor. Both individual receipts and whole-log
+integrity use the same pin policy. A missing advisory witness does not invalidate
+an otherwise valid signed checkpoint; witness metadata is not independently
+verified by the BFF.
+
+## Private-preview Dex
 Dex is useful for a colleague test ring without a public ingress:
 
 ```yaml

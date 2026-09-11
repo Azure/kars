@@ -64,6 +64,33 @@ CSS variants and fail-closed parsing. Three comments describing example URLs
 and input/number presentation were clarified without changing runtime code.
 This is a scanner-correctness change, not application source sign-off.
 
+## Focused crypto integration review
+
+A bounded review of the flagged digest/receipt paths found that receipt detail
+verification did not enforce configured out-of-band pins, and whole-log
+key-ID-only pinning trusted a mutable label without binding it to the key.
+Both paths now use one resolver: public-key pins compare decoded Ed25519 bytes,
+and ID pins require the controller's full SHA-256 fingerprint of those bytes.
+Unconfigured verification retains its explicitly weaker cluster-anchor trust.
+Malformed or mismatched configured pins fail verification rather than silently
+falling back. The existing wire payload, DSSE framing, chain and checkpoint
+formats are unchanged.
+
+The same review found a missing-witness branch that incorrectly invalidated
+an otherwise verified checkpoint. Witness presence remains advisory and no
+longer controls checkpoint validity. Added regressions cover both verification
+paths, matching/mismatching/malformed pins, a fully re-signed replacement-anchor
+fork retaining the pinned ID, the controller fingerprint vector, and a valid
+checkpoint without witness metadata. Rust execution is pending hosted CI;
+syntax checks are not represented as test execution.
+
+Other findings remain open: credential-review V1 derives a secret key with a
+custom versioned SHA-256 construction and cannot inherit a plain content-digest
+exception. Case-normalization of remediation manifest paths also needs a
+separately versioned identity correction that preserves existing work.
+Standard digest/receipt adapter extraction and its exact byte-equivalence
+vectors remain required; no blanket crypto allowance is granted.
+
 The imported application predates the core repository's file-size and copyright
 header conventions. Several files exceed the unchanged 800-line new-file cap,
 and the header gate reports missing Microsoft headers on imported files.
