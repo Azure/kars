@@ -38,6 +38,26 @@ def invalid():
 
 
 class RegistrationSchemaTests(unittest.TestCase):
+    def test_namespace_patch_uses_merge_patch_without_losing_identity_fences(self):
+        body = {"metadata": {"uid": "namespace-uid", "resourceVersion": "42",
+                             "annotations": {"kars.azure.com/private-enabled": "true"}}}
+        for method in ("PATCH", "POST", "PUT", "GET"):
+            with self.subTest(method=method), patch.object(schema, "build_opener") as build:
+                submitted = None if method == "GET" else body
+                response = build.return_value.open.return_value
+                response.code = 200
+                response.read.return_value = json.dumps(body).encode()
+                self.assertEqual(schema.request(12345, method, "/api/v1/namespaces/fixture", submitted),
+                                 (200, body))
+                sent = build.return_value.open.call_args.args[0]
+                self.assertEqual(sent.get_method(), method)
+                self.assertEqual(sent.get_header("Content-type"),
+                                 "application/merge-patch+json" if method == "PATCH" else "application/json")
+                self.assertEqual(sent.get_header("Accept"), "application/json")
+                self.assertEqual(None if sent.data is None else json.loads(sent.data), submitted)
+                self.assertEqual(build.return_value.open.call_args.kwargs["timeout"], 15)
+                self.assertEqual(build.call_args.args[0].proxies, {})
+
     def test_native_kubectl_invalid_classification_does_not_echo_body(self):
         message = f'The CustomResourceDefinition "{schema.CRD_NAME}" is invalid: {PRIVATE}'
         self.assertEqual(command_error_category(message), "Invalid")
