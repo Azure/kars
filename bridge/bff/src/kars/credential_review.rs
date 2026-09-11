@@ -85,34 +85,6 @@ fn digest(value: &impl Serialize) -> Result<String, kube::Error> {
     Ok(format!("sha256:{}", sha256_hex(bytes)))
 }
 
-#[cfg(test)]
-mod digest_tests {
-    use super::*;
-
-    #[test]
-    fn review_digest_preserves_compact_sorted_json_and_full_hex_width() {
-        let a: Value = serde_json::from_str(r#"{"b":2,"a":1}"#).unwrap();
-        let b: Value = serde_json::from_str(r#"{"a":1,"b":2}"#).unwrap();
-        assert_eq!(digest(&a).unwrap(), digest(&b).unwrap());
-        assert_eq!(
-            digest(&a).unwrap(),
-            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
-        );
-        assert_eq!(
-            digest(&serde_json::json!({"a":null})).unwrap(),
-            "sha256:d091f9c83c091f79652fe8786375b3fe4ce0861a56f5bfbafedbe431877ff0e8"
-        );
-        assert_ne!(
-            digest(&serde_json::json!({"a":null})).unwrap(),
-            digest(&serde_json::json!({})).unwrap()
-        );
-        assert_ne!(
-            digest(&serde_json::json!([1, 2])).unwrap(),
-            digest(&serde_json::json!([2, 1])).unwrap()
-        );
-    }
-}
-
 fn intent(object: &DynamicObject) -> Result<String, kube::Error> {
     let mut value =
         serde_json::to_value(object).map_err(|_| failure("Credential intent encoding failed"))?;
@@ -631,5 +603,33 @@ impl Cluster {
             ));
         }
         Ok(current)
+    }
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn review_digest_preserves_compact_sorted_json_and_full_hex_width() {
+        let a: Value = serde_json::from_str(r#"{"b":2,"a":1}"#).unwrap();
+        let b: Value = serde_json::from_str(r#"{"a":1,"b":2}"#).unwrap();
+        assert_eq!(digest(&a).unwrap(), digest(&b).unwrap());
+        assert_eq!(
+            digest(&a).unwrap(),
+            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+        );
+        assert_eq!(
+            digest(&serde_json::json!({"a":null})).unwrap(),
+            "sha256:d091f9c83c091f79652fe8786375b3fe4ce0861a56f5bfbafedbe431877ff0e8"
+        );
+        assert_ne!(
+            digest(&serde_json::json!({"a":null})).unwrap(),
+            digest(&serde_json::json!({})).unwrap()
+        );
+        assert_ne!(
+            digest(&serde_json::json!([1, 2])).unwrap(),
+            digest(&serde_json::json!([2, 1])).unwrap()
+        );
     }
 }

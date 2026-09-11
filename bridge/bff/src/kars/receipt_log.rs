@@ -55,23 +55,6 @@ pub(crate) struct ReceiptLog {
     pub public_key: Option<BTreeMap<String, String>>,
 }
 
-#[cfg(test)]
-mod digest_tests {
-    use super::*;
-
-    #[test]
-    fn chain_hash_keeps_decimal_sequence_and_exact_pipe_framing() {
-        assert_eq!(
-            chain_entry_hash(0, "team/task", "abc", ""),
-            "aaf7650dad15d6e904ca99871f8bd152e6495e8bfd9e86a42bfd39f10a7c8499"
-        );
-        assert_ne!(
-            chain_entry_hash(0, "team/task", "abc", ""),
-            chain_entry_hash(0, "team/task", "abc", "\n")
-        );
-    }
-}
-
 impl ReceiptLog {
     pub fn anchor(&self) -> Option<(String, String, String)> {
         let data = self.public_key.as_ref()?;
@@ -289,3 +272,20 @@ impl Cluster {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn chain_hash_keeps_decimal_sequence_and_exact_pipe_framing() {
+        assert_eq!(
+            chain_entry_hash(0, "team/task", "abc", ""),
+            "aaf7650dad15d6e904ca99871f8bd152e6495e8bfd9e86a42bfd39f10a7c8499"
+        );
+        assert_ne!(
+            chain_entry_hash(0, "team/task", "abc", ""),
+            chain_entry_hash(0, "team/task", "abc", "\n")
+        );
+    }
+}
