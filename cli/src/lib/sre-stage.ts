@@ -5,6 +5,8 @@ import { parseAllDocuments } from "yaml";
 import { get, requireRegistrar, type ApiObject, type Execute } from "./sre-authority.js";
 import { listSreHelmReleases, sreHelmStageWait } from "./sre-helm.js";
 import { ACTION_CRD, planActionCrd } from "./sre-action-crd.js";
+import { prepareCoreHelmSchemas } from "./core-helm-schemas.js";
+import { waitForInstalledCoreSchemas } from "./schema-stage.js";
 
 function parts(image: string): [string,string] {
   const index=image.lastIndexOf(":");
@@ -47,14 +49,15 @@ export async function stageAuthority(
   const stageAction=await planActionCrd(execute,actions[0],namespace,release,helm);
   if(helm) {
     const wait=await sreHelmStageWait(execute);
-    if(!dryRun)await stageAction();
-    await execute("helm",["upgrade",release,chart,"--namespace",namespace,"--reset-then-reuse-values",
+    const args=["upgrade",release,chart,"--namespace",namespace,"--reset-then-reuse-values",
       "--set","sre.authorityStage=true",
       "--set-string",`controller.image.repository=${controllerRepository}`,
       "--set-string",`controller.image.tag=${controllerTag}`,
       "--set-string",`inferenceRouter.image.repository=${routerRepository}`,
       "--set-string",`inferenceRouter.image.tag=${routerTag}`,
-      ...(dryRun?["--dry-run=server"]:[wait,"--timeout","8m"])],{stdio:"pipe"});
+      ...(dryRun?["--dry-run=server"]:[wait,"--timeout","8m"])];
+    if(!dryRun)await prepareCoreHelmSchemas(execute,args);
+    await execute("helm",args,{stdio:"pipe"});
     return;
   }
   if(controller.metadata.annotations?.["meta.helm.sh/release-name"]) {
@@ -100,7 +103,12 @@ export async function stageAuthority(
   for(const name of unchangedCrds) {
     await execute("kubectl",["wait","--for=condition=Established",`crd/${name}`,"--timeout=60s"],{stdio:"pipe"});
   }
+  let schemasPublished=false;
   for(const {object,existing} of writes.sort((a,b)=>Number(b.object.kind==="CustomResourceDefinition")-Number(a.object.kind==="CustomResourceDefinition"))) {
+    if(object.kind!=="CustomResourceDefinition"&&!schemasPublished) {
+      await waitForInstalledCoreSchemas(execute,documents);
+      schemasPublished=true;
+    }
     const annotations={...object.metadata.annotations,
       "kars.azure.com/sre-authority-staged":namespace,"kars.azure.com/sre-authority-release":release};
     if(existing) {
@@ -116,6 +124,7 @@ export async function stageAuthority(
       await execute("kubectl",["wait","--for=condition=Established",`crd/${object.metadata.name}`,"--timeout=60s"],{stdio:"pipe"});
     }
   }
+  if(!schemasPublished)await waitForInstalledCoreSchemas(execute,documents);
   await execute("kubectl",["patch","deployment","kars-controller","-n",namespace,"--type=merge","-p",JSON.stringify({
     metadata:{uid:controller.metadata.uid,resourceVersion:controller.metadata.resourceVersion},
     spec:{template:{spec:{containers}}},

@@ -8,6 +8,7 @@ import {
   inspectMeshInstallation, meshImageValueArgs, verifyMeshHealth,
 } from "./mesh-release.js";
 import { applyPushedImages } from "../commands/push-apply.js";
+vi.mock("./core-helm-schemas.js", () => ({ prepareCoreHelmSchemas: vi.fn(async () => {}) }));
 
 function fixture(owned: boolean) {
   const labels: Record<string, string> = owned
