@@ -1648,7 +1648,7 @@ fn dedupe_followup_task(
             ordered.len() - 1
         ),
         description: format!(
-            "Multiple open pull requests mention this remediation's package or advisory. Their titles are not coverage evidence. Compare actual changed files with the exact case-sensitive manifest, package, advisory and head-SHA checks before treating any work as equivalent. Preserve distinct manifest fixes. Only after equivalence is verified, preserve the oldest canonical PR unless a newer PR has strictly better, already-green evidence and close superseded duplicates. Never merge; report exact URLs/head SHAs/check states.\n\nCanonical candidate: #{} {}\nDuplicate candidates: {}",
+            "Multiple open pull requests mention this remediation's package or advisory. Their titles are not coverage evidence. Compare actual changed files with the exact case-sensitive manifest, package, advisory and head-SHA checks before treating any work as equivalent. Preserve distinct manifest fixes. Only after equivalence is verified, preserve the oldest canonical PR unless a newer PR has strictly better, already-green evidence and close superseded duplicates; never merge. Report exact URLs/head SHAs/check states.\n\nCanonical candidate: #{} {}\nDuplicate candidates: {}",
             canonical.number, canonical.html_url, duplicates
         ),
         depends_on: Vec::new(),
