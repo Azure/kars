@@ -226,9 +226,10 @@ blocks activation; it is not deleted or adopted to make qualification pass.
 Unrelated non-consuming Pods are preserved.
 
 Apply rechecks the complete enforcing policy/binding specifications and their
-current type-check/observation status. Existing writer authority is retired
-first, including absence checks for its owned read Roles/Bindings. Namespace
-protection is then enabled in `Pending`, identities/templates are rechecked,
+current type-check/observation status. When updating a grant, that grant's existing
+writer authority is retired first, including absence checks for its owned read
+Roles/Bindings; another workspace's grant is not reset. For first qualification,
+namespace protection is then enabled in `Pending`, identities/templates are rechecked,
 and only approved authority-consuming controller replicas are paused. This
 includes private material, privileged ServiceAccount automount/projected tokens,
 and host-access authority, not just Secret references. All captured consuming
@@ -304,14 +305,75 @@ exposed key with a newer Secret resourceVersion does not count as rotation.
 Old bundle/key qualification markers cannot bypass this post-retirement proof.
 If authority reappears or the pinned Secret UID changes, activation blocks.
 The original replica intent is restored only after fences and templates are
-qualified. Recovery state remains through grant publication; retrying after
-restoration starts a new retirement attempt and requires another fresh key.
+qualified. Recovery state remains through grant publication. A verified completed
+restoration retains its epochs and fresh key on publication retry; it does not
+start another retirement merely because a grant CREATE/PATCH failed.
 As for activation without budget TLS, apply waits for the reviewed root rollout and
 retirement of its captured old Pod UIDs, including terminating Pods, so the
 broker cannot silently keep its old startup-cached TLS identity. No budget
 ledger, cancellation, settlement, pricing, or dispatch logic is changed by this
 private-capability activation check. Budget operation without this capability
 still has no additional activation/bootstrap requirement.
+
+### Shared roots and multiple workspaces
+
+The same `grant preview` / `grant apply` commands automatically reuse an already
+completed root and shared writer namespace. There is no separate activation
+command, per-workspace controller root, or test-only override. First qualification
+still performs the full retirement above. Once restoration and current consumer
+checks succeed, apply seals a bounded version-2 completion envelope in the existing
+`kars.azure.com/private-root-retirement` annotation. It preserves the **exact v1
+JSON string**, its digest, and the original qualified review including every
+original scope epoch. This existing annotation is operator-only even for the root
+projector; ordinary private annotations cannot safely hold lifecycle evidence.
+No policy change is required. Its public digests are integrity/binding metadata,
+not credentials or writer authorization.
+
+Reuse verifies the original full namespace/consumer binding, exact current
+bundle/profile/root/template/budget inputs, restored replica intent and readiness,
+original scope fences, reviewed owner chains and execution, current epochs, and
+absence of every captured old UID—even a returning non-consuming holder. It does
+not simply remove namespaces from the retirement binding. Shared namespace
+epochs, parent approvals, consumer replicas/templates, older grant documents,
+and retirement/key history are not rewritten. Updating or revoking a grant still
+uses that grant's existing UID/resourceVersion and owned-authority retirement
+flow. Re-enrollment after all grants are removed is supported while the original
+namespace and consumer evidence remains intact.
+
+An additional clean scope has its own root-bound version-3 scope receipt in that
+same operator-only annotation **on its own namespace**, not on the shared root.
+UID/resourceVersion-fenced
+`Pending` staging precedes a complete empty-private-consumer check. Its own epoch
+is then recorded in `Stamping`, approved templates are stamped, and only verified
+completion changes the receipt to `Qualified`. Interrupted stamping reuses that
+scope's recorded epoch; it never regenerates shared epochs. A bare Pending or
+Qualified annotation without matching lifecycle evidence is not reusable.
+Concurrent stale previews/CAS conflicts require re-preview and preserve completed
+scopes. Failed controller grant verification issues no writer authority; pending
+protection preserves other scopes only after independent live namespace and
+consumer verification.
+
+Legacy v1 `restoring` records are not silently treated as completed. Migration
+requires the original stored qualified grant (including its epochs), or, if none
+exists, the exact original namespace/consumer review plus all live completion
+checks. The transition wraps the original v1 JSON with a CAS against those exact
+unchanged bytes. Older CLI versions reject the new envelope instead of restarting
+the shared lifecycle. An interrupted original restore can resume its
+captured replica intent and epochs; it cannot qualify another workspace until
+complete. Pausing/retired attempts retain their original binding, captured UIDs,
+baseline and exposed-key history, including the existing post-retirement budget
+rotation requirement.
+
+**Deliberate bounds:** additional scopes with existing private consumers require
+owner-specific retirement/rotation; shared enrollment does not pause the root or
+adopt those consumers. Existing marked templates and consuming Pod/Job instances
+also require explicit recovery. Changed shared consumers, deleted original
+evidence namespaces, changed root/profile/bundle/template/budget identities or
+keys, and missing/tampered retirement evidence fail explicitly. A completed budget
+qualification can be shared only with its exact already-qualified key and Secret
+UID/resourceVersion; this flow does not coordinate a live multi-grant shared-key
+rotation. Each receipt is limited to 128 KiB. These failures preserve existing
+work and do not authorize a fallback, delete protection, or reset older grants.
 
 Direct Helm RPC enablement only requests the listener. It does not stage root
 trust or authorize private writers; the listener remains unavailable until
@@ -323,8 +385,12 @@ grant disablement) retains namespace protection; no automatic deactivation
 path removes it before authority retirement.
 
 For qualification, the canonical artifact is regenerated/checked with
-`python3 tools/private-consumption-bundle.py --check`. CLI tests cover the
-existing preview/apply hook and staged failures. The native
+`python3 tools/private-consumption-bundle.py --check`. CLI fake-executor tests
+cover the existing preview/apply hook, two-workspace epoch/authority continuity,
+legacy migration, interrupted staging, budget reuse and CAS failures. Controller
+transport tests check that a failed grant preserves independently verified shared
+scopes without authorizing that grant. These are not native policy/RBAC proof.
+The native
 `tests/e2e/private_consumption.py::named_cases` fixture runs after operator
 activation through the existing API harness: it establishes actual
 resourceNames-scoped RBAC, uses inert zero-replica/suspended/no-eligible-node
