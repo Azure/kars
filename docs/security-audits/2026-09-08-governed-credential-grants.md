@@ -37,6 +37,28 @@ this repository.
 
 ## Current validation
 
+### Native integration and source-gate follow-up (2026-09-11)
+
+Core candidate `c73506bb` passed complete public technical CI. Downstream
+Bridge native qualification at `99c84c0d` reached the real operator apply
+path and rejected a live Pod/owner execution mismatch. Kubernetes 1.31's
+`DefaultTolerationSeconds` admission adds two bounded tolerations to Pods
+but not their parent templates. The comparison now recognizes only those
+exact default entries where the reviewed template does not already cover
+the taint/effect. Explicit/wildcard policies, changed durations, duplicates,
+containers, identities and host authority remain enforced. Targeted CLI
+regressions pass locally; hosted native qualification remains required.
+
+The prototype-polluting test-fixture merge reported by CodeQL now rejects
+`__proto__`, `constructor` and `prototype` recursively. The observer readiness
+request already used HTTPS-only transport, a pinned CA, explicit address
+resolution, no proxy and no redirects; the flagged formatted-URL construction
+is replaced by a typed URL with a literal HTTPS scheme and fixed port/path.
+Only the bounded observer hostname is variable. New endpoint assertions cover
+host/userinfo/path/query/scheme injection. This is not a claim that the
+previous probe sent plaintext, and no CodeQL alert has been dismissed or
+suppressed. New Rust execution and CodeQL results are pending.
+
 ### Credential lifecycle repair (2026-09-10)
 
 Downstream native acceptance exposed two remaining lifecycle failures at public

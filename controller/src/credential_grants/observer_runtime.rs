@@ -9,6 +9,25 @@ use k8s_openapi::api::{
 };
 use std::net::{IpAddr, SocketAddr};
 
+fn observer_endpoint(server_name: &str) -> Result<reqwest::Url, &'static str> {
+    if !server_name.starts_with("observer-")
+        || !server_name.ends_with(".kars.internal")
+        || server_name.len() > 253
+        || !server_name.bytes().all(|byte| {
+            byte.is_ascii_lowercase() || byte.is_ascii_digit() || matches!(byte, b'-' | b'.')
+        })
+    {
+        return Err("Observation TLS server name is invalid");
+    }
+    let mut url = reqwest::Url::parse("https://observer.invalid/internal/observations/scope")
+        .map_err(|_| "Observation HTTPS endpoint is invalid")?;
+    url.set_host(Some(server_name))
+        .map_err(|_| "Observation TLS server name is invalid")?;
+    url.set_port(Some(crate::service_observer::PORT))
+        .map_err(|_| "Observation HTTPS port is invalid")?;
+    Ok(url)
+}
+
 pub(super) async fn expiry(
     client: &Client,
     sandbox: &KarsSandbox,
@@ -160,6 +179,7 @@ pub(super) async fn probe(
             return Ok(false);
         };
         diagnostic.stage("observer_tls_client");
+        let endpoint = observer_endpoint(&binding.server_name)?;
         let ca = reqwest::Certificate::from_pem(binding.ca_pem.as_bytes())
             .map_err(|_| "Observation CA invalid")?;
         let http = reqwest::Client::builder()
@@ -176,16 +196,7 @@ pub(super) async fn probe(
             .build()
             .map_err(|_| "Observation probe TLS unavailable")?;
         diagnostic.stage("observer_transport");
-        let response = match http
-            .get(format!(
-                "https://{}:{}/internal/observations/scope",
-                binding.server_name,
-                crate::service_observer::PORT
-            ))
-            .bearer_auth(token)
-            .send()
-            .await
-        {
+        let response = match http.get(endpoint).bearer_auth(token).send().await {
             Ok(response) => response,
             Err(error) => {
                 diagnostic.transport(&error);
@@ -238,6 +249,33 @@ async fn read_body(mut response: reqwest::Response) -> Result<serde_json::Value,
 mod tests {
     use super::*;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    #[test]
+    fn observer_endpoint_is_https_with_only_the_reviewed_hostname_and_fixed_scope() {
+        let name = "observer-00000000-0000-0000-0000-000000000001.kars.internal";
+        let endpoint = observer_endpoint(name).unwrap();
+        assert_eq!(endpoint.scheme(), "https");
+        assert_eq!(endpoint.host_str(), Some(name));
+        assert_eq!(endpoint.port(), Some(crate::service_observer::PORT));
+        assert_eq!(endpoint.path(), "/internal/observations/scope");
+        assert!(endpoint.username().is_empty());
+        assert!(endpoint.password().is_none());
+        assert!(endpoint.query().is_none());
+        assert!(endpoint.fragment().is_none());
+        for invalid in [
+            "http://observer-id.kars.internal",
+            "observer-id@other.kars.internal",
+            "observer-id/path.kars.internal",
+            "observer-id?query.kars.internal",
+            "observer-id#fragment.kars.internal",
+            "observer-id:80.kars.internal",
+            "observer-id\\other.kars.internal",
+            "observer-id%2fother.kars.internal",
+            "",
+        ] {
+            assert!(observer_endpoint(invalid).is_err());
+        }
+    }
 
     async fn payload(
         bytes: Vec<u8>,
