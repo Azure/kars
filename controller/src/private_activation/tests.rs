@@ -146,7 +146,7 @@ fn private_activation_requires_explicit_replica_intent_including_zero() {
     let mut objects = BTreeMap::new();
     let mut review = test_support::install(&mut objects, "core", "core-uid", "controller", &[]);
     review["root"]["replicaIntent"] = json!(0);
-    let decoded: crate::credential_grant_activation::PrivateActivation =
+    let decoded: crate::credential_grant::activation::PrivateActivation =
         serde_json::from_value(review.clone()).unwrap();
     assert_eq!(decoded.root.replica_intent, 0);
     review["root"]
@@ -154,7 +154,7 @@ fn private_activation_requires_explicit_replica_intent_including_zero() {
         .unwrap()
         .remove("replicaIntent");
     assert!(
-        serde_json::from_value::<crate::credential_grant_activation::PrivateActivation>(review)
+        serde_json::from_value::<crate::credential_grant::activation::PrivateActivation>(review)
             .is_err()
     );
 }
