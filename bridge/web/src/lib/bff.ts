@@ -5,6 +5,13 @@
 // live here once. Importing this from a Client Component is a build error by
 // design (it has no "use client").
 
+import type {
+  BffHealth, BffReadiness, BffProbe, SubmitSkillInput, FoundryStatus, FoundryVerifyResult,
+  CreateRole, CopilotLoginStart, CopilotLoginPoll, LocalInferenceStatus, CuratedLocalModel,
+  LocalModelDeployment, LocalDeployLiveStatus,
+} from "./bff-contracts";
+export type * from "./bff-contracts";
+
 import { bffBaseUrl } from "./config";
 import { cookies } from "next/headers";
 import { SESSION_COOKIE, verifySession } from "./session-token";
@@ -20,24 +27,6 @@ import type {
   TaskDetail,
   TaskSummary,
 } from "./types";
-
-/** Liveness shape returned by the BFF `/healthz`. */
-export interface BffHealth {
-  status: string;
-  service: string;
-  version: string;
-}
-
-/** Readiness shape returned by the BFF `/readyz`. */
-export interface BffReadiness {
-  status: string;
-  cluster_configured: boolean;
-}
-
-/** Result of probing the BFF — either reachable with a payload, or not. */
-export type BffProbe<T> =
-  | { reachable: true; data: T }
-  | { reachable: false; error: string };
 
 async function getJson<T>(path: string): Promise<BffProbe<T>> {
   const url = `${bffBaseUrl()}${path}`;
@@ -616,18 +605,6 @@ export function listUserSkills(): Promise<import("./types").SkillSummary[]> {
 export function getFleetTelemetry(): Promise<import("./types").FleetTelemetry> {
   return requestJson("/api/agents/fleet");
 }
-export interface SubmitSkillInput {
-  name: string;
-  display_name?: string;
-  version: string;
-  summary: string;
-  bounding_policy: string;
-  recipe?: string;
-  mcp_servers?: string[];
-  uploaded_by?: string;
-  /** Package files — flat filenames (SKILL.md + scripts) the agent installs. */
-  files?: { name: string; content: string }[];
-}
 /** User-side: submit a skill package. It lands PENDING operator review. */
 export function submitSkill(
   input: SubmitSkillInput,
@@ -728,24 +705,6 @@ export function deleteMcpProfile(name: string): Promise<import("./types").McpPro
   return requestJson(`/api/operator/mcp-profiles/${encodeURIComponent(name)}`, { method: "DELETE" });
 }
 
-/** Operator: Foundry connection status/onboarding. */
-export interface FoundryStatus {
-  connected: boolean;
-  project_endpoint: string | null;
-  inference_endpoint: string | null;
-  memory_store_id: string | null;
-  auth: string | null;
-  has_api_key: boolean;
-}
-export interface FoundryCheck { label: string; status: string; detail: string }
-export interface FoundryConnection { name: string; category: string | null }
-export interface FoundryDiscovered {
-  models: string[];
-  connections: FoundryConnection[];
-  memory_store_found: boolean | null;
-}
-export interface FoundryVerifyResult { checks: FoundryCheck[]; discovered: FoundryDiscovered }
-
 export function getFoundry(): Promise<FoundryStatus> {
   return requestJson("/api/operator/foundry");
 }
@@ -768,8 +727,6 @@ export function verifyFoundry(): Promise<FoundryVerifyResult> {
 export function listAgents(): Promise<import("./types").AgentLifecycle[]> {
   return requestJson("/api/agents");
 }
-
-export interface CreateRole { name: string; system_prompt?: string; runtime?: string; model?: string; skills?: string[] }
 export function createTeam(namespace: string, body: { name: string; display_name?: string; charter: string; tier?: number; authority_ceiling?: number; delegation_depth?: number; reporting_to?: string; knowledge_commons?: string; memory?: string; tool_policy?: string; runtime?: string; model?: string; model_fallbacks?: string[]; mcp_servers?: string[]; egress?: { host: string; port?: number }[]; egress_mode?: "learning" | "strict"; cadence_minutes?: number; lifecycle_mode?: import("./types").TeamLifecycleMode; warm_idle_seconds?: number; launch?: boolean; roles?: CreateRole[]; execution_plan?: import("./types").ExecutionPlan; git_write_repos?: string[]; created_by?: string }): Promise<{ created: boolean; name: string }> {
   return requestJson(`/api/namespaces/${encodeURIComponent(namespace)}/teams`, { method: "POST", body: JSON.stringify(body) });
 }
@@ -787,16 +744,9 @@ export function putProvider(body: { kind: string; auth: string; endpoint?: strin
 export function discoverModels(body: { kind: string; endpoint?: string; key?: string }): Promise<import("./types").DiscoveredModel[]> {
   return requestJson("/api/operator/providers/discover", { method: "POST", body: JSON.stringify(body) });
 }
-
-// ─── GitHub Copilot device-flow sign-in ─────────────────────────────────────
-// Mints a Copilot-authorized token via GitHub's device flow (a stock `gh`
-// token 404s on the Copilot exchange). The token is stored server-side; the
-// browser only ever sees the user code + the discovered models.
-export interface CopilotLoginStart { device_code: string; user_code: string; verification_uri: string; interval: number; expires_in: number }
 export function copilotLoginStart(): Promise<CopilotLoginStart> {
   return requestJson("/api/operator/providers/copilot/login/start", { method: "POST" });
 }
-export interface CopilotLoginPoll { status: "pending" | "authorized"; models?: import("./types").DiscoveredModel[] }
 export function copilotLoginPoll(device_code: string): Promise<CopilotLoginPoll> {
   return requestJson("/api/operator/providers/copilot/login/poll", { method: "POST", body: JSON.stringify({ device_code }) });
 }
@@ -821,44 +771,11 @@ export function promoteAdditionalProvider(tag: string): Promise<{ promoted: bool
 export function setDefaultModel(deployment: string, provider: string): Promise<{ ok: boolean; default: string; provider: string }> {
   return requestJson("/api/operator/models/default", { method: "POST", body: JSON.stringify({ deployment, provider }) });
 }
-
-
-// ─── Local (in-cluster) inference (§ local-inference) ────────────────────────
-// A model running entirely inside the cluster — no external API, no egress
-// dependency. Built on AI Runway's ModelDeployment CRD, which kars does not
-// install itself (see docs/local-inference.md in the kars core repo) — an
-// operator installs AI Runway + KAITO once, the same tier as the GitHub App.
-
-export interface LocalInferenceStatus {
-  available: boolean;
-  gpu_node_count: number;
-  gpu_products: string[];
-}
 export function getLocalInferenceStatus(): Promise<LocalInferenceStatus> {
   return requestJson("/api/operator/local-inference/status");
 }
-
-export interface CuratedLocalModel {
-  id: string;
-  label: string;
-  tier: "cpu" | "gpu";
-  params: string;
-}
 export function getLocalInferenceCatalog(): Promise<CuratedLocalModel[]> {
   return requestJson("/api/operator/local-inference/catalog");
-}
-
-export interface LocalModelDeployment {
-  name: string;
-  namespace: string;
-  managed: boolean;
-  model_id: string | null;
-  engine: string | null;
-  provider: string | null;
-  phase: string | null;
-  message: string | null;
-  endpoint: string | null;
-  created_at: string | null;
 }
 export function listLocalModelDeployments(): Promise<LocalModelDeployment[]> {
   return requestJson("/api/operator/local-inference/deployments");
@@ -868,26 +785,6 @@ export function createLocalModelDeployment(body: { name: string; model_id: strin
 }
 export function deleteLocalModelDeployment(name: string): Promise<{ deleted: boolean; name: string }> {
   return requestJson(`/api/operator/local-inference/deployments/${encodeURIComponent(name)}`, { method: "DELETE" });
-}
-
-export interface DeployCondition { type: string; status: string; reason: string; message: string }
-export interface DeployPodState { name: string; phase: string; ready: boolean; running: boolean; waiting_reason: string | null; waiting_message: string | null }
-export interface DeployActivity { time: string | null; reason: string; message: string; type: string; count: number }
-export interface LocalDeployLiveStatus {
-  name: string;
-  found: boolean;
-  phase: string | null;
-  message: string | null;
-  percent: number;
-  ready: boolean;
-  failed: boolean;
-  failure_reason: string | null;
-  failure_message: string | null;
-  replicas_desired: number;
-  replicas_ready: number;
-  conditions: DeployCondition[];
-  pods: DeployPodState[];
-  activities: DeployActivity[];
 }
 export function getLocalDeploymentLiveStatus(name: string): Promise<LocalDeployLiveStatus> {
   return requestJson(`/api/operator/local-inference/deployments/${encodeURIComponent(name)}/status`);

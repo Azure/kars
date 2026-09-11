@@ -11,6 +11,7 @@ import test from "node:test";
 const require = createRequire(import.meta.url);
 const ts = require("typescript");
 const entry = fileURLToPath(new URL("../src/lib/types.ts", import.meta.url));
+const clientContracts = fileURLToPath(new URL("../src/lib/bff-contracts.ts", import.meta.url));
 const directory = new URL("../src/lib/types/", import.meta.url);
 const modules = readdirSync(directory).filter(name => name.endsWith(".ts"))
   .map(name => fileURLToPath(new URL(name, directory)));
@@ -18,7 +19,7 @@ const lock = JSON.parse(readFileSync(new URL("../package-lock.json", import.meta
 
 test("the shared DTO surface type-checks with its locked compiler", () => {
   assert.equal(ts.version, lock.packages["node_modules/typescript"].version);
-  const program = ts.createProgram([entry, ...modules], {
+  const program = ts.createProgram([entry, ...modules, clientContracts], {
     strict: true, noEmit: true, types: [], skipLibCheck: true,
     target: ts.ScriptTarget.ES2017,
     module: ts.ModuleKind.ESNext,
@@ -69,11 +70,27 @@ test("the shared DTO surface type-checks with its locked compiler", () => {
   }).map(symbol => symbol.name).sort();
   assert.deepEqual(runtimeNames, ["TIER_LABELS", "WIRING_LABELS"],
     "DTO modules must not add runtime initialization or lose existing label exports");
+  assert.ok(program.getSourceFile(clientContracts).statements.every(statement =>
+    ts.isInterfaceDeclaration(statement) || ts.isTypeAliasDeclaration(statement)),
+  "server client contracts must remain entirely erased types");
+});
+
+test("server client types keep their original barrel without moving transport", () => {
+  const path = fileURLToPath(new URL("../src/lib/bff.ts", import.meta.url));
+  const source = ts.createSourceFile(path, readFileSync(path, "utf8"), ts.ScriptTarget.Latest, true);
+  const forwarding = source.statements.filter(statement =>
+    ts.isExportDeclaration(statement) && statement.isTypeOnly && !statement.exportClause
+    && statement.moduleSpecifier?.text === "./bff-contracts");
+  assert.equal(forwarding.length, 1);
+  assert.ok(source.statements.some(statement =>
+    ts.isFunctionDeclaration(statement) && statement.name?.text === "authenticatedBffFetch"));
+  assert.ok(source.statements.some(statement =>
+    ts.isClassDeclaration(statement) && statement.name?.text === "BffError"));
 });
 
 test("the public DTO barrel and domain modules remain bounded", () => {
   assert.ok(modules.length > 0);
-  for (const path of [entry, ...modules]) {
+  for (const path of [entry, ...modules, clientContracts]) {
     const source = readFileSync(path, "utf8");
     const lines = source.split("\n").length - (source.endsWith("\n") ? 1 : 0);
     assert.ok(lines <= 800, `${path} has ${lines} physical lines`);
