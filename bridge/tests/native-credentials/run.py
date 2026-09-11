@@ -153,6 +153,9 @@ def main():
                     "Live core did not issue native writer authority; see grant diagnostics")
             lifecycle = LifecycleCases(setup, bff, credentials)
             observations = ObservationCases(setup, bff, lifecycle)
+            from grant_continuity_case import run as grant_continuity
+            case("shared-workspace-and-active-grant-update-continuity",
+                 lambda: grant_continuity(credentials))
             workspace = case("create-only-bootstrap-and-v1-preservation", credentials.bootstrap)
             case("unobserved-collision-no-adoption", credentials.collision)
             case("new-source-late-conflict-zero-mutations", lambda: credentials.late_conflict(False))
