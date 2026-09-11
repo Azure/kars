@@ -58,18 +58,13 @@ for f in "${changed[@]}"; do
   esac
   [ -f "$f" ] || continue
 
-  # For each ADDED line in the diff, check pattern.
+  # Filter once per file; full product imports must not fork twice per source line.
   while IFS= read -r line; do
     stripped="${line#+}"
-    # Override-aware
-    if printf '%s' "$stripped" | grep -qE 'ci:stub-ok:'; then
-      continue
-    fi
-    if printf '%s' "$stripped" | grep -qE "$PATTERNS"; then
-      echo "fail: $f: new stub/placeholder introduced: ${stripped:0:160}" >&2
-      fail=1
-    fi
-  done < <(git diff "${BASE_REF}...HEAD" -- "$f" 2>/dev/null | grep -E '^\+[^+]')
+    echo "fail: $f: new stub/placeholder introduced: ${stripped:0:160}" >&2
+    fail=1
+  done < <(git diff "${BASE_REF}...HEAD" -- "$f" 2>/dev/null |
+    grep -E '^\+[^+]' | grep -E "$PATTERNS" | grep -vE 'ci:stub-ok:')
 done
 
 exit $fail
