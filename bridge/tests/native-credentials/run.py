@@ -10,6 +10,7 @@ from api_gate import CORE_REVISION
 from api_outcome_diagnostics import collect as api_outcome_diagnostics
 from boot import bridge_connection, install_bridge, install_core
 from credential_cases import CredentialCases
+from credential_diagnostics import condition_category, runtime_scope
 from lifecycle_cases import LifecycleCases
 from native_api import CORE, STATE, Failure, Setup, command, core, require, scheduling_detail, status_detail
 from observation_cases import ObservationCases
@@ -50,8 +51,10 @@ def diagnostics(setup):
                 "reason": item.get("status", {}).get("reason"),
                 "integrationError": item.get("status", {}).get("integrationError"),
                 "serviceObservation": item.get("status", {}).get("serviceObservation"),
-                "conditions": [{key: condition.get(key) for key in ("type", "status", "reason")}
+                "conditions": [{**{key: condition.get(key) for key in ("type", "status", "reason")},
+                                "category": condition_category(condition.get("message"))}
                                for condition in item.get("status", {}).get("conditions", [])],
+                "privateScope": runtime_scope(setup, item) if label == "sandboxes" else None,
                 "scheduling": scheduling_detail(item) if label == "pods" else None,
                 "containers": [
                     {"name": container["name"], "ready": container.get("ready"),
