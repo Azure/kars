@@ -1039,6 +1039,7 @@ fn merge_discovered_tasks(
 
 fn engineering_task_requires_review(task_id: &str) -> bool {
     task_id.starts_with("dependabot-pr-")
+        || task_id.starts_with("dependency-remediation-")
         || task_id.starts_with("dependabot-alert-")
         || task_id.starts_with("code-scanning-alert-")
         || task_id.starts_with("secret-scanning-alert-")
