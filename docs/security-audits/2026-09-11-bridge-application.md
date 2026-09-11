@@ -126,6 +126,23 @@ separately versioned identity correction that preserves existing work.
 Standard digest/receipt adapter extraction and its exact byte-equivalence
 vectors remain required; no blanket crypto allowance is granted.
 
+### Content-digest adapter qualification
+
+The standard SHA-256 content/receipt uses now route through a small BFF-local
+`providers/signing.rs` adapter. Callers retain their original input bytes,
+framing, case policy and output widths: full trace/objective/review/receipt
+digests, eight-byte GitHub connection suffixes, sixteen-byte artifact addresses,
+and existing engineering identifiers. The duplicated GitHub connection recipe
+is shared by grant validation and the route surface.
+
+Independent known-answer regressions cover standard SHA-256, raw subject case
+and whitespace, sorted compact review JSON with null/absent distinctions,
+decimal/pipe receipt chaining, and short artifact IDs. CI requires their actual
+registration before running the complete suite. Hosted execution is still
+pending; syntax/metadata checks are not a substitute. This extraction does not
+reclassify the V1 secret-key derivation as a content hash, alter receipt
+signature verification, or grant a scanner exception.
+
 The imported application predates the core repository's file-size and copyright
 header conventions. Several files exceed the unchanged 800-line new-file cap,
 and the header gate reports missing Microsoft headers on imported files.

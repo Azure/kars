@@ -51,7 +51,12 @@ jobs:
             routes::receipts::anchor::tests::pins_follow_the_controller_raw_key_fingerprint_contract \
             routes::receipts::anchor::tests::copied_key_id_cannot_substitute_another_public_key \
             routes::receipts::anchor::tests::malformed_empty_mismatched_or_missing_pins_fail_closed \
-            kars::receipt_log::tests::receipt_endpoint_still_requires_signed_payload_binding_and_full_overflow_inclusion
+            kars::receipt_log::tests::receipt_endpoint_still_requires_signed_payload_binding_and_full_overflow_inclusion \
+            providers::signing::tests::sha256_matches_standard_known_answers_without_normalizing_bytes \
+            kars::credential_review::digest_tests::review_digest_preserves_compact_sorted_json_and_full_hex_width \
+            kars::receipt_log::digest_tests::chain_hash_keeps_decimal_sequence_and_exact_pipe_framing \
+            routes::artifacts::digest_tests::artifact_addresses_keep_the_existing_sixteen_byte_short_form \
+            routes::github::tests::connection_names_keep_the_original_raw_subject_and_eight_byte_digest
           do
             grep -Fx "$name: test" /tmp/kars-bridge-bff-tests.txt
           done

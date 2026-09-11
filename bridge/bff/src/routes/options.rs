@@ -8,11 +8,11 @@
 // objects the blueprint composes by reference. Absent CRDs surface as empty
 // lists (the web layer renders the honesty grammar), never as errors.
 
+use crate::providers::signing::sha256_hex;
 use axum::Json;
 use axum::extract::State;
 use kube::core::DynamicObject;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -670,7 +670,7 @@ pub(crate) fn mcp_server_option(resource: &DynamicObject) -> RefOption {
             });
             serde_json::to_vec(&signature)
                 .ok()
-                .map(|bytes| format!("sha256:{:x}", Sha256::digest(bytes)))
+                .map(|bytes| format!("sha256:{}", sha256_hex(bytes)))
         });
     let mut option = RefOption {
         name: name_of(resource),

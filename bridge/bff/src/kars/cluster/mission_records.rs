@@ -1,7 +1,7 @@
 use super::{Cluster, MissionOutputRecord};
+use crate::providers::signing::sha256_hex;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::Api;
-use sha2::{Digest, Sha256};
 
 pub(super) fn mission_evidence_key(cm: &ConfigMap, legacy_label: &str) -> Option<String> {
     cm.metadata
@@ -186,8 +186,8 @@ pub(super) fn trace_record_identity(cm: &ConfigMap) -> Option<String> {
     }
     let captured_at = data.get("capturedAt").map(String::as_str).unwrap_or("");
     Some(format!(
-        "legacy:{captured_at}:{:x}",
-        Sha256::digest(trace.as_bytes())
+        "legacy:{captured_at}:{}",
+        sha256_hex(trace.as_bytes())
     ))
 }
 

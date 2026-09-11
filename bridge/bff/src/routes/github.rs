@@ -4,10 +4,10 @@
 // GitHub App; each authenticated principal gets an isolated ConfigMap containing
 // only its installation id, account, and repos. Tokens are minted at run time.
 
+pub(crate) use crate::kars::github_connection_name as connection_config_map_name;
 use axum::Json;
 use axum::extract::{Extension, Path, State};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
@@ -303,11 +303,6 @@ fn upstream(e: kube::Error) -> AppError {
     AppError::Upstream(e.to_string())
 }
 
-pub(crate) fn connection_config_map_name(principal_sub: &str) -> String {
-    let digest = Sha256::digest(principal_sub.as_bytes());
-    format!("kars-github-connection-{}", hex::encode(&digest[..8]))
-}
-
 pub(crate) fn authorize_repo_set(
     requested: &[String],
     granted: &[String],
@@ -526,6 +521,19 @@ pub async fn disconnect(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_names_keep_the_original_raw_subject_and_eight_byte_digest() {
+        for (subject, suffix) in [
+            ("Alice", "3bc51062973c458d"),
+            ("alice", "2bd806c97f0e00af"),
+            (" Alice ", "f3a5bb89166b4962"),
+        ] {
+            let expected = format!("kars-github-connection-{suffix}");
+            assert_eq!(connection_config_map_name(subject), expected);
+            assert_eq!(crate::kars::github_connection_name(subject), expected);
+        }
+    }
 
     #[test]
     fn different_principals_have_different_non_identifying_names() {

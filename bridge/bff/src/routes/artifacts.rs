@@ -6,6 +6,7 @@
 // ConfigMaps. This is a read-only projection of those real records; it never
 // fabricates a deliverable and is honestly empty until a mission produces one.
 
+use crate::providers::signing::sha256;
 use axum::{
     Json,
     extract::{Extension, State},
@@ -13,7 +14,6 @@ use axum::{
 use kube::ResourceExt;
 use serde::Deserialize;
 use serde::Serialize;
-use sha2::{Digest, Sha256};
 use std::collections::HashSet;
 
 use crate::auth::Principal;
@@ -21,15 +21,32 @@ use crate::error::{AppError, AppResult};
 use crate::routes::ownership::output_is_owned_by;
 use crate::state::AppState;
 
-/// `sha256:<hex>` content-address over arbitrary bytes (16-byte short form,
-/// matching the controller's receipt-digest convention).
+/// Existing 16-byte short content address used by artifact and lineage DIDs.
 fn content_address(bytes: &[u8]) -> String {
-    let full = Sha256::digest(bytes);
+    let full = sha256(bytes);
     let mut out = String::from("sha256:");
     for b in &full[..16] {
         out.push_str(&format!("{b:02x}"));
     }
     out
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_addresses_keep_the_existing_sixteen_byte_short_form() {
+        assert_eq!(
+            content_address(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223"
+        );
+        assert_eq!(
+            content_address(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb924"
+        );
+        assert_ne!(content_address(b"abc"), content_address(b"abc\n"));
+    }
 }
 
 #[derive(Debug, Serialize)]

@@ -9,5 +9,6 @@ pub mod auth;
 pub mod config;
 pub mod error;
 pub mod kars;
+mod providers;
 pub mod routes;
 pub mod state;

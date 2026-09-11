@@ -5,6 +5,7 @@ use super::{
     credential_transport::{failure, object_api, safe},
     credentials::input_name,
 };
+use crate::providers::signing::sha256_hex;
 use k8s_openapi::{
     api::core::v1::{Namespace, Secret},
     apimachinery::pkg::apis::meta::v1::ObjectMeta,
@@ -12,7 +13,6 @@ use k8s_openapi::{
 use kube::{Api, ResourceExt, api::DynamicObject};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use sha2::{Digest, Sha256};
 
 #[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -82,7 +82,35 @@ fn digest(value: &impl Serialize) -> Result<String, kube::Error> {
     value.sort_all_objects();
     let bytes =
         serde_json::to_vec(&value).map_err(|_| failure("Credential review encoding failed"))?;
-    Ok(format!("sha256:{:x}", Sha256::digest(bytes)))
+    Ok(format!("sha256:{}", sha256_hex(bytes)))
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn review_digest_preserves_compact_sorted_json_and_full_hex_width() {
+        let a: Value = serde_json::from_str(r#"{"b":2,"a":1}"#).unwrap();
+        let b: Value = serde_json::from_str(r#"{"a":1,"b":2}"#).unwrap();
+        assert_eq!(digest(&a).unwrap(), digest(&b).unwrap());
+        assert_eq!(
+            digest(&a).unwrap(),
+            "sha256:43258cff783fe7036d8a43033f830adfc60ec037382473548ac742b888292777"
+        );
+        assert_eq!(
+            digest(&serde_json::json!({"a":null})).unwrap(),
+            "sha256:d091f9c83c091f79652fe8786375b3fe4ce0861a56f5bfbafedbe431877ff0e8"
+        );
+        assert_ne!(
+            digest(&serde_json::json!({"a":null})).unwrap(),
+            digest(&serde_json::json!({})).unwrap()
+        );
+        assert_ne!(
+            digest(&serde_json::json!([1, 2])).unwrap(),
+            digest(&serde_json::json!([2, 1])).unwrap()
+        );
+    }
 }
 
 fn intent(object: &DynamicObject) -> Result<String, kube::Error> {
