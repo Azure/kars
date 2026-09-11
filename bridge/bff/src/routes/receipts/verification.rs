@@ -85,19 +85,7 @@ pub struct CheckpointEvidence {
     pub witness_signature_b64: Option<String>,
 }
 
-pub(super) fn sha256_hex(bytes: &[u8]) -> String {
-    use sha2::{Digest, Sha256};
-    hex(&Sha256::digest(bytes))
-}
-
-fn hex(bytes: &[u8]) -> String {
-    use std::fmt::Write;
-    let mut out = String::with_capacity(bytes.len() * 2);
-    for b in bytes {
-        let _ = write!(out, "{b:02x}");
-    }
-    out
-}
+pub(super) use crate::providers::signing::sha256_hex;
 
 /// A whole-log integrity verdict — the page-level answer to "is this audit log
 /// actually tamper-evident?". Unlike a per-receipt proof, this recomputes the

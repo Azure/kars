@@ -1,6 +1,6 @@
 // kars Bridge BFF — remediation identity and compatibility with persisted intake.
 
-use sha2::{Digest, Sha256};
+use crate::providers::signing::sha256;
 
 use super::{GithubPull, TeamTaskDto};
 
@@ -24,7 +24,7 @@ impl RemediationIdentity {
 
     fn work_id(&self) -> String {
         let framed = serde_json::json!([2, self.repo, self.manifest_path, self.package]);
-        let digest = Sha256::digest(framed.to_string().as_bytes());
+        let digest = sha256(framed.to_string().as_bytes());
         format!("dependency-remediation-v2-{}", hex::encode(&digest[..10]))
     }
 
@@ -39,7 +39,7 @@ impl RemediationIdentity {
                 .to_ascii_lowercase(),
             self.package.to_ascii_lowercase()
         );
-        let digest = Sha256::digest(identity.as_bytes());
+        let digest = sha256(identity.as_bytes());
         format!("dependency-remediation-{}", hex::encode(&digest[..10]))
     }
 }

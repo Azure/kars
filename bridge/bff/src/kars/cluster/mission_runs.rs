@@ -1,9 +1,9 @@
 use super::{AgentIdentity, Cluster, MeshRunOutcome};
+use crate::providers::signing::sha256_hex;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::Api;
-use sha2::{Digest, Sha256};
 
 impl Cluster {
     /// Request a **mesh-driven agent run** of a task by stamping the
@@ -238,7 +238,7 @@ impl Cluster {
                 && completed.as_deref() != Some(req.as_str())
             {
                 let encoded = BASE64_STANDARD.encode(revised_objective.as_bytes());
-                let digest = format!("sha256:{:x}", Sha256::digest(revised_objective.as_bytes()));
+                let digest = format!("sha256:{}", sha256_hex(revised_objective.as_bytes()));
                 let patch = serde_json::json!({
                     "metadata": { "annotations": {
                         "kars.azure.com/run-objective-nonce": req.clone(),
@@ -260,7 +260,7 @@ impl Cluster {
                 .unwrap_or(0)
         );
         let encoded = BASE64_STANDARD.encode(revised_objective.as_bytes());
-        let digest = format!("sha256:{:x}", Sha256::digest(revised_objective.as_bytes()));
+        let digest = format!("sha256:{}", sha256_hex(revised_objective.as_bytes()));
         let patch = serde_json::json!({
             "metadata": { "annotations": {
                 "kars.azure.com/run-requested": nonce.clone(),

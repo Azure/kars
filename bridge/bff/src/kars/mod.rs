@@ -10,6 +10,7 @@ mod credential_tests;
 mod credential_transport;
 pub mod credentials;
 mod github_grants;
+pub(crate) use github_grants::github_connection_name;
 pub mod operator_credentials;
 pub mod receipt;
 pub(crate) mod receipt_log;

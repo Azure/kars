@@ -7,13 +7,13 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 use std::time::Duration;
 
+use crate::providers::signing::sha256;
 use axum::Json;
 use axum::extract::{Extension, Path, State};
 use chrono::{DateTime, Utc};
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::ResourceExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
@@ -449,7 +449,7 @@ fn default_true() -> bool {
 }
 
 pub(crate) fn source_config_map_name(namespace: &str, team: &str) -> String {
-    let digest = Sha256::digest(format!("{namespace}/{team}").as_bytes());
+    let digest = sha256(format!("{namespace}/{team}").as_bytes());
     let stem = team.chars().take(40).collect::<String>();
     format!("kars-eng-{stem}-{}", hex::encode(&digest[..6]))
 }
@@ -632,7 +632,7 @@ fn validate_request(
 }
 
 fn initial_jitter_seconds(source_name: &str) -> i64 {
-    let digest = Sha256::digest(source_name.as_bytes());
+    let digest = sha256(source_name.as_bytes());
     i64::from(digest[0] % 60)
 }
 
@@ -693,7 +693,7 @@ fn source_id(repo: &str, number: u64) -> String {
 }
 
 fn work_id(repo: &str, number: u64) -> String {
-    let digest = Sha256::digest(source_id(repo, number).as_bytes());
+    let digest = sha256(source_id(repo, number).as_bytes());
     format!("dependabot-pr-{}", hex::encode(&digest[..10]))
 }
 
@@ -755,7 +755,7 @@ fn alert_source_id(signal: EngineeringSignal, repo: &str, number: u64) -> String
 }
 
 fn alert_work_id(signal: EngineeringSignal, repo: &str, number: u64) -> String {
-    let digest = Sha256::digest(alert_source_id(signal, repo, number).as_bytes());
+    let digest = sha256(alert_source_id(signal, repo, number).as_bytes());
     format!("{}-{}", signal_slug(signal), hex::encode(&digest[..10]))
 }
 
@@ -1598,8 +1598,7 @@ fn review_followup_task(item: &EngineeringReviewItem, created_at: &str) -> Optio
     ) {
         return None;
     }
-    let digest =
-        Sha256::digest(format!("github-review:{}:{}", item.repo, item.pr_number).as_bytes());
+    let digest = sha256(format!("github-review:{}:{}", item.repo, item.pr_number).as_bytes());
     Some(TeamTaskDto {
         id: format!("github-pr-fix-{}", hex::encode(&digest[..10])),
         title: format!(
@@ -1639,7 +1638,7 @@ fn dedupe_followup_task(
         .map(|pull| format!("#{} {}", pull.number, pull.html_url))
         .collect::<Vec<_>>()
         .join(", ");
-    let digest = Sha256::digest(format!("{repo}:{remediation_id}").as_bytes());
+    let digest = sha256(format!("{repo}:{remediation_id}").as_bytes());
     Some(TeamTaskDto {
         id: format!("github-pr-dedupe-{}", hex::encode(&digest[..10])),
         title: format!(
@@ -2599,7 +2598,7 @@ pub async fn decide_review_item(
         request.pr_number,
         request.head_sha
     );
-    let digest = Sha256::digest(identity.as_bytes());
+    let digest = sha256(identity.as_bytes());
     let task = TeamTaskDto {
         id: format!("github-pr-feedback-{}", hex::encode(&digest[..10])),
         title: format!(

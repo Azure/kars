@@ -5,11 +5,11 @@
 
 use std::collections::BTreeMap;
 
+use crate::providers::signing::sha256_parts;
 use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::ListMeta;
 use kube::{Api, api::ListParams};
 use serde::Deserialize;
-use sha2::{Digest, Sha256};
 
 use super::cluster::Cluster;
 
@@ -34,15 +34,16 @@ pub(crate) fn chain_entry_hash(
     payload_sha256: &str,
     prev_hash: &str,
 ) -> String {
-    let mut hash = Sha256::new();
-    hash.update(seq.to_string().as_bytes());
-    hash.update(b"|");
-    hash.update(receipt.as_bytes());
-    hash.update(b"|");
-    hash.update(payload_sha256.as_bytes());
-    hash.update(b"|");
-    hash.update(prev_hash.as_bytes());
-    hex::encode(hash.finalize())
+    let sequence = seq.to_string();
+    hex::encode(sha256_parts([
+        sequence.as_bytes(),
+        b"|",
+        receipt.as_bytes(),
+        b"|",
+        payload_sha256.as_bytes(),
+        b"|",
+        prev_hash.as_bytes(),
+    ]))
 }
 
 #[derive(Debug, Default)]
@@ -52,6 +53,23 @@ pub(crate) struct ReceiptLog {
     pub checkpoint: Option<BTreeMap<String, String>>,
     pub witness: Option<BTreeMap<String, String>>,
     pub public_key: Option<BTreeMap<String, String>>,
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn chain_hash_keeps_decimal_sequence_and_exact_pipe_framing() {
+        assert_eq!(
+            chain_entry_hash(0, "team/task", "abc", ""),
+            "aaf7650dad15d6e904ca99871f8bd152e6495e8bfd9e86a42bfd39f10a7c8499"
+        );
+        assert_ne!(
+            chain_entry_hash(0, "team/task", "abc", ""),
+            chain_entry_hash(0, "team/task", "abc", "\n")
+        );
+    }
 }
 
 impl ReceiptLog {

@@ -3,9 +3,16 @@ use super::{
     credential_contract::{GitHubBinding, Identity},
     credentials::failure,
 };
+use crate::providers::signing::sha256;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{Api, ResourceExt};
-use sha2::{Digest, Sha256};
+
+pub(crate) fn github_connection_name(subject: &str) -> String {
+    format!(
+        "kars-github-connection-{}",
+        hex::encode(&sha256(subject.as_bytes())[..8])
+    )
+}
 
 impl Cluster {
     pub async fn github_connection_grant(
@@ -16,10 +23,7 @@ impl Cluster {
         write: bool,
     ) -> Result<GitHubBinding, kube::Error> {
         let grant = self.credential_grant(namespace).await?;
-        let name = format!(
-            "kars-github-connection-{}",
-            hex::encode(&Sha256::digest(subject.as_bytes())[..8])
-        );
+        let name = github_connection_name(subject);
         let connection = Api::<ConfigMap>::namespaced(self.client.clone(), namespace)
             .get(&name)
             .await?;
