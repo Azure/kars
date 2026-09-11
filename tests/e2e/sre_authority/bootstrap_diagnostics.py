@@ -7,6 +7,8 @@ import json
 import re
 import subprocess
 
+from sre_authority.bootstrap_private_policy import private_policy_failure
+
 REASONS = {
     "Forbidden", "Invalid", "InternalError", "BadRequest", "NotFound", "AlreadyExists",
     "Unauthorized", "Conflict", "ServiceUnavailable", "FailedCreate", "ReplicaFailure",
@@ -201,7 +203,7 @@ def identifier(value):
     return value if isinstance(value, str) and re.fullmatch(r"[A-Za-z0-9_.:/-]{1,253}", value) else None
 
 
-def failure_facts(message, policies):
+def failure_facts(message, policies, *, causes=()):
     if not isinstance(message, str):
         return {}
     message = message[:65536]
@@ -222,6 +224,7 @@ def failure_facts(message, policies):
             if isinstance(known, str) and known in message:
                 facts["validationMessages"].append({"policy": name, "index": index, "message": known})
     facts["serviceAccountMissing"] = 'serviceaccount "kars-controller" not found' in message.lower()
+    facts.update(private_policy_failure(message, policies, causes))
     return facts
 
 
@@ -230,8 +233,9 @@ def api_result(code, body, policies):
     if isinstance(body, dict) and body.get("kind") == "Status":
         reason = body.get("reason")
         report["reason"] = reason if isinstance(reason, str) and reason in REASONS else "unclassified"
-        report.update(failure_facts(body.get("message"), policies))
         details = body.get("details", {})
+        report.update(failure_facts(body.get("message"), policies,
+                                   causes=details.get("causes", ()) if isinstance(details, dict) else ()))
         if (code == 422 and reason == "Invalid" and isinstance(details, dict)
                 and details.get("group") == "admissionregistration.k8s.io"
                 and details.get("kind") == "ValidatingAdmissionPolicy"
