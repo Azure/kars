@@ -3,7 +3,7 @@
 
 use super::*;
 use crate::mcp::tools::ToolCallOutput;
-use serde_json::json;
+use serde_json::{Value, json};
 
 #[test]
 fn protocol_content_real_json_roundtrips_losslessly() {
