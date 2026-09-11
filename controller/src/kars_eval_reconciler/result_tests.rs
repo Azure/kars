@@ -363,75 +363,74 @@ async fn error_only_and_mixed_terminal_reports_separate_inconclusive_from_real_d
                 store.report["failed"] = json!(1);
                 store.report["errored"] = json!(5);
             }
-            let result = observation::observe(&f.client, &f.eval, &f.intent, &f.corpus)
-                .await
-                .unwrap();
-            assert_eq!(result.state, "Inconclusive");
-            assert_eq!(result.drift, mixed);
-            assert_eq!(result.result.unwrap().failed, if mixed { 1 } else { 0 });
         }
-    }
-
-    #[tokio::test]
-    async fn request_claim_is_uid_rv_fenced_stable_across_retries_and_new_after_acknowledgement() {
-        let mut f = fixture::setup().await;
-        f.eval.metadata.annotations = Some([(ANNOTATION_RUN_NOW.into(), "true".into())].into());
-        f.store.lock().unwrap().eval = json!(f.eval);
-        let api = Api::<KarsEval>::namespaced(f.client.clone(), "tenant");
-        assert!(workloads::claim_trigger(&api, &f.eval).await.unwrap());
-        let claimed: KarsEval =
-            serde_json::from_value(f.store.lock().unwrap().eval.clone()).unwrap();
-        let token = claimed.annotations()[workloads::RUN_TOKEN].clone();
-        assert!(!workloads::claim_trigger(&api, &claimed).await.unwrap());
-        assert!(
-            workloads::claim_trigger(&api, &f.eval).await.is_err(),
-            "old RV must not overwrite the claim"
-        );
-        let acknowledged = workloads::acknowledge_trigger(&api, &claimed, "created-job")
-            .await
-            .unwrap();
-        assert_eq!(
-            acknowledged.annotations().get(workloads::LAST_TOKEN),
-            Some(&token)
-        );
-        assert!(!acknowledged.annotations().contains_key(ANNOTATION_RUN_NOW));
-        assert!(
-            acknowledged.status.is_none(),
-            "creation acknowledgement is not evaluation completion"
-        );
-        let mut next = acknowledged;
-        next.metadata
-            .annotations
-            .as_mut()
-            .unwrap()
-            .insert(ANNOTATION_RUN_NOW.into(), "true".into());
-        f.store.lock().unwrap().eval = json!(next);
-        workloads::claim_trigger(&api, &next).await.unwrap();
-        let fresh: KarsEval = serde_json::from_value(f.store.lock().unwrap().eval.clone()).unwrap();
-        assert_ne!(fresh.annotations().get(workloads::RUN_TOKEN), Some(&token));
-    }
-
-    #[tokio::test]
-    async fn report_time_scope_and_retained_integrity_are_not_repaired_into_success() {
-        let f = fixture::setup().await;
-        f.store.lock().unwrap().report["startedAt"] = json!("2025-01-01T00:00:00Z");
         let result = observation::observe(&f.client, &f.eval, &f.intent, &f.corpus)
             .await
             .unwrap();
         assert_eq!(result.state, "Inconclusive");
-        assert!(!result.drift);
-        {
-            let mut store = f.store.lock().unwrap();
-            let cm = store.cms.values_mut().next().unwrap();
-            let mut evidence: serde_json::Value =
-                serde_json::from_str(cm["data"]["evidence.json"].as_str().unwrap()).unwrap();
-            evidence["job_uid"] = json!("foreign");
-            cm["data"]["evidence.json"] = json!(evidence.to_string());
-        }
-        assert!(
-            observation::observe(&f.client, &f.eval, &f.intent, &f.corpus)
-                .await
-                .is_err()
-        );
+        assert_eq!(result.drift, mixed);
+        assert_eq!(result.result.unwrap().failed, if mixed { 1 } else { 0 });
     }
+}
+
+#[tokio::test]
+async fn request_claim_is_uid_rv_fenced_stable_across_retries_and_new_after_acknowledgement() {
+    let mut f = fixture::setup().await;
+    f.eval.metadata.annotations = Some([(ANNOTATION_RUN_NOW.into(), "true".into())].into());
+    f.store.lock().unwrap().eval = json!(f.eval);
+    let api = Api::<KarsEval>::namespaced(f.client.clone(), "tenant");
+    assert!(workloads::claim_trigger(&api, &f.eval).await.unwrap());
+    let claimed: KarsEval = serde_json::from_value(f.store.lock().unwrap().eval.clone()).unwrap();
+    let token = claimed.annotations()[workloads::RUN_TOKEN].clone();
+    assert!(!workloads::claim_trigger(&api, &claimed).await.unwrap());
+    assert!(
+        workloads::claim_trigger(&api, &f.eval).await.is_err(),
+        "old RV must not overwrite the claim"
+    );
+    let acknowledged = workloads::acknowledge_trigger(&api, &claimed, "created-job")
+        .await
+        .unwrap();
+    assert_eq!(
+        acknowledged.annotations().get(workloads::LAST_TOKEN),
+        Some(&token)
+    );
+    assert!(!acknowledged.annotations().contains_key(ANNOTATION_RUN_NOW));
+    assert!(
+        acknowledged.status.is_none(),
+        "creation acknowledgement is not evaluation completion"
+    );
+    let mut next = acknowledged;
+    next.metadata
+        .annotations
+        .as_mut()
+        .unwrap()
+        .insert(ANNOTATION_RUN_NOW.into(), "true".into());
+    f.store.lock().unwrap().eval = json!(next);
+    workloads::claim_trigger(&api, &next).await.unwrap();
+    let fresh: KarsEval = serde_json::from_value(f.store.lock().unwrap().eval.clone()).unwrap();
+    assert_ne!(fresh.annotations().get(workloads::RUN_TOKEN), Some(&token));
+}
+
+#[tokio::test]
+async fn report_time_scope_and_retained_integrity_are_not_repaired_into_success() {
+    let f = fixture::setup().await;
+    f.store.lock().unwrap().report["startedAt"] = json!("2025-01-01T00:00:00Z");
+    let result = observation::observe(&f.client, &f.eval, &f.intent, &f.corpus)
+        .await
+        .unwrap();
+    assert_eq!(result.state, "Inconclusive");
+    assert!(!result.drift);
+    {
+        let mut store = f.store.lock().unwrap();
+        let cm = store.cms.values_mut().next().unwrap();
+        let mut evidence: serde_json::Value =
+            serde_json::from_str(cm["data"]["evidence.json"].as_str().unwrap()).unwrap();
+        evidence["job_uid"] = json!("foreign");
+        cm["data"]["evidence.json"] = json!(evidence.to_string());
+    }
+    assert!(
+        observation::observe(&f.client, &f.eval, &f.intent, &f.corpus)
+            .await
+            .is_err()
+    );
 }
