@@ -100,8 +100,8 @@ async fn fixture() -> (
     let mut parent = task.clone();
     parent.metadata.name = Some("team-principal".into());
     parent.metadata.uid = Some("principal".into());
-    parent.metadata.owner_references = None;
-    parent.metadata.annotations = None;
+    parent.metadata.annotations =
+        Some([("kars.azure.com/team-role".into(), "principal".into())].into());
     parent.spec.parent_ref = None;
     parent.spec.envelope = team.spec.envelope.clone();
     parent.spec.blueprint = team.spec.blueprint.clone();
