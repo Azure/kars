@@ -19,6 +19,7 @@ ERRORS = {
 MODULES = (
     "commands/credential-grants", "lib/private-activation",
     "lib/private-activation-retirement", "lib/kube-bootstrap", "lib/kube-context",
+    "lib/private-activation-continuity",
     "lib/repo-assets",
 )
 
