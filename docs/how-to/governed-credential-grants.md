@@ -340,6 +340,21 @@ uses that grant's existing UID/resourceVersion and owned-authority retirement
 flow. Re-enrollment after all grants are removed is supported while the original
 namespace and consumer evidence remains intact.
 
+Active-grant updates capture namespace UID/resourceVersion and complete namespace
+snapshots **before** quiescing the selected writer grant. The controller removes
+that grant's `kars.azure.com/credential-reader-<grant UID>` label, annotation and
+metadata finalizer after read authority retires. Apply waits for this cleanup as
+well as the current writer acknowledgement and owned-role absence. It may advance
+only the affected reviewed namespace resourceVersions, and only when the observed
+delta is precisely removal of those existing, controller-bound guard fields.
+Other grants' guards, all other labels/annotations/finalizers, the namespace's
+native `spec.finalizers` hold, private receipts/epochs and remaining namespace
+content must be unchanged. Empty metadata maps/lists omitted after the last guard
+is removed are equivalent. Bare RV changes or unrelated drift fail closed.
+The original root/template/profile/budget and grant inputs are revalidated; this
+is not a new preview or adoption of arbitrary latest versions. Selected grant
+intent and UID/resourceVersion CAS remain fenced through publication.
+
 An additional clean scope has its own root-bound version-3 scope receipt in that
 same operator-only annotation **on its own namespace**, not on the shared root.
 UID/resourceVersion-fenced
