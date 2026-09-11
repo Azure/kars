@@ -39,6 +39,16 @@ this repository.
 
 ### Shared-root workspace continuity candidate
 
+Focused review found that an active grant could quiesce its own writers and
+then reject the namespace version change caused by controller guard retirement.
+The correction accepts only removal of that grant's exact guard label,
+annotation and metadata finalizer, while pinning namespace UID, unrelated
+content/guards, private receipts/epochs and the original authority inputs.
+Grant intent, retired-role inventory and UID/resourceVersion fences remain
+required. The fixtures now model the real controller guard mutations.
+There are 31 focused guard-retirement regressions within 129 provisional CLI
+tests; independent closure and real native active-grant updates remain pending.
+
 Public Bridge native run 34638188545 passed the first actual operator-reviewed
 enrollment and writer readiness, then rejected each additional workspace because
 the persisted root-retirement binding included the first workspace's scope.
