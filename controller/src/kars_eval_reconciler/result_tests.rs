@@ -337,31 +337,31 @@ fn inconclusive_and_legacy_results_never_emit_all_passed_conditions() {
                 .all(|c| c.status == "False")
         );
     }
+}
 
-    #[tokio::test]
-    async fn error_only_and_mixed_terminal_reports_separate_inconclusive_from_real_drift() {
-        for mixed in [false, true] {
-            let f = fixture::setup().await;
-            {
-                let mut store = f.store.lock().unwrap();
-                store.jobs.values_mut().next().unwrap()["status"] = json!({"failed":1,"conditions":[
+#[tokio::test]
+async fn error_only_and_mixed_terminal_reports_separate_inconclusive_from_real_drift() {
+    for mixed in [false, true] {
+        let f = fixture::setup().await;
+        {
+            let mut store = f.store.lock().unwrap();
+            store.jobs.values_mut().next().unwrap()["status"] = json!({"failed":1,"conditions":[
                     {"type":"Failed","status":"True","lastTransitionTime":"2026-09-10T20:00:05Z"}]});
-                let pod = store.pods.values_mut().next().unwrap();
-                pod["status"]["phase"] = json!("Failed");
-                pod["status"]["containerStatuses"][0]["state"]["terminated"]["exitCode"] = json!(2);
-                for case in store.report["results"].as_array_mut().unwrap() {
-                    case["actual"] = serde_json::Value::Null;
-                    case["verdict"] = json!({"result":"Errored","category":"Upstream"});
-                }
-                store.report["passed"] = json!(0);
-                store.report["errored"] = json!(6);
-                if mixed {
-                    store.report["results"][1]["actual"] = json!({"decision":"Allowed"});
-                    store.report["results"][1]["verdict"] =
-                        json!({"result":"Fail","reason":"DecisionMismatch"});
-                    store.report["failed"] = json!(1);
-                    store.report["errored"] = json!(5);
-                }
+            let pod = store.pods.values_mut().next().unwrap();
+            pod["status"]["phase"] = json!("Failed");
+            pod["status"]["containerStatuses"][0]["state"]["terminated"]["exitCode"] = json!(2);
+            for case in store.report["results"].as_array_mut().unwrap() {
+                case["actual"] = serde_json::Value::Null;
+                case["verdict"] = json!({"result":"Errored","category":"Upstream"});
+            }
+            store.report["passed"] = json!(0);
+            store.report["errored"] = json!(6);
+            if mixed {
+                store.report["results"][1]["actual"] = json!({"decision":"Allowed"});
+                store.report["results"][1]["verdict"] =
+                    json!({"result":"Fail","reason":"DecisionMismatch"});
+                store.report["failed"] = json!(1);
+                store.report["errored"] = json!(5);
             }
             let result = observation::observe(&f.client, &f.eval, &f.intent, &f.corpus)
                 .await

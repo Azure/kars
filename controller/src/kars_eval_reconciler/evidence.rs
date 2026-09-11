@@ -331,28 +331,31 @@ pub(super) async fn publish(
             }
         }
         intent.revalidate(client, eval).await?;
-        let mut cm = existing.clone().unwrap_or_else(|| ConfigMap {
-            metadata: kube::api::ObjectMeta {
-                name: Some(name(eval)),
-                namespace: eval.namespace(),
-                owner_references: Some(vec![
-                    eval.controller_owner_ref(&())
-                        .context("Eval owner UID missing")?,
-                ]),
-                labels: Some(
-                    [
-                        (
-                            "app.kubernetes.io/managed-by".into(),
-                            "kars-controller".into(),
-                        ),
-                        (super::LABEL_KEY_CLAW_EVAL.into(), eval.name_any()),
-                    ]
-                    .into(),
-                ),
+        let mut cm = match existing.clone() {
+            Some(current) => current,
+            None => ConfigMap {
+                metadata: kube::api::ObjectMeta {
+                    name: Some(name(eval)),
+                    namespace: eval.namespace(),
+                    owner_references: Some(vec![
+                        eval.controller_owner_ref(&())
+                            .context("Eval owner UID missing")?,
+                    ]),
+                    labels: Some(
+                        [
+                            (
+                                "app.kubernetes.io/managed-by".into(),
+                                "kars-controller".into(),
+                            ),
+                            (super::LABEL_KEY_CLAW_EVAL.into(), eval.name_any()),
+                        ]
+                        .into(),
+                    ),
+                    ..Default::default()
+                },
                 ..Default::default()
             },
-            ..Default::default()
-        });
+        };
         cm.data = Some(
             [
                 ("report.json".into(), report),
