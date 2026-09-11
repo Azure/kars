@@ -111,6 +111,22 @@ anchors and receipt logs resolve `KARS_NAMESPACE`, then `POD_NAMESPACE`, then
 `kars-system`; set the same namespace environment for the CLI verifier.
 Initialization failures are logged and retried, without silently rotating malformed keys.
 
+The receipt inclusion log starts in `kars-receipt-log` and continues in numbered
+`kars-receipt-log-000001` ConfigMaps. At 700 KiB of committed chain JSON, the
+controller seals the current segment with Kubernetes immutability before writing
+the next one; sequence numbers and hash links continue across segments. Existing
+single-ConfigMap logs remain readable, including legacy heads without labels.
+Corrupt history, missing segments and API failures are errors, not empty logs.
+Individual signed receipts remain available if log persistence fails.
+
+Use the matching CLI for `receipt verify`, `receipt log` and `receipt checkpoint`:
+all three read the complete log from one ConfigMap-list snapshot in the configured
+receipt namespace, so the verifier needs ConfigMap **list** permission there.
+Do not downgrade the writer or verifier after rotation: older versions only know
+the head, and a sealed prefix cannot be appended to. No segment is automatically
+deleted, and neither segmentation nor a controller-signed checkpoint constitutes
+an independent witness or persistent sandbox storage.
+
 ### Infrastructure CRDs
 
 Two more CRDs round out the API. You don't author these per agent, but the same Helm chart installs them and they show up under `kubectl get crds`:

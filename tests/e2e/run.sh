@@ -906,6 +906,15 @@ EOF
         fail "KarsTask: amplifying envelope was NOT rejected by admission"
     fi
 
+    # Whitespace-only padding preserves real history; only the installed
+    # controller creates the next segment and the CLI verifies its receipt.
+    if [[ "${GITHUB_ACTIONS:-}" == "true" ]]; then
+        if python3 "$SCRIPT_DIR/receipt_log_rotation.py" --root "$ROOT_DIR"; then
+            pass "Receipt log: real controller rotation, complete CLI inclusion, immutable prefix"
+        else
+            fail "Receipt log: native rotation/inclusion/immutability proof failed"
+        fi
+    fi
     kubectl delete karstask e2e-karstask -n kars-system --wait=false >/dev/null 2>&1 || true
 }
 

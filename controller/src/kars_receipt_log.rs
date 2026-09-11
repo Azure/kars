@@ -8,8 +8,8 @@
 //! ## What this is — and, honestly, what it is not
 //!
 //! Each emitted [`crate::kars_receipt::KarsReceipt`] is entered into an
-//! append-only, hash-chained log stored in the `kars-receipt-log` ConfigMap in
-//! `kars-system`. Every entry binds the receipt's signed-payload digest to the
+//! append-only, hash-chained log starting in the `kars-receipt-log` ConfigMap
+//! and continuing in bounded, numbered segments. Every entry binds the receipt's signed-payload digest to the
 //! previous entry's hash, so the **set** of receipts becomes tamper-evident:
 //! deleting or altering any one receipt (or reordering them) breaks the chain
 //! at that point, which a verifier detects — something a per-receipt signature
@@ -33,15 +33,15 @@
 
 use anyhow::{Context, Result};
 use k8s_openapi::api::core::v1::ConfigMap;
-use kube::{
-    Client,
-    api::{Api, PostParams},
-};
+use kube::{Client, api::Api};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
 use crate::providers::signing::receipt_namespace;
 pub use crate::providers::signing::sha256_hex;
+
+mod storage;
+pub use storage::{append, read_chain};
 
 /// ConfigMap holding the hash-chained inclusion log.
 pub const LOG_CONFIGMAP_NAME: &str = "kars-receipt-log";
@@ -57,8 +57,6 @@ const GENESIS_PREV: &str = "genesis";
 const EMPTY_ROOT: &str = "genesis";
 /// SSA field manager for checkpoint writes.
 const CHECKPOINT_FIELD_MANAGER: &str = "kars-controller/receipt-checkpoint";
-/// Bounded optimistic-concurrency retries on append.
-const MAX_APPEND_RETRIES: usize = 5;
 
 /// One entry in the inclusion log.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -145,105 +143,6 @@ fn already_current(chain: &[InclusionEntry], receipt: &str, payload_sha256: &str
         .rev()
         .find(|e| e.receipt == receipt)
         .is_some_and(|e| e.payload_sha256 == payload_sha256)
-}
-
-/// Append an inclusion entry for a freshly-emitted receipt. Idempotent and
-/// concurrency-safe (optimistic resourceVersion retry). Returns the entry that
-/// represents this receipt's current inclusion (existing or newly appended).
-pub async fn append(
-    client: &Client,
-    receipt: &str,
-    payload_sha256: &str,
-) -> Result<InclusionEntry> {
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &receipt_namespace());
-
-    for _ in 0..MAX_APPEND_RETRIES {
-        let existing = cms.get_opt(LOG_CONFIGMAP_NAME).await?;
-        let (chain, resource_version) = match &existing {
-            Some(cm) => {
-                let chain = cm
-                    .data
-                    .as_ref()
-                    .and_then(|d| d.get(CHAIN_KEY))
-                    .and_then(|s| serde_json::from_str::<Vec<InclusionEntry>>(s).ok())
-                    .unwrap_or_default();
-                (chain, cm.metadata.resource_version.clone())
-            }
-            None => (Vec::new(), None),
-        };
-
-        if already_current(&chain, receipt, payload_sha256) {
-            // Nothing to do — return the current inclusion entry.
-            return Ok(chain
-                .into_iter()
-                .rev()
-                .find(|e| e.receipt == receipt)
-                .expect("already_current implies an entry exists"));
-        }
-
-        let mut new_chain = chain;
-        let entry = next_entry(&new_chain, receipt, payload_sha256);
-        new_chain.push(entry.clone());
-        let chain_json =
-            serde_json::to_string(&new_chain).context("serialize receipt inclusion chain")?;
-
-        let result = if existing.is_none() {
-            // Create the log ConfigMap.
-            let cm: ConfigMap = serde_json::from_value(serde_json::json!({
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {
-                    "name": LOG_CONFIGMAP_NAME,
-                    "namespace": receipt_namespace(),
-                    "labels": {
-                        "app.kubernetes.io/name": "kars",
-                        "app.kubernetes.io/component": "receipt-inclusion-log",
-                    },
-                },
-                "data": { CHAIN_KEY: chain_json },
-            }))?;
-            cms.create(&PostParams::default(), &cm).await.map(|_| ())
-        } else {
-            // Replace with optimistic concurrency on resourceVersion.
-            let cm: ConfigMap = serde_json::from_value(serde_json::json!({
-                "apiVersion": "v1",
-                "kind": "ConfigMap",
-                "metadata": {
-                    "name": LOG_CONFIGMAP_NAME,
-                    "namespace": receipt_namespace(),
-                    "resourceVersion": resource_version,
-                },
-                "data": { CHAIN_KEY: chain_json },
-            }))?;
-            cms.replace(LOG_CONFIGMAP_NAME, &PostParams::default(), &cm)
-                .await
-                .map(|_| ())
-        };
-
-        match result {
-            Ok(()) => {
-                tracing::debug!(receipt = %receipt, seq = entry.seq, "receipt entered in inclusion log");
-                return Ok(entry);
-            }
-            // 409 Conflict (lost the optimistic race) → retry with a fresh read.
-            Err(kube::Error::Api(ae)) if ae.code == 409 => continue,
-            Err(e) => return Err(e).context("appending to receipt inclusion log"),
-        }
-    }
-    anyhow::bail!("receipt inclusion log append exhausted retries (contention)")
-}
-
-/// Read and parse the full inclusion chain (for checkpointing + the CLI).
-pub async fn read_chain(client: &Client) -> Result<Vec<InclusionEntry>> {
-    let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &receipt_namespace());
-    let cm = cms.get_opt(LOG_CONFIGMAP_NAME).await?;
-    Ok(cm
-        .and_then(|c| {
-            c.data
-                .and_then(|d| d.get(CHAIN_KEY).cloned())
-                .and_then(|s| serde_json::from_str::<Vec<InclusionEntry>>(&s).ok())
-        })
-        .unwrap_or_default())
 }
 
 /// The root hash a checkpoint commits to: the head entry's hash (which, in a
