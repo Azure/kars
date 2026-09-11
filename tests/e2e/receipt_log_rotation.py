@@ -8,6 +8,7 @@ import copy
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import time
 import uuid
@@ -54,7 +55,23 @@ def conflict(code, body, name):
             and body.get("details", {}).get("name") == name)
 
 
-def cli(root, *args):
+def checkpoint_lag(report):
+    checks = report.get("checks")
+    if report.get("ok") is not False or not isinstance(checks, list) or not checks:
+        return False
+    if any(not isinstance(c, dict) or type(c.get("ok")) is not bool for c in checks):
+        return False
+    failures = [c for c in checks if not c["ok"]]
+    if len(failures) != 1 or failures[0].get("name") != "checkpoint":
+        return False
+    match = re.fullmatch(
+        r"checkpoint \(size ([0-9]+)\) diverges from the live log \(size ([0-9]+)\)"
+        r" \u2014 history may have been rewritten", failures[0].get("detail", ""))
+    return (match is not None and int(match[1]) < int(match[2])
+            and any(c.get("name") == "inclusion" and c["ok"] for c in checks))
+
+
+def cli(root, *args, allow_checkpoint_lag=False):
     env = {**os.environ, "KARS_NAMESPACE": NS, "POD_NAMESPACE": NS}
     try:
         result = subprocess.run(
@@ -62,11 +79,16 @@ def cli(root, *args):
             cwd=root, env=env, capture_output=True, text=True, timeout=30, check=False)
     except (OSError, subprocess.TimeoutExpired):
         raise ProbeFailure("packaged-cli-unavailable") from None
-    require(result.returncode == 0, "packaged-cli-failed")
+    require(result.returncode in ((0, 2) if allow_checkpoint_lag else (0,)), "packaged-cli-failed")
     try:
-        return json.loads(result.stdout)
+        report = json.loads(result.stdout)
     except ValueError:
         raise ProbeFailure("packaged-cli-json") from None
+    require(isinstance(report, dict), "packaged-cli-report")
+    if result.returncode == 2:
+        require(checkpoint_lag(report), "packaged-cli-verification-failed")
+        return None
+    return report
 
 
 def preserved(current, original):
@@ -153,6 +175,43 @@ def immutable_denial(code, body):
                     for c in details.get("causes", []) if isinstance(c, dict)))
 
 
+def await_verified_receipt(root, port, task, prefix, deadline):
+    checkpoint_uid = None
+    name = task["metadata"]["name"]
+    while time.monotonic() < deadline:
+        same_task(read(port, f"{TASKS}/{name}", "KarsTask", name), task)
+        log = cli(root, "log")
+        require(log.get("intact") is True and log.get("entries", [])[:len(prefix)] == prefix,
+                "complete-cli-chain")
+        cp_name = "kars-receipt-checkpoint"
+        code, checkpoint = api.request(port, "GET", f"{CMS}/{cp_name}")
+        if code == 404:
+            require(isinstance(checkpoint, dict) and checkpoint.get("kind") == "Status"
+                    and checkpoint.get("reason") == "NotFound"
+                    and checkpoint.get("details", {}).get("name") == cp_name, "checkpoint-notfound")
+            time.sleep(0.2)
+            continue
+        require(code == 200, "checkpoint-read")
+        meta = identity(checkpoint, "ConfigMap", cp_name)
+        require(checkpoint_uid is None or meta["uid"] == checkpoint_uid, "checkpoint-replaced")
+        checkpoint_uid = meta["uid"]
+        data = checkpoint.get("data", {})
+        require(isinstance(data, dict) and all(
+            isinstance(data.get(key), str) and data[key]
+            for key in ("treeSize", "rootHash", "keyId", "signature", "note")),
+            "checkpoint-shape")
+        verified = cli(root, "verify", name, "-n", NS, allow_checkpoint_lag=True)
+        if verified is None:
+            time.sleep(0.2)
+            continue
+        require(verified.get("ok") is True and all(any(
+            c.get("name") == required and c.get("ok") is True
+            for c in verified.get("checks", [])) for required in ("inclusion", "checkpoint")),
+            "new-receipt-inclusion-checkpoint")
+        return log
+    raise ProbeFailure("receipt-checkpoint-convergence-deadline")
+
+
 def run(root, port):
     deadline = time.monotonic() + 30
     while time.monotonic() < deadline:
@@ -206,13 +265,10 @@ def run(root, port):
         data = segment.get("data", {})
         require(data.get("segmentIndex") == "1"
                 and data.get("previousRootHash") == prefix[-1]["entryHash"], "overflow-binding")
-        log = cli(root, "log")
-        require(log.get("intact") is True and log.get("entries", [])[:len(prefix)] == prefix,
-                "complete-cli-chain")
-        verified = cli(root, "verify", name, "-n", NS)
-        require(verified.get("ok") is True and any(
-            c.get("name") == "inclusion" and c.get("ok") is True
-            for c in verified.get("checks", [])), "new-receipt-inclusion")
+        # Append and checkpoint publication are separate controller writes.
+        # Only authenticated checkpoint/log convergence may consume the remainder
+        # of the original deadline; no signature/authority failure is retried.
+        log = await_verified_receipt(root, port, task, prefix, deadline)
         attempt = copy.deepcopy(sealed)
         attempt["data"]["chain.json"] += " "
         code, body = api.request(port, "PUT", f"{CMS}/{HEAD}?dryRun=All", attempt)

@@ -176,6 +176,98 @@ class DenialTests(unittest.TestCase):
                 probe.main()
         proxy.assert_not_called()
 
+
+class CheckpointConvergenceTests(unittest.TestCase):
+    def report(self, detail=None):
+        return {"ok": detail is None, "checks": [
+            {"name": "signature", "ok": True},
+            {"name": "inclusion", "ok": True},
+            {"name": "checkpoint", "ok": detail is None, "detail": detail or "valid"},
+        ]}
+
+    def lag(self):
+        return self.report(
+            "checkpoint (size 1) diverges from the live log (size 2)"
+            " \u2014 history may have been rewritten")
+
+    def test_retries_only_precise_authenticated_checkpoint_lag(self):
+        self.assertTrue(probe.checkpoint_lag(self.lag()))
+        for reason in ("signed checkpoint signature INVALID", "untrusted key", "other"):
+            self.assertFalse(probe.checkpoint_lag(self.report(reason)))
+        invalid = self.lag()
+        invalid["checks"][0]["ok"] = False
+        self.assertFalse(probe.checkpoint_lag(invalid))
+        invalid = self.lag()
+        invalid["checks"][1]["ok"] = False
+        self.assertFalse(probe.checkpoint_lag(invalid))
+        for size in (2, 3):
+            self.assertFalse(probe.checkpoint_lag(self.report(
+                f"checkpoint (size {size}) diverges from the live log (size 2)"
+                " \u2014 history may have been rewritten")))
+
+    def test_actual_cli_nonzero_contract_accepts_only_lag(self):
+        for report, accepted in ((self.lag(), True), (self.report("signature INVALID"), False)):
+            result = type("Result", (), {"returncode": 2, "stdout": json.dumps(report)})()
+            with patch.object(probe.subprocess, "run", return_value=result):
+                if accepted:
+                    self.assertIsNone(probe.cli("/unused", "verify", "task", allow_checkpoint_lag=True))
+                else:
+                    with self.assertRaises(probe.ProbeFailure):
+                        probe.cli("/unused", "verify", "task", allow_checkpoint_lag=True)
+
+    def checkpoint(self):
+        obj = head()
+        obj["metadata"]["name"] = "kars-receipt-checkpoint"
+        obj["metadata"]["uid"] = "checkpoint-uid"
+        obj["data"] = {k: "value" for k in ("treeSize", "rootHash", "keyId", "signature", "note")}
+        return obj
+
+    def test_append_visible_before_checkpoint_converges_without_new_deadline(self):
+        task = RetirementTests().task()
+        prefix = [{"seq": 0, "entryHash": "original-root"}]
+        log = {"intact": True, "entries": prefix + [{"seq": 1}]}
+        responses = [log, None, log, self.report()]
+        with patch.object(probe, "read", return_value=task), \
+                patch.object(probe.api, "request", return_value=(200, self.checkpoint())), \
+                patch.object(probe, "cli", side_effect=responses) as cli, \
+                patch.object(probe.time, "monotonic", side_effect=[1, 2]), \
+                patch.object(probe.time, "sleep"):
+            result = probe.await_verified_receipt("/unused", 1, task, prefix, 3)
+        self.assertEqual(result, log)
+        self.assertEqual(cli.call_count, 4)
+
+    def test_forbidden_checkpoint_read_is_immediately_fatal(self):
+        task = RetirementTests().task()
+        with patch.object(probe, "read", return_value=task), \
+                patch.object(probe, "cli", return_value={"intact": True, "entries": []}) as cli, \
+                patch.object(probe.api, "request", return_value=(403, status(403, "Forbidden"))), \
+                patch.object(probe.time, "monotonic", return_value=1):
+            with self.assertRaisesRegex(probe.ProbeFailure, "checkpoint-read"):
+                probe.await_verified_receipt("/unused", 1, task, [], 2)
+        self.assertEqual(cli.call_count, 1)
+
+    def test_signature_failure_is_not_retried_as_publication_lag(self):
+        task = RetirementTests().task()
+        with patch.object(probe, "read", return_value=task), \
+                patch.object(probe.api, "request", return_value=(200, self.checkpoint())), \
+                patch.object(probe, "cli", side_effect=[
+                    {"intact": True, "entries": []}, probe.ProbeFailure("signature-invalid"),
+                ]) as cli, patch.object(probe.time, "monotonic", return_value=1):
+            with self.assertRaisesRegex(probe.ProbeFailure, "signature-invalid"):
+                probe.await_verified_receipt("/unused", 1, task, [], 2)
+        self.assertEqual(cli.call_count, 2)
+
+    def test_lag_exhausts_original_deadline_without_overwriting_checkpoint(self):
+        task = RetirementTests().task()
+        with patch.object(probe, "read", return_value=task), \
+                patch.object(probe.api, "request", return_value=(200, self.checkpoint())) as api, \
+                patch.object(probe, "cli", side_effect=[{"intact": True, "entries": []}, None]), \
+                patch.object(probe.time, "monotonic", side_effect=[1, 3]), \
+                patch.object(probe.time, "sleep"):
+            with self.assertRaisesRegex(probe.ProbeFailure, "convergence-deadline"):
+                probe.await_verified_receipt("/unused", 1, task, [], 3)
+        self.assertEqual([c.args[1] for c in api.call_args_list], ["GET"])
+
     def test_refuses_unowned_kubeconfig_before_api_access(self):
         with patch.dict(os.environ, {"GITHUB_ACTIONS": "true", "KUBECONFIG": "/other/config"}), \
                 patch("sys.argv", ["probe", "--root", "/unused"]), \
