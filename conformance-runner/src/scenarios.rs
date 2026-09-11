@@ -377,11 +377,12 @@ mod tests {
             host: "169.254.169.254".into(),
             port: 80,
         };
+        let error = replay(&t, &scen, "case-egress-imds", None)
+            .await
+            .unwrap_err();
         assert_eq!(
-            replay(&t, &scen, "case-egress-imds", None)
-                .await
-                .unwrap_err(),
-            crate::outcome::ReplayError::Upstream
+            error.downcast_ref::<crate::outcome::ReplayError>(),
+            Some(&crate::outcome::ReplayError::Upstream)
         );
     }
 
