@@ -53,7 +53,7 @@ impl AnchorPins {
         if let Some(expected) = &self.key_id {
             // The controller defines key IDs as full SHA-256 fingerprints of
             // the raw public key, not an independently mutable ConfigMap label.
-            if expected != &super::sha256_hex(&key) || expected != &key_id {
+            if expected != &super::sha256_hex(key) || expected != &key_id {
                 return Err(
                     "Receipt anchor key does not match the configured SHA-256 fingerprint.",
                 );
@@ -100,7 +100,7 @@ mod tests {
 
     #[test]
     fn pins_follow_the_controller_raw_key_fingerprint_contract() {
-        assert_eq!(super::super::sha256_hex(&public_key(KEY).unwrap()), ID);
+        assert_eq!(super::super::sha256_hex(public_key(KEY).unwrap()), ID);
         for (key_id, public_key) in [
             (None, None),
             (Some(ID.into()), None),
