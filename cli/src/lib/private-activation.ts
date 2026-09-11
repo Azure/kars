@@ -636,13 +636,33 @@ async function reviewedOwner(execute: Execute, pod: Json, scope: NamespaceReview
     if (owner.apiVersion !== version) throw new Error("Private consumer owner API identity is invalid");
     const parent = await read(execute, kinds[owner.kind], owner.name, scope.namespace.name);
     if (reviewed(parent).uid !== owner.uid) throw new Error("Private consumer owner was replaced");
-    if (canonical(executionSpec(template(current).spec, current.kind === "Pod"))
-      !== canonical(executionSpec(template(parent).spec, false))) {
+    if (!matchesReviewedExecution(template(current).spec, template(parent).spec, current.kind === "Pod")) {
       throw new Error("Consumer execution differs from the reviewed controller template; preserve it for explicit Pod review");
     }
     current = parent;
   }
   return undefined;
+}
+
+export function matchesReviewedExecution(current: unknown, parent: unknown, pod: boolean): boolean {
+  const actual = executionSpec(current, pod);
+  const expected = executionSpec(parent, false);
+  if (pod) {
+    // DefaultTolerationSeconds mutates Pods, not controller templates.
+    const tolerations = list(actual.tolerations ?? []);
+    const reviewedTolerations = list(expected.tolerations ?? []);
+    for (const key of ["node.kubernetes.io/not-ready", "node.kubernetes.io/unreachable"]) {
+      const implicit = { key, operator: "Exists", effect: "NoExecute", tolerationSeconds: 300 };
+      if (reviewedTolerations.some(value =>
+        [key, ""].includes(String(at(value, "key") ?? ""))
+        && ["NoExecute", ""].includes(String(at(value, "effect") ?? "")))) continue;
+      const index = tolerations.findIndex(value => canonical(value) === canonical(implicit));
+      if (index >= 0) tolerations.splice(index, 1);
+    }
+    if (tolerations.length) actual.tolerations = tolerations;
+    else delete actual.tolerations;
+  }
+  return canonical(actual) === canonical(expected);
 }
 
 function executionSpec(value: unknown, pod: boolean): RecordValue {

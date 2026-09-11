@@ -43,6 +43,9 @@ function fixture() {
   const pods = new Map<string, any[]>([["work", []], ["core", []], ["reader", []]]);
   const merge = (value: any, patch: any) => {
     for (const [name, entry] of Object.entries(patch)) {
+      if (name === "__proto__" || name === "constructor" || name === "prototype") {
+        throw new Error("Unsafe fixture patch property");
+      }
       if (entry && typeof entry === "object" && !Array.isArray(entry)) {
         value[name] ??= {};
         merge(value[name], entry);
@@ -87,6 +90,16 @@ function fixture() {
   const preview = () => previewPrivateActivation(execute, "work", [{ namespace: "reader" }], [], "core", "kcm-certificate", []);
   return { objects, pods, calls, execute, preview, key, deployment };
 }
+
+it("rejects prototype-mutating properties in private activation fixture patches", async () => {
+  for (const key of ["__proto__", "constructor", "prototype"]) {
+    const f = fixture();
+    const patch = `{"metadata":{"uid":"work-uid","resourceVersion":"1"},"spec":{"${key}":{"polluted":true}}}`;
+    await expect(f.execute(["patch", "namespace", "work", "--type=merge", "-p", patch]))
+      .rejects.toThrow("Unsafe fixture patch property");
+    expect(Object.hasOwn(Object.prototype, "polluted")).toBe(false);
+  }
+});
 
 function rootPod(f: ReturnType<typeof fixture>, uid = "old-root") {
   const root = f.objects.get(f.key("deployment", "kars-controller", "core"));
