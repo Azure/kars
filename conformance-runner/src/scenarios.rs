@@ -29,7 +29,7 @@
 
 use anyhow::Result;
 use kars_eval_corpus::{
-    ActualDecision, Burst, ChatMessage, Decision, ObservedSample, PolicyKindRef, Scenario,
+    ActualDecision, Burst, ChatMessage, ObservedSample, PolicyKindRef, Scenario,
 };
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};

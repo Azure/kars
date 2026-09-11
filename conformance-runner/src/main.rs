@@ -19,6 +19,7 @@
 //!   - `0` — nonempty corpus selection; every case passed.
 //!   - `1` — conclusive replay with at least one policy failure.
 //!   - `2` — any inconclusive case, empty selection, or execution/reporting error.
+//!
 //! `KARS_EVAL_REPORT_FORMAT=v2` enables truthful inconclusive reports.
 //! Without it, conclusive output remains v1 and inconclusive runs emit no report.
 
