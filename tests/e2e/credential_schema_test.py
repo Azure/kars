@@ -61,12 +61,17 @@ def denied(policy="p", binding="p", message="Exact UID fixture invariant", name=
 
 class FixtureAPI:
     """In-memory transport fixture for verifying harness orchestration only."""
-    def __init__(self):
+    def __init__(self, pending_crd_status=()):
         self.objects, self.calls, self.actor_calls = {}, [], []
+        self.pending_crd_status = list(pending_crd_status)
 
     def request(self, _port, method, path, obj=None):
         self.calls.append((method, path, copy.deepcopy(obj)))
         if method == "GET":
+            if path == schema.CRDS + "/" + schema.CRD and path in self.objects and self.pending_crd_status:
+                current = copy.deepcopy(self.objects[path])
+                current["status"] = self.pending_crd_status.pop(0)
+                return 200, current
             return (200, copy.deepcopy(self.objects[path])) if path in self.objects else (404, {})
         if method == "DELETE":
             if obj["preconditions"]["uid"] != self.objects[path]["metadata"]["uid"]:
@@ -114,6 +119,19 @@ class FixtureAPI:
 
 
 class CredentialSchemaTests(unittest.TestCase):
+    def test_new_crd_null_conditions_wait_for_establishment_without_losing_cleanup(self):
+        api = FixtureAPI([{"conditions": None}, None, {}, {"conditions": []}])
+        crd, selected = schema.select_shipped(json.dumps({"kind": "List", "items": documents()}))
+        with patch.object(schema, "render", return_value=(crd, selected)), \
+             patch.object(schema, "request", side_effect=api.request), \
+             patch.object(schema, "as_actor", side_effect=api.actor), \
+             patch.object(schema.time, "sleep"):
+            results = schema.exercise(Path("."), 1, "v1.31.0", TOKEN)
+        self.assertEqual(api.pending_crd_status, [])
+        self.assertEqual(api.objects, {})
+        self.assertEqual(len([r for r in results if r["category"] == "intended-denial"]), 4)
+        self.assertEqual(results[-1]["category"], "cleaned")
+
     def test_source_extraction_preserves_selected_rendered_expressions(self):
         objects = documents()
         adjacent = "\n".join(json.dumps(obj) for obj in objects)

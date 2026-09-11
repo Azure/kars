@@ -20,7 +20,7 @@ import uuid
 from urllib.error import HTTPError
 from urllib.request import ProxyHandler, Request, build_opener
 
-from sre_authority.registration_schema import CONTEXT, command, kind_proxy, request
+from sre_authority.registration_schema import CONTEXT, command, crd_established, kind_proxy, request
 
 CRD = "karscredentialgrants.kars.azure.com"
 CRDS = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions"
@@ -268,9 +268,7 @@ def prepare(port, owned, crd, namespace, other, token):
     require(ns_objects[0]["metadata"]["uid"] != ns_objects[1]["metadata"]["uid"], "fixtures")
     owned.create(CRDS, crd, "grant-schema")
     wait_for(lambda: request(port, "GET", CRDS + "/" + CRD),
-             lambda code, body: code == 200 and isinstance(body, dict) and any(
-                 c.get("type") == "Established" and c.get("status") == "True"
-                 for c in body.get("status", {}).get("conditions", [])), "grant-schema")
+             crd_established, "grant-schema")
     actors = {}
     for name, verb in (("credential-writer", "use-agent-credentials"),
                        ("kars-controller", "project-credentials")):
