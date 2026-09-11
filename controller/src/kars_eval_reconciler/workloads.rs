@@ -284,19 +284,18 @@ pub(super) async fn acknowledge_trigger(
     job_name: &str,
 ) -> anyhow::Result<KarsEval> {
     let (uid, rv) = identity(&eval.metadata)?;
-    Ok(api
-        .patch(
-            &eval.name_any(),
-            &PatchParams::default(),
-            &Patch::Merge(json!({
-                "metadata":{"uid":uid,"resourceVersion":rv,"annotations":{
-                    crate::kars_eval::ANNOTATION_RUN_NOW:null, RUN_TOKEN:null, LAST_RUN:job_name,
-                    LAST_TOKEN:eval.annotations().get(RUN_TOKEN),
-                }},
-            })),
-        )
-        .await
-        .context("acknowledge created run with original UID/resourceVersion")?)
+    api.patch(
+        &eval.name_any(),
+        &PatchParams::default(),
+        &Patch::Merge(json!({
+            "metadata":{"uid":uid,"resourceVersion":rv,"annotations":{
+                crate::kars_eval::ANNOTATION_RUN_NOW:null, RUN_TOKEN:null, LAST_RUN:job_name,
+                LAST_TOKEN:eval.annotations().get(RUN_TOKEN),
+            }},
+        })),
+    )
+    .await
+    .context("acknowledge created run with original UID/resourceVersion")
 }
 
 pub(super) fn owner(eval: &KarsEval) -> anyhow::Result<Value> {

@@ -100,27 +100,25 @@ pub(super) async fn observe(
             .get_opt(requested)
             .await
             .context("read last explicitly requested Job")?
-    {
-        if job
+        && job
             .spec
             .as_ref()
             .and_then(|spec| spec.template.metadata.as_ref())
             .is_some_and(|meta| intent.matches(meta))
-        {
-            verify_job(&job, &cronjobs, eval, intent).await?;
-            let created = job
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .context("Job creation timestamp missing")?
-                .0
-                .to_string();
-            candidates.push((created, job));
-            candidates.sort_by(|a, b| {
-                a.0.cmp(&b.0)
-                    .then_with(|| a.1.metadata.uid.cmp(&b.1.metadata.uid))
-            });
-        }
+    {
+        verify_job(&job, &cronjobs, eval, intent).await?;
+        let created = job
+            .metadata
+            .creation_timestamp
+            .as_ref()
+            .context("Job creation timestamp missing")?
+            .0
+            .to_string();
+        candidates.push((created, job));
+        candidates.sort_by(|a, b| {
+            a.0.cmp(&b.0)
+                .then_with(|| a.1.metadata.uid.cmp(&b.1.metadata.uid))
+        });
     }
     let latest = candidates.last();
     if let (Some((_, job)), Some(old)) = (latest, retained.as_ref()) {
@@ -329,7 +327,12 @@ async fn read_evidence(
             continue;
         }
         let phase = pod.status.as_ref().and_then(|s| s.phase.as_deref());
-        if !matches!(phase, Some("Succeeded" | "Failed")) {
+        if !matches!(
+            phase,
+            Some(
+                crate::status::phase::POD_PHASE_SUCCEEDED | crate::status::phase::POD_PHASE_FAILED
+            )
+        ) {
             continue;
         }
         let terminated = pod
