@@ -58,7 +58,8 @@ jobs:
             routes::artifacts::digest_tests::artifact_addresses_keep_the_existing_sixteen_byte_short_form \
             routes::github::tests::connection_names_keep_the_original_raw_subject_and_eight_byte_digest \
             providers::receipt::tests::rfc8032_known_answer_and_malformed_signatures_keep_exact_verification_semantics \
-            providers::credential_review::tests::legacy_v1_key_preserves_domain_null_byte_and_raw_secret_encoding
+            providers::credential_review::tests::legacy_v1_key_preserves_domain_null_byte_and_raw_secret_encoding \
+            providers::credential_review::tests::tag_comparison_requires_equal_length_and_every_byte_without_normalization
           do
             grep -Fx "$name: test" /tmp/kars-bridge-bff-tests.txt
           done

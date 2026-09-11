@@ -18,8 +18,9 @@ class CryptoGateTests(GitFixture):
             env={**os.environ, "BASE_REF": self.base}, timeout=30,
         )
 
-    def test_exact_standard_digest_adapter_is_the_only_new_allowed_file(self):
-        self.write("bridge/bff/src/providers/signing.rs", "use sha2::{Digest, Sha256};\n")
+    def test_exact_reviewed_adapters_are_allowed_without_a_directory_exception(self):
+        for name in ("signing.rs", "receipt.rs", "credential_review.rs"):
+            self.write("bridge/bff/src/providers/" + name, "use sha2::{Digest, Sha256};\n")
         self.commit()
         result = self.gate()
         self.assertEqual((result.returncode, result.stderr), (0, ""))
@@ -27,14 +28,18 @@ class CryptoGateTests(GitFixture):
     def test_filename_prefixes_cannot_impersonate_allowlisted_adapters(self):
         for name in ("controller/src/providers/signing.rs-extra.rs",
                      "bridge/bff/src/providers/signing.rs-extra.rs",
-                     "bridge/bff/src/providers/signing.rs/child.rs"):
+                     "bridge/bff/src/providers/signing.rs/child.rs",
+                     "bridge/bff/src/providers/receipt.rs-extra.rs",
+                     "bridge/bff/src/providers/credential_review.rs-extra.rs"):
             self.write(name, "use sha2::{Digest, Sha256};\n")
         self.commit()
         result = self.gate()
         self.assertEqual(result.returncode, 1)
         for name in ("controller/src/providers/signing.rs-extra.rs",
                      "bridge/bff/src/providers/signing.rs-extra.rs",
-                     "bridge/bff/src/providers/signing.rs/child.rs"):
+                     "bridge/bff/src/providers/signing.rs/child.rs",
+                     "bridge/bff/src/providers/receipt.rs-extra.rs",
+                     "bridge/bff/src/providers/credential_review.rs-extra.rs"):
             self.assertIn(f"fail: {name} introduces custom crypto", result.stderr)
 
     def test_application_derivation_and_unreviewed_provider_files_remain_blocked(self):
