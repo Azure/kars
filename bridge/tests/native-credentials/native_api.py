@@ -23,6 +23,12 @@ class Failure(Exception):
     """Only static, secret-free diagnostics may enter this exception."""
 
 
+class CommandFailure(Failure):
+    def __init__(self, executable, code, stderr):
+        super().__init__(f"Setup command {executable} failed ({code})")
+        self.stderr = stderr
+
+
 def require(condition, message):
     if not condition:
         raise Failure(message)
@@ -33,7 +39,8 @@ def command(*args, stdin=None, timeout=180):
         args, input=stdin, cwd=ROOT, capture_output=True, text=True,
         timeout=timeout, check=False,
     )
-    require(result.returncode == 0, f"Setup command {args[0]} failed ({result.returncode})")
+    if result.returncode != 0:
+        raise CommandFailure(args[0], result.returncode, result.stderr)
     return result.stdout
 
 
