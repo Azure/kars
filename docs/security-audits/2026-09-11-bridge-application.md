@@ -152,6 +152,27 @@ The V1 secret-key derivation is not reclassified as content hashing, and
 unreviewed application/provider paths remain rejected. Receipt signature
 verification and outstanding source-review requirements are unchanged.
 
+### Receipt primitive adapter candidate
+
+The existing Ed25519 verification calls now share a separate
+`providers/receipt.rs` wrapper, including calls previously indented inside route
+functions. It retains the same standard-base64 decoding, exact 64-byte signature
+length and `ed25519-dalek` verification operation. Anchor pins, signed payload,
+DSSE framing, payload-binding checks, chain/checkpoint comparisons and advisory
+witness semantics remain at the existing callers.
+
+Signing used to construct test receipts is confined to a `cfg(test)` helper.
+An RFC 8032 known-answer signature was independently verified with Node's crypto
+implementation, and the Rust regression also rejects changed messages/keys,
+invalid signature lengths, malformed encodings and trailing whitespace.
+Existing fully re-signed attacker-anchor regressions remain required.
+This new wrapper is not yet allowlisted or Rust-qualified; the V1 credential
+key-derivation review remains separate and unresolved.
+The remaining function-local skill-package and egress-approval content hashes
+also use the qualified SHA adapter without changing their canonical input,
+`host:port` framing or identifier widths. They are not left hidden from the
+top-level import scanner.
+
 The imported application predates the core repository's file-size and copyright
 header conventions. Several files exceed the unchanged 800-line new-file cap,
 and the header gate reports missing Microsoft headers on imported files.

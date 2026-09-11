@@ -1,4 +1,6 @@
 use super::*;
+use crate::providers::receipt::ReceiptTestSigner as SigningKey;
+use crate::providers::signing::sha256_hex;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
@@ -8,9 +10,7 @@ use axum::{
     routing::get,
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
-use ed25519_dalek::{Signer, SigningKey};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 
@@ -534,10 +534,10 @@ async fn receipt_detail_handler_reads_legacy_overflow_and_absence_without_hiding
         "spec":{"taskRef":{"name":"task-3"},"envelopeDigest":format!("sha256:{digest}"),
             "predicateType":predicate_type,"scheme":"DSSEv1+ed25519","keyId":"test",
             "dsse":{"payloadType":payload_type,"payload":STANDARD.encode(&payload),
-                    "signatures":[{"keyid":"test","sig":STANDARD.encode(key.sign(&pae).to_bytes())}]},
+                    "signatures":[{"keyid":"test","sig":STANDARD.encode(key.sign(&pae))}]},
             "claims":[]},"status":{"inclusionSeq":3}});
     let mut chain = entries(4);
-    chain[3]["payloadSha256"] = hex::encode(Sha256::digest(&payload)).into();
+    chain[3]["payloadSha256"] = sha256_hex(&payload).into();
     chain[3]["entryHash"] = chain_entry_hash(
         3,
         "work/task-3",
@@ -599,13 +599,13 @@ fn receipt_log_integrity_still_verifies_real_signed_checkpoints_and_exact_tree_s
         let signature = key.sign(format!("kars-receipt-log\n{tree_size}\n{root}\n").as_bytes());
         let mut maps = log_maps("work", &chain, Some(1));
         maps.push(map("work", "kars-receipt-pubkey", json!({
-            "keyId":"test","publicKey":STANDARD.encode(key.verifying_key().to_bytes()),"scheme":"DSSEv1+ed25519"})));
+            "keyId":"test","publicKey":STANDARD.encode(key.public_key()),"scheme":"DSSEv1+ed25519"})));
         maps.push(map(
             "work",
             "kars-receipt-checkpoint",
             json!({
             "treeSize":tree_size.to_string(),"rootHash":root,"keyId":"test",
-            "signature":STANDARD.encode(signature.to_bytes())}),
+            "signature":STANDARD.encode(signature)}),
         ));
         let log = parsed(wire_snapshot(maps), "work").unwrap();
         let integrity = crate::routes::receipts::verify_log_integrity(&log);
@@ -621,8 +621,8 @@ async fn receipt_endpoint_still_requires_signed_payload_binding_and_full_overflo
     let namespace = std::env::var("BRIDGE_CORE_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let (_, state, api, server) = fixture(&namespace).await;
     let key = SigningKey::from_bytes(&[42; 32]);
-    let public_key = STANDARD.encode(key.verifying_key().to_bytes());
-    let key_id = hex::encode(Sha256::digest(key.verifying_key().to_bytes()));
+    let public_key = STANDARD.encode(key.public_key());
+    let key_id = sha256_hex(key.public_key());
     let payload_type = "application/vnd.in-toto+json";
     let predicate_type = "https://kars.azure.com/attestations/GovernanceReceipt/v0";
     let digest = "0123456789abcdef0123456789abcdef";
@@ -644,10 +644,10 @@ async fn receipt_endpoint_still_requires_signed_payload_binding_and_full_overflo
             "spec":{"taskRef":{"name":"task-3"},"envelopeDigest":format!("sha256:{digest}"),
                 "predicateType":predicate_type,"scheme":"DSSEv1+ed25519","keyId":key_id,
                 "dsse":{"payloadType":payload_type,"payload":STANDARD.encode(&payload),
-                        "signatures":[{"keyid":key_id,"sig":STANDARD.encode(key.sign(&pae).to_bytes())}]},
+                        "signatures":[{"keyid":key_id,"sig":STANDARD.encode(key.sign(&pae))}]},
                 "claims":[]},"status":{"inclusionSeq":3}});
     let mut chain = entries(4);
-    chain[3]["payloadSha256"] = hex::encode(Sha256::digest(&payload)).into();
+    chain[3]["payloadSha256"] = sha256_hex(&payload).into();
     chain[3]["entryHash"] = chain_entry_hash(
         3,
         "work/task-3",
@@ -663,7 +663,7 @@ async fn receipt_endpoint_still_requires_signed_payload_binding_and_full_overflo
         json!({"keyId":key_id,"publicKey":public_key,"scheme":"DSSEv1+ed25519"}),
     ));
     maps.push(map(&namespace, "kars-receipt-checkpoint", json!({"treeSize":"4","rootHash":root,
-            "keyId":key_id,"signature":STANDARD.encode(key.sign(format!("kars-receipt-log\n4\n{root}\n").as_bytes()).to_bytes())})));
+            "keyId":key_id,"signature":STANDARD.encode(key.sign(format!("kars-receipt-log\n4\n{root}\n").as_bytes()))})));
     maps.push(map(
         &namespace,
         "kars-receipt-witness",
@@ -711,15 +711,13 @@ async fn receipt_endpoint_still_requires_signed_payload_binding_and_full_overflo
                 (
                     "kars-receipt-pubkey",
                     "publicKey",
-                    STANDARD.encode(replacement.verifying_key().to_bytes()),
+                    STANDARD.encode(replacement.public_key()),
                 ),
                 (
                     "kars-receipt-checkpoint",
                     "signature",
                     STANDARD.encode(
-                        replacement
-                            .sign(format!("kars-receipt-log\n4\n{root}\n").as_bytes())
-                            .to_bytes(),
+                        replacement.sign(format!("kars-receipt-log\n4\n{root}\n").as_bytes()),
                     ),
                 ),
             ] {
@@ -732,7 +730,7 @@ async fn receipt_endpoint_still_requires_signed_payload_binding_and_full_overflo
                 map["data"][field] = value.into();
             }
             api.receipt_details.get_mut(receipt_path).unwrap()["spec"]["dsse"]["signatures"][0]["sig"] =
-                STANDARD.encode(replacement.sign(&pae).to_bytes()).into();
+                STANDARD.encode(replacement.sign(&pae)).into();
         }
         for (pin_id, pin_key, matches_original) in [
             (None, None, true),

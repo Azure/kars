@@ -97,7 +97,7 @@ mod tests {
     use super::*;
     use crate::kars::receipt::{DsseEnvelope, DsseSignature};
     use crate::kars::task::LocalObjectRef;
-    use ed25519_dalek::{Signer, SigningKey, Verifier};
+    use crate::providers::receipt::{ReceiptTestSigner as SigningKey, verify_ed25519};
     use serde_json::json;
 
     fn receipt() -> (KarsReceiptSpec, SigningKey) {
@@ -132,7 +132,7 @@ mod tests {
                     payload_type: PAYLOAD_TYPE.into(),
                     signatures: vec![DsseSignature {
                         keyid: "test-key".into(),
-                        sig: STANDARD.encode(signature.to_bytes()),
+                        sig: STANDARD.encode(signature),
                     }],
                 },
                 claims,
@@ -160,13 +160,11 @@ mod tests {
         let (mut spec, key) = receipt();
         spec.claims[0].status = "PASS".into();
         let payload = STANDARD.decode(&spec.dsse.payload).unwrap();
-        let signature = STANDARD.decode(&spec.dsse.signatures[0].sig).unwrap();
-        key.verifying_key()
-            .verify(
-                &super::super::pae(PAYLOAD_TYPE, &payload),
-                &ed25519_dalek::Signature::from_slice(&signature).unwrap(),
-            )
-            .unwrap();
+        assert!(verify_ed25519(
+            &key.public_key(),
+            &super::super::pae(PAYLOAD_TYPE, &payload),
+            &spec.dsse.signatures[0].sig,
+        ));
         assert!(decode(&spec, "tenant", "task").is_err());
     }
 
