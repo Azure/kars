@@ -47,6 +47,10 @@ jobs:
       - name: Make scripts executable
         run: chmod +x ci/*.sh
 
+      - name: Verify source-gate regression fixtures
+        if: matrix.gate == 'no-stubs'
+        run: python3 -m unittest discover -s ci/tests -p '*_test.py'
+
       - name: Run gate ${{ matrix.gate }}
         shell: bash
         env:
