@@ -1,12 +1,15 @@
 # Rust (BFF)
 /bff/target/
 **/*.rs.bk
+!/bff/Cargo.lock
 
 # Node / Next.js (web)
 node_modules
 /web/.next/
 /web/out/
 /web/next-env.d.ts
+!/web/src/app/workspace/artifacts/
+!/web/src/app/workspace/artifacts/**
 
 # Env & secrets — never commit
 .env

@@ -10,12 +10,18 @@ const read = (path: string) => readFileSync(new URL(path, repository), "utf8");
 
 describe("optional Bridge monorepo boundary", () => {
   it("includes the whole application without making it a core Cargo member", () => {
+    const tracked = execFileSync("git", ["ls-files", "bridge/"], {
+      cwd: repository, encoding: "utf8",
+    }).split("\n");
     for (const path of [
       "bridge/bff/Cargo.toml", "bridge/bff/Cargo.lock", "bridge/web/package.json",
       "bridge/teams-gateway/package.json", "bridge/deploy/helm/kars-bridge/Chart.yaml",
       "bridge/docs/README.md",
+      "bridge/web/src/app/workspace/artifacts/page.tsx",
+      "bridge/web/src/app/workspace/artifacts/loading.tsx",
     ]) {
       expect(existsSync(new URL(path, repository)), path).toBe(true);
+      expect(tracked, `${path} must be in the checkout, not only the working tree`).toContain(path);
     }
     const cargo = read("Cargo.toml");
     expect(cargo.match(/members\s*=\s*\[([\s\S]*?)\]/)?.[1]).not.toContain("bridge/");
