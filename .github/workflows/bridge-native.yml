@@ -131,6 +131,14 @@ jobs:
           install .native/core/target/debug/kars-controller .native/core/bin/amd64/
           install .native/core/target/debug/kars-inference-router .native/core/bin/amd64/
           install bff/target/debug/kars-bridge-bff .native/bin/
+      - name: Set up the exact operator CLI toolchain
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: bridge/.native/core/cli/package-lock.json
+      - name: Build the locked public operator CLI
+        run: npm ci --prefix .native/core/cli && npm run build --prefix .native/core/cli
       - name: Package only local qualification images, never publish
         run: |
           docker build --build-arg TARGETARCH=amd64 \

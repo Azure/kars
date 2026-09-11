@@ -74,6 +74,19 @@ describe("Monorepo native prerequisite", () => {
     expect(credentials).not.toContain("get_metadata");
   });
 
+  it("enrolls writers through the same-source public operator review workflow", () => {
+    expect(workflow).toContain("npm ci --prefix .native/core/cli");
+    expect(workflow).toContain("npm run build --prefix .native/core/cli");
+    const enrollment = read("tests/native-credentials/enrollment.py");
+    expect(enrollment).toContain('".native/core/cli/dist/index.js"');
+    expect(enrollment).toContain('"credentials", "grant", "preview"');
+    expect(enrollment).toContain('"credentials", "grant", "apply"');
+    expect(enrollment).toContain('"--private-controller-profile", "service-accounts"');
+    expect(enrollment).toContain('setup.ready_grant(namespace)');
+    expect(enrollment).not.toContain("admin.create(");
+    expect(enrollment).not.toMatch(/failurePolicy|patch.*conditions|break-glass/);
+  });
+
   it("qualifies actual CNI traffic and never treats API existence as enforcement", () => {
     expect(workflow).toContain("--version 1.18.5");
     expect(workflow).toContain("needs: [contract-scope, api-admission, native-runtime]");
