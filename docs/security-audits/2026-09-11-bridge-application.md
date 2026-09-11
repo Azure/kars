@@ -89,6 +89,35 @@ unused task-module import and incorrectly nested anchor tests were rejected.
 The correction removes the import, places the tests at module scope and
 requires their exact registration in the hosted test inventory before running
 the complete suite. No lint suppression or assertion removal is used.
+The corrected `09954106` passed actual BFF Clippy, required regression
+registration and the complete Cargo suite in Azure run 34614267072.
+
+## Permanent integration CI
+
+Core Rust, CLI and Kind checkout configurations now omit `bridge/` and assert
+its absence. CLI validation uses its committed lockfile. A disposable sparse
+checkout of public `09954106` also resolved all eight core workspace packages
+with locked offline metadata and no Bridge directory; this is not local
+compilation evidence.
+
+Shared change classification is fail-closed, includes both sides of renames,
+and covers CLI/runtime/mesh/shipped-skill and unknown source paths. Only root
+documentation can bypass native execution. Reusable CI retains full non-PR
+qualification, including release caller events. Core-only Kind can omit
+Bridge-only changes while paired native qualification still requires them.
+
+Both component and native workflows now report stable aggregates. Component
+acceptance includes every build, dependency/lock audit, secret/configuration
+scan and real add-on job. Native acceptance rejects failed scope selection,
+missing outputs and failed/cancelled/unexpectedly skipped required lanes;
+documentation-only skips explicitly do not claim runtime execution.
+
+Local Git/scope/aggregate regressions and the core Python harness passed.
+Structural CLI checks are provisional because the shared local Vitest/YAML
+cache differs from the committed lock; the new hosted locked CLI job must
+qualify them. Required branch-check policy integration, complete supported-pair
+contracts and standing-Team acceptance remain open. No protection was weakened
+or changed to accept these unqualified workflows.
 
 Other findings remain open: credential-review V1 derives a secret key with a
 custom versioned SHA-256 construction and cannot inherit a plain content-digest

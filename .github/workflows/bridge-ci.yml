@@ -3,10 +3,8 @@ name: Bridge CI
 on:
   pull_request:
     branches: [main, dev, kars-bridge]
-    paths: ['bridge/**', '.github/workflows/bridge-ci.yml', '.github/workflows/bridge-native.yml', 'Cargo.toml', 'ci/npm-audit-bulk.mjs']
   push:
     branches: [main, kars-bridge]
-    paths: ['bridge/**', '.github/workflows/bridge-ci.yml', '.github/workflows/bridge-native.yml', 'Cargo.toml', 'ci/npm-audit-bulk.mjs']
   workflow_dispatch:
 
 permissions:
@@ -17,6 +15,19 @@ concurrency:
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
+  bridge-required-gates:
+    name: Bridge component acceptance
+    needs: [addon, bff, dependencies, lockfiles, rust-dependencies, secrets, security, web]
+    if: always()
+    runs-on: ubuntu-22.04
+    env:
+      COMPONENT_RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 ci/bridge_component_results.py
+
   bff:
     name: BFF build and test
     runs-on: ubuntu-latest

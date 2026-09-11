@@ -3,15 +3,8 @@ name: Bridge native qualification
 on:
   pull_request:
     branches: [main, dev, kars-bridge]
-    paths:
-      - '.github/workflows/bridge-native.yml'
-      - 'bridge/**'
-      - 'controller/**'
-      - 'inference-router/**'
-      - 'shared/**'
-      - 'deploy/helm/kars/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
+  push:
+    branches: [main, kars-bridge]
   workflow_dispatch:
 
 permissions:
@@ -31,8 +24,33 @@ defaults:
     working-directory: bridge
 
 jobs:
+  contract-scope:
+    name: Core and Bridge contract scope
+    runs-on: ubuntu-22.04
+    defaults:
+      run:
+        working-directory: .
+    outputs:
+      required: ${{ steps.scope.outputs.required }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify contract scope and aggregate behavior
+        run: python3 -m unittest discover -s ci/tests -p bridge_contracts_test.py
+      - id: scope
+        run: |
+          python3 ci/bridge_contracts.py \
+            --event "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_OUTPUT"
+
   api-admission:
     name: Native API and admission (no active SRE)
+    needs: contract-scope
+    if: needs.contract-scope.outputs.required == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 15
     steps:
@@ -74,6 +92,8 @@ jobs:
 
   native-runtime:
     name: Native BFF grants, lifecycle, TLS and CNI (no active SRE)
+    needs: contract-scope
+    if: needs.contract-scope.outputs.required == 'true'
     # Collect actual controller/BFF evidence independently of schema diagnostics.
     # Both jobs remain mandatory in the final gate; core readiness is unchanged.
     runs-on: ubuntu-22.04
@@ -165,16 +185,20 @@ jobs:
 
   native-required-gates:
     name: Require both native API and runtime acceptance
-    needs: [api-admission, native-runtime]
+    needs: [contract-scope, api-admission, native-runtime]
     if: always()
     runs-on: ubuntu-22.04
     timeout-minutes: 2
     env:
+      SCOPE_RESULT: ${{ needs.contract-scope.result }}
+      NATIVE_REQUIRED: ${{ needs.contract-scope.outputs.required }}
       API_RESULT: ${{ needs.api-admission.result }}
       RUNTIME_RESULT: ${{ needs.native-runtime.result }}
     steps:
-      - name: Fail if either independent prerequisite failed or was skipped
-        working-directory: ${{ github.workspace }}
-        run: |
-          test "$API_RESULT" = success
-          test "$RUNTIME_RESULT" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Require scoped native contract outcomes
+        working-directory: .
+        run: bash ci/bridge-contract-result.sh

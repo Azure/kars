@@ -24,10 +24,11 @@ concurrency:
 jobs:
   # ── Change classifier ─────────────────────────────────────────────
   # Emits `code=true` when anything other than docs/assets is touched.
-  # Docs-only PRs (markdown, docs/, screencast .cast/.gif) skip the
+  # Root documentation-only PRs skip the
   # ~19min Rust build, E2E, chaos and bench rows. Required jobs still
   # RUN (so their status reports) but short-circuit their expensive
-  # steps. Non-PR events (push/dispatch/call) always run the full set.
+  # steps. Shipped skills and unknown source paths remain in scope.
+  # Non-PR events (push/dispatch/call) always run the full set.
   changes:
     name: Detect change scope
     runs-on: ubuntu-latest
@@ -35,23 +36,14 @@ jobs:
       code: ${{ steps.scope.outputs.code }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
       - id: scope
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"; exit 0
-          fi
-          base="${{ github.event.pull_request.base.sha }}"
-          head="${{ github.event.pull_request.head.sha }}"
-          git fetch --no-tags --depth=50 origin "$base" "$head" 2>/dev/null || true
-          changed="$(git diff --name-only "$base" "$head" 2>/dev/null)"
-          # Strip docs/asset-only paths; anything left means code changed.
-          code="$(echo "$changed" | grep -vE '^(docs/|.*\.md$|README\.md|mkdocs\.ya?ml|book\.toml)' || true)"
-          if [ -n "$code" ]; then
-            echo "code=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "code=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::Docs/asset-only change — skipping Rust build, E2E, chaos, bench"
-          fi
+          python3 ci/bridge_contracts.py --output code \
+            --event "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_OUTPUT"
 
   # ── ONE Rust compile per CI run ───────────────────────────────────
   # This job is the SINGLE source of compiled Rust artefacts for the
@@ -72,6 +64,14 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/bridge/
+          sparse-checkout-cone-mode: false
+      - name: Require standalone core checkout
+        working-directory: .
+        run: test ! -e bridge
       - if: needs.changes.outputs.code == 'true'
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
@@ -254,10 +254,18 @@ jobs:
         working-directory: cli
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          sparse-checkout: |
+            /*
+            !/bridge/
+          sparse-checkout-cone-mode: false
+      - name: Require standalone core checkout
+        working-directory: .
+        run: test ! -e bridge
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-      - run: npm install
+      - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
@@ -656,33 +664,26 @@ jobs:
       # Required by docker/build-push-action GHA cache backend
       # (cache-to: type=gha) used by the image pre-build steps below.
       actions: write
-    if: |
-      needs.changes.outputs.code == 'true' && (
-      github.event_name == 'push' ||
-      github.event_name == 'workflow_dispatch' ||
-      github.event_name == 'workflow_call' ||
-      github.event_name == 'pull_request' )
+    if: needs.changes.outputs.code == 'true'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          sparse-checkout: |
+            /*
+            !/bridge/
+          sparse-checkout-cone-mode: false
+      - name: Require standalone core checkout
+        working-directory: .
+        run: test ! -e bridge
 
       - name: Detect runtime-affecting changes
         id: paths
         run: |
-          if [ "${{ github.event_name }}" != "pull_request" ]; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          base="${{ github.event.pull_request.base.sha }}"
-          head="${{ github.event.pull_request.head.sha }}"
-          # Fetch enough history to diff.
-          git fetch --no-tags --depth=50 origin "$base" "$head" 2>/dev/null || true
-          if git diff --name-only "$base" "$head" 2>/dev/null \
-             | grep -E '^(controller/|inference-router/|a2a-gateway/|kars-a2a-core/|deploy/helm/|sandbox-images/|tests/e2e/|shared/|runtimes/hermes/src/kars_runtime_hermes/plugin/sre|cli/src/(commands/(sre|budget)|lib/sre|lib/namespace-ownership)|Cargo\.toml|Cargo\.lock|Makefile)' >/dev/null; then
-            echo "run=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "run=false" >> "$GITHUB_OUTPUT"
-            echo "::notice::No runtime-affecting paths changed — skipping e2e"
-          fi
+          python3 ci/bridge_contracts.py --output run --core-only \
+            --event "${{ github.event_name }}" \
+            --base "${{ github.event.pull_request.base.sha }}" \
+            --head "${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_OUTPUT"
 
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         if: steps.paths.outputs.run == 'true'

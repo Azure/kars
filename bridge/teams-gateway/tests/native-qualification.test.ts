@@ -76,9 +76,12 @@ describe("Monorepo native prerequisite", () => {
 
   it("qualifies actual CNI traffic and never treats API existence as enforcement", () => {
     expect(workflow).toContain("--version 1.18.5");
-    expect(workflow).toContain("needs: [api-admission, native-runtime]");
-    expect(workflow).toContain('test "$API_RESULT" = success');
-    expect(workflow).toContain('test "$RUNTIME_RESULT" = success');
+    expect(workflow).toContain("needs: [contract-scope, api-admission, native-runtime]");
+    expect(workflow).toContain("bash ci/bridge-contract-result.sh");
+    const aggregate = readFileSync(new URL("../../../ci/bridge-contract-result.sh", import.meta.url), "utf8");
+    expect(aggregate).toContain('${API_RESULT:?Missing API result}');
+    expect(aggregate).toContain('${RUNTIME_RESULT:?Missing runtime result}');
+    expect(aggregate).toContain("Both native API and runtime acceptance must succeed");
     expect(workflow).not.toContain("continue-on-error:");
     expect(read("tests/native-credentials/kind_config.py")).toContain('"disableDefaultCNI": True');
     const observations = read("tests/native-credentials/observation_cases.py");
