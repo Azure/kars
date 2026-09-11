@@ -25,6 +25,7 @@ pub struct Store {
     pub eval_status_writes: usize,
     pub target_status_writes: usize,
     pub job_serial: usize,
+    pub cron_serial: usize,
     pub lose_ack: bool,
     pub log_error: bool,
     pub mutate_on_log: Option<&'static str>,
@@ -153,6 +154,18 @@ impl Respond for Server {
                     store.jobs.values_mut().next().unwrap()["metadata"]["annotations"]
                         [workloads::RUN_TOKEN] = json!("wrong-token")
                 }
+                Some("historical-job-token" | "historical-job-uid") => {
+                    let name = store.eval["metadata"]["annotations"][workloads::LAST_RUN]
+                        .as_str()
+                        .unwrap()
+                        .to_owned();
+                    let job = store.jobs.get_mut(&name).unwrap();
+                    if mutation == Some("historical-job-token") {
+                        job["metadata"]["annotations"][workloads::RUN_TOKEN] = json!("changed");
+                    } else {
+                        job["metadata"]["uid"] = json!("changed");
+                    }
+                }
                 Some("pod-uid") => {
                     store.pods.values_mut().next().unwrap()["metadata"]["uid"] =
                         json!("replacement")
@@ -207,6 +220,19 @@ impl Respond for Server {
                 |value| ResponseTemplate::new(200).set_body_json(value),
             );
         }
+        if method == "DELETE" && base == CRONS {
+            let Some(old) = store.crons.get(name) else {
+                return failure(404);
+            };
+            let options: Value = serde_json::from_slice(&request.body).unwrap();
+            if options["preconditions"]["uid"] != old["metadata"]["uid"]
+                || options["preconditions"]["resourceVersion"] != old["metadata"]["resourceVersion"]
+            {
+                return failure(409);
+            }
+            let removed = store.crons.remove(name).unwrap();
+            return ResponseTemplate::new(200).set_body_json(removed);
+        }
         let mut value: Value = serde_json::from_slice(&request.body).unwrap();
         let name = value["metadata"]["name"].as_str().unwrap().to_owned();
         if method == "POST" {
@@ -222,7 +248,8 @@ impl Respond for Server {
             value["metadata"]["uid"] = json!(if is_report {
                 format!("cm-uid-{name}")
             } else if base == CRONS {
-                "cron-uid".into()
+                store.cron_serial += 1;
+                format!("cron-uid-{}", store.cron_serial)
             } else {
                 store.job_serial += 1;
                 format!("job-uid-{}", store.job_serial)
@@ -284,7 +311,11 @@ impl Fixture {
             &self.client,
             &self.eval,
             &self.corpus.digest,
-            "custom-numeric-user:latest",
+            self.eval
+                .spec
+                .runner_image
+                .as_deref()
+                .unwrap_or("custom-numeric-user:latest"),
             &sandbox_router_url("demo"),
         )
         .await
@@ -307,7 +338,11 @@ impl Fixture {
             &self.eval,
             &self.intent,
             "karseval-eval-corpus",
-            "custom-numeric-user:latest",
+            self.eval
+                .spec
+                .runner_image
+                .as_deref()
+                .unwrap_or("custom-numeric-user:latest"),
             &self.intent.router,
             &self.corpus.label,
         )
@@ -337,8 +372,9 @@ impl Fixture {
         pod["metadata"]["resourceVersion"] = json!("30");
         pod["metadata"]["ownerReferences"] = json!([{"apiVersion":"batch/v1","kind":"Job",
             "name":name,"uid":job["metadata"]["uid"],"controller":true}]);
+        let image = pod["spec"]["containers"][0]["image"].clone();
         pod["status"] = json!({"phase":"Succeeded","containerStatuses":[{"name":"runner",
-            "image":"custom-numeric-user:latest","imageID":"image-id","ready":false,
+            "image":image,"imageID":"image-id","ready":false,
             "restartCount":0,"state":{"terminated":{"exitCode":0,
                 "startedAt":"2026-09-10T20:00:00Z","finishedAt":"2026-09-10T20:00:04Z"}}}]});
         store.pods.insert(format!("{name}-pod"), pod);
@@ -392,6 +428,7 @@ pub async fn setup() -> Fixture {
         eval_status_writes: 0,
         target_status_writes: 0,
         job_serial: 0,
+        cron_serial: 0,
         lose_ack: false,
         log_error: false,
         mutate_on_log: None,

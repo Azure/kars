@@ -5,6 +5,7 @@ use super::*;
 mod drift_tests;
 mod fixture;
 mod request_tests;
+mod transition_tests;
 
 #[tokio::test]
 async fn current_owned_producer_report_is_persisted_before_readiness_and_retries_are_idempotent() {

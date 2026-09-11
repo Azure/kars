@@ -58,6 +58,15 @@ pub(super) async fn observe(
     let jobs = Api::<Job>::namespaced(client.clone(), ns);
     let cronjobs = Api::<CronJob>::namespaced(client.clone(), ns);
     let pods = Api::<Pod>::namespaced(client.clone(), ns);
+    let fulfilled = retained
+        .as_ref()
+        .filter(|record| {
+            cache_authorized && record.fulfills_request(intent) && !record.current(intent)
+        })
+        .cloned();
+    if let Some(record) = &fulfilled {
+        verify_fulfillment_source(&jobs, eval, record).await?;
+    }
     let list = jobs
         .list(&ListParams::default().labels(&format!(
             "{}={}",
@@ -131,13 +140,14 @@ pub(super) async fn observe(
         .map(String::as_str)
         == Some("true");
     let retained = retained.filter(|evidence| cache_authorized && evidence.current(intent));
-    // A missing request is not permission to fall back to an older success. A protected
-    // receipt is the only evidence that may outlive the requested Job's TTL.
+    // Historical fulfillment releases only the request gate. The old report remains
+    // excluded by current(intent), even when a new scheduled run can now be observed.
     let missing_request = intent.request_job.as_ref().is_some_and(|requested| {
         !candidates
             .iter()
             .any(|(_, job)| job.name_any() == *requested)
-    }) && retained.is_none();
+    }) && retained.is_none()
+        && fulfilled.is_none();
     let requested_running = if let Some((_, job)) = candidates
         .iter()
         .find(|(_, job)| intent.request_job.as_deref() == Some(job.name_any().as_str()))
@@ -216,6 +226,9 @@ pub(super) async fn observe(
     let has_report = legacy_store || cache_authorized || selected.is_some();
     if let Some(selected) = selected {
         ensure!(selected.current(intent), "selected evidence is not current");
+        if let Some(record) = &fulfilled {
+            verify_fulfillment_source(&jobs, eval, record).await?;
+        }
         receipt = Some(evidence::publish(client, eval, intent, &selected).await?);
         // Durable evidence is the retry key. Status may have lost its previous acknowledgement.
         history.retain(|item| item.job_name != selected.job_name);
@@ -243,6 +256,83 @@ pub(super) async fn observe(
         has_report,
         receipt,
     })
+}
+
+async fn verify_fulfillment_source(
+    jobs: &Api<Job>,
+    eval: &KarsEval,
+    record: &Evidence,
+) -> anyhow::Result<()> {
+    let Some(job) = jobs
+        .get_opt(&record.job_name)
+        .await
+        .context("recheck historical request fulfillment")?
+    else {
+        // Only a receipt authenticated by protected status reaches this path.
+        return Ok(());
+    };
+    let (uid, _) = workloads::identity(&job.metadata)?;
+    ensure!(
+        uid == record.job_uid
+            && job.metadata.generation == Some(record.job_generation)
+            && job
+                .metadata
+                .creation_timestamp
+                .as_ref()
+                .map(|at| at.0.to_string())
+                == Some(record.created_at.clone())
+            && workloads::terminal(&job)?.is_some_and(|(_, at)| at == record.at),
+        "historical fulfillment Job identity/terminal state changed"
+    );
+    let stamps = job
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.template.metadata.as_ref())
+        .and_then(|meta| meta.annotations.as_ref())
+        .context("historical fulfillment producer stamps missing")?;
+    ensure!(
+        stamps.get(workloads::INTENT) == Some(&record.intent)
+            && (record.request_job.is_none()
+                || (stamps.get(workloads::LAST_TOKEN) == record.request_marker.as_ref()
+                    && stamps.get(workloads::LAST_RUN) == record.request_job.as_ref())),
+        "historical fulfillment producer/request changed"
+    );
+    if eval.annotations().get(workloads::LAST_RUN) == Some(&record.job_name) {
+        ensure!(
+            workloads::owned_by(
+                &job.metadata,
+                workloads::namespace(eval)?,
+                &record.eval_uid,
+                &eval.name_any(),
+                "KarsEval",
+                "kars.azure.com/v1alpha1",
+            ) && job.annotations().get(workloads::RUN_TOKEN) == record.request_marker.as_ref(),
+            "historical explicit request token/source changed"
+        );
+    } else {
+        // The protected receipt authenticated this native Job UID and its original
+        // owner chain. That historical CronJob may since have been deleted/recreated.
+        // Fresh scheduled reports still require the live CronJob UID in verify_job.
+        ensure!(
+            job.namespace() == eval.namespace()
+                && job
+                    .metadata
+                    .owner_references
+                    .as_ref()
+                    .is_some_and(|owners| {
+                        owners.len() == 1
+                            && owners[0].kind == "CronJob"
+                            && owners[0].api_version == "batch/v1"
+                            && owners[0].name == super::cron_job_name(&eval.name_any())
+                            && owners[0].controller == Some(true)
+                            && !owners[0].uid.is_empty()
+                    })
+                && job.annotations().get(workloads::LAST_TOKEN) == record.request_marker.as_ref()
+                && job.annotations().get(workloads::LAST_RUN) == record.request_job.as_ref(),
+            "historical scheduled request source changed"
+        );
+    }
+    Ok(())
 }
 
 fn verify_retained_source(

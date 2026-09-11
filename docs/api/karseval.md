@@ -99,10 +99,22 @@ consumer checks those producer stamps together with native UID ownership and
 the actual spec; names and labels alone are not attribution. A missing or
 still-running explicitly requested Job keeps the eval Pending, rather than
 falling back to an older success (including an older scheduled success).
-When the requested Job is absent, only an already protected, current receipt
-can authorize continued evaluation; the controller does not guess whether a
-missing Job completed or merely disappeared. New runs from the current
-scheduled producer can subsequently become the latest result.
+When the requested Job is absent, a protected terminal receipt must prove
+fulfillment of that exact Eval UID, request token and requested Job. The
+controller does not guess whether a missing Job completed or merely disappeared.
+That fulfillment can survive a corpus, runner, schedule or target intent change:
+it releases the outstanding-request gate, but never makes the historical report
+current. Only a newly attributed run of the current producer can restore Ready.
+If the historical source Job still exists, its UID, generation, terminal time,
+producer/request stamps and ownership are checked before observation and
+again before publishing the new report. The protected receipt authenticates
+the historical owner chain even if that CronJob was subsequently collected or
+recreated; fresh scheduled reports must match the live CronJob UID.
+Later scheduled receipts preserve the
+verified request context, allowing repeated intent changes and Job/Pod GC
+(including a historical Job already terminating)
+without another manual trigger. An unauthenticated receipt or receipt from
+another request cannot release the gate.
 
 ---
 
