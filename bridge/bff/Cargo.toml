@@ -32,6 +32,7 @@ schemars = "0.8"
 rustls = { version = "0.23", features = ["aws-lc-rs"] }
 base64 = "0.22"
 sha2 = "0.10"
+subtle = "2.6"
 ed25519-dalek = "2"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }

@@ -10,7 +10,7 @@ use crate::{
     auth::Principal,
     error::{AppError, AppResult},
     kars::credential_review::{CredentialReview, ReviewedWrite, StoredSource},
-    providers::credential_review::derive_v1_key,
+    providers::credential_review::{derive_v1_key, equal_tag},
     state::AppState,
 };
 
@@ -158,16 +158,6 @@ fn value_tag(
         .rsplit_once('.')
         .map(|(_, signature)| signature.to_string())
         .ok_or_else(conflict)
-}
-
-fn equal_tag(first: &str, second: &str) -> bool {
-    first.len() == second.len()
-        && first
-            .as_bytes()
-            .iter()
-            .zip(second.as_bytes())
-            .fold(0u8, |diff, (a, b)| diff | (a ^ b))
-            == 0
 }
 
 fn validate_input(input: &ReviewRequest) -> AppResult<()> {

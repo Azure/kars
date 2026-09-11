@@ -187,8 +187,23 @@ HS256 algorithms, audiences, five-minute expiry, three-submission bounds,
 operator identity and existing review/continuation/value-tag formats are
 unchanged. An algorithm change would require a separately versioned migration
 covering active continuation receipts and rolling upgrades, not silently
-invalidating their tags. The new key adapter is not allowlisted or approved by
-this record; explicit review and hosted compatibility proof remain required.
+invalidating their tags.
+
+Exact `1289a681` through `a9a2d0da` source review found no new cryptographic or
+v1 wire-compatibility defect in these extractions. Public run 34649106554 passed
+Clippy, the required independent known-answer inventory and the complete Rust
+suite. Only the two exact wrapper files are now registered: a standard Ed25519
+adapter and an **explicit legacy v1 secret-derivation compatibility exception**.
+This does not relabel the legacy recipe as HKDF, extend its scope to directories,
+or imply whole-application approval.
+
+The review also noted that the unchanged hand-written tag comparison lacked
+a vetted constant-time implementation contract. It now uses `subtle::ConstantTimeEq`
+through the key adapter, preserving exact byte/length equality and all tag wire
+formats. `subtle` was already locked transitively at 2.6.1; only its direct
+dependency edge was added, without version changes or network installation.
+Every-byte, prefix and length regressions are required in hosted inventory.
+That small follow-up still requires fresh Clippy and full-suite execution.
 
 The imported application predates the core repository's file-size and copyright
 header conventions. Several files exceed the unchanged 800-line new-file cap,

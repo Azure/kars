@@ -6,6 +6,7 @@
 //! Changing it requires a versioned review/continuation/value-tag migration.
 
 use sha2::{Digest, Sha256};
+use subtle::ConstantTimeEq;
 
 pub(crate) fn derive_v1_key(principal_secret: &str) -> [u8; 32] {
     let mut hash = Sha256::new();
@@ -14,9 +15,28 @@ pub(crate) fn derive_v1_key(principal_secret: &str) -> [u8; 32] {
     hash.finalize().into()
 }
 
+pub(crate) fn equal_tag(first: &str, second: &str) -> bool {
+    bool::from(first.as_bytes().ct_eq(second.as_bytes()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn tag_comparison_requires_equal_length_and_every_byte_without_normalization() {
+        let tag = "A".repeat(43);
+        assert!(equal_tag(&tag, &tag));
+        assert!(equal_tag("", ""));
+        assert!(!equal_tag(&tag, ""));
+        assert!(!equal_tag(&tag, &tag[..42]));
+        assert!(!equal_tag(&tag, &format!("{tag}A")));
+        for index in 0..tag.len() {
+            let mut changed = tag.as_bytes().to_vec();
+            changed[index] = b'B';
+            assert!(!equal_tag(&tag, &String::from_utf8(changed).unwrap()));
+        }
+    }
 
     #[test]
     fn legacy_v1_key_preserves_domain_null_byte_and_raw_secret_encoding() {
