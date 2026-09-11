@@ -25,6 +25,12 @@ use crate::routes::tasks::require_cluster;
 use crate::routes::teams::{TeamTaskDto, read_task_list, require_owned_team};
 use crate::state::AppState;
 
+mod remediation;
+use remediation::{
+    description_matches_remediation, match_remediation_task, note_candidate_pulls,
+    remediation_work_id,
+};
+
 const CONFIG_KEY: &str = "config.json";
 const CURSOR_KEY: &str = "cursor.json";
 const STATUS_KEY: &str = "status.json";
@@ -658,7 +664,7 @@ fn is_dependabot_pr(pr: &GithubPull) -> bool {
     }) || pr.head.name.to_ascii_lowercase().starts_with("dependabot/")
 }
 
-fn open_pull_covers_dependabot_alert(pr: &GithubPull, alert: &GithubDependabotAlert) -> bool {
+fn open_pull_may_address_dependabot_alert(pr: &GithubPull, alert: &GithubDependabotAlert) -> bool {
     let haystack = format!("{} {}", pr.title, pr.head.name).to_ascii_lowercase();
     if alert
         .security_advisory
@@ -751,47 +757,6 @@ fn alert_source_id(signal: EngineeringSignal, repo: &str, number: u64) -> String
 fn alert_work_id(signal: EngineeringSignal, repo: &str, number: u64) -> String {
     let digest = Sha256::digest(alert_source_id(signal, repo, number).as_bytes());
     format!("{}-{}", signal_slug(signal), hex::encode(&digest[..10]))
-}
-
-fn remediation_work_id(repo: &str, manifest_path: Option<&str>, package: &str) -> String {
-    let identity = format!(
-        "{}:{}:{}",
-        repo.to_ascii_lowercase(),
-        manifest_path.unwrap_or("unknown").to_ascii_lowercase(),
-        package.to_ascii_lowercase()
-    );
-    let digest = Sha256::digest(identity.as_bytes());
-    format!("dependency-remediation-{}", hex::encode(&digest[..10]))
-}
-
-fn description_matches_remediation(
-    description: &str,
-    repo: &str,
-    manifest_path: Option<&str>,
-    package: &str,
-) -> bool {
-    let lower = description.to_ascii_lowercase();
-    let repo = repo.to_ascii_lowercase();
-    let package = package.to_ascii_lowercase();
-    let repo_match =
-        lower.contains(&format!("repo={repo};")) || lower.contains(&format!("\"repo\":\"{repo}\""));
-    let package_match = lower.contains(&format!("pkg={package};"))
-        || lower.contains(&format!("package={package};"))
-        || lower.contains(&format!("\"package\":\"{package}\""));
-    let manifest_match = match manifest_path {
-        Some(manifest) => {
-            let manifest = manifest.to_ascii_lowercase();
-            lower.contains(&format!("manifest={manifest};"))
-                || lower.contains(&format!("manifest_path={manifest};"))
-                || lower.contains(&format!("\"manifest_path\":\"{manifest}\""))
-        }
-        None => {
-            lower.contains("manifest=unknown;")
-                || lower.contains("manifest_path=unknown;")
-                || lower.contains("\"manifest_path\":null")
-        }
-    };
-    repo_match && package_match && manifest_match
 }
 
 fn legacy_alert_retirement(id: &str, remediation_id: &str, created_at: &str) -> TeamTaskDto {
@@ -1021,8 +986,13 @@ fn merge_discovered_tasks(
         .map(|(index, task)| (task.id.clone(), index))
         .collect::<BTreeMap<_, _>>();
     let mut added = 0;
-    for task in discovered {
-        if let Some(index) = positions.get(&task.id).copied() {
+    for mut task in discovered {
+        let (matching_id, _) = match_remediation_task(&mut task, |id| {
+            positions
+                .get(id)
+                .map(|index| existing[*index].description.as_str())
+        });
+        if let Some(index) = positions.get(&matching_id).copied() {
             let current = &mut existing[index];
             let renewable_alert = task.id.starts_with("dependabot-alert-")
                 || task.id.starts_with("code-scanning-alert-")
@@ -1085,11 +1055,16 @@ fn append_bounded_tasks(
     attempt_cap: usize,
 ) -> bool {
     let mut queue_candidates = Vec::new();
-    for task in incoming {
+    for mut task in incoming {
+        let (matching_id, _) = match_remediation_task(&mut task, |id| {
+            known_tasks
+                .get(id)
+                .map(|(_, description)| description.as_str())
+        });
         let renewable_alert = task.id.starts_with("dependabot-alert-")
             || task.id.starts_with("code-scanning-alert-")
             || task.id.starts_with("secret-scanning-alert-");
-        match known_tasks.get(&task.id) {
+        match known_tasks.get(&matching_id) {
             None => {
                 known_tasks.insert(
                     task.id.clone(),
@@ -1667,12 +1642,12 @@ fn dedupe_followup_task(
     Some(TeamTaskDto {
         id: format!("github-pr-dedupe-{}", hex::encode(&digest[..10])),
         title: format!(
-            "[PR dedupe] Keep {repo} PR #{} and retire {} duplicate(s)",
+            "[PR dedupe] Review {repo} PR #{} and {} possible duplicate(s)",
             canonical.number,
             ordered.len() - 1
         ),
         description: format!(
-            "Multiple open pull requests cover the same canonical remediation. Verify equivalent scope and preserve the oldest canonical PR unless a newer PR has strictly better, already-green evidence. Close superseded duplicates, never merge, and report exact URLs/head SHAs/check states.\n\nCanonical candidate: #{} {}\nDuplicate candidates: {}",
+            "Multiple open pull requests mention this remediation's package or advisory. Their titles are not coverage evidence. Compare actual changed files with the exact case-sensitive manifest, package, advisory and head-SHA checks before treating any work as equivalent. Preserve distinct manifest fixes. Only after equivalence is verified, preserve the oldest canonical PR unless a newer PR has strictly better, already-green evidence and close superseded duplicates. Never merge; report exact URLs/head SHAs/check states.\n\nCanonical candidate: #{} {}\nDuplicate candidates: {}",
             canonical.number, canonical.html_url, duplicates
         ),
         depends_on: Vec::new(),
@@ -1955,6 +1930,15 @@ async fn perform_sync(
                             let mut signal_tasks = Vec::new();
                             for alert in &alerts.items {
                                 let mut task = dependabot_alert_task(repo, alert, &now);
+                                let (matching_id, identity_warning) =
+                                    match_remediation_task(&mut task, |id| {
+                                        known_tasks
+                                            .get(id)
+                                            .map(|(_, description)| description.as_str())
+                                    });
+                                if let Some(warning) = identity_warning {
+                                    errors.push(warning);
+                                }
                                 let legacy_ids = known_tasks
                                     .iter()
                                     .filter(|(id, (status, description))| {
@@ -1971,7 +1955,7 @@ async fn perform_sync(
                                     .collect::<Vec<_>>();
                                 for legacy_id in legacy_ids {
                                     let retirement =
-                                        legacy_alert_retirement(&legacy_id, &task.id, &now);
+                                        legacy_alert_retirement(&legacy_id, &matching_id, &now);
                                     known_tasks.insert(
                                         legacy_id,
                                         ("done".into(), retirement.description.clone()),
@@ -1980,38 +1964,22 @@ async fn perform_sync(
                                 }
                                 let covering_pulls = open_pull_coverage
                                     .iter()
-                                    .filter(|pull| open_pull_covers_dependabot_alert(pull, alert))
+                                    .filter(|pull| {
+                                        open_pull_may_address_dependabot_alert(pull, alert)
+                                    })
                                     .collect::<Vec<_>>();
-                                if dedupe_seen.insert(task.id.clone())
-                                    && let Some(dedupe) =
-                                        dedupe_followup_task(repo, &task.id, &covering_pulls, &now)
+                                if dedupe_seen.insert(matching_id.clone())
+                                    && let Some(dedupe) = dedupe_followup_task(
+                                        repo,
+                                        &matching_id,
+                                        &covering_pulls,
+                                        &now,
+                                    )
                                 {
                                     tasks.push(dedupe);
                                 }
-                                if let Some(pull) = covering_pulls
-                                    .iter()
-                                    .min_by_key(|pull| pull.number)
-                                    .copied()
-                                {
-                                    if known_tasks
-                                        .get(&task.id)
-                                        .is_some_and(|(status, _)| status == "pending")
-                                    {
-                                        task.status = "done".into();
-                                        task.done_at = Some(now.clone());
-                                        task.description.push_str(&format!(
-                                            "\n\nCovered by existing open PR #{}: {}",
-                                            pull.number, pull.html_url
-                                        ));
-                                        known_tasks.insert(
-                                            task.id.clone(),
-                                            ("done".into(), task.description.clone()),
-                                        );
-                                        tasks.push(task);
-                                    }
-                                } else {
-                                    signal_tasks.push(task);
-                                }
+                                note_candidate_pulls(&mut task, &covering_pulls);
+                                signal_tasks.push(task);
                             }
                             let bounded = append_bounded_tasks(
                                 &mut tasks,
@@ -2766,7 +2734,7 @@ pub fn spawn_poller(state: AppState, sweep_interval: Duration) {
 mod tests {
     use super::*;
 
-    fn pull(login: &str, head: &str, number: u64) -> GithubPull {
+    pub(super) fn pull(login: &str, head: &str, number: u64) -> GithubPull {
         GithubPull {
             number,
             html_url: format!("https://github.com/acme/api/pull/{number}"),
@@ -2863,7 +2831,9 @@ mod tests {
     fn legacy_remediation_matching_is_exact_and_repo_scoped() {
         let description = concat!(
             "AUTH SOURCE: manifest=package-lock.json; pkg=react-dom; ghsa=GHSA-a. ",
-            "Structured: {\"repo\":\"acme/web\",\"details\":{\"manifest_path\":\"package-lock.json\",",
+            "\n\nStructured source details (JSON):\n",
+            "{\"signal\":\"dependabot_alert\",\"work_id\":\"dependabot-alert-legacy\",",
+            "\"repo\":\"acme/web\",\"details\":{\"manifest_path\":\"package-lock.json\",",
             "\"package\":\"react-dom\"}}"
         );
         assert!(description_matches_remediation(
@@ -2908,7 +2878,7 @@ mod tests {
     }
 
     #[test]
-    fn open_pull_covers_same_package_or_advisory() {
+    fn open_pull_candidates_mention_the_same_package_or_advisory() {
         let alert = GithubDependabotAlert {
             number: 17,
             html_url: "https://github.com/acme/api/security/dependabot/17".into(),
@@ -2936,12 +2906,12 @@ mod tests {
         };
         let mut package_pr = pull("agent", "fix-babel-core", 42);
         package_pr.title = "chore: bump @babel/core to 8.0.0".into();
-        assert!(open_pull_covers_dependabot_alert(&package_pr, &alert));
+        assert!(open_pull_may_address_dependabot_alert(&package_pr, &alert));
         let mut advisory_pr = pull("agent", "security-fix", 43);
         advisory_pr.title = "fix GHSA-aaaa-bbbb-cccc".into();
-        assert!(open_pull_covers_dependabot_alert(&advisory_pr, &alert));
+        assert!(open_pull_may_address_dependabot_alert(&advisory_pr, &alert));
         let unrelated = pull("agent", "fix-vite", 44);
-        assert!(!open_pull_covers_dependabot_alert(&unrelated, &alert));
+        assert!(!open_pull_may_address_dependabot_alert(&unrelated, &alert));
     }
 
     #[test]

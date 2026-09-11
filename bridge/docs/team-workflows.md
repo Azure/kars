@@ -42,6 +42,26 @@ Intent
 | Memory | Approved retained knowledge injected into later runs. | A replay of every raw conversation. |
 | Engineering intake | Repository signal discovery and backlog creation. | The activity timeline or the agents doing the work. |
 
+### Engineering intake identity and existing PRs
+
+Dependabot remediation work uses a versioned identity containing the repository,
+the exact case-sensitive manifest path, and package name. For example,
+`Services/package-lock.json` and `services/package-lock.json` are different
+targets. Missing manifest metadata is also different from a file named
+`unknown`. Repository casing does not create duplicate work.
+
+Existing work IDs, runs, receipts, dependencies and history are not renamed.
+Intake reuses an older remediation ID only when its retained structured source
+metadata proves the same repository, manifest and package. If that evidence is
+missing or ambiguous, the old history remains intact, the new versioned work is
+tracked separately, and intake reports the ambiguity for review.
+
+A PR title mentioning the package or advisory is only a search hint. It does
+not prove that the PR fixes this manifest, does not mark remediation delivered,
+and does not suppress new work. The assigned agent must inspect the actual diff
+and current head-SHA evidence, reusing a matching PR rather than creating a
+duplicate. Distinct manifest fixes must not be closed as duplicates.
+
 ## 1. Compose a team
 
 From **Workspace -> Teams -> Set up a team**, enter a standing charter. The
