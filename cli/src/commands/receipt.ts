@@ -29,6 +29,14 @@ import { Command } from "commander";
 import chalk from "chalk";
 import { createHash, createPublicKey, verify as cryptoVerify } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import {
+  inclusionEntryHash,
+  readInclusionChain,
+  verifyInclusionChain,
+  type InclusionEntry,
+} from "./receipt-log.js";
+
+export { inclusionEntryHash, verifyInclusionChain } from "./receipt-log.js";
 
 function anchorNamespace(): string {
   return process.env.KARS_NAMESPACE?.trim() || process.env.POD_NAMESPACE?.trim() || "kars-system";
@@ -289,56 +297,8 @@ async function fetchAnchor(): Promise<TrustAnchor | null> {
   };
 }
 
-interface InclusionEntry {
-  seq: number;
-  receipt: string;
-  payloadSha256: string;
-  prevHash: string;
-  entryHash: string;
-}
-
-/** Entry-hash recipe, byte-identical to the controller (kars_receipt_log.rs). */
-export function inclusionEntryHash(
-  seq: number,
-  receipt: string,
-  payloadSha256: string,
-  prevHash: string,
-): string {
-  return createHash("sha256")
-    .update(`${seq}|${receipt}|${payloadSha256}|${prevHash}`)
-    .digest("hex");
-}
-
-/** Verify chain integrity; returns the broken seq, or null if intact. */
-export function verifyInclusionChain(chain: InclusionEntry[]): number | null {
-  let prev = "genesis";
-  for (let i = 0; i < chain.length; i++) {
-    const e = chain[i];
-    if (e.seq !== i) return i;
-    if (e.prevHash !== prev) return e.seq;
-    if (inclusionEntryHash(e.seq, e.receipt, e.payloadSha256, e.prevHash) !== e.entryHash) {
-      return e.seq;
-    }
-    prev = e.entryHash;
-  }
-  return null;
-}
-
 async function fetchInclusionChain(): Promise<InclusionEntry[] | null> {
-  const cm = (await kubectlGetJson([
-    "get",
-    "configmap",
-    LOG_CONFIGMAP,
-    "-n",
-    anchorNamespace(),
-  ])) as { data?: Record<string, string> } | null;
-  const raw = cm?.data?.["chain.json"];
-  if (!raw) return null;
-  try {
-    return JSON.parse(raw) as InclusionEntry[];
-  } catch {
-    return null;
-  }
+  return readInclusionChain(anchorNamespace());
 }
 
 interface CheckpointData {
