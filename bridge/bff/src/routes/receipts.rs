@@ -19,7 +19,10 @@ use crate::kars::receipt_log::{ReceiptLog, chain_entry_hash};
 use crate::routes::ownership::require_task_evidence_access;
 use crate::state::AppState;
 
+mod anchor;
 mod statement;
+
+pub(crate) use anchor::AnchorPins;
 
 /// A DSSE signature line, browser-facing.
 #[derive(Debug, Serialize)]
@@ -364,8 +367,8 @@ pub async fn compliance_pack(
 }
 
 /// The outcome of an in-browser cryptographic verification — performed
-/// server-side by the BFF against the controller's out-of-band public-key
-/// anchor, so an auditor gets a real verdict — and the underlying evidence —
+/// server-side against the controller's public key and any configured
+/// independent pins, so an auditor gets a verdict and underlying evidence
 /// without installing the CLI.
 #[derive(Debug, Serialize)]
 pub struct VerifyResult {
@@ -407,7 +410,7 @@ pub struct Evidence {
     /// Base64 Ed25519 signature over the DSSE PAE of the statement.
     pub signature_b64: Option<String>,
     pub scheme: Option<String>,
-    /// The out-of-band trust anchor the signature was checked against.
+    /// The published anchor checked against any configured independent pins.
     pub anchor_key_id: Option<String>,
     pub anchor_public_key_b64: Option<String>,
     /// The receipt's position in the hash-chained inclusion log + the proof.
@@ -440,9 +443,8 @@ pub struct CheckpointEvidence {
     pub signed_note: String,
     pub signature_b64: String,
     pub signature_valid: bool,
-    /// An independent transparency witness co-signs the same root with a
-    /// SEPARATE key — evidence the log isn't forked. Its public key isn't
-    /// published in V0, so we surface its identity + co-signature honestly.
+    /// Advisory witness metadata; its public key is not published in V0,
+    /// so neither its identity nor its co-signature is verified here.
     pub witness_key_id: Option<String>,
     pub witness_signature_b64: Option<String>,
 }
@@ -493,6 +495,13 @@ pub struct LogIntegrity {
 /// checkpoint against the published anchor key. Used by the audit page so its
 /// integrity verdict is a real verification, not a `inclusion_seq != null` proxy.
 pub(crate) fn verify_log_integrity(log: &ReceiptLog) -> LogIntegrity {
+    verify_log_integrity_with_pins(log, AnchorPins::from_env())
+}
+
+pub(crate) fn verify_log_integrity_with_pins(
+    log: &ReceiptLog,
+    pins: Result<AnchorPins, &'static str>,
+) -> LogIntegrity {
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
     let mut out = LogIntegrity::default();
     let chain = &log.entries;
@@ -530,50 +539,31 @@ pub(crate) fn verify_log_integrity(log: &ReceiptLog) -> LogIntegrity {
         let cp_root = cp.get("rootHash").cloned().unwrap_or_default();
         let cp_sig = cp.get("signature").cloned().unwrap_or_default();
         let note = format!("kars-receipt-log\n{cp_tree}\n{cp_root}\n");
-        let anchor = log.anchor();
-
-        // OUT-OF-BAND PINNING. The in-cluster anchor lives in the same trust
-        // domain as the log, so on its own it can't prove tamper-evidence
-        // against an insider who can rewrite both. When the operator pins the
-        // anchor out-of-band (BRIDGE_RECEIPT_ANCHOR_KEY_ID / _PUBKEY), require
-        // the in-cluster anchor to match it — and only then is the verdict
-        // absolute. Without a pin, the anchor is trusted-on-read and the banner
-        // reflects the weaker, honest claim.
-        let pin_key_id = std::env::var("BRIDGE_RECEIPT_ANCHOR_KEY_ID").ok();
-        let pin_pubkey = std::env::var("BRIDGE_RECEIPT_ANCHOR_PUBKEY").ok();
-        let anchor_matches_pin = match (&anchor, pin_key_id.as_deref(), pin_pubkey.as_deref()) {
-            (Some((kid, pub_b64, _)), pk_id, pk_pub) => {
-                let id_ok = pk_id.is_none_or(|w| w == kid);
-                let pub_ok = pk_pub.is_none_or(|w| w.trim() == pub_b64.trim());
-                (pk_id.is_some() || pk_pub.is_some()) && id_ok && pub_ok
+        let anchor = match pins.and_then(|pins| pins.resolve(log)) {
+            Ok(anchor) => {
+                out.anchor_pinned = anchor.pinned;
+                Some(anchor)
             }
-            _ => false,
+            Err(reason) => {
+                tracing::warn!(reason, "Receipt checkpoint trust anchor rejected");
+                None
+            }
         };
-        out.anchor_pinned = anchor_matches_pin;
-
-        // If a pin is configured but the in-cluster anchor does NOT match it,
-        // the anchor is untrusted — do not honor any signature made with it.
-        let pin_configured = pin_key_id.is_some() || pin_pubkey.is_some();
-        let anchor_trusted = !pin_configured || anchor_matches_pin;
-
-        let cp_sig_ok = anchor_trusted
-            && anchor
-                .as_ref()
-                .and_then(|(_, pub_b64, _)| BASE64.decode(pub_b64.as_bytes()).ok())
-                .and_then(|b| <[u8; 32]>::try_from(b).ok())
-                .and_then(|pk| VerifyingKey::from_bytes(&pk).ok())
-                .map(|vk| {
-                    BASE64
-                        .decode(cp_sig.as_bytes())
-                        .ok()
-                        .and_then(|sb| <[u8; 64]>::try_from(sb).ok())
-                        .map(|sb| {
-                            vk.verify(note.as_bytes(), &Signature::from_bytes(&sb))
-                                .is_ok()
-                        })
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
+        let cp_sig_ok = anchor
+            .as_ref()
+            .and_then(|anchor| VerifyingKey::from_bytes(&anchor.public_key).ok())
+            .map(|vk| {
+                BASE64
+                    .decode(cp_sig.as_bytes())
+                    .ok()
+                    .and_then(|sb| <[u8; 64]>::try_from(sb).ok())
+                    .map(|sb| {
+                        vk.verify(note.as_bytes(), &Signature::from_bytes(&sb))
+                            .is_ok()
+                    })
+                    .unwrap_or(false)
+            })
+            .unwrap_or(false);
         out.checkpoint_verified =
             chain_consistent && cp_sig_ok && cp_root == chain_head && cp_tree == out.tree_size;
     }
@@ -610,11 +600,21 @@ fn pae(payload_type: &str, body: &[u8]) -> Vec<u8> {
 /// published public-key anchor (`kars-receipt-pubkey` ConfigMap). This is the
 /// same trust root `kars receipt verify` uses; performing it here lets an
 /// auditor get a real cryptographic verdict in the browser. The BFF never
-/// trusts a key embedded in the receipt — only the out-of-band anchor.
+/// trusts a key embedded in the receipt. Independently configured pins
+/// constrain the cluster-published anchor when present.
 pub async fn verify_receipt(
+    state: State<AppState>,
+    principal: Extension<Principal>,
+    path: Path<(String, String)>,
+) -> AppResult<Json<VerifyResult>> {
+    verify_receipt_with_pins(state, principal, path, AnchorPins::from_env()).await
+}
+
+pub(crate) async fn verify_receipt_with_pins(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Path((ns, name)): Path<(String, String)>,
+    pins: Result<AnchorPins, &'static str>,
 ) -> AppResult<Json<VerifyResult>> {
     use base64::engine::general_purpose::STANDARD as B64;
     use ed25519_dalek::{Signature, Verifier, VerifyingKey};
@@ -672,7 +672,7 @@ pub async fn verify_receipt(
     evidence.scheme = Some(spec.scheme.clone());
     evidence.signature_b64 = spec.dsse.signatures.first().map(|s| s.sig.clone());
 
-    // 1) Trust anchor present (out-of-band published public key).
+    // 1) Both verification paths resolve the same configured trust boundary.
     let log = match cluster.receipt_log().await {
         Ok(log) => log,
         Err(error) => {
@@ -691,27 +691,41 @@ pub async fn verify_receipt(
             }));
         }
     };
-    let anchor = log.anchor();
-    let Some((anchor_key_id, anchor_pub_b64, anchor_scheme)) = anchor else {
-        push(
-            &mut checks,
-            "Trust anchor",
-            false,
-            "No published public-key anchor (kars-receipt-pubkey) found — cannot verify.".into(),
-            None,
-            None,
-        );
-        return Ok(Json(VerifyResult {
-            verified: false,
-            checks,
-            evidence,
-        }));
+    let anchor = match pins.and_then(|pins| pins.resolve(&log)) {
+        Ok(anchor) => anchor,
+        Err(reason) => {
+            push(
+                &mut checks,
+                "Trust anchor",
+                false,
+                reason.into(),
+                None,
+                None,
+            );
+            return Ok(Json(VerifyResult {
+                verified: false,
+                checks,
+                evidence,
+            }));
+        }
     };
+    let anchor_key_id = anchor.key_id;
+    let anchor_pub_b64 = anchor.public_key_b64;
+    let anchor_scheme = anchor.scheme;
     evidence.anchor_key_id = Some(anchor_key_id.clone());
     evidence.anchor_public_key_b64 = Some(anchor_pub_b64.clone());
-    push(&mut checks, "Trust anchor", true,
-        "An out-of-band public key is published by the controller; the signature is checked against THIS key, never one carried in the receipt.".into(),
-        None, None);
+    push(
+        &mut checks,
+        "Trust anchor",
+        true,
+        if anchor.pinned {
+            "The controller's public key matches the configured out-of-band pins.".into()
+        } else {
+            "The signature is checked against the cluster-published key, not a key in the receipt. No independent out-of-band pin is configured.".into()
+        },
+        None,
+        None,
+    );
 
     // 2) Receipt key id matches the anchor.
     let key_match = spec.key_id == anchor_key_id;
@@ -720,7 +734,7 @@ pub async fn verify_receipt(
         "Signing key identity",
         key_match,
         if key_match {
-            "The receipt's key fingerprint matches the published anchor.".into()
+            "The receipt's key identifier matches the published anchor.".into()
         } else {
             "The receipt's signing key does NOT match the trusted anchor.".into()
         },
@@ -741,10 +755,7 @@ pub async fn verify_receipt(
 
     // 4) Ed25519 signature verifies over the DSSE PAE of the exact payload.
     let mut sig_ok = false;
-    let pub_bytes = B64
-        .decode(anchor_pub_b64.as_bytes())
-        .ok()
-        .and_then(|b| <[u8; 32]>::try_from(b).ok());
+    let pub_bytes = Some(anchor.public_key);
     if let (Some(pk), false) = (pub_bytes, payload_raw.is_empty())
         && let Ok(vk) = VerifyingKey::from_bytes(&pk)
     {
@@ -931,20 +942,19 @@ pub async fn verify_receipt(
                         name: "Independent witness".to_string(),
                         passed: false,
                         advisory: true,
-                        detail: "A separate transparency-witness key co-signs the same tree head — evidence the log isn't forked behind your back. Its public key isn't published in V0, so this is shown, not re-verified here.".into(),
+                        detail: "A witness co-signature is published, but its public key is unavailable here, so it is shown without verification.".into(),
                         expected: Some(w.clone()),
                         computed: None,
                     });
             } else {
-                inclusion_ok = false;
-                push(
-                    &mut checks,
-                    "Signed checkpoint",
-                    false,
-                    "No signed checkpoint is available for the inclusion log.".into(),
-                    None,
-                    None,
-                );
+                checks.push(VerifyCheck {
+                    name: "Independent witness".into(),
+                    passed: false,
+                    advisory: true,
+                    detail: "No independent witness key is published; checkpoint signature verification is unaffected.".into(),
+                    expected: None,
+                    computed: None,
+                });
             }
         } else {
             inclusion_ok = false;

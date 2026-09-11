@@ -2,7 +2,7 @@ use super::*;
 use axum::{
     Json, Router,
     body::{Body, to_bytes},
-    extract::State,
+    extract::{Extension, Path, State},
     http::{Method, Request, StatusCode, Uri},
     response::{IntoResponse, Response},
     routing::get,
@@ -299,6 +299,34 @@ async fn fixture(
 }
 
 async fn request(state: crate::state::AppState, path: &str, owner: bool) -> (StatusCode, Value) {
+    request_with_pins(state, path, owner, None).await
+}
+
+async fn request_with_pins(
+    state: crate::state::AppState,
+    path: &str,
+    owner: bool,
+    pins: Option<crate::routes::receipts::AnchorPins>,
+) -> (StatusCode, Value) {
+    let verify = move |state: State<crate::state::AppState>,
+                       principal: Extension<crate::auth::Principal>,
+                       path: Path<(String, String)>| {
+        let pins = pins.clone();
+        async move {
+            match pins {
+                Some(pins) => {
+                    crate::routes::receipts::verify_receipt_with_pins(
+                        state,
+                        principal,
+                        path,
+                        Ok(pins),
+                    )
+                    .await
+                }
+                None => crate::routes::receipts::verify_receipt(state, principal, path).await,
+            }
+        }
+    };
     let app = Router::new()
         .route("/api/insights", get(crate::routes::insights::get_insights))
         .route("/api/system", get(crate::routes::system::get_system))
@@ -308,7 +336,7 @@ async fn request(state: crate::state::AppState, path: &str, owner: bool) -> (Sta
         )
         .route(
             "/api/namespaces/{ns}/tasks/{name}/receipt/verify",
-            get(crate::routes::receipts::verify_receipt),
+            get(verify),
         )
         .route(
             "/api/namespaces/{ns}/tasks/{name}/receipt",
@@ -588,9 +616,12 @@ fn receipt_log_integrity_still_verifies_real_signed_checkpoints_and_exact_tree_s
 
 #[tokio::test]
 async fn receipt_endpoint_still_requires_signed_payload_binding_and_full_overflow_inclusion() {
+    use crate::routes::receipts::{AnchorPins, verify_log_integrity_with_pins};
     let namespace = std::env::var("BRIDGE_CORE_NAMESPACE").unwrap_or_else(|_| "kars-system".into());
     let (_, state, api, server) = fixture(&namespace).await;
     let key = SigningKey::from_bytes(&[42; 32]);
+    let public_key = STANDARD.encode(key.verifying_key().to_bytes());
+    let key_id = hex::encode(Sha256::digest(key.verifying_key().to_bytes()));
     let payload_type = "application/vnd.in-toto+json";
     let predicate_type = "https://kars.azure.com/attestations/GovernanceReceipt/v0";
     let digest = "0123456789abcdef0123456789abcdef";
@@ -610,9 +641,9 @@ async fn receipt_endpoint_still_requires_signed_payload_binding_and_full_overflo
     let receipt = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsReceipt",
             "metadata":{"name":"task-3","namespace":"work","uid":"receipt","resourceVersion":"1"},
             "spec":{"taskRef":{"name":"task-3"},"envelopeDigest":format!("sha256:{digest}"),
-                "predicateType":predicate_type,"scheme":"DSSEv1+ed25519","keyId":"test",
+                "predicateType":predicate_type,"scheme":"DSSEv1+ed25519","keyId":key_id,
                 "dsse":{"payloadType":payload_type,"payload":STANDARD.encode(&payload),
-                        "signatures":[{"keyid":"test","sig":STANDARD.encode(key.sign(&pae).to_bytes())}]},
+                        "signatures":[{"keyid":key_id,"sig":STANDARD.encode(key.sign(&pae).to_bytes())}]},
                 "claims":[]},"status":{"inclusionSeq":3}});
     let mut chain = entries(4);
     chain[3]["payloadSha256"] = hex::encode(Sha256::digest(&payload)).into();
@@ -628,11 +659,10 @@ async fn receipt_endpoint_still_requires_signed_payload_binding_and_full_overflo
     maps.push(map(
         &namespace,
         "kars-receipt-pubkey",
-        json!({"keyId":"test",
-            "publicKey":STANDARD.encode(key.verifying_key().to_bytes()),"scheme":"DSSEv1+ed25519"}),
+        json!({"keyId":key_id,"publicKey":public_key,"scheme":"DSSEv1+ed25519"}),
     ));
     maps.push(map(&namespace, "kars-receipt-checkpoint", json!({"treeSize":"4","rootHash":root,
-            "keyId":"test","signature":STANDARD.encode(key.sign(format!("kars-receipt-log\n4\n{root}\n").as_bytes()).to_bytes())})));
+            "keyId":key_id,"signature":STANDARD.encode(key.sign(format!("kars-receipt-log\n4\n{root}\n").as_bytes()).to_bytes())})));
     maps.push(map(
         &namespace,
         "kars-receipt-witness",
@@ -651,6 +681,103 @@ async fn receipt_endpoint_still_requires_signed_payload_binding_and_full_overflo
     assert_eq!(body["verified"], true);
     assert_eq!(body["evidence"]["inclusion"]["tree_size"], 4);
     assert_eq!(body["evidence"]["inclusion"]["seq"], 3);
+    api.lock().unwrap().snapshot["items"]
+        .as_array_mut()
+        .unwrap()
+        .retain(|item| item["metadata"]["name"] != "kars-receipt-witness");
+    let (_, without_witness) = request(state.clone(), path, false).await;
+    assert_eq!(without_witness["verified"], true);
+    let checks = without_witness["checks"].as_array().unwrap();
+    assert_eq!(
+        checks
+            .iter()
+            .filter(|c| c["name"] == "Signed checkpoint")
+            .count(),
+        1
+    );
+    let witness = checks
+        .iter()
+        .find(|c| c["name"] == "Independent witness")
+        .unwrap();
+    assert_eq!(witness["advisory"], true);
+    assert_eq!(witness["passed"], false);
+
+    for forged in [false, true] {
+        if forged {
+            let replacement = SigningKey::from_bytes(&[17; 32]);
+            let mut api = api.lock().unwrap();
+            for (name, field, value) in [
+                (
+                    "kars-receipt-pubkey",
+                    "publicKey",
+                    STANDARD.encode(replacement.verifying_key().to_bytes()),
+                ),
+                (
+                    "kars-receipt-checkpoint",
+                    "signature",
+                    STANDARD.encode(
+                        replacement
+                            .sign(format!("kars-receipt-log\n4\n{root}\n").as_bytes())
+                            .to_bytes(),
+                    ),
+                ),
+            ] {
+                let map = api.snapshot["items"]
+                    .as_array_mut()
+                    .unwrap()
+                    .iter_mut()
+                    .find(|item| item["metadata"]["name"] == name)
+                    .unwrap();
+                map["data"][field] = value.into();
+            }
+            api.receipt_details.get_mut(receipt_path).unwrap()["spec"]["dsse"]["signatures"][0]["sig"] =
+                STANDARD.encode(replacement.sign(&pae).to_bytes()).into();
+        }
+        for (pin_id, pin_key, matches_original) in [
+            (None, None, true),
+            (Some(key_id.clone()), None, true),
+            (None, Some(public_key.clone()), true),
+            (Some(key_id.clone()), Some(public_key.clone()), true),
+            (Some("wrong".into()), None, false),
+            (None, Some(STANDARD.encode([0_u8; 32])), false),
+            (
+                Some(key_id.clone()),
+                Some(STANDARD.encode([0_u8; 32])),
+                false,
+            ),
+            (Some(String::new()), None, false),
+            (None, Some(String::new()), false),
+        ] {
+            let configured = pin_id.is_some() || pin_key.is_some();
+            let expected = matches_original && (!forged || !configured);
+            let pins = AnchorPins {
+                key_id: pin_id,
+                public_key: pin_key,
+            };
+            let snapshot = api.lock().unwrap().snapshot.clone();
+            let log = parsed(snapshot, &namespace).unwrap();
+            let integrity = verify_log_integrity_with_pins(&log, Ok(pins.clone()));
+            assert!(integrity.chain_consistent);
+            assert_eq!(
+                integrity.checkpoint_verified, expected,
+                "{pins:?}, forged={forged}"
+            );
+            assert_eq!(integrity.anchor_pinned, expected && configured);
+            let (status, result) =
+                request_with_pins(state.clone(), path, false, Some(pins.clone())).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(result["verified"], expected, "{pins:?}, forged={forged}");
+            if !expected {
+                assert!(
+                    result["checks"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .any(|check| check["name"] == "Trust anchor" && check["passed"] == false)
+                );
+            }
+        }
+    }
     api.lock()
         .unwrap()
         .receipt_details
