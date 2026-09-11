@@ -6,6 +6,13 @@ selected for migration.
 
 ## Authority
 
+Private activation compares each live consumer against its reviewed owner
+template. Kubernetes' two standard, admission-injected 300-second
+`NoExecute` tolerations do not make that execution different. Explicit
+tolerations, nonstandard durations, duplicate entries and every credential,
+container and host-authority change still require exact review; custom
+admission mutations are not silently ignored.
+
 `KarsCredentialGrant/workspace` is a **metadata-only**, namespaced operator
 delegation. It pins the workspace UID, writer ServiceAccount UIDs, permitted
 agent key names, and each enrolled integration Secret's exact name/UID/purpose.
