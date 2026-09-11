@@ -27,16 +27,22 @@
 //! Webhook delivery + the `kars eval run` CLI surface ship in
 //! slice 6.4.
 
+mod evidence;
+mod observation;
+mod report;
+#[cfg(test)]
+mod result_tests;
 mod runner;
+mod workloads;
 
 use anyhow::Result;
 use futures::StreamExt;
 use k8s_openapi::api::batch::v1::{CronJob, Job};
-use k8s_openapi::api::core::v1::{ConfigMap, Pod};
+use k8s_openapi::api::core::v1::ConfigMap;
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
 use kube::{
     Client, ResourceExt,
-    api::{Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams},
+    api::{Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams, PostParams},
     runtime::controller::{Action, Controller},
 };
 use runner::runner_pod_spec_json;
@@ -47,15 +53,14 @@ use std::time::Duration;
 
 use crate::crd::KarsSandbox;
 use crate::kars_eval::{
-    ANNOTATION_RUN_NOW, CorpusSource, EvalResult, EvalResultSummary, KarsEval, KarsEvalStatus,
-    TYPE_CONFORMANCE_DRIFT, push_history_bounded, reason,
+    ANNOTATION_RUN_NOW, CorpusSource, EvalResult, KarsEval, KarsEvalStatus, TYPE_CONFORMANCE_DRIFT,
+    reason,
 };
 use crate::mcp_server::LocalObjectRef;
 use crate::status::conditions::{self, reason as cond_reason, status as cond_status};
 use crate::status::phase::{PHASE_DEGRADED, PHASE_PENDING, PHASE_READY};
 
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_EVAL;
-const DRIFT_FIELD_MANAGER: &str = "kars-controller/karseval-drift";
 const FINALIZER: &str = "kars.azure.com/karseval-cleanup";
 
 const REQUEUE_OK: Duration = Duration::from_secs(300);
@@ -70,10 +75,12 @@ const LABEL_KEY_CLAW_EVAL: &str = "kars.azure.com/karseval";
 
 #[derive(Debug, thiserror::Error)]
 enum ReconcileError {
-    #[error("Kubernetes API error: {0}")]
+    #[error("Evaluation Kubernetes API request failed")]
     Kube(#[from] kube::Error),
-    #[error("JSON serialization error: {0}")]
+    #[error("Evaluation JSON contract failed")]
     SerdeJson(#[from] serde_json::Error),
+    #[error("Evaluation evidence unavailable")]
+    Evidence(#[from] anyhow::Error),
 }
 
 impl ReconcileError {
@@ -81,6 +88,7 @@ impl ReconcileError {
         match self {
             ReconcileError::Kube(_) => "kube_api",
             ReconcileError::SerdeJson(_) => "serde",
+            ReconcileError::Evidence(_) => "evidence",
         }
     }
 }
@@ -102,6 +110,24 @@ struct Ctx {
 }
 
 async fn reconcile(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
+    let outcome = reconcile_inner(eval.clone(), ctx.clone()).await;
+    if outcome.is_err() && eval.metadata.deletion_timestamp.is_none() {
+        let api = Api::<KarsEval>::namespaced(ctx.client.clone(), workloads::namespace(&eval)?);
+        let current = api.get(&eval.name_any()).await?;
+        if current.metadata.uid == eval.metadata.uid
+            && current.metadata.generation == eval.metadata.generation
+            && serde_json::to_value(&current.spec)? == serde_json::to_value(&eval.spec)?
+        {
+            let prior = current.status.clone().unwrap_or_default();
+            write_degraded(&api, &current, prior.conditions.as_deref().unwrap_or_default(), &prior,
+                "EvidenceUnavailable", "Evaluation work or evidence persistence failed; no current successful result is asserted").await?;
+        }
+    }
+    outcome
+}
+
+async fn reconcile_inner(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, ReconcileError> {
+    let mut eval = (*eval).clone();
     let name = eval.name_any();
     let ns = eval.namespace().unwrap_or_else(|| "default".into());
     tracing::info!(karseval = %name, ns = %ns, "Reconciling KarsEval");
@@ -110,7 +136,6 @@ async fn reconcile(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     let configmaps: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
     let jobs: Api<Job> = Api::namespaced(ctx.client.clone(), &ns);
     let cronjobs: Api<CronJob> = Api::namespaced(ctx.client.clone(), &ns);
-    let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
 
     if eval.metadata.deletion_timestamp.is_some() {
         return finalize(&evals_api, &configmaps, &jobs, &cronjobs, &eval, &name).await;
@@ -148,8 +173,7 @@ async fn reconcile(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         Err((why_reason, why_msg)) => {
             return write_degraded(
                 &evals_api,
-                &name,
-                observed_generation,
+                &eval,
                 &prior_conditions,
                 &prior_status,
                 why_reason,
@@ -159,30 +183,38 @@ async fn reconcile(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         }
     };
 
-    // -------- 2. Ensure corpus ConfigMap --------------------------
-    let eval_uid = eval.metadata.uid.as_deref();
-    let cm_name = format!("karseval-{name}-corpus");
-    if let Err(e) = ensure_corpus_configmap(&configmaps, &cm_name, &name, eval_uid, &resolved).await
-    {
-        tracing::warn!(karseval = %name, error_class = e.class(), "KarsEvalCorpusWriteFailed");
-        return write_degraded(
-            &evals_api,
-            &name,
-            observed_generation,
-            &prior_conditions,
-            &prior_status,
-            reason::CORPUS_FETCH_FAILED,
-            &format!("corpus ConfigMap write failed: {e}"),
-        )
-        .await;
+    if workloads::claim_trigger(&evals_api, &eval).await? {
+        return Ok(Action::requeue(Duration::from_secs(1)));
     }
-
     let runner_image = eval
         .spec
         .runner_image
         .clone()
         .unwrap_or_else(default_runner_image);
     let target_url = sandbox_router_url(&eval.spec.target_sandbox_ref.name);
+    let mut intent = workloads::Intent::new(
+        &ctx.client,
+        &eval,
+        &resolved.digest,
+        &runner_image,
+        &target_url,
+    )
+    .await?;
+
+    // -------- 2. Ensure corpus ConfigMap --------------------------
+    let cm_name = format!("karseval-{name}-corpus");
+    if let Err(e) = ensure_corpus_configmap(&configmaps, &cm_name, &eval, &resolved).await {
+        tracing::warn!(karseval = %name, error_class = e.class(), "KarsEvalCorpusWriteFailed");
+        return write_degraded(
+            &evals_api,
+            &eval,
+            &prior_conditions,
+            &prior_status,
+            reason::CORPUS_FETCH_FAILED,
+            "owned corpus ConfigMap write failed",
+        )
+        .await;
+    }
 
     // -------- 3. Handle run-now annotation ------------------------
     let mut spawned_run_now: Option<String> = None;
@@ -194,82 +226,93 @@ async fn reconcile(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         .map(|v| v == "true")
         .unwrap_or(false)
     {
-        let job_name = run_now_job_name(&name, eval.metadata.resource_version.as_deref());
-        match ensure_run_now_job(
+        let job_name = run_now_job_name(
+            &name,
+            eval.annotations()
+                .get(workloads::RUN_TOKEN)
+                .map(String::as_str),
+        );
+        intent.revalidate(&ctx.client, &eval).await?;
+        ensure_run_now_job(
             &jobs,
             &job_name,
-            &name,
-            eval_uid,
+            &eval,
+            &intent,
             &cm_name,
             &runner_image,
             &target_url,
             &resolved.label,
         )
-        .await
-        {
-            Ok(()) => {
-                spawned_run_now = Some(job_name.clone());
-                if let Err(e) = clear_run_now_annotation(&evals_api, &name).await {
-                    tracing::warn!(karseval = %name, "failed to clear run-now annotation: {e}");
-                }
-            }
-            Err(e) => {
-                tracing::warn!(karseval = %name, "KarsEvalRunNowJobCreateFailed: {e}");
-            }
-        }
+        .await?;
+        spawned_run_now = Some(job_name.clone());
+        eval = workloads::acknowledge_trigger(&evals_api, &eval, &job_name).await?;
+        intent = workloads::Intent::new(
+            &ctx.client,
+            &eval,
+            &resolved.digest,
+            &runner_image,
+            &target_url,
+        )
+        .await?;
     }
 
     // -------- 4. Ensure CronJob or delete -------------------------
     let cron_job_name = if let Some(schedule) = eval.spec.schedule.as_deref() {
         let cj_name = cron_job_name(&name);
-        match ensure_cronjob(
+        intent.revalidate(&ctx.client, &eval).await?;
+        ensure_cronjob(
             &cronjobs,
             &cj_name,
-            &name,
-            eval_uid,
+            &eval,
+            &intent,
             schedule,
             &cm_name,
             &runner_image,
             &target_url,
             &resolved.label,
         )
-        .await
-        {
-            Ok(()) => Some(cj_name),
-            Err(e) => {
-                tracing::warn!(karseval = %name, "KarsEvalCronJobApplyFailed: {e}");
-                None
-            }
-        }
+        .await?;
+        Some(cj_name)
     } else {
         let cj_name = cron_job_name(&name);
-        if let Err(e) = delete_if_exists(&cronjobs, &cj_name).await {
-            tracing::warn!(karseval = %name, "stale cronjob delete failed: {e}");
+        if let Some(existing) = cronjobs.get_opt(&cj_name).await? {
+            workloads::require_owner(&existing.metadata, &eval)?;
+            let (uid, rv) = workloads::identity(&existing.metadata)?;
+            cronjobs
+                .delete(
+                    &cj_name,
+                    &DeleteParams {
+                        preconditions: Some(kube::api::Preconditions {
+                            uid: Some(uid.into()),
+                            resource_version: Some(rv.into()),
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await?;
         }
         None
     };
 
     // -------- 5. Observe completed Jobs ---------------------------
-    let prior_history = prior_status.history.clone();
-    let (history, last_result, last_run_at) = observe_completed_jobs(
-        &jobs,
-        &pods,
-        &name,
-        &resolved.digest,
-        &resolved.label,
-        &prior_history,
-    )
-    .await
-    .unwrap_or_else(|e| {
-        tracing::warn!(karseval = %name, "observe_completed_jobs failed: {e}");
-        (
-            prior_history.clone(),
-            prior_status.last_result.clone(),
-            prior_status.last_run_at.clone(),
-        )
-    });
-
-    let drift_detected = last_result.as_ref().map(|r| r.failed > 0).unwrap_or(false);
+    let observed = match observation::observe(&ctx.client, &eval, &intent, &resolved).await {
+        Ok(observed) => observed,
+        Err(_) => {
+            return write_degraded(
+                &evals_api,
+                &eval,
+                &prior_conditions,
+                &prior_status,
+                "EvidenceUnavailable",
+                "Evaluation evidence could not be validated or durably persisted",
+            )
+            .await;
+        }
+    };
+    let history = observed.history;
+    let last_result = observed.result;
+    let last_run_at = observed.last_run_at;
+    let drift_detected = observed.drift;
 
     // -------- 6. Optionally patch sandbox Degraded ----------------
     if eval.spec.fail_sandbox_on_drift.unwrap_or(false) && drift_detected {
@@ -283,8 +326,13 @@ async fn reconcile(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
                 )
             })
             .unwrap_or_else(|| format!("KarsEval/{name} reported drift"));
-        if let Err(e) =
-            patch_sandbox_drift(&sandboxes, &eval.spec.target_sandbox_ref.name, &fail_msg).await
+        if let Err(e) = patch_sandbox_drift(
+            &sandboxes,
+            &eval.spec.target_sandbox_ref.name,
+            intent.target_uid.as_deref(),
+            &fail_msg,
+        )
+        .await
         {
             tracing::warn!(
                 karseval = %name,
@@ -295,10 +343,10 @@ async fn reconcile(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     }
 
     // -------- 7. Patch KarsEval status ----------------------------
-    let phase = match (&last_result, drift_detected) {
-        (Some(_), false) => PHASE_READY,
-        (Some(_), true) => PHASE_DEGRADED,
-        (None, _) => PHASE_PENDING,
+    let phase = match observed.state {
+        "AllPassed" => PHASE_READY,
+        "Pending" => PHASE_PENDING,
+        _ => PHASE_DEGRADED,
     };
 
     let new_conditions = build_conditions(
@@ -308,7 +356,7 @@ async fn reconcile(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         spawned_run_now.as_deref(),
         cron_job_name.as_deref(),
         last_result.as_ref(),
-        drift_detected,
+        (observed.state, drift_detected),
     );
 
     let new_status = KarsEvalStatus {
@@ -323,23 +371,38 @@ async fn reconcile(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         }),
         corpus_digest: Some(resolved.digest.clone()),
         cron_job_name,
+        report_config_map_ref: observed.has_report.then(|| LocalObjectRef {
+            name: evidence::name(&eval),
+        }),
+        report_config_map_uid: observed.receipt.as_ref().map(|receipt| receipt.uid.clone()),
+        report_evidence_digest: observed
+            .receipt
+            .as_ref()
+            .map(|receipt| receipt.digest.clone()),
     };
+    let current = intent.revalidate(&ctx.client, &eval).await?;
+    let mut status_value = serde_json::to_value(&new_status)?;
+    status_value["lastRunAt"] = json!(new_status.last_run_at);
+    status_value["lastResult"] = json!(new_status.last_result);
+    if let Some(result) = &new_status.last_result {
+        status_value["lastResult"]["firstFailingCases"] = json!(result.first_failing_cases);
+    }
+    status_value["history"] = json!(new_status.history);
+    status_value["cronJobName"] = json!(new_status.cron_job_name);
+    status_value["reportConfigMapRef"] = json!(new_status.report_config_map_ref);
+    status_value["reportConfigMapUid"] = json!(new_status.report_config_map_uid);
+    status_value["reportEvidenceDigest"] = json!(new_status.report_evidence_digest);
     let status_patch = json!({
-        "apiVersion": "kars.azure.com/v1alpha1",
-        "kind": "KarsEval",
-        "status": new_status,
+        "metadata":{"uid":current.metadata.uid,"resourceVersion":current.metadata.resource_version},
+        "status": status_value,
     });
     evals_api
-        .patch_status(
-            &name,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(status_patch),
-        )
+        .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_patch))
         .await?;
 
-    if last_result.is_none() {
+    if observed.state == "Pending" {
         Ok(Action::requeue(REQUEUE_AWAITING_RUN))
-    } else if drift_detected {
+    } else if observed.state != "AllPassed" {
         Ok(Action::requeue(REQUEUE_FAIL))
     } else {
         Ok(Action::requeue(REQUEUE_OK))
@@ -436,8 +499,7 @@ fn sha256_hex(bytes: &[u8]) -> String {
 async fn ensure_corpus_configmap(
     api: &Api<ConfigMap>,
     cm_name: &str,
-    owner: &str,
-    eval_uid: Option<&str>,
+    eval: &KarsEval,
     resolved: &ResolvedCorpus,
 ) -> Result<(), ReconcileError> {
     let mut data: BTreeMap<String, String> = BTreeMap::new();
@@ -459,13 +521,9 @@ async fn ensure_corpus_configmap(
         "kars.azure.com/karseval-corpus-label".into(),
         resolved.label.clone(),
     );
-    let owner_refs = eval_uid.and_then(|uid| {
-        serde_json::from_value::<
-            Vec<k8s_openapi::apimachinery::pkg::apis::meta::v1::OwnerReference>,
-        >(karseval_owner_refs(owner, uid))
-        .ok()
-    });
-    let cm = ConfigMap {
+    let owner = eval.name_any();
+    let owner_refs = serde_json::from_value(workloads::owner(eval)?)?;
+    let mut cm = ConfigMap {
         metadata: ObjectMeta {
             name: Some(cm_name.into()),
             annotations: Some(annotations),
@@ -474,21 +532,33 @@ async fn ensure_corpus_configmap(
                     "app.kubernetes.io/managed-by".into(),
                     "kars-controller".into(),
                 ),
-                (LABEL_KEY_CLAW_EVAL.into(), owner.into()),
+                (LABEL_KEY_CLAW_EVAL.into(), owner),
                 ("kars.azure.com/artifact".into(), "claw-eval-corpus".into()),
             ])),
-            owner_references: owner_refs,
+            owner_references: Some(owner_refs),
+            namespace: eval.namespace(),
             ..Default::default()
         },
         data: Some(data),
         ..Default::default()
     };
-    api.patch(
-        cm_name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(&cm),
-    )
-    .await?;
+    if let Some(existing) = api.get_opt(cm_name).await? {
+        workloads::require_owner(&existing.metadata, eval)?;
+        workloads::identity(&existing.metadata)?;
+        if existing.data == cm.data
+            && workloads::contains(
+                &json!(existing.metadata.annotations),
+                &json!(cm.metadata.annotations),
+            )
+        {
+            return Ok(());
+        }
+        cm.metadata.uid = existing.metadata.uid;
+        cm.metadata.resource_version = existing.metadata.resource_version;
+        api.replace(cm_name, &PostParams::default(), &cm).await?;
+    } else {
+        api.create(&PostParams::default(), &cm).await?;
+    }
     Ok(())
 }
 
@@ -549,14 +619,16 @@ fn short_hash(s: &str) -> String {
 async fn ensure_run_now_job(
     api: &Api<Job>,
     job_name: &str,
-    eval_name: &str,
-    eval_uid: Option<&str>,
+    eval: &KarsEval,
+    intent: &workloads::Intent,
     cm_name: &str,
     runner_image: &str,
     target_url: &str,
     corpus_label: &str,
 ) -> Result<(), ReconcileError> {
-    let pod_spec = runner_pod_spec_json(eval_name, cm_name, runner_image, target_url, corpus_label);
+    let eval_name = eval.name_any();
+    let pod_spec =
+        runner_pod_spec_json(&eval_name, cm_name, runner_image, target_url, corpus_label);
     let mut metadata = json!({
         "name": job_name,
         "labels": {
@@ -568,8 +640,10 @@ async fn ensure_run_now_job(
             "kars.azure.com/karseval-name": eval_name,
         },
     });
-    if let Some(uid) = eval_uid {
-        metadata["ownerReferences"] = karseval_owner_refs(eval_name, uid);
+    metadata["namespace"] = json!(eval.namespace());
+    metadata["ownerReferences"] = workloads::owner(eval)?;
+    if let Some(token) = eval.annotations().get(workloads::RUN_TOKEN) {
+        metadata["annotations"][workloads::RUN_TOKEN] = json!(token);
     }
     let body = json!({
         "apiVersion": "batch/v1",
@@ -580,6 +654,7 @@ async fn ensure_run_now_job(
             "ttlSecondsAfterFinished": 3600,
             "template": {
                 "metadata": {
+                    "annotations": intent.annotations(),
                     "labels": {
                         "app.kubernetes.io/managed-by": "kars-controller",
                         LABEL_KEY_CLAW_EVAL: eval_name,
@@ -589,12 +664,21 @@ async fn ensure_run_now_job(
             },
         },
     });
-    api.patch(
-        job_name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(body),
-    )
-    .await?;
+    if let Some(existing) = api.get_opt(job_name).await? {
+        workloads::require_owner(&existing.metadata, eval)?;
+        workloads::identity(&existing.metadata)?;
+        if !workloads::contains(&serde_json::to_value(&existing.spec)?, &body["spec"])
+            || existing.annotations().get(workloads::RUN_TOKEN)
+                != eval.annotations().get(workloads::RUN_TOKEN)
+        {
+            return Err(
+                anyhow::anyhow!("existing run slot differs from its produced intent").into(),
+            );
+        }
+    } else {
+        api.create(&PostParams::default(), &serde_json::from_value(body)?)
+            .await?;
+    }
     Ok(())
 }
 
@@ -602,15 +686,17 @@ async fn ensure_run_now_job(
 async fn ensure_cronjob(
     api: &Api<CronJob>,
     cj_name: &str,
-    eval_name: &str,
-    eval_uid: Option<&str>,
+    eval: &KarsEval,
+    intent: &workloads::Intent,
     schedule: &str,
     cm_name: &str,
     runner_image: &str,
     target_url: &str,
     corpus_label: &str,
 ) -> Result<(), ReconcileError> {
-    let pod_spec = runner_pod_spec_json(eval_name, cm_name, runner_image, target_url, corpus_label);
+    let eval_name = eval.name_any();
+    let pod_spec =
+        runner_pod_spec_json(&eval_name, cm_name, runner_image, target_url, corpus_label);
     let mut metadata = json!({
         "name": cj_name,
         "labels": {
@@ -618,9 +704,8 @@ async fn ensure_cronjob(
             LABEL_KEY_CLAW_EVAL: eval_name,
         },
     });
-    if let Some(uid) = eval_uid {
-        metadata["ownerReferences"] = karseval_owner_refs(eval_name, uid);
-    }
+    metadata["namespace"] = json!(eval.namespace());
+    metadata["ownerReferences"] = workloads::owner(eval)?;
     let body = json!({
         "apiVersion": "batch/v1",
         "kind": "CronJob",
@@ -643,6 +728,7 @@ async fn ensure_cronjob(
                     "ttlSecondsAfterFinished": 86400,
                     "template": {
                         "metadata": {
+                            "annotations": intent.annotations(),
                             "labels": {
                                 "app.kubernetes.io/managed-by": "kars-controller",
                                 LABEL_KEY_CLAW_EVAL: eval_name,
@@ -654,24 +740,24 @@ async fn ensure_cronjob(
             },
         },
     });
-    api.patch(
-        cj_name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(body),
-    )
-    .await?;
-    Ok(())
-}
-
-async fn clear_run_now_annotation(api: &Api<KarsEval>, name: &str) -> Result<(), ReconcileError> {
-    // JSON-merge `null` removes the key.
-    let body = json!({
-        "metadata": {
-            "annotations": {ANNOTATION_RUN_NOW: null},
-        },
-    });
-    api.patch(name, &PatchParams::default(), &Patch::Merge(body))
-        .await?;
+    let mut desired: CronJob = serde_json::from_value(body)?;
+    if let Some(existing) = api.get_opt(cj_name).await? {
+        workloads::require_owner(&existing.metadata, eval)?;
+        workloads::identity(&existing.metadata)?;
+        if workloads::contains(
+            &serde_json::to_value(&existing.spec)?,
+            &serde_json::to_value(&desired.spec)?,
+        ) {
+            return Ok(());
+        }
+        desired.metadata.uid = existing.metadata.uid;
+        desired.metadata.resource_version = existing.metadata.resource_version;
+        desired.status = existing.status;
+        api.replace(cj_name, &PostParams::default(), &desired)
+            .await?;
+    } else {
+        api.create(&PostParams::default(), &desired).await?;
+    }
     Ok(())
 }
 
@@ -688,268 +774,20 @@ where
 }
 
 // ─────────────────────────────────────────────────────────────────────
-// Job observation + RunReport parsing
-// ─────────────────────────────────────────────────────────────────────
-
-async fn observe_completed_jobs(
-    jobs: &Api<Job>,
-    pods: &Api<Pod>,
-    eval_name: &str,
-    corpus_digest: &str,
-    corpus_label: &str,
-    prior_history: &[EvalResultSummary],
-) -> Result<(Vec<EvalResultSummary>, Option<EvalResult>, Option<String>), ReconcileError> {
-    let lp = ListParams::default().labels(&format!("{LABEL_KEY_CLAW_EVAL}={eval_name}"));
-    let job_list = jobs.list(&lp).await?;
-
-    // Collect (job, completion_time) pairs for jobs that have a
-    // succeeded count > 0. Sort by completion_time ascending so we
-    // ingest them in chronological order.
-    let mut completed: Vec<(String, String)> = Vec::new();
-    for j in job_list.items {
-        let job_name = j.name_any();
-        let succeeded = j.status.as_ref().and_then(|s| s.succeeded).unwrap_or(0);
-        if succeeded == 0 {
-            continue;
-        }
-        let completion_time = j
-            .status
-            .as_ref()
-            .and_then(|s| s.completion_time.as_ref())
-            .map(|t| timestamp_to_rfc3339(&t.0))
-            .unwrap_or_else(rfc3339_now);
-        completed.push((job_name, completion_time));
-    }
-    completed.sort_by(|a, b| a.1.cmp(&b.1));
-
-    let already_seen: std::collections::HashSet<&str> =
-        prior_history.iter().map(|h| h.job_name.as_str()).collect();
-
-    let mut history = prior_history.to_vec();
-    let mut last_result: Option<EvalResult> = None;
-    let mut last_run_at: Option<String> = None;
-
-    for (job_name, completion_time) in completed {
-        if already_seen.contains(job_name.as_str()) {
-            continue;
-        }
-        let report = match read_job_report(pods, &job_name).await {
-            Ok(Some(r)) => r,
-            Ok(None) => {
-                tracing::warn!(
-                    karseval = %eval_name,
-                    job = %job_name,
-                    "no parseable RunReport on pod log"
-                );
-                continue;
-            }
-            Err(e) => {
-                tracing::warn!(
-                    karseval = %eval_name,
-                    job = %job_name,
-                    "read_job_report failed: {e}"
-                );
-                continue;
-            }
-        };
-
-        let first_failing_cases: Vec<String> = report
-            .results
-            .iter()
-            .filter(|c| c.verdict_pass.is_none() || c.verdict_pass == Some(false))
-            .take(5)
-            .map(|c| c.case_id.clone())
-            .collect();
-        let failed_u32 = u32::try_from(report.failed).unwrap_or(u32::MAX);
-        let passed_u32 = u32::try_from(report.passed).unwrap_or(u32::MAX);
-        let total_u32 = u32::try_from(report.total).unwrap_or(u32::MAX);
-        let errored_u32 = total_u32.saturating_sub(passed_u32.saturating_add(failed_u32));
-
-        let result = EvalResult {
-            schema_version: report.schema_version,
-            corpus_digest: corpus_digest.to_string(),
-            total: total_u32,
-            passed: passed_u32,
-            failed: failed_u32,
-            errored: errored_u32,
-            corpus_label: corpus_label.to_string(),
-            job_name: job_name.clone(),
-            first_failing_cases,
-        };
-        let summary = EvalResultSummary {
-            at: completion_time.clone(),
-            corpus_digest: corpus_digest.to_string(),
-            total: total_u32,
-            passed: passed_u32,
-            failed: failed_u32,
-            errored: errored_u32,
-            job_name: job_name.clone(),
-        };
-        history = push_history_bounded(history, summary);
-        last_result = Some(result);
-        last_run_at = Some(completion_time);
-    }
-
-    if last_result.is_none() {
-        // Preserve prior result if no new run completed this cycle.
-        last_result = history.first().map(|h| EvalResult {
-            schema_version: "v1".into(),
-            corpus_digest: h.corpus_digest.clone(),
-            total: h.total,
-            passed: h.passed,
-            failed: h.failed,
-            errored: h.errored,
-            corpus_label: corpus_label.to_string(),
-            job_name: h.job_name.clone(),
-            first_failing_cases: vec![],
-        });
-        if last_result.is_some() {
-            last_run_at = history.first().map(|h| h.at.clone());
-        }
-    }
-
-    Ok((history, last_result, last_run_at))
-}
-
-/// Compact projection of the runner's `RunReport`. We deliberately
-/// re-declare the relevant fields here (instead of importing the
-/// `RunReport` type from the runner crate) so the controller is not
-/// coupled to the runner's full schema. Only the contract surface in
-/// `REPORT_SCHEMA_VERSION = "v1"` is parsed.
-#[derive(Debug, serde::Deserialize)]
-struct ParsedReport {
-    #[serde(rename = "schemaVersion")]
-    schema_version: String,
-    total: usize,
-    passed: usize,
-    failed: usize,
-    #[serde(default)]
-    results: Vec<ParsedCase>,
-}
-
-#[derive(Debug, serde::Deserialize)]
-struct ParsedCase {
-    #[serde(rename = "caseId")]
-    case_id: String,
-    /// Materialised from `verdict.result == "Pass"`. `None` for
-    /// malformed entries.
-    #[serde(skip_deserializing, default)]
-    verdict_pass: Option<bool>,
-    /// Raw verdict object — used to populate `verdict_pass`.
-    #[serde(default)]
-    verdict: serde_json::Value,
-}
-
-async fn read_job_report(
-    pods: &Api<Pod>,
-    job_name: &str,
-) -> Result<Option<ParsedReport>, ReconcileError> {
-    let lp = ListParams::default().labels(&format!("job-name={job_name}"));
-    let pod_list = pods.list(&lp).await?;
-    let mut pod_name: Option<String> = None;
-    for p in pod_list.items {
-        // Prefer pods that have already reached terminal state.
-        let phase = p
-            .status
-            .as_ref()
-            .and_then(|s| s.phase.clone())
-            .unwrap_or_default();
-        if phase == crate::status::phase::POD_PHASE_SUCCEEDED
-            || phase == crate::status::phase::POD_PHASE_FAILED
-        {
-            pod_name = Some(p.name_any());
-            break;
-        }
-        if pod_name.is_none() {
-            pod_name = Some(p.name_any());
-        }
-    }
-    let Some(pod) = pod_name else {
-        return Ok(None);
-    };
-    let logs = match pods.logs(&pod, &kube::api::LogParams::default()).await {
-        Ok(l) => l,
-        Err(kube::Error::Api(ae)) if ae.code == 404 => return Ok(None),
-        Err(e) => return Err(e.into()),
-    };
-    Ok(parse_report_from_log(&logs))
-}
-
-/// Walk a pod log looking for the runner's JSON report. The runner
-/// emits the report to stdout as a single JSON object — typically
-/// compact on one line, but the parser tolerates a pretty-printed
-/// (multi-line) report as well. Tracing goes to stderr (kept
-/// separate by container's log mux). The latest successfully-parsed
-/// report wins (a re-run within the same pod, unlikely but
-/// supported, is honoured).
-fn parse_report_from_log(log: &str) -> Option<ParsedReport> {
-    let mut latest: Option<ParsedReport> = None;
-    // Fast path: a compact single-line report.
-    for line in log.lines() {
-        let line = line.trim();
-        if !line.starts_with('{') {
-            continue;
-        }
-        if let Some(p) = try_parse_report(line) {
-            latest = Some(p);
-        }
-    }
-    if latest.is_some() {
-        return latest;
-    }
-    // Slow path: pretty-printed JSON spanning multiple lines. Scan
-    // for every `{` byte and let `serde_json::Deserializer::into_iter`
-    // consume one JSON value starting at that offset; the deserializer
-    // tolerates trailing input, so a multi-line object embedded in a
-    // larger log is recoverable.
-    let bytes = log.as_bytes();
-    for (i, &b) in bytes.iter().enumerate() {
-        if b != b'{' {
-            continue;
-        }
-        let suffix = &log[i..];
-        let mut de = serde_json::Deserializer::from_str(suffix).into_iter::<ParsedReport>();
-        if let Some(Ok(mut parsed)) = de.next() {
-            if parsed.schema_version.is_empty() {
-                continue;
-            }
-            for case in parsed.results.iter_mut() {
-                case.verdict_pass = case
-                    .verdict
-                    .get("result")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s == "Pass");
-            }
-            latest = Some(parsed);
-        }
-    }
-    latest
-}
-
-fn try_parse_report(s: &str) -> Option<ParsedReport> {
-    let mut parsed: ParsedReport = serde_json::from_str(s).ok()?;
-    if parsed.schema_version.is_empty() {
-        return None;
-    }
-    for case in parsed.results.iter_mut() {
-        case.verdict_pass = case
-            .verdict
-            .get("result")
-            .and_then(|v| v.as_str())
-            .map(|s| s == "Pass");
-    }
-    Some(parsed)
-}
-
-// ─────────────────────────────────────────────────────────────────────
 // Sandbox drift patch
 // ─────────────────────────────────────────────────────────────────────
 
 async fn patch_sandbox_drift(
     sandboxes: &Api<KarsSandbox>,
     sandbox_name: &str,
+    expected_uid: Option<&str>,
     message: &str,
 ) -> Result<(), ReconcileError> {
+    let current = sandboxes.get(sandbox_name).await?;
+    let (uid, rv) = workloads::identity(&current.metadata)?;
+    if Some(uid) != expected_uid || current.metadata.deletion_timestamp.is_some() {
+        return Err(anyhow::anyhow!("evaluation target changed before drift publication").into());
+    }
     let condition = json!({
         "type": crate::status::conditions::TYPE_DEGRADED,
         "status": "True",
@@ -958,18 +796,13 @@ async fn patch_sandbox_drift(
         "lastTransitionTime": rfc3339_now(),
     });
     let body = json!({
-        "apiVersion": "kars.azure.com/v1alpha1",
-        "kind": "KarsSandbox",
+        "metadata": {"uid":uid, "resourceVersion":rv},
         "status": {
             "conditions": [condition],
         },
     });
     sandboxes
-        .patch_status(
-            sandbox_name,
-            &PatchParams::apply(DRIFT_FIELD_MANAGER).force(),
-            &Patch::Apply(body),
-        )
+        .patch_status(sandbox_name, &PatchParams::default(), &Patch::Merge(body))
         .await?;
     Ok(())
 }
@@ -982,18 +815,6 @@ fn rfc3339_now() -> String {
     chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
 }
 
-/// Convert a `jiff::Timestamp` (k8s_openapi default time type) to a
-/// seconds-precision RFC 3339 string. `jiff::Timestamp`'s `Display`
-/// impl emits sub-second precision; we strip via chrono to keep status
-/// strings stable across reconciles.
-fn timestamp_to_rfc3339(ts: &k8s_openapi::jiff::Timestamp) -> String {
-    let secs = ts.as_second();
-    chrono::DateTime::<chrono::Utc>::from_timestamp(secs, 0)
-        .map(|d| d.to_rfc3339_opts(chrono::SecondsFormat::Secs, true))
-        .unwrap_or_else(rfc3339_now)
-}
-
-#[allow(clippy::too_many_arguments)]
 fn build_conditions(
     prior: &[Condition],
     observed_generation: Option<i64>,
@@ -1001,8 +822,25 @@ fn build_conditions(
     spawned_run_now: Option<&str>,
     cron_job_name: Option<&str>,
     last_result: Option<&EvalResult>,
-    drift_detected: bool,
+    (state, drift_detected): (&str, bool),
 ) -> Vec<Condition> {
+    let state = if state != "Pending" && last_result.is_some_and(|r| r.schema_version == "v1") {
+        "RunnerUpgradeRequired"
+    } else if state == "AllPassed"
+        && !last_result.is_some_and(|r| {
+            r.schema_version == "v2"
+                && r.total > 0
+                && r.passed == r.total
+                && r.failed == 0
+                && r.errored == 0
+        })
+    {
+        "Inconclusive"
+    } else {
+        state
+    };
+    let drift_detected =
+        drift_detected && last_result.is_some_and(|r| r.schema_version == "v2" && r.failed > 0);
     let mut out: Vec<Condition> = Vec::with_capacity(4);
 
     let prior_ready = conditions::find(prior, conditions::TYPE_READY);
@@ -1010,12 +848,12 @@ fn build_conditions(
     let prior_degraded = conditions::find(prior, conditions::TYPE_DEGRADED);
     let prior_drift = conditions::find(prior, TYPE_CONFORMANCE_DRIFT);
 
-    let ready_status = if last_result.is_some() && !drift_detected {
+    let ready_status = if state == "AllPassed" {
         cond_status::TRUE
     } else {
         cond_status::FALSE
     };
-    let ready_reason = if last_result.is_none() {
+    let ready_reason = if state == "Pending" {
         if spawned_run_now.is_some() {
             reason::RUN_TRIGGERED
         } else if cron_job_name.is_some() {
@@ -1023,24 +861,24 @@ fn build_conditions(
         } else {
             cond_reason::RECONCILED
         }
-    } else if drift_detected {
-        reason::DRIFT_DETECTED
     } else {
-        reason::ALL_PASSED
+        state
     };
-    let ready_msg = match (last_result, drift_detected) {
-        (None, _) => format!(
-            "awaiting first run — corpus {} ({})",
+    let ready_msg = match (state, last_result) {
+        ("Pending", _) => format!(
+            "awaiting current run — corpus {} ({})",
             resolved.label, resolved.digest
         ),
-        (Some(r), false) => format!(
+        ("AllPassed", Some(r)) => format!(
             "all {} cases passed against corpus {}",
             r.total, r.corpus_label
         ),
-        (Some(r), true) => format!(
+        ("DriftDetected", Some(r)) => format!(
             "{} of {} cases failed against corpus {}",
             r.failed, r.total, r.corpus_label
         ),
+        ("RunnerUpgradeRequired", _) => "Legacy v1 history is retained but cannot establish fresh Ready; upgrade the runner to negotiated v2.".into(),
+        _ => "Current evaluation is inconclusive; unavailable, incomplete or invalid evidence is not policy enforcement.".into(),
     };
     out.push(conditions::preserve_transition_time(
         prior_ready,
@@ -1051,7 +889,7 @@ fn build_conditions(
         observed_generation,
     ));
 
-    let progressing_status = if last_result.is_none() {
+    let progressing_status = if state == "Pending" {
         cond_status::TRUE
     } else {
         cond_status::FALSE
@@ -1079,21 +917,13 @@ fn build_conditions(
     out.push(conditions::preserve_transition_time(
         prior_degraded,
         conditions::TYPE_DEGRADED,
-        if drift_detected {
+        if !matches!(state, "AllPassed" | "Pending") {
             cond_status::TRUE
         } else {
             cond_status::FALSE
         },
-        if drift_detected {
-            reason::DRIFT_DETECTED
-        } else {
-            cond_reason::RECONCILED
-        },
-        if drift_detected {
-            "most recent run reported case failures"
-        } else {
-            "no errors"
-        },
+        ready_reason,
+        &ready_msg,
         observed_generation,
     ));
 
@@ -1107,16 +937,18 @@ fn build_conditions(
         },
         if drift_detected {
             reason::DRIFT_DETECTED
-        } else {
+        } else if state == "AllPassed" {
             reason::ALL_PASSED
+        } else {
+            "NotEvaluated"
         },
         match last_result {
             Some(r) if drift_detected => format!(
                 "{} failing cases out of {} (corpus {})",
                 r.failed, r.total, r.corpus_label
             ),
-            Some(r) => format!("all {} cases passed", r.total),
-            None => "no runs observed yet".into(),
+            Some(r) if state == "AllPassed" => format!("all {} cases passed", r.total),
+            _ => "no current conclusive policy verdict".into(),
         }
         .as_str(),
         observed_generation,
@@ -1130,13 +962,16 @@ fn build_conditions(
 /// branches above to keep their bodies skinny.
 async fn write_degraded(
     api: &Api<KarsEval>,
-    name: &str,
-    observed_generation: Option<i64>,
+    eval: &KarsEval,
     prior_conditions: &[Condition],
     prior_status: &KarsEvalStatus,
     why_reason: &str,
     why_msg: &str,
 ) -> Result<Action, ReconcileError> {
+    let current = api.get(&eval.name_any()).await?;
+    workloads::same_eval(&current, eval)?;
+    let observed_generation = current.metadata.generation;
+    let (uid, rv) = workloads::identity(&current.metadata)?;
     let prior_ready = conditions::find(prior_conditions, conditions::TYPE_READY);
     let prior_progressing = conditions::find(prior_conditions, conditions::TYPE_PROGRESSING);
     let prior_degraded = conditions::find(prior_conditions, conditions::TYPE_DEGRADED);
@@ -1185,16 +1020,22 @@ async fn write_degraded(
         corpus_config_map_ref: prior_status.corpus_config_map_ref.clone(),
         corpus_digest: prior_status.corpus_digest.clone(),
         cron_job_name: prior_status.cron_job_name.clone(),
+        report_config_map_ref: None,
+        report_config_map_uid: None,
+        report_evidence_digest: None,
     };
     let patch = json!({
-        "apiVersion": "kars.azure.com/v1alpha1",
-        "kind": "KarsEval",
+        "metadata":{"uid":uid,"resourceVersion":rv},
         "status": new_status,
     });
+    let mut patch = patch;
+    patch["status"]["reportConfigMapRef"] = serde_json::Value::Null;
+    patch["status"]["reportConfigMapUid"] = serde_json::Value::Null;
+    patch["status"]["reportEvidenceDigest"] = serde_json::Value::Null;
     api.patch_status(
-        name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(patch),
+        &eval.name_any(),
+        &PatchParams::default(),
+        &Patch::Merge(patch),
     )
     .await?;
     Ok(Action::requeue(REQUEUE_FAIL))
@@ -1407,28 +1248,31 @@ mod tests {
           {"caseId":"c3","tags":[],"scenario":{"kind":"ChatCompletion","messageCount":1},"expected":{"decision":"Blocked"},"actual":{"decision":"Allowed"},"verdict":{"result":"Fail","reason":"DecisionMismatch","expected":"Blocked","actual":"Allowed"},"durationMs":100}
         ]}
         "#;
-        let parsed = parse_report_from_log(log).expect("parses");
-        assert_eq!(parsed.schema_version, "v1");
+        let corpus = kars_eval_corpus::load_builtin("jailbreak-baseline").unwrap();
+        let parsed =
+            report::parse(log, &corpus, "unused", "unused").expect("parses readable legacy");
+        assert_eq!(parsed.version, "v1");
         assert_eq!(parsed.total, 3);
         assert_eq!(parsed.passed, 2);
         assert_eq!(parsed.failed, 1);
-        assert_eq!(parsed.results.len(), 3);
-        assert_eq!(parsed.results[0].verdict_pass, Some(true));
-        assert_eq!(parsed.results[2].verdict_pass, Some(false));
+        assert!(!parsed.qualified());
+        assert_eq!(parsed.wire["results"][0]["verdict"]["result"], "Pass");
+        assert_eq!(parsed.wire["results"][2]["verdict"]["result"], "Fail");
     }
 
     #[test]
     fn parse_report_ignores_non_json_lines() {
         let log = "INFO booting\nERROR oh no\nnot json at all\n";
-        assert!(parse_report_from_log(log).is_none());
+        let corpus = kars_eval_corpus::load_builtin("jailbreak-baseline").unwrap();
+        assert!(report::parse(log, &corpus, "unused", "unused").is_err());
     }
 
     #[test]
-    fn parse_report_picks_latest_match() {
+    fn malformed_count_only_reports_are_not_current_evidence() {
         let log = r#"{"schemaVersion":"v1","total":1,"passed":1,"failed":0,"results":[]}
 {"schemaVersion":"v1","total":5,"passed":4,"failed":1,"results":[]}"#;
-        let parsed = parse_report_from_log(log).expect("parses");
-        assert_eq!(parsed.total, 5);
+        let corpus = kars_eval_corpus::load_builtin("jailbreak-baseline").unwrap();
+        assert!(report::parse(log, &corpus, "unused", "unused").is_err());
     }
 
     #[tokio::test]
@@ -1479,7 +1323,7 @@ mod tests {
             None,
             Some("karseval-x"),
             None,
-            false,
+            ("Pending", false),
         );
         let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
         assert_eq!(ready.status, "False");
@@ -1489,7 +1333,7 @@ mod tests {
             .find(|c| c.type_ == TYPE_CONFORMANCE_DRIFT)
             .unwrap();
         assert_eq!(drift.status, "False");
-        assert_eq!(drift.reason, "AllPassed");
+        assert_eq!(drift.reason, "NotEvaluated");
     }
 
     #[test]
@@ -1500,7 +1344,7 @@ mod tests {
             label: "builtin:jailbreak-baseline".into(),
         };
         let r = EvalResult {
-            schema_version: "v1".into(),
+            schema_version: "v2".into(),
             corpus_digest: "sha256:abc".into(),
             total: 10,
             passed: 7,
@@ -1510,7 +1354,15 @@ mod tests {
             job_name: "karseval-x-runnow-aa".into(),
             first_failing_cases: vec!["c-1".into()],
         };
-        let conds = build_conditions(&[], Some(2), &resolved, Some("job-x"), None, Some(&r), true);
+        let conds = build_conditions(
+            &[],
+            Some(2),
+            &resolved,
+            Some("job-x"),
+            None,
+            Some(&r),
+            ("DriftDetected", true),
+        );
         let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
         let degraded = conds.iter().find(|c| c.type_ == "Degraded").unwrap();
         let drift = conds
@@ -1531,7 +1383,7 @@ mod tests {
             label: "builtin:jailbreak-baseline".into(),
         };
         let r = EvalResult {
-            schema_version: "v1".into(),
+            schema_version: "v2".into(),
             corpus_digest: "sha256:abc".into(),
             total: 10,
             passed: 10,
@@ -1541,7 +1393,15 @@ mod tests {
             job_name: "karseval-x-runnow-bb".into(),
             first_failing_cases: vec![],
         };
-        let conds = build_conditions(&[], Some(3), &resolved, None, Some("cj"), Some(&r), false);
+        let conds = build_conditions(
+            &[],
+            Some(3),
+            &resolved,
+            None,
+            Some("cj"),
+            Some(&r),
+            ("AllPassed", false),
+        );
         let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
         assert_eq!(ready.status, "True");
         assert_eq!(ready.reason, "AllPassed");

@@ -27,13 +27,14 @@
 //! via [`crate::transport::CASE_ID_HEADER`] so the router's audit log
 //! can correlate without polluting bodies).
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use kars_eval_corpus::{
     ActualDecision, Burst, ChatMessage, Decision, ObservedSample, PolicyKindRef, Scenario,
 };
 use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
+use crate::outcome::ReplayError;
 use crate::transport::{
     CASE_ID_HEADER, Transport, egress_connect_via_proxy, mcp_response_to_decision,
     response_to_decision,
@@ -58,7 +59,7 @@ pub async fn replay(
             })?;
             let parts =
                 egress_connect_via_proxy(proxy_addr, host, *port, case_id, transport.timeout())
-                    .await;
+                    .await?;
             Ok(ActualDecision {
                 decision: parts.decision,
                 by_policy_kind: parts.by_policy_kind,
@@ -209,13 +210,10 @@ async fn single_call(
     if let Some(token) = auth_header {
         req = req.header("authorization", token);
     }
-    let resp = req
-        .send()
-        .await
-        .with_context(|| format!("POST {path}: transport error"))?;
+    let resp = req.send().await.map_err(ReplayError::request)?;
     let parts = match style {
-        CallStyle::HttpStatus => response_to_decision(resp, default_kind).await,
-        CallStyle::McpJsonRpc => mcp_response_to_decision(resp, default_kind).await,
+        CallStyle::HttpStatus => response_to_decision(resp, default_kind).await?,
+        CallStyle::McpJsonRpc => mcp_response_to_decision(resp, default_kind).await?,
     };
     Ok(ActualDecision {
         decision: parts.decision,
@@ -247,7 +245,7 @@ async fn burst_call(
 
     for i in 0..burst.count {
         if window > Duration::ZERO && start.elapsed() >= window {
-            break;
+            return Err(ReplayError::Timeout.into());
         }
 
         let mut req = transport
@@ -258,25 +256,17 @@ async fn burst_call(
         if let Some(token) = auth_header {
             req = req.header("authorization", token);
         }
-        let send = req.send().await;
-
-        let observation = match send {
-            Ok(resp) => {
-                let parts = match style {
-                    CallStyle::HttpStatus => response_to_decision(resp, default_kind).await,
-                    CallStyle::McpJsonRpc => mcp_response_to_decision(resp, default_kind).await,
-                };
-                ObservedSample {
-                    seq: i,
-                    decision: parts.decision,
-                    reason: parts.reason,
-                }
-            }
-            Err(e) => ObservedSample {
+        let resp = req.send().await.map_err(ReplayError::request)?;
+        let observation = {
+            let parts = match style {
+                CallStyle::HttpStatus => response_to_decision(resp, default_kind).await?,
+                CallStyle::McpJsonRpc => mcp_response_to_decision(resp, default_kind).await?,
+            };
+            ObservedSample {
                 seq: i,
-                decision: Decision::Blocked,
-                reason: Some(format!("transport error: {e}")),
-            },
+                decision: parts.decision,
+                reason: parts.reason,
+            }
         };
         observations.push(observation);
     }
@@ -453,7 +443,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn tool_call_jsonrpc_error_maps_to_blocked() {
+    async fn tool_call_jsonrpc_error_is_inconclusive() {
         let s = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/mcp"))
@@ -468,20 +458,17 @@ mod tests {
             args: None,
             burst: None,
         };
-        let actual = replay(&t, &scen, "case-tool-blocked", None).await.unwrap();
-        assert_eq!(actual.decision, Decision::Blocked);
-        assert_eq!(actual.by_policy_kind, Some(PolicyKindRef::ToolPolicy));
-        assert!(
-            actual
-                .reason
-                .as_deref()
-                .unwrap_or("")
-                .contains("forbidden_tool")
+        let error = replay(&t, &scen, "case-tool-blocked", None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ReplayError>(),
+            Some(&ReplayError::Protocol)
         );
     }
 
     #[tokio::test]
-    async fn tool_call_is_error_content_maps_to_blocked() {
+    async fn tool_call_is_error_content_is_not_a_policy_verdict() {
         let s = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/mcp"))
@@ -496,14 +483,12 @@ mod tests {
             args: None,
             burst: None,
         };
-        let actual = replay(&t, &scen, "case-tool-iserr", None).await.unwrap();
-        assert_eq!(actual.decision, Decision::Blocked);
-        assert!(
-            actual
-                .reason
-                .as_deref()
-                .unwrap_or("")
-                .contains("policy denied")
+        let error = replay(&t, &scen, "case-tool-iserr", None)
+            .await
+            .unwrap_err();
+        assert_eq!(
+            error.downcast_ref::<ReplayError>(),
+            Some(&ReplayError::Protocol)
         );
     }
 
@@ -512,7 +497,7 @@ mod tests {
         let s = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/mcp"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
+            .respond_with(ResponseTemplate::new(429).set_body_string(
                 r#"{"jsonrpc":"2.0","id":1,"error":{"code":-32000,"message":"rate limit exceeded"}}"#,
             ))
             .mount(&s)
@@ -569,7 +554,7 @@ mod tests {
         let s = MockServer::start().await;
         Mock::given(method("POST"))
             .and(path("/platform/mcp"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
+            .respond_with(ResponseTemplate::new(403).set_body_string(
                 r#"{"jsonrpc":"2.0","id":1,"result":{"content":[{"type":"text","text":"cross-sandbox read denied"}],"isError":true}}"#,
             ))
             .mount(&s)
@@ -582,13 +567,6 @@ mod tests {
         let actual = replay(&t, &scen, "case-mem-deny", None).await.unwrap();
         assert_eq!(actual.decision, Decision::Blocked);
         assert_eq!(actual.by_policy_kind, Some(PolicyKindRef::KarsMemory));
-        assert!(
-            actual
-                .reason
-                .as_deref()
-                .unwrap_or("")
-                .contains("cross-sandbox read denied")
-        );
     }
 
     #[tokio::test]
