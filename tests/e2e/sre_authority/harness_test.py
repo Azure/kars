@@ -7,6 +7,7 @@ import copy
 import json
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tempfile
 import time
@@ -499,16 +500,17 @@ class HarnessTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[3]
         workflow = (root / ".github/workflows/ci.yml").read_text()
         kind = workflow.split("  e2e-kind:", 1)[1].split("  bench-regression:", 1)[0]
-        expression = re.search(r"\| grep -E '([^']+)'", kind)
-        self.assertIsNotNone(expression)
-        pattern = expression.group(1)
+        self.assertIn("ci/bridge_contracts.py --output run --core-only", kind)
+        required = runpy.run_path(str(root / "ci/bridge_contracts.py"))["native_required"]
         for path in ("shared/sre_privacy.rs", "shared/another_security_module.rs",
-                     "controller/src/sre_authority.rs", "cli/src/lib/sre-authority.ts"):
+                     "controller/src/sre_authority.rs", "cli/src/lib/sre-authority.ts",
+                     "cli/src/lib/private-activation.ts", "runtimes/openclaw/skills/SKILL.md",
+                     "unrelated/shared/sre_privacy.rs"):
             with self.subTest(path=path):
-                self.assertRegex(path, pattern)
-        for path in ("docs/how-to/sre-authority.md", "unrelated/shared/sre_privacy.rs"):
+                self.assertTrue(required([path], core_only=True))
+        for path in ("docs/how-to/sre-authority.md", "bridge/web/src/page.tsx"):
             with self.subTest(path=path):
-                self.assertNotRegex(path, pattern)
+                self.assertFalse(required([path], core_only=True))
 
 
 if __name__ == "__main__":
