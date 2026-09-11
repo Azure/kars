@@ -3,92 +3,18 @@
 
 import { describe, expect, it, vi } from "vitest";
 import { rootCertificates } from "node:tls";
+import { fixture as baseFixture, rootPod } from "./private-activation-fixtures.js";
 import { applyReviewedGrant } from "../commands/credential-grants.js";
 import {
-  bundleDefinition, previewPrivateActivation, stagePrivateActivation, validatePrivateActivation,
+  previewPrivateActivation, stagePrivateActivation, validatePrivateActivation,
   validateQualifiedActivation, privateMaterial, PRIVATE_PREFIX,
   consumesPrivateAuthority,
 } from "./private-activation.js";
 
 function fixture() {
-  const objects = new Map<string, any>();
-  const calls: string[][] = [];
-  const key = (kind: string, name: string, namespace = "") => `${kind}/${namespace}/${name}`;
-  for (const name of ["work", "core", "reader"]) objects.set(key("namespace", name), {
-    kind: "Namespace", metadata: { name, uid: `${name}-uid`, resourceVersion: "1", annotations: {} },
-  });
-  objects.set(key("serviceaccount", "kars-controller", "core"), {
-    metadata: { name: "kars-controller", namespace: "core", uid: "controller-sa", resourceVersion: "1" },
-  });
-  objects.set(key("serviceaccount", "bff", "reader"), {
-    metadata: { name: "bff", namespace: "reader", uid: "reader-sa", resourceVersion: "1" },
-  });
-  for (const name of bundleDefinition().controllers as string[]) objects.set(key("serviceaccount", name, "kube-system"), {
-    metadata: { name, namespace: "kube-system", uid: `${name}-uid`, resourceVersion: "1" },
-  });
-  const deployment = {
-    kind: "Deployment", metadata: { name: "kars-controller", namespace: "core", uid: "deployment", resourceVersion: "1", generation: 1 },
-    spec: { replicas: 1, template: { metadata: {}, spec: { serviceAccountName: "kars-controller",
-      containers: [{ name: "controller", image: "fixture", command: ["controller"] }] } } },
-    status: { observedGeneration: 1, updatedReplicas: 1, availableReplicas: 1 },
-  };
-  objects.set(key("deployment", "kars-controller", "core"), deployment);
-  objects.set(key("deployments.apps", "kars-controller", "core"), deployment);
-  for (const [index, entry] of (bundleDefinition().objects as any[]).entries()) {
-    const value = structuredClone(entry);
-    value.metadata = { ...value.metadata, uid: `policy-${index}`, resourceVersion: "1", generation: 1 };
-    if (value.kind === "ValidatingAdmissionPolicy") value.status = { observedGeneration: 1, typeChecking: {} };
-    objects.set(key(value.kind.toLowerCase(), value.metadata.name), value);
-  }
-  const pods = new Map<string, any[]>([["work", []], ["core", []], ["reader", []]]);
-  const merge = (value: any, patch: any) => {
-    for (const [name, entry] of Object.entries(patch)) {
-      if (name === "__proto__" || name === "constructor" || name === "prototype") {
-        throw new Error("Unsafe fixture patch property");
-      }
-      if (entry && typeof entry === "object" && !Array.isArray(entry)) {
-        value[name] ??= {};
-        merge(value[name], entry);
-      } else value[name] = entry;
-    }
-  };
-  const execute = async (args: string[], input?: string) => {
-    calls.push(args);
-    if (args[0] === "auth") return "yes";
-    if (args[0] === "create") {
-      const value = JSON.parse(input!);
-      value.metadata.uid = "created-grant";
-      value.metadata.resourceVersion = "1";
-      objects.set(key("karscredentialgrants.kars.azure.com", value.metadata.name, value.metadata.namespace), value);
-      return JSON.stringify(value);
-    }
-    const namespace = args.includes("-n") ? args[args.indexOf("-n") + 1]! : "";
-    if (args[0] === "get" && args[1] === "pods") return JSON.stringify({ metadata: {}, items: pods.get(namespace) ?? [] });
-    const value = objects.get(key(args[1]!, args[2]!, namespace));
-    if (!value && args.includes("--ignore-not-found")) return "";
-    if (!value) throw new Error("fixture object unavailable");
-    if (args[0] === "get" && args[1] === "secret") {
-      const format = args[args.indexOf("-o") + 1];
-      if (format === "go-template={{json .metadata}}") return JSON.stringify(value.metadata);
-      if (format === "go-template={{.type}}") return value.type;
-      if (format === 'go-template={{index .data "tls.crt"}}') return value.data["tls.crt"];
-    }
-    if (args[0] === "get") return JSON.stringify(value);
-    if (args[0] !== "patch") throw new Error("Unexpected fixture mutation");
-    const patch = JSON.parse(args[args.indexOf("-p") + 1]!);
-    expect(patch.metadata.uid).toBe(value.metadata.uid);
-    expect(patch.metadata.resourceVersion).toBe(value.metadata.resourceVersion);
-    merge(value, patch);
-    value.metadata.resourceVersion = String(Number(value.metadata.resourceVersion) + 1);
-    if (value.kind === "Deployment" && patch.spec) {
-      value.metadata.generation = Number(value.metadata.generation) + 1;
-      value.status = { observedGeneration: value.metadata.generation,
-        updatedReplicas: value.spec.replicas, availableReplicas: value.spec.replicas };
-    }
-    return JSON.stringify(value);
-  };
-  const preview = () => previewPrivateActivation(execute, "work", [{ namespace: "reader" }], [], "core", "kcm-certificate", []);
-  return { objects, pods, calls, execute, preview, key, deployment };
+  const f = baseFixture();
+  const preview = () => previewPrivateActivation(f.execute, "work", [{ namespace: "reader" }], [], "core", "kcm-certificate", []);
+  return { ...f, preview };
 }
 
 it("rejects prototype-mutating properties in private activation fixture patches", async () => {
@@ -100,21 +26,6 @@ it("rejects prototype-mutating properties in private activation fixture patches"
     expect(Object.hasOwn(Object.prototype, "polluted")).toBe(false);
   }
 });
-
-function rootPod(f: ReturnType<typeof fixture>, uid = "old-root") {
-  const root = f.objects.get(f.key("deployment", "kars-controller", "core"));
-  f.objects.set(f.key("replicasets.apps", "root-rs", "core"), {
-    kind: "ReplicaSet", metadata: { name: "root-rs", namespace: "core", uid: "root-rs-uid", resourceVersion: "1",
-      ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "kars-controller", uid: "deployment", controller: true }] },
-    spec: { template: structuredClone(root.spec.template) },
-  });
-  return {
-    kind: "Pod", metadata: { name: uid, namespace: "core", uid, resourceVersion: "1",
-      annotations: {},
-      ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "root-rs", uid: "root-rs-uid", controller: true }] },
-    spec: structuredClone(root.spec.template.spec),
-  };
-}
 
 function budgetFixture(replicas = 2) {
   const f = fixture();
@@ -138,7 +49,10 @@ function budgetFixture(replicas = 2) {
     secret.data["tls.crt"] = Buffer.from(rootCertificates[index]!).toString("base64");
     secret.metadata.resourceVersion = String(Number(secret.metadata.resourceVersion) + 1);
   };
-  const state = () => JSON.parse(f.objects.get(f.key("namespace", "core")).metadata.annotations[`${PRIVATE_PREFIX}root-retirement`]);
+  const state = () => {
+    const saved = JSON.parse(f.objects.get(f.key("namespace", "core")).metadata.annotations[`${PRIVATE_PREFIX}root-retirement`]);
+    return saved.version === 2 ? JSON.parse(saved.retirement) : saved;
+  };
   let paused = false;
   const execute = async (args: string[], input?: string) => {
     if (args[0] === "get" && args[1] === "pods" && args[args.indexOf("-n") + 1] === "core"
@@ -315,6 +229,52 @@ describe("generic private activation staging", () => {
     expect(f.deployment.spec.replicas).toBe(2);
   });
 
+  it("shares a completed post-retirement budget qualification without another rotation or root restart", async () => {
+    const f = budgetFixture();
+    f.objects.set(f.key("namespace", "second"), { metadata: { name: "second", uid: "second-uid", resourceVersion: "1", annotations: {} } });
+    const document = async (namespace: string) => ({
+      apiVersion: "kars.azure.com/v1alpha1", kind: "KarsCredentialGrant",
+      metadata: { name: "workspace", namespace },
+      spec: { workspaceUid: `${namespace}-uid`, enabled: true,
+        writers: [{ namespace: "reader", name: "bff", uid: "reader-sa" }],
+        privateActivation: await previewPrivateActivation(f.execute, namespace, [{ namespace: "reader" }], [], "core", "kcm-certificate", []) },
+    });
+    await expect(applyReviewedGrant(f.execute, await document("work"))).rejects.toThrow("operator rotation");
+    const retired = structuredClone(f.state());
+    await expect(document("second")).rejects.toThrow("retirement");
+    expect(f.state()).toEqual(retired);
+    f.rotate(1);
+    await applyReviewedGrant(f.execute, await document("work"));
+    const original = structuredClone(f.objects.get(f.key("karscredentialgrants.kars.azure.com", "workspace", "work")));
+    const root = structuredClone(f.deployment);
+    const secret = structuredClone(f.secret);
+    const history = structuredClone(f.state());
+    f.calls.length = 0;
+    await applyReviewedGrant(f.execute, await document("second"));
+    expect(f.deployment).toEqual(root);
+    expect(f.secret).toEqual(secret);
+    expect(f.state()).toEqual(history);
+    expect(f.objects.get(f.key("karscredentialgrants.kars.azure.com", "workspace", "work"))).toEqual(original);
+    expect(f.calls.filter(args => args[0] === "patch").every(args => args[1] === "namespace" && args[2] === "second")).toBe(true);
+    await validateQualifiedActivation(f.execute, original.spec.privateActivation);
+  });
+
+  it.each(["key", "secret", "version", "configuration"])("rejects changed qualified budget %s without overwriting retirement history", async fault => {
+    const f = budgetFixture();
+    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
+    f.rotate(1);
+    await stagePrivateActivation(f.execute, await f.preview());
+    const history = structuredClone(f.state());
+    if (fault === "key") f.rotate(2);
+    if (fault === "secret") f.secret.metadata.uid = "replacement";
+    if (fault === "version") f.secret.metadata.resourceVersion += "1";
+    if (fault === "configuration") f.objects.get(f.key("deployment", "kars-controller", "core")).spec.template.spec.containers[0].env[0].value = "false";
+    f.calls.length = 0;
+    await expect(f.preview()).rejects.toThrow();
+    expect(f.state()).toEqual(history);
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+  });
+
   it("ignores legacy bundle/qualified-key markers as post-retirement freshness evidence", async () => {
     const f = budgetFixture();
     const review = await f.preview();
@@ -410,7 +370,7 @@ describe("generic private activation staging", () => {
     expect(f.deployment.spec.replicas).toBe(0);
   });
 
-  it("retains intent through a failed final grant publication and requires another fresh post-retirement key", async () => {
+  it("retains completed qualification through failed publication without exposing or rotating the fresh budget key again", async () => {
     const f = budgetFixture();
     await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
     f.rotate(1);
@@ -427,10 +387,18 @@ describe("generic private activation staging", () => {
     })).rejects.toThrow("publication conflict");
     expect(f.deployment.spec.replicas).toBe(2);
     expect(f.state().replicaIntent).toBe(2);
-    await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
-    expect(f.state().attempt).not.toBe(saved.attempt);
-    expect(f.state().baseline.keyDigest).not.toBe(saved.baseline.keyDigest);
-    expect(f.deployment.spec.replicas).toBe(0);
+    const before = structuredClone(f.deployment);
+    const history = structuredClone(f.state());
+    const priorEpochs = ["work", "core", "reader"].map(name =>
+      f.objects.get(f.key("namespace", name)).metadata.annotations[`${PRIVATE_PREFIX}epoch`]);
+    f.calls.length = 0;
+    const resumed = await stagePrivateActivation(f.execute, await f.preview());
+    expect(resumed.namespaces.map(scope => scope.epoch)).toEqual(priorEpochs);
+    expect(f.state()).toEqual(history);
+    expect(f.state().attempt).toBe(saved.attempt);
+    expect(f.state().baseline.keyDigest).toBe(saved.baseline.keyDigest);
+    expect(f.deployment).toEqual(before);
+    expect(f.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
   });
 
   it("publishes only the second reviewed apply after retirement and fresh TLS rotation", async () => {

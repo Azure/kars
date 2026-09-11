@@ -32,7 +32,7 @@ export function replicaIntent(deployment: unknown): number {
   return value;
 }
 
-function binding(activation: PrivateActivation): string {
+export function retirementBinding(activation: PrivateActivation): string {
   const identity = ({ name, uid }: { name: string; uid: string }) => ({ name, uid });
   const root = activation.root;
   return digest({
@@ -49,13 +49,21 @@ function binding(activation: PrivateActivation): string {
   });
 }
 
-function decode(namespace: unknown): RootRetirement | undefined {
+export function retirementState(namespace: unknown): RootRetirement | undefined {
   const raw = at(namespace, "metadata", "annotations", FIELD);
   if (raw === undefined) return undefined;
   if (typeof raw !== "string") throw new Error(failure);
   let value: unknown;
   try { value = JSON.parse(raw); } catch { throw new Error(failure); }
-  const state = record(value);
+  let state = record(value);
+  if (state.version === 2) {
+    if (Object.keys(state).sort().join(",") !== "activation,retirement,retirementDigest,version"
+      || typeof state.retirement !== "string") throw new Error(failure);
+    let original: ReturnType<typeof record>;
+    try { original = record(JSON.parse(state.retirement)); } catch { throw new Error(failure); }
+    if (state.retirement !== canonical(original) || state.retirementDigest !== digest(original)) throw new Error(failure);
+    state = original;
+  }
   const hex = (v: unknown): v is string => typeof v === "string" && /^[a-f0-9]{64}$/.test(v);
   const text = (v: unknown): v is string => typeof v === "string" && v.length > 0 && v.length <= 253;
   if (Object.keys(state).some(k => !["version", "attempt", "binding", "replicaIntent", "originalVersion",
@@ -88,7 +96,7 @@ function decode(namespace: unknown): RootRetirement | undefined {
 export function retirementReview(
   activation: PrivateActivation, namespace: unknown, deployment: unknown, recoverIntent = false,
 ): RootRetirement | undefined {
-  const state = decode(namespace);
+  const state = retirementState(namespace);
   if (reviewed(namespace).uid !== activation.root.namespace.uid
     || reviewed(deployment).uid !== activation.root.deployment.uid
     || templateDigest(deployment) !== activation.root.templateDigest) throw new Error(failure);
@@ -100,7 +108,7 @@ export function retirementReview(
     return undefined;
   }
   if (recoverIntent) activation.root.replicaIntent = state.replicaIntent;
-  if (binding(activation) !== state.binding || activation.root.replicaIntent !== state.replicaIntent
+  if (retirementBinding(activation) !== state.binding || activation.root.replicaIntent !== state.replicaIntent
     || state.pauseRoot !== consumesPrivateAuthority(deployment, activation.root.namespace.name, activation)) throw new Error(failure);
   const replicas = replicaIntent(deployment);
   const paused = state.pauseRoot ? 0 : state.replicaIntent;
@@ -119,7 +127,7 @@ export function startRetirement(
   activation: PrivateActivation, deployment: unknown, previous: RootRetirement | undefined,
 ): RootRetirement {
   if (previous && previous.phase !== "restoring") return structuredClone(previous);
-  return { version: 1, attempt: randomBytes(32).toString("hex"), binding: binding(activation),
+  return { version: 1, attempt: randomBytes(32).toString("hex"), binding: retirementBinding(activation),
     replicaIntent: activation.root.replicaIntent, originalVersion: reviewed(deployment).resourceVersion,
     pauseRoot: consumesPrivateAuthority(deployment, activation.root.namespace.name, activation),
     phase: "pausing", captured: previous?.captured ?? {},
