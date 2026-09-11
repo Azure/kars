@@ -21,6 +21,11 @@ chart settings, uses RuntimeDefault seccomp, and replaces the AKS-specific
 sandbox pool selector with the standard Linux node label.
 
 ```bash
+kars schemas prepare --release kars --namespace kars-system \
+  --chart deploy/helm/kars \
+  --values deploy/helm/kars/values-generic.yaml \
+  --values my-generic-values.yaml
+
 helm upgrade --install kars deploy/helm/kars \
   --namespace kars-system \
   --create-namespace \
@@ -34,6 +39,15 @@ policy, monitoring, ingress, and signing integrations. A NetworkPolicy-capable
 CNI is required.
 
 The overlay is opt-in and does not change existing AKS defaults.
+
+The schema preparation step is required before the first admission installation;
+a single Helm invocation cannot order asynchronous CRD OpenAPI publication ahead
+of policy type checking. Use the same chart, release, namespace, context and
+values as the following Helm operation. The public helper installs only exact
+owned CRDs and verifies Established, resource discovery, hashed OpenAPI v3
+documents and resolvable declared types. It does not install policies or grant
+writer authority. See [the schema lifecycle](../../../docs/how-to/helm-installation.md#required-schema-before-admission-stage)
+for ownership, upgrade and already-failed-policy bounds.
 
 To use an externally managed AgentMesh deployment instead, set:
 
@@ -51,9 +65,10 @@ helm template kars deploy/helm/kars \
   --values deploy/helm/kars/values-generic.yaml >/tmp/kars.yaml
 ```
 
-The chart templates all Kars `CustomResourceDefinition` objects during Helm
-installation. CRDs added by later Kars versions are installed when that chart
-version is upgraded.
+CRDs remain in the chart's tracked templates, not Helm's install-only `crds/`
+directory. Pre-created CRDs carry the exact intended Helm ownership, and the
+following Helm operation records/manages them normally. Later upgrades use the
+same schema preflight; they do not delete CRDs or customer resources.
 
 For an existing AKS cluster, run `kars config adopt-aks` after Helm installation
 to write the local deployment context used by `kars upgrade`, `kars push`, and

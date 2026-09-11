@@ -8,6 +8,7 @@ import type { Execute } from "../lib/deployment-target.js";
 import type { DeploymentRecord } from "../lib/core-image-apply.js";
 import { releaseImagePlan } from "../lib/release.js";
 import { planSandboxImages } from "../lib/sandbox-image-apply.js";
+vi.mock("../lib/core-helm-schemas.js", () => ({ prepareCoreHelmSchemas: vi.fn(async () => {}) }));
 
 const digest = `sha256:${"a".repeat(64)}`;
 const pushed = (name: string): PushedImage => ({

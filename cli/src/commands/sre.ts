@@ -10,6 +10,7 @@ import { authorityCommand } from "./sre-authority.js";
 import { assertDestroySafe, assertSafeMutation, enroll, get, preview, registration, requireRegistrar, waitForAuthority } from "../lib/sre-authority.js";
 import { stageSource } from "../lib/sre-source.js";
 import { listSreHelmReleases } from "../lib/sre-helm.js";
+import { prepareCoreHelmSchemas, prepareCoreTemplateSchemas } from "../lib/core-helm-schemas.js";
 
 const HELM_RELEASE_NAME = /^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?(?:\.[a-z0-9](?:[-a-z0-9]*[a-z0-9])?)*$/;
 
@@ -131,9 +132,11 @@ export function sreCommand(): Command {
         execa(file, [...(options.context ? [file === "helm" ? "--kube-context" : "--context", options.context] : []), ...args], commandOptions);
       await requireRegistrar(execute);
       if (mode === "install") {
-        await execute("helm", ["install", options.release, chartPath, "--namespace", options.namespace,
+        const installArgs = ["install", options.release, chartPath, "--namespace", options.namespace,
           "--create-namespace", "--set", "sre.enabled=false",
-          "--set", "azure.workloadIdentity.clientId=dummy", "--wait", "--timeout", "8m"], { stdio: "pipe" });
+          "--set", "azure.workloadIdentity.clientId=dummy", "--wait", "--timeout", "8m"];
+        await prepareCoreHelmSchemas(execute, installArgs);
+        await execute("helm", installArgs, { stdio: "pipe" });
         mode = "upgrade";
       }
       if (!await get(execute, "crd", "karssreregistrations.kars.azure.com")) {
@@ -222,6 +225,9 @@ export function sreCommand(): Command {
           // apply to avoid a tempfile and to inherit kubectl's own
           // diff/error formatting.
           const { stdout } = await execa("helm", helmArgs, { stdio: "pipe" });
+          const remainder = await prepareCoreTemplateSchemas(execute, stdout, {
+            release: options.release, namespace: options.namespace, ownership: "template",
+          });
           const kctxArgs = options.context ? ["--context", options.context] : [];
           await execa(
             "kubectl",
@@ -232,11 +238,12 @@ export function sreCommand(): Command {
               "--server-side",
             ],
             {
-              input: stdout,
+              input: remainder,
               stdio: ["pipe", "inherit", "inherit"],
             },
           );
         } else {
+          await prepareCoreHelmSchemas(execa, helmArgs);
           await execa("helm", helmArgs, { stdio: "inherit" });
         }
       } catch {
@@ -313,6 +320,7 @@ export function sreCommand(): Command {
 
       console.log(chalk.cyan("▸ disabling kars-sre via helm upgrade --reuse-values…"));
       try {
+        await prepareCoreHelmSchemas(execa, helmArgs);
         await execa("helm", helmArgs, { stdio: "inherit" });
       } catch {
         console.error(chalk.red("✗ helm upgrade failed"));
