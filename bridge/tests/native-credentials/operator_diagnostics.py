@@ -12,6 +12,7 @@ ERRORS = {
     "Private activation inventory is malformed": "malformed-inventory",
     "Private activation requires live API UID/resourceVersion identities": "missing-live-identity",
     "Reviewed private namespace changed": "namespace-review-changed",
+    "Consumer execution differs from the reviewed controller template; preserve it for explicit Pod review": "consumer-execution-drift",
     "Private activation staging requires the existing cluster-scoped credential operator authority": "operator-authority",
     "Explicit credential-grant operator permission is required": "operator-authority",
 }
