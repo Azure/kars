@@ -39,14 +39,30 @@ Development identity examples are not production authentication defaults.
 The foreground BFF launcher does not kill an unrelated listener or silently
 leave a detached process.
 
-The monorepo adaptation still needs component builds, static/security review,
-add-on install/removal evidence and same-candidate native acceptance. Core
-credential and evaluator prerequisites remain separate reviewed PRs; full
-governed Team execution is not declared qualified by this import.
+At public candidate `cf7e0ed1b821a10cd0b24515a579429410954bfd`, Bridge CI
+34606482468 passed all ten component/audit/add-on jobs. Native run 34606482569
+failed: the API lane reported undeclared `params` in credential-source-writes,
+and the runtime lane's initial grant was denied by private-consumption-grant.
+Lifecycle and TLS/CNI acceptance were not reached. Subsequent changes require
+fresh same-candidate qualification. Core credential and evaluator prerequisites
+remain separate reviewed PRs; full governed Team execution is not declared
+qualified by this import.
 
 The existing capability-audit, crypto, stub and null-provider gates now include
 Bridge's relevant production paths. CodeQL retains repository-wide analysis
 with no path exclusions. Importing source does not exempt it from these gates.
+
+The stub gate now filters once per file instead of forking per source line.
+That performance-only step reproduced all 130 prior public findings exactly.
+The subsequent syntax-aware correction distinguishes actual JS/TS fields and
+JSX/Tailwind form syntax from unfinished-code markers using the CLI's existing
+locked TypeScript parser. Comments, string values and standalone unfinished
+declarations remain checked, including on the same line as a form attribute;
+parse or tool failures fail the gate. No production path or marker pattern was
+removed. Eleven regression fixtures cover scope, genuine markers, diff position,
+CSS variants and fail-closed parsing. Three comments describing example URLs
+and input/number presentation were clarified without changing runtime code.
+This is a scanner-correctness change, not application source sign-off.
 
 The imported application predates the core repository's file-size and copyright
 header conventions. Several files exceed the unchanged 800-line new-file cap,

@@ -12,9 +12,12 @@
 # on the same line. Reviewer must sign off in the security-audit doc.
 #
 # Scope: production code only.
+# JS/TS field syntax uses the CLI's locked TypeScript parser. Comment/value
+# markers remain checked, including on lines with legitimate UI fields.
 set -euo pipefail
 
 BASE_REF="${BASE_REF:-origin/main}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
@@ -57,6 +60,14 @@ for f in "${changed[@]}"; do
     */tests/*|*/test/*|*.test.ts|*.spec.ts|*_test.rs|*/tests.rs) continue;;
   esac
   [ -f "$f" ] || continue
+
+  case "$f" in
+    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs)
+      if ! node "$SCRIPT_DIR/no-stubs-ts.mjs" "$BASE_REF" "$f" "$PATTERNS"; then
+        fail=1
+      fi
+      continue;;
+  esac
 
   # Filter once per file; full product imports must not fork twice per source line.
   while IFS= read -r line; do

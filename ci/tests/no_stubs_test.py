@@ -65,6 +65,70 @@ class NoStubsTests(unittest.TestCase):
         result = self.gate()
         self.assertEqual((result.returncode, result.stderr), (0, ""))
 
+    def test_javascript_placeholder_identifiers_are_not_unfinished_implementations(self):
+        self.write("bridge/web/src/fixture.tsx", """
+type Props = { placeholder?: string };
+export function Field({ placeholder }: Props) {
+  return <input placeholder={placeholder} />;
+}
+export const card = { placeholder: "Describe the requested changes" };
+export const quoted = { "placeholder": "Search" };
+export const styled = <input className="placeholder:text-muted focus:placeholder:text-white" />;
+""")
+        self.commit()
+        result = self.gate()
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_javascript_identifiers_do_not_hide_real_markers_on_the_same_line(self):
+        lines = [
+            'export const a = { placeholder: "TODO implement" };',
+            'export const b = { placeholder: "Search" }; // FIXME validation',
+            'export const c = { placeholder: "placeholder" };',
+            'export const d = "placeholder";',
+            'export function placeholder() { return null; }',
+            'export const placeholder = null;',
+            'export const e = { placeholder: function placeholder() { return null; } };',
+            '// placeholder implementation',
+        ]
+        self.write("bridge/web/src/fixture.ts", "\n".join(lines) + "\n")
+        self.commit()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stderr.splitlines(), [
+            "fail: bridge/web/src/fixture.ts: new stub/placeholder introduced: " + line
+            for line in lines])
+
+    def test_javascript_diff_positions_do_not_scan_unchanged_markers(self):
+        self.write("bridge/web/src/fixture.ts", '// TODO pre-existing\nexport const old = 1;\n')
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.write("bridge/web/src/fixture.ts",
+                   '// TODO pre-existing\nexport const replacement = { placeholder: "Search" };\n')
+        self.commit()
+        result = self.gate()
+        self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_javascript_parser_failure_never_becomes_a_clean_scan(self):
+        self.write("bridge/web/src/fixture.ts", "const placeholder = ;\n")
+        self.commit()
+        result = self.gate()
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("fail:", result.stderr)
+
+    def test_css_variant_recognition_keeps_other_markers_and_non_css_strings(self):
+        lines = [
+            'export const a = <input className="placeholder:text-muted TODO" />;',
+            'export const b = <input className="placeholder" />;',
+            'export const c = "placeholder:text-muted";',
+        ]
+        self.write("bridge/web/src/fixture.tsx", "\n".join(lines) + "\n")
+        self.commit()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stderr.splitlines(), [
+            "fail: bridge/web/src/fixture.tsx: new stub/placeholder introduced: " + line
+            for line in lines])
+
     def test_only_checks_production_paths_and_not_test_files(self):
         for path in ("docs/example.ts", "bridge/bff/src/tests/example.rs",
                      "bridge/bff/src/test/example.rs", "bridge/bff/src/tests.rs",
