@@ -224,9 +224,7 @@ async fn receipt_collector_signs_d0_history_after_promotion_to_d1() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path_regex(
-            "/api/v1/namespaces/[^/]+/configmaps/kars-receipt-log",
-        ))
+        .and(path_regex("/api/v1/namespaces/[^/]+/configmaps"))
         .respond_with(ResponseTemplate::new(403).set_body_json(json!({
             "status": "Failure", "code": 403, "reason": "Forbidden", "message": "log unavailable",
         })))
