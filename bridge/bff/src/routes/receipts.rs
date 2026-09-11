@@ -7,8 +7,6 @@
 
 use axum::Json;
 use axum::extract::{Extension, Path, State};
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use serde::Serialize;
 use serde_json::Value;
 
