@@ -33,6 +33,13 @@ receipts/epochs, actual writer capability reviews, and continued denial of
 broad Secret listing. Ready conditions still come only from the controller;
 fixture state changes are not substituted for these live checks.
 
+The observer native case likewise adds its exact Sandbox UID through the
+operator preview/apply path with an explicit runtime Deployment review. A raw
+patch to `observationTargets` is not private-scope qualification. If existing
+private consumers require separate retirement or recovery, that refusal remains
+visible and the observer lane stays unqualified; the fixture does not fabricate
+a qualified epoch or bypass the required operator lifecycle.
+
 Set `core.namespace` independently from the chart's `namespace`. BFF/web
 default workspace and provider operations use the configured core namespace;
 the optional Teams Secret remains in the dedicated Bridge integration namespace.
