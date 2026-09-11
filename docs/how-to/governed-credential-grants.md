@@ -322,6 +322,17 @@ activation callback. It reads no mounted token, emits no credential, and cannot
 pass while that Pod UID remains (including terminating) or while its API
 authority remains authenticated.
 
+The existing bootstrap collector adds `publicPolicyFailure` to failed
+`kars-private-consumption` API diagnostics. It emits only complete known public
+field/annotation keys or CEL binding names from the canonical bundle, plus
+canonical expression indexes/names when the response actually supplies a
+location, identifier, or exact public expression. It does not infer an
+expression from a missing key. Unknown keys, policy drift, ambiguous attribution
+and unavailable locations remain explicitly `unclassified`; no raw Status,
+object, header, token, annotation value or expression text is exported.
+Recognition never changes the original HTTP status or failed bootstrap
+assertion. The same bounded collector runs in the existing schema CI job.
+
 Install the new CRD, controller and admission policies first. Install the private
 add-on's ServiceAccount without broad Secret or Deployment write permissions.
 The namespaces must already exist.
