@@ -113,8 +113,9 @@ def command(stage, args, *, root, data=None):
 
 def request(port, method, path, obj=None, *, accept="application/json"):
     body = None if obj is None else json.dumps(obj).encode()
+    content_type = "application/merge-patch+json" if method == "PATCH" else "application/json"
     req = Request(f"http://127.0.0.1:{port}{path}", data=body, method=method,
-                  headers={"Content-Type": "application/json", "Accept": accept})
+                  headers={"Content-Type": content_type, "Accept": accept})
     opener = build_opener(ProxyHandler({}))
     try:
         response = opener.open(req, timeout=15)
