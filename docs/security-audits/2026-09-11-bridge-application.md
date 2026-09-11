@@ -173,6 +173,23 @@ also use the qualified SHA adapter without changing their canonical input,
 `host:port` framing or identifier widths. They are not left hidden from the
 top-level import scanner.
 
+### Explicit version-one credential-key compatibility boundary
+
+The existing credential review key recipe is isolated in
+`providers/credential_review.rs`, separate from the allowed content-digest
+adapter. It remains the exact versioned SHA-256 derivation over the domain,
+literal NUL and raw principal-secret bytes; it is not described as HKDF or as a
+plain content hash. Independent compatibility vectors preserve whitespace and
+the existing derived-key bytes.
+
+This is an architectural extraction, not a claim of new cryptographic assurance.
+HS256 algorithms, audiences, five-minute expiry, three-submission bounds,
+operator identity and existing review/continuation/value-tag formats are
+unchanged. An algorithm change would require a separately versioned migration
+covering active continuation receipts and rolling upgrades, not silently
+invalidating their tags. The new key adapter is not allowlisted or approved by
+this record; explicit review and hosted compatibility proof remain required.
+
 The imported application predates the core repository's file-size and copyright
 header conventions. Several files exceed the unchanged 800-line new-file cap,
 and the header gate reports missing Microsoft headers on imported files.

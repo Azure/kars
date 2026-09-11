@@ -4,13 +4,13 @@ use axum::{
 };
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey, Header, Validation, decode, encode};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use super::operator::{CredentialRequest, credential_write_error, is_dns1123_label, is_env_key};
 use crate::{
     auth::Principal,
     error::{AppError, AppResult},
     kars::credential_review::{CredentialReview, ReviewedWrite, StoredSource},
+    providers::credential_review::derive_v1_key,
     state::AppState,
 };
 
@@ -101,10 +101,7 @@ fn signing_key(state: &AppState) -> AppResult<Vec<u8>> {
                 "Signed operator sessions are required for credential review".into(),
             )
         })?;
-    let mut hash = Sha256::new();
-    hash.update(b"kars-bridge/credential-review-signing-key/v1\0");
-    hash.update(secret.as_bytes());
-    Ok(hash.finalize().to_vec())
+    Ok(derive_v1_key(secret).to_vec())
 }
 
 fn sign(key: &[u8], claims: &Claims) -> AppResult<String> {
