@@ -192,6 +192,9 @@ pub struct SourceMetadata {
     pub name: String,
     pub uid: String,
     pub resource_version: String,
+    /// Previous version in the controller's UID/RV-fenced ownership-only update.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ownership_from_resource_version: Option<String>,
     pub keys: Vec<String>,
     pub phase: String,
     pub reason: String,

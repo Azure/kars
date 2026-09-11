@@ -27,7 +27,8 @@ def failure_site(error):
     while frame:
         name = Path(frame.tb_frame.f_code.co_filename).name
         if name in ("bootstrap_probe.py", "binding_probe.py", "bootstrap_cases.py",
-                    "controller_update_probe.py", "collection_delete_probe.py", "private_consumption_phase.py"):
+                    "controller_update_probe.py", "collection_delete_probe.py", "private_consumption_phase.py") \
+                and frame.tb_frame.f_code.co_name != "require":
             result.update(source=name, line=frame.tb_lineno)
         frame = frame.tb_next
     return result

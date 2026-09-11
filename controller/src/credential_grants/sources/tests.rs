@@ -13,6 +13,7 @@ const LEGACY: &str = "/api/v1/namespaces/work/secrets/kars-workspace-channels";
 struct State {
     objects: BTreeMap<String, Value>,
     patches: Vec<Value>,
+    conflict: bool,
 }
 fn merge(value: &mut Value, patch: &Value) {
     if let Some(fields) = patch.as_object() {
@@ -63,7 +64,17 @@ async fn fixture(
     Mock::given(|_:&wiremock::Request|true).respond_with(move |r:&wiremock::Request| {
         let mut s=captured.lock().unwrap();let path=r.url.path();
         if r.method=="GET" && let Some(value)=s.objects.get(path) {return ResponseTemplate::new(200).set_body_json(value);}
-        if r.method=="PATCH" && path==SOURCE {
+        if r.method=="GET" && path=="/api/v1/namespaces/work/secrets" {
+            let items = s.objects.values().filter(|value| value["kind"] == "Secret")
+                .map(|value| json!({"metadata":value["metadata"]})).collect::<Vec<_>>();
+            return ResponseTemplate::new(200).set_body_json(json!({
+                "apiVersion":"meta.k8s.io/v1","kind":"PartialObjectMetadataList","metadata":{},"items":items}));
+        }
+        if r.method=="PATCH" && path.starts_with("/api/v1/namespaces/work/secrets/") {
+            if s.conflict {
+                return ResponseTemplate::new(409).set_body_json(json!({
+                    "apiVersion":"v1","kind":"Status","status":"Failure","reason":"Conflict","code":409}));
+            }
             let body:Value=r.body_json().unwrap();let value=s.objects.get_mut(path).unwrap();
             assert_eq!(value["metadata"]["uid"],body["metadata"]["uid"]);
             assert_eq!(value["metadata"]["resourceVersion"],body["metadata"]["resourceVersion"]);
@@ -77,6 +88,89 @@ async fn fixture(
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
     (server, client, state, grant)
+}
+
+#[tokio::test]
+async fn credential_ownership_receipt_attests_only_the_exact_metadata_cas_and_expires_on_change() {
+    const TARGET_SOURCE: &str =
+        "/api/v1/namespaces/work/secrets/kars-credential-input-sandbox-agent";
+    let (_server, client, state, mut grant) = fixture(false).await;
+    {
+        let mut state = state.lock().unwrap();
+        state.objects.insert(
+            "/apis/kars.azure.com/v1alpha1/namespaces/work/karssandboxes/agent".into(),
+            json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsSandbox",
+                "metadata":{"name":"agent","namespace":"work","uid":"agent","resourceVersion":"1"},
+                "spec":{"inferenceRef":{"name":"policy"}}}),
+        );
+        state.objects.insert(
+            TARGET_SOURCE.into(),
+            json!({
+            "apiVersion":"v1","kind":"Secret","type":"Opaque",
+            "metadata":{"name":"kars-credential-input-sandbox-agent","namespace":"work",
+                "uid":"agent-source","resourceVersion":"1","annotations":{
+                    PURPOSE:INPUT_PURPOSE,WORKSPACE:"work",TARGET_KIND:"KarsSandbox",TARGET:"agent",
+                    TARGET_UID:"agent",GRANT_UID:"grant",INTENT:"explicit-reference-v2"}},
+            "data":{"SLACK_BOT_TOKEN":ByteString(b"original".to_vec())}}),
+        );
+        state.conflict = true;
+    }
+    assert!(inventory(&client, &grant).await.is_err());
+    assert!(state.lock().unwrap().patches.is_empty());
+    state.lock().unwrap().conflict = false;
+    let observed = inventory(&client, &grant).await.unwrap();
+    let bound = observed
+        .iter()
+        .find(|entry| entry.uid == "agent-source")
+        .unwrap();
+    assert_eq!(bound.ownership_from_resource_version.as_deref(), Some("1"));
+    assert_eq!(bound.resource_version, "2");
+    {
+        let state = state.lock().unwrap();
+        assert_eq!(state.patches.len(), 1);
+        assert_eq!(
+            state.patches[0]
+                .as_object()
+                .unwrap()
+                .keys()
+                .collect::<Vec<_>>(),
+            vec!["metadata"]
+        );
+        assert_eq!(
+            state.objects[TARGET_SOURCE]["data"]["SLACK_BOT_TOKEN"],
+            json!(ByteString(b"original".to_vec()))
+        );
+    }
+    grant.status = Some(CredentialGrantStatus {
+        sources: observed,
+        ..Default::default()
+    });
+    let repeated = inventory(&client, &grant).await.unwrap();
+    assert_eq!(
+        repeated
+            .iter()
+            .find(|entry| entry.uid == "agent-source")
+            .unwrap()
+            .ownership_from_resource_version
+            .as_deref(),
+        Some("1")
+    );
+    assert_eq!(state.lock().unwrap().patches.len(), 1);
+    {
+        let mut state = state.lock().unwrap();
+        state.objects.get_mut(TARGET_SOURCE).unwrap()["metadata"]["resourceVersion"] = "3".into();
+        state.objects.get_mut(TARGET_SOURCE).unwrap()["data"]["SLACK_BOT_TOKEN"] =
+            json!(ByteString(b"changed".to_vec()));
+    }
+    let changed = inventory(&client, &grant).await.unwrap();
+    assert!(
+        changed
+            .iter()
+            .find(|entry| entry.uid == "agent-source")
+            .unwrap()
+            .ownership_from_resource_version
+            .is_none()
+    );
 }
 
 #[tokio::test]

@@ -17,6 +17,17 @@ parameter-independent source boundary continues to restrict Secret creation
 even while a grant is being deleted. Native `resourceNames` entries are exact
 names, never wildcard patterns. Values remain Opaque Kubernetes Secrets.
 
+When core attaches a source's ownership metadata, it records
+`status.sources[].ownershipFromResourceVersion`. Together with that entry's
+current UID, `resourceVersion` and target identity, this attests one successful
+UID/RV-fenced **metadata-only** update. It does not authorize another value
+write. The receipt is retained only while the exact source UID, version and
+target remain current, and disappears after any other source version change.
+Source writers still cannot create or modify ownership references themselves.
+An adapter may use this controller-owned status to recognize its own stored
+value after enrollment without reading values or accepting arbitrary version
+changes. Older cores without this evidence cannot authorize that transition.
+
 An enrolled provider/controller-settings store may only contain its
 purpose-specific keys. Core, not Bridge, applies typed provider environment
 updates and UID-bound Teams Deployment rollouts. Bridge has no Deployment patch
