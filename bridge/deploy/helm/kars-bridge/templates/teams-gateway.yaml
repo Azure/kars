@@ -1,0 +1,297 @@
+# kars Bridge — Teams Gateway: dedicated ServiceAccount, RBAC, Deployment,
+# Service, NetworkPolicy, and optional Ingress for Teams webhook callbacks.
+# Credentials live in a DEDICATED Secret (kars-bridge-teams), NEVER in the
+# workspace-channels Secret that gets propagated to sandbox pods.
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ .Values.teamsGateway.conversationConfigMapName }}
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: teams-gateway
+data:
+  bindings.json: "[]"
+  approval-messages.json: "[]"
+  resource-versions.json: "{}"
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kars-bridge-teams-gateway
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: teams-gateway
+---
+# Least-privilege Role: watch KarsApprovals, read/write the conversation ConfigMap.
+# No cluster-wide write privileges.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-teams-gateway
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karsapprovals", "karstasks", "karsteams"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["{{ .Values.teamsGateway.conversationConfigMapName }}"]
+    verbs: ["get", "patch", "update"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-teams-gateway
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-teams-gateway
+subjects:
+  - kind: ServiceAccount
+    name: kars-bridge-teams-gateway
+    namespace: {{ include "kars-bridge.namespace" . }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kars-bridge-teams-gateway
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: teams-gateway
+spec:
+  replicas: {{ ternary .Values.teamsGateway.replicas 0 .Values.teamsGateway.enabled }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kars-bridge
+      app.kubernetes.io/component: teams-gateway
+  template:
+    metadata:
+      labels:
+        {{- include "kars-bridge.labels" . | nindent 8 }}
+        app.kubernetes.io/component: teams-gateway
+    spec:
+      serviceAccountName: kars-bridge-teams-gateway
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: teams-gateway
+          image: "{{ .Values.teamsGateway.image.repository }}:{{ .Values.teamsGateway.image.tag }}"
+          imagePullPolicy: {{ .Values.teamsGateway.image.pullPolicy }}
+          ports:
+            - name: teams
+              containerPort: {{ .Values.teamsGateway.port }}
+            - name: internal
+              containerPort: {{ add .Values.teamsGateway.port 1 }}
+          env:
+            - name: TEAMS_GATEWAY_PORT
+              value: "{{ .Values.teamsGateway.port }}"
+            - name: TEAMS_BFF_BASE_URL
+              value: "http://kars-bridge-bff.{{ include "kars-bridge.namespace" . }}.svc.cluster.local:{{ .Values.bff.port }}"
+            - name: TEAMS_CONFIGMAP_NAMESPACE
+              value: {{ include "kars-bridge.namespace" . | quote }}
+            - name: TEAMS_CONFIGMAP_NAME
+              value: {{ .Values.teamsGateway.conversationConfigMapName | quote }}
+            - name: TEAMS_WATCH_NAMESPACE
+              value: {{ include "kars-bridge.namespace" . | quote }}
+            # All secrets from the dedicated kars-bridge-teams Secret
+            - name: TEAMS_CLIENT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.teamsGateway.secretName }}
+                  key: client-id
+                  optional: true
+            - name: TEAMS_TENANT_ID
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.teamsGateway.secretName }}
+                  key: tenant-id
+                  optional: true
+            - name: TEAMS_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.teamsGateway.secretName }}
+                  key: client-secret
+                  optional: true
+            - name: TEAMS_ENTRA_ROLE_MAP
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.teamsGateway.secretName }}
+                  key: entra-role-map
+                  optional: true
+            - name: TEAMS_BFF_INTERNAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.teamsGateway.secretName }}
+                  key: bff-internal-secret
+                  optional: true
+            {{- with .Values.teamsGateway.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /healthz, port: internal }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: internal }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            {{- toYaml .Values.teamsGateway.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kars-bridge-teams-gateway
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: teams-gateway
+spec:
+  selector:
+    app.kubernetes.io/name: kars-bridge
+    app.kubernetes.io/component: teams-gateway
+  ports:
+    - name: teams
+      port: {{ .Values.teamsGateway.port }}
+      targetPort: teams
+    - name: internal
+      port: {{ add .Values.teamsGateway.port 1 }}
+      targetPort: internal
+---
+{{- if .Values.networkPolicy.create }}
+# NetworkPolicy: ingress from internet (Teams webhooks) + BFF (proactive notify).
+# Egress: DNS + K8s API + BFF + Teams Bot Framework service (HTTPS).
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-teams-gateway
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kars-bridge
+      app.kubernetes.io/component: teams-gateway
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    - ports:
+        - port: {{ .Values.teamsGateway.port }}
+          protocol: TCP
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kars-bridge
+              app.kubernetes.io/component: bff
+      ports:
+        - port: {{ add .Values.teamsGateway.port 1 }}
+          protocol: TCP
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+      ports:
+        - port: 443
+          protocol: TCP
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kars-bridge
+              app.kubernetes.io/component: bff
+      ports:
+        - port: {{ .Values.bff.port }}
+          protocol: TCP
+---
+# Allow the Teams gateway to reach the BFF (add gateway as ingress source on BFF policy)
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-bff-teams-gateway-ingress
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kars-bridge
+      app.kubernetes.io/component: bff
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kars-bridge
+              app.kubernetes.io/component: teams-gateway
+      ports:
+        - port: {{ .Values.bff.port }}
+          protocol: TCP
+{{- end }}
+{{- if .Values.teamsGateway.ingress.enabled }}
+---
+# TLS Ingress for Teams webhook callbacks — routes directly to the gateway,
+# not through the web pod.
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: {{ .Release.Name }}-teams-webhook
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: teams-gateway
+  annotations:
+    {{- with .Values.teamsGateway.ingress.annotations }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+spec:
+  {{- if .Values.teamsGateway.ingress.className }}
+  ingressClassName: {{ .Values.teamsGateway.ingress.className | quote }}
+  {{- end }}
+  tls:
+    - hosts:
+        - {{ .Values.teamsGateway.ingress.host | quote }}
+      {{- if .Values.teamsGateway.ingress.tlsSecretName }}
+      secretName: {{ .Values.teamsGateway.ingress.tlsSecretName | quote }}
+      {{- end }}
+  rules:
+    - host: {{ .Values.teamsGateway.ingress.host | quote }}
+      http:
+        paths:
+          - path: {{ .Values.teamsGateway.ingress.path | default "/api/messages" }}
+            pathType: Prefix
+            backend:
+              service:
+                name: kars-bridge-teams-gateway
+                port:
+                  name: teams
+{{- end }}

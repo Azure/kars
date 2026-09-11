@@ -235,6 +235,25 @@ fuzz-quick: ## Smoke-run each fuzz target for 10s (CI-fast)
 		cargo +nightly fuzz run $$t -- -max_total_time=10 -runs=100000 || exit 1; \
 	done
 
+# ─── Optional Bridge ──────────────────────────────────────────────────────────
+
+.PHONY: bridge-check bridge-bff bridge-web bridge-images bridge-helm-lint
+
+bridge-check: ## Check the optional Bridge application without changing core build targets
+	$(MAKE) -C bridge check
+
+bridge-bff: ## Run the optional Bridge BFF in the foreground
+	$(MAKE) -C bridge bff
+
+bridge-web: ## Run the optional Bridge web application
+	$(MAKE) -C bridge web
+
+bridge-images: ## Build optional Bridge images; does not publish or deploy
+	$(MAKE) -C bridge images
+
+bridge-helm-lint: ## Lint the separate additive Bridge chart
+	$(MAKE) -C bridge helm-lint
+
 # ─── Clean ────────────────────────────────────────────────────────────────────
 
 clean: ## Remove build artifacts

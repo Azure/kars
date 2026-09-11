@@ -43,6 +43,15 @@ kars connect dev-agent
 
 ---
 
+## Optional Kars Bridge
+
+[Kars Bridge](bridge/README.md) provides the Workspace, Operator Console and Audit
+application for missions, standing teams and governed evidence. Its complete
+source is under `bridge/`, with separate packages, images and an additive Helm
+release. **Kars core builds, installs and runs without Bridge.** Removing Bridge
+must preserve core resources and customer data. The `kars-bridge` branch is an
+integration preview, not a production release or image publication.
+
 ## The problem
 
 Giving an AI agent real tools means giving it real credentials and a real network. In production that is too much blast radius: a single prompt-injected agent can reach your Azure subscription, your GitHub org, and your customer data.

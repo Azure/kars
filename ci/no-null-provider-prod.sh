@@ -21,6 +21,7 @@ SCAN_PATHS=(
   'cli/src/commands/'
   'docs/'
   'tests/compat/fixtures/'
+  'bridge/deploy/'
 )
 
 # Detect suspect manifests.

@@ -1,0 +1,286 @@
+@import "tailwindcss";
+
+/*
+ * kars Bridge design tokens — refreshed.
+ * A premium, restrained enterprise palette: cool slate neutrals + a single
+ * teal "signal" accent reserved for trust/verification surfaces. Elevation,
+ * radius, and ring tokens give a consistent, modern depth. Token NAMES are
+ * stable — every existing component inherits the refresh for free.
+ */
+:root {
+  --background: #f6f8fb;
+  --surface: #ffffff;
+  --surface-muted: #eef2f7;
+  --border: #e3e9f1;
+  --foreground: #0b1424;
+  --foreground-muted: #475268;
+  --signal: #0e8f86;
+  --signal-fg: #ffffff;
+  --accent: #6366f1;
+  --accent-fg: #ffffff;
+  --danger: #dc2626;
+  --warning: #c9700a;
+  --ok: #15a34a;
+  --radius: 0.875rem;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.05), 0 1px 3px rgba(15, 23, 42, 0.06);
+  --shadow-md: 0 10px 28px -10px rgba(15, 23, 42, 0.16), 0 2px 6px -2px rgba(15, 23, 42, 0.08);
+  --shadow-lg: 0 24px 56px -18px rgba(15, 23, 42, 0.26), 0 6px 14px -6px rgba(15, 23, 42, 0.10);
+}
+
+/* Dark tokens. Applied when the operator explicitly chooses dark
+ * (`html.dark`) OR when the system prefers dark and no explicit light choice
+ * was made (`html:not(.light)`), so an in-app toggle can override the system. */
+:root.dark {
+  --background: #070b14;
+  --surface: #0e1626;
+  --surface-muted: #18233a;
+  --border: #1d2a40;
+  --foreground: #e6edf7;
+  --foreground-muted: #93a1ba;
+  --signal: #2dd4bf;
+  --signal-fg: #042f2e;
+  --accent: #818cf8;
+  --accent-fg: #0b1020;
+  --danger: #f87171;
+  --warning: #fbbf24;
+  --ok: #4ade80;
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+  --shadow-md: 0 10px 30px -10px rgba(0, 0, 0, 0.55);
+}
+
+@media (prefers-color-scheme: dark) {
+  :root:not(.light):not(.dark) {
+    --background: #070b14;
+    --surface: #0e1626;
+    --surface-muted: #18233a;
+    --border: #1d2a40;
+    --foreground: #e6edf7;
+    --foreground-muted: #93a1ba;
+    --signal: #2dd4bf;
+    --signal-fg: #042f2e;
+    --accent: #818cf8;
+    --accent-fg: #0b1020;
+    --danger: #f87171;
+    --warning: #fbbf24;
+    --ok: #4ade80;
+    --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
+    --shadow-md: 0 10px 30px -10px rgba(0, 0, 0, 0.55);
+  }
+}
+
+@theme inline {
+  --color-background: var(--background);
+  --color-surface: var(--surface);
+  --color-surface-muted: var(--surface-muted);
+  --color-border: var(--border);
+  --color-foreground: var(--foreground);
+  --color-foreground-muted: var(--foreground-muted);
+  --color-signal: var(--signal);
+  --color-signal-fg: var(--signal-fg);
+  --color-accent: var(--accent);
+  --color-accent-fg: var(--accent-fg);
+  --color-danger: var(--danger);
+  --color-warning: var(--warning);
+  --color-ok: var(--ok);
+  --font-sans: var(--font-geist-sans);
+  --font-mono: var(--font-geist-mono);
+}
+
+body {
+  background:
+    radial-gradient(1100px 620px at 78% -8%, color-mix(in srgb, var(--signal) 12%, transparent), transparent 60%),
+    radial-gradient(900px 560px at -6% 8%, color-mix(in srgb, var(--accent) 11%, transparent), transparent 55%),
+    var(--background);
+  background-attachment: fixed;
+  color: var(--foreground);
+  font-feature-settings: "cv02", "cv03", "cv04", "ss01";
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+/* Premium scrollbars + smooth, consistent focus across the app. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: var(--border) transparent;
+}
+/* B34 — visible keyboard focus (WCAG 2.4.7/2.4.11). Keyboard users get a
+   clear ring; mouse users are unaffected because we key off :focus-visible. */
+:focus-visible {
+  outline: 2px solid var(--signal, #14b8a6);
+  outline-offset: 2px;
+  border-radius: 4px;
+}
+/* B6 — buttons must advertise their affordance. The browser/Tailwind default
+   for <button> is cursor: default, making every CTA read as unclickable, and
+   disabled buttons give no distinct signal. Restore the expected cursors. */
+button:not(:disabled),
+[role="button"]:not([aria-disabled="true"]),
+summary {
+  cursor: pointer;
+}
+button:disabled,
+button[aria-disabled="true"],
+[role="button"][aria-disabled="true"] {
+  cursor: not-allowed;
+}
+
+/* ─── Motion + surface utilities (design system) ─────────────────────────── */
+@keyframes kb-rise { from { opacity: 0; transform: translateY(8px); } to { opacity: 1; transform: translateY(0); } }
+@keyframes kb-pop { 0% { opacity: 0; transform: scale(.96); } 60% { transform: scale(1.01); } 100% { opacity: 1; transform: scale(1); } }
+@keyframes kb-shimmer { 0% { background-position: -200% 0; } 100% { background-position: 200% 0; } }
+@keyframes kb-pulse-ring { 0% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--signal) 45%, transparent); } 70% { box-shadow: 0 0 0 7px transparent; } 100% { box-shadow: 0 0 0 0 transparent; } }
+@keyframes kb-draw { from { stroke-dashoffset: var(--len, 100); } to { stroke-dashoffset: 0; } }
+/* Orchestration cube — a slowly tumbling governed core. Pure presentation; the
+   data tiles around it carry the REAL orchestration facts. */
+@keyframes kb-cube-spin {
+  0%   { transform: rotateX(-24deg) rotateY(0deg); }
+  100% { transform: rotateX(-24deg) rotateY(360deg); }
+}
+@keyframes kb-cube-settle {
+  0%   { transform: rotateX(-24deg) rotateY(var(--from, 300deg)); }
+  100% { transform: rotateX(-18deg) rotateY(360deg); }
+}
+@keyframes kb-edge-flow {
+  0%,100% { opacity: .25; }
+  50%     { opacity: 1; }
+}
+/* Packet flow along an active graph edge (dash marches from hub → node). */
+@keyframes kb-flow {
+  to { stroke-dashoffset: -17; }
+}
+@keyframes kb-agent-breathe {
+  0%, 100% {
+    box-shadow:
+      0 8px 24px color-mix(in srgb, var(--signal) 8%, transparent),
+      0 0 0 0 color-mix(in srgb, var(--signal) 24%, transparent);
+  }
+  50% {
+    box-shadow:
+      0 12px 32px color-mix(in srgb, var(--signal) 16%, transparent),
+      0 0 0 5px transparent;
+  }
+}
+@keyframes kb-graph-orbit {
+  0% { transform: scale(.88); opacity: .75; }
+  70%, 100% { transform: scale(1.25); opacity: 0; }
+}
+.kb-agent-node-active { animation: kb-agent-breathe 2.6s ease-in-out infinite; }
+.kb-graph-edge-active { animation: kb-flow .9s linear infinite; }
+.kb-graph-orbit { animation: kb-graph-orbit 2s ease-out infinite; }
+.kb-cube-scene { perspective: 640px; }
+.kb-cube {
+  position: relative;
+  transform-style: preserve-3d;
+  animation: kb-cube-spin 9s linear infinite;
+}
+.kb-cube.kb-cube-done { animation: kb-cube-settle 1.1s cubic-bezier(.22,1,.36,1) both; }
+.kb-cube-face {
+  position: absolute; inset: 0;
+  border: 1px solid color-mix(in srgb, var(--signal) 55%, var(--border));
+  background: color-mix(in srgb, var(--signal) 10%, var(--surface));
+  border-radius: 10px;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kb-cube { animation: none; transform: rotateX(-20deg) rotateY(-32deg); }
+}
+
+/* ── Real Rubik's cube — 6 faces × 3×3 stickers, premium 3D tumble. ───────── */
+@keyframes kb-rubik-tumble {
+  0%   { transform: rotateX(-28deg) rotateY(-42deg); }
+  50%  { transform: rotateX(-20deg) rotateY(-6deg); }
+  100% { transform: rotateX(-28deg) rotateY(-42deg); }
+}
+.kb-rubik-scene {
+  perspective: 760px;
+  perspective-origin: 50% 42%;
+  filter: drop-shadow(0 18px 26px color-mix(in srgb, var(--foreground) 22%, transparent));
+}
+.kb-rubik {
+  position: relative;
+  transform-style: preserve-3d;
+  transform: rotateX(-26deg) rotateY(-34deg);
+  animation: kb-rubik-tumble 7s ease-in-out infinite;
+}
+.kb-rubik.kb-rubik-settle { animation-play-state: paused; transform: rotateX(-22deg) rotateY(-34deg); transition: transform .9s cubic-bezier(.22,1,.36,1); }
+.kb-rubik-face {
+  position: absolute; inset: 0;
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  grid-template-rows: repeat(3, 1fr);
+  gap: 6%;
+  padding: 6%;
+  border-radius: 12px;
+  background: #0b0f16;               /* the cube's plastic body */
+  box-shadow: inset 0 0 0 1px rgba(255,255,255,.04);
+  backface-visibility: hidden;
+}
+.kb-rubik-sticker {
+  border-radius: 16%;
+  box-shadow: inset 0 2px 4px rgba(255,255,255,.35), inset 0 -3px 6px rgba(0,0,0,.35), 0 1px 1px rgba(0,0,0,.25);
+}
+/* Self-assembly: while the package is being computed, stickers cascade in from
+   nothing (scale + fade, staggered per position) so the cube visibly builds
+   itself, then keeps a faint "recompute" flicker to read as live calculation. */
+@keyframes kb-sticker-assemble {
+  0%   { opacity: 0; transform: scale(.15) rotate(-25deg); }
+  70%  { opacity: 1; transform: scale(1.06); }
+  100% { opacity: 1; transform: scale(1) rotate(0); }
+}
+.kb-rubik-assembling .kb-rubik-sticker {
+  animation: kb-sticker-assemble .55s cubic-bezier(.22,1,.36,1) both;
+}
+@media (prefers-reduced-motion: reduce) {
+  .kb-rubik { animation: none; transform: rotateX(-22deg) rotateY(-34deg); }
+  .kb-rubik-assembling .kb-rubik-sticker { animation: none; }
+}
+
+.kb-rise { animation: kb-rise .4s cubic-bezier(.22,1,.36,1) both; }
+.kb-pop { animation: kb-pop .45s cubic-bezier(.22,1,.36,1) both; }
+.kb-stagger > * { animation: kb-rise .45s cubic-bezier(.22,1,.36,1) both; }
+.kb-stagger > *:nth-child(1){animation-delay:.04s}
+.kb-stagger > *:nth-child(2){animation-delay:.10s}
+.kb-stagger > *:nth-child(3){animation-delay:.16s}
+.kb-stagger > *:nth-child(4){animation-delay:.22s}
+.kb-stagger > *:nth-child(5){animation-delay:.28s}
+.kb-stagger > *:nth-child(6){animation-delay:.34s}
+.kb-stagger > *:nth-child(7){animation-delay:.40s}
+.kb-stagger > *:nth-child(8){animation-delay:.46s}
+
+.kb-pulse { animation: kb-pulse-ring 1.8s ease-out infinite; }
+
+.kb-skeleton {
+  background: linear-gradient(90deg, var(--surface-muted) 25%, color-mix(in srgb, var(--surface-muted) 60%, var(--surface)) 37%, var(--surface-muted) 63%);
+  background-size: 200% 100%;
+  animation: kb-shimmer 1.4s ease-in-out infinite;
+  border-radius: .5rem;
+}
+
+/* Card surface with hover lift — the new default container. */
+.kb-card { position: relative; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow-sm); }
+/* A faint top highlight gives cards a lit, elevated feel (premium depth). */
+.kb-card::before { content: ""; position: absolute; inset: 0 0 auto 0; height: 1px; border-radius: var(--radius) var(--radius) 0 0; background: linear-gradient(90deg, transparent, color-mix(in srgb, var(--foreground) 8%, transparent), transparent); pointer-events: none; }
+.kb-card-hover { transition: box-shadow .22s cubic-bezier(.22,1,.36,1), border-color .22s, transform .22s cubic-bezier(.22,1,.36,1); }
+.kb-card-hover:hover { box-shadow: var(--shadow-lg); border-color: color-mix(in srgb, var(--signal) 42%, var(--border)); transform: translateY(-2px); }
+
+/* Subtle dotted/grid texture for hero + composer canvases. */
+.kb-canvas { background-image: radial-gradient(color-mix(in srgb, var(--foreground) 6%, transparent) 1px, transparent 1px); background-size: 22px 22px; }
+
+/* Org chart — a real reporting-line tree drawn with pure-CSS connectors so the
+   edges never break on wrap (the row scrolls horizontally instead). */
+.kb-orgtree ul { display: flex; justify-content: center; padding-top: 20px; position: relative; margin: 0; list-style: none; }
+.kb-orgtree > ul { padding-top: 0; }
+.kb-orgtree li { display: flex; flex-direction: column; align-items: center; position: relative; padding: 20px 12px 0 12px; }
+.kb-orgtree li::before, .kb-orgtree li::after { content: ""; position: absolute; top: 0; right: 50%; width: 50%; height: 20px; border-top: 1.5px solid var(--border); }
+.kb-orgtree li::after { right: auto; left: 50%; border-left: 1.5px solid var(--border); }
+.kb-orgtree li:only-child::before, .kb-orgtree li:only-child::after { display: none; }
+.kb-orgtree li:only-child { padding-top: 20px; }
+.kb-orgtree li:first-child::before, .kb-orgtree li:last-child::after { border: 0 none; }
+.kb-orgtree li:last-child::before { border-right: 1.5px solid var(--border); border-radius: 0 6px 0 0; }
+.kb-orgtree li:first-child::after { border-radius: 6px 0 0 0; }
+.kb-orgtree ul ul::before { content: ""; position: absolute; top: 0; left: 50%; width: 0; height: 20px; border-left: 1.5px solid var(--border); }
+.kb-orgtree-node { display: inline-flex; }
+
+@media (prefers-reduced-motion: reduce) {
+  .kb-rise, .kb-pop, .kb-stagger > *, .kb-pulse, .kb-skeleton,
+  .kb-agent-node-active, .kb-graph-edge-active, .kb-graph-orbit { animation: none; }
+}

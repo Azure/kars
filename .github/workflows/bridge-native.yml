@@ -1,0 +1,180 @@
+name: Bridge native qualification
+
+on:
+  pull_request:
+    branches: [main, dev, kars-bridge]
+    paths:
+      - '.github/workflows/bridge-native.yml'
+      - 'bridge/**'
+      - 'controller/**'
+      - 'inference-router/**'
+      - 'shared/**'
+      - 'deploy/helm/kars/**'
+      - 'Cargo.toml'
+      - 'Cargo.lock'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-native-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CORE_REVISION: ${{ github.event.pull_request.head.sha || github.sha }}
+  KUBECONFIG: ${{ github.workspace }}/bridge/.native/kubeconfig
+  TMPDIR: ${{ github.workspace }}/bridge/.native/scratch
+
+defaults:
+  run:
+    working-directory: bridge
+
+jobs:
+  api-admission:
+    name: Native API and admission (no active SRE)
+    runs-on: ubuntu-22.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Create isolated disposable runner paths
+        run: install -d -m 700 .native/scratch .native/evidence
+      - name: Check out the exact public core candidate
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: bridge/.native/core
+          persist-credentials: false
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.17.3
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          version: v0.24.0
+          kubectl_version: v1.31.0
+          node_image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
+          cluster_name: bridge-native-api
+          kubeconfig: ${{ github.workspace }}/bridge/.native/kubeconfig
+      - name: Validate real CRD schemas and every admission expression
+        run: python3 tests/native-credentials/api_gate.py
+      - name: Retain only secret-free acceptance markers
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: native-api-evidence
+          path: bridge/.native/evidence/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Remove the disposable API cluster
+        if: always()
+        run: kind delete cluster --name bridge-native-api
+
+  native-runtime:
+    name: Native BFF grants, lifecycle, TLS and CNI (no active SRE)
+    # Collect actual controller/BFF evidence independently of schema diagnostics.
+    # Both jobs remain mandatory in the final gate; core readiness is unchanged.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    env:
+      CARGO_INCREMENTAL: '0'
+      CARGO_BUILD_JOBS: '2'
+      CARGO_PROFILE_DEV_DEBUG: '0'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - run: install -d -m 700 .native/scratch .native/evidence .native/bin
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          path: bridge/.native/core
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: |
+            bridge/.native/core
+            bridge/bff
+          key: native-locked-debug-no-symbols
+          cache-on-failure: true
+      - name: Build core and Bridge from the same exact source on the disposable host
+        run: |
+          cargo build --manifest-path .native/core/Cargo.toml --locked \
+            -p kars-controller -p kars-inference-router \
+            --bin kars-controller --bin kars-inference-router
+          cargo build --manifest-path bff/Cargo.toml --locked --bin kars-bridge-bff
+          install -d .native/core/bin/amd64
+          install .native/core/target/debug/kars-controller .native/core/bin/amd64/
+          install .native/core/target/debug/kars-inference-router .native/core/bin/amd64/
+          install bff/target/debug/kars-bridge-bff .native/bin/
+      - name: Package only local qualification images, never publish
+        run: |
+          docker build --build-arg TARGETARCH=amd64 \
+            --file .native/core/controller/Dockerfile --tag kars-native-controller:latest .native/core
+          docker build --build-arg TARGETARCH=amd64 \
+            --file .native/core/inference-router/Dockerfile --tag kars-native-router:latest .native/core
+          docker build --file .native/core/tests/e2e/Dockerfile.sandbox-stub \
+            --tag kars-native-runtime-base:latest .native/core/tests/e2e
+          docker build --file tests/native-credentials/Dockerfile.runtime \
+            --tag kars-native-runtime:latest tests/native-credentials
+          docker build --file tests/native-credentials/Dockerfile.bff \
+            --tag kars-native-bff:latest .native/bin
+          docker build --file tests/native-credentials/Dockerfile.probe \
+            --tag kars-native-probe:latest tests/native-credentials
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v3.17.3
+      - name: Prepare a real CNI topology with metadata-only API auditing
+        run: python3 tests/native-credentials/kind_config.py
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          version: v0.24.0
+          kubectl_version: v1.31.0
+          node_image: kindest/node:v1.31.0@sha256:53df588e04085fd41ae12de0c3fe4c72f7013bba32a20e7325357a1ac94ba865
+          cluster_name: bridge-native
+          config: bridge/.native/kind.json
+          kubeconfig: ${{ github.workspace }}/bridge/.native/kubeconfig
+      - name: Install pinned Cilium, retaining normal kube-proxy
+        run: |
+          helm install cilium cilium --repo https://helm.cilium.io --version 1.18.5 \
+            --namespace kube-system --set ipam.mode=kubernetes \
+            --set kubeProxyReplacement=false --set operator.replicas=1 \
+            --set image.pullPolicy=IfNotPresent --wait --timeout 5m
+          kubectl rollout status daemonset/cilium -n kube-system --timeout=180s
+          kubectl wait --for=condition=Ready nodes --all --timeout=180s
+          kind load docker-image --name bridge-native kars-native-controller:latest \
+            kars-native-router:latest kars-native-runtime:latest kars-native-bff:latest kars-native-probe:latest
+      - name: Exercise normal BFF entrypoints and native controller authority
+        timeout-minutes: 35
+        run: python3 tests/native-credentials/run.py
+      - name: Retain only bounded secret-free native outcomes
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: native-runtime-evidence
+          path: bridge/.native/evidence/*.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Destroy the entire disposable native environment
+        if: always()
+        run: kind delete cluster --name bridge-native
+
+  native-required-gates:
+    name: Require both native API and runtime acceptance
+    needs: [api-admission, native-runtime]
+    if: always()
+    runs-on: ubuntu-22.04
+    timeout-minutes: 2
+    env:
+      API_RESULT: ${{ needs.api-admission.result }}
+      RUNTIME_RESULT: ${{ needs.native-runtime.result }}
+    steps:
+      - name: Fail if either independent prerequisite failed or was skipped
+        working-directory: ${{ github.workspace }}
+        run: |
+          test "$API_RESULT" = success
+          test "$RUNTIME_RESULT" = success

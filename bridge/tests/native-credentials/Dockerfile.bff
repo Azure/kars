@@ -1,0 +1,5 @@
+# Hosted build-once test packaging; private binaries never leave this runner.
+FROM mcr.microsoft.com/azurelinux/distroless/base:3.0
+COPY kars-bridge-bff /usr/local/bin/kars-bridge-bff
+USER 10001:10001
+ENTRYPOINT ["/usr/local/bin/kars-bridge-bff"]
