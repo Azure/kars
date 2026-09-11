@@ -60,87 +60,6 @@ impl AnchorPins {
             }
         }
 
-        #[cfg(test)]
-        mod tests {
-            use super::*;
-
-            const KEY: &str = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
-            const ID: &str = "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9";
-
-            fn log() -> ReceiptLog {
-                ReceiptLog {
-                    public_key: Some(
-                        [
-                            ("keyId", ID),
-                            ("publicKey", KEY),
-                            ("scheme", "DSSEv1+ed25519"),
-                        ]
-                        .map(|(key, value)| (key.to_string(), value.to_string()))
-                        .into_iter()
-                        .collect(),
-                    ),
-                    ..ReceiptLog::default()
-                }
-            }
-
-            #[test]
-            fn pins_follow_the_controller_raw_key_fingerprint_contract() {
-                assert_eq!(super::super::sha256_hex(&public_key(KEY).unwrap()), ID);
-                for (key_id, public_key) in [
-                    (None, None),
-                    (Some(ID.into()), None),
-                    (None, Some(format!(" {KEY}\n"))),
-                    (Some(ID.into()), Some(KEY.into())),
-                ] {
-                    let configured = key_id.is_some() || public_key.is_some();
-                    let anchor = AnchorPins { key_id, public_key }.resolve(&log()).unwrap();
-                    assert_eq!(anchor.pinned, configured);
-                    assert_eq!(anchor.key_id, ID);
-                }
-            }
-
-            #[test]
-            fn copied_key_id_cannot_substitute_another_public_key() {
-                let pins = AnchorPins {
-                    key_id: Some(ID.into()),
-                    public_key: None,
-                };
-                let mut log = log();
-                log.public_key
-                    .as_mut()
-                    .unwrap()
-                    .insert("publicKey".into(), STANDARD.encode([17_u8; 32]));
-                assert!(pins.resolve(&log).is_err());
-                assert!(!AnchorPins::default().resolve(&log).unwrap().pinned);
-            }
-
-            #[test]
-            fn malformed_empty_mismatched_or_missing_pins_fail_closed() {
-                for (key_id, public_key) in [
-                    (Some(String::new()), None),
-                    (Some("wrong".into()), None),
-                    (None, Some(String::new())),
-                    (None, Some("not base64".into())),
-                    (None, Some(STANDARD.encode([1_u8; 31]))),
-                    (None, Some(STANDARD.encode([1_u8; 33]))),
-                    (Some(ID.into()), Some(STANDARD.encode([1_u8; 32]))),
-                ] {
-                    assert!(AnchorPins { key_id, public_key }.resolve(&log()).is_err());
-                }
-                assert!(
-                    AnchorPins::default()
-                        .resolve(&ReceiptLog::default())
-                        .is_err()
-                );
-                let mut invalid = log();
-                invalid
-                    .public_key
-                    .as_mut()
-                    .unwrap()
-                    .insert("publicKey".into(), "invalid".into());
-                assert!(AnchorPins::default().resolve(&invalid).is_err());
-            }
-        }
         if let Some(expected) = &self.public_key
             && public_key(expected)? != key
         {
@@ -153,5 +72,87 @@ impl AnchorPins {
             scheme,
             pinned: self.key_id.is_some() || self.public_key.is_some(),
         })
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    const KEY: &str = "11qYAYKxCrfVS/7TyWQHOg7hcvPapiMlrwIaaPcHURo=";
+    const ID: &str = "21fe31dfa154a261626bf854046fd2271b7bed4b6abe45aa58877ef47f9721b9";
+
+    fn log() -> ReceiptLog {
+        ReceiptLog {
+            public_key: Some(
+                [
+                    ("keyId", ID),
+                    ("publicKey", KEY),
+                    ("scheme", "DSSEv1+ed25519"),
+                ]
+                .map(|(key, value)| (key.to_string(), value.to_string()))
+                .into_iter()
+                .collect(),
+            ),
+            ..ReceiptLog::default()
+        }
+    }
+
+    #[test]
+    fn pins_follow_the_controller_raw_key_fingerprint_contract() {
+        assert_eq!(super::super::sha256_hex(&public_key(KEY).unwrap()), ID);
+        for (key_id, public_key) in [
+            (None, None),
+            (Some(ID.into()), None),
+            (None, Some(format!(" {KEY}\n"))),
+            (Some(ID.into()), Some(KEY.into())),
+        ] {
+            let configured = key_id.is_some() || public_key.is_some();
+            let anchor = AnchorPins { key_id, public_key }.resolve(&log()).unwrap();
+            assert_eq!(anchor.pinned, configured);
+            assert_eq!(anchor.key_id, ID);
+        }
+    }
+
+    #[test]
+    fn copied_key_id_cannot_substitute_another_public_key() {
+        let pins = AnchorPins {
+            key_id: Some(ID.into()),
+            public_key: None,
+        };
+        let mut log = log();
+        log.public_key
+            .as_mut()
+            .unwrap()
+            .insert("publicKey".into(), STANDARD.encode([17_u8; 32]));
+        assert!(pins.resolve(&log).is_err());
+        assert!(!AnchorPins::default().resolve(&log).unwrap().pinned);
+    }
+
+    #[test]
+    fn malformed_empty_mismatched_or_missing_pins_fail_closed() {
+        for (key_id, public_key) in [
+            (Some(String::new()), None),
+            (Some("wrong".into()), None),
+            (None, Some(String::new())),
+            (None, Some("not base64".into())),
+            (None, Some(STANDARD.encode([1_u8; 31]))),
+            (None, Some(STANDARD.encode([1_u8; 33]))),
+            (Some(ID.into()), Some(STANDARD.encode([1_u8; 32]))),
+        ] {
+            assert!(AnchorPins { key_id, public_key }.resolve(&log()).is_err());
+        }
+        assert!(
+            AnchorPins::default()
+                .resolve(&ReceiptLog::default())
+                .is_err()
+        );
+        let mut invalid = log();
+        invalid
+            .public_key
+            .as_mut()
+            .unwrap()
+            .insert("publicKey".into(), "invalid".into());
+        assert!(AnchorPins::default().resolve(&invalid).is_err());
     }
 }

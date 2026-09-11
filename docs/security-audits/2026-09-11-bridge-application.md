@@ -84,6 +84,12 @@ fork retaining the pinned ID, the controller fingerprint vector, and a valid
 checkpoint without witness metadata. Rust execution is pending hosted CI;
 syntax checks are not represented as test execution.
 
+Hosted Bridge CI at `132e1be5` stopped at Clippy before executing tests: an
+unused task-module import and incorrectly nested anchor tests were rejected.
+The correction removes the import, places the tests at module scope and
+requires their exact registration in the hosted test inventory before running
+the complete suite. No lint suppression or assertion removal is used.
+
 Other findings remain open: credential-review V1 derives a secret key with a
 custom versioned SHA-256 construction and cannot inherit a plain content-digest
 exception. Case-normalization of remediation manifest paths also needs a
