@@ -4,7 +4,7 @@
 // Each entry pre-fills the friendly add form (name + endpoint URL + allowed
 // tools). URLs are the vendors' documented hosted MCP endpoints where one exists
 // (the operator confirms/edits before creating); self-hosted reference servers
-// carry a placeholder URL + a docs link so the operator points it at their own
+// carry an example URL + a docs link so the operator points it at their own
 // deployment. Nothing is created until the operator reviews and submits.
 
 export type McpHosting = "hosted" | "managed" | "external";

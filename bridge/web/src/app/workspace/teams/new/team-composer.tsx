@@ -269,7 +269,7 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
     const a = MEMBER_ARCHETYPES.find((x) => x.id === id);
     if (!a) return;
     // B2: dedup — the archetype dropdown gives no confirmation and resets to
-    // its placeholder, so users spam-click it thinking nothing happened and
+    // its initial prompt, so users spam-click it thinking nothing happened and
     // spray duplicate roles. Adding an archetype already in the roster is a
     // no-op (a role can still be added manually via "+ Add role" if a second
     // instance is genuinely wanted). Also flash a visible note so the add isn't

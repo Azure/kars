@@ -1,7 +1,7 @@
 // kars Bridge web — value formatting helpers. Disciplined, audit-friendly
 // rendering of machine values (counts, budgets, money).
 
-/** Thousands-separated integer, or an em-dash placeholder when null. */
+/** Thousands-separated integer, or an em dash when null. */
 export function formatInt(n: number | null | undefined): string {
   if (n == null) return "—";
   return n.toLocaleString();
