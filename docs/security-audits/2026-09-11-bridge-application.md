@@ -139,9 +139,18 @@ Independent known-answer regressions cover standard SHA-256, raw subject case
 and whitespace, sorted compact review JSON with null/absent distinctions,
 decimal/pipe receipt chaining, and short artifact IDs. CI requires their actual
 registration before running the complete suite. Hosted execution is still
-pending; syntax/metadata checks are not a substitute. This extraction does not
-reclassify the V1 secret-key derivation as a content hash, alter receipt
-signature verification, or grant a scanner exception.
+pending in the initial extraction; syntax/metadata checks are not a substitute.
+Corrected `1289a681` then passed actual Clippy, required known-answer registration
+and the complete Rust suite in public run 34641158050.
+
+After that qualification, only the 44-line standard digest adapter is registered
+in the existing crypto-wrapper allowlist. File entries now match exactly rather
+than granting accidental prefix access to lookalike paths; intentionally listed
+directory prefixes retain their previous scope. Four actual-Git regressions
+cover these boundaries. No directory-wide Bridge allowance is added.
+The V1 secret-key derivation is not reclassified as content hashing, and
+unreviewed application/provider paths remain rejected. Receipt signature
+verification and outstanding source-review requirements are unchanged.
 
 The imported application predates the core repository's file-size and copyright
 header conventions. Several files exceed the unchanged 800-line new-file cap,

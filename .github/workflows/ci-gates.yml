@@ -63,6 +63,10 @@ jobs:
         if: matrix.gate == 'no-stubs'
         run: python3 -m unittest discover -s ci/tests -p '*_test.py'
 
+      - name: Verify exact crypto-adapter boundaries
+        if: matrix.gate == 'no-custom-crypto'
+        run: python3 -m unittest discover -s ci/tests -p crypto_gate_test.py
+
       - name: Run gate ${{ matrix.gate }}
         shell: bash
         env:
