@@ -24,7 +24,8 @@ def as_tenant(port, path, obj, *, user=USER, method="POST", uid=None):
         if not isinstance(uid, str) or not uid or len(uid) > 128 or not all(c.isalnum() or c == "-" for c in uid):
             raise RuntimeError("Admission fixture UID is invalid")
         headers["Impersonate-Uid"] = uid
-    req = Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(obj).encode(), method=method,
+    req = Request(f"http://127.0.0.1:{port}{path}",
+                  data=None if method == "GET" else json.dumps(obj).encode(), method=method,
                   headers=headers)
     try:
         response = build_opener(ProxyHandler({})).open(req, timeout=15)

@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import copy
+from contextlib import nullcontext
 import hashlib
 import json
 from pathlib import Path
@@ -78,7 +79,8 @@ class PrivateConsumptionFixtures(unittest.TestCase):
     def test_native_phase_transport_exercises_both_namespaces_controller_uids_and_fenced_cleanup(self):
         api = PhaseAPI()
         reports = []
-        with patch.object(phase, "request", side_effect=api.request), \
+        with patch.object(phase, "kind_proxy", return_value=nullcontext((2, {}))), \
+                patch.object(phase, "request", side_effect=api.request), \
                 patch.object(phase.shared, "request", side_effect=api.request), \
                 patch.object(phase, "as_tenant", side_effect=api.actor), \
                 patch.object(phase.shared, "wait_for", side_effect=api.wait):
@@ -102,7 +104,8 @@ class PrivateConsumptionFixtures(unittest.TestCase):
         for fault in ("allow-private", "allow-missing-metadata", "unrelated-not-found"):
             api = PhaseAPI(fault)
             reports = []
-            with patch.object(phase, "request", side_effect=api.request), \
+            with patch.object(phase, "kind_proxy", return_value=nullcontext((2, {}))), \
+                    patch.object(phase, "request", side_effect=api.request), \
                     patch.object(phase.shared, "request", side_effect=api.request), \
                     patch.object(phase, "as_tenant", side_effect=api.actor), \
                     patch.object(phase.shared, "wait_for", side_effect=api.wait), self.assertRaises(RuntimeError):
