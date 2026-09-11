@@ -363,14 +363,13 @@ pub(crate) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
                 return Err(ERROR.into());
             }
         }
-        if let Some(budget) = &activation.root.budget_tls {
-            if field(&ns, "budget-namespace-uid")? != budget.namespace.uid
+        if let Some(budget) = &activation.root.budget_tls
+            && (field(&ns, "budget-namespace-uid")? != budget.namespace.uid
                 || field(&ns, "budget-tls-uid")? != budget.secret.uid
                 || field(&ns, "budget-tls-version")? != budget.secret.resource_version
-                || field(&ns, "budget-key")? != budget.key_digest
-            {
-                return Err(ERROR.into());
-            }
+                || field(&ns, "budget-key")? != budget.key_digest)
+        {
+            return Err(ERROR.into());
         }
         inspect_namespace(client, &ns, &epoch).await?;
     }
