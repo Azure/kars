@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn egress_connect_502_dns_fail_maps_to_blocked() {
+    async fn egress_connect_502_dns_failure_is_inconclusive_not_a_policy_block() {
         let addr = spawn_fake_forward_proxy(b"HTTP/1.1 502 DNS validation failed\r\n\r\n").await;
         let t = Transport::new("http://router.invalid:8443", Duration::from_secs(2))
             .unwrap()
@@ -377,9 +377,12 @@ mod tests {
             host: "169.254.169.254".into(),
             port: 80,
         };
-        let actual = replay(&t, &scen, "case-egress-imds", None).await.unwrap();
-        assert_eq!(actual.decision, Decision::Blocked);
-        assert_eq!(actual.by_policy_kind, Some(PolicyKindRef::EgressAllowlist));
+        assert_eq!(
+            replay(&t, &scen, "case-egress-imds", None)
+                .await
+                .unwrap_err(),
+            crate::outcome::ReplayError::Upstream
+        );
     }
 
     #[tokio::test]
@@ -596,7 +599,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/v1/chat/completions"))
             .and(header("authorization", "Bearer xyz"))
-            .respond_with(ResponseTemplate::new(200))
+            .respond_with(ResponseTemplate::new(200).set_body_string("{}"))
             .mount(&s)
             .await;
         let t = transport(&s);
