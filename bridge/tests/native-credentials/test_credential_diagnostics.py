@@ -18,6 +18,16 @@ class CredentialDiagnosticsTests(unittest.TestCase):
         for message in (None, {}, PRIVATE, "prefix" + next(iter(CATEGORIES))):
             self.assertEqual(condition_category(message), "unclassified")
 
+    def test_governed_failure_details_only_retain_known_categories_and_http_codes(self):
+        prefix = "CredentialSourceUnavailable: governed credential source or operator grant is unavailable "
+        self.assertEqual(condition_category(prefix + "[target_api; code=Some(404)]"),
+                         "source_or_grant:target_api:404")
+        self.assertEqual(condition_category(prefix + "[bundle_owner; code=None]"),
+                         "source_or_grant:bundle_owner")
+        for suffix in ("[target_api; code=Some(999)]", "[private_value; code=None]",
+                       "[target_api; code=Some(404)]" + PRIVATE, PRIVATE):
+            self.assertEqual(condition_category(prefix + suffix), "unclassified")
+
     def test_scope_capture_reports_only_booleans_and_fixed_states(self):
         sandbox = {"metadata": {"name": "test", "namespace": "work", "uid": "sandbox",
                                "annotations": {"kars.azure.com/namespace-uid": "runtime"}}}

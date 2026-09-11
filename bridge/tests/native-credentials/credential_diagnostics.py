@@ -1,5 +1,7 @@
 """Secret-free failure categories and private-scope metadata booleans."""
 
+import re
+
 from native_api import Failure, resource
 
 PREFIX = "kars.azure.com/private-"
@@ -12,12 +14,29 @@ CATEGORIES = {
     "Private capability is unqualified; regenerate and apply the reviewed grant activation": "private_qualification_invalid",
     "SRE privacy qualification is still pending; no credential issued or reused": "privacy_pending",
 }
+GOVERNED_CATEGORIES = {
+    "binding_shape", "grant_identity", "target_identity", "owner_authority",
+    "source_identity", "source_metadata", "source_owner", "legacy_review",
+    "bundle_owner", "bundle_missing", "target_changed", "grant_changed", "source_changed",
+    "grant_api", "namespace_api", "target_api", "source_metadata_api", "source_value_api",
+    "bundle_read_api", "bundle_create_api", "bundle_bind_api", "bundle_write_api",
+    "source_recheck_api", "source_bind_api", "legacy_import_api", "legacy_identity_api",
+    "legacy_namespace_api", "legacy_metadata_api", "legacy_target_api", "legacy_value_api",
+    "unclassified",
+}
 
 
 def condition_category(message):
     if not isinstance(message, str):
         return "unclassified"
-    return CATEGORIES.get(message.removeprefix("CredentialSourceUnavailable: "), "unclassified")
+    message = message.removeprefix("CredentialSourceUnavailable: ")
+    detail = re.fullmatch(
+        r"governed credential source or operator grant is unavailable "
+        r"\[([a-z_]+); code=(?:None|Some\(([1-5][0-9]{2})\))\]", message,
+    )
+    if detail and detail[1] in GOVERNED_CATEGORIES:
+        return "source_or_grant:" + detail[1] + (":" + detail[2] if detail[2] else "")
+    return CATEGORIES.get(message, "unclassified")
 
 
 def runtime_scope(setup, sandbox):
