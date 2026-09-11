@@ -60,7 +60,7 @@ const KUBE_COMMANDS = new Set([
   "connect", "list", "operator", "push", "destroy", "logs", "status",
   "inspect", "model", "policy", "egress", "headlamp", "trace", "eval",
   "handoff", "mesh", "pair", "convert", "a2a", "a2a-agent", "attest",
-  "migrate", "toolpolicy", "inferencepolicy", "memory", "mcp", "namespace",
+  "migrate", "toolpolicy", "inferencepolicy", "memory", "mcp", "namespace", "schemas",
 ]);
 
 export async function bootstrapKubeContext(argv: string[]): Promise<void> {

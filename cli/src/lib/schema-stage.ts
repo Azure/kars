@@ -1,0 +1,176 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
+import {
+  canonicalSchema, normalizedCrd, readSchemaObject, SCHEMA_DIGEST, schemaDigest, schemaDocuments,
+  schemaIdentity, schemaOwnerFields, verifySchemaOwner, type ObjectMap, type SchemaExecute, type SchemaOwner,
+} from "./schema-documents.js";
+import { waitForPublishedSchemas, type PublishedType, type SchemaWait } from "./schema-discovery.js";
+
+interface PlannedSchema { desired: ObjectMap; current?: ObjectMap; uid?: string; change: boolean }
+export interface SchemaStageOptions extends SchemaOwner, SchemaWait { checkOnly?: boolean }
+
+function validateOwner(owner: SchemaOwner): void {
+  if (!/^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$/.test(owner.release) || owner.release.length > 53
+    || !/^[a-z0-9](?:[-a-z0-9]*[a-z0-9])?$/.test(owner.namespace) || owner.namespace.length > 63
+    || !["helm", "template"].includes(owner.ownership)) throw new Error("An exact schema release, namespace and ownership mode are required");
+}
+
+function servedTypes(crds: ObjectMap[]): PublishedType[] {
+  return crds.flatMap(crd => crd.spec.versions.filter((version: ObjectMap) => version.served).map((version: ObjectMap) => ({
+    group: crd.spec.group, version: version.name, kind: crd.spec.names.kind, plural: crd.spec.names.plural,
+    namespaced: crd.spec.scope === "Namespaced", schema: version.schema.openAPIV3Schema,
+  })));
+}
+
+async function policySafety(execute: SchemaExecute, documents: ObjectMap[]): Promise<boolean> {
+  let observed = true;
+  for (const desired of documents.filter(object => object.kind === "ValidatingAdmissionPolicy")) {
+    const current = await readSchemaObject(execute, "validatingadmissionpolicy", desired.metadata.name);
+    if (!current || canonicalSchema(current.spec) !== canonicalSchema(desired.spec)) continue;
+    if (typeof current.metadata.generation !== "number") throw new Error("Existing policy generation is unavailable");
+    if (current.status?.observedGeneration >= current.metadata.generation) {
+      const warnings = current.status?.typeChecking?.expressionWarnings ?? [];
+      if (current.status.observedGeneration !== current.metadata.generation || !current.status.typeChecking
+        || !Array.isArray(warnings) || warnings.length) {
+        throw new Error(`Policy ${desired.metadata.name} already has observed type-check warnings or invalid status for this exact spec; schema staging cannot repair it without a real policy upgrade or upstream/operator recovery`);
+      }
+    } else {
+      observed = false;
+    }
+  }
+  return observed;
+}
+
+async function existingPoliciesObserved(execute: SchemaExecute, documents: ObjectMap[], options: SchemaWait): Promise<void> {
+  const now = options.now ?? Date.now;
+  const sleep = options.sleep ?? (ms => new Promise(resolve => setTimeout(resolve, ms)));
+  const deadline = now() + (options.timeoutMs ?? 120_000);
+  while (!await policySafety(execute, documents)) {
+    if (now() >= deadline) throw new Error("Existing unchanged admission policy is not observed; no policy generation/status was altered");
+    await sleep(Math.min(500, Math.max(1, deadline - now())));
+  }
+}
+
+/** For the existing narrowly-owned SRE staging path, after its CRD writes.
+ * This does not create, adopt or modify any schema. */
+export async function waitForInstalledCoreSchemas(
+  execute: SchemaExecute, documents: ObjectMap[], options: SchemaWait = {},
+): Promise<void> {
+  const crds = documents.filter(object => object.kind === "CustomResourceDefinition");
+  if (!crds.length || crds.length > 64) throw new Error("Missing or unbounded installed core schema inventory");
+  const identities = new Map<string, string>();
+  for (const desired of crds) {
+    const current = await readSchemaObject(execute, "customresourcedefinition", desired.metadata.name);
+    if (!current || canonicalSchema(normalizedCrd(current)) !== canonicalSchema(normalizedCrd(desired))) {
+      throw new Error(`Installed CRD ${desired.metadata.name} differs from the chart; prepare core schemas before SRE authority`);
+    }
+    identities.set(desired.metadata.name, schemaIdentity(current).uid);
+  }
+  await waitForPublishedSchemas(execute, servedTypes(crds), async () => {
+    let established = true;
+    for (const desired of crds) {
+      const current = await readSchemaObject(execute, "customresourcedefinition", desired.metadata.name);
+      if (!current || schemaIdentity(current).uid !== identities.get(desired.metadata.name)
+        || canonicalSchema(normalizedCrd(current)) !== canonicalSchema(normalizedCrd(desired))) throw new Error("Installed core schema changed during publication");
+      established &&= current.status?.conditions?.some((condition: ObjectMap) => condition.type === "Established" && condition.status === "True") === true;
+    }
+    return established;
+  }, options);
+  await existingPoliciesObserved(execute, documents, options);
+}
+
+export async function stageCoreSchemaDocuments(
+  execute: SchemaExecute, documents: ObjectMap[], options: SchemaStageOptions,
+): Promise<{ schemas: number; published: true }> {
+  validateOwner(options);
+  const owner: SchemaOwner = { release: options.release, namespace: options.namespace, ownership: options.ownership };
+  const crds = documents.filter(object => object.kind === "CustomResourceDefinition");
+  if (!crds.length || crds.length > 64 || new Set(crds.map(object => object.metadata.name)).size !== crds.length) {
+    throw new Error("Core chart must contain between 1 and 64 uniquely identified CRDs");
+  }
+  for (const crd of crds) {
+    normalizedCrd(crd);
+    if (crd.metadata.namespace || crd.metadata.uid || crd.metadata.resourceVersion || crd.metadata.ownerReferences?.length) {
+      throw new Error("Chart CRDs must not carry live/foreign object identities");
+    }
+  }
+  const types = servedTypes(crds);
+  for (const policy of documents.filter(object => object.kind === "ValidatingAdmissionPolicy" && object.spec?.paramKind)) {
+    const param = policy.spec.paramKind;
+    if (param.apiVersion !== "v1" && !types.some(type => `${type.group}/${type.version}` === param.apiVersion && type.kind === param.kind)) {
+      throw new Error(`Policy ${policy.metadata.name} parameter schema is absent from the exact chart`);
+    }
+  }
+  await policySafety(execute, documents);
+  const plans: PlannedSchema[] = [];
+  let priorManifest: ObjectMap[] | undefined;
+  for (const desired of crds) {
+    const current = await readSchemaObject(execute, "customresourcedefinition", desired.metadata.name);
+    if (!current) {
+      if (options.checkOnly) throw new Error(`Schema ${desired.metadata.name} has not been staged`);
+      plans.push({ desired, change: true });
+      continue;
+    }
+    verifySchemaOwner(current, owner);
+    const wanted = normalizedCrd(desired);
+    const actual = normalizedCrd(current);
+    const change = canonicalSchema(actual) !== canonicalSchema(wanted);
+    if (change) {
+      if (options.checkOnly) throw new Error(`Schema ${desired.metadata.name} differs from the chart`);
+      const recorded = current.metadata.annotations?.[SCHEMA_DIGEST] === schemaDigest(actual);
+      if (!recorded) {
+        if (owner.ownership !== "helm") throw new Error(`Customized or unrecorded schema ${desired.metadata.name}; no overwrite is permitted`);
+        priorManifest ??= schemaDocuments((await execute("helm", ["get", "manifest", owner.release, "-n", owner.namespace],
+          { stdio: "pipe" })).stdout);
+        const previous = priorManifest.find(object => object.kind === "CustomResourceDefinition" && object.metadata.name === desired.metadata.name);
+        if (!previous || canonicalSchema(normalizedCrd(previous)) !== canonicalSchema(actual)) {
+          throw new Error(`Live schema ${desired.metadata.name} conflicts with its Helm release; no overwrite is permitted`);
+        }
+      }
+      if (actual.scope !== wanted.scope || canonicalSchema(actual.names) !== canonicalSchema(wanted.names)
+        || (current.status?.storedVersions ?? []).some((version: string) => !wanted.versions.some((item: ObjectMap) => item.name === version))) {
+        throw new Error(`Schema ${desired.metadata.name} requires an explicit identity/storage migration`);
+      }
+    }
+    plans.push({ desired, current, uid: schemaIdentity(current).uid, change });
+  }
+  // Plan every ownership/schema conflict before making the first write.
+  for (const plan of plans.filter(plan => plan.change)) {
+    const fields = schemaOwnerFields(owner);
+    const object = { apiVersion: plan.desired.apiVersion, kind: plan.desired.kind, spec: plan.desired.spec, metadata: {
+      ...plan.desired.metadata,
+      ...(plan.current ? schemaIdentity(plan.current) : {}),
+      labels: { ...plan.desired.metadata.labels, ...fields.labels },
+      annotations: { ...plan.desired.metadata.annotations, ...fields.annotations,
+        [SCHEMA_DIGEST]: schemaDigest(normalizedCrd(plan.desired)) },
+    } };
+    const manager = owner.ownership === "helm" ? "helm" : "kars-schema-stage";
+    const args = plan.current
+      ? ["apply", "--server-side", `--field-manager=${manager}`, "-f", "-", "-o", "json"]
+      : ["create", `--field-manager=${manager}`, "-f", "-", "-o", "json"];
+    const applied: ObjectMap = JSON.parse((await execute("kubectl", [...args, "--request-timeout=20s"],
+      { stdio: "pipe", input: JSON.stringify(object), timeout: 25_000 })).stdout);
+    const identity = schemaIdentity(applied);
+    if ((plan.uid && plan.uid !== identity.uid) || applied.metadata.name !== plan.desired.metadata.name
+      || canonicalSchema(normalizedCrd(applied)) !== canonicalSchema(normalizedCrd(plan.desired))) throw new Error("Schema write returned an unreviewed identity/spec");
+    verifySchemaOwner(applied, owner);
+    plan.uid = identity.uid;
+  }
+  await waitForPublishedSchemas(execute, types, async () => {
+    let established = true;
+    for (const plan of plans) {
+      const current = await readSchemaObject(execute, "customresourcedefinition", plan.desired.metadata.name);
+      if (!current || schemaIdentity(current).uid !== plan.uid
+        || canonicalSchema(normalizedCrd(current)) !== canonicalSchema(normalizedCrd(plan.desired))) throw new Error("CRD identity or schema changed before admission installation");
+      verifySchemaOwner(current, owner);
+      const conditions = current.status?.conditions ?? [];
+      if (conditions.some((condition: ObjectMap) => (condition.type === "NamesAccepted" && condition.status === "False")
+        || (condition.type === "NonStructuralSchema" && condition.status === "True"))) throw new Error("CRD names or structural schema are rejected");
+      established &&= conditions.some((condition: ObjectMap) => condition.type === "Established" && condition.status === "True");
+    }
+    return established;
+  }, options);
+  await existingPoliciesObserved(execute, documents, options);
+  return { schemas: crds.length, published: true };
+}

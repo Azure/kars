@@ -44,6 +44,7 @@ import { auditCommand } from "./commands/audit.js";
 import { headlampCommand } from "./commands/headlamp.js";
 import { sreCommand } from "./commands/sre.js";
 import { updateCommand } from "./commands/update.js";
+import { schemasCommand } from "./commands/schemas.js";
 
 export function createCli(): Command {
   const program = new Command();
@@ -57,6 +58,7 @@ export function createCli(): Command {
 
   // Lifecycle
   program.addCommand(upCommand());
+  program.addCommand(schemasCommand());
   program.addCommand(upgradeCommand());
   program.addCommand(devCommand());
   program.addCommand(addCommand());
@@ -116,7 +118,7 @@ export function createCli(): Command {
 
   program.addHelpText("after", `
 Command groups:
-  Lifecycle       up, dev, add, push, destroy
+  Lifecycle       up, schemas, dev, add, push, destroy
   Operations      connect, status, list, logs, inspect
   Configuration   credentials, budget, model, policy, egress, config
   Observability   trace, eval, operator, audit, headlamp

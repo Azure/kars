@@ -13,6 +13,7 @@ import { acquireImages } from "./up/images.js";
 import { requireBundledAsset } from "../lib/repo-assets.js";
 import { resolveVmSizes } from "../lib/vm-size.js";
 import { cliReleaseTag } from "../lib/version.js";
+import { prepareCoreHelmSchemas } from "../lib/core-helm-schemas.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -784,9 +785,6 @@ Auto-resume:
           // small system nodes. 10m avoids a spurious "context deadline
           // exceeded" while k8s is still legitimately rolling out.
           "--timeout", "10m",
-          // Preserve the existing core field-manager behavior; the SRE
-          // preflight above rejects unreviewed grant migration before this.
-          "--force-conflicts",
         ];
         if (foundryEndpoint) {
           helmArgs.push("--set", `foundry.endpoint=${foundryEndpoint}`);
@@ -855,6 +853,7 @@ Auto-resume:
         } catch { /* non-critical — controller will log warning */ }
 
         stepper.update(`${helmExists ? "Upgrading" : "Installing"} kars Helm chart (controller + CRD + RBAC + seccomp)...`);
+        await prepareCoreHelmSchemas(execa, helmArgs);
         await execa("helm", helmArgs, { stdio: "pipe" });
         stepper.detail(helmExists ? "ok" : "new", `Helm release — ${helmExists ? "upgraded" : "installed"}`);
 
