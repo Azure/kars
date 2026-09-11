@@ -4,66 +4,15 @@
 import { describe, expect, it } from "vitest";
 import { applyReviewedGrant } from "../commands/credential-grants.js";
 import {
-  PRIVATE_PREFIX as P, previewPrivateActivation, stagePrivateActivation, validateQualifiedActivation,
+  PRIVATE_PREFIX as P, stagePrivateActivation, validateQualifiedActivation,
   bundleDefinition, type Execute,
 } from "./private-activation.js";
-import { fixture, rootPod } from "./private-activation-fixtures.js";
+import { continuityFixture as setup, privateAuthoritySnapshot } from "./private-activation-fixtures.js";
 
 const RESOURCE = "karscredentialgrants.kars.azure.com";
 const HISTORY = `${P}root-retirement`;
 const ROOT = HISTORY;
 const SCOPE = HISTORY;
-
-function setup() {
-  const f = fixture();
-  const authority = new Map<string, { metadata: { annotations: Record<string, string> } }>();
-  const namespace = (name: string) => f.objects.get(f.key("namespace", name));
-  const grant = (name = "work") => f.objects.get(f.key(RESOURCE, "workspace", name));
-  for (const name of ["second", "third"]) f.objects.set(f.key("namespace", name), {
-    kind: "Namespace", metadata: { name, uid: `${name}-uid`, resourceVersion: "1", annotations: {} },
-  });
-  f.pods.set("core", [rootPod(f)]);
-  const execute: Execute = async (args, input) => {
-    if (args[1]?.startsWith("roles,")) return JSON.stringify({ metadata: {}, items: [...authority.values()] });
-    const result = await f.execute(args, input);
-    if (args[0] === "patch" && args[2] === "kars-controller") {
-      const patch = JSON.parse(args[args.indexOf("-p") + 1]!);
-      if (patch.spec?.replicas === 0) f.pods.set("core", []);
-      if (patch.spec?.replicas > 0) f.pods.set("core", [rootPod(f, "new-root")]);
-    }
-    if (args[0] === "create" || (args[0] === "patch" && args[1] === RESOURCE)) {
-      const stored = grant(args[0] === "create" ? JSON.parse(input!).metadata.namespace : args[args.indexOf("-n") + 1]);
-      stored.metadata.generation = (stored.metadata.generation ?? 0) + 1;
-      const active = stored.spec.enabled !== false && stored.spec.writers.length > 0;
-      stored.status = { observedGeneration: stored.metadata.generation,
-        conditions: [{ type: "WriterReady", status: active ? "True" : "False" }] };
-      if (active) authority.set(stored.metadata.uid, { metadata: {
-        annotations: { "kars.azure.com/credential-grant-owner": stored.metadata.uid },
-      } });
-      else authority.delete(stored.metadata.uid);
-    }
-    return result;
-  };
-  const preview = (work = "work", consumers: string[] = [], run = execute, profile = "kcm-certificate") =>
-    previewPrivateActivation(run, work, [{ namespace: "reader" }], [], "core", profile, consumers);
-  const document = async (work = "work", consumers: string[] = [], run = execute) => {
-    const existing = grant(work);
-    return {
-      apiVersion: "kars.azure.com/v1alpha1", kind: "KarsCredentialGrant",
-      metadata: { name: "workspace", namespace: work, ...(existing ? {
-        uid: existing.metadata.uid, resourceVersion: existing.metadata.resourceVersion,
-      } : {}) },
-      spec: { workspaceUid: namespace(work).metadata.uid,
-        enabled: true, writers: [{ namespace: "reader", name: "bff", uid: "reader-sa" }],
-        privateActivation: await preview(work, consumers, run) },
-    };
-  };
-  const preserved = () => structuredClone({
-    root: namespace("core"), reader: namespace("reader"), work: namespace("work"), deployment: f.deployment,
-    grant: grant(), authority: authority.get(grant()?.metadata.uid), pods: f.pods.get("core"),
-  });
-  return { ...f, execute, preview, document, namespace, grant, authority, preserved };
-}
 
 function legacy(f: ReturnType<typeof setup>): void {
   const namespace = f.namespace("core");
@@ -113,13 +62,13 @@ describe("completed private qualification continuity", () => {
     await applyReviewedGrant(f.execute, await f.document());
     await applyReviewedGrant(f.execute, await f.document("second"));
     const other = structuredClone(f.grant("second"));
-    const namespaces = ["work", "core", "reader", "second"].map(name => structuredClone(f.namespace(name)));
+    const namespaces = ["work", "core", "reader", "second"].map(name => privateAuthoritySnapshot(f.namespace(name)));
     const review = await f.document();
     f.calls.length = 0;
     await applyReviewedGrant(f.execute, { ...review, spec: { ...review.spec, agentKeys: ["CUSTOM_API_KEY"] } });
     expect(f.grant("second")).toEqual(other);
     expect(f.calls.filter(args => args[0] === "patch").every(args => args[1] === RESOURCE && args.includes("work"))).toBe(true);
-    expect(["work", "core", "reader", "second"].map(name => f.namespace(name))).toEqual(namespaces);
+    expect(["work", "core", "reader", "second"].map(name => privateAuthoritySnapshot(f.namespace(name)))).toEqual(namespaces);
     for (const work of ["work", "second"]) {
       const prior = structuredClone(f.grant(work));
       await applyReviewedGrant(f.execute, { ...prior, spec: { ...prior.spec, writers: [] } });
@@ -129,7 +78,7 @@ describe("completed private qualification continuity", () => {
     f.calls.length = 0;
     await applyReviewedGrant(f.execute, await f.document());
     expect(f.calls.some(args => args[0] === "patch")).toBe(false);
-    expect(["work", "core", "reader", "second"].map(name => f.namespace(name))).toEqual(namespaces);
+    expect(["work", "core", "reader", "second"].map(name => privateAuthoritySnapshot(f.namespace(name)))).toEqual(namespaces);
   });
 
   it("migrates a completed v1 restoring record using its original stored grant, without rewriting retirement history", async () => {

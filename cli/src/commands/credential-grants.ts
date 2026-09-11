@@ -10,6 +10,7 @@ import {
   validateQualifiedActivation, canonical, type PrivateActivation,
   verifyOwnedRuntimeNamespace,
 } from "../lib/private-activation.js";
+import { captureGuardRetirement, refreshGuardRetirement } from "../lib/private-activation-guard-retirement.js";
 
 type Execute=(args:string[],input?:string)=>Promise<string>;
 const resource="karscredentialgrants.kars.azure.com";
@@ -136,6 +137,7 @@ export async function applyReviewedGrant(run:Execute,document:any):Promise<void>
   let quiescentSpec:unknown;
   if(document.spec.enabled!==false&&document.spec.writers.length){
     if(existing&&existing.spec.writers.length){
+      const guardReview=await captureGuardRetirement(run,stagedSpec.privateActivation,existing);
       quiescentSpec={...existing.spec,writers:[]};
       await run(["patch",resource,"workspace","-n",document.metadata.namespace,"--type=merge","-p",JSON.stringify({
         metadata:{uid:existing.metadata.uid,resourceVersion:existing.metadata.resourceVersion},spec:quiescentSpec,
@@ -153,14 +155,24 @@ export async function applyReviewedGrant(run:Execute,document:any):Promise<void>
             throw new Error("Private authority retirement inventory is incomplete");
           if(!inventory.items.some((object:any)=>
             object.metadata?.annotations?.["kars.azure.com/credential-grant-owner"]===existing.metadata.uid)){
-            existing=current;break;
+            const refreshed=await refreshGuardRetirement(run,guardReview);
+            if(refreshed){
+              stagedSpec.privateActivation=refreshed;
+              existing=current;break;
+            }
           }
         }
         if(Date.now()>=deadline)throw new Error("Prior writer authority retirement is still pending; no new activation was published");
         await new Promise(resolve=>setTimeout(resolve,500));
       }
     }
-    stagedSpec.privateActivation=await stagePrivateActivation(run,document.spec.privateActivation);
+    if(quiescentSpec){
+      await validateGrantDocument(run,{...document,spec:stagedSpec});
+      const current=await get(run,resource,"workspace",document.metadata.namespace);
+      if(!current||current.metadata.uid!==existing.metadata.uid||canonical(current.spec)!==canonical(quiescentSpec))
+        throw new Error("Grant changed after retiring prior private writer authority");
+    }
+    stagedSpec.privateActivation=await stagePrivateActivation(run,stagedSpec.privateActivation);
     await validateQualifiedActivation(run,stagedSpec.privateActivation);
   }
   if(existing){
