@@ -16,12 +16,14 @@
 //! and unit-testable without a kube apiserver.
 //!
 //! Exit codes:
-//!   - `0` — corpus replayed; every case passed.
-//!   - `1` — corpus replayed; at least one case failed.
-//!   - `2` — hard error (could not load corpus, could not write report,
-//!     runner crashed before completion).
+//!   - `0` — nonempty corpus selection; every case passed.
+//!   - `1` — conclusive replay with at least one policy failure.
+//!   - `2` — any inconclusive case, empty selection, or execution/reporting error.
+//! `KARS_EVAL_REPORT_FORMAT=v2` enables truthful inconclusive reports.
+//! Without it, conclusive output remains v1 and inconclusive runs emit no report.
 
 mod cli;
+mod outcome;
 mod report;
 mod scenarios;
 mod transport;
@@ -35,6 +37,7 @@ use std::process::ExitCode;
 use std::time::Instant;
 
 use crate::cli::{Cli, CorpusSource};
+use crate::outcome::{Format, ReplayError};
 use crate::report::{CaseReport, RunReport, VerdictWire, build_case_report};
 use crate::scenarios::replay;
 use crate::transport::Transport;
@@ -46,15 +49,9 @@ async fn main() -> ExitCode {
     init_tracing();
 
     match run(cli).await {
-        Ok(any_failed) => {
-            if any_failed {
-                ExitCode::from(1)
-            } else {
-                ExitCode::from(0)
-            }
-        }
+        Ok(code) => ExitCode::from(code),
         Err(e) => {
-            eprintln!("conformance-runner: fatal error: {e:#}");
+            eprintln!("conformance-runner: fatal error: {e}");
             ExitCode::from(2)
         }
     }
@@ -69,8 +66,14 @@ fn init_tracing() {
         .try_init();
 }
 
-/// Returns `Ok(true)` if any case failed, `Ok(false)` if all passed.
-async fn run(cli: Cli) -> Result<bool> {
+async fn run(cli: Cli) -> Result<u8> {
+    let format_value = std::env::var(outcome::FORMAT_ENV);
+    let format = match format_value {
+        Ok(value) => Format::parse(Some(&value)),
+        Err(std::env::VarError::NotPresent) => Format::parse(None),
+        Err(std::env::VarError::NotUnicode(_)) => Err("invalid report format environment"),
+    }
+    .map_err(anyhow::Error::msg)?;
     let started = chrono::Utc::now();
     let started_clock = Instant::now();
 
@@ -82,7 +85,6 @@ async fn run(cli: Cli) -> Result<bool> {
         corpus_name = %corpus.name,
         corpus_digest = %digest,
         cases = corpus.cases.len(),
-        router_base = %cli.router_base,
         "starting conformance run",
     );
 
@@ -101,7 +103,7 @@ async fn run(cli: Cli) -> Result<bool> {
         }
     });
     if let Some(addr) = forward_proxy_addr {
-        tracing::info!(forward_proxy = %addr, "EgressConnect cases will tunnel through this forward proxy");
+        tracing::info!("EgressConnect forward proxy configured");
         transport = transport.with_forward_proxy(addr);
     } else if needs_forward_proxy {
         anyhow::bail!(
@@ -113,6 +115,7 @@ async fn run(cli: Cli) -> Result<bool> {
     let mut results: Vec<CaseReport> = Vec::with_capacity(corpus.cases.len());
     let mut passed: usize = 0;
     let mut failed: usize = 0;
+    let mut errored: usize = 0;
 
     for case in &corpus.cases {
         if let Some(only) = &cli.only_case
@@ -147,28 +150,27 @@ async fn run(cli: Cli) -> Result<bool> {
                 match report.verdict {
                     VerdictWire::Pass => passed += 1,
                     VerdictWire::Fail { .. } => failed += 1,
+                    VerdictWire::Errored { .. } => errored += 1,
                 }
                 report
             }
             Err(e) => {
-                failed += 1;
-                tracing::warn!(
-                    case_id = %case.id,
-                    error = %e,
-                    "case replay failed at transport layer; recording as DecisionMismatch (Blocked)",
-                );
-                synthetic_transport_failure_report(
-                    case,
-                    &format!("transport error: {e:#}"),
-                    case_started.elapsed().as_millis() as u64,
-                )
+                errored += 1;
+                let category = e
+                    .downcast_ref::<ReplayError>()
+                    .copied()
+                    .unwrap_or(ReplayError::Protocol);
+                report::errored_case(case, category, case_started.elapsed().as_millis() as u64)
             }
         };
 
         match &case_report.verdict {
             VerdictWire::Pass => tracing::info!(case_id = %case.id, "PASS"),
-            VerdictWire::Fail { failure } => {
-                tracing::warn!(case_id = %case.id, ?failure, "FAIL");
+            VerdictWire::Fail { .. } => {
+                tracing::warn!(case_id = %case.id, "FAIL");
+            }
+            VerdictWire::Errored { category } => {
+                tracing::warn!(case_id = %case.id, %category, "INCONCLUSIVE")
             }
         }
 
@@ -179,21 +181,43 @@ async fn run(cli: Cli) -> Result<bool> {
     let duration_ms = started_clock.elapsed().as_millis() as u64;
 
     let total = results.len();
+    let code = outcome::exit_code(total, failed, errored);
+    if format == Format::V1 && code == 2 {
+        anyhow::bail!(
+            "inconclusive/empty evaluation cannot be represented by v1; no report emitted; request KARS_EVAL_REPORT_FORMAT=v2"
+        );
+    }
+    let report_router = if format == Format::V2 {
+        let mut router = url::Url::parse(&cli.router_base).context("invalid report router URL")?;
+        router
+            .set_username("")
+            .map_err(|_| anyhow::anyhow!("invalid report router URL"))?;
+        router
+            .set_password(None)
+            .map_err(|_| anyhow::anyhow!("invalid report router URL"))?;
+        router.set_query(None);
+        router.set_fragment(None);
+        router.to_string().trim_end_matches('/').to_owned()
+    } else {
+        cli.router_base.clone()
+    };
     let report = RunReport {
-        schema_version: report::REPORT_SCHEMA_VERSION,
+        schema_version: format.version(),
         corpus_name: corpus.name.clone(),
         corpus_digest: digest,
         started_at: started.to_rfc3339(),
         completed_at: completed.to_rfc3339(),
         duration_ms,
-        router_base: cli.router_base.clone(),
+        router_base: report_router,
         total,
         passed,
         failed,
+        errored: (format == Format::V2).then_some(errored),
         results,
     };
 
-    let json = serde_json::to_string_pretty(&report).context("serialize report")?;
+    let json = serde_json::to_string_pretty(&report::wire_report(&report, format)?)
+        .context("serialize report")?;
     write_report(&cli.output, &json).with_context(|| format!("write {}", cli.output.display()))?;
 
     if !cli.no_stdout {
@@ -204,10 +228,11 @@ async fn run(cli: Cli) -> Result<bool> {
         total,
         passed,
         failed,
+        errored,
         duration_ms,
         "conformance run complete"
     );
-    Ok(failed > 0)
+    Ok(code)
 }
 
 fn load_corpus(source: &CorpusSource) -> Result<(Corpus, Vec<u8>)> {
@@ -250,31 +275,6 @@ fn write_report(path: &PathBuf, json: &str) -> Result<()> {
     }
     std::fs::write(path, json).context("write report file")?;
     Ok(())
-}
-
-/// Build a [`CaseReport`] that records a transport-level failure as a
-/// `DecisionMismatch` (actual `Blocked` vs. whatever was expected). The
-/// reason carries the transport error string so the 6.3 reconciler can
-/// surface it; the corpus's `judge` function only sees actual decisions,
-/// so we bypass it here and stamp the failure directly.
-fn synthetic_transport_failure_report(
-    case: &kars_eval_corpus::Case,
-    reason: &str,
-    duration_ms: u64,
-) -> CaseReport {
-    use kars_eval_corpus::{ActualDecision, Decision, Verdict, VerdictFailure};
-
-    let actual = ActualDecision {
-        decision: Decision::Blocked,
-        by_policy_kind: None,
-        reason: Some(reason.to_string()),
-        observations: Vec::new(),
-    };
-    let verdict = Verdict::Fail(VerdictFailure::DecisionMismatch {
-        expected: case.expect.decision,
-        actual: Decision::Blocked,
-    });
-    build_case_report(case, &actual, &verdict, duration_ms)
 }
 
 /// Derive a sensible default forward-proxy address from `router_base`

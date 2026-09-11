@@ -99,7 +99,7 @@ both a `CronJob` and a one-shot `Job`. They run independently.
 ```
 $ kubectl get karseval -A
 NAMESPACE              NAME                SANDBOX     SCHEDULE      PHASE     LASTRUN   PASSED  FAILED  AGE
-kars-my-agent     nightly-regression  my-agent    0 3 * * *     Ready     12h       41      1       3d
+kars-my-agent     nightly-regression  my-agent    0 3 * * *     Ready     12h       42      0       3d
 ```
 
 The printer columns (`Sandbox`, `Schedule`, `Phase`, `LastRun`,
@@ -108,13 +108,13 @@ fastest way to see "is my eval doing its job?".
 
 ### `status.phase`
 
-Stamped by the reconciler from `(have-last-result, drifted)`:
+Stamped only after checking current intent, terminal workload identity and persisted evidence:
 
 | Phase | Meaning |
 |---|---|
 | `Pending` | CR has been admitted; no run has completed yet. Either the first run is in flight or `run-now` hasn't been set and there's no schedule. |
-| `Ready` | At least one run has completed and the most recent one had `failed == 0`. |
-| `Degraded` | The most recent run had `failed > 0` (drift). When `spec.failSandboxOnDrift=true` the target `KarsSandbox` is also patched to `Degraded` with reason `ConformanceDrift` via the `kars-controller/karseval-drift` field manager. |
+| `Ready` | A current, attributed v2 run evaluated the complete nonempty corpus, every case passed, and its bounded report was persisted. |
+| `Degraded` | A current policy failure, inconclusive/error result, unavailable evidence, or legacy runner requiring upgrade. Only confirmed current policy failures can set sandbox `ConformanceDrift`; that write is UID/resourceVersion-fenced. |
 
 ### `status.conditions`
 
@@ -125,7 +125,7 @@ Three standard plus one KarsEval-specific:
 | `Ready` | Same trigger as phase=Ready. |
 | `Progressing` | A run is in flight (Job exists and hasn't completed). |
 | `Degraded` | Same trigger as phase=Degraded. |
-| `ConformanceDrift` | Most recent run reported `failed > 0`. This is the operator's drift signal; it does not by itself patch the sandbox unless `failSandboxOnDrift=true`. |
+| `ConformanceDrift` | Current attributed v2 evidence contains real policy failures. Transport failures and unverifiable legacy reports are not policy drift. A mixed run can be inconclusive overall and still contain a real policy failure. |
 
 Reasons used on each condition are listed in
 [`docs/api/conditions.md#karseval`](conditions.md#karseval).
@@ -147,9 +147,22 @@ To diff the two most recent runs:
 kars eval diff nightly-regression
 ```
 
-For the per-case detail (which prompt failed and why), grab the runner
-pod log directly — the reconciler keeps the spawning `Job.metadata.name`
-in `status.lastResult.jobName`:
+`status.reportConfigMapRef` points to the exclusively Eval-owned
+`karseval-<name>-report` ConfigMap. `report.json` keeps bounded per-case
+IDs, expected/actual symbolic decisions, verdict/error categories and durations;
+the existing `pass`/`errored` case projections remain readable by Bridge.
+`evidence.json` binds the Eval generation/UID, current intent, Job/Pod identities
+and evidence digest. Combined retention is capped at 256 KiB and 512 cases.
+The protected status also records `reportConfigMapUid` and
+`reportEvidenceDigest`; cache-only replay after Job GC must match that prior
+controller receipt as well as current intent. An unsigned ConfigMap alone
+cannot create fresh Ready.
+Raw prompts, response bodies, headers and free-form error details are not retained.
+The latest report is written before history/readiness advances; a lost write
+acknowledgement is retried idempotently. Foreign or malformed ConfigMaps are
+preserved and surfaced as evidence errors, never adopted with force-SSA.
+
+The source runner log remains accessible using the spawning Job name:
 
 ```bash
 kubectl logs -n kars-system job/$(kubectl get karseval -n kars-system \
@@ -166,10 +179,43 @@ with `lastResult.corpusDigest` this lets operators answer
 "did the corpus drift, or did the sandbox drift?" without leaving
 `kubectl`.
 
-The corpus is materialised into a `ConfigMap` (pointer in
-`status.corpusConfigMapRef`) and mounted into the runner pod; the
-runner re-hashes the bytes and refuses to start if the in-pod digest
-disagrees with the CR-stamped one.
+The corpus is materialised into an ownership-checked ConfigMap and mounted into
+the runner pod. The runner reports its hash of the bytes it actually read.
+The consumer rejects a v2 report whose digest, corpus name, router, case
+inventory, timestamps or native workload identity disagrees with the current
+intent. It never replaces the reported digest with a newly resolved digest.
+
+### Report negotiation and consumer-first rollout
+
+The actual Job and CronJob builder sets `KARS_EVAL_REPORT_FORMAT=v2`. There is
+no new mandatory CLI option, image pin, or UID override. Custom runner images
+with an ordinary numeric non-root USER remain supported.
+
+| Controller / runner | Result |
+|---|---|
+| Older controller / new runner | No format environment: conclusive healthy or policy-failing runs retain v1 output. Inconclusive or empty runs exit 2 without fabricating a v1 report. |
+| New controller / new runner | The environment selects strict v2, including `Errored` with no actual decision and a bounded category. |
+| New controller / older or custom v1 runner | The image can still run. Valid v1 results/history stay readable, but Ready remains false with `RunnerUpgradeRequired`, not fabricated policy drift. Upgrade the runner for qualification. |
+
+Deploy the strict consumer before using negotiated v2 runners. An older
+consumer's loose version handling is not a safety boundary. Existing unbound
+pre-upgrade Jobs are not silently adopted as current evidence; existing history
+and exclusively owned legacy reports remain readable.
+
+Exit codes are 0 only for a nonempty all-pass run, 1 for conclusive policy
+failure, and 2 whenever any case is inconclusive (including mixed runs), the
+selection is empty, or execution/reporting fails. HTTP authentication failures,
+5xx, malformed or incomplete responses, and failed CONNECT/burst requests are
+inconclusive. MCP JSON-RPC errors and `isError` text are not guessed into policy
+decisions; explicit HTTP policy statuses/decision headers retain their existing
+role. `reasonContains` is evaluated internally without persisting response text.
+
+Only native Job `Complete=True` or `Failed=True` conditions are terminal;
+failed-attempt counters alone are not. Eval/Job/Pod UID, generation, owner and
+spec continuity are rechecked around log reads and persistence. Changing intent
+or requesting a new run cannot promote stale history to a fresh pass.
+These rules do not claim runner-image execution or native lifecycle
+qualification from source-only tests.
 
 ---
 

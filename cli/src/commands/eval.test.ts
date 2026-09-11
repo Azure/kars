@@ -7,6 +7,41 @@ import { __test } from "./eval.js";
 
 const { summarizeEvalRow, renderEvalShow, renderEvalDiff } = __test;
 
+describe("current evaluator result contract", () => {
+  it("reads canonical counts and exposes inconclusive results without inventing drift", () => {
+    const row = summarizeEvalRow({
+      status: { phase: "Degraded", lastResult: {total: 6, passed: 0, failed: 0, errored: 6} },
+    });
+    expect(row[5]).toBe("0/6; 6 inconclusive");
+    expect(row[5]).not.toContain("drift");
+  });
+
+  it("preserves explicit zero counts over older aliases and shows the owned report pointer", () => {
+    const rendered = renderEvalShow({
+      status: {
+        phase: "Degraded",
+        conditions: [{type: "Ready", status: "False", reason: "RunnerUpgradeRequired"}],
+        reportConfigMapRef: {name: "karseval-eval-report"},
+        lastResult: {total: 6, passed: 0, failed: 0, errored: 6, passedCases: 6},
+      },
+    });
+    expect(rendered).toContain("0/6 passed");
+    expect(rendered).toContain("inconclusive:        6");
+    expect(rendered).toContain("RunnerUpgradeRequired");
+    expect(rendered).toContain("karseval-eval-report");
+    expect(rendered).not.toContain("drift:               YES");
+  });
+
+  it("compares canonical and legacy summaries without losing errored counts", () => {
+    const diff = renderEvalDiff(
+      {totalCases: 6, passedCases: 6},
+      {total: 6, passed: 4, failed: 1, errored: 1},
+    );
+    expect(diff).toContain("6/6  →  4/6");
+    expect(diff).toContain("inconclusive: 0  →  1");
+  });
+});
+
 describe("summarizeEvalRow", () => {
   it("renders a row for a builtin-corpus, never-run eval", () => {
     const row = summarizeEvalRow({
