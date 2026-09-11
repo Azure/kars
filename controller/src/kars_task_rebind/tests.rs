@@ -310,7 +310,11 @@ async fn credential_rebind_full_task_reconcile_preserves_uids_data_and_regenerat
         .await
         .unwrap();
     let task = current(&state);
-    assert!(super::super::task_is_ready(&task));
+    assert!(
+        super::super::task_is_ready(&task),
+        "current task readiness: {:?}",
+        task.status
+    );
     {
         let s = state.lock().unwrap();
         assert_eq!(s.objects[TASK]["metadata"]["uid"], "task-uid");

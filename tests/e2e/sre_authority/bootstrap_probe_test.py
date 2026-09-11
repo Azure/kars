@@ -497,8 +497,9 @@ class PrivateConsumptionDiagnosticTests(unittest.TestCase):
                 self.assertEqual(facts["publicPolicyFailure"]["missingKeyClassification"], "unclassified")
                 self.assertNotIn("do-not-publish", json.dumps(facts))
 
-    def test_reported_public_match_condition_and_variable_names_have_canonical_indexes(self):
-        for section, label in (("matchConditions", "match condition"), ("variables", "variable")):
+    def test_current_variable_names_have_indexes_and_obsolete_match_conditions_are_unclassified(self):
+        self.assertNotIn("matchConditions", self.policy["spec"])
+        for section, label in (("variables", "variable"),):
             definition = self.policy["spec"][section][0]
             facts = self.response(f"{label} '{definition['name']}' failed: no such key: metadata")
             self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [
@@ -507,6 +508,9 @@ class PrivateConsumptionDiagnosticTests(unittest.TestCase):
         facts = self.response("expression 'variables.a' failed: no such key: metadata")
         self.assertEqual(facts["publicPolicyFailure"]["expressionSites"],
                          [{"field": "spec.variables[0].expression", "name": "a"}])
+        facts = self.response("match condition 'activated-private-namespace' failed: no such key: metadata")
+        self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [])
+        self.assertEqual(facts["publicPolicyFailure"]["expressionClassification"], "unclassified")
 
     def test_full_public_expression_is_identified_without_exporting_expression_or_referenced_variables(self):
         expression = self.policy["spec"]["validations"][0]["expression"]
@@ -520,7 +524,7 @@ class PrivateConsumptionDiagnosticTests(unittest.TestCase):
         self.assertNotIn("do_not_publish", json.dumps(facts))
 
     def test_actual_supplied_field_locations_in_messages_and_status_causes_are_attributed(self):
-        for section in ("matchConditions", "variables", "validations"):
+        for section in ("variables", "validations"):
             field = f"spec.{section}[0].expression"
             expected = {"field": field}
             name = self.policy["spec"][section][0].get("name")
@@ -539,6 +543,7 @@ class PrivateConsumptionDiagnosticTests(unittest.TestCase):
         for text in ("no such key: metadata", "references variables.a; no such key: metadata",
                      "variable 'do-not-publish' failed: no such key: metadata",
                      "spec.variables[999].expression failed: no such key: metadata",
+                     "spec.matchConditions[0].expression failed: no such key: metadata",
                      "spec.variables[0].expression.do-not-publish failed: no such key: metadata",
                      "spec.variables[0].do-not-publish failed: no such key: metadata"):
             facts = self.response(text)

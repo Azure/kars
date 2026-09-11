@@ -478,15 +478,9 @@
         ],
         "validations": [
           {
-            "expression": "!(variables.material || variables.identity || variables.privileged || variables.marked) || variables.manager || variables.projector || (variables.authenticatedStage && request.?subResource.orValue('') != 'ephemeralcontainers' && (variables.retiring || (variables.fresh && (request.operation == 'CREATE' || variables.sameTemplate))))",
+            "expression": "variables.a[?'kars.azure.com/private-enabled'].orValue('') == 'true' ? (!(variables.material || variables.identity || variables.privileged || variables.marked) || variables.manager || variables.projector || (variables.authenticatedStage && request.?subResource.orValue('') != 'ephemeralcontainers' && (variables.retiring || (variables.fresh && (request.operation == 'CREATE' || variables.sameTemplate))))) : true",
             "message": "Private capability consumption requires qualified actor authority; an epoch alone grants none",
             "reason": "Forbidden"
-          }
-        ],
-        "matchConditions": [
-          {
-            "name": "activated-private-namespace",
-            "expression": "namespaceObject.metadata.?annotations.orValue({})[?'kars.azure.com/private-enabled'].orValue('') == 'true'"
           }
         ]
       }
@@ -657,15 +651,9 @@
         ],
         "validations": [
           {
-            "expression": "variables.manager || variables.projector || (request.namespace == 'kars-sre' && authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed())",
+            "expression": "variables.a[?'kars.azure.com/private-enabled'].orValue('') == 'true' ? (variables.manager || variables.projector || (request.namespace == 'kars-sre' && authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed())) : true",
             "message": "Private capability namespaces require explicit operator authority for workload connections",
             "reason": "Forbidden"
-          }
-        ],
-        "matchConditions": [
-          {
-            "name": "activated-private-namespace",
-            "expression": "namespaceObject.metadata.?annotations.orValue({})[?'kars.azure.com/private-enabled'].orValue('') == 'true'"
           }
         ]
       }

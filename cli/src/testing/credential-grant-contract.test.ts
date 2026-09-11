@@ -19,6 +19,21 @@ const specSchema=(name:string)=>resource("CustomResourceDefinition",`${name}.kar
 const source=(path:string)=>readFileSync(new URL(path,root),"utf8");
 
 describe("governed credential public contract",()=>{
+  it("evaluates private activation with materialized namespace metadata, never in match conditions",()=>{
+    for(const name of ["kars-private-consumption","kars-private-consumption-connect"]){
+      const policy=resource("ValidatingAdmissionPolicy",name);
+      expect(policy.spec.matchConditions).toBeUndefined();
+      expect(policy.spec.variables.find((v:{name:string})=>v.name==="a"))
+        .toEqual({name:"a",expression:"namespaceObject.metadata.?annotations.orValue({})"});
+      expect(policy.spec.validations[0].expression)
+        .toMatch(/^variables\.a\[\?'kars\.azure\.com\/private-enabled'\]\.orValue\(''\) == 'true' \? \(/);
+      expect(policy.spec.validations[0].expression).toMatch(/\) : true$/);
+      expect(policy.spec.failurePolicy).toBe("Fail");
+      expect(policy.spec.validations[0].reason).toBe("Forbidden");
+      expect(resource("ValidatingAdmissionPolicyBinding",name).spec.validationActions).toEqual(["Deny","Audit"]);
+      expect(policy.spec.matchConstraints.resourceRules.every((rule:{scope:string})=>rule.scope==="Namespaced")).toBe(true);
+    }
+  });
   it("allows ordinary collection cleanup without losing protected old-object names",()=>{
     for(const name of ["kars-sre-private-identity","kars-sre-role-authority","kars-sre-consumer-authority"]){
       const policy=resource("ValidatingAdmissionPolicy",name);
