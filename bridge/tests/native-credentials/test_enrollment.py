@@ -9,6 +9,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 import enrollment
+import operator_diagnostics
 from native_api import BRIDGE, CORE, WRITER, Failure, core, resource
 
 
@@ -75,7 +76,7 @@ class EnrollmentTests(unittest.TestCase):
     def enroll(self):
         with patch.object(enrollment, "ROOT", self.root), \
              patch.object(enrollment, "CLI", self.cli), \
-             patch.object(enrollment, "command", side_effect=self.command), \
+             patch.object(operator_diagnostics, "command", side_effect=self.command), \
              patch.object(enrollment, "private_file", side_effect=self.private_file):
             return enrollment.enroll(self.setup, self.namespace, self.writer, self.keys)
 

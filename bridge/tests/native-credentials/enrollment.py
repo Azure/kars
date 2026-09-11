@@ -2,7 +2,8 @@
 
 import json
 
-from native_api import BRIDGE, CORE, ROOT, WRITER, Failure, command, core, private_file, require, resource, uid, until
+from native_api import BRIDGE, CORE, ROOT, WRITER, Failure, core, private_file, require, resource, uid, until
+from operator_diagnostics import operator_command
 
 CLI = ROOT / ".native/core/cli/dist/index.js"
 
@@ -31,7 +32,7 @@ def enroll(setup, namespace, writer, keys):
     for key in keys:
         args.extend(["--agent-key", key])
     try:
-        reviewed = json.loads(command(*args, timeout=180))
+        reviewed = json.loads(operator_command("preview", *args, timeout=180))
     except json.JSONDecodeError:
         raise Failure("Core operator preview did not return a JSON document") from None
     require(
@@ -53,7 +54,7 @@ def enroll(setup, namespace, writer, keys):
         "Operator preview did not bind the requested native identities and keys",
     )
     review_file = private_file(f"grant-review-{namespace}.json", json.dumps(reviewed))
-    command("node", str(CLI), "credentials", "grant", "apply", str(review_file), timeout=360)
+    operator_command("apply", "node", str(CLI), "credentials", "grant", "apply", str(review_file), timeout=360)
     grant = setup.ready_grant(namespace)
     recorded = grant.get("spec", {})
     activation = recorded.get("privateActivation") if isinstance(recorded, dict) else None
