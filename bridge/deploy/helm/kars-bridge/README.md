@@ -4,20 +4,25 @@ kars Bridge is an **additive** layer on top of [kars](https://github.com/Azure/k
 kars runs on its own; the Bridge deploys the operator console + workspace (BFF + web)
 and the least-privilege RBAC the BFF needs — it never replaces any kars component.
 
-**Private preview:** there is no public Bridge image/release matrix yet. The
-[compatibility document](../../../docs/compatibility.md) records the full private
-Kars candidate and historical qualification separately. The public Kars
-foundation PRs alone do not provide the full runtime required by Bridge.
+**Public source integration:** Bridge is published in **Azure/kars** through
+the **`kars-bridge`** integration branch, but is **not yet release-qualified**.
+There is no public Bridge image/release matrix yet. The
+[compatibility document](../../../docs/compatibility.md) separates the current
+integration candidate from historical preview qualification; source publication
+alone does not qualify the full runtime required by Bridge.
 
-The chart uses standard Kubernetes workloads, but only **AKS** and **local
-kind** are live-qualified today. EKS and GKE require environment-specific
-identity, registry, ingress, CNI, inference, and compatibility validation.
+The chart uses standard Kubernetes workloads. Historical **AKS** and **local
+kind** preview results do not qualify the current public candidate. EKS and GKE
+also require environment-specific identity, registry, ingress, CNI, inference,
+and compatibility validation.
 
 ## Prerequisites
 
+Run the commands below from `bridge/`, entered from the repository root (`cd bridge`).
+
 - A Kubernetes cluster (new or existing) with the **kars CRDs + controller** installed:
   ```bash
-  helm install kars ../kars/deploy/helm/kars -n kars-system --create-namespace
+  helm install kars ../deploy/helm/kars -n kars-system --create-namespace
   ```
 - The Bridge images, pushed to a registry your cluster can pull (or loaded into kind).
 
@@ -64,7 +69,7 @@ helm install kars-bridge deploy/helm/kars-bridge -n kars-system \
 ### kars + Bridge together, on a NEW cluster
 
 ```bash
-helm install kars       ../kars/deploy/helm/kars -n kars-system --create-namespace
+helm install kars       ../deploy/helm/kars -n kars-system --create-namespace
 helm install kars-bridge deploy/helm/kars-bridge -n kars-system   # additive
 ```
 (or `make helm-install` — see the Makefile.)
