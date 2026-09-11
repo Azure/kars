@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import unittest
 from unittest.mock import patch
 
-from . import registration_schema as api
+from sre_authority import registration_schema as api
 
 
 class ConnectionProxyTests(unittest.TestCase):
