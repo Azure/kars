@@ -12,6 +12,7 @@ import time
 
 from native_api import BRIDGE, CORE, ROOT, STATE, command, core, private_file, require, until
 from loaded_images import loaded_image
+from schema_preparation import prepare_schemas
 
 
 def install_core(setup):
@@ -43,8 +44,11 @@ def install_core(setup):
         "monitoring": {"enabled": False, "prometheus": {"enabled": False}},
     }
     private_file("core-values.json", json.dumps(values))
+    prepared = prepare_schemas(".native/core-values.json", "kind-bridge-native")
+    print(json.dumps({"nativeSetup": "core-schema-preparation", **prepared}), flush=True)
     command("helm", "install", "kars", ".native/core/deploy/helm/kars",
-            "--namespace", CORE, "--values", ".native/core-values.json", "--timeout", "180s")
+            "--namespace", CORE, "--values", ".native/core-values.json", "--timeout", "180s",
+            "--kube-context", "kind-bridge-native")
     command("kubectl", "rollout", "status", "deployment/kars-controller",
             "-n", CORE, "--timeout=180s", timeout=195)
     require(not setup.admin.get("/apis/kars.azure.com/v1alpha1/karssreregistrations")["items"],

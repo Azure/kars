@@ -48,11 +48,15 @@ jobs:
             --head "${{ github.event.pull_request.head.sha || github.sha }}" >> "$GITHUB_OUTPUT"
 
   api-admission:
-    name: Native API and admission (no active SRE)
+    name: Native API and admission (cold install ${{ matrix.cold_install }}, no active SRE)
     needs: contract-scope
     if: needs.contract-scope.outputs.required == 'true'
     runs-on: ubuntu-22.04
     timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        cold_install: [1, 2, 3]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -69,6 +73,13 @@ jobs:
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
         with:
           version: v3.17.3
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: bridge/.native/core/cli/package-lock.json
+      - name: Build the locked public schema operator
+        run: npm ci --prefix .native/core/cli && npm run build --prefix .native/core/cli
       - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           version: v0.24.0
@@ -82,7 +93,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
-          name: native-api-evidence
+          name: native-api-evidence-${{ matrix.cold_install }}
           path: bridge/.native/evidence/*.json
           if-no-files-found: warn
           retention-days: 7

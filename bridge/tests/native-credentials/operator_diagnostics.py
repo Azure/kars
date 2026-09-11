@@ -21,6 +21,8 @@ MODULES = (
     "lib/private-activation-retirement", "lib/kube-bootstrap", "lib/kube-context",
     "lib/private-activation-continuity",
     "lib/private-activation-guard-retirement",
+    "commands/schemas", "lib/core-helm-schemas", "lib/schema-stage",
+    "lib/schema-documents", "lib/schema-discovery",
     "lib/repo-assets",
 )
 
@@ -43,7 +45,7 @@ def source_location(stderr):
 
 
 def operator_command(stage, *args, timeout):
-    if stage not in ("preview", "apply"):
+    if stage not in ("preview", "apply", "schemas"):
         raise Failure("Unknown native operator enrollment stage")
     try:
         return command(*args, timeout=timeout)

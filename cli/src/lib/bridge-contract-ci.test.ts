@@ -80,6 +80,14 @@ describe("permanent core and Bridge CI boundary", () => {
     expect(steps.some(step => String(step.run).includes("ci/bridge_contracts.py"))).toBe(true);
     const checkout = steps.find(step => String(step.uses).startsWith("actions/checkout@"));
     expect(mapping(checkout?.with)["fetch-depth"]).toBe(0);
+    const api = mapping(mapping(native.jobs)["api-admission"]);
+    const strategy = mapping(api.strategy);
+    expect(strategy["fail-fast"]).toBe(false);
+    expect(mapping(strategy.matrix).cold_install).toEqual([1, 2, 3]);
+    const apiSteps = jobSteps(native, "api-admission");
+    expect(apiSteps.some(step => String(step.run).includes("npm ci --prefix .native/core/cli"))).toBe(true);
+    const artifact = apiSteps.find(step => String(step.uses).startsWith("actions/upload-artifact@"));
+    expect(mapping(artifact?.with).name).toBe("native-api-evidence-${{ matrix.cold_install }}");
   });
 
   it("cannot turn skipped or failed required native jobs into a passing aggregate", () => {

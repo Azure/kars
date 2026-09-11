@@ -45,6 +45,9 @@ their complete API. They mirror BFF DTOs rather than owning server contracts.
 The only runtime values are the existing `TIER_LABELS` and `WIRING_LABELS`
 literal objects. The Node contract test checks the locked compiler, complete
 barrel exports, erased imports, inert runtime values and per-file bounds.
+Server-side client types are similarly re-exported from `@/lib/bff` through
+`bff-contracts.ts`; authentication, cookie forwarding, fetch and error handling
+remain in the original server module.
 
 The integration candidate's core Rust, CLI and Kind jobs check out the repository
 with `bridge/` physically absent. Core builds and runtime acceptance must not
@@ -56,6 +59,13 @@ skip native execution; CLI, runtime, mesh, chart, dependency, shipped-skill and
 unknown source changes require it. Core-only Kind scope excludes Bridge-only
 changes, which still require paired Bridge qualification. Pushes, manual runs
 and reusable CI callers retain full qualification.
+
+API/admission acceptance runs three isolated cold installs. Each builds the
+locked, same-source core CLI and calls `kars schemas prepare` with the exact
+chart, values, release, namespace and context used by the following Helm
+installation. Runtime acceptance uses that same core preparation entrypoint.
+Schema and admission warnings remain failures; no policy status or generation
+is changed merely to refresh a diagnostic.
 
 `Bridge component acceptance` aggregates every BFF, web, audit and add-on job
 and runs even for core-only PRs. Failed, cancelled or skipped component jobs
