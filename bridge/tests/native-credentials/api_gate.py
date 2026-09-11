@@ -12,6 +12,7 @@ import sys
 import time
 
 from source_revision import CORE_REVISION
+from schema_preparation import prepare_schemas
 
 ROOT = Path(__file__).resolve().parents[2]
 EVIDENCE = ROOT / ".native/evidence/api.json"
@@ -52,11 +53,14 @@ def main():
         run("kubectl", "label", "namespace", "kars-system", "app.kubernetes.io/managed-by=Helm")
         run("kubectl", "annotate", "namespace", "kars-system",
             "meta.helm.sh/release-name=kars", "meta.helm.sh/release-namespace=kars-system")
+        evidence["schemaPreparation"] = prepare_schemas(
+            "tests/native-credentials/api-values.yaml", "kind-bridge-native-api")
+        evidence["markers"].append("native-schemas-published-before-admission")
         run(
             "helm", "install", "kars", ".native/core/deploy/helm/kars",
             "--namespace", "kars-system",
             "--values", "tests/native-credentials/api-values.yaml",
-            "--timeout", "120s",
+            "--timeout", "120s", "--kube-context", "kind-bridge-native-api",
         )
         evidence["markers"].append("native-chart-install")
         crds = kubernetes("get", "customresourcedefinitions")["items"]

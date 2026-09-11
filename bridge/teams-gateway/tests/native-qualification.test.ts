@@ -32,6 +32,13 @@ describe("Monorepo native prerequisite", () => {
     expect(gate).not.toMatch(/--validate=false|--disable-openapi-validation|failurePolicy.*Ignore/);
     expect(gate).not.toContain("--create-namespace");
     expect(read("tests/native-credentials/api-values.yaml")).toContain("sre:\n  enabled: false");
+    expect(gate.indexOf('evidence["schemaPreparation"] = prepare_schemas('))
+      .toBeLessThan(gate.indexOf('"helm", "install", "kars"'));
+    const boot = read("tests/native-credentials/boot.py");
+    expect(boot.indexOf("prepared = prepare_schemas("))
+      .toBeLessThan(boot.indexOf('command("helm", "install", "kars"'));
+    expect(workflow).toContain("cold_install: [1, 2, 3]");
+    expect(workflow).toContain("name: native-api-evidence-${{ matrix.cold_install }}");
   });
 
   it("parses the runner without executing local Kubernetes or producing cache files", () => {
