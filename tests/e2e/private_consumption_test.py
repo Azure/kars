@@ -85,10 +85,14 @@ class PrivateConsumptionFixtures(unittest.TestCase):
                 patch.object(phase, "as_tenant", side_effect=api.actor), \
                 patch.object(phase.shared, "wait_for", side_effect=api.wait):
             cases = phase.cases(1, api.bundle["objects"], reports.append)
-        self.assertEqual(len(cases), 108)
+        self.assertEqual(len(cases), 112)
         self.assertTrue(all(case["matched"] for case in cases))
         self.assertEqual(len([c for c in cases if "-missing-metadata" in c["case"]]), 40)
         self.assertEqual(len([c for c in cases if c["expectedStatus"] == 404]), 8)
+        self.assertEqual({c["case"] for c in cases if c["case"].endswith("-wrong-root-uid")
+                          and c["expectedStatus"] == 403},
+                         {name + "-wrong-root-uid" for name in phase.CONNECTIONS}
+                         | {kind + "-wrong-root-uid" for kind in ("Pod", *(k[0] for k in KINDS))})
         self.assertEqual(api.objects, {})
         self.assertTrue(all(preconditions.get("uid") for preconditions in api.deleted))
         self.assertFalse(any("/secrets" in call[2] or "/status" in call[2] for call in api.calls))
@@ -96,6 +100,26 @@ class PrivateConsumptionFixtures(unittest.TestCase):
                             if call[1] == "GET" and call[2].split("/")[-1] in phase.CONNECTIONS))
         self.assertEqual(len(api.namespace_patches), 2)
         self.assertTrue(all({"uid", "resourceVersion"} <= set(p["metadata"]) for p in api.namespace_patches))
+        roles = [body for _, method, path, body in api.calls
+                 if method == "POST" and path.endswith("/clusterroles")]
+        bindings = [body for _, method, path, body in api.calls
+                    if method == "POST" and path.endswith("/clusterrolebindings")]
+        self.assertEqual(len(roles), 1)
+        self.assertEqual(roles[0]["rules"], [{
+            "apiGroups": ["kars.azure.com"], "resources": ["karscredentialgrants"],
+            "resourceNames": ["workspace"], "verbs": ["project-credentials"]}])
+        self.assertEqual(len(bindings), 1)
+        namespace = api.namespace_patches[0]["metadata"]["annotations"][PREFIX + "root-namespace"]
+        self.assertEqual(bindings[0]["roleRef"], {
+            "apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole",
+            "name": roles[0]["metadata"]["name"]})
+        self.assertEqual(bindings[0]["subjects"], [
+            {"kind": "ServiceAccount", "name": "root", "namespace": namespace}])
+        self.assertTrue(roles[0]["metadata"]["name"].startswith(namespace + "-"))
+        self.assertFalse(any("project-credentials" in rule["verbs"]
+                             for _, method, path, body in api.calls
+                             if method == "POST" and path.endswith("/roles")
+                             for rule in body["rules"]))
         self.assertTrue(all(not obj["spec"].get("matchConditions")
                             for obj in api.fault_policies))
         self.assertNotIn("do-not-publish", json.dumps(reports))
