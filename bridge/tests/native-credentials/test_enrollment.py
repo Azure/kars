@@ -73,13 +73,14 @@ class EnrollmentTests(unittest.TestCase):
         self.review_files.append(path)
         return path
 
-    def enroll(self, *, previous=None, keys=None):
+    def enroll(self, *, previous=None, keys=None, observations=()):
         with patch.object(enrollment, "ROOT", self.root), \
              patch.object(enrollment, "CLI", self.cli), \
              patch.object(operator_diagnostics, "command", side_effect=self.command), \
              patch.object(enrollment, "private_file", side_effect=self.private_file):
             return enrollment.enroll(self.setup, self.namespace, self.writer,
-                                     self.keys if keys is None else keys, previous=previous)
+                                     self.keys if keys is None else keys, previous=previous,
+                                     observations=observations)
 
     def test_uses_real_public_preview_apply_and_then_controller_readiness(self):
         self.assertEqual(self.enroll(), self.grant)
@@ -136,6 +137,25 @@ class EnrollmentTests(unittest.TestCase):
         self.grant["spec"]["integrationStores"] = [{"secret": {"name": "private"}}]
         with self.assertRaisesRegex(Failure, "only an agent-key grant"):
             self.enroll(previous=copy.deepcopy(self.grant))
+        self.assertEqual(self.commands, [])
+
+    def test_observation_target_and_private_consumer_are_explicitly_reviewed(self):
+        target = {"kind": "KarsSandbox", "namespace": self.namespace, "name": "observer", "uid": "target"}
+        self.review["spec"]["observationTargets"] = [target]
+        self.grant["spec"]["observationTargets"] = [target]
+        self.enroll(observations=[target])
+        args = self.commands[0][0]
+        self.assertIn("--observe", args)
+        self.assertIn("observer", args)
+        self.assertIn("kars-observer/Deployment/observer", args)
+        self.commands.clear()
+        self.review["spec"]["observationTargets"] = [{**target, "uid": "replaced"}]
+        with self.assertRaises(Failure):
+            self.enroll(observations=[target])
+        self.assertEqual(len(self.commands), 1)
+        self.commands.clear()
+        with self.assertRaises(Failure):
+            self.enroll(observations=[{**target, "namespace": "other"}])
         self.assertEqual(self.commands, [])
 
     def test_operator_apply_failure_cannot_become_ready_or_a_direct_create_fallback(self):

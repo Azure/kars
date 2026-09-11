@@ -10,6 +10,7 @@ import time
 
 from lifecycle_cases import running
 from credential_cases import SOURCE, selection
+from enrollment import enroll
 from native_api import BRIDGE, CORE, WRITER, command, core, private_file, require, resource, uid, until
 from private_tls import call, forward
 from runtime_state import runtime_state
@@ -106,10 +107,11 @@ class ObservationCases:
         )
         command("kubectl", "apply", "-f", "-", stdin=manifest)
         until("BFF retains API connectivity under existing Cilium isolation", self.bff.ready, 30)
-        self.setup.admin.patch(resource(CORE, "karscredentialgrants", "workspace"), {"spec": {
-            "observationTargets": [{"kind": "KarsSandbox", "namespace": CORE,
-                                    "name": target["sandbox"], "uid": uid(value)}],
-        }})
+        grant = self.setup.ready_grant(CORE)
+        writer = self.setup.admin.get(core(BRIDGE, "serviceaccounts", WRITER))
+        enroll(self.setup, CORE, writer, grant["spec"]["agentKeys"], previous=grant, observations=[
+            {"kind": "KarsSandbox", "namespace": CORE, "name": target["sandbox"], "uid": uid(value)},
+        ])
         self.ready()
         until("real BFF-to-observer9447 and router-to-verifier9448", lambda:
               self.public().get("available") is True, 240)

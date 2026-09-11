@@ -100,6 +100,11 @@ describe("Monorepo native prerequisite", () => {
     expect(continuity).toContain("scope_snapshot(setup, scopes) == before_update");
     expect(continuity).toContain('"verb": "use-agent-credentials"');
     expect(continuity).toContain("expected=(403,)");
+    const observation = read("tests/native-credentials/observation_cases.py")
+      .split("    def enable(self):", 2)[1].split("    def ready(self):", 1)[0];
+    expect(observation).toContain("enroll(self.setup, CORE, writer");
+    expect(observation).toContain("previous=grant, observations=[");
+    expect(observation).not.toContain('self.setup.admin.patch(resource(CORE, "karscredentialgrants"');
   });
 
   it("qualifies actual CNI traffic and never treats API existence as enforcement", () => {

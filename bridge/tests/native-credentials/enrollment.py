@@ -8,7 +8,7 @@ from operator_diagnostics import operator_command
 CLI = ROOT / ".native/core/cli/dist/index.js"
 
 
-def enroll(setup, namespace, writer, keys, *, previous=None):
+def enroll(setup, namespace, writer, keys, *, previous=None, observations=()):
     require(CLI.is_file(), "The exact core CLI must be built before native enrollment")
     path = resource(namespace, "karscredentialgrants", "workspace")
     existing = setup.admin.optional(path)
@@ -50,6 +50,16 @@ def enroll(setup, namespace, writer, keys, *, previous=None):
         "--private-root", CORE, "--private-controller-profile", "service-accounts",
         "--private-consumer", f"{BRIDGE}/Deployment/kars-bridge-bff",
     ]
+    expected_observations = list(observations)
+    for target in expected_observations:
+        require(
+            isinstance(target, dict) and set(target) == {"kind", "namespace", "name", "uid"}
+            and target["kind"] == "KarsSandbox" and target["namespace"] == namespace
+            and all(isinstance(target[key], str) and target[key] for key in ("name", "uid")),
+            "Native observation enrollment requires exact workspace Sandbox identities",
+        )
+        args.extend(["--observe", target["name"], "--private-consumer",
+                     f"kars-{target['name']}/Deployment/{target['name']}"])
     for key in keys:
         args.extend(["--agent-key", key])
     try:
@@ -74,6 +84,7 @@ def enroll(setup, namespace, writer, keys, *, previous=None):
         and spec.get("workspaceUid") == uid(workspace)
         and spec.get("writers") == [expected_writer]
         and spec.get("agentKeys") == keys
+        and spec.get("observationTargets", []) == expected_observations
         and isinstance(spec.get("privateActivation"), dict)
         and spec.get("privateActivation", {}).get("phase") == "reviewed",
         "Operator preview did not bind the requested native identities and keys",
@@ -90,6 +101,7 @@ def enroll(setup, namespace, writer, keys, *, previous=None):
         and recorded.get("workspaceUid") == uid(workspace)
         and recorded.get("writers") == [expected_writer]
         and recorded.get("agentKeys") == keys
+        and recorded.get("observationTargets", []) == expected_observations
         and isinstance(activation, dict)
         and activation.get("phase") == "qualified",
         "The recorded native grant differs from its operator review",
