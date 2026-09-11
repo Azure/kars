@@ -1,6 +1,7 @@
 // kars Bridge BFF — receipt verification, extracted without changing wire formats.
 
 use super::*;
+use crate::providers::receipt::verify_ed25519;
 
 /// The outcome of an in-browser cryptographic verification — performed
 /// server-side against the controller's public key and any configured
@@ -126,7 +127,6 @@ pub(crate) fn verify_log_integrity_with_pins(
     log: &ReceiptLog,
     pins: Result<AnchorPins, &'static str>,
 ) -> LogIntegrity {
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
     let mut out = LogIntegrity::default();
     let chain = &log.entries;
     if chain.is_empty() {
@@ -175,19 +175,7 @@ pub(crate) fn verify_log_integrity_with_pins(
         };
         let cp_sig_ok = anchor
             .as_ref()
-            .and_then(|anchor| VerifyingKey::from_bytes(&anchor.public_key).ok())
-            .map(|vk| {
-                BASE64
-                    .decode(cp_sig.as_bytes())
-                    .ok()
-                    .and_then(|sb| <[u8; 64]>::try_from(sb).ok())
-                    .map(|sb| {
-                        vk.verify(note.as_bytes(), &Signature::from_bytes(&sb))
-                            .is_ok()
-                    })
-                    .unwrap_or(false)
-            })
-            .unwrap_or(false);
+            .is_some_and(|anchor| verify_ed25519(&anchor.public_key, note.as_bytes(), &cp_sig));
         out.checkpoint_verified =
             chain_consistent && cp_sig_ok && cp_root == chain_head && cp_tree == out.tree_size;
     }
@@ -241,7 +229,6 @@ pub(crate) async fn verify_receipt_with_pins(
     pins: Result<AnchorPins, &'static str>,
 ) -> AppResult<Json<VerifyResult>> {
     use base64::engine::general_purpose::STANDARD as B64;
-    use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 
     let cluster = require_cluster(&state)?;
     require_task_evidence_access(cluster, &ns, &name, &principal).await?;
@@ -380,19 +367,13 @@ pub(crate) async fn verify_receipt_with_pins(
     // 4) Ed25519 signature verifies over the DSSE PAE of the exact payload.
     let mut sig_ok = false;
     let pub_bytes = Some(anchor.public_key);
-    if let (Some(pk), false) = (pub_bytes, payload_raw.is_empty())
-        && let Ok(vk) = VerifyingKey::from_bytes(&pk)
-    {
+    if let (Some(pk), false) = (pub_bytes, payload_raw.is_empty()) {
         let message = pae(&spec.dsse.payload_type, &payload_raw);
-        let valid_signature = spec.dsse.signatures.iter().find(|s| {
-            s.keyid == anchor_key_id
-                && B64
-                    .decode(s.sig.as_bytes())
-                    .ok()
-                    .and_then(|sb| <[u8; 64]>::try_from(sb).ok())
-                    .map(|sb| vk.verify(&message, &Signature::from_bytes(&sb)).is_ok())
-                    .unwrap_or(false)
-        });
+        let valid_signature = spec
+            .dsse
+            .signatures
+            .iter()
+            .find(|s| s.keyid == anchor_key_id && verify_ed25519(&pk, &message, &s.sig));
         sig_ok = valid_signature.is_some();
         if let Some(signature) = valid_signature {
             evidence.signature_b64 = Some(signature.sig.clone());
@@ -522,19 +503,8 @@ pub(crate) async fn verify_receipt_with_pins(
             let cp_root = cp.get("rootHash").cloned().unwrap_or_default();
             let cp_sig = cp.get("signature").cloned().unwrap_or_default();
             let note = format!("kars-receipt-log\n{cp_tree}\n{cp_root}\n");
-            let cp_sig_ok = pub_bytes
-                .and_then(|pk| VerifyingKey::from_bytes(&pk).ok())
-                .map(|vk| {
-                    B64.decode(cp_sig.as_bytes())
-                        .ok()
-                        .and_then(|sb| <[u8; 64]>::try_from(sb).ok())
-                        .map(|sb| {
-                            vk.verify(note.as_bytes(), &Signature::from_bytes(&sb))
-                                .is_ok()
-                        })
-                        .unwrap_or(false)
-                })
-                .unwrap_or(false);
+            let cp_sig_ok =
+                pub_bytes.is_some_and(|pk| verify_ed25519(&pk, note.as_bytes(), &cp_sig));
             let root_matches = cp_root == chain_head && cp_tree == tree_size as i64;
 
             let witness = log.witness.as_ref();

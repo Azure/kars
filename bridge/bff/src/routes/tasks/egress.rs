@@ -74,8 +74,7 @@ pub async fn request_egress(
         .ok_or_else(|| AppError::BadRequest("mission has no running sandbox to widen".into()))?;
     let port = req.port.unwrap_or(443);
     let ttl = normalize_ttl(req.ttl.as_deref().unwrap_or("2h"));
-    use sha2::{Digest, Sha256};
-    let suffix = hex::encode(Sha256::digest(format!("{host}:{port}").as_bytes()));
+    let suffix = crate::providers::signing::sha256_hex(format!("{host}:{port}").as_bytes());
     let approval_name = format!("{name}-eg-{}", &suffix[..12]);
     let task_uid = task
         .metadata

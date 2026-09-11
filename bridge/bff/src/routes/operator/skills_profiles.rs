@@ -287,7 +287,6 @@ pub async fn submit_skill(
         }
         spec["package"] = serde_json::json!(true);
         spec["files"] = serde_json::json!(files.keys().cloned().collect::<Vec<_>>());
-        use sha2::{Digest, Sha256};
         let configmap_data: std::collections::BTreeMap<String, String> = files
             .iter()
             .map(|(path, content)| (path.replace('/', "__"), content.clone()))
@@ -296,7 +295,7 @@ pub async fn submit_skill(
             .map_err(|e| AppError::Internal(anyhow::Error::new(e)))?;
         spec["packageDigest"] = serde_json::json!(format!(
             "sha256:{}",
-            hex::encode(Sha256::digest(&canonical))
+            crate::providers::signing::sha256_hex(canonical)
         ));
     }
     let uploader = principal.name;

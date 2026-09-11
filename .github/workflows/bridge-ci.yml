@@ -56,7 +56,8 @@ jobs:
             kars::credential_review::digest_tests::review_digest_preserves_compact_sorted_json_and_full_hex_width \
             kars::receipt_log::digest_tests::chain_hash_keeps_decimal_sequence_and_exact_pipe_framing \
             routes::artifacts::digest_tests::artifact_addresses_keep_the_existing_sixteen_byte_short_form \
-            routes::github::tests::connection_names_keep_the_original_raw_subject_and_eight_byte_digest
+            routes::github::tests::connection_names_keep_the_original_raw_subject_and_eight_byte_digest \
+            providers::receipt::tests::rfc8032_known_answer_and_malformed_signatures_keep_exact_verification_semantics
           do
             grep -Fx "$name: test" /tmp/kars-bridge-bff-tests.txt
           done
