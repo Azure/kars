@@ -35,7 +35,24 @@ async fn auth_upstream_protocol_and_truncated_body_are_inconclusive_not_blocked(
     let sender = tokio::spawn(async move {
         let (mut stream, _) = listener.accept().await.unwrap();
         let mut request = [0u8; 4096];
-        stream.read(&mut request).await.unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(5), async {
+            let mut used = 0;
+            while !request[..used].windows(4).any(|bytes| bytes == b"\r\n\r\n") {
+                assert!(
+                    used < request.len(),
+                    "request headers exceeded the fixture bound"
+                );
+                let count = stream.read(&mut request[used..]).await.unwrap();
+                assert!(
+                    count > 0,
+                    "client closed before sending complete request headers"
+                );
+                used += count;
+            }
+            assert!(request[..used].starts_with(b"GET / HTTP/1.1\r\n"));
+        })
+        .await
+        .unwrap();
         stream
             .write_all(
                 b"HTTP/1.1 403 Forbidden\r\nContent-Length: 100\r\nConnection: close\r\n\r\n{}",
