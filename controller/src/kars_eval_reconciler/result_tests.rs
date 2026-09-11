@@ -382,6 +382,12 @@ async fn request_claim_is_uid_rv_fenced_stable_across_retries_and_new_after_ackn
     assert!(workloads::claim_trigger(&api, &f.eval).await.unwrap());
     let claimed: KarsEval = serde_json::from_value(f.store.lock().unwrap().eval.clone()).unwrap();
     let token = claimed.annotations()[workloads::RUN_TOKEN].clone();
+    assert_eq!(token.len(), "sha256:".len() + 64);
+    assert!(
+        token["sha256:".len()..]
+            .bytes()
+            .all(|byte| byte.is_ascii_hexdigit())
+    );
     assert!(!workloads::claim_trigger(&api, &claimed).await.unwrap());
     assert!(
         workloads::claim_trigger(&api, &f.eval).await.is_err(),

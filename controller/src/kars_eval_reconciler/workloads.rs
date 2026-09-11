@@ -265,7 +265,10 @@ pub(super) async fn claim_trigger(api: &Api<KarsEval>, eval: &KarsEval) -> anyho
         return Ok(false);
     }
     let (uid, rv) = identity(&eval.metadata)?;
-    let token = content_digest(&serde_json::to_vec(&(uid, rv))?);
+    let token = format!(
+        "sha256:{}",
+        crate::providers::signing::sha256_hex(&serde_json::to_vec(&(uid, rv))?)
+    );
     api.patch(
         &eval.name_any(),
         &PatchParams::default(),

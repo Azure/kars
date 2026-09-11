@@ -345,7 +345,7 @@ async fn reconcile_inner(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, R
     // -------- 7. Patch KarsEval status ----------------------------
     let phase = match observed.state {
         "AllPassed" => PHASE_READY,
-        "Pending" => PHASE_PENDING,
+        PHASE_PENDING => PHASE_PENDING,
         _ => PHASE_DEGRADED,
     };
 
@@ -400,7 +400,7 @@ async fn reconcile_inner(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, R
         .patch_status(&name, &PatchParams::default(), &Patch::Merge(status_patch))
         .await?;
 
-    if observed.state == "Pending" {
+    if observed.state == PHASE_PENDING {
         Ok(Action::requeue(REQUEUE_AWAITING_RUN))
     } else if observed.state != "AllPassed" {
         Ok(Action::requeue(REQUEUE_FAIL))
@@ -824,7 +824,7 @@ fn build_conditions(
     last_result: Option<&EvalResult>,
     (state, drift_detected): (&str, bool),
 ) -> Vec<Condition> {
-    let state = if state != "Pending" && last_result.is_some_and(|r| r.schema_version == "v1") {
+    let state = if state != PHASE_PENDING && last_result.is_some_and(|r| r.schema_version == "v1") {
         "RunnerUpgradeRequired"
     } else if state == "AllPassed"
         && !last_result.is_some_and(|r| {
@@ -853,7 +853,7 @@ fn build_conditions(
     } else {
         cond_status::FALSE
     };
-    let ready_reason = if state == "Pending" {
+    let ready_reason = if state == PHASE_PENDING {
         if spawned_run_now.is_some() {
             reason::RUN_TRIGGERED
         } else if cron_job_name.is_some() {
@@ -865,7 +865,7 @@ fn build_conditions(
         state
     };
     let ready_msg = match (state, last_result) {
-        ("Pending", _) => format!(
+        (PHASE_PENDING, _) => format!(
             "awaiting current run — corpus {} ({})",
             resolved.label, resolved.digest
         ),
@@ -889,7 +889,7 @@ fn build_conditions(
         observed_generation,
     ));
 
-    let progressing_status = if state == "Pending" {
+    let progressing_status = if state == PHASE_PENDING {
         cond_status::TRUE
     } else {
         cond_status::FALSE
@@ -917,7 +917,7 @@ fn build_conditions(
     out.push(conditions::preserve_transition_time(
         prior_degraded,
         conditions::TYPE_DEGRADED,
-        if !matches!(state, "AllPassed" | "Pending") {
+        if !matches!(state, "AllPassed" | PHASE_PENDING) {
             cond_status::TRUE
         } else {
             cond_status::FALSE
