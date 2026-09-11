@@ -1,8 +1,9 @@
-# Private Bridge governed credential adapter
+# Bridge governed credential adapter
 
-Bridge stays private while the core contract is integrated and qualified.
-This change neither publishes app source/images nor changes repository visibility.
-Existing audit gates and pending review evidence remain required.
+Bridge source is being integrated into **Azure/kars:kars-bridge** as an optional
+add-on. Source publication is not release qualification; images are not published
+by these acceptance workflows. Existing audit gates and pending review evidence
+remain required.
 
 The BFF consumes `KarsCredentialGrant/workspace`; it cannot create or expand
 that operator grant. Operators enroll the actual BFF ServiceAccount UID and
@@ -10,9 +11,24 @@ existing purpose-specific store UIDs using the core CLI. Bootstrap missing
 stores as explicitly selected empty Opaque objects before enrollment, never by
 adopting a racing existing object.
 
+Enabled writers also require the core's reviewed private-consumption activation.
+A direct grant CREATE with writers but without that activation is intentionally
+denied. Use the same-source core CLI's `credentials grant preview` and
+`credentials grant apply` workflow, including an explicit `--private-root` and
+the actual `--private-controller-profile`; do not manufacture activation
+metadata or patch a Ready condition to bypass enrollment.
+
+Activation can retire approved private consumers and replace the root controller
+Pod. Shared-controller and multi-workspace continuity remain under qualification:
+this draft is not authorization to migrate an existing installation. The native
+lane uses the locked public CLI, verifies the reviewed workspace/writer UIDs and
+key scope, stores its metadata-only review privately, and waits for actual
+controller readiness. Local orchestration fixtures are not native authority
+evidence.
+
 Set `core.namespace` independently from the chart's `namespace`. BFF/web
 default workspace and provider operations use the configured core namespace;
-the optional Teams Secret remains in the private Bridge integration namespace.
+the optional Teams Secret remains in the dedicated Bridge integration namespace.
 
 The credential form now requires a target kind and workspace, and accepts an
 explicit reviewed target UID. It stores a governed source without precreating

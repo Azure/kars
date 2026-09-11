@@ -219,18 +219,8 @@ class Setup:
         })
 
     def grant(self, namespace, writer, keys=None):
-        workspace = self.admin.get(f"/api/v1/namespaces/{namespace}")
-        result = self.admin.create(resource(namespace, "karscredentialgrants"), {
-            "apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsCredentialGrant",
-            "metadata": {"name": "workspace", "namespace": namespace},
-            "spec": {"workspaceUid": uid(workspace), "enabled": True,
-                     "writers": [{"namespace": BRIDGE, "name": WRITER, "uid": uid(writer)}],
-                     "agentKeys": keys or ["SLACK_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"],
-                     "integrationStores": [], "legacyImports": [],
-                     "observationTargets": [], "githubConnections": []},
-        })
-        self.ready_grant(namespace)
-        return result
+        from enrollment import enroll
+        return enroll(self, namespace, writer, keys or ["SLACK_BOT_TOKEN", "TELEGRAM_BOT_TOKEN"])
 
     def ready_grant(self, namespace):
         def ready():
