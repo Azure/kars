@@ -61,9 +61,10 @@ async fn server(mixed: bool, allow_all: bool) -> MockServer {
     for (index, case) in corpus.cases.iter().enumerate() {
         let status = if mixed && index == 0 {
             500
-        } else if allow_all || (mixed && index == 1) {
-            200
-        } else if case.expect.decision == kars_eval_corpus::Decision::Allowed {
+        } else if allow_all
+            || (mixed && index == 1)
+            || case.expect.decision == kars_eval_corpus::Decision::Allowed
+        {
             200
         } else {
             403
