@@ -38,6 +38,20 @@ def invalid():
 
 
 class RegistrationSchemaTests(unittest.TestCase):
+    def test_crd_readiness_requires_a_real_established_condition_not_nullable_status(self):
+        established = {"type": "Established", "status": "True"}
+        self.assertTrue(schema.crd_established(200, {"status": {"conditions": [established]}}))
+        for body in (None, [], {}, {"status": None}, {"status": {}},
+                     {"status": {"conditions": None}}, {"status": {"conditions": []}},
+                     {"status": {"conditions": "Established"}},
+                     {"status": {"conditions": [None]}},
+                     {"status": {"conditions": [established, None]}},
+                     {"status": {"conditions": [{"type": "Established", "status": True}]}},
+                     {"status": {"conditions": [{"type": "Established", "status": "False"}]}}):
+            with self.subTest(body=body):
+                self.assertFalse(schema.crd_established(200, body))
+        self.assertFalse(schema.crd_established(503, {"status": {"conditions": [established]}}))
+
     def test_namespace_patch_uses_merge_patch_without_losing_identity_fences(self):
         body = {"metadata": {"uid": "namespace-uid", "resourceVersion": "42",
                              "annotations": {"kars.azure.com/private-enabled": "true"}}}

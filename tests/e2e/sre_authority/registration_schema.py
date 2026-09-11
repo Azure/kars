@@ -130,6 +130,19 @@ def request(port, method, path, obj=None, *, accept="application/json"):
         return code, None
 
 
+def crd_established(code, body):
+    if code != 200 or not isinstance(body, dict):
+        return False
+    status = body.get("status")
+    if not isinstance(status, dict):
+        return False
+    conditions = status.get("conditions")
+    return (isinstance(conditions, list)
+            and all(isinstance(condition, dict) for condition in conditions)
+            and any(condition.get("type") == "Established" and condition.get("status") == "True"
+                    for condition in conditions))
+
+
 def connection_proxy_arguments(namespaces):
     if (len(namespaces) != 2 or not isinstance(namespaces[0], str)
             or re.fullmatch(r"kars-cel-[a-f0-9]{32}", namespaces[0]) is None
@@ -209,8 +222,7 @@ def exercise_instances(root, port, obj, method, path, accepted, prefix):
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         code, current = request(port, "GET", f"{CRD_PATH}/{CRD_NAME}")
-        if code == 200 and any(condition.get("type") == "Established" and condition.get("status") == "True"
-                               for condition in current.get("status", {}).get("conditions", [])):
+        if crd_established(code, current):
             break
         time.sleep(0.5)
     else:

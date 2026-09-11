@@ -22,7 +22,7 @@ import time
 import uuid
 
 import credential_schema as shared
-from sre_authority.registration_schema import CONTEXT, command, kind_proxy, request
+from sre_authority.registration_schema import CONTEXT, command, crd_established, kind_proxy, request
 
 CRDS = shared.CRDS
 ADMISSION = shared.ADMISSION
@@ -262,8 +262,7 @@ def install(port, owned, crds, shipped, namespace, token, results):
             require(code == 200 and isinstance(obj, dict)
                     and obj.get("metadata", {}).get("uid") == installed["metadata"]["uid"],
                     case, code, "native-error")
-            return any(c.get("type") == "Established" and c.get("status") == "True"
-                       for c in obj.get("status", {}).get("conditions", []))
+            return crd_established(code, obj)
 
         wait_for(lambda: request(port, "GET", CRDS + "/" + crd["metadata"]["name"]),
                  established, case)
