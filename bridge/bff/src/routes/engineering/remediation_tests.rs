@@ -385,6 +385,20 @@ fn existing_v2_and_legacy_history_are_not_renamed_or_combined() {
 }
 
 #[test]
+fn persisted_legacy_and_versioned_remediation_keep_mandatory_human_review() {
+    let mut original = legacy("acme/api", Some("package-lock.json"), "vite", "pending");
+    let mut versioned = discovered("acme/api", Some("services/package-lock.json"), "vite", 99);
+    original.review_required = false;
+    versioned.review_required = false;
+    let identities = [original.id.clone(), versioned.id.clone()];
+    let (merged, queued) = merge_discovered_tasks(vec![original, versioned], Vec::new());
+    assert_eq!(queued, 0);
+    assert!(merged.iter().all(|task| task.review_required));
+    assert_eq!(merged[0].id, identities[0]);
+    assert_eq!(merged[1].id, identities[1]);
+}
+
+#[test]
 fn merge_rechecks_legacy_metadata_in_the_latest_persisted_state() {
     let original = legacy(
         "acme/api",
