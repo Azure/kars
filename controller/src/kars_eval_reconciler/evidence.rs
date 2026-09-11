@@ -34,6 +34,8 @@ pub(super) struct Evidence {
     pub error: Option<String>,
     pub digest: String,
     pub request_marker: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub request_job: Option<String>,
 }
 
 impl Evidence {
@@ -117,6 +119,12 @@ impl Evidence {
             && self.eval_generation == intent.generation
             && self.intent == intent.digest
             && self.request_marker == intent.request_marker
+            && (self.request_job == intent.request_job
+                // Pre-stamp receipts can prove their own explicit Job, not a
+                // different Job retroactively assigned the latest request token.
+                || (self.request_job.is_none()
+                    && self.request_marker.is_some()
+                    && intent.request_job.as_deref() == Some(self.job_name.as_str())))
     }
 
     pub fn state(&self) -> &'static str {

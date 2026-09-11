@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 
 use super::*;
+mod drift_tests;
 mod fixture;
+mod request_tests;
 
 #[tokio::test]
 async fn current_owned_producer_report_is_persisted_before_readiness_and_retries_are_idempotent() {
@@ -185,6 +187,8 @@ async fn actual_cronjob_template_and_native_owner_chain_are_required_for_schedul
         job["spec"] = cron["spec"]["jobTemplate"]["spec"].clone();
         job["metadata"]["ownerReferences"] = json!([{"apiVersion":"batch/v1","kind":"CronJob",
             "name":name,"uid":cron["metadata"]["uid"],"controller":true}]);
+        job["metadata"]["annotations"] =
+            cron["spec"]["jobTemplate"]["metadata"]["annotations"].clone();
         let template = job["spec"]["template"].clone();
         let pod = store.pods.values_mut().next().unwrap();
         pod["spec"] = template["spec"].clone();
@@ -433,6 +437,67 @@ async fn report_time_scope_and_retained_integrity_are_not_repaired_into_success(
             serde_json::from_str(cm["data"]["evidence.json"].as_str().unwrap()).unwrap();
         evidence["job_uid"] = json!("foreign");
         cm["data"]["evidence.json"] = json!(evidence.to_string());
+    }
+
+    #[tokio::test]
+    async fn report_completion_accepts_only_the_terminal_kubernetes_second() {
+        for (completed, expected) in [
+            ("2026-09-10T20:00:03.400Z", "Ready"),
+            ("2026-09-10T20:00:03.999999999Z", "Ready"),
+            ("2026-09-10T20:00:04Z", "Degraded"),
+            ("2026-09-10T20:00:04.001Z", "Degraded"),
+        ] {
+            let mut f = fixture::setup().await;
+            {
+                let mut store = f.store.lock().unwrap();
+                store.report["completedAt"] = json!(completed);
+                store.pods.values_mut().next().unwrap()["status"]["containerStatuses"][0]["state"]
+                    ["terminated"]["finishedAt"] = json!("2026-09-10T20:00:03Z");
+            }
+            assert_eq!(
+                f.reconcile().await.phase.as_deref(),
+                Some(expected),
+                "{completed}"
+            );
+            if expected == "Degraded" {
+                let store = f.store.lock().unwrap();
+                let encoded = store.cms[&evidence::name(&f.eval)]["data"]["evidence.json"]
+                    .as_str()
+                    .unwrap();
+                let record: evidence::Evidence = serde_json::from_str(encoded).unwrap();
+                assert_eq!(
+                    record.error.as_deref(),
+                    Some("ReportTimeAttributionMismatch")
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn finish_precision_does_not_relax_creation_exit_or_uid_bounds() {
+        for mutation in ["creation", "exit", "pod-uid"] {
+            let mut f = fixture::setup().await;
+            {
+                let mut store = f.store.lock().unwrap();
+                store.report["completedAt"] = json!("2026-09-10T20:00:03.400Z");
+                store.pods.values_mut().next().unwrap()["status"]["containerStatuses"][0]["state"]
+                    ["terminated"]["finishedAt"] = json!("2026-09-10T20:00:03Z");
+                match mutation {
+                    "creation" => store.report["startedAt"] = json!("2026-09-10T19:59:59.999Z"),
+                    "exit" => {
+                        store.pods.values_mut().next().unwrap()["status"]["containerStatuses"][0]
+                            ["state"]["terminated"]["exitCode"] = json!(2)
+                    }
+                    "pod-uid" => store.mutate_on_log = Some("pod-uid"),
+                    _ => unreachable!(),
+                }
+            }
+            assert_eq!(
+                f.reconcile().await.phase.as_deref(),
+                Some("Degraded"),
+                "{mutation}"
+            );
+        }
     }
     assert!(
         observation::observe(&f.client, &f.eval, &f.intent, &f.corpus)

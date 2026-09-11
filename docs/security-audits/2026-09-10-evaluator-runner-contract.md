@@ -143,3 +143,31 @@ from this approval.
 
 Signed-off-by: pallakatos (maintainer delegation recorded above) <lakatos.toth.pal@gmail.com>
 Signed-off-by: GitHub Copilot (delegated AI review, not an independent human) <223556219+Copilot@users.noreply.github.com>
+
+## Follow-up evaluator evidence corrections (2026-09-11, not executed)
+
+The prerequisite branch based on `9d9f9a9a00ac0c20bb4a5ae185edbef4f4c6ee8a`
+addresses three exact-source review findings. This section does not extend the
+earlier source approval or assert a new review/hosted/native result.
+
+- Container `finishedAt` uses Kubernetes whole-second precision. Fractional
+  report completion in that second is accepted, but the following second is
+  rejected; creation-time, report-interval, exit and UID fences remain.
+- Job selection and retained receipts bind producer-stamped request token and
+  requested Job identity, independently of spec intent. A missing explicit
+  Job without a protected current receipt stays Pending; an older success is
+  not re-stamped with the Eval's new token. The claim/ack handoff and CronJob
+  templates preserve request context. Current protected receipts can survive
+  Pod/Job GC without changing their source identity. Scheduled results remain
+  eligible after the explicit request is observed, not as a substitute for
+  an unresolved missing/running request.
+- Sandbox drift patches preserve unrelated conditions, replace/deduplicate
+  only Degraded, use standard transition-time/generation helpers and retain
+  the existing UID/resourceVersion conflict fence.
+
+Regression source exercises the actual reconciliation, workload builders and
+HTTP transport fixture for fractional timestamps, missing/new/wrong requests,
+current/scheduled/retained receipt identity, GC and drift condition conflicts.
+No Rust compilation, tests or Clippy were executed locally: available space
+was below the unchanged 8.5 GiB floor. Hosted Rust and native qualification
+remain required; fixture source and formatting are not execution evidence.

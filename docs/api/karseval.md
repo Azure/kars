@@ -92,6 +92,18 @@ There are exactly two ways to start a run:
 A CR with **both** a schedule and the run-now annotation will produce
 both a `CronJob` and a one-shot `Job`. They run independently.
 
+The controller claims each explicit request before creating its Job. Its token
+and requested Job name are stamped on the Pod template, and scheduled Jobs
+inherit that acknowledged request context from their CronJob template. The
+consumer checks those producer stamps together with native UID ownership and
+the actual spec; names and labels alone are not attribution. A missing or
+still-running explicitly requested Job keeps the eval Pending, rather than
+falling back to an older success (including an older scheduled success).
+When the requested Job is absent, only an already protected, current receipt
+can authorize continued evaluation; the controller does not guess whether a
+missing Job completed or merely disappeared. New runs from the current
+scheduled producer can subsequently become the latest result.
+
 ---
 
 ## Status — what to read
@@ -157,6 +169,13 @@ The protected status also records `reportConfigMapUid` and
 `reportEvidenceDigest`; cache-only replay after Job GC must match that prior
 controller receipt as well as current intent. An unsigned ConfigMap alone
 cannot create fresh Ready.
+The receipt also binds the producer's request token and requested Job name.
+It survives Pod/Job TTL cleanup without relabeling an old run as a new request.
+If the same terminal Job remains but its Pods have been collected, its matching
+protected receipt is reused unchanged; a replacement Job UID is not accepted.
+A protected pre-stamp receipt remains usable after GC only when its existing
+token, intent and source Job identify the same explicit request; a receipt
+from a different Job cannot be retroactively bound to that request.
 Raw prompts, response bodies, headers and free-form error details are not retained.
 The latest report is written before history/readiness advances; a lost write
 acknowledgement is retried idempotently. Foreign or malformed ConfigMaps are
@@ -184,6 +203,11 @@ the runner pod. The runner reports its hash of the bytes it actually read.
 The consumer rejects a v2 report whose digest, corpus name, router, case
 inventory, timestamps or native workload identity disagrees with the current
 intent. It never replaces the reported digest with a newly resolved digest.
+Kubernetes `metav1.Time` exposes container completion at whole-second
+precision. Fractional report completion within that same second is accepted;
+the start must still be at or after Job creation, and completion in the next
+second is rejected. Report interval, exit-code and native identity checks
+remain mandatory.
 
 ### Report negotiation and consumer-first rollout
 
@@ -214,6 +238,11 @@ Only native Job `Complete=True` or `Failed=True` conditions are terminal;
 failed-attempt counters alone are not. Eval/Job/Pod UID, generation, owner and
 spec continuity are rechecked around log reads and persistence. Changing intent
 or requesting a new run cannot promote stale history to a fresh pass.
+Sandbox drift publication preserves every unrelated condition, upserts only
+`Degraded`, records the observed sandbox generation and preserves transition
+time while its status stays True. Its read/modify/write remains fenced by
+the target UID and resourceVersion, so a conflict cannot overwrite a
+concurrent sandbox update.
 These rules do not claim runner-image execution or native lifecycle
 qualification from source-only tests.
 
