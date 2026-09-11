@@ -50,6 +50,13 @@ def rule(group, version, resources, scope="Namespaced"):
     return {"apiGroups": [group], "apiVersions": [version], "operations": ["CREATE", "UPDATE"],
             "resources": resources, "scope": scope}
 
+
+def private_namespace_validation(expression):
+    # Kubernetes 1.31 match conditions receive no namespace object. Validation
+    # does; the ternary propagates missing metadata rather than masking errors.
+    return f"variables.a[?'{PREFIX}enabled'].orValue('') == 'true' ? ({expression}) : true"
+
+
 def activation_schema():
     def object_schema(properties, required):
         return {"type": "object", "properties": properties, "required": required}
@@ -192,13 +199,12 @@ def bundle():
          rule("apps", "v1", ["deployments", "replicasets", "statefulsets", "daemonsets"]),
          rule("batch", "v1", ["jobs", "cronjobs"])],
         variables,
-        [("!(variables.material || variables.identity || variables.privileged || variables.marked) || "
+        [(private_namespace_validation(
+          "!(variables.material || variables.identity || variables.privileged || variables.marked) || "
           "variables.manager || variables.projector || "
           "(variables.authenticatedStage && request.?subResource.orValue('') != 'ephemeralcontainers' && "
-          "(variables.retiring || (variables.fresh && (request.operation == 'CREATE' || variables.sameTemplate))))",
+          "(variables.retiring || (variables.fresh && (request.operation == 'CREATE' || variables.sameTemplate))))"),
           "Private capability consumption requires qualified actor authority; an epoch alone grants none")],
-        [{"name": "activated-private-namespace",
-          "expression": f"{metadata}[?'{PREFIX}enabled'].orValue('') == 'true'"}],
     )
     output += pair(
         "kars-private-consumption-namespace",
@@ -225,11 +231,10 @@ def bundle():
     output += pair(
         "kars-private-consumption-connect", [connect],
         [variable("a", metadata), variable("manager", manager), variable("projector", projector)],
-        [("variables.manager || variables.projector || (request.namespace == 'kars-sre' && "
-          "authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed())",
+        [(private_namespace_validation(
+          "variables.manager || variables.projector || (request.namespace == 'kars-sre' && "
+          "authorizer.group('kars.azure.com').resource('karssreregistrations').name('canonical').check('use').allowed())"),
           "Private capability namespaces require explicit operator authority for workload connections")],
-        [{"name": "activated-private-namespace",
-          "expression": f"{metadata}[?'{PREFIX}enabled'].orValue('') == 'true'"}],
     )
     output += pair(
         "kars-private-consumption-grant",

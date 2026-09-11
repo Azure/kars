@@ -126,7 +126,10 @@ fn merge(value: &mut Value, patch: &Value) {
 
 async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
     let server = MockServer::start().await;
-    let state = Arc::new(Mutex::new(State::default()));
+    let state = Arc::new(Mutex::new(State {
+        objects: BTreeMap::from([(format!("/api/v1/namespaces/{NS}"), json!(namespace()))]),
+        ..Default::default()
+    }));
     let handler = state.clone();
     Mock::given(|_: &wiremock::Request| true).respond_with(move |request: &wiremock::Request| {
         let mut state = handler.lock().unwrap();
@@ -479,6 +482,30 @@ async fn already_qualified_control_is_reused_without_reissuing_or_touching_forei
         "secret:7"
     );
     assert_eq!(secret_writes(&state.lock().unwrap()), 0);
+}
+
+#[tokio::test]
+async fn missing_or_replaced_live_namespace_never_receives_new_control_material() {
+    for missing in [false, true] {
+        let (_server, client, state) = fixture().await;
+        {
+            let mut state = state.lock().unwrap();
+            let path = format!("/api/v1/namespaces/{NS}");
+            if missing {
+                state.objects.remove(&path);
+            } else {
+                state.objects.get_mut(&path).unwrap()["metadata"]["uid"] = "replacement".into();
+            }
+        }
+        assert!(
+            credentials::ensure(&client, &source(), &namespace())
+                .await
+                .is_err()
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(token_issuances(&state), 0);
+        assert_eq!(secret_writes(&state), 0);
+    }
 }
 
 #[tokio::test]

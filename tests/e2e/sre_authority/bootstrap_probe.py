@@ -27,7 +27,7 @@ def failure_site(error):
     while frame:
         name = Path(frame.tb_frame.f_code.co_filename).name
         if name in ("bootstrap_probe.py", "binding_probe.py", "bootstrap_cases.py",
-                    "controller_update_probe.py", "collection_delete_probe.py"):
+                    "controller_update_probe.py", "collection_delete_probe.py", "private_consumption_phase.py"):
             result.update(source=name, line=frame.tb_lineno)
         frame = frame.tb_next
     return result
@@ -234,6 +234,9 @@ def main(root, diagnostics_only, candidate=False, retirement=False):
                     raise RuntimeError("Actual API log media precondition failed")
                 state = exercise(root, port, objects, policies, wait_seconds=180 if candidate else 90,
                                  retirement=retirement and not candidate)
+                from sre_authority.private_consumption_phase import cases as private_phase_cases
+                private_phase_cases(port, objects,
+                                    lambda facts: write_report(root, "bootstrap-private-consumption-phase.json", facts))
                 from sre_authority.bootstrap_cases import admission_cases
                 cases = admission_cases(port, policies)
                 write_report(root, "bootstrap-admission-cases.json", {"cases": cases})
