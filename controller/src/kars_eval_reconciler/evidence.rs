@@ -127,6 +127,22 @@ impl Evidence {
                     && intent.request_job.as_deref() == Some(self.job_name.as_str())))
     }
 
+    /// A protected terminal receipt can discharge its request without qualifying
+    /// its report for a different intent. Scheduled receipts carry the request
+    /// binding only after the observation gate has admitted that request.
+    pub fn fulfills_request(&self, intent: &Intent) -> bool {
+        self.eval_uid == intent.eval_uid
+            && self.eval_generation <= intent.generation
+            && intent
+                .request_marker
+                .as_ref()
+                .is_some_and(|token| self.request_marker.as_ref() == Some(token))
+            && intent.request_job.as_ref().is_some_and(|job| {
+                self.request_job.as_ref() == Some(job)
+                    || (self.request_job.is_none() && self.job_name == *job)
+            })
+    }
+
     pub fn state(&self) -> &'static str {
         match &self.report {
             Some(report) if !report.qualified() => "RunnerUpgradeRequired",
