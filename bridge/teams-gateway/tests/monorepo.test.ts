@@ -67,6 +67,19 @@ describe("optional Bridge monorepo boundary", () => {
     expect(read("bridge/docs/deployment.md")).toContain("repository root (`cd bridge`)");
   });
 
+  it("resolves the documented installation charts from the Bridge working directory", () => {
+    const guide = read("bridge/deploy/helm/kars-bridge/README.md");
+    const commands = [...guide.matchAll(/helm install (kars|kars-bridge)\s+(\S+)/g)];
+    expect(commands.filter((match) => match[1] === "kars")).toHaveLength(2);
+    expect(commands.filter((match) => match[1] === "kars-bridge").length).toBeGreaterThan(0);
+    for (const [, release, path] of commands) {
+      expect(existsSync(new URL(`${path}/Chart.yaml`, new URL("bridge/", repository))),
+        `${release} chart ${path} must resolve from bridge/`).toBe(true);
+    }
+    expect(guide).toContain("repository root (`cd bridge`)");
+    expect(guide).toContain("not yet release-qualified");
+  });
+
   it("does not include operator state or a cluster-specific deployment overlay", () => {
     expect(existsSync(new URL("bridge/.openclaw/", repository))).toBe(false);
     expect(existsSync(new URL("bridge/deploy/helm/kars-bridge/values-aks-airunway.yaml", repository)))
