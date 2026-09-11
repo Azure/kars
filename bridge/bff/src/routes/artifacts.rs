@@ -31,24 +31,6 @@ fn content_address(bytes: &[u8]) -> String {
     out
 }
 
-#[cfg(test)]
-mod digest_tests {
-    use super::*;
-
-    #[test]
-    fn artifact_addresses_keep_the_existing_sixteen_byte_short_form() {
-        assert_eq!(
-            content_address(b"abc"),
-            "sha256:ba7816bf8f01cfea414140de5dae2223"
-        );
-        assert_eq!(
-            content_address(b""),
-            "sha256:e3b0c44298fc1c149afbf4c8996fb924"
-        );
-        assert_ne!(content_address(b"abc"), content_address(b"abc\n"));
-    }
-}
-
 #[derive(Debug, Serialize)]
 pub struct ArtifactFileDto {
     pub name: String,
@@ -409,4 +391,22 @@ pub async fn list_artifacts(
     missions.sort_by(|a, b| b.finished_at.cmp(&a.finished_at));
 
     Ok(Json(ArtifactsIndexDto { missions }))
+}
+
+#[cfg(test)]
+mod digest_tests {
+    use super::*;
+
+    #[test]
+    fn artifact_addresses_keep_the_existing_sixteen_byte_short_form() {
+        assert_eq!(
+            content_address(b"abc"),
+            "sha256:ba7816bf8f01cfea414140de5dae2223"
+        );
+        assert_eq!(
+            content_address(b""),
+            "sha256:e3b0c44298fc1c149afbf4c8996fb924"
+        );
+        assert_ne!(content_address(b"abc"), content_address(b"abc\n"));
+    }
 }
