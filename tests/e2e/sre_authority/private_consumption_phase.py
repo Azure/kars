@@ -182,18 +182,27 @@ def cases(port, objects, emit):
         rules.append({"apiGroups": [""], "resources": ["pods/" + name for name in CONNECTIONS],
                       "resourceNames": [ABSENT_POD], "verbs": ["get"]})
         for name in ("tenant", "root"):
-            role_rules = copy.deepcopy(rules)
-            if name == "root":
-                role_rules.append({"apiGroups": ["kars.azure.com"], "resources": ["karscredentialgrants"],
-                                   "resourceNames": ["workspace"], "verbs": ["project-credentials"]})
             owned.create(f"{shared.RBAC}/namespaces/{namespace}/roles", {
                 "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "Role",
-                "metadata": {"name": name, "namespace": namespace}, "rules": role_rules})
+                "metadata": {"name": name, "namespace": namespace}, "rules": rules})
             owned.create(f"{shared.RBAC}/namespaces/{namespace}/rolebindings", {
                 "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "RoleBinding",
                 "metadata": {"name": name, "namespace": namespace},
                 "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
                 "subjects": [{"kind": "ServiceAccount", "name": name, "namespace": namespace}]})
+        # The shipped projector check is cluster-scoped, as is the real controller
+        # binding. Delegate only its synthetic verb, never the controller's API access.
+        projector = namespace + "-projector"
+        owned.create(shared.RBAC + "/clusterroles", {
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRole",
+            "metadata": {"name": projector},
+            "rules": [{"apiGroups": ["kars.azure.com"], "resources": ["karscredentialgrants"],
+                       "resourceNames": ["workspace"], "verbs": ["project-credentials"]}]})
+        owned.create(shared.RBAC + "/clusterrolebindings", {
+            "apiVersion": "rbac.authorization.k8s.io/v1", "kind": "ClusterRoleBinding",
+            "metadata": {"name": projector},
+            "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "ClusterRole", "name": projector},
+            "subjects": [{"kind": "ServiceAccount", "name": "root", "namespace": namespace}]})
         # KCM creates per-controller identities lazily. Inert workloads cause
         # actual reconciliation; the scheduled CronJob can only create suspended Jobs.
         prime_controller_accounts(port, owned, namespace)
@@ -224,6 +233,8 @@ def cases(port, objects, emit):
         patch_fence(port, ns, fields)
         for subresource in CONNECTIONS:
             connect(subresource + "-private-tenant", namespace, subresource, 403, accounts["tenant"])
+            connect(subresource + "-wrong-root-uid", namespace, subresource, 403,
+                    (accounts["root"][0], "wrong-uid"))
             connect(subresource + "-private-root-admission", namespace, subresource, 404, accounts["root"])
         parents = {}
         for kind in kinds:
