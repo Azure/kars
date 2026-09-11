@@ -99,6 +99,35 @@ class PrivateConsumptionFixtures(unittest.TestCase):
         self.assertTrue(all(not obj["spec"].get("matchConditions")
                             for obj in api.fault_policies))
         self.assertNotIn("do-not-publish", json.dumps(reports))
+        primers = [body for _, method, path, body in api.calls
+                   if method == "POST" and "dryRun" not in path
+                   and body.get("metadata", {}).get("name", "").startswith("phase-prime-")]
+        self.assertEqual(len(primers), 7)
+        for obj in primers:
+            pod = phase.template(obj)["spec"]
+            self.assertEqual(pod["schedulerName"], "private-consumption-never-schedule")
+            self.assertFalse(pod["automountServiceAccountToken"])
+            self.assertTrue(all(c["imagePullPolicy"] == "Never" for c in pod["containers"]))
+            if obj["kind"] == "CronJob":
+                self.assertFalse(obj["spec"]["suspend"])
+                self.assertTrue(obj["spec"]["jobTemplate"]["spec"]["suspend"])
+                self.assertEqual(obj["spec"]["jobTemplate"]["spec"]["parallelism"], 0)
+            elif obj["kind"] == "Job":
+                self.assertTrue(obj["spec"]["suspend"])
+                self.assertEqual(obj["spec"]["parallelism"], 0)
+            elif obj["kind"] != "DaemonSet":
+                self.assertEqual(obj["spec"]["replicas"], 0)
+
+    def test_failure_site_reports_failed_call_not_the_generic_require_helper(self):
+        from sre_authority.bootstrap_probe import failure_site
+        try:
+            phase.source_policy([])
+        except RuntimeError as error:
+            site = failure_site(error)
+        else:
+            self.fail("missing policy must fail")
+        self.assertEqual(site["source"], "private_consumption_phase.py")
+        self.assertNotEqual(site["line"], phase.require.__code__.co_firstlineno + 2)
 
     def test_native_phase_rejects_wrong_denials_false_fault_acceptance_and_wrong_lookup_errors(self):
         for fault in ("allow-private", "allow-missing-metadata", "unrelated-not-found"):
@@ -384,7 +413,9 @@ class PhaseAPI:
             return 404, {"kind": "Status", "reason": "NotFound", "details": {
                 "name": phase.ABSENT_POD, "kind": "secrets" if self.fault == "unrelated-not-found" else "pods"}}
         if method == "GET" and "/kube-system/serviceaccounts/" in path:
-            return 200, {"metadata": {"uid": "uid-" + path.rsplit("/", 1)[1]}}
+            name = path.rsplit("/", 1)[1]
+            return 200, {"kind": "ServiceAccount", "metadata": {
+                "name": name, "namespace": "kube-system", "uid": "uid-" + name}}
         if method == "GET" and "/nodes?" in path:
             return 200, {"items": []}
         if "?dryRun=All" in path:

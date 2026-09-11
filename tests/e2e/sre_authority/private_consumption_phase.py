@@ -83,6 +83,21 @@ def patch_fence(port, namespace, fields):
     require(code == 200 and updated["metadata"]["uid"] == namespace["metadata"]["uid"])
 
 
+def prime_controller_accounts(port, owned, namespace):
+    for kind, _, _, _ in KINDS:
+        obj = workload(kind, "phase-prime-" + kind.lower(), namespace)
+        if kind == "CronJob":
+            obj["spec"]["schedule"] = "* * * * *"
+            obj["spec"]["suspend"] = False
+            require(obj["spec"]["jobTemplate"]["spec"]["suspend"] is True
+                    and obj["spec"]["jobTemplate"]["spec"]["parallelism"] == 0)
+        if kind == "DaemonSet":
+            selector = template(obj)["spec"]["nodeSelector"]["private-consumption.test/never-schedule"]
+            code, nodes = request(port, "GET", "/api/v1/nodes?labelSelector=private-consumption.test%2Fnever-schedule%3D" + selector)
+            require(code == 200 and not nodes.get("items"))
+        owned.create(collection(obj), obj)
+
+
 def cases(port, objects, emit):
     policy, binding = source_policy(objects)
     connect_policy, connect_binding = source_policy(objects, POLICY + "-connect")
@@ -179,6 +194,9 @@ def cases(port, objects, emit):
                 "metadata": {"name": name, "namespace": namespace},
                 "roleRef": {"apiGroup": "rbac.authorization.k8s.io", "kind": "Role", "name": name},
                 "subjects": [{"kind": "ServiceAccount", "name": name, "namespace": namespace}]})
+        # KCM creates per-controller identities lazily. Inert workloads cause
+        # actual reconciliation; the scheduled CronJob can only create suspended Jobs.
+        prime_controller_accounts(port, owned, namespace)
         kinds = ["Pod", *(item[0] for item in KINDS)]
         for kind in kinds:
             probe(kind + "-ordinary-unactivated", shape(kind, namespace), 201, accounts["tenant"])
@@ -186,8 +204,16 @@ def cases(port, objects, emit):
             connect(subresource + "-unactivated-admission", namespace, subresource, 404, accounts["tenant"])
         controller_uids = {}
         for controller, _, _ in STAGES:
-            code, account = request(port, "GET", f"/api/v1/namespaces/kube-system/serviceaccounts/{controller}")
-            require(code == 200 and account.get("metadata", {}).get("uid"))
+            path = f"/api/v1/namespaces/kube-system/serviceaccounts/{controller}"
+            code, account = shared.wait_for(
+                lambda path=path: request(port, "GET", path),
+                lambda code, obj: code == 200 and obj.get("metadata", {}).get("uid"),
+                "fixtures", seconds=90)
+            emit({"controllerAccount": controller, "httpStatus": code,
+                  "actualUidPresent": bool(account.get("metadata", {}).get("uid"))})
+            require(code == 200 and account.get("metadata", {}).get("name") == controller
+                    and account["metadata"].get("namespace") == "kube-system"
+                    and account["metadata"].get("uid"))
             controller_uids[controller] = account["metadata"]["uid"]
         fields = {PREFIX + "enabled": "true", PREFIX + "state": "Qualified",
                   PREFIX + "namespace-uid": ns["metadata"]["uid"], PREFIX + "epoch": epoch,

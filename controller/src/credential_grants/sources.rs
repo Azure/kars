@@ -90,6 +90,7 @@ fn source_metadata(source: &Secret, grant: &KarsCredentialGrant) -> Result<Sourc
         name: source.name_any(),
         uid: uid.into(),
         resource_version: rv.into(),
+        ownership_from_resource_version: None,
         keys,
         phase: if !valid {
             "Blocked"
@@ -209,9 +210,36 @@ pub(super) async fn inventory(
                         "metadata":{"uid":source.metadata.uid,"resourceVersion":source.metadata.resource_version,"ownerReferences":[owner],
                             "annotations":{TARGET_UID:target.uid}}
                     }))).await.map_err(|e|api_error("Bind observed source ownership",e))?;
+                    if bound.metadata.uid != source.metadata.uid
+                        || bound.metadata.name != source.metadata.name
+                        || bound.metadata.namespace != source.metadata.namespace
+                        || bound.metadata.resource_version == source.metadata.resource_version
+                    {
+                        return Err(
+                            "Source ownership response changed identity or omitted its transition"
+                                .into(),
+                        );
+                    }
+                    value.ownership_from_resource_version =
+                        source.metadata.resource_version.clone();
                     value.resource_version = identity(&bound.metadata)?.1.into();
                     value.phase = "Ready".into();
                 }
+            }
+            if value.phase == "Ready" && value.ownership_from_resource_version.is_none() {
+                value.ownership_from_resource_version = grant
+                    .status
+                    .as_ref()
+                    .and_then(|status| {
+                        status.sources.iter().find(|previous| {
+                            previous.name == value.name
+                                && previous.uid == value.uid
+                                && previous.phase == "Ready"
+                                && previous.resource_version == value.resource_version
+                                && previous.target == value.target
+                        })
+                    })
+                    .and_then(|previous| previous.ownership_from_resource_version.clone());
             }
             sources.push(value);
         }
