@@ -1,0 +1,144 @@
+{{- if .Values.idp.enabled }}
+# kars Bridge — in-cluster IdP (Dex) for multi-user SSO.
+#
+# WHY THIS EXISTS: colleagues reach the Bridge over a single
+#   `kubectl port-forward svc/kars-bridge-web 3000:3000`
+# with NO public ingress and NO LoadBalancer. The OIDC login flow redirects the
+# *browser* to the IdP's authorization endpoint, so the IdP must be reachable at
+# an origin the browser can resolve. Rather than force every colleague to edit
+# /etc/hosts and run a second port-forward for Dex, the web pod proxies /dex/*
+# to this in-cluster Dex Service (see web/src/app/dex/[...path]/route.ts) and
+# Dex's issuer is set to `{web origin}/dex`. One port-forward, zero host hacks.
+#
+# Dex runs entirely in-cluster; it is never exposed publicly. Static passwords
+# are for a private alpha only — point `idp.dex.connectors` at a real upstream
+# (Entra ID, Okta, GitHub, ...) for anything beyond a colleague test ring.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: dex
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app: dex
+data:
+  config.yaml: |
+    # Issuer is the browser-facing origin + /dex (served by the web same-origin
+    # proxy), NOT the in-cluster Service DNS — otherwise the browser could not
+    # resolve the authorize/login redirects.
+    issuer: {{ .Values.idp.issuer | quote }}
+    storage: { type: memory }
+    web: { http: 0.0.0.0:5556 }
+    oauth2: { skipApprovalScreen: true }
+    staticClients:
+      - id: {{ .Values.idp.clientId | quote }}
+        name: kars Bridge
+        secretEnv: DEX_CLIENT_SECRET
+        redirectURIs: {{ .Values.idp.redirectURIs | toJson }}
+    enablePasswordDB: {{ .Values.idp.dex.enablePasswordDB }}
+    {{- with .Values.idp.dex.staticPasswords }}
+    staticPasswords:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+    {{- with .Values.idp.dex.connectors }}
+    connectors:
+      {{- toYaml . | nindent 6 }}
+    {{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: dex
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app: dex
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: dex
+  template:
+    metadata:
+      labels:
+        {{- include "kars-bridge.labels" . | nindent 8 }}
+        app: dex
+      annotations:
+        # Roll the pod when the config changes so issuer/user edits take effect.
+        checksum/config: {{ .Values.idp | toJson | sha256sum }}
+    spec:
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: dex
+          image: {{ .Values.idp.dex.image | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/dex", "serve", "/etc/dex/config.yaml"]
+          env:
+            - name: DEX_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.idp.secretName }}
+                  key: client-secret
+          ports:
+            - containerPort: 5556
+          securityContext:
+            allowPrivilegeEscalation: false
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: config
+              mountPath: /etc/dex
+              readOnly: true
+      volumes:
+        - name: config
+          configMap:
+            name: dex
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: dex
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app: dex
+spec:
+  selector:
+    app: dex
+  ports:
+    - name: http
+      port: 5556
+      targetPort: 5556
+{{- if .Values.networkPolicy.create }}
+---
+# kars ships a kars-system-default-deny that drops pod-to-pod on non-allowlisted
+# ports; the web pod's /dex proxy hop is not on that allowlist. This additive
+# policy opens ingress to Dex on 5556 from in-cluster callers so the same-origin
+# proxy (and OIDC discovery/token/JWKS server-side calls) can reach it.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-dex
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app: dex
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector: {}
+      ports:
+        - port: 5556
+          protocol: TCP
+{{- end }}
+{{- end }}

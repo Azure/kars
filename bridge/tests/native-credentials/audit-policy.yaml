@@ -1,0 +1,9 @@
+apiVersion: audit.k8s.io/v1
+kind: Policy
+omitStages:
+  - RequestReceived
+  - ResponseStarted
+rules:
+  # No request/response bodies: Secrets, TokenRequests and principal assertions
+  # must never enter the disposable audit log or uploaded evidence.
+  - level: Metadata

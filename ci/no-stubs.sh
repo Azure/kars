@@ -26,6 +26,9 @@ PROD_PATHS=(
   'runtimes/openclaw/src/'
   'sandbox-images/'
   'cli/profiles/'
+  'bridge/bff/src/'
+  'bridge/web/src/'
+  'bridge/teams-gateway/src/'
 )
 
 # Patterns that indicate an unfinished production code path.

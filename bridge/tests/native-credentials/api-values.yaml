@@ -1,0 +1,16 @@
+controller:
+  replicas: 0
+inferenceRouter:
+  replicas: 0
+observationPrivacyRpc:
+  enabled: true
+sre:
+  enabled: false
+agentMesh:
+  enabled: false
+meshPeer:
+  enabled: false
+monitoring:
+  enabled: false
+  prometheus:
+    enabled: false

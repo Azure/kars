@@ -1,0 +1,41 @@
+{{- $namespace := include "kars-bridge.namespace" . }}
+{{- $retainOwnedNamespace := false }}
+{{- $existing := dict }}
+{{- if .Release.IsUpgrade }}
+{{- $existing = lookup "v1" "Namespace" "" $namespace }}
+{{- if $existing }}
+{{- $annotations := default dict $existing.metadata.annotations }}
+{{- $retainOwnedNamespace = and
+      (eq (index $annotations "meta.helm.sh/release-name") .Release.Name)
+      (eq (index $annotations "meta.helm.sh/release-namespace") .Release.Namespace) }}
+{{- end }}
+{{- end }}
+{{- if or .Values.createNamespace $retainOwnedNamespace }}
+{{- if and (eq (include "kars-bridge.namespace" .) "kars-system") (not .Release.IsUpgrade) }}
+{{- fail "Bridge must not own the shared kars-system namespace on a new install; set createNamespace=false and install Kars first" }}
+{{- end }}
+{{- if and (eq (include "kars-bridge.namespace" .) .Release.Namespace) (not .Release.IsUpgrade) }}
+{{- fail "A chart cannot bootstrap its own Helm release storage namespace; set createNamespace=false and use helm --create-namespace, or store the release in a separate existing namespace" }}
+{{- end }}
+# Keep legacy chart-owned namespaces in upgrade manifests so retention can be
+# applied before an operator changes ownership or uninstalls the release.
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: {{ include "kars-bridge.namespace" . }}
+  annotations:
+    # A Bridge uninstall must never cascade-delete Kars CRs that happen to
+    # live in the same namespace. Leave an empty chart-created namespace
+    # behind for the operator to remove explicitly.
+    {{- if $retainOwnedNamespace }}
+    {{- toYaml (mergeOverwrite (deepCopy (default dict $existing.metadata.annotations)) (dict "helm.sh/resource-policy" "keep")) | nindent 4 }}
+    {{- else }}
+    helm.sh/resource-policy: keep
+    {{- end }}
+  labels:
+    {{- if $retainOwnedNamespace }}
+    {{- toYaml (default dict $existing.metadata.labels) | nindent 4 }}
+    {{- else }}
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    {{- end }}
+{{- end }}

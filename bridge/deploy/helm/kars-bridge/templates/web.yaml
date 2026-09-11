@@ -1,0 +1,135 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kars-bridge-web
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  replicas: {{ .Values.web.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kars-bridge
+      app.kubernetes.io/component: web
+  template:
+    metadata:
+      labels:
+        {{- include "kars-bridge.labels" . | nindent 8 }}
+        app.kubernetes.io/component: web
+    spec:
+      securityContext:
+        {{- toYaml (mergeOverwrite (dict "fsGroup" 10001) .Values.podSecurityContext) | nindent 8 }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: web
+          image: "{{ .Values.web.image.repository }}:{{ .Values.web.image.tag }}"
+          imagePullPolicy: {{ .Values.web.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.web.port }}
+          env:
+            - name: PORT
+              value: "{{ .Values.web.port }}"
+            # Next.js standalone server binds to $HOSTNAME; Kubernetes sets
+            # HOSTNAME to the pod name, so without this it listens only on the
+            # pod-name interface and the readiness probe (pod IP) never succeeds.
+            - name: HOSTNAME
+              value: "0.0.0.0"
+            # Server components + the /api rewrite target the in-cluster BFF Service.
+            - name: BRIDGE_BFF_URL
+              value: "http://kars-bridge-bff.{{ include "kars-bridge.namespace" . }}.svc.cluster.local:{{ .Values.bff.port }}"
+            - name: BRIDGE_DEFAULT_NAMESPACE
+              value: {{ include "kars-bridge.coreNamespace" . | quote }}
+            {{- if .Values.idp.enabled }}
+            # ── In-cluster IdP (Dex) SSO wiring ──────────────────────────────
+            # Issuer is the browser-facing {web origin}/dex, reached via the web
+            # pod's same-origin /dex proxy (DEX_UPSTREAM_URL) both server-side
+            # (discovery/token/JWKS) and browser-side (authorize/login). One
+            # port-forward, no /etc/hosts. See templates/idp.yaml.
+            - name: BRIDGE_OIDC_ISSUER
+              value: {{ .Values.idp.issuer | quote }}
+            - name: BRIDGE_OIDC_CLIENT_ID
+              value: {{ .Values.idp.clientId | quote }}
+            - name: BRIDGE_OIDC_REDIRECT_URI
+              value: {{ index .Values.idp.redirectURIs 0 | quote }}
+            - name: BRIDGE_OIDC_SCOPES
+              value: {{ .Values.idp.scopes | quote }}
+            - name: BRIDGE_OIDC_ROLE_CLAIM
+              value: {{ .Values.idp.roleClaim | quote }}
+            - name: BRIDGE_OIDC_ROLE_MAP
+              value: {{ .Values.idp.roleMap | toJson | quote }}
+            - name: BRIDGE_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.idp.secretName }}
+                  key: client-secret
+            - name: BRIDGE_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.idp.secretName }}
+                  key: session-secret
+            - name: DEX_UPSTREAM_URL
+              value: {{ default (printf "http://dex.%s.svc.cluster.local:5556" (include "kars-bridge.namespace" .)) .Values.idp.dexUpstreamUrl | quote }}
+            {{- end }}
+            {{- if and (not .Values.idp.enabled) .Values.auth.principalSecretName }}
+            - name: BRIDGE_SESSION_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.auth.principalSecretName }}
+                  key: {{ .Values.auth.principalSecretKey }}
+            {{- end }}
+            {{- with .Values.web.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /api/health, port: http }
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          volumeMounts:
+            - name: web-cache
+              mountPath: /app/.next/cache
+            - name: web-tmp
+              mountPath: /tmp
+          resources:
+            {{- toYaml .Values.web.resources | nindent 12 }}
+      volumes:
+        - name: web-cache
+          emptyDir:
+            sizeLimit: 256Mi
+        - name: web-tmp
+          emptyDir:
+            sizeLimit: 128Mi
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kars-bridge-web
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: web
+spec:
+  selector:
+    app.kubernetes.io/name: kars-bridge
+    app.kubernetes.io/component: web
+  ports:
+    - name: http
+      port: {{ .Values.web.port }}
+      targetPort: http

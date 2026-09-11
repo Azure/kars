@@ -1,0 +1,7 @@
+# Controlled test runtime, extending the exact core egress-guard fixture.
+# No private image is published and no production runtime is replaced.
+FROM kars-native-runtime-base:latest
+RUN tdnf install -y python3 && tdnf clean all
+COPY runtime_probe.py /opt/kars-native/runtime_probe.py
+USER 1000:1000
+CMD ["python3", "/opt/kars-native/runtime_probe.py"]

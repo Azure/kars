@@ -1,0 +1,23 @@
+# Rust (BFF)
+/bff/target/
+**/*.rs.bk
+
+# Node / Next.js (web)
+node_modules
+/web/.next/
+/web/out/
+/web/next-env.d.ts
+
+# Env & secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.DS_Store
+.idea/
+.vscode/
+*.log
+
+# Disposable native qualification credentials, builds, and evidence
+/.native/

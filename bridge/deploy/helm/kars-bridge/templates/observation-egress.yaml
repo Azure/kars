@@ -1,0 +1,38 @@
+{{- $networkPolicy := .Values.networkPolicy | default dict }}
+{{- $observations := $networkPolicy.observations | default dict }}
+{{- if ($observations.enabled | default false) }}
+{{- if not ($observations.existingIsolationConfirmed | default false) }}
+{{- fail "Observation egress requires explicit confirmation that the BFF is already egress-isolated; preserve its API/provider/OIDC/GitHub baseline policy" }}
+{{- end }}
+{{- if not ($observations.targetNamespaces | default list) }}
+{{- fail "Observation egress requires exact reviewed targetNamespaces" }}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-observation-egress
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kars-bridge
+      app.kubernetes.io/component: bff
+  policyTypes: ["Egress"]
+  egress:
+    - to:
+        - namespaceSelector:
+            matchExpressions:
+              - key: kubernetes.io/metadata.name
+                operator: In
+                values:
+                  {{- toYaml $observations.targetNamespaces | nindent 18 }}
+          podSelector:
+            matchExpressions:
+              - key: kars.azure.com/sandbox
+                operator: Exists
+      ports:
+        - port: 9447
+          protocol: TCP
+{{- end }}

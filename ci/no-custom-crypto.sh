@@ -74,6 +74,9 @@ PROD_PATHS=(
   'runtimes/openclaw/src/'
   'sandbox-images/'
   'cli/profiles/'
+  'bridge/bff/src/'
+  'bridge/web/src/'
+  'bridge/teams-gateway/src/'
 )
 
 # Patterns — each is a canonical import / invocation we never want written by us.

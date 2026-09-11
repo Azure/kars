@@ -1,0 +1,81 @@
+{{- if .Values.networkPolicy.create }}
+# kars Bridge — additive NetworkPolicies.
+#
+# kars applies a `kars-system-default-deny` policy that selects EVERY pod in the
+# namespace and drops all pod-to-pod traffic except a fixed allow-list (DNS, the
+# API server, AgentMesh, sandbox routers, IMDS). That allow-list does NOT include
+# the Bridge web -> BFF hop, so without these policies the console cannot reach the
+# BFF under a policy-enforcing CNI. NetworkPolicies are additive (their rules are
+# OR-ed with the default-deny), so these only OPEN the Bridge's own ports.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-web
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kars-bridge
+      app.kubernetes.io/component: web
+  policyTypes: ["Ingress", "Egress"]
+  ingress:
+    # Reach the console from an ingress controller / load balancer / port-forward.
+    - ports:
+        - port: {{ .Values.web.port }}
+          protocol: TCP
+  egress:
+    # Resolve Service DNS names (also granted by the default-deny; repeated here so
+    # the policy is self-sufficient on clusters with a different default-deny).
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # The same-origin /api/* proxy to the BFF.
+    - to:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kars-bridge
+              app.kubernetes.io/component: bff
+      ports:
+        - port: {{ .Values.bff.port }}
+          protocol: TCP
+    {{- if .Values.idp.enabled }}
+    # Same-origin /dex proxy and server-side OIDC discovery/token/JWKS.
+    - to:
+        - podSelector:
+            matchLabels:
+              app: dex
+      ports:
+        - port: 5556
+          protocol: TCP
+    {{- end }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-bff
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: kars-bridge
+      app.kubernetes.io/component: bff
+  policyTypes: ["Ingress"]
+  ingress:
+    # The web pod's same-origin proxy is the only ingress to the BFF; the K8s API,
+    # sandbox-router egress and DNS the BFF itself needs are already granted to all
+    # pods by the kars-system default-deny.
+    - from:
+        - podSelector:
+            matchLabels:
+              app.kubernetes.io/name: kars-bridge
+              app.kubernetes.io/component: web
+      ports:
+        - port: {{ .Values.bff.port }}
+          protocol: TCP
+{{- end }}

@@ -1,0 +1,122 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kars-bridge-bff
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bff
+spec:
+  replicas: {{ .Values.bff.replicas }}
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kars-bridge
+      app.kubernetes.io/component: bff
+  template:
+    metadata:
+      labels:
+        {{- include "kars-bridge.labels" . | nindent 8 }}
+        app.kubernetes.io/component: bff
+    spec:
+      serviceAccountName: {{ include "kars-bridge.serviceAccountName" . }}
+      {{- with .Values.global.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: bff
+          image: "{{ .Values.bff.image.repository }}:{{ .Values.bff.image.tag }}"
+          imagePullPolicy: {{ .Values.bff.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.bff.port }}
+          env:
+            - name: BRIDGE_BFF_HOST
+              value: "0.0.0.0"
+            - name: BRIDGE_BFF_PORT
+              value: "{{ .Values.bff.port }}"
+            - name: BRIDGE_DEFAULT_NAMESPACE
+              value: {{ include "kars-bridge.coreNamespace" . | quote }}
+            - name: BRIDGE_CORE_NAMESPACE
+              value: {{ include "kars-bridge.coreNamespace" . | quote }}
+            - name: BRIDGE_INSTALL_NAMESPACE
+              value: {{ include "kars-bridge.namespace" . | quote }}
+            - name: BRIDGE_LOG_JSON
+              value: "true"
+            {{- if or .Values.idp.enabled .Values.auth.principalSecretName }}
+            # Same HS256 key the web uses to verify bridge-session cookies. The
+            # web forwards the signed session; the BFF independently verifies it
+            # and enforces persona authorization on every API route.
+            - name: BRIDGE_PRINCIPAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ ternary .Values.idp.secretName .Values.auth.principalSecretName .Values.idp.enabled }}
+                  key: {{ ternary "session-secret" .Values.auth.principalSecretKey .Values.idp.enabled }}
+            {{- end }}
+            # Shared secret for the Teams gateway internal decision endpoint.
+            # Optional until an admin configures Teams from Connections.
+            - name: BRIDGE_TEAMS_INTERNAL_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.teamsGateway.secretName }}
+                  key: bff-internal-secret
+                  optional: true
+            # Entra→Bridge role map for server-side principal resolution.
+            - name: BRIDGE_TEAMS_ENTRA_ROLE_MAP
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.teamsGateway.secretName }}
+                  key: entra-role-map
+                  optional: true
+            - name: BRIDGE_TEAMS_SECRET_NAME
+              value: {{ .Values.teamsGateway.secretName | quote }}
+            - name: BRIDGE_TEAMS_GATEWAY_DEPLOYMENT
+              value: "kars-bridge-teams-gateway"
+            - name: BRIDGE_BFF_DEPLOYMENT
+              value: "kars-bridge-bff"
+            {{- with .Values.bff.extraEnv }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+          readinessProbe:
+            httpGet: { path: /readyz, port: http }
+            initialDelaySeconds: 3
+            periodSeconds: 10
+            timeoutSeconds: 10
+          livenessProbe:
+            httpGet: { path: /healthz, port: http }
+            initialDelaySeconds: 10
+            periodSeconds: 20
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: { drop: ["ALL"] }
+          resources:
+            {{- toYaml .Values.bff.resources | nindent 12 }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations: {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity: {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kars-bridge-bff
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+    app.kubernetes.io/component: bff
+spec:
+  selector:
+    app.kubernetes.io/name: kars-bridge
+    app.kubernetes.io/component: bff
+  ports:
+    - name: http
+      port: {{ .Values.bff.port }}
+      targetPort: http

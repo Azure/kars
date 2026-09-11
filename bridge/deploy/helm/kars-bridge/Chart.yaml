@@ -1,0 +1,27 @@
+apiVersion: v2
+name: kars-bridge
+description: >-
+  kars Bridge — the command center (operator console + workspace) that runs
+  ADDITIVELY on top of a kars install. Deploys the BFF and web surfaces plus the
+  least-privilege RBAC the BFF needs. kars can run on its own; the Bridge layers
+  on top and never replaces any kars component.
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+keywords:
+  - kars
+  - openclaw
+  - ai
+  - agent
+  - console
+  - bridge
+home: https://github.com/Azure/kars/tree/kars-bridge/bridge
+sources:
+  - https://github.com/Azure/kars/tree/kars-bridge/bridge
+maintainers:
+  - name: kars Bridge
+annotations:
+  # Additive layer: requires a kars install (the kars CRDs + controller) already
+  # present in the target cluster. Install kars first (or alongside), then this.
+  kars.azure.com/requires: "Bridge/core compatibility matrix"
+  kars.azure.com/additive: "true"

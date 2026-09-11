@@ -1,0 +1,35 @@
+kars Bridge {{ .Chart.AppVersion }} installed in namespace {{ include "kars-bridge.namespace" . }} (release {{ .Release.Name }}).
+
+This is an ADDITIVE layer on top of kars. It expects the kars CRDs + controller to
+already be present in the cluster. Install a compatible full Kars runtime from
+its separate checkout first; see docs/compatibility.md. The public foundation
+PRs alone are not the full Bridge runtime. Images remain private preview.
+
+Verify the required API group before enabling user traffic:
+    kubectl api-resources --api-group=kars.azure.com
+    kubectl -n {{ include "kars-bridge.namespace" . }} get karstasks,karsteams,karsapprovals
+
+The BFF /readyz probe requires all documented Kars APIs and list permission.
+API availability does not prove source/image or controller compatibility.
+Microsoft Teams is optional and has zero gateway replicas by default.
+New installs cannot claim kars-system. Any chart-owned namespace, including
+legacy shared namespaces, is kept on uninstall to avoid cascading deletion of
+Kars resources. Preserve createNamespace when upgrading an unprotected legacy
+namespace until the installed Helm manifest contains the keep annotation.
+
+Reach the console + workspace:
+{{- if .Values.ingress.enabled }}
+    https://{{ .Values.ingress.host }}/workspace   (user)
+    https://{{ .Values.ingress.host }}/console     (operator/admin)
+{{- else }}
+    # No ingress configured — port-forward the web Service:
+    kubectl -n {{ include "kars-bridge.namespace" . }} port-forward svc/kars-bridge-web {{ .Values.web.port }}:{{ .Values.web.port }}
+    # then open http://localhost:{{ .Values.web.port }}/workspace
+{{- end }}
+
+The BFF runs as ServiceAccount "{{ include "kars-bridge.serviceAccountName" . }}" under a
+least-privilege ClusterRole. Persona checks in the BFF govern individual users;
+the ClusterRole is the aggregate Kubernetes permission ceiling.
+
+AKS and local kind are live-qualified. EKS/GKE require environment-specific
+identity, registry, ingress, CNI, inference, and compatibility validation.

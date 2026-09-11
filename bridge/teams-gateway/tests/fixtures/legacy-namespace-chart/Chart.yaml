@@ -1,0 +1,4 @@
+apiVersion: v2
+name: legacy-bridge-namespace
+version: 0.1.0
+description: Test fixture reproducing the old chart-owned namespace without retention.
