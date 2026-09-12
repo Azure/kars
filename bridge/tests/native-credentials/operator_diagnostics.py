@@ -14,6 +14,7 @@ ERRORS = {
     "Private activation requires live API UID/resourceVersion identities": "missing-live-identity",
     "Reviewed private namespace changed": "namespace-review-changed",
     "Consumer execution differs from the reviewed controller template; preserve it for explicit Pod review": "consumer-execution-drift",
+    "Private consumer template changed after protection was enabled": "consumer-template-drift",
     "Private activation staging requires the existing cluster-scoped credential operator authority": "operator-authority",
     "Explicit credential-grant operator permission is required": "operator-authority",
     "Late private runtime retirement changed or is unsupported; preserve the runtime and re-preview its original review": "late-runtime-review",

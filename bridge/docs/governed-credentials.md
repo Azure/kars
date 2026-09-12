@@ -260,6 +260,16 @@ are never written to this evidence. Collection cannot qualify any assertion.
 TLS negatives, 9447/9448 paths, CNI peer denial, and credential rotation remain
 required unchanged.
 
+An operator template-drift refusal also records `enrollmentTemplateDrift`.
+It compares the fixture's pre-preview runtime, controller and BFF Deployment
+snapshots with the existing CLI review and current objects, using the shipped
+CLI's `templateDigest` (including its epoch normalization). Only fixed actor
+labels and comparison booleans are emitted; templates, values and hashes stay
+private. `baselineMatchesReview` must be true before attributing differences
+to changes after review. Each current Deployment is UID/RV-rechecked; missing,
+ambiguous or changing evidence is explicitly unavailable. This failure-only
+diagnostic neither retries enrollment, refreshes approval nor qualifies a test.
+
 `observer_target_client` optionally carries an atomic group of five booleans:
 `transport_debug_observable`, `transport_trace_observable`,
 `tcp_connect_started`, `tcp_connected`, and `http_handshake_complete`.
