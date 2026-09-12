@@ -71,9 +71,10 @@ export function fixture() {
     if (!value) throw new Error("fixture object unavailable");
     if (args[0] === "get" && args[1] === "secret") {
       const format = args[args.indexOf("-o") + 1];
-      if (format === "go-template={{json .metadata}}") return JSON.stringify(value.metadata);
+      if (format === "jsonpath-as-json={.metadata}") return JSON.stringify([value.metadata]);
       if (format === "go-template={{.type}}") return value.type;
       if (format === 'go-template={{index .data "tls.crt"}}') return value.data["tls.crt"];
+      if (format !== "json") throw new Error("Unsupported fixture Secret printer");
     }
     if (args[0] === "get") return JSON.stringify(value);
     if (args[0] !== "patch") throw new Error("Unexpected fixture mutation");

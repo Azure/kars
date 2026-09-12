@@ -135,7 +135,7 @@ describe("reviewed late runtime private enrollment", () => {
     const review = await f.document();
     expect(console.error).toHaveBeenCalledWith(expect.stringContaining("controller admin-key rotation"));
     expect(f.calls.every(args => args[0] === "get")).toBe(true);
-    expect(f.calls.filter(args => args[1] === "secret").every(args => args.includes("go-template={{json .metadata}}"))).toBe(true);
+    expect(f.calls.filter(args => args[1] === "secret").every(args => args.includes("jsonpath-as-json={.metadata}"))).toBe(true);
     const oldKey = f.secret.data["control-token"];
     await applyReviewedGrant(f.execute, review);
     expect(f.preserved()).toEqual(before);
