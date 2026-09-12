@@ -24,14 +24,24 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        if: matrix.project == 'teams-gateway'
       - name: Generate and verify the bounded lock delta
         working-directory: bridge/${{ matrix.project }}
         run: |
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
           git --no-pager diff -- package-lock.json
-          node ../../ci/bridge-lock-delta.mjs
+          if [ "$(basename "$PWD")" = teams-gateway ]; then
+            node ../../ci/bridge-vitest-lock.mjs
+          else
+            node ../../ci/bridge-lock-delta.mjs
+          fi
           npm ci --ignore-scripts --no-audit --no-fund
           npm ls --all > dependency-tree.txt
+      - name: Qualify the patched gateway test runner
+        if: matrix.project == 'teams-gateway'
+        working-directory: bridge/teams-gateway
+        run: npm run lint && npm run typecheck && npm run build && npm test
       - name: Audit the generated lock
         run: node ci/npm-audit-bulk.mjs bridge/${{ matrix.project }}/package-lock.json
       - name: Record artifact provenance
