@@ -95,9 +95,9 @@ retention-only release with unchanged schemas can establish that prerequisite;
 this tool does not perform it implicitly, edit Helm history or drop atomic.
 Incompatible schema/data changes require a separately reviewed migration with
 data preservation evidence. There is no force/confirmation override here. The
-existing explicit, non-atomic SRE authority-stage command retains only its
-previously reviewed full-fingerprint legacy action-params migration; ordinary
-upgrades and rollback do not gain that exception.
+existing explicit, non-atomic SRE authority-stage command supports the closed
+BASE365 migration below; ordinary upgrades and rollback do not gain that
+exception.
 
 SRE `authority stage --dry-run` remains a read-only server-side preview: it does
 not run the action-params conversion, schema writes, controller rollout or
@@ -105,15 +105,71 @@ subject changes. A successful preview is not a completed migration. Failures
 emit `SRE-STAGE-FAILURE <fixed-stage>` before propagating the original error;
 the marker contains no command arguments, response bodies or raw cause.
 `prerequisite-chart-render`, `action-schema-review`, and `helm-server-dry-run`
-distinguish the principal pre-mutation failure points. Actual application uses
-`action-schema-migration` and `core-schema-preparation` before `helm-upgrade`.
+identify pre-mutation failure points. `core-schema-preparation` covers read-only
+planning in both preview and apply, and schema publication during apply; the
+marker alone does not establish that writes occurred. Template-mode action
+conversion uses `action-schema-migration`; a real Helm update uses `helm-upgrade`.
 
-The historical BASE365 chart also differs from the current chart in Task/Team
-budget validation, MCP managed-mode validation and the Sandbox credentialsRef
-name pattern. The approved action-params conversion does not approve those
-additional schema transitions. The compatibility gate must continue to block
-an unreviewed whole-chart migration rather than weaken validation to make an
-SRE fixture pass.
+### Closed BASE365 SRE migration
+
+`kars sre authority stage` has a separate, explicitly reviewed migration for
+the canonical BASE365 chart (`8b206065608593667a40665b3f48225ef9ce278d`) to the
+current core schemas. It does not relax `assertSchemaCompatibility` or add a
+general CEL/validation exception. A private, non-serializable permit is issued
+only after the complete 18-existing/21-target CRD inventory matches pinned
+before/after spec fingerprints and the exact Helm release/namespace owner.
+The finite target catalog includes the incoming `b5ad6791` evaluator-protocol-v2
+report-reference, report-UID and evidence-digest fields. The summary distinguishes
+`core-470` (pre-composition) from `evaluator-v2`; it does not guess missing fields.
+
+The controller must already be paused at zero replicas, with no remaining
+controller-ServiceAccount Pods. Staging does not silently stop a live controller.
+Its UID/resourceVersion and quiescence remain fenced until schema qualification
+finishes. Already-completed current schemas do not require a second migration
+or controller pause for normal image-only authority staging.
+
+Before any real action/schema write, the CLI qualifies all schemas and a complete
+bounded inventory of affected objects, validates unchanged UID/RV-bound objects
+through **server dry-run PUTs**, and dry-runs every proposed CRD CREATE/SSA update.
+The full Helm stage is also server-previewed before applying the schema plan.
+Foreign ownership, customized/unknown before or after schemas, forbidden reads or
+dry-runs, incomplete inventories and late data/UID/RV changes stop the operation.
+The bound is 512 affected objects and 8 MiB total reviewed data; larger or actively
+changing installations need a separate reviewed migration procedure.
+
+The closed transition preserves old valid data rather than inventing new
+authority:
+
+| Canonical change | Required existing-data qualification |
+|---|---|
+| Action params: boolean additionalProperties to preserve-unknown-fields | Existing object validates under the old schema; arbitrary nested params survive unchanged |
+| Task/Team/Profile budget scope and new Task/Team budget CEL | All newly introduced scope/binding/account fields are absent, including roster members; old-schema server validation still succeeds |
+| MCP managed mode and mutual-exclusion CEL | No pre-existing managed-mode fields or new workload/readiness evidence |
+| Sandbox source-or-bundle reference pattern and private bindings | Existing references remain exact v1 `kars-credential-source-*` references; no newly introduced binding/budget/observation fields |
+| Evaluator v2 optional status fields | No pre-existing report-reference/UID/digest evidence is grandfathered |
+
+No custom-resource spec/status is migrated or rewritten. Canonical data hashes,
+UIDs and resourceVersions are rechecked before writes and after publication;
+new authority CRDs must remain empty during this legacy transition. Each real
+schema write retains the original UID and uses its reviewed resourceVersion
+without forced field ownership. `SRE-SCHEMA-MIGRATION` reports only fixed profile,
+counts and `qualified`/`applied` state, never object values. An interruption can
+resume only from the exact canonical before/already-applied target states with
+fresh data qualification; there is no destructive schema rollback.
+
+This SRE transition is explicitly **non-atomic**. It never removes a supplied
+rollback flag or edits Helm history. Old successful releases without full keep
+retention cannot become automatic rollback targets by virtue of this permit.
+Where atomic operation is required, establish an explicitly reviewed
+retention-only, unchanged-schema release first. Unknown target revisions, live
+post-baseline authority, non-quiescent controllers and incompatible customer
+data remain unsupported rather than being adopted.
+
+The native BASE365 fixture calls the actual public CLI preview and apply for
+negative late ownership/schema cases, verifies zero earlier action conversion, and measures
+Task/Team/MCP/Eval/action data plus UIDs/RVs across the real positive stage.
+Local transport and pure fixture tests are not that native proof; the composed
+target still needs the hosted run.
 
 ### Rendering and target identity
 

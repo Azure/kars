@@ -11,8 +11,9 @@ import { describe, expect, it, vi } from "vitest";
 import { ACTION_CRD, planActionCrd } from "./sre-action-crd.js";
 import { stageAuthority } from "./sre-stage.js";
 import type { Execute } from "./sre-authority.js";
-import { schemaFixture } from "./schema-stage.test-support.js";
+import { crd, schemaFixture } from "./schema-stage.test-support.js";
 import { normalizedCrd, schemaDigest, schemaOwnerFields, SCHEMA_DIGEST } from "./schema-documents.js";
+import { migrationFixture } from "./sre-migration.test-support.js";
 
 const action = parse(readFileSync(new URL("../../../deploy/helm/kars/templates/crd-karssreaction.yaml", import.meta.url), "utf8"));
 const registration = parse(readFileSync(new URL("../../../deploy/helm/kars/templates/crd-karssreregistration.yaml", import.meta.url), "utf8"));
@@ -34,15 +35,17 @@ function fixture(helm = false) {
   delete params(existing)["x-kubernetes-preserve-unknown-fields"];
   params(existing).additionalProperties = true;
   if (helm) existing.metadata.annotations[SCHEMA_DIGEST] = schemaDigest(normalizedCrd(existing));
-  const schemas = schemaFixture([action, registration, policy]);
+  const schemas = helm ? migrationFixture() : schemaFixture([action, registration, policy]);
+  const documents = helm ? [...("after" in schemas ? schemas.after : []), policy] : [action, registration, policy];
   schemas.objects.set(ACTION_CRD, existing);
-  const controller = { metadata: { name: "kars-controller", uid: "controller-uid", resourceVersion: "2" },
-    spec: { template: { spec: { serviceAccountName: "kars-controller", containers: [{ name: "controller", image: "old:latest" }] } } } };
+  const controller = { metadata: { name: "kars-controller", namespace: "kars-system", uid: "controller-uid", resourceVersion: "2" },
+    spec: { replicas: 0, template: { spec: { serviceAccountName: "kars-controller", containers: [{ name: "controller", image: "old:latest" }] } } } };
+  if(helm) Object.assign(controller.metadata,schemaOwnerFields({ownership:"helm",namespace:"kars-system",release:"kars"}));
   const execute = vi.fn<Execute>(async (file, args, options) => {
     if (file === "helm") {
       if (args[0] === "list") return { stdout: helm ? '[{"name":"kars","namespace":"kars-system"}]' : "[]" };
       if (args[0] === "version") return { stdout: "v4.2.4" };
-      if (args[0] === "template") return { stdout: [action, registration, policy].map(obj => JSON.stringify(obj)).join("\n---\n") };
+      if (args[0] === "template") return { stdout: documents.map(obj => JSON.stringify(obj)).join("\n---\n") };
       if (args[0] === "upgrade") return { stdout: "" };
       return schemas.execute(file,args,options);
     }
@@ -66,7 +69,7 @@ function fixture(helm = false) {
     }
     if(args[0]==="create"||args[0]==="apply") {
       const result=await schemas.execute(file,args,options);
-      if(args[0]==="apply"&&JSON.parse(options.input!).metadata.name===ACTION_CRD) {
+      if(args[0]==="apply"&&!args.includes("--dry-run=server")&&JSON.parse(options.input!).metadata.name===ACTION_CRD) {
         Object.assign(existing,JSON.parse(result.stdout));
         schemas.objects.set(ACTION_CRD,existing);
       }
@@ -115,18 +118,23 @@ describe("existing action API prerequisite compatibility", () => {
     expect(f.existing.metadata.uid).toBe(before.metadata.uid);
     expect(f.existing.metadata.annotations["operator.example/keep"]).toBe("custom metadata");
     const calls = f.execute.mock.calls;
-    const patch = calls.findIndex(([, args]) => args[0] === "patch" && args[2] === ACTION_CRD);
+    const patch = calls.findIndex(([, args, settings]) => helm
+      ? args[0]==="apply"&&!args.includes("--dry-run=server")&&JSON.parse(settings.input!).metadata.name===ACTION_CRD
+      : args[0] === "patch" && args[2] === ACTION_CRD);
     const wait = calls.findIndex(([, args]) => args.includes("/openapi/v3"));
-    const dependent = calls.findIndex(([file, args, options]) => helm ? file === "helm" && args[0] === "upgrade"
+    const dependent = calls.findIndex(([file, args, options]) => helm ? file === "helm" && args[0] === "upgrade" && !args.includes("--dry-run=server")
       : args[0] === "create" && JSON.parse(options.input!).kind === "ValidatingAdmissionPolicy");
     expect(patch).toBeGreaterThan(0);
     expect(wait).toBeGreaterThan(patch);
     expect(dependent).toBeGreaterThan(wait);
-    const operations = JSON.parse(calls[patch][1].at(-1)!);
-    expect(operations.slice(0, 2)).toEqual([
-      { op: "test", path: "/metadata/uid", value: "action-uid" },
-      { op: "test", path: "/metadata/resourceVersion", value: "17" },
-    ]);
+    if(helm) expect(JSON.parse(calls[patch][2].input!).metadata).toMatchObject({uid:"action-uid",resourceVersion:"17"});
+    else {
+      const operations = JSON.parse(calls[patch][1].at(-1)!);
+      expect(operations.slice(0, 2)).toEqual([
+        { op: "test", path: "/metadata/uid", value: "action-uid" },
+        { op: "test", path: "/metadata/resourceVersion", value: "17" },
+      ]);
+    }
     expect(f.existing.metadata.annotations["kars.azure.com/sre-authority-staged"]).toBe(helm ? undefined : "kars-system");
     if (helm) expect(calls[dependent][1]).toEqual(expect.arrayContaining(["--wait=legacy", "--timeout", "8m"]));
   });
@@ -198,7 +206,7 @@ describe("existing action API prerequisite compatibility", () => {
     });
 
     await expect(f.run(false, execute)).rejects.toThrow("Established timeout");
-    expect(execute.mock.calls.some(([, args, options]) => args[0]==="upgrade"
+    expect(execute.mock.calls.some(([, args, options]) => (args[0]==="upgrade"&&!args.includes("--dry-run=server"))
       || (args[0]==="create"&&JSON.parse(options.input!).kind!=="CustomResourceDefinition"))).toBe(false);
   });
 
@@ -208,7 +216,7 @@ describe("existing action API prerequisite compatibility", () => {
       || (args[0] === "apply" && JSON.parse(options.input!).metadata.name === ACTION_CRD)
       ? Promise.reject(new Error("Forbidden action API update")) : f.execute(file, args, options);
     await expect(f.run(false, execute)).rejects.toThrow("Forbidden action API update");
-    expect(f.execute.mock.calls.some(([, args]) => ["create", "upgrade"].includes(args[0]))).toBe(false);
+    expect(f.execute.mock.calls.some(([, args]) => ["create", "upgrade"].includes(args[0]) && !args.includes("--dry-run=server"))).toBe(false);
   });
 
   it("requires API establishment even when an existing registration schema is unchanged", async () => {
@@ -233,13 +241,26 @@ describe("existing action API prerequisite compatibility", () => {
     expect(f.execute.mock.calls.some(([, args]) => args[0] === "patch")).toBe(false);
   });
 
+  it("rejects a late template core-schema mismatch before the action conversion", async () => {
+    const f = fixture();
+    const desired = crd("KarsSandbox", "karssandboxes");
+    const current = f.schemas.install(desired);
+    current.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.external = { type: "string" };
+    const execute: Execute = (file,args,settings) => file==="helm"&&args[0]==="template"
+      ? Promise.resolve({stdout:[action,registration,policy,desired].map(object=>JSON.stringify(object)).join("\n---\n")})
+      : f.execute(file,args,settings);
+    await expect(f.run(false,execute)).rejects.toThrow("separately reviewed core schema migration");
+    expect(params(f.existing).additionalProperties).toBe(true);
+    expect(f.execute.mock.calls.some(([,args])=>["create","apply","patch"].includes(args[0]))).toBe(false);
+  });
+
   it.each([false, true])("dry-run never repairs APIs or mutates the controller (Helm: %s)", async helm => {
     const f = fixture(helm);
     const log = vi.spyOn(console, "log").mockImplementation(() => {});
     try {
       await f.run(true);
       expect(params(f.existing).additionalProperties).toBe(true);
-      expect(f.execute.mock.calls.some(([, args]) => ["patch", "create", "wait", "rollout"].includes(args[0]))).toBe(false);
+      expect(f.execute.mock.calls.some(([,args])=>["patch", "create", "wait", "rollout"].includes(args[0])&&!args.includes("--dry-run=server"))).toBe(false);
     } finally { log.mockRestore(); }
   });
 
@@ -258,7 +279,7 @@ describe("existing action API prerequisite compatibility", () => {
     const before = structuredClone([...f.schemas.objects]);
     await f.run(true);
     expect([...f.schemas.objects]).toEqual(before);
-    expect(f.execute.mock.calls.some(([,args])=>["create","apply","patch","delete","wait","rollout"].includes(args[0]))).toBe(false);
+    expect(f.execute.mock.calls.some(([,args])=>["create","apply","patch","delete","wait","rollout"].includes(args[0])&&!args.includes("--dry-run=server"))).toBe(false);
     expect(f.execute.mock.calls.find(([file,args])=>file==="helm"&&args[0]==="upgrade")?.[1])
       .toContain("--dry-run=server");
     expect(params(f.existing).additionalProperties).toBe(true);
@@ -275,7 +296,22 @@ describe("existing action API prerequisite compatibility", () => {
       expect(report).toHaveBeenCalledWith("SRE-STAGE-FAILURE helm-server-dry-run");
       expect(report.mock.calls.flat().join(" ")).not.toContain(failure.message);
       expect(params(f.existing).additionalProperties).toBe(true);
-      expect(f.execute.mock.calls.some(([,args])=>["create","apply","patch","delete"].includes(args[0]))).toBe(false);
+      expect(f.execute.mock.calls.some(([,args])=>["create","apply","patch","delete"].includes(args[0])&&!args.includes("--dry-run=server"))).toBe(false);
+    } finally { report.mockRestore(); }
+  });
+
+  it("previews the real Helm apply before any schema write, even when --dry-run was not requested", async () => {
+    const f = fixture(true);
+    const failure = new Error("server-side Helm preflight rejected");
+    const report = vi.spyOn(console,"error").mockImplementation(()=>{});
+    const execute:Execute = (file,args,settings) => file==="helm"&&args[0]==="upgrade"&&args.includes("--dry-run=server")
+      ? Promise.reject(failure) : f.execute(file,args,settings);
+    try {
+      await expect(f.run(false,execute)).rejects.toBe(failure);
+      expect(report).toHaveBeenCalledWith("SRE-STAGE-FAILURE helm-server-dry-run");
+      expect(f.schemas.writes).toEqual([]);
+      expect(params(f.existing).additionalProperties).toBe(true);
+      expect(f.execute.mock.calls.some(([file,args])=>file==="helm"&&args[0]==="upgrade"&&!args.includes("--dry-run=server"))).toBe(false);
     } finally { report.mockRestore(); }
   });
 
