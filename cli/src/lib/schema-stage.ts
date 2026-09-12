@@ -7,12 +7,16 @@ import {
 } from "./schema-documents.js";
 import { waitForPublishedSchemas, type PublishedType, type SchemaWait } from "./schema-discovery.js";
 import { assertRollbackCompatibility, assertSchemaCompatibility, requireCrdRetention } from "./schema-compatibility.js";
+import {
+  authorizesSreSchemaMigration, completeSreSchemaMigration, recheckSreSchemaMigration, recordSreSchemaWrite, type QualifiedSreMigration,
+} from "./sre-schema-migration.js";
 
 interface PlannedSchema { desired: ObjectMap; current?: ObjectMap; uid?: string; change: boolean }
 export interface SchemaStageOptions extends SchemaOwner, SchemaWait {
   checkOnly?: boolean;
   rollbackDocuments?: ObjectMap[];
   beforeWrite?: () => Promise<void>;
+  reviewedSreMigration?: QualifiedSreMigration;
 }
 
 function validateOwner(owner: SchemaOwner): void {
@@ -85,10 +89,12 @@ export async function waitForInstalledCoreSchemas(
   await existingPoliciesObserved(execute, documents, options);
 }
 
-export async function stageCoreSchemaDocuments(
+export async function planCoreSchemaDocuments(
   execute: SchemaExecute, documents: ObjectMap[], options: SchemaStageOptions,
-): Promise<{ schemas: number; published: true }> {
+): Promise<() => Promise<{ schemas: number; published: true }>> {
   validateOwner(options);
+  documents = structuredClone(documents);
+  if (options.reviewedSreMigration && options.rollbackDocuments) throw new Error("Reviewed SRE schema migration cannot use automatic rollback");
   const owner: SchemaOwner = { release: options.release, namespace: options.namespace, ownership: options.ownership };
   const crds = documents.filter(object => object.kind === "CustomResourceDefinition");
   if (!crds.length || crds.length > 64 || new Set(crds.map(object => object.metadata.name)).size !== crds.length) {
@@ -99,9 +105,9 @@ export async function stageCoreSchemaDocuments(
     if (crd.metadata.namespace || crd.metadata.uid || crd.metadata.resourceVersion || crd.metadata.ownerReferences?.length) {
       throw new Error("Chart CRDs must not carry live/foreign object identities");
     }
-    requireCrdRetention(crds);
-    if (options.rollbackDocuments) assertRollbackCompatibility(crds, options.rollbackDocuments);
   }
+  requireCrdRetention(crds);
+  if (options.rollbackDocuments) assertRollbackCompatibility(crds, options.rollbackDocuments);
   const types = servedTypes(crds);
   for (const policy of documents.filter(object => object.kind === "ValidatingAdmissionPolicy" && object.spec?.paramKind)) {
     const param = policy.spec.paramKind;
@@ -114,6 +120,10 @@ export async function stageCoreSchemaDocuments(
   let priorManifest: ObjectMap[] | undefined;
   for (const desired of crds) {
     const current = await readSchemaObject(execute, "customresourcedefinition", desired.metadata.name);
+    if (options.reviewedSreMigration && !options.checkOnly
+      && !authorizesSreSchemaMigration(options.reviewedSreMigration, current, desired)) {
+      throw new Error("Schema plan differs from its qualified SRE migration snapshot");
+    }
     if (!current) {
       if (options.checkOnly) throw new Error(`Schema ${desired.metadata.name} has not been staged`);
       plans.push({ desired, change: true });
@@ -139,14 +149,12 @@ export async function stageCoreSchemaDocuments(
         || (current.status?.storedVersions ?? []).some((version: string) => !wanted.versions.some((item: ObjectMap) => item.name === version))) {
         throw new Error(`Schema ${desired.metadata.name} requires an explicit identity/storage migration`);
       }
-      assertSchemaCompatibility(current, desired);
+      if (!options.reviewedSreMigration) assertSchemaCompatibility(current, desired);
     }
     if (options.rollbackDocuments) assertRollbackCompatibility([current], options.rollbackDocuments);
     plans.push({ desired, current, uid: schemaIdentity(current).uid, change });
   }
-  // Plan every ownership/schema conflict before making the first write.
-  await options.beforeWrite?.();
-  for (const plan of plans.filter(plan => plan.change)) {
+  const writeRequest = (plan: PlannedSchema) => {
     const fields = schemaOwnerFields(owner);
     const object = { apiVersion: plan.desired.apiVersion, kind: plan.desired.kind, spec: plan.desired.spec, metadata: {
       ...plan.desired.metadata,
@@ -159,28 +167,63 @@ export async function stageCoreSchemaDocuments(
     const args = plan.current
       ? ["apply", "--server-side", `--field-manager=${manager}`, "-f", "-", "-o", "json"]
       : ["create", `--field-manager=${manager}`, "-f", "-", "-o", "json"];
-    const applied: ObjectMap = JSON.parse((await execute("kubectl", [...args, "--request-timeout=20s"],
-      { stdio: "pipe", input: JSON.stringify(object), timeout: 25_000 })).stdout);
-    const identity = schemaIdentity(applied);
-    if ((plan.uid && plan.uid !== identity.uid) || applied.metadata.name !== plan.desired.metadata.name
-      || canonicalSchema(normalizedCrd(applied)) !== canonicalSchema(normalizedCrd(plan.desired))) throw new Error("Schema write returned an unreviewed identity/spec");
-    verifySchemaOwner(applied, owner);
-    plan.uid = identity.uid;
-  }
-  await waitForPublishedSchemas(execute, types, async () => {
-    let established = true;
-    for (const plan of plans) {
-      const current = await readSchemaObject(execute, "customresourcedefinition", plan.desired.metadata.name);
-      if (!current || schemaIdentity(current).uid !== plan.uid
-        || canonicalSchema(normalizedCrd(current)) !== canonicalSchema(normalizedCrd(plan.desired))) throw new Error("CRD identity or schema changed before admission installation");
-      verifySchemaOwner(current, owner);
-      const conditions = current.status?.conditions ?? [];
-      if (conditions.some((condition: ObjectMap) => (condition.type === "NamesAccepted" && condition.status === "False")
-        || (condition.type === "NonStructuralSchema" && condition.status === "True"))) throw new Error("CRD names or structural schema are rejected");
-      established &&= conditions.some((condition: ObjectMap) => condition.type === "Established" && condition.status === "True");
+    return { object, args };
+  };
+  if (options.reviewedSreMigration && !options.checkOnly) {
+    await recheckSreSchemaMigration(options.reviewedSreMigration);
+    for (const plan of plans.filter(plan => plan.change)) {
+      const { object, args } = writeRequest(plan);
+      const checked: ObjectMap = JSON.parse((await execute("kubectl", [...args, "--dry-run=server", "--request-timeout=20s"],
+        { stdio: "pipe", input: JSON.stringify(object), timeout: 25_000 })).stdout);
+      if ((plan.uid && schemaIdentity(checked).uid !== plan.uid)
+        || canonicalSchema(normalizedCrd(checked)) !== canonicalSchema(normalizedCrd(plan.desired))) {
+        throw new Error("Migration schema dry-run returned another identity or schema");
+      }
+      verifySchemaOwner(checked, owner);
     }
-    return established;
-  }, options);
-  await existingPoliciesObserved(execute, documents, options);
-  return { schemas: crds.length, published: true };
+    await recheckSreSchemaMigration(options.reviewedSreMigration);
+  }
+  // Every plan and server dry-run completes before any real schema/action write.
+  return async () => {
+    await options.beforeWrite?.();
+    if (options.reviewedSreMigration) await recheckSreSchemaMigration(options.reviewedSreMigration);
+    for (const plan of plans.filter(plan => plan.change)) {
+      if (options.reviewedSreMigration) await recheckSreSchemaMigration(options.reviewedSreMigration, plan.desired.metadata.name);
+      const { object, args } = writeRequest(plan);
+      const applied: ObjectMap = JSON.parse((await execute("kubectl", [...args, "--request-timeout=20s"],
+        { stdio: "pipe", input: JSON.stringify(object), timeout: 25_000 })).stdout);
+      const identity = schemaIdentity(applied);
+      if ((plan.uid && plan.uid !== identity.uid) || applied.metadata.name !== plan.desired.metadata.name
+        || canonicalSchema(normalizedCrd(applied)) !== canonicalSchema(normalizedCrd(plan.desired))) throw new Error("Schema write returned an unreviewed identity/spec");
+      verifySchemaOwner(applied, owner);
+      plan.uid = identity.uid;
+      if (options.reviewedSreMigration) {
+        recordSreSchemaWrite(options.reviewedSreMigration, applied);
+        await recheckSreSchemaMigration(options.reviewedSreMigration, plan.desired.metadata.name);
+      }
+    }
+    await waitForPublishedSchemas(execute, types, async () => {
+      let established = true;
+      for (const plan of plans) {
+        const current = await readSchemaObject(execute, "customresourcedefinition", plan.desired.metadata.name);
+        if (!current || schemaIdentity(current).uid !== plan.uid
+          || canonicalSchema(normalizedCrd(current)) !== canonicalSchema(normalizedCrd(plan.desired))) throw new Error("CRD identity or schema changed before admission installation");
+        verifySchemaOwner(current, owner);
+        const conditions = current.status?.conditions ?? [];
+        if (conditions.some((condition: ObjectMap) => (condition.type === "NamesAccepted" && condition.status === "False")
+          || (condition.type === "NonStructuralSchema" && condition.status === "True"))) throw new Error("CRD names or structural schema are rejected");
+        established &&= conditions.some((condition: ObjectMap) => condition.type === "Established" && condition.status === "True");
+      }
+      return established;
+    }, options);
+    await existingPoliciesObserved(execute, documents, options);
+    if (options.reviewedSreMigration) await completeSreSchemaMigration(options.reviewedSreMigration);
+    return { schemas: crds.length, published: true };
+  };
+}
+
+export async function stageCoreSchemaDocuments(
+  execute: SchemaExecute, documents: ObjectMap[], options: SchemaStageOptions,
+): Promise<{ schemas: number; published: true }> {
+  return (await planCoreSchemaDocuments(execute, documents, options))();
 }
