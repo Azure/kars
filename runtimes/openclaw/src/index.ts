@@ -369,6 +369,7 @@ import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _st
 import { processTaskWithTools as _processTaskWithTools } from "./core/agt-task-loop.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
 import { registerHttpFetchTool } from "./core/agt-tools/http-fetch.js";
+import { registerGitHubActionsTool } from "./core/agt-tools/github-actions.js";
 import { registerMcpBridgeTools } from "./core/agt-tools/mcp-bridge.js";
 import { registerFoundryTools } from "./core/agt-tools/foundry.js";
 import { registerAgtTools } from "./core/agt-tools/agt.js";
@@ -2839,7 +2840,10 @@ const azureClawPlugin = definePluginEntry({
 
           const result = await origExecute(id, params, signal);
           const txt = result?.content?.[0]?.text || "";
-          trackToolExecution(tool.name, params, txt, log);
+          // CI output may itself contain secrets; never checkpoint log bodies.
+          if (tool.name !== "github_actions_job_logs") {
+            trackToolExecution(tool.name, params, txt, log);
+          }
           return result;
         },
       });
@@ -2938,6 +2942,7 @@ const azureClawPlugin = definePluginEntry({
     // unchanged; the registration helpers receive a Deps bag for late-bound
     // foundryProject + log + config access.
     registerHttpFetchTool(api);
+    registerGitHubActionsTool(api);
     registerMcpBridgeTools(api);
     // Skip Foundry tool catalog when running against GH-token providers
     // (`github-models` or `github-copilot`). Foundry tools require an Azure

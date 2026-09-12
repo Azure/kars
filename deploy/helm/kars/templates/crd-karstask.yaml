@@ -3,6 +3,8 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: karstasks.kars.azure.com
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     app.kubernetes.io/name: kars
     app.kubernetes.io/component: crd
@@ -125,6 +127,10 @@ spec:
                     - deployment
                     - provider
                     type: object
+                  credentialBindings:
+                    {{- include "kars.credentialBindingsSchema" . | nindent 20 }}
+                  githubBinding:
+                    {{- include "kars.githubBindingSchema" . | nindent 20 }}
                   modelFallbacks:
                     description: Ordered alternative inference routes; absent preserves the default route.
                     type: array

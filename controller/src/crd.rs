@@ -77,6 +77,11 @@ pub struct KarsSandboxSpec {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub credentials_ref: Option<crate::credential_source::CredentialSourceRef>,
 
+    /// Explicit operator-granted sources for a directly authored Sandbox.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub credential_bindings: Option<crate::credential_grant::CredentialBindings>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub github_binding: Option<crate::credential_grant::GitHubBinding>,
     /// Controller-generated governed-inference account binding. A task-owned
     /// finite Sandbox cannot omit, repoint, or fall back around this binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -1157,6 +1162,8 @@ impl Default for GovernanceConfig {
 #[derive(Debug, Serialize, Deserialize, Default, Clone, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KarsSandboxStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_observation: Option<crate::credential_grant::ObservationStatus>,
     /// Pending | Creating | Running | Failed | Terminating
     pub phase: Option<String>,
     pub sandbox_pod: Option<String>,

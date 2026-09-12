@@ -3,6 +3,7 @@
 
 import { createHash } from "node:crypto";
 import { get, type ApiObject, type Execute } from "./sre-authority.js";
+import { normalizedCrd, schemaOwnerFields, verifySchemaOwner, SCHEMA_DIGEST, schemaDigest } from "./schema-documents.js";
 
 export const ACTION_CRD = "karssreactions.kars.azure.com";
 const PARAMS = "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/action/properties/params";
@@ -52,19 +53,29 @@ export async function planActionCrd(
   const existing = await get(execute, "customresourcedefinition", ACTION_CRD);
   if (!existing) {
     return async () => {
-      await execute("kubectl", ["create", "-f", "-"], { stdio: "pipe", input: JSON.stringify({
-        ...desired, metadata: { ...desired.metadata, ...(helm ? {
-          labels: { ...desired.metadata.labels, "app.kubernetes.io/managed-by": "Helm" },
-          annotations: { "meta.helm.sh/release-name": release, "meta.helm.sh/release-namespace": namespace },
-        } : {}) },
+      const fields = schemaOwnerFields({ ownership: helm ? "helm" : "template", namespace, release });
+      await execute("kubectl", ["create", "-f", "-", `--field-manager=${helm ? "helm" : "kars-schema-stage"}`], { stdio: "pipe", input: JSON.stringify({
+        ...desired, metadata: { ...desired.metadata,
+          labels: { ...desired.metadata.labels, ...fields.labels },
+          annotations: { ...desired.metadata.annotations, ...fields.annotations, [SCHEMA_DIGEST]: schemaDigest(normalizedCrd(desired)) },
+        },
       }) });
       await established(execute);
     };
   }
   const annotations = existing.metadata.annotations ?? {};
   const manager = existing.metadata.labels?.["app.kubernetes.io/managed-by"];
+  if (helm) verifySchemaOwner(existing, { ownership: "helm", namespace, release });
+  const preparedTemplate = !helm && manager === "kars-schema-stage";
+  if (preparedTemplate) verifySchemaOwner(existing, { ownership: "template", namespace, release });
+  const legacyTemplate = !helm && !manager
+    && annotations["kars.azure.com/sre-authority-staged"] === namespace
+    && annotations["kars.azure.com/sre-authority-release"] === release;
+  if (!helm && !preparedTemplate && !legacyTemplate) {
+    throw new Error("Foreign or unmarked action CRD; explicit schema ownership review is required");
+  }
   if (existing.metadata.deletionTimestamp || existing.metadata.ownerReferences?.length
-    || (manager && manager !== "Helm")
+    || (manager && manager !== "Helm" && !preparedTemplate)
     || (annotations["meta.helm.sh/release-name"] && (!helm || annotations["meta.helm.sh/release-name"] !== release))
     || (annotations["meta.helm.sh/release-namespace"] && (!helm || annotations["meta.helm.sh/release-namespace"] !== namespace))
     || (annotations["kars.azure.com/sre-authority-staged"] && annotations["kars.azure.com/sre-authority-staged"] !== namespace)
@@ -88,6 +99,7 @@ export async function planActionCrd(
         { op: "test", path: `${PARAMS}/additionalProperties`, value: true },
         { op: "remove", path: `${PARAMS}/additionalProperties` },
         { op: "add", path: `${PARAMS}/x-kubernetes-preserve-unknown-fields`, value: true },
+        { op: "add", path: "/metadata/annotations/kars.azure.com~1core-schema-spec", value: schemaDigest(normalizedCrd(desired)) },
       ] : []),
     ])], { stdio: "pipe" });
     await established(execute);

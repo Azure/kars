@@ -14,6 +14,7 @@ from .common import (
 from .credential_paths import seed_privacy_gaps
 from .legacy_crds import preflight_legacy_crds
 from .registration_schema import create_registration_crd
+from .canonical_migration import assert_data_unchanged, deny_late_conflicts, finish_data_proof, seed_data
 
 LEGACY_COMMIT = "8b206065608593667a40665b3f48225ef9ce278d"
 CONTROL = "e2e-control-rotation"
@@ -153,6 +154,8 @@ def prepare_legacy(h):
         "meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": SYSTEM})
     create_registration_crd(h, obj)
     h.k("wait", "--for=condition=Established", "crd/karssreregistrations.kars.azure.com", "--timeout=60s", timeout=70)
+    migration_data = seed_data(h)
+    deny_late_conflicts(h, migration_data)
     before = h.get("clusterrolebinding", "kars-sre-reader")
     action_before = h.get("crd", "karssreactions.kars.azure.com")
     action_spec = deepcopy(action_before["spec"])
@@ -165,12 +168,14 @@ def prepare_legacy(h):
     after = h.get("clusterrolebinding", "kars-sre-reader")
     require(before["metadata"]["uid"] == after["metadata"]["uid"] and before["subjects"] == after["subjects"],
             "Authority stage preview changed legacy grants")
+    assert_data_unchanged(h, migration_data)
     h.cli("authority", "stage", "--controller-image", "kars-controller:e2e",
           "--router-image", "kars-inference-router:e2e", timeout=180)
     action_after = h.get("crd", "karssreactions.kars.azure.com")
     require(action_after["metadata"]["uid"] == action_before["metadata"]["uid"]
             and action_after["spec"] == action_spec,
             "Native action API staging replaced its identity or changed fields outside the params repair")
+    finish_data_proof(h, migration_data)
     h.passed("Actual CLI stages the historical action CRD params repair in place before dependent policies")
     h.save()
     h.passed("Legacy source/grants/consumer seeded using real UIDs before new policies; immutable old chart only, no old binary execution")

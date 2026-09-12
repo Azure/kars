@@ -35,10 +35,11 @@ use crate::fedcred::{FedCredConfig, FedCredManager};
 
 mod agent_env;
 pub(crate) mod byo_contract;
-mod credential_sources;
+pub(crate) mod credential_sources;
 mod dev_env;
+mod github_services;
 pub(crate) mod governance_mounts;
-mod governed_services;
+pub(crate) mod governed_services;
 mod inference;
 mod mcp_binding;
 mod mcp_egress;
@@ -51,7 +52,7 @@ use mcp_egress::mcp_egress_rule;
 mod pod_spec;
 mod sre_egress;
 pub(crate) use pod_spec::{
-    build_egress_guard_command, build_pod_security_context, isolation_scheduling,
+    build_egress_guard_command, build_pod_labels, build_pod_security_context, isolation_scheduling,
     sandbox_node_selector_from,
 };
 
@@ -1313,8 +1314,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         // a graceful resume. We still walk the rest of this block so
         // image / env / volume drift is reflected on the suspended
         // Deployment (so resume picks up the latest spec).
-        let suspended_by_spec = spec.suspended.unwrap_or(false);
-        let desired_replicas: i64 = if suspended_by_spec { 0 } else { 1 };
+        let desired_replicas = crate::kars_task_reconciler::rebind::runtime_replicas(&sandbox);
 
         // S10.A2: image now comes from the runtime plan (already
         // resolved against the controller default fallback). The
@@ -1330,8 +1330,6 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         } else {
             "Always"
         };
-
-        let deploy_api: Api<Deployment> = Api::namespaced(client.clone(), &sandbox_ns);
 
         // Token budget values resolved from the InferencePolicy ref above
         // (hoisted to the top of `reconcile` after S13). 0 = unlimited.
@@ -2045,7 +2043,8 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         "nodeSelector": node_selector
         });
 
-        governed_services::mount(&mut pod_spec);
+        service_identity.mount(&mut pod_spec);
+        crate::credential_grants::mount_observations(&mut pod_spec, &sandbox);
 
         // Set runtimeClassName for Kata (confidential) isolation
         if let Some(rc) = runtime_class {
@@ -2656,11 +2655,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                 "template": {
                     "metadata": {
                         "annotations": pod_annotations,
-                        "labels": {
-                            "kars.azure.com/sandbox": name,
-                            "kars.azure.com/component": "sandbox",
-                            "azure.workload.identity/use": "true"
-                        }
+                        "labels": build_pod_labels(&name)
                     },
                     "spec": pod_spec
                 }
@@ -2688,13 +2683,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             credentials.decorate(&mut deployment, &sandbox, namespace);
         }
         service_identity.decorate(&mut deployment);
-        deploy_api
-            .patch(
-                &name,
-                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
-                &Patch::Apply(deployment),
-            )
-            .await?;
+        crate::credential_grants::decorate_observations(&mut deployment, &sandbox);
+        crate::kars_task_reconciler::rebind::apply_deployment(
+            client,
+            &sandbox,
+            deployment,
+            &service_identity.identity,
+        )
+        .await
+        .map_err(ReconcileError::Configuration)?;
         service_projection = Some(service_identity);
     } // end 'deployment_block
 
@@ -3140,16 +3137,13 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
-    Ok(Action::requeue(Duration::from_secs(
-        if sandbox.spec.credentials_ref.is_some()
-            || sre_projection.is_some()
-            || !governance_config.effective_mcp_server_refs().is_empty()
-        {
-            30
+    Ok(Action::requeue(
+        if sre_projection.is_some() || !governance_config.effective_mcp_server_refs().is_empty() {
+            Duration::from_secs(30)
         } else {
-            300
+            credential_sources::refresh_interval(&sandbox)
         },
-    )))
+    ))
 }
 
 /// How long to wait before requeuing a failed reconcile, by error kind.

@@ -4,6 +4,8 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: karssandboxes.kars.azure.com
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     app.kubernetes.io/name: kars
 spec:
@@ -70,6 +72,10 @@ spec:
                           maxLength: 253
                     aiConformanceReference:
                       type: boolean
+                credentialBindings:
+                  {{- include "kars.credentialBindingsSchema" . | nindent 18 }}
+                githubBinding:
+                  {{- include "kars.githubBindingSchema" . | nindent 18 }}
                 inferenceBudgetRef:
                   type: object
                   x-kubernetes-preserve-unknown-fields: true
@@ -83,7 +89,7 @@ spec:
                       type: string
                       minLength: 1
                       maxLength: 253
-                      pattern: "^kars-credential-source-[a-z0-9][a-z0-9-]*$"
+                      pattern: "^kars-credential-(source|bundle)-[a-z0-9][a-z0-9-]*$"
                     uid:
                       type: string
                       minLength: 1
@@ -749,6 +755,22 @@ spec:
             status:
               type: object
               properties:
+                serviceObservation:
+                  type: object
+                  required: [capability, phase, reason, version, grant, secret, namespaceUid, privacyRevision]
+                  properties:
+                    capability: {type: string}
+                    phase: {type: string}
+                    reason: {type: string}
+                    version: {type: string}
+                    namespaceUid: {type: string}
+                    privacyRevision: {type: string}
+                    privacyEpoch: {type: string, nullable: true}
+                    deploymentUid: {type: string}
+                    grant:
+                      {{- include "kars.credentialIdentitySchema" . | nindent 22 }}
+                    secret:
+                      {{- include "kars.credentialIdentitySchema" . | nindent 22 }}
                 phase:
                   type: string
                   enum: ["Pending", "Creating", "Running", "Failed", "Terminating", "Degraded"]
@@ -764,6 +786,9 @@ spec:
                       lastTransitionTime:
                         type: string
                         format: date-time
+                      observedGeneration:
+                        type: integer
+                        format: int64
                       reason:
                         type: string
                       message:
@@ -847,6 +872,8 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: karspairings.kars.azure.com
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     app.kubernetes.io/name: kars
 spec:

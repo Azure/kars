@@ -415,10 +415,20 @@ jobs:
         with:
           version: v1.30.5
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Build same-source CLI for schema request parity
+        working-directory: cli
+        run: npm ci && npm run build
+      - name: Require the compiled production schema request helper
+        run: node tests/e2e/sre_authority/task_schema_payload.mjs check
       - name: Check public-schema diagnostic privacy
-        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test eval_pod_admission_test receipt_log_rotation_test
+        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test sre_authority.connection_proxy_test credential_schema_test credential_policy_schema_test sandbox_condition_schema_test eval_pod_admission_test private_consumption_test receipt_log_rotation_test governed_services_test
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
+      - name: Prove native Sandbox condition generation pruning, retention and type validation
+        run: PYTHONPATH=tests/e2e python3 -m sandbox_condition_schema
       - name: Prove native historical Helm wait orders CRDs before hooks and permits schema upgrades
         run: PYTHONPATH=tests/e2e python3 -m sre_authority.legacy_crd_probe
       - name: Reset disposable cluster after historical Helm proof
@@ -428,7 +438,14 @@ jobs:
       - name: Validate the SRE CRD against the actual API server
         id: sre_schema
         run: python3 tests/e2e/sre_authority/registration_schema.py --exercise
+      - name: Prove shipped credential CEL with matching and mismatched native namespace UIDs
+        id: credential_schema
+        run: PYTHONPATH=tests/e2e python3 -m credential_schema
+      - name: Prove shipped credential store, rebind and exposure policies against native types
+        id: credential_policy_schema
+        run: PYTHONPATH=tests/e2e python3 -m credential_policy_schema
       - name: Prove controller Pod admission with all chart policies and no image execution
+        if: ${{ !cancelled() && steps.sre_schema.outcome == 'success' }}
         id: sre_bootstrap
         run: PYTHONPATH=tests/e2e python3 -m sre_authority.bootstrap_probe --retirement-bind-proof
       - name: Collect nil-schema adapter candidate evidence without weakening production gates
@@ -445,8 +462,12 @@ jobs:
           path: |
             e2e-sre-schema-diag/versions.json
             e2e-sre-schema-diag/legacy-helm-readiness.json
+            e2e-sre-schema-diag/migration-seed-*.json
             e2e-sre-schema-diag/validation.json
             e2e-sre-schema-diag/validation-instances.json
+            e2e-sre-schema-diag/credential-namespace-uid.json
+            e2e-sre-schema-diag/credential-policy-typechecking.json
+            e2e-sre-schema-diag/sandbox-condition-generation.json
             e2e-sre-schema-diag/namespace-accessor-candidate.json
             e2e-sre-schema-diag/namespace-accessor-candidate-instances.json
             e2e-sre-schema-diag/bootstrap-*.json
@@ -464,6 +485,7 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - run: helm lint deploy/helm/kars
+      - run: python3 tools/private-consumption-bundle.py --check
       - name: Preserve task admission defaults with reused legacy values
         run: python3 ci/helm-task-floor-compat.py
       - name: Render installation profiles
