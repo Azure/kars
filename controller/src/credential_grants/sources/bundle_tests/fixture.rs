@@ -17,6 +17,7 @@ pub struct State {
     pub target_path: String,
     pub source_path: String,
     pub bundle_path: String,
+    pub consumer_path: Option<String>,
     pub after_create: Option<&'static str>,
     pub after_anchor: Option<&'static str>,
     pub create_response: Option<&'static str>,
@@ -68,7 +69,12 @@ pub fn mutate(state: &mut State, mutation: &str) {
         .objects
         .get(&bundle)
         .map(|value| value["metadata"]["uid"].clone());
-    let object: &str = if mutation.starts_with("bundle-") {
+    let object: &str = if mutation.starts_with("consumer-") {
+        state
+            .consumer_path
+            .as_deref()
+            .expect("Task consumer missing")
+    } else if mutation.starts_with("bundle-") {
         &bundle
     } else if mutation.starts_with("source-") {
         &source
@@ -86,6 +92,46 @@ pub fn mutate(state: &mut State, mutation: &str) {
             value["metadata"]["generation"] = json!(2);
         }
         "status" => value["status"] = json!({"phase":"Pending","reason":"ConcurrentReconcile"}),
+        "task-progress" => {
+            value["status"]["executionPhase"] = json!("Degraded");
+            value["status"]["executionDetail"] = json!("Sandbox is awaiting credentials");
+            value["status"]["sandboxRef"] = json!({"name":value["metadata"]["name"]});
+        }
+        "task-phase" => value["status"]["phase"] = json!("Degraded"),
+        "task-ready-condition" => value["status"]["conditions"][0]["status"] = json!("False"),
+        "task-envelope" => value["status"]["envelopeDigest"] = json!("sha256:foreign"),
+        "task-generation" => {
+            value["metadata"]["generation"] = json!(2);
+            value["status"]["observedGeneration"] = json!(2);
+        }
+        "task-observed" => value["status"]["observedGeneration"] = json!(0),
+        "task-spec" => value["spec"]["objective"] = json!("Changed intent"),
+        "task-bindings" => {
+            value["spec"]["blueprint"]["credentialBindings"]["sources"][0]["keys"] = json!([])
+        }
+        "task-parent" => value["spec"]["parentRef"] = json!({"name":"foreign"}),
+        "task-lineage" => value["status"]["lineage"] = json!(["foreign"]),
+        "task-budget" => value["status"]["inferenceBudget"] = json!({"uid":"foreign"}),
+        "task-launch" => value["spec"]["execution"]["launch"] = json!(false),
+        "task-sandbox-ref" => value["status"]["sandboxRef"] = json!({"name":"foreign"}),
+        "task-stopping" => value["status"]["executionPhase"] = json!("Stopping"),
+        "task-detail-type" => value["status"]["executionDetail"] = json!({"not":"text"}),
+        "task-unknown-status" => value["status"]["futureAuthority"] = json!("changed"),
+        "consumer-uid" => value["metadata"]["uid"] = json!("replacement-consumer"),
+        "consumer-name" => value["metadata"]["name"] = json!("foreign"),
+        "consumer-namespace" => value["metadata"]["namespace"] = json!("foreign"),
+        "consumer-delete" => value["metadata"]["deletionTimestamp"] = json!("2026-09-12T00:00:00Z"),
+        "consumer-generation" => value["metadata"]["generation"] = json!(2),
+        "consumer-owner" => value["metadata"]["ownerReferences"][0]["uid"] = json!("foreign"),
+        "consumer-spec" => value["spec"]["inferenceRef"]["name"] = json!("foreign"),
+        "consumer-bindings" => {
+            value["spec"]["credentialBindings"]["sources"][0]["keys"] = json!([])
+        }
+        "consumer-legacy" => {
+            value["spec"]["credentialsRef"] = json!({"name":"foreign","uid":"foreign"})
+        }
+        "consumer-annotation" => value["metadata"]["annotations"]["authority"] = json!("changed"),
+        "consumer-status" => value["status"] = json!({"phase":"Degraded"}),
         "target-uid" | "source-uid" | "grant-uid" | "namespace-uid" | "bundle-uid" => {
             value["metadata"]["uid"] = json!("replacement")
         }
@@ -117,6 +163,9 @@ pub fn mutate(state: &mut State, mutation: &str) {
         "grant-unready" => value["status"]["phase"] = json!("Blocked"),
         "source-value" => {
             value["data"]["TELEGRAM_BOT_TOKEN"] = json!(ByteString(b"fresh-value".to_vec()))
+        }
+        "source-slack-value" => {
+            value["data"]["SLACK_BOT_TOKEN"] = json!(ByteString(b"fresh-task-value".to_vec()))
         }
         "bundle-data" => {
             value["data"] = json!({"TELEGRAM_BOT_TOKEN":ByteString(b"foreign-value".to_vec())})
@@ -169,6 +218,10 @@ fn respond(state: &mut State, request: &Request) -> ResponseTemplate {
                 "bundle" => state.bundle_path.as_str(),
                 "grant" => GRANT,
                 "namespace" => NAMESPACE,
+                "consumer" => state
+                    .consumer_path
+                    .as_deref()
+                    .expect("consumer path missing"),
                 _ => panic!("unknown read failure"),
             }
         });
@@ -369,6 +422,7 @@ pub async fn setup(kind: &str) -> Fixture {
         target_path,
         source_path,
         bundle_path,
+        consumer_path: None,
         after_create: None,
         after_anchor: None,
         create_response: None,

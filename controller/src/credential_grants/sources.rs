@@ -477,6 +477,15 @@ pub(crate) async fn prepare(
     target: &CredentialTarget,
     bindings: &CredentialBindings,
 ) -> Result<Secret, String> {
+    prepare_inner(client, target, bindings, None).await
+}
+
+async fn prepare_inner(
+    client: &Client,
+    target: &CredentialTarget,
+    bindings: &CredentialBindings,
+    task_consumer: Option<bundle::TaskConsumer<'_>>,
+) -> Result<Secret, String> {
     validate_bindings(bindings)?;
     let mut target_object = targets::read(client, target).await?;
     if target.kind == "KarsSandbox" {
@@ -490,6 +499,9 @@ pub(crate) async fn prepare(
         if !crate::kars_task_reconciler::task_is_ready(&task) {
             return Err("Credential target Task authority is not current".into());
         }
+    }
+    if let Some(consumer) = task_consumer {
+        bundle::verify_task_caller(client, consumer, &target_object, target, bindings).await?;
     }
     let grant = current(client, &target.namespace, &bindings.grant).await?;
     let mut values = BTreeMap::<String, ByteString>::new();
@@ -522,6 +534,19 @@ pub(crate) async fn prepare(
                 || annotation(&target_object.metadata, bundle_uid_key)
                     != source.metadata.uid.as_deref()
             {
+                tracing::warn!(
+                    target_kind = %target.kind,
+                    namespace = %target.namespace,
+                    target = %target.name,
+                    anchor_present = annotation(&target_object.metadata, bundle_uid_key).is_some(),
+                    anchor_matches = annotation(&target_object.metadata, bundle_uid_key) == source.metadata.uid.as_deref(),
+                    purpose_matches = annotation(&source.metadata, PURPOSE) == Some(BUNDLE_PURPOSE),
+                    target_uid_matches = annotation(&source.metadata, TARGET_UID) == Some(target.uid.as_str()),
+                    grant_uid_matches = annotation(&source.metadata, GRANT_UID) == grant.metadata.uid.as_deref(),
+                    owner_matches = source.metadata.owner_references.as_deref() == Some([owner_ref(target)].as_slice()),
+                    opaque = source.type_.as_deref() == Some("Opaque"),
+                    "CredentialBundleExistingOwnershipMismatch"
+                );
                 return Err("Existing credential bundle is not owned by the exact target".into());
             }
             bundle::verify_owned(&source, target, &grant)?;
@@ -549,12 +574,16 @@ pub(crate) async fn prepare(
                     grant: &grant,
                     states: &states,
                     created: &created,
+                    task_consumer,
                 },
             )
             .await?;
             created
         }
     };
+    if let Some(consumer) = task_consumer {
+        bundle::verify_task_caller(client, consumer, &target_object, target, bindings).await?;
+    }
     let live = targets::read(client, target).await?;
     if identity(&live.metadata)? != identity(&target_object.metadata)? {
         return Err("Credential target changed before bundle write".into());
@@ -641,7 +670,7 @@ pub(crate) async fn for_sandbox(
         .as_ref()
         .and_then(|b| b.credential_bindings.as_ref())
         .ok_or("Task credential grant was removed")?;
-    let bundle = prepare(
+    let bundle = prepare_inner(
         client,
         &CredentialTarget {
             kind: "KarsTask".into(),
@@ -650,6 +679,14 @@ pub(crate) async fn for_sandbox(
             uid: owner.uid.clone(),
         },
         bindings,
+        sandbox
+            .spec
+            .credential_bindings
+            .as_ref()
+            .map(|_| bundle::TaskConsumer {
+                sandbox,
+                task: &task,
+            }),
     )
     .await?;
     if let Some(declared) = &sandbox.spec.credential_bindings {
