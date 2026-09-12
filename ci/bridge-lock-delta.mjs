@@ -14,6 +14,11 @@ const targets = project === "web"
   ? { "node_modules/mermaid": "11.16.1", "node_modules/dompurify": "3.4.13" }
   : { "node_modules/qs": "6.16.0" };
 
+console.log(JSON.stringify({
+  versions: Object.fromEntries(Object.keys(targets).map(name => [name, after.packages[name]?.version])),
+  added: Object.keys(after.packages).filter(name => !Object.hasOwn(before.packages, name)),
+  removed: Object.keys(before.packages).filter(name => !Object.hasOwn(after.packages, name)),
+}));
 assert.deepEqual(Object.keys(after.packages).sort(), Object.keys(before.packages).sort());
 for (const [name, entry] of Object.entries(before.packages)) {
   if (Object.hasOwn(targets, name)) {
@@ -29,7 +34,7 @@ for (const [name, entry] of Object.entries(before.packages)) {
     assert.deepEqual(current, previous, `Unexpected package metadata change: ${name}`);
   } else if (name === "" && project === "web") {
     assert.deepEqual(after.packages[name], {
-      ...entry, dependencies: { ...entry.dependencies, mermaid: "^11.16.1" },
+      ...entry, dependencies: { ...entry.dependencies, mermaid: "11.16.1" },
     });
   } else {
     assert.deepEqual(after.packages[name], entry, `Unrelated package changed: ${name}`);
