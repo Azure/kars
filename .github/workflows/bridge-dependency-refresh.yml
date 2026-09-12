@@ -1,0 +1,60 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+name: Bridge dependency lock qualification
+
+on:
+  push:
+    branches: [chore/bridge-dependency-refresh]
+
+permissions:
+  contents: read
+
+jobs:
+  locks:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [web, teams-gateway]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Generate and verify the bounded lock delta
+        working-directory: bridge/${{ matrix.project }}
+        run: |
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+          node ../../ci/bridge-lock-delta.mjs
+          npm ci --ignore-scripts --no-audit --no-fund
+          npm ls --all > dependency-tree.txt
+      - name: Audit the generated lock
+        run: node ci/npm-audit-bulk.mjs bridge/${{ matrix.project }}/package-lock.json
+      - name: Record artifact provenance
+        working-directory: bridge/${{ matrix.project }}
+        env:
+          SOURCE_SHA: ${{ github.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          node --input-type=module -e '
+            import { createHash } from "node:crypto";
+            import { readFileSync, writeFileSync } from "node:fs";
+            const hashes = Object.fromEntries(["package.json", "package-lock.json"].map(
+              name => [name, createHash("sha256").update(readFileSync(name)).digest("hex")]));
+            writeFileSync("lock-provenance.json", JSON.stringify({
+              source: process.env.SOURCE_SHA, run: process.env.RUN_ID, hashes
+            }, null, 2) + "\n");
+          '
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: bridge-lock-${{ matrix.project }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            bridge/${{ matrix.project }}/package.json
+            bridge/${{ matrix.project }}/package-lock.json
+            bridge/${{ matrix.project }}/lock-provenance.json
+            bridge/${{ matrix.project }}/dependency-tree.txt
