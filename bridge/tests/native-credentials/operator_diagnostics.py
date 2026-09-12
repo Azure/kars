@@ -33,6 +33,7 @@ MODULES = (
     "lib/private-activation-continuity",
     "lib/private-activation-guard-retirement",
     "lib/private-activation-late-scope",
+    "lib/private-activation-writer-settle",
     "commands/schemas", "lib/core-helm-schemas", "lib/schema-stage",
     "lib/schema-documents", "lib/schema-discovery",
     "lib/repo-assets",

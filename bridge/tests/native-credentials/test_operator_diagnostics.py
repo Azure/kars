@@ -72,6 +72,17 @@ class OperatorDiagnosticsTests(unittest.TestCase):
         self.assertNotIn(PRIVATE, str(failure.exception))
         self.assertEqual(output.getvalue(), "")
 
+    def test_writer_settling_reports_only_its_exact_module_location(self):
+        stderr = (
+            f"{PRIVATE}\n"
+            f"    at settled (/private/{PRIVATE}/cli/dist/lib/private-activation-writer-settle.js:222:10)\n"
+            "    at applyReviewedGrant (/cli/dist/commands/credential-grants.js:170:20)\n"
+        )
+        self.assertEqual(source_location(stderr), "lib/private-activation-writer-settle:222")
+        self.assertNotIn(PRIVATE, source_location(stderr))
+        self.assertEqual(source_location(
+            "    at function (/cli/dist/lib/private-activation-writer-settle-private.js:1:2)"), "unavailable")
+
     def test_malformed_ambiguous_or_extended_snapshot_checks_remain_unavailable(self):
         valid = {"resourceVersionMatch": False, "observedGenerationMatch": True,
                  "phaseRunningMatch": True, "readyConditionMatch": True}
