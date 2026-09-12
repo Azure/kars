@@ -36,6 +36,7 @@ export interface PrivateContinuity {
   proof: RootQualification;
   state: RootRetirement;
   sealed: boolean;
+  lateScopes?: string[];
 }
 
 function encoded(value: unknown): string {
@@ -208,9 +209,10 @@ export async function reviewPrivateContinuity(
   if (!sealed && !rootReady(deployment, state) && retirementBinding(activation) !== state.binding) {
     throw new Error("Original private root restore is incomplete; resume its exact review before adding another workspace");
   }
-  const continuity = { proof, state, sealed };
+  const continuity = { proof, state, sealed, lateScopes: [] as string[] };
   for (const scope of activation.namespaces) {
     const plan = await scopePlan(execute, activation, scope, continuity);
+    if (plan === "Late") continuity.lateScopes.push(scope.namespace.uid);
     if (recoverIntent && plan === "Late") {
       console.error(`Private enrollment of ${scope.namespace.name} requires reviewed runtime suspension, retirement of all old Pod UIDs, `
         + "controller admin-key rotation and restoration of the original suspension/replica intent. "

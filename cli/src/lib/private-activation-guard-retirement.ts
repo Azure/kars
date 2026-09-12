@@ -82,6 +82,7 @@ function released(snapshot: NamespaceSnapshot, key: string): Record<string, Json
 /** Called only after the selected grant's acknowledgement and owned-role absence checks. */
 export async function refreshGuardRetirement(
   execute: Execute, review: GuardRetirementReview,
+  settle?: (activation: PrivateActivation) => Promise<PrivateActivation>,
 ): Promise<PrivateActivation | undefined> {
   const activation = structuredClone(review.activation);
   let pending = false;
@@ -99,6 +100,7 @@ export async function refreshGuardRetirement(
     if (scope) scope.namespace.resourceVersion = identity.resourceVersion;
   }
   if (pending) return undefined;
-  await validatePrivateActivation(execute, activation);
-  return activation;
+  const settled = settle ? await settle(activation) : activation;
+  await validatePrivateActivation(execute, settled);
+  return settled;
 }

@@ -11,6 +11,7 @@ import {
   verifyOwnedRuntimeNamespace,
 } from "../lib/private-activation.js";
 import { captureGuardRetirement, refreshGuardRetirement } from "../lib/private-activation-guard-retirement.js";
+import { captureWriterSettlement, observeWriterSettlement, settleWriterRetirement } from "../lib/private-activation-writer-settle.js";
 
 type Execute=(args:string[],input?:string)=>Promise<string>;
 const resource="karscredentialgrants.kars.azure.com";
@@ -138,6 +139,7 @@ export async function applyReviewedGrant(run:Execute,document:any):Promise<void>
   if(document.spec.enabled!==false&&document.spec.writers.length){
     if(existing&&existing.spec.writers.length){
       const guardReview=await captureGuardRetirement(run,stagedSpec.privateActivation,existing);
+      const settlement=await captureWriterSettlement(run,stagedSpec.privateActivation,existing);
       quiescentSpec={...existing.spec,writers:[]};
       await run(["patch",resource,"workspace","-n",document.metadata.namespace,"--type=merge","-p",JSON.stringify({
         metadata:{uid:existing.metadata.uid,resourceVersion:existing.metadata.resourceVersion},spec:quiescentSpec,
@@ -147,6 +149,7 @@ export async function applyReviewedGrant(run:Execute,document:any):Promise<void>
         const current=await get(run,resource,"workspace",document.metadata.namespace);
         if(!current||current.metadata.uid!==existing.metadata.uid||canonical(current.spec)!==canonical(quiescentSpec))
           throw new Error("Grant changed while retiring prior private writer authority");
+        if(settlement)await observeWriterSettlement(run,stagedSpec.privateActivation,settlement);
         if(current.status?.observedGeneration===current.metadata.generation
           &&current.status?.conditions?.some((c:any)=>c.type==="WriterReady"&&c.status==="False")){
           const inventory=JSON.parse(await run(["get","roles,rolebindings,clusterroles,clusterrolebindings",
@@ -155,7 +158,8 @@ export async function applyReviewedGrant(run:Execute,document:any):Promise<void>
             throw new Error("Private authority retirement inventory is incomplete");
           if(!inventory.items.some((object:any)=>
             object.metadata?.annotations?.["kars.azure.com/credential-grant-owner"]===existing.metadata.uid)){
-            const refreshed=await refreshGuardRetirement(run,guardReview);
+            const refreshed=await refreshGuardRetirement(run,guardReview,settlement
+              ?activation=>settleWriterRetirement(run,activation,settlement):undefined);
             if(refreshed){
               stagedSpec.privateActivation=refreshed;
               existing=current;break;
