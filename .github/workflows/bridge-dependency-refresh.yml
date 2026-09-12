@@ -28,6 +28,7 @@ jobs:
         working-directory: bridge/${{ matrix.project }}
         run: |
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+          git --no-pager diff -- package-lock.json
           node ../../ci/bridge-lock-delta.mjs
           npm ci --ignore-scripts --no-audit --no-fund
           npm ls --all > dependency-tree.txt

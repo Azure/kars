@@ -11,7 +11,11 @@ const path = `bridge/${project}/package-lock.json`;
 const before = JSON.parse(execFileSync("git", ["show", `HEAD:${path}`], { encoding: "utf8" }));
 const after = JSON.parse(readFileSync("package-lock.json", "utf8"));
 const targets = project === "web"
-  ? { "node_modules/mermaid": "11.16.1", "node_modules/dompurify": "3.4.13" }
+  ? {
+      "node_modules/mermaid": "11.16.1",
+      "node_modules/dompurify": "3.4.13",
+      "node_modules/@types/trusted-types": "2.0.7",
+    }
   : { "node_modules/qs": "6.16.0" };
 
 console.log(JSON.stringify({
@@ -22,6 +26,7 @@ console.log(JSON.stringify({
 assert.deepEqual(Object.keys(after.packages).sort(), Object.keys(before.packages).sort());
 for (const [name, entry] of Object.entries(before.packages)) {
   if (Object.hasOwn(targets, name)) {
+    if (name === "node_modules/@types/trusted-types") assert.equal(entry.version, "2.0.7");
     assert.equal(after.packages[name].version, targets[name]);
     assert.match(after.packages[name].resolved, /^https:\/\/registry\.npmjs\.org\//);
     assert.match(after.packages[name].integrity, /^sha512-[A-Za-z0-9+/]+={0,2}$/);
