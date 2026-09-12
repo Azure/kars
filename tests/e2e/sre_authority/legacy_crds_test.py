@@ -20,7 +20,8 @@ from sre_authority.registration_schema import request
 from sre_authority.canonical_migration import seed_data
 from sre_authority.canonical_migration_test import FakeHarness
 from sre_authority.canonical_seed import (
-    SEEDS, SeedRejected, collection_path, dry_run_seed_data, request_seed, seed_definitions, seed_status,
+    SEEDS, SeedRejected, collection_path, dry_run_seed_data, nested_action_definition,
+    prove_nested_params_support, request_seed, seed_definitions, seed_status,
 )
 
 
@@ -182,11 +183,24 @@ class CanonicalSeedProbeTests(unittest.TestCase):
         self.assertEqual(definitions["karssreaction"]["spec"], {
             "action": {"type": "ScaleDeployment", "params": {
                 "namespace": "kars-system", "name": "kars-controller", "replicas": 0,
-                "opaque": {"nested": [1, "retained", True]}}},
+                "opaque": "retained"}},
             "approval": {"state": "Rejected"}})
         definitions["karstask"]["spec"]["envelope"]["tier"] = 9
         self.assertEqual(dict(seed_definitions())["karstask"]["spec"]["envelope"]["tier"], 1)
         self.assertEqual(definitions["karsteam"]["spec"]["envelope"]["tier"], 1)
+
+    def test_original_nested_shape_is_preserved_on_both_correct_schema_sides_with_distinct_names(self):
+        baseline = dict(seed_definitions())["karssreaction"]
+        before = nested_action_definition(after_migration=False)
+        after = nested_action_definition(after_migration=True)
+        self.assertEqual(before["spec"], after["spec"])
+        for obj in (before, after):
+            self.assertEqual(obj["spec"]["action"]["params"]["opaque"], {"nested": [1, "retained", True]})
+            scalar = copy.deepcopy(obj)
+            scalar["metadata"]["name"] = baseline["metadata"]["name"]
+            scalar["spec"]["action"]["params"]["opaque"] = "retained"
+            self.assertEqual(scalar, baseline)
+        self.assertEqual(len({obj["metadata"]["name"] for obj in (baseline, before, after)}), 3)
 
     def test_bad_request_diagnostics_only_expose_fixed_kind_categories_and_paths(self):
         message = ('Secret-value cannot unmarshal; strict decoding error: '
@@ -246,10 +260,137 @@ class CanonicalSeedProbeTests(unittest.TestCase):
         dry_run_seed_data(h)
         self.assertEqual(h.objects, before)
         posts = [(path, body) for method, path, body in h.calls if method == "POST"]
+        expected = seed_definitions() + [("karssreaction", nested_action_definition(after_migration=False))]
         self.assertEqual(posts, [(collection_path(resource) + "?fieldManager=kubectl-create&fieldValidation=Strict&dryRun=All", obj)
-                                for resource, obj in seed_definitions()])
+                                for resource, obj in expected])
         self.assertTrue(all(method in ("GET", "POST") for method, _path, _body in h.calls))
         self.assertNotIn("ephemeral-dry-run", json.dumps(list(h.objects.values())))
+        self.assertEqual(self.reporter.call_args.args[2], {
+            "kind": "KarsSREAction", "httpStatus": 400, "category": "BadRequest",
+            "fields": ["spec.action.params.opaque.nested"], "validation": ["strict-decoding", "unknown-field"],
+            "expectedHttpStatus": 400, "matched": True, "mode": "nested-before-server-dry-run"})
+
+    def test_historical_negative_requires_the_exact_native_rejection_not_any_failure(self):
+        faults = (
+            (403, {"kind": "Status", "reason": "Forbidden"}),
+            (400, {"kind": "Status", "reason": "BadRequest",
+                   "message": 'strict decoding error: unknown field "spec.action.params.name"'}),
+            (400, {"kind": "Status", "reason": "BadRequest",
+                   "message": 'strict decoding error: unknown field "spec.action.params.opaque.nested", unknown field "unreviewed"'}),
+            (400, {"kind": "Status", "reason": "BadRequest",
+                   "message": 'unknown field "spec.action.params.opaque.nested"'}),
+            (422, {"kind": "Status", "reason": "Invalid"}),
+            (201, nested_action_definition(after_migration=False)),
+        )
+        for code, body in faults:
+            h = FakeHarness()
+            original = h.api
+            def api(method, path, **kwargs):
+                result = original(method, path, **kwargs)
+                if method == "POST" and kwargs["body"] == nested_action_definition(after_migration=False):
+                    return types.SimpleNamespace(status_code=code, json=lambda: body)
+                return result
+            h.api = api
+            before = copy.deepcopy(h.objects)
+            with self.subTest(code=code, body=body), self.assertRaisesRegex(AssertionError, "exact expected API result"):
+                dry_run_seed_data(h)
+            self.assertEqual(h.objects, before)
+
+    def test_post_migration_nested_acceptance_retains_scalar_data_and_all_identities_without_persistence(self):
+        h = FakeHarness()
+        fixtures = seed_data(h)
+        h.migrate_action_schema()
+        before = copy.deepcopy(h.objects)
+        h.calls.clear()
+        prove_nested_params_support(h)
+        self.assertEqual(h.objects, before)
+        for fixture in fixtures:
+            self.assertEqual(h.get(fixture["resource"], fixture["name"])["metadata"]["uid"], fixture["before"]["uid"])
+        self.assertEqual([body for method, _path, body in h.calls if method == "POST"],
+                         [nested_action_definition(after_migration=True)])
+        self.assertTrue(all(method == "GET" or method == "POST" and "dryRun=All" in path
+                            for method, path, _body in h.calls))
+        self.assertTrue(self.reporter.call_args.args[2]["matched"])
+        self.assertEqual(self.reporter.call_args.args[2]["expectedHttpStatus"], 201)
+
+    def test_post_migration_acceptance_cannot_prune_change_or_add_nested_values_or_forge_ready(self):
+        changes = (
+            lambda body: body["spec"]["action"]["params"]["opaque"].pop("nested"),
+            lambda body: body["spec"]["action"]["params"]["opaque"].update(nested=[1, "changed", True]),
+            lambda body: body["spec"]["action"]["params"]["opaque"].update(nested=[1, "retained", 1]),
+            lambda body: body["spec"]["action"]["params"]["opaque"].update(extra="unreviewed"),
+            lambda body: body.update(status={"phase": "Ready"}),
+        )
+        for change in changes:
+            h = FakeHarness()
+            h.migrate_action_schema()
+            original = h.api
+            def api(method, path, **kwargs):
+                result = original(method, path, **kwargs)
+                if method == "POST":
+                    body = result.json()
+                    change(body)
+                    return types.SimpleNamespace(status_code=201, json=lambda: body)
+                return result
+            h.api = api
+            before = copy.deepcopy(h.objects)
+            with self.subTest(change=change), self.assertRaisesRegex(AssertionError, "exact expected API result"):
+                prove_nested_params_support(h)
+            self.assertEqual(h.objects, before)
+
+    def test_post_migration_snapshot_rejects_schema_cas_data_and_workload_drift(self):
+        for fault in ("uid", "resourceVersion", "schema", "data", "workload", "persisted-probe"):
+            h = FakeHarness()
+            seed_data(h)
+            h.migrate_action_schema()
+            original = h.api
+            def api(method, path, **kwargs):
+                result = original(method, path, **kwargs)
+                if method == "POST":
+                    crd = h.objects[("crd", "karssreactions.kars.azure.com")]
+                    if fault in ("uid", "resourceVersion"):
+                        crd["metadata"][fault] = "changed"
+                    elif fault == "schema":
+                        crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["description"] = "changed"
+                    elif fault == "data":
+                        h.objects[("karssreaction", "e2e-migration-karssreaction")]["spec"]["approval"]["state"] = "Pending"
+                    elif fault == "workload":
+                        h.objects[("deployment", "kars-controller")]["spec"]["template"] = {"changed": True}
+                    else:
+                        h.create(kwargs["body"])
+                return result
+            h.api = api
+            with self.subTest(fault=fault), self.assertRaisesRegex(AssertionError, "changed|already exists"):
+                prove_nested_params_support(h)
+
+    def test_post_migration_probe_requires_paused_controller_and_no_same_name_object(self):
+        for fault in ("controller", "collision"):
+            h = FakeHarness()
+            h.migrate_action_schema()
+            if fault == "controller":
+                h.objects[("deployment", "kars-controller")]["spec"]["replicas"] = 1
+            else:
+                h.create(nested_action_definition(after_migration=True))
+            with self.subTest(fault=fault), self.assertRaisesRegex(AssertionError, "paused|already exists"):
+                prove_nested_params_support(h)
+            self.assertTrue(all(method == "GET" for method, _path, _body in h.calls))
+
+    def test_documented_params_schema_is_accepted_but_extra_validation_is_not_ignored(self):
+        for phase in (False, True):
+            for constraint in ({"maxProperties": 1}, {"properties": {"opaque": {"type": "string"}}},
+                               {"additionalProperties": False}):
+                h = FakeHarness()
+                if phase:
+                    h.migrate_action_schema()
+                crd = h.objects[("crd", "karssreactions.kars.azure.com")]
+                params = crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"]["action"]["properties"]["params"]
+                self.assertIn("description", params)
+                params.update(constraint)
+                probe = prove_nested_params_support if phase else dry_run_seed_data
+                with self.subTest(phase=phase, constraint=constraint), self.assertRaisesRegex(AssertionError, "wrong side"):
+                    probe(h)
+                self.assertFalse(any(method == "POST" and body == nested_action_definition(after_migration=phase)
+                                     for method, _path, body in h.calls))
 
     def test_all_failed_bodies_are_identified_before_any_real_seed_creation(self):
         h = FakeHarness()
@@ -331,6 +472,7 @@ class CanonicalSeedProbeTests(unittest.TestCase):
         self.assertLess(source.index("dry_run_seed_data(h)"), source.index("create_registration_crd(h, obj)"))
         self.assertLess(source.index("dry_run_seed_data(h)"), source.index('"--dry-run=server"'))
         self.assertIn('"historicalSeedStrictServerDryRuns": 5', source)
+        self.assertIn('"historicalNestedParamsRejection": "passed"', source)
         self.assertNotIn("--validate=false", source)
 
 

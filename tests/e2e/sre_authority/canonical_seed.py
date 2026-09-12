@@ -23,6 +23,7 @@ WORKLOADS = (
     "/apis/apps/v1/statefulsets", "/apis/apps/v1/daemonsets",
     "/apis/batch/v1/jobs", "/apis/batch/v1/cronjobs",
 )
+NESTED_FIELD = "spec.action.params.opaque.nested"
 
 
 def seed_definitions():
@@ -35,13 +36,21 @@ def seed_definitions():
         {"corpus": {"builtin": "sre"}, "targetSandboxRef": {"name": "sre"}},
         {"action": {"type": "ScaleDeployment", "params": {
             "namespace": SYSTEM, "name": "kars-controller", "replicas": 0,
-            "opaque": {"nested": [1, "retained", True]},
+            "opaque": "retained",
         }}, "approval": {"state": "Rejected"}},
     ]
     return [(resource, {"apiVersion": "kars.azure.com/v1alpha1", "kind": kind,
                         "metadata": {"name": f"e2e-migration-{resource}", "namespace": SYSTEM},
                         "spec": copy.deepcopy(spec)})
             for (resource, _plural, kind), spec in zip(SEEDS, specs)]
+
+
+def nested_action_definition(*, after_migration):
+    obj = dict(seed_definitions())["karssreaction"]
+    suffix = "after" if after_migration else "before"
+    obj["metadata"]["name"] += f"-nested-{suffix}"
+    obj["spec"]["action"]["params"]["opaque"] = {"nested": [1, "retained", True]}
+    return obj
 
 
 def collection_path(resource):
@@ -64,6 +73,8 @@ def _field_paths(value, path=""):
 def seed_status(resource, code, body):
     expected = dict(seed_definitions())[resource]
     allowed = _field_paths(expected)
+    if resource == "karssreaction":
+        allowed |= _field_paths(nested_action_definition(after_migration=False))
     report = {"kind": expected["kind"], "httpStatus": code, "category": "unexpected-response",
               "fields": [], "validation": []}
     if not isinstance(body, dict) or body.get("kind") != "Status":
@@ -116,23 +127,22 @@ class SeedRejected(AssertionError):
     pass
 
 
-def request_seed(h, resource, obj, *, dry_run):
-    expected = dict(seed_definitions()).get(resource)
-    require(expected is not None and json.dumps(obj, sort_keys=True) == json.dumps(expected, sort_keys=True),
-            "Only the exact public historical seed body may be submitted")
-    mode = "server-dry-run" if dry_run else "create"
-    filename = f"migration-seed-{resource}-{mode}.json"
-    write_report(h.root, filename, {"kind": expected["kind"], "mode": mode,
-                                   "httpStatus": None, "category": "requesting"})
+def _write_seed_report(h, resource, mode, report):
+    report["mode"] = mode
+    write_report(h.root, f"migration-seed-{resource}-{mode}.json", report)
+
+
+def _submit_seed(h, resource, expected, *, dry_run, mode):
+    _write_seed_report(h, resource, mode, {"kind": expected["kind"],
+                                         "httpStatus": None, "category": "requesting"})
     path = (collection_path(resource) + "?fieldManager=kubectl-create&fieldValidation=Strict"
             + ("&dryRun=All" if dry_run else ""))
-    response = h.api("POST", path, body=obj)
+    response = h.api("POST", path, body=expected)
     try:
         body = response.json()
     except (ValueError, TypeError):
         body = None
     report = seed_status(resource, response.status_code, body)
-    report["mode"] = mode
     if response.status_code == 201 and isinstance(body, dict) and body.get("kind") == expected["kind"]:
         meta = body.get("metadata")
         identity = isinstance(meta, dict) and all(meta.get(key) == expected["metadata"][key]
@@ -144,11 +154,49 @@ def request_seed(h, resource, obj, *, dry_run):
             report["category"] = "accepted"
         else:
             report["category"] = "identity-or-data-round-trip"
-    write_report(h.root, filename, report)
+    return body, report
+
+
+def request_seed(h, resource, obj, *, dry_run):
+    expected = dict(seed_definitions()).get(resource)
+    require(expected is not None and json.dumps(obj, sort_keys=True) == json.dumps(expected, sort_keys=True),
+            "Only the exact public historical seed body may be submitted")
+    mode = "server-dry-run" if dry_run else "create"
+    body, report = _submit_seed(h, resource, expected, dry_run=dry_run, mode=mode)
+    _write_seed_report(h, resource, mode, report)
     if report["category"] != "accepted":
         raise SeedRejected(f"Historical seed {expected['kind']} {mode} rejected: "
-                           f"HTTP {response.status_code}; category={report['category']}")
+                           f"HTTP {report['httpStatus']}; category={report['category']}")
     return body
+
+
+def _request_nested_params(h, *, after_migration):
+    crd = h.get("crd", "karssreactions.kars.azure.com")
+    versions = crd.get("spec", {}).get("versions", []) if isinstance(crd, dict) else []
+    require(len(versions) == 1, "Nested params probe requires the single reviewed action API version")
+    params = (versions[0].get("schema", {}).get("openAPIV3Schema", {}).get("properties", {}).get("spec", {})
+              .get("properties", {}).get("action", {}).get("properties", {}).get("params"))
+    expected_schema = ({"type": "object", "x-kubernetes-preserve-unknown-fields": True} if after_migration
+                       else {"type": "object", "additionalProperties": True})
+    require(isinstance(params, dict) and {key: value for key, value in params.items() if key != "description"} == expected_schema,
+            "Nested params probe is on the wrong side of the actual schema migration")
+    expected = nested_action_definition(after_migration=after_migration)
+    mode = "nested-after-server-dry-run" if after_migration else "nested-before-server-dry-run"
+    body, report = _submit_seed(h, "karssreaction", expected, dry_run=True, mode=mode)
+    if after_migration:
+        matched = (report["category"] == "accepted"
+                   and json.dumps(body["spec"]["action"]["params"], sort_keys=True)
+                   == json.dumps(expected["spec"]["action"]["params"], sort_keys=True))
+    else:
+        message = body.get("message") if isinstance(body, dict) else None
+        matched = (report["httpStatus"] == 400 and report["category"] == "BadRequest"
+                   and report["fields"] == [NESTED_FIELD]
+                   and report["validation"] == ["strict-decoding", "unknown-field"]
+                   and isinstance(message, str) and len(message) <= 16384
+                   and re.findall(r'unknown field "([^"\r\n]*)"', message) == [NESTED_FIELD])
+    report.update(expectedHttpStatus=201 if after_migration else 400, matched=bool(matched))
+    _write_seed_report(h, "karssreaction", mode, report)
+    require(matched, f"Nested action params {mode} did not satisfy the exact expected API result")
 
 
 def _inventory(h, path):
@@ -168,7 +216,7 @@ def _inventory(h, path):
     return sorted(items, key=lambda item: item["metadata"]["uid"])
 
 
-def _snapshot(h):
+def _snapshot(h, *, after_migration=False):
     controller = h.get("deployment", "kars-controller", SYSTEM)
     require(controller and controller.get("spec", {}).get("replicas") == 0
             and all(controller.get("status", {}).get(key, 0) == 0
@@ -176,9 +224,16 @@ def _snapshot(h):
             and all(controller.get("metadata", {}).get(key) for key in ("uid", "resourceVersion")),
             "Historical seed dry-runs require the actual controller paused with a stable identity")
     state = {"controller": controller}
+    action_crd = h.get("crd", "karssreactions.kars.azure.com")
+    require(action_crd and all(action_crd.get("metadata", {}).get(key) for key in ("uid", "resourceVersion")),
+            "Nested params probe requires the real action CRD identity")
+    state["actionSchema"] = action_crd
     for resource, _plural, _kind in SEEDS:
         state[resource] = _inventory(h, collection_path(resource))
-        require(not any(obj["metadata"]["name"] == f"e2e-migration-{resource}" for obj in state[resource]),
+        absent = {f"e2e-migration-{resource}"} if not after_migration else set()
+        if resource == "karssreaction":
+            absent |= {nested_action_definition(after_migration=phase)["metadata"]["name"] for phase in (False, True)}
+        require(not any(obj["metadata"]["name"] in absent for obj in state[resource]),
                 "Historical seed already exists; no collision or adoption is permitted")
     for path in WORKLOADS:
         objects = _inventory(h, path)
@@ -205,7 +260,19 @@ def dry_run_seed_data(h):
                 request_seed(h, resource, obj, dry_run=True)
             except SeedRejected:
                 rejected += 1
+        require(rejected == 0, f"{rejected} historical seed bodies failed strict server dry-run; see fixed kind/field diagnostics")
+        _request_nested_params(h, after_migration=False)
     finally:
         require(_snapshot(h) == before, "Historical seed dry-runs changed stored data, identity or workload intent")
-    require(rejected == 0, f"{rejected} historical seed bodies failed strict server dry-run; see fixed kind/field diagnostics")
     h.passed("All five historical seed bodies passed strict server dry-run without persistence or workload changes")
+    h.passed("Historical nested action params rejected at the exact observed unknown field without persistence")
+
+
+def prove_nested_params_support(h):
+    before = _snapshot(h, after_migration=True)
+    try:
+        _request_nested_params(h, after_migration=True)
+    finally:
+        require(_snapshot(h, after_migration=True) == before,
+                "Post-migration nested params dry-run changed stored data, identity or workload intent")
+    h.passed("Migrated action API retained nested params unchanged in a nonexecuting, nonpersistent server dry-run")
