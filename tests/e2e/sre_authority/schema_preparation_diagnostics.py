@@ -4,6 +4,7 @@
 """Closed CLI diagnostic vocabulary; never relay executable output or values."""
 
 import json
+from .ssa_diagnostics import CONFLICT_KEYS, valid_conflict_facts
 
 SOURCES = {
     **{step: "core-helm-schemas" for step in ("helm-render", "helm-rollback-review", "helm-history-recheck")},
@@ -43,7 +44,7 @@ def schema_preparation_failure(stderr):
             value = json.loads(line[len(prefix):])
         except ValueError:
             continue
-        if not isinstance(value, dict) or set(value) - {"step", "source", "kind", "field", "shape", "category", "reason"}:
+        if not isinstance(value, dict) or set(value) - ({"step", "source", "kind", "field", "shape", "category", "reason"} | CONFLICT_KEYS):
             continue
         step, category = value.get("step"), value.get("category")
         if (not isinstance(step, str) or step not in SOURCES
@@ -56,6 +57,8 @@ def schema_preparation_failure(stderr):
                for key, allowed in (("kind", KINDS), ("field", FIELDS), ("reason", REASONS))):
             continue
         if ("reason" in value) != (category == "api-rejection"):
+            continue
+        if not valid_conflict_facts(value):
             continue
         if "shape" in value:
             shape = value["shape"]
