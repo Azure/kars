@@ -379,10 +379,73 @@ complete. Pausing/retired attempts retain their original binding, captured UIDs,
 baseline and exposed-key history, including the existing post-retirement budget
 rotation requirement.
 
-**Deliberate bounds:** additional scopes with existing private consumers require
-owner-specific retirement/rotation; shared enrollment does not pause the root or
-adopt those consumers. Existing marked templates and consuming Pod/Job instances
-also require explicit recovery. Changed shared consumers, deleted original
+### Late enrollment of an existing Task runtime
+
+The same `preview --observe <sandbox> --private-consumer
+kars-<sandbox>/Deployment/<sandbox>` and `apply` commands now support a narrow
+owner-specific retirement lifecycle. Preview is read-only and reports the effect
+on stderr; its JSON and the private-consumption/v1 grant schema are unchanged.
+The supported target is one live controller-owned Deployment in its exact
+KarsSandbox namespace claim, optionally owned by a current Ready, launched
+KarsTask. Namespace/Sandbox/Task UIDs, executable template, source specification,
+Task authorization and controller ownership must agree. An unobserved Sandbox
+generation or changed reviewed Deployment resourceVersion requires re-preview.
+Task authorization is the production `sha256:<64 lowercase hexadecimal digits>`
+string, retained byte-for-byte in the configured identity, receipt and recovery
+checks. It is not interchangeable with a bare hexadecimal structural digest.
+Only the existing controller-issued `router-services-admin` token may need
+rotation. Missing or customized keys, existing observer/TLS/App material,
+privileged token/host access and other consumers are not adopted.
+
+Apply records a root-bound version-4 receipt in the **target namespace's existing
+operator-only `kars.azure.com/private-root-retirement` annotation**:
+
+1. `Pausing` saves original suspension and replica intent, source/owner hashes,
+   Secret UID/version and a digest of the existing authentication key. Apply,
+   unlike preview, reads this one bounded private token into operator memory;
+   neither the token nor source credential values are printed or stored in the
+   receipt. UID/resourceVersion-CAS sets `spec.suspended=true` and scales the
+   reviewed Deployment to zero. It never sets Task `execution.launch=false`.
+2. Every old Pod UID, **including terminating Pods**, must disappear before
+   `Retired`. The namespace stays Pending and the original authentication-key
+   baseline must remain unchanged throughout retirement.
+3. `Rotating` publishes only the target's new epoch/approved parent. The existing
+   controller `ensure_bound` quarantine/retired-consumer checks mint a genuinely
+   fresh admin token, preserving Secret UID. Apply waits for that token's actual
+   bytes to differ and for the exact controller-owned template to reference its
+   new Secret UID/resourceVersion and private epoch. A stamp alone cannot qualify.
+   Only these two template annotations may change; executable/source drift fails.
+4. `Restoring` rechecks original owners/specifications, the new private key and
+   captured UID retirement before restoring the original suspension intent.
+   `Qualified` requires observed Deployment readiness (or the original suspended
+   zero replicas). Supported replica intent is the controller's zero/one policy.
+
+The controller independently honors this operator-owned in-progress receipt.
+It forces zero replicas until `Restoring`, verifies the original raw Sandbox/Task
+specification and owner/generation bindings, and checks the actual new token
+digest and Secret/template versions at the restore boundary. Concurrent tenant
+unsuspension cannot bypass the recorded retirement or substitute a different
+source. Completed scopes return to the existing controller lifecycle; unrelated
+core runtimes without this receipt are unchanged.
+The recorded Deployment incarnation is checked before **both CREATE and UPDATE**,
+including completed v4 scopes. If it disappears or is replaced, no replacement
+is adopted or created; explicit operator recovery is required. Ordinary core
+creation and existing v3 scope handling do not acquire this v4 identity fence.
+
+Re-preview after a CAS conflict or lost response resumes the recorded attempt,
+original intent and epoch; it cannot adopt changed templates/specifications or
+invent missing retirement evidence. Failure preserves suspension and recovery
+records. Task, Sandbox, namespace, source bundles, projections, agent keys and
+persistent volumes are not deleted or replaced. **Pod-local ephemeral state,
+including `emptyDir`, is restarted**, as preview explains; this is not a backup
+or live migration facility. Already-enrolled observer/App runtimes require their
+separate explicit rotation workflow. Later executable/source changes also require
+an explicit review rather than silent acceptance by this retirement receipt.
+
+**Deliberate bounds:** other additional scopes with existing private consumers
+still require owner-specific retirement/rotation; shared enrollment never pauses
+the root or adopts arbitrary consumers. Existing marked templates and consuming
+Pod/Job instances also require explicit recovery. Changed shared consumers, deleted original
 evidence namespaces, changed root/profile/bundle/template/budget identities or
 keys, and missing/tampered retirement evidence fail explicitly. A completed budget
 qualification can be shared only with its exact already-qualified key and Secret

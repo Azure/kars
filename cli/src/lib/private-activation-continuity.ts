@@ -11,6 +11,7 @@ import {
 import {
   replicaIntent, retirementBinding, retirementReview, retirementState, type RootRetirement,
 } from "./private-activation-retirement.js";
+import { reviewLateScope, stageLateScope } from "./private-activation-late-scope.js";
 
 const RETIREMENT = "kars.azure.com/private-root-retirement";
 // Unlike other private annotations, this existing field is operator-only,
@@ -208,13 +209,20 @@ export async function reviewPrivateContinuity(
     throw new Error("Original private root restore is incomplete; resume its exact review before adding another workspace");
   }
   const continuity = { proof, state, sealed };
-  for (const scope of activation.namespaces) await scopePlan(execute, activation, scope, continuity);
+  for (const scope of activation.namespaces) {
+    const plan = await scopePlan(execute, activation, scope, continuity);
+    if (recoverIntent && plan === "Late") {
+      console.error(`Private enrollment of ${scope.namespace.name} requires reviewed runtime suspension, retirement of all old Pod UIDs, `
+        + "controller admin-key rotation and restoration of the original suspension/replica intent. "
+        + "Task, Sandbox, namespace and stored customer data are retained; Pod-local ephemeral state is restarted. Shared root and other grants are not reset.");
+    }
+  }
   return continuity;
 }
 
 async function scopePlan(
   execute: Execute, activation: PrivateActivation, scope: NamespaceReview, continuity: PrivateContinuity,
-): Promise<"Qualified" | "Stamping" | "Pending" | "New"> {
+): Promise<"Qualified" | "Stamping" | "Pending" | "New" | "Late"> {
   const original = continuity.proof.activation.namespaces.find(value => value.namespace.name === scope.namespace.name);
   if (original) {
     if (scopeBinding(scope) !== scopeBinding(original) || (scope.epoch !== undefined && scope.epoch !== original.epoch)) throw new Error(failure);
@@ -225,11 +233,19 @@ async function scopePlan(
   const namespace = await read(execute, "namespace", scope.namespace.name);
   if (reviewed(namespace).uid !== scope.namespace.uid) throw new Error(failure);
   const raw = at(namespace, "metadata", "annotations", SCOPE);
+  if (raw !== undefined && record(JSON.parse(String(raw))).version === 4) {
+    const plan = await reviewLateScope(execute, activation, scope, digest(continuity.proof));
+    if (!plan) throw new Error(failure);
+    if (plan === "Qualified") await qualifiedScope(execute, activation, scope);
+    return plan;
+  }
   if (raw === undefined) {
     if (scope.epoch !== undefined || Object.keys(record(at(namespace, "metadata", "annotations") ?? {}))
       .some(key => key.startsWith(PRIVATE_PREFIX))) {
       throw new Error("Additional namespace has unproven private lifecycle state; preserve it for explicit recovery");
     }
+    const late = await reviewLateScope(execute, activation, scope, digest(continuity.proof));
+    if (late) return late;
     await consumers(execute, activation, scope, [], false);
     return "New";
   }
@@ -300,6 +316,11 @@ export async function stageSharedActivation(
     const plan = await scopePlan(execute, activation, scope, continuity);
     if (plan === "Qualified") continue;
     await assertSealed(execute, continuity);
+    if (plan === "Late") {
+      await stageLateScope(execute, activation, scope, digest(continuity.proof), () => assertSealed(execute, continuity));
+      await qualifiedScope(execute, activation, scope);
+      continue;
+    }
     const receipt: ScopeQualification = { version: 3, root: digest(continuity.proof), binding: scopeBinding(scope), phase: "Pending" };
     if (plan === "New") {
       await patchNamespace(execute, scope, { ...annotations(activation, scope, "Pending"), [SCOPE]: encoded(receipt) },
