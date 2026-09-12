@@ -114,6 +114,29 @@ async fn materialized_task_execution_status_cas_recovers_its_task_anchor_not_its
 }
 
 #[tokio::test]
+async fn task_runtime_without_explicit_launch_cannot_create_or_recover_a_bundle() {
+    for execution in [None, Some(json!({"launch":false}))] {
+        let f = materialized().await;
+        {
+            let mut state = f.state.lock().unwrap();
+            let task_path = state.target_path.clone();
+            let task = state.objects.get_mut(&task_path).unwrap();
+            if let Some(value) = execution {
+                task["spec"]["execution"] = value;
+            } else {
+                task["spec"].as_object_mut().unwrap().remove("execution");
+            }
+            let typed: KarsTask = serde_json::from_value(task.clone()).unwrap();
+            task["status"]["envelopeDigest"] = json!(typed.envelope_digest());
+        }
+        assert!(consume(&f).await.is_err());
+        assert_no_values(&f);
+        let state = f.state.lock().unwrap();
+        assert_eq!((state.creates, state.anchors), (0, 0));
+    }
+}
+
+#[tokio::test]
 async fn task_recovery_rejects_changed_governance_spec_parent_or_authority_status() {
     for change in [
         "target-uid",
