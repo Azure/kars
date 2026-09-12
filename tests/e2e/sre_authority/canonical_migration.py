@@ -12,7 +12,7 @@ import hashlib
 import json
 
 from .common import SYSTEM, require
-from .canonical_seed import dry_run_seed_data, request_seed, seed_definitions
+from .canonical_seed import dry_run_seed_data, prove_nested_params_support, request_seed, seed_definitions
 
 CRDS = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions"
 STAGE = ("authority", "stage", "--controller-image", "kars-controller:e2e",
@@ -93,6 +93,8 @@ def deny_late_conflicts(h, fixtures):
 
 
 def finish_data_proof(h, fixtures):
+    assert_data_unchanged(h, fixtures)
+    prove_nested_params_support(h)
     assert_data_unchanged(h, fixtures)
     h.passed("Native BASE365-to-current schema migration preserved all fixture data/UIDs/resourceVersions")
     for fixture in fixtures:
