@@ -325,6 +325,13 @@ retained, never invented. Stable missing witnesses or authority drift still
 block enrollment. A final recheck after lineage inspection prevents reporting
 settlement from an outdated snapshot. No mutation or stale write is retried.
 
+If restoration validation still refuses the observed state, the CLI emits
+`KARS_PRIVATE_WRITER_TRANSITION` with fixed booleans distinguishing generation,
+projection/revision, replica, metadata, executable-template and witness
+mismatches. No compared values or hashes are emitted. These facts only explain
+the unchanged refusal; they do not broaden accepted transitions or the
+120-second production bound.
+
 For first qualification,
 namespace protection is then enabled in `Pending`, identities/templates are rechecked,
 and only approved authority-consuming controller replicas are paused. This

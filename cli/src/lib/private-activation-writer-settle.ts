@@ -115,6 +115,49 @@ function possibleTransition(current: ObjectValue, runtime: RuntimeReview): boole
   return at(current, "status", "observedGeneration") !== gen(current) && sameBody(current, expected, true, true);
 }
 
+function transitionParts(deployment: ObjectValue) {
+  const metadata = structuredClone(record(deployment.metadata));
+  delete metadata.resourceVersion;
+  delete metadata.generation;
+  const annotations = at(metadata, "annotations");
+  if (annotations) {
+    delete record(annotations)[REVISION];
+    if (!Object.keys(record(annotations)).length) delete metadata.annotations;
+  }
+  const spec = structuredClone(record(deployment.spec));
+  delete spec.replicas;
+  delete spec.template;
+  const pod = structuredClone(template(deployment));
+  const podAnnotations = at(pod, "metadata", "annotations");
+  if (podAnnotations) {
+    delete record(podAnnotations)[PROJECTION];
+    if (!Object.keys(record(podAnnotations)).length) delete record(pod.metadata).annotations;
+  }
+  return { metadata, spec, pod };
+}
+
+function reportTransition(
+  deployment: ObjectValue, expected: ObjectValue, runtime: RuntimeReview,
+  state: { unchanged: boolean; paused: boolean; projectionSame: boolean; restoring: boolean; generationMatches: boolean },
+): void {
+  const current = transitionParts(deployment);
+  const before = transitionParts(expected);
+  console.error(`KARS_PRIVATE_WRITER_TRANSITION ${JSON.stringify({
+    ...state,
+    pauseSeen: runtime.pauseSeen,
+    withdrawnSeen: runtime.withdrawnVersion !== undefined,
+    emptySeen: runtime.emptyVersion !== undefined,
+    projectionMatches: at(template(deployment), "metadata", "annotations", PROJECTION)
+      === at(template(expected), "metadata", "annotations", PROJECTION),
+    revisionMatches: at(deployment, "metadata", "annotations", REVISION)
+      === at(expected, "metadata", "annotations", REVISION),
+    metadataMatches: canonical(current.metadata) === canonical(before.metadata),
+    specMatches: canonical(current.spec) === canonical(before.spec),
+    templateMatches: canonical(current.pod) === canonical(before.pod),
+    replicasMatches: replicaIntent(deployment) === replicaIntent(expected),
+  })}`);
+}
+
 async function snapshotCurrent(
   execute: Execute, runtime: RuntimeReview, task: ObjectValue, deployment: ObjectValue, projection: ObjectValue,
 ): Promise<boolean> {
@@ -298,9 +341,19 @@ export async function observeWriterSettlement(
     }
     const restoredGeneration = gen(before.deployment) + (initialReplicas ? 2 : Number(changedRevision));
     if (!unchanged && !isPause && (!restoringShape || !runtime.pauseSeen || gen(deployment) !== restoredGeneration)) {
+      reportTransition(deployment, restored, runtime, {
+        unchanged, paused: isPause, projectionSame, restoring: restoringShape,
+        generationMatches: gen(deployment) === restoredGeneration,
+      });
       throw new Error("Unreviewed template or controller pause/restore generation changed");
     }
-    if (unchanged && gen(deployment) !== gen(before.deployment) && (!runtime.pauseSeen || gen(deployment) !== restoredGeneration)) throw new Error(ERROR);
+    if (unchanged && gen(deployment) !== gen(before.deployment) && (!runtime.pauseSeen || gen(deployment) !== restoredGeneration)) {
+      reportTransition(deployment, restored, runtime, {
+        unchanged, paused: isPause, projectionSame, restoring: restoringShape,
+        generationMatches: gen(deployment) === restoredGeneration,
+      });
+      throw new Error(ERROR);
+    }
     if (!await snapshotCurrent(execute, runtime, task, deployment, projection)) {
       allReady = false;
       continue;
