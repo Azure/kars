@@ -216,6 +216,23 @@ spec:
                   `CronJob` that fires periodic runs.
                 nullable: true
                 type: string
+              reportConfigMapRef:
+                description: Bounded, exclusively owned latest per-case report and attribution.
+                nullable: true
+                properties:
+                  name:
+                    type: string
+                required:
+                - name
+                type: object
+              reportConfigMapUid:
+                description: API UID of the report ConfigMap verified before publishing this status.
+                nullable: true
+                type: string
+              reportEvidenceDigest:
+                description: Digest of evidence already verified by this controller; fences cache-only replay.
+                nullable: true
+                type: string
               history:
                 description: |-
                   Summaries of the previous [`MAX_HISTORY`] runs, newest-first. The

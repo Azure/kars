@@ -43,6 +43,11 @@ interface EvalCaseResult {
 }
 
 interface EvalResult {
+  total?: number;
+  passed?: number;
+  failed?: number;
+  errored?: number;
+  firstFailingCases?: string[];
   startedAt?: string;
   finishedAt?: string;
   totalCases?: number;
@@ -61,6 +66,7 @@ interface KarsEvalStatus {
   lastRunAt?: string;
   lastResult?: EvalResult;
   history?: EvalResult[];
+  reportConfigMapRef?: { name?: string };
 }
 
 interface KarsEvalSpec {
@@ -94,7 +100,7 @@ interface KarsEvalCR {
 
 /** Shape one row of `kars eval list` output. Exported so tests
  *  can drive it without spawning `kubectl`. */
-export function summarizeEvalRow(item: KarsEvalCR, now: Date = new Date()): string[] {
+export function summarizeEvalRow(item: KarsEvalCR, _now: Date = new Date()): string[] {
   const md = item.metadata ?? {};
   const spec = item.spec ?? {};
   const status = item.status ?? {};
@@ -110,7 +116,7 @@ export function summarizeEvalRow(item: KarsEvalCR, now: Date = new Date()): stri
   const phase = status.phase ?? "Pending";
   const age = formatAge(md.creationTimestamp);
   const summary = last
-    ? `${last.passedCases ?? 0}/${last.totalCases ?? 0}${last.drift ? " ⚠ drift" : ""}`
+    ? `${last.passed ?? last.passedCases ?? 0}/${last.total ?? last.totalCases ?? 0}${last.errored ? `; ${last.errored} inconclusive` : ""}${last.drift ? " ⚠ drift" : ""}`
     : "—";
 
   return [name, target, corpus, phase, age, summary];
@@ -151,6 +157,9 @@ export function renderEvalShow(item: KarsEvalCR): string {
   if (status.lastRunAt) {
     lines.push(`    lastRunAt:           ${status.lastRunAt}`);
   }
+  if (status.reportConfigMapRef?.name) {
+    lines.push(`    latest report:       ${status.reportConfigMapRef.name}`);
+  }
   for (const c of status.conditions ?? []) {
     lines.push(`    ${(c.type ?? "?").padEnd(20)} ${c.status ?? "?"} (${c.reason ?? ""})`);
     if (c.message) lines.push(`      ${chalk.dim(c.message)}`);
@@ -161,8 +170,11 @@ export function renderEvalShow(item: KarsEvalCR): string {
     lines.push(chalk.bold("  Last run"));
     lines.push(`    corpus:              ${last.corpusLabel ?? "—"}`);
     lines.push(`    started:             ${last.startedAt ?? "—"}`);
-    lines.push(`    finished:            ${last.finishedAt ?? "—"}`);
-    lines.push(`    cases:               ${last.passedCases ?? 0}/${last.totalCases ?? 0} passed`);
+    lines.push(`    finished:            ${last.finishedAt ?? status.lastRunAt ?? "—"}`);
+    lines.push(`    cases:               ${last.passed ?? last.passedCases ?? 0}/${last.total ?? last.totalCases ?? 0} passed`);
+    if (last.failed !== undefined) lines.push(`    failed:              ${last.failed}`);
+    if (last.errored !== undefined) lines.push(`    inconclusive:        ${last.errored}`);
+    if (last.firstFailingCases?.length) lines.push(`    first failures:      ${last.firstFailingCases.slice(0, 5).join(", ")}`);
     if (last.drift) lines.push(chalk.red(`    drift:               YES`));
     if (last.jobName) lines.push(`    job:                 ${last.jobName}`);
     const failed = (last.cases ?? []).filter(c => c.outcome === "Fail");
@@ -191,8 +203,11 @@ export function renderEvalDiff(older: EvalResult, newer: EvalResult): string {
   lines.push(chalk.bold("  Run diff (older → newer)"));
   lines.push(`    started:   ${older.startedAt ?? "—"}  →  ${newer.startedAt ?? "—"}`);
   lines.push(
-    `    passed:    ${older.passedCases ?? 0}/${older.totalCases ?? 0}  →  ${newer.passedCases ?? 0}/${newer.totalCases ?? 0}`,
+    `    passed:    ${older.passed ?? older.passedCases ?? 0}/${older.total ?? older.totalCases ?? 0}  →  ${newer.passed ?? newer.passedCases ?? 0}/${newer.total ?? newer.totalCases ?? 0}`,
   );
+  if (older.errored !== undefined || newer.errored !== undefined) {
+    lines.push(`    inconclusive: ${older.errored ?? 0}  →  ${newer.errored ?? 0}`);
+  }
   if (older.drift !== newer.drift) {
     lines.push(
       `    drift:     ${older.drift ? "YES" : "no"}  →  ${newer.drift ? chalk.red("YES") : "no"}`,

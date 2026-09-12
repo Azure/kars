@@ -209,6 +209,15 @@ pub struct KarsEvalStatus {
     /// `CronJob` that fires periodic runs.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cron_job_name: Option<String>,
+    /// Bounded, exclusively owned latest per-case report and attribution.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_config_map_ref: Option<LocalObjectRef>,
+    /// API UID of the report ConfigMap verified before publishing this status.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_config_map_uid: Option<String>,
+    /// Digest of evidence already verified by this controller; fences cache-only replay.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub report_evidence_digest: Option<String>,
 }
 
 /// Full result of one eval run. Mirrors the runner's `RunReport` plus the
