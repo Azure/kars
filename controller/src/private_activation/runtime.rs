@@ -190,6 +190,7 @@ pub(crate) async fn apply_deployment(
     }
     let api = Api::<Deployment>::namespaced(client.clone(), &namespace_name);
     let previous = api.get_opt(&sandbox.name_any()).await.map_err(|_| ERROR)?;
+    super::late_scope::fence(client, &namespace, sandbox, previous.as_ref(), deployment).await?;
     let applied = if let Some(previous) = previous {
         live(&previous.metadata)?;
         if !approved_deployment(&namespace, &previous, &epoch)

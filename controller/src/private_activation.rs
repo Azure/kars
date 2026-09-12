@@ -4,6 +4,7 @@
 //! Live qualification of the generic private capability, not core bootstrap.
 
 mod consumers;
+mod late_scope;
 mod runtime;
 mod verification;
 
