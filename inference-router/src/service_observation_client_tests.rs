@@ -241,6 +241,7 @@ async fn actual_http_token_file_dispatch_keeps_auth_and_per_request_progress() {
 
 #[tokio::test]
 async fn pooled_http_success_does_not_inherit_previous_connection_progress() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let server = MockServer::start().await;
     Mock::given(method("GET"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({
@@ -353,6 +354,7 @@ async fn cancelled_http_wait_is_distinct_from_predispatch_and_wrong_identity_is_
 async fn stalled_tls_is_distinct_from_completed_tcp_and_http_setup() {
     use tokio::{io::AsyncReadExt, net::TcpListener};
 
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let (sent, received) = tokio::sync::oneshot::channel();
