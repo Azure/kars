@@ -35,6 +35,20 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_sre_stage_diagnostics_keep_only_fixed_known_phase_names(self):
+        from sre_authority.common import command_error_category
+        private = "DO-NOT-EMIT-PRIVATE-DATA"
+        for stage in ("action-schema-review", "helm-server-dry-run", "core-schema-preparation"):
+            value = command_error_category(f"{private}\nSRE-STAGE-FAILURE {stage}\n{private}")
+            self.assertEqual(value, "sre-stage:" + stage)
+            self.assertNotIn(private, value)
+        for value in (f"SRE-STAGE-FAILURE {private}",
+                      f"SRE-STAGE-FAILURE action-schema-review {private}"):
+            self.assertEqual(command_error_category(value), "unclassified")
+        self.assertEqual(command_error_category(
+            "SRE-STAGE-FAILURE action-schema-review\nSRE-STAGE-FAILURE helm-server-dry-run"),
+            "sre-stage:ambiguous")
+
     def test_hermes_runtime_assertion_verifies_exact_pin_and_runtime_without_blanket_standin_acceptance(self):
         helper = Path(__file__).resolve().parents[1] / "sre-authority.sh"
         cases = [
