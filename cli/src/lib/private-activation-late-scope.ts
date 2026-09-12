@@ -26,6 +26,7 @@ interface Runtime {
   suspended: boolean | null;
   task?: { object: ReviewedObject; spec: string; generation: number; authorization: string };
 }
+interface RuntimeSnapshot { runtime: Runtime; sandbox: Json; task?: Json }
 interface Material { object: ReviewedObject; key: string }
 interface Receipt {
   version: 4;
@@ -145,7 +146,18 @@ async function namespaceFor(execute: Execute, scope: NamespaceReview): Promise<R
   return namespace;
 }
 
-async function runtimeFor(execute: Execute, scope: NamespaceReview, namespace: unknown, deployment: unknown): Promise<Runtime> {
+function sameReadSnapshot(before: Json, after: Json): boolean {
+  const body = (value: Json) => {
+    const copy = structuredClone(record(value));
+    delete record(copy.metadata).resourceVersion;
+    return canonical(copy);
+  };
+  // An identical status PATCH can advance only this opaque revision. Keep the
+  // original reviewed identity; all status, metadata and authority remain exact.
+  return body(before) === body(after);
+}
+
+async function runtimeFor(execute: Execute, scope: NamespaceReview, namespace: unknown, deployment: unknown): Promise<RuntimeSnapshot> {
   const fields = record(at(namespace, "metadata", "annotations"));
   const name = text(fields["kars.azure.com/sandbox-name"]);
   const workspace = text(fields["kars.azure.com/sandbox-namespace"]);
@@ -175,6 +187,7 @@ async function runtimeFor(execute: Execute, scope: NamespaceReview, namespace: u
     || at(sandbox, "status", "serviceObservation") != null) throw new Error(failure);
   const owners = items(at(sandbox, "metadata", "ownerReferences") ?? []);
   let task: Runtime["task"];
+  let taskSnapshot: Json | undefined;
   if (owners.length) {
     const owner = record(owners[0]);
     if (owners.length !== 1 || owner.apiVersion !== "kars.azure.com/v1alpha1"
@@ -197,9 +210,12 @@ async function runtimeFor(execute: Execute, scope: NamespaceReview, namespace: u
       || !items(at(current, "status", "conditions") ?? []).some(c => at(c, "type") === "Ready" && at(c, "status") === "True")) throw new Error(failure);
     task = { object: taskIdentity, spec: digest({ spec: current.spec, owners: at(current, "metadata", "ownerReferences") ?? [] }),
       generation: currentGeneration, authorization };
+    taskSnapshot = current;
   }
-  return { sandbox: identity, workspace, spec: sandboxSpec(sandbox), owners: digest(owners),
-    generation: generation(sandbox), suspended: suspended(sandbox), ...(task ? { task } : {}) };
+  return { sandbox, ...(taskSnapshot ? { task: taskSnapshot } : {}), runtime: {
+    sandbox: identity, workspace, spec: sandboxSpec(sandbox), owners: digest(owners),
+    generation: generation(sandbox), suspended: suspended(sandbox), ...(task ? { task } : {}),
+  } };
 }
 
 function sameRuntime(current: Runtime, original: Runtime, phase: Phase): void {
@@ -308,7 +324,8 @@ async function current(
   const namespace = await namespaceFor(execute, scope);
   const deployment = await read(execute, "deployments.apps", consumer.object.name, scope.namespace.name);
   if (reviewed(deployment).uid !== consumer.object.uid) throw new Error(failure);
-  const runtime = await runtimeFor(execute, scope, namespace, deployment);
+  const snapshot = await runtimeFor(execute, scope, namespace, deployment);
+  const runtime = snapshot.runtime;
   if (state) {
     sameRuntime(runtime, state.runtime, state.phase);
     if (state.root !== root || state.deployment.uid !== consumer.object.uid || structure(deployment) !== state.structure
@@ -331,12 +348,26 @@ async function current(
       || replicaIntent(deployment) !== (runtime.suspended === true ? 0 : 1)
       || at(template(deployment), "metadata", "annotations", `${P}epoch`) !== undefined) throw new Error(failure);
     const sandbox = await read(execute, "karssandbox", runtime.sandbox.name, runtime.workspace);
-    if (reviewed(sandbox).resourceVersion !== runtime.sandbox.resourceVersion
-      || at(sandbox, "status", "observedGeneration") !== runtime.generation
-      || at(sandbox, "status", "phase") !== "Running"
-      || !items(at(sandbox, "status", "conditions") ?? []).some(condition =>
+    const conditions = at(sandbox, "status", "conditions");
+    const checks = {
+      resourceVersionMatch: reviewed(sandbox).resourceVersion === runtime.sandbox.resourceVersion,
+      observedGenerationMatch: at(sandbox, "status", "observedGeneration") === runtime.generation,
+      phaseRunningMatch: at(sandbox, "status", "phase") === "Running",
+      readyConditionMatch: Array.isArray(conditions) && conditions.some(condition =>
         at(condition, "type") === "Ready" && at(condition, "status") === "True"
-        && at(condition, "observedGeneration") === runtime.generation)) throw new Error(failure);
+        && at(condition, "observedGeneration") === runtime.generation),
+    };
+    if (!sameReadSnapshot(snapshot.sandbox, sandbox)
+      || !checks.observedGenerationMatch || !checks.phaseRunningMatch || !checks.readyConditionMatch) {
+      console.error(`KARS_PRIVATE_LATE_SANDBOX_CHECKS ${JSON.stringify(checks)}`);
+      throw new Error(failure);
+    }
+    if (runtime.task && (!snapshot.task || !sameReadSnapshot(snapshot.task,
+      await read(execute, "karstask", runtime.task.object.name, runtime.workspace)))) throw new Error(failure);
+    if (canonical(await namespaceFor(execute, scope)) !== canonical(namespace)
+      || canonical(await read(execute, "deployments.apps", consumer.object.name, scope.namespace.name)) !== canonical(deployment)) {
+      throw new Error(failure);
+    }
   }
   supportedTemplate(deployment, scope, activation);
   const secret = await materialInventory(execute, scope, runtime);
