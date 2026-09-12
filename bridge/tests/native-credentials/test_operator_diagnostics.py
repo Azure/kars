@@ -43,6 +43,19 @@ class OperatorDiagnosticsTests(unittest.TestCase):
                      f"    at object (/cli/dist/lib/private-activation.js:1:2){PRIVATE}"):
             self.assertEqual(source_location(line), "unavailable")
 
+    def test_late_scope_leaf_is_retained_instead_of_only_its_awaiting_caller(self):
+        stderr = (
+            f"{PRIVATE}\n"
+            "Error: Customized admin credential mount requires explicit recovery\n"
+            f"    at supportedTemplate (/private/{PRIVATE}/cli/dist/lib/private-activation-late-scope.js:285:19)\n"
+            "    at scopePlan (/cli/dist/lib/private-activation-continuity.js:231:22)\n"
+        )
+        self.assertEqual(category(stderr), "late-admin-mount")
+        self.assertEqual(source_location(stderr), "lib/private-activation-late-scope:285")
+        self.assertNotIn(PRIVATE, category(stderr) + source_location(stderr))
+        for module in ("private-activation-late-scope-private", "private-activation-late-scope/unknown"):
+            self.assertEqual(source_location(f"    at function (/cli/dist/lib/{module}.js:1:2)"), "unavailable")
+
     def test_success_and_unknown_stage_do_not_change_authority(self):
         with tempfile.TemporaryDirectory(prefix="native-operator-success-") as directory, \
              patch.object(native_api, "ROOT", Path(directory)):
