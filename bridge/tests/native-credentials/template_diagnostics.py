@@ -113,8 +113,8 @@ def project(before, current, review, before_digest, current_digest):
 
 def collect(setup, baselines, failure):
     result = {"diagnosticOnly": True, "available": False, "category": "not-eligible"}
-    if not isinstance(failure, str) or not failure.startswith(
-            "Native operator apply failed: consumer-template-drift "):
+    if not isinstance(failure, str) or not any(failure.startswith(f"Native operator apply failed: {category} ")
+            for category in ("consumer-template-drift", "writer-runtime-transition")):
         return result
     result["category"] = "unavailable"
     try:

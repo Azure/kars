@@ -25,7 +25,7 @@ const data = { SLACK_BOT_TOKEN: Buffer.from("original-customer-token").toString(
 const managedFields = [{ manager: "kars-controller", operation: "Update", apiVersion: "v1",
   fieldsType: "FieldsV1", fieldsV1: { "f:data": { ".": {}, "f:SLACK_BOT_TOKEN": {} } } }];
 
-async function projectionWire() {
+async function projectionWire(delayResponseMs = 0) {
   let secret: any;
   const requests: string[] = [];
   const server = createServer((request, response) => {
@@ -38,8 +38,14 @@ async function projectionWire() {
         resources: [{ name: "secrets", singularName: "secret", namespaced: true, kind: "Secret", verbs: ["get", "list"] }] },
       [`/api/v1/namespaces/${secret?.metadata.namespace}/secrets/${secret?.metadata.name}`]: secret,
     };
-    response.writeHead(path in objects ? 200 : 404, { "Content-Type": "application/json", Connection: "close" });
-    response.end(JSON.stringify(objects[path] ?? { apiVersion: "v1", kind: "Status", status: "Failure", reason: "NotFound", code: 404 }));
+    const send = () => {
+      response.writeHead(path in objects ? 200 : 404, { "Content-Type": "application/json", Connection: "close" });
+      response.end(JSON.stringify(objects[path] ?? { apiVersion: "v1", kind: "Status", status: "Failure", reason: "NotFound", code: 404 }));
+    };
+    if (delayResponseMs && path.includes("/secrets/")) {
+      setTimeout(send, delayResponseMs);
+      delayResponseMs = 0;
+    } else send();
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
   const address = server.address();
@@ -50,11 +56,21 @@ async function projectionWire() {
       secret = structuredClone({ apiVersion: "v1", ...value });
       // A regular project file is a non-directory cache root: kubectl cannot
       // create cache files, and the fixture never touches a user's kubeconfig.
-      const result = await promisify(execFile)("kubectl", [
-        "--kubeconfig", devNull, "--cache-dir", fileURLToPath(new URL("../../package.json", import.meta.url)),
-        "--server", `http://127.0.0.1:${address.port}`, "--request-timeout=3s", ...args,
-      ], { encoding: "utf8", timeout: 10_000, windowsHide: true });
-      return result.stdout;
+      try {
+        const result = await promisify(execFile)("kubectl", [
+          "--kubeconfig", devNull, "--cache-dir", fileURLToPath(new URL("../../package.json", import.meta.url)),
+          "--server", `http://127.0.0.1:${address.port}`, "--request-timeout=10s", ...args,
+        ], { encoding: "utf8", timeout: 20_000, windowsHide: true });
+        return result.stdout;
+      } catch (error) {
+        if (!(error instanceof Error) || !("code" in error) || !("killed" in error)) throw error;
+        const code = typeof error.code === "number" && Number.isInteger(error.code)
+          && error.code >= 0 && error.code <= 255 ? error.code : "unknown";
+        const killed = typeof error.killed === "boolean" ? error.killed : null;
+        const signal = "signal" in error && (error.signal === "SIGTERM" || error.signal === "SIGKILL")
+          ? error.signal : "signal" in error && error.signal === null ? null : "other";
+        throw new Error(`Loopback kubectl fixture failed ${JSON.stringify({ code, killed, signal, requests: requests.length })}`);
+      }
     },
     close: () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())),
   };
@@ -282,6 +298,31 @@ describe("late runtime authority across selected writer retirement", () => {
     expect(f.grant().spec.writers).toEqual([]);
   });
 
+  it("reports only boolean restoration differences while preserving the refusal", async () => {
+    const { f, review, settlement } = await quiesced();
+    await observeWriterSettlement(f.execute, review.spec.privateActivation, settlement);
+    f.restore();
+    f.deployment.metadata.annotations[REVISION] = "1";
+    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement))
+      .rejects.toThrow("Unreviewed template or controller pause/restore generation changed");
+    const prefix = "KARS_PRIVATE_WRITER_TRANSITION ";
+    const lines = vi.mocked(console.error).mock.calls.map(([value]) => String(value))
+      .filter(value => value.startsWith(prefix));
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.length).toBeLessThan(512);
+    const facts = JSON.parse(lines[0]!.slice(prefix.length));
+    expect(Object.keys(facts).sort()).toEqual(["unchanged", "paused", "projectionSame", "restoring",
+      "generationMatches", "pauseSeen", "withdrawnSeen", "emptySeen", "projectionMatches",
+      "revisionMatches", "metadataMatches", "specMatches", "templateMatches", "replicasMatches"].sort());
+    expect(Object.values(facts).every(value => typeof value === "boolean")).toBe(true);
+    expect(facts).toMatchObject({ generationMatches: true, pauseSeen: true, withdrawnSeen: true,
+      emptySeen: true, projectionMatches: true, revisionMatches: false, metadataMatches: true,
+      specMatches: true, templateMatches: true, replicasMatches: true, restoring: false });
+    expect(lines[0]).not.toContain(data.SLACK_BOT_TOKEN);
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+  });
+
   it.each([false, true])("handles an owned refill during lineage lookup without accepting template drift=%s", async unreviewed => {
     const { f, review, settlement } = await quiesced();
     let changed = false;
@@ -461,7 +502,7 @@ describe("late runtime authority across selected writer retirement", () => {
 
   it("proves the real JSON and metadata JSONPath printer views differ only in managedFields", async () => {
     const f = await setup();
-    const wire = await projectionWire();
+    const wire = await projectionWire(3200);
     f.projection.metadata.managedFields = managedFields;
     try {
       const args = ["get", "secret", f.projection.metadata.name, "-n", "kars-late", "-o", "json"];
@@ -475,8 +516,16 @@ describe("late runtime authority across selected writer retirement", () => {
       expect(metadata).not.toHaveProperty("data");
       expect(JSON.stringify(metadata)).not.toContain(data.SLACK_BOT_TOKEN);
       expect(wire.requests.every(request => request.startsWith("GET "))).toBe(true);
+      const failure: unknown = await wire.get([
+        "get", "secret", "private-missing-canary", "-n", "kars-late", "-o", "json",
+      ], f.projection).then(() => undefined, error => error);
+      if (!(failure instanceof Error)) throw new Error("Missing fixture object must fail");
+      expect(failure.message).toContain("Loopback kubectl fixture failed");
+      expect(failure.message).toContain('"code":1');
+      expect(failure.message).not.toContain("private-missing-canary");
+      expect(failure.message).not.toContain(data.SLACK_BOT_TOKEN);
     } finally { await wire.close(); }
-  }, 20_000);
+  }, 45_000);
 
   it("completes shipped apply with the actual kubectl projection printer views", async () => {
     const f = await setup();

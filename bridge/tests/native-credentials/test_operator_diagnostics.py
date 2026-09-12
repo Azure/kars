@@ -12,8 +12,8 @@ from unittest.mock import patch
 import native_api
 from native_api import Failure
 from operator_diagnostics import (
-    CHECK_PREFIX, COMMAND_PREFIX, ERRORS, WRITER_CHECK_PREFIX, category, command_facts,
-    operator_command, sandbox_checks, source_location, writer_checks,
+    CHECK_PREFIX, COMMAND_PREFIX, ERRORS, TRANSITION_FIELDS, TRANSITION_PREFIX, WRITER_CHECK_PREFIX, category, command_facts,
+    operator_command, sandbox_checks, source_location, transition_checks, writer_checks,
 )
 
 PRIVATE = "DO-NOT-EMIT-TOKENS-OR-PRIVATE-API-BODIES"
@@ -65,6 +65,29 @@ class OperatorDiagnosticsTests(unittest.TestCase):
             self.assertEqual(category(line + PRIVATE), "unclassified-cli-error")
             self.assertEqual(category(prefix + ": " + PRIVATE), "unclassified-cli-error")
         self.assertEqual(category(f"{PRIVATE}: {message}"), "unclassified-cli-error")
+
+    def test_restoration_failure_retains_only_the_closed_boolean_snapshot(self):
+        facts = {key: True for key, _ in TRANSITION_FIELDS}
+        facts["revisionMatches"] = False
+        marker = TRANSITION_PREFIX + json.dumps(facts)
+        stderr = (f"{PRIVATE}\n{marker}\n"
+                  "Error: Unreviewed template or controller pause/restore generation changed\n")
+        with self.assertRaises(Failure) as failure:
+            operator_command("apply", sys.executable, "-c",
+                             "import sys; print(sys.argv[1],file=sys.stderr); sys.exit(1)", stderr, timeout=5)
+        message = str(failure.exception)
+        self.assertIn("writer-runtime-transition", message)
+        self.assertIn("writer-transition=", message)
+        self.assertIn("deployment-revision=false", message)
+        self.assertIn("generation=true", message)
+        self.assertNotIn(PRIVATE, message)
+        for value in (marker + PRIVATE, marker + "\n" + marker,
+                      TRANSITION_PREFIX + json.dumps({**facts, "private": PRIVATE}),
+                      TRANSITION_PREFIX + json.dumps({**facts, "revisionMatches": 0}),
+                      TRANSITION_PREFIX + json.dumps({key: value for key, value in facts.items() if key != "paused"}),
+                      TRANSITION_PREFIX + '{"paused":true,"paused":false}'):
+            self.assertEqual(transition_checks(value), "unavailable")
+        self.assertEqual(transition_checks(PRIVATE), "")
 
     def test_late_scope_leaf_is_retained_instead_of_only_its_awaiting_caller(self):
         stderr = (

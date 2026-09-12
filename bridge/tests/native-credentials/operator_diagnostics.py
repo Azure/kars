@@ -61,6 +61,15 @@ WRITER_CHECK_FIELDS = (
     ("projectionMetadataMatches", "metadata-matches"),
     ("deploymentTransitionMatches", "deployment"),
 )
+TRANSITION_PREFIX = "KARS_PRIVATE_WRITER_TRANSITION "
+TRANSITION_FIELDS = (
+    ("unchanged", "unchanged"), ("paused", "paused"), ("projectionSame", "projection"),
+    ("restoring", "restoring"), ("generationMatches", "generation"),
+    ("pauseSeen", "pause-witness"), ("withdrawnSeen", "withdrawal-witness"), ("emptySeen", "empty-witness"),
+    ("projectionMatches", "projection-version"), ("revisionMatches", "deployment-revision"),
+    ("metadataMatches", "metadata"), ("specMatches", "spec"),
+    ("templateMatches", "template"), ("replicasMatches", "replicas"),
+)
 COMMAND_PREFIX = "KARS_PRIVATE_COMMAND_FAILURE "
 COMMAND_PHASES = {"Unscoped", "Review", "Pausing", "Retired", "Rotating", "Restoring", "Qualified"}
 COMMAND_OPERATIONS = {"get", "patch", "create", "auth", "other"}
@@ -131,6 +140,10 @@ def writer_checks(stderr):
     return _checks(stderr, WRITER_CHECK_PREFIX, WRITER_CHECK_FIELDS)
 
 
+def transition_checks(stderr):
+    return _checks(stderr, TRANSITION_PREFIX, TRANSITION_FIELDS)
+
+
 def command_facts(stderr):
     prefixes = (COMMAND_PREFIX, "PrivateCommandFailure: " + COMMAND_PREFIX)
     payloads = [line[len(prefix):] for line in stderr.splitlines()
@@ -166,6 +179,9 @@ def operator_command(stage, *args, timeout):
         recheck = writer_checks(error.stderr)
         if recheck:
             details += f" (writer-recheck={recheck})"
+        transition = transition_checks(error.stderr)
+        if transition:
+            details += f" (writer-transition={transition})"
         facts = command_facts(error.stderr)
         if facts:
             details += f" (command={facts})"
