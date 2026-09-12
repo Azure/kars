@@ -15,7 +15,14 @@ export function canonicalMigrationSchemas(evalV2 = false): { before: ObjectMap[]
   const after = schemaDocuments(execFileSync("helm", ["template", "kars", chart, "--namespace", "kars-system",
     "--set", "sre.enabled=false", "--dry-run=client"], { encoding: "utf8" }))
     .filter(object => object.kind === "CustomResourceDefinition");
-  const evalSchema = after.find(object => object.spec.names.kind === "KarsEval")!.spec.versions[0].schema.openAPIV3Schema;
+  const evalCrd = after.find(object => object.spec.names.kind === "KarsEval")!;
+  if (!CANONICAL_SCHEMAS[evalCrd.metadata.name].after.includes(schemaDigest(normalizedCrd(evalCrd)))) {
+    throw new Error("Current evaluator schema is not a qualified fixture input");
+  }
+  const evalSchema = evalCrd.spec.versions[0].schema.openAPIV3Schema;
+  for (const key of ["reportConfigMapRef", "reportConfigMapUid", "reportEvidenceDigest"]) {
+    delete evalSchema.properties.status.properties[key];
+  }
   if (evalV2) Object.assign(evalSchema.properties.status.properties, {
     reportConfigMapRef: { description: "Bounded, exclusively owned latest per-case report and attribution.", nullable: true,
       properties: { name: { type: "string" } }, required: ["name"], type: "object" },
