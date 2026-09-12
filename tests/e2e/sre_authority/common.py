@@ -63,6 +63,16 @@ def command_site():
 
 
 def command_error_category(stderr):
+    stages = {
+        "registrar", "controller-review", "release-inventory", "prerequisite-chart-render",
+        "action-schema-review", "helm-compatibility", "action-schema-migration",
+        "core-schema-preparation", "helm-server-dry-run", "helm-upgrade",
+        "template-ownership-review", "schema-publication", "template-authority-write",
+        "controller-rollout",
+    }
+    observed = set(re.findall(r"^SRE-STAGE-FAILURE ([a-z-]+)$", stderr, re.MULTILINE)) & stages
+    if observed:
+        return "sre-stage:" + (next(iter(observed)) if len(observed) == 1 else "ambiguous")
     status = re.search(r"Error from server \((Forbidden|Unauthorized|Invalid|NotFound|"
                        r"AlreadyExists|Conflict|BadRequest|InternalError|ServiceUnavailable)\)", stderr)
     if status:
