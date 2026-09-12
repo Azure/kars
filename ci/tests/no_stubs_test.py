@@ -13,6 +13,7 @@ import unittest
 from git_fixture import GitFixture
 
 GATE = Path(__file__).resolve().parents[1] / "no-stubs.sh"
+TS_GATE = GATE.with_name("no-stubs-ts.mjs")
 
 
 class NoStubsTests(GitFixture):
@@ -39,6 +40,31 @@ class NoStubsTests(GitFixture):
         self.commit()
         result = self.gate()
         self.assertEqual((result.returncode, result.stderr), (0, ""))
+
+    def test_javascript_gate_uses_the_same_fixed_markers_as_the_shell_gate(self):
+        markers = ["TODO work", "FIXME work", "XXX work", "HACK work",
+                   "unimplemented!()", "todo!()", 'panic!("not implemented")',
+                   "placeholder", "value.stub()", "value.mock()",
+                   "return None; // placeholder", "return Ok(()); // stub"]
+        lines = ["// " + marker for marker in markers]
+        self.write("bridge/web/src/fixture.ts", "\n".join(lines) + "\n")
+        self.commit()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertEqual(result.stderr.splitlines(), [
+            "fail: bridge/web/src/fixture.ts: new stub/placeholder introduced: " + line
+            for line in lines])
+
+    def test_javascript_gate_rejects_caller_supplied_patterns(self):
+        self.write("bridge/web/src/fixture.ts", "// TODO work\n")
+        self.commit()
+        for pattern in ("(a+)+$", "[", "^$", "TODO"):
+            with self.subTest(pattern=pattern):
+                result = subprocess.run(
+                    ["node", str(TS_GATE), self.base, "bridge/web/src/fixture.ts", pattern],
+                    cwd=self.root, text=True, capture_output=True, timeout=10)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("marker patterns differ from the fixed policy", result.stderr)
 
     def test_javascript_placeholder_identifiers_are_not_unfinished_implementations(self):
         self.write("bridge/web/src/fixture.tsx", """

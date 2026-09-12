@@ -76,16 +76,14 @@ async function forward(req: NextRequest): Promise<Response> {
   let upstream: Response;
   try {
     upstream = await fetch(target, init);
-  } catch (err) {
-    const cause = (err as { cause?: unknown })?.cause;
+  } catch {
+    // Request URLs and fetch errors can contain credentials; log only the event.
+    console.error("[bridge/api] BFF upstream request failed");
     return new Response(
       JSON.stringify({
         error: {
           code: "bad_gateway",
           message: "BFF unreachable",
-          detail: String(err),
-          cause: String(cause ?? ""),
-          target,
         },
       }),
       { status: 502, headers: { "content-type": "application/json" } },

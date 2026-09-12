@@ -170,7 +170,7 @@ describe("Bridge optional add-on boundary (offline Helm manifests)", () => {
     const role = resource<V1ClusterRole>(resources, "ClusterRole", "kars-bridge-kars-bridge");
     for (const api of requiredApis) {
       expect(role.rules?.some((rule) =>
-        rule.apiGroups?.includes("kars.azure.com")
+        rule.apiGroups?.some((group) => group === "kars.azure.com")
         && rule.resources?.includes(api)
         && rule.verbs?.includes("list"),
       ), `readiness list permission for ${api}`).toBe(true);
