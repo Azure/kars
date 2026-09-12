@@ -16,13 +16,92 @@ use serde_json::json;
 pub(super) const REVISION: &str = "kars.azure.com/services-privacy-revision";
 pub(super) const VERSION: &str = crate::sre_registration::CONTROL_VERSION;
 pub(super) const RETIRED: &str = "kars.azure.com/services-credential-retired";
+pub(super) const SOURCE_REVISION: &str = "kars.azure.com/services-source-revision";
 
-pub(super) struct Projection {
-    pub(super) version: String,
+#[derive(Debug, thiserror::Error)]
+pub(crate) enum IssuanceError {
+    #[error("SRE privacy qualification is still pending; no credential issued or reused")]
+    PrivacyPending,
+    #[error("{0}")]
+    Rejected(String),
+}
+
+impl From<String> for IssuanceError {
+    fn from(error: String) -> Self {
+        Self::Rejected(error)
+    }
+}
+
+impl From<&str> for IssuanceError {
+    fn from(error: &str) -> Self {
+        Self::Rejected(error.into())
+    }
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct Purpose {
+    pub secret: &'static str,
+    pub token_key: Option<&'static str>,
+    pub version_annotation: &'static str,
+}
+
+const ADMIN: Purpose = Purpose {
+    secret: SECRET,
+    token_key: Some("control-token"),
+    version_annotation: VERSION,
+};
+pub(crate) const OBSERVER: Purpose = Purpose {
+    secret: "router-services-observer",
+    token_key: Some("observation-token"),
+    version_annotation: "kars.azure.com/services-observer-version",
+};
+pub(crate) const GITHUB: Purpose = Purpose {
+    secret: "router-github-app",
+    token_key: None,
+    version_annotation: "kars.azure.com/github-private-version",
+};
+pub(crate) const OBSERVER_TLS: Purpose = Purpose {
+    secret: "router-services-observer-identity",
+    token_key: None,
+    version_annotation: "kars.azure.com/services-observer-tls-version",
+};
+
+pub(crate) struct Projection {
+    pub(crate) version: String,
+    pub(crate) epoch: Option<String>,
+    purpose: Purpose,
+    consumption_epoch: Option<String>,
 }
 
 impl Projection {
-    pub(super) fn decorate(&self, deployment: &mut Deployment) {
+    pub(crate) fn retired(purpose: Purpose, sandbox: &KarsSandbox) -> Result<Self, String> {
+        Ok(Self {
+            version: format!(
+                "retired:{}:{}",
+                sandbox
+                    .uid()
+                    .ok_or("Retired credential Sandbox UID missing")?,
+                sandbox.metadata.generation.unwrap_or_default()
+            ),
+            epoch: None,
+            purpose,
+            consumption_epoch: None,
+        })
+    }
+
+    pub(crate) fn decorate(&self, deployment: &mut Deployment) {
+        if let Some(epoch) = &self.consumption_epoch {
+            deployment
+                .spec
+                .as_mut()
+                .expect("controller Deployment spec")
+                .template
+                .metadata
+                .get_or_insert_default()
+                .annotations
+                .get_or_insert_default()
+                .insert(crate::private_activation::EPOCH.into(), epoch.clone());
+        }
         deployment
             .spec
             .as_mut()
@@ -32,10 +111,10 @@ impl Projection {
             .get_or_insert_with(Default::default)
             .annotations
             .get_or_insert_with(Default::default)
-            .insert(VERSION.into(), self.version.clone());
+            .insert(self.purpose.version_annotation.into(), self.version.clone());
     }
 
-    pub(super) async fn consumers_current(
+    pub(crate) async fn consumers_current(
         &self,
         client: &Client,
         namespace: &str,
@@ -51,13 +130,18 @@ impl Projection {
             pod.metadata
                 .annotations
                 .as_ref()
-                .and_then(|annotations| annotations.get(VERSION))
+                .and_then(|annotations| annotations.get(self.purpose.version_annotation))
                 == Some(&self.version)
         }))
     }
 }
 
-fn validate(secret: &Secret, source_uid: &str, namespace: &Namespace) -> Result<(), String> {
+pub(crate) fn validate(
+    secret: &Secret,
+    source_uid: &str,
+    namespace: &Namespace,
+    purpose: Purpose,
+) -> Result<(), String> {
     let annotations = secret.metadata.annotations.as_ref();
     let matches = |key, value: &str| {
         annotations
@@ -72,7 +156,7 @@ fn validate(secret: &Secret, source_uid: &str, namespace: &Namespace) -> Result<
             .as_deref()
             .is_none_or(str::is_empty)
         || secret.metadata.deletion_timestamp.is_some()
-        || secret.metadata.name.as_deref() != Some(SECRET)
+        || secret.metadata.name.as_deref() != Some(purpose.secret)
         || secret.metadata.namespace != namespace.metadata.name
         || secret
             .metadata
@@ -92,13 +176,21 @@ fn validate(secret: &Secret, source_uid: &str, namespace: &Namespace) -> Result<
             namespace.metadata.uid.as_deref().unwrap_or_default(),
         )
         || secret.type_.as_deref().is_some_and(|kind| kind != "Opaque")
-        || secret
-            .data
-            .as_ref()
-            .and_then(|data| data.get("control-token"))
-            .is_none_or(|value| {
-                value.0.len() != 64 || value.0.iter().any(|byte| !byte.is_ascii_graphic())
-            })
+        || purpose.token_key.is_some_and(|key| {
+            secret
+                .data
+                .as_ref()
+                .and_then(|data| data.get(key))
+                .is_none_or(|value| {
+                    value.0.len() != 64 || value.0.iter().any(|byte| !byte.is_ascii_graphic())
+                })
+        })
+        || (purpose.token_key.is_none()
+            && secret
+                .data
+                .as_ref()
+                .and_then(|data| data.get("config.json"))
+                .is_none())
     {
         return Err(
             "Existing governed service credential has conflicting ownership or invalid data".into(),
@@ -107,7 +199,7 @@ fn validate(secret: &Secret, source_uid: &str, namespace: &Namespace) -> Result<
     Ok(())
 }
 
-fn current(secret: &Secret, epoch: Option<&str>) -> bool {
+pub(crate) fn current(secret: &Secret, epoch: Option<&str>) -> bool {
     let annotations = secret.metadata.annotations.as_ref();
     if annotations.is_some_and(|annotations| annotations.contains_key(RETIRED)) {
         return false;
@@ -125,7 +217,7 @@ fn current(secret: &Secret, epoch: Option<&str>) -> bool {
     }
 }
 
-async fn review_consumer(
+pub(crate) async fn review_consumer(
     client: &Client,
     namespace: &str,
     name: &str,
@@ -170,6 +262,7 @@ async fn quarantine(
     namespace: &str,
     name: &str,
     secret: &Secret,
+    purpose: Purpose,
 ) -> Result<(), String> {
     if secret
         .metadata
@@ -180,12 +273,30 @@ async fn quarantine(
         != Some("true")
     {
         Api::<Secret>::namespaced(client.clone(), namespace)
-            .patch(SECRET, &PatchParams::default(), &Patch::Merge(json!({
+            .patch(purpose.secret, &PatchParams::default(), &Patch::Merge(json!({
                 "metadata":{"uid":secret.metadata.uid,"resourceVersion":secret.metadata.resource_version,
                     "annotations":{RETIRED:"true",REVISION:null,EPOCH:null}},
             }))).await.map_err(api_error)?;
     }
     let consumer = review_consumer(client, namespace, name).await?;
+    let fence = Api::<Namespace>::all(client.clone())
+        .get(namespace)
+        .await
+        .map_err(api_error)?;
+    if crate::private_activation::required_in_namespace(client, &fence).await?
+        && consumer.as_ref().is_some_and(|deployment| {
+            fence
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|a| a.get(crate::private_activation::EPOCH))
+                .is_none_or(|epoch| {
+                    !crate::private_activation::approved_deployment(&fence, deployment, epoch)
+                })
+        })
+    {
+        return Err("Unreviewed private consumer preserved; an operator UID/template retirement review is required".into());
+    }
     if let Some(deployment) = consumer
         && deployment
             .spec
@@ -208,23 +319,27 @@ async fn checked_epoch(
     namespace: &str,
     name: &str,
     existing: Option<&Secret>,
-) -> Result<Option<String>, String> {
-    match crate::sre_authority::privacy_readiness(client, namespace).await {
-        Ok(crate::sre_authority::PrivacyReadiness::Qualified(epoch)) => Ok(epoch),
+    purpose: Purpose,
+) -> Result<Option<String>, IssuanceError> {
+    let result = match crate::sre_authority::privacy_readiness(client, namespace).await {
+        Ok(crate::sre_authority::PrivacyReadiness::Qualified(_)) => {
+            crate::sre_authority::privacy_epoch(client, namespace).await
+        }
         Ok(crate::sre_authority::PrivacyReadiness::Pending) => {
-            Err("SRE privacy qualification is still pending; no credential issued or reused".into())
+            return Err(IssuanceError::PrivacyPending);
         }
-        Err(error) => {
-            if let Some(secret) = existing {
-                quarantine(client, namespace, name, secret)
-                    .await
-                    .map_err(|failure| {
-                        format!("{error}; owned control credential quarantine failed: {failure}")
-                    })?;
-            }
-            Err(error)
-        }
+        Err(error) => Err(error),
+    };
+    if let Err(error) = &result
+        && let Some(secret) = existing
+    {
+        quarantine(client, namespace, name, secret, purpose)
+            .await
+            .map_err(|failure| {
+                format!("{error}; owned control credential quarantine failed: {failure}")
+            })?;
     }
+    result.map_err(IssuanceError::Rejected)
 }
 
 pub(in crate::reconciler) async fn quarantine_on_privacy_loss(
@@ -246,20 +361,30 @@ pub(in crate::reconciler) async fn quarantine_on_privacy_loss(
     if crate::sre_authority::privacy_readiness(client, &namespace.name_any())
         .await
         .is_ok()
+        && crate::private_activation::for_sandbox(client, &live, &namespace)
+            .await
+            .is_ok()
     {
         return Ok(());
     }
-    let secret = Api::<Secret>::namespaced(client.clone(), &namespace.name_any())
-        .get_opt(SECRET)
-        .await
-        .map_err(api_error)?;
-    if let Some(secret) = secret {
-        validate(
-            &secret,
-            live.metadata.uid.as_deref().ok_or("Sandbox UID missing")?,
-            &namespace,
-        )?;
-        quarantine(client, &namespace.name_any(), &live.name_any(), &secret).await?;
+    let api = Api::<Secret>::namespaced(client.clone(), &namespace.name_any());
+    for purpose in [ADMIN, OBSERVER, OBSERVER_TLS, GITHUB] {
+        if let Some(secret) = api.get_opt(purpose.secret).await.map_err(api_error)? {
+            validate(
+                &secret,
+                live.metadata.uid.as_deref().ok_or("Sandbox UID missing")?,
+                &namespace,
+                purpose,
+            )?;
+            quarantine(
+                client,
+                &namespace.name_any(),
+                &live.name_any(),
+                &secret,
+                purpose,
+            )
+            .await?;
+        }
     }
     Ok(())
 }
@@ -269,6 +394,29 @@ pub(super) async fn ensure(
     sandbox: &KarsSandbox,
     namespace: &Namespace,
 ) -> Result<Projection, String> {
+    ensure_for(client, sandbox, namespace, ADMIN, None).await
+}
+
+pub(crate) async fn ensure_for(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+    purpose: Purpose,
+    configuration: Option<&str>,
+) -> Result<Projection, String> {
+    ensure_bound(client, sandbox, namespace, purpose, configuration, None)
+        .await
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) async fn ensure_bound(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+    purpose: Purpose,
+    configuration: Option<&str>,
+    source_revision: Option<&str>,
+) -> Result<Projection, IssuanceError> {
     if !super::super::namespace_ownership::claimed(namespace, sandbox)
         .map_err(|_| "Governed service credential namespace claim is invalid")?
         || sandbox.metadata.deletion_timestamp.is_some()
@@ -282,24 +430,126 @@ pub(super) async fn ensure(
         .as_deref()
         .ok_or("Sandbox UID missing")?;
     let namespace_name = namespace.name_any();
+    if purpose.secret != SECRET {
+        review_consumer(client, &namespace_name, &sandbox.name_any()).await?;
+    }
     let secrets: Api<Secret> = Api::namespaced(client.clone(), &namespace_name);
-    let existing = secrets.get_opt(SECRET).await.map_err(api_error)?;
+    let mut existing = secrets.get_opt(purpose.secret).await.map_err(api_error)?;
     if let Some(secret) = existing.as_ref() {
-        validate(secret, source_uid, namespace)?;
+        validate(secret, source_uid, namespace, purpose)?;
+    }
+    let consumption_epoch =
+        match crate::private_activation::for_sandbox(client, sandbox, namespace).await {
+            Ok(epoch) => epoch,
+            Err(error) => {
+                if let Some(secret) = &existing {
+                    quarantine(
+                        client,
+                        &namespace_name,
+                        &sandbox.name_any(),
+                        secret,
+                        purpose,
+                    )
+                    .await?;
+                }
+                return Err(error.into());
+            }
+        };
+    if let Some(secret) = existing.as_ref()
+        && !crate::private_activation::stamp_matches(secret, consumption_epoch.as_deref())
+    {
+        let fresh_namespace = Api::<Namespace>::all(client.clone())
+            .get(&namespace_name)
+            .await
+            .map_err(api_error)?;
+        if let Some(deployment) =
+            review_consumer(client, &namespace_name, &sandbox.name_any()).await?
+            && !crate::private_activation::approved_deployment(
+                &fresh_namespace,
+                &deployment,
+                consumption_epoch
+                    .as_deref()
+                    .ok_or("Private epoch missing")?,
+            )
+        {
+            return Err("Unreviewed private credential consumer preserved; operator activation review required".into());
+        }
+        quarantine(
+            client,
+            &namespace_name,
+            &sandbox.name_any(),
+            secret,
+            purpose,
+        )
+        .await?;
+        if !crate::private_activation::retired_material_consumers(client, &namespace_name).await? {
+            return Err(
+                "Owned private credential consumers are still retiring; no material was reissued"
+                    .into(),
+            );
+        }
+        if purpose.secret == GITHUB.secret {
+            let old: serde_json::Value = secret
+                .data
+                .as_ref()
+                .and_then(|data| data.get("config.json"))
+                .and_then(|bytes| serde_json::from_slice(&bytes.0).ok())
+                .ok_or("Prior private GitHub configuration is invalid")?;
+            let new: serde_json::Value =
+                serde_json::from_str(configuration.ok_or("Private GitHub configuration missing")?)
+                    .map_err(|_| "Private GitHub configuration is invalid")?;
+            if !crate::private_activation::different_rsa_keys(
+                old["private_key_pem"]
+                    .as_str()
+                    .ok_or("Prior private App key missing")?,
+                new["private_key_pem"]
+                    .as_str()
+                    .ok_or("Private App key missing")?,
+            )? {
+                return Err("Potentially exposed GitHub App key requires operator rotation before private requalification".into());
+            }
+        }
+        let previous_uid = secret.uid();
+        existing = secrets.get_opt(purpose.secret).await.map_err(api_error)?;
+        if existing.as_ref().and_then(ResourceExt::uid) != previous_uid {
+            return Err("Private credential was replaced during retirement".into());
+        }
     }
     let mut epoch = checked_epoch(
         client,
         &namespace_name,
         &sandbox.name_any(),
         existing.as_ref(),
+        purpose,
     )
     .await?;
-    let secret = if let Some(secret) = existing
-        .as_ref()
-        .filter(|secret| current(secret, epoch.as_deref()))
-    {
+    let secret = if let Some(secret) = existing.as_ref().filter(|secret| {
+        current(secret, epoch.as_deref())
+            && crate::private_activation::stamp_matches(secret, consumption_epoch.as_deref())
+            && source_revision.is_none_or(|revision| {
+                secret
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|annotations| annotations.get(SOURCE_REVISION))
+                    .map(String::as_str)
+                    == Some(revision)
+            })
+            && configuration.is_none_or(|configuration| {
+                secret
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get("config.json"))
+                    .is_some_and(|value| value.0 == configuration.as_bytes())
+            })
+    }) {
         secret.clone()
     } else {
+        if crate::private_activation::for_sandbox(client, sandbox, namespace).await?
+            != consumption_epoch
+        {
+            return Err("Private activation changed before material issuance".into());
+        }
         if existing.is_some() {
             review_consumer(client, &namespace_name, &sandbox.name_any()).await?;
             // The ownership inventory awaited API calls. Recheck privacy at
@@ -309,6 +559,7 @@ pub(super) async fn ensure(
                 &namespace_name,
                 &sandbox.name_any(),
                 existing.as_ref(),
+                purpose,
             )
             .await?;
         }
@@ -316,27 +567,42 @@ pub(super) async fn ensure(
             SOURCE_UID: source_uid, NAMESPACE_UID: namespace.metadata.uid,
             REVISION: crate::sre_privacy::REVISION,
         });
+        if let Some(epoch) = &consumption_epoch {
+            annotations[crate::private_activation::EPOCH] = epoch.clone().into();
+        }
+        if let Some(revision) = source_revision {
+            annotations[SOURCE_REVISION] = json!(revision);
+        }
         if let Some(epoch) = epoch.as_ref() {
             annotations[EPOCH] = json!(epoch);
         }
-        let material = crate::providers::signing::generate_service_token();
+        let mut material = serde_json::Map::new();
+        if let Some(key) = purpose.token_key {
+            material.insert(
+                key.into(),
+                crate::providers::signing::generate_service_token().into(),
+            );
+        }
+        if let Some(configuration) = configuration {
+            material.insert("config.json".into(), configuration.into());
+        }
         if let Some(secret) = existing {
             annotations[RETIRED] = serde_json::Value::Null;
             if epoch.is_none() {
                 annotations[EPOCH] = serde_json::Value::Null;
             }
-            secrets.patch(SECRET, &PatchParams::default(), &Patch::Merge(json!({
+            secrets.patch(purpose.secret, &PatchParams::default(), &Patch::Merge(json!({
                 "metadata": {"uid": secret.metadata.uid, "resourceVersion": secret.metadata.resource_version,
                     "annotations": annotations},
-                "stringData": {"control-token": material},
+                "stringData": material,
             }))).await.map_err(api_error)?
         } else {
             let definition: Secret = serde_json::from_value(json!({
                 "apiVersion": "v1", "kind": "Secret", "type": "Opaque",
-                "metadata": {"name": SECRET, "namespace": namespace_name,
+                "metadata": {"name": purpose.secret, "namespace": namespace_name,
                     "labels": {"app.kubernetes.io/managed-by": "kars-controller"},
                     "annotations": annotations},
-                "stringData": {"control-token": material},
+                "stringData": material,
             }))
             .map_err(|_| "Governed service credential serialization failed")?;
             secrets
@@ -345,17 +611,117 @@ pub(super) async fn ensure(
                 .map_err(api_error)?
         }
     };
-    validate(&secret, source_uid, namespace)?;
-    if !current(&secret, epoch.as_deref()) {
+    validate(&secret, source_uid, namespace, purpose)?;
+    if !current(&secret, epoch.as_deref())
+        || !crate::private_activation::stamp_matches(&secret, consumption_epoch.as_deref())
+        || source_revision.is_some_and(|revision| {
+            secret
+                .metadata
+                .annotations
+                .as_ref()
+                .and_then(|annotations| annotations.get(SOURCE_REVISION))
+                .map(String::as_str)
+                != Some(revision)
+        })
+    {
         return Err(
             "Governed service credential privacy stamp did not match the verified write".into(),
         );
     }
     Ok(Projection {
+        purpose,
+        epoch,
+        consumption_epoch,
         version: format!(
             "{}:{}",
             secret.metadata.uid.unwrap(),
             secret.metadata.resource_version.unwrap()
         ),
     })
+}
+
+pub(crate) async fn retire_for(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+    purpose: Purpose,
+) -> Result<(), String> {
+    let namespace = super::super::namespace_ownership::recheck(client, sandbox, namespace)
+        .await
+        .map_err(|_| "Private credential namespace authority changed")?;
+    let api: Api<Secret> = Api::namespaced(client.clone(), &namespace.name_any());
+    if let Some(secret) = api.get_opt(purpose.secret).await.map_err(api_error)? {
+        validate(
+            &secret,
+            sandbox
+                .metadata
+                .uid
+                .as_deref()
+                .ok_or("Sandbox UID missing")?,
+            &namespace,
+            purpose,
+        )?;
+        quarantine(
+            client,
+            &namespace.name_any(),
+            &sandbox.name_any(),
+            &secret,
+            purpose,
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+pub(crate) async fn existing_configuration(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+    purpose: Purpose,
+) -> Result<Option<serde_json::Value>, String> {
+    let namespace = super::super::namespace_ownership::recheck(client, sandbox, namespace)
+        .await
+        .map_err(|_| "Private configuration namespace authority changed")?;
+    let existing = Api::<Secret>::namespaced(client.clone(), &namespace.name_any())
+        .get_opt(purpose.secret)
+        .await
+        .map_err(api_error)?;
+    let Some(secret) = existing else {
+        return Ok(None);
+    };
+    validate(
+        &secret,
+        sandbox
+            .metadata
+            .uid
+            .as_deref()
+            .ok_or("Sandbox UID missing")?,
+        &namespace,
+        purpose,
+    )?;
+    let consumption_epoch =
+        crate::private_activation::for_sandbox(client, sandbox, &namespace).await?;
+    if !crate::private_activation::stamp_matches(&secret, consumption_epoch.as_deref()) {
+        return Ok(None);
+    }
+    let epoch = checked_epoch(
+        client,
+        &namespace.name_any(),
+        &sandbox.name_any(),
+        Some(&secret),
+        purpose,
+    )
+    .await
+    .map_err(|error| error.to_string())?;
+    if !current(&secret, epoch.as_deref()) {
+        return Ok(None);
+    }
+    secret
+        .data
+        .as_ref()
+        .and_then(|data| data.get("config.json"))
+        .map(|value| {
+            serde_json::from_slice(&value.0).map_err(|_| "Private configuration is invalid".into())
+        })
+        .transpose()
 }

@@ -17,9 +17,12 @@ REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
 # Capability-introducing paths — mirrors §4.4 of the plan.
-CAP_RE='^(controller/src/(crd|reconcilers|admission)|inference-router/src/(mcp|a2a|providers|routes)|cli/src/(commands|migrate|adapters)|runtimes/openclaw/src/(core|index\.ts)|sandbox-images/[^/]+/(Dockerfile|entrypoint\.sh)|cli/profiles/|deploy/seccomp/|deploy/helm/kars/files/|shared/.*\.rs$)'
+CAP_RE='^(controller/src/(crd|reconcilers|admission)|inference-router/src/(mcp|a2a|providers|routes)|cli/src/(commands|migrate|adapters)|runtimes/openclaw/src/(core|index\.ts)|sandbox-images/[^/]+/(Dockerfile|entrypoint\.sh)|cli/profiles/|deploy/seccomp/|deploy/helm/kars/files/|shared/.*\.rs$|bridge/(bff/src/|web/src/|teams-gateway/src/|deploy/|[^/]+/Dockerfile|start-bff\.sh))'
 
-changed=$(git diff --name-only "${BASE_REF}...HEAD" 2>/dev/null || git diff --name-only HEAD)
+if ! changed=$(git diff --no-ext-diff --name-only "${BASE_REF}...HEAD"); then
+  echo "fail: cannot determine the reviewed capability diff." >&2
+  exit 1
+fi
 # Exclude test files — they exercise capabilities but don't introduce
 # them. Catches *.test.ts / *.test.js / *_test.rs / tests/ directories.
 touches_cap=$(printf '%s\n' "$changed" \
@@ -30,10 +33,14 @@ if [ -z "$touches_cap" ]; then
   exit 0
 fi
 
-# Is at least one docs/security-audits/*.md added in this PR?
-added_audit=$(printf '%s\n' "$changed" | grep -E '^docs/security-audits/[0-9]{4}-[0-9]{2}-[0-9]{2}-.+\.md$' || true)
+# Modifying or renaming an older approval cannot extend its recorded scope.
+if ! additions=$(git diff --no-ext-diff --name-only --find-renames=50% --diff-filter=A "${BASE_REF}...HEAD"); then
+  echo "fail: cannot determine newly added audit records." >&2
+  exit 1
+fi
+added_audit=$(printf '%s\n' "$additions" | grep -E '^docs/security-audits/[0-9]{4}-[0-9]{2}-[0-9]{2}-.+\.md$' || true)
 if [ -z "$added_audit" ]; then
-  echo "fail: capability-introducing files touched but no docs/security-audits/YYYY-MM-DD-<slug>.md added." >&2
+  echo "fail: capability-introducing files touched but no new docs/security-audits/YYYY-MM-DD-<slug>.md added." >&2
   echo "      touched capabilities:" >&2
   printf '        %s\n' $touches_cap >&2
   echo "      Copy docs/security-audits/_template.md and fill it in (see docs/security-audits/README.md)." >&2

@@ -47,6 +47,30 @@ jobs:
       - name: Make scripts executable
         run: chmod +x ci/*.sh
 
+      - name: Set up the locked source parser
+        if: matrix.gate == 'no-stubs'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: cli/package-lock.json
+
+      - name: Install locked source parser
+        if: matrix.gate == 'no-stubs'
+        run: npm ci --prefix cli --ignore-scripts --no-audit --no-fund
+
+      - name: Verify source-gate regression fixtures
+        if: matrix.gate == 'no-stubs'
+        run: python3 -m unittest discover -s ci/tests -p '*_test.py'
+
+      - name: Verify exact crypto-adapter boundaries
+        if: matrix.gate == 'no-custom-crypto'
+        run: python3 -m unittest discover -s ci/tests -p crypto_gate_test.py
+
+      - name: Verify fresh audit-record boundaries
+        if: matrix.gate == 'security-audit-required'
+        run: python3 -m unittest discover -s ci/tests -p security_audit_gate_test.py
+
       - name: Run gate ${{ matrix.gate }}
         shell: bash
         env:

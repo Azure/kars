@@ -441,5 +441,183 @@ COMMIT
         self.assertIn("return 1", install)
 
 
+class PrivateConsumptionDiagnosticTests(unittest.TestCase):
+    def setUp(self):
+        root = Path(__file__).resolve().parents[3]
+        bundle = json.loads((root / "deploy/helm/kars/files/private-consumption.json").read_text())
+        self.policy = next(obj for obj in bundle["objects"]
+                           if obj["kind"] == "ValidatingAdmissionPolicy"
+                           and obj["metadata"]["name"] == "kars-private-consumption")
+        self.policies = {"kars-private-consumption": self.policy}
+        self.header = ('pods "do-not-publish-object" is forbidden: ValidatingAdmissionPolicy '
+                       '"kars-private-consumption" with binding "kars-private-consumption" denied request: ')
+
+    def response(self, error, *, details=None, policies=None):
+        body = {"kind": "Status", "reason": "Invalid", "message": self.header + error,
+                "details": {"kind": "Pod", "name": "do-not-publish-object"} if details is None else details,
+                "headers": {"Authorization": "do-not-publish-token"},
+                "object": {"metadata": {"annotations": {"private": "do-not-publish-value"}}}}
+        return api_result(422, body, self.policies if policies is None else policies)
+
+    def test_original_847_failure_class_is_preserved_without_inventing_the_unretained_key(self):
+        # The retained 847 report has no original key or expression. This
+        # controlled Status reproduces that failure class, not a captured body.
+        facts = self.response("no such key: do-not-publish-unretained-key")
+        self.assertEqual(facts["httpStatus"], 422)
+        self.assertEqual(facts["reason"], "Invalid")
+        self.assertEqual(facts["categories"], ["no-such-key", "forbidden"])
+        self.assertEqual(facts["validationMessages"], [])
+        self.assertEqual(facts["publicPolicyFailure"], {
+            "policy": "kars-private-consumption", "missingKeys": [],
+            "missingKeyClassification": "unclassified", "expressionSites": [],
+            "expressionClassification": "unclassified",
+        })
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+
+    def test_only_whole_known_public_field_and_annotation_keys_are_emitted(self):
+        for key in ("namespaceObject", "metadata", "jobTemplate", "uid", "kars.azure.com/private-enabled",
+                    "kars.azure.com/private-deployment-controller-uid"):
+            for quote in ("", "'", '"'):
+                with self.subTest(key=key, quote=quote):
+                    facts = self.response(f"no such key: {quote}{key}{quote}; do-not-publish-value")
+                    detail = facts["publicPolicyFailure"]
+                    self.assertEqual(detail["missingKeys"], [key])
+                    self.assertEqual(detail["missingKeyClassification"], "known-public-key")
+                    self.assertEqual(detail["expressionSites"], [])
+                    self.assertEqual(detail["expressionClassification"], "unclassified")
+                    self.assertNotIn("do-not-publish", json.dumps(facts))
+
+    def test_unknown_keys_dynamic_annotation_keys_and_known_prefixes_remain_unclassified(self):
+        for key in ("do-not-publish", "metadata-do-not-publish", "metadata.do-not-publish",
+                    "kars.azure.com/private-parent-do-not-publish",
+                    "kars.azure.com/private-enabled/do-not-publish", "orValue"):
+            with self.subTest(key=key):
+                facts = self.response(f"no such key: {key}")
+                self.assertEqual(facts["publicPolicyFailure"]["missingKeys"], [])
+                self.assertEqual(facts["publicPolicyFailure"]["missingKeyClassification"], "unclassified")
+                self.assertNotIn("do-not-publish", json.dumps(facts))
+
+    def test_current_variable_names_have_indexes_and_obsolete_match_conditions_are_unclassified(self):
+        self.assertNotIn("matchConditions", self.policy["spec"])
+        for section, label in (("variables", "variable"),):
+            definition = self.policy["spec"][section][0]
+            facts = self.response(f"{label} '{definition['name']}' failed: no such key: metadata")
+            self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [
+                {"field": f"spec.{section}[0].expression", "name": definition["name"]}])
+            self.assertEqual(facts["publicPolicyFailure"]["expressionClassification"], "provided-public-location")
+        facts = self.response("expression 'variables.a' failed: no such key: metadata")
+        self.assertEqual(facts["publicPolicyFailure"]["expressionSites"],
+                         [{"field": "spec.variables[0].expression", "name": "a"}])
+        facts = self.response("match condition 'activated-private-namespace' failed: no such key: metadata")
+        self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [])
+        self.assertEqual(facts["publicPolicyFailure"]["expressionClassification"], "unclassified")
+
+    def test_full_public_expression_is_identified_without_exporting_expression_or_referenced_variables(self):
+        expression = self.policy["spec"]["validations"][0]["expression"]
+        facts = self.response(f"expression '{expression}' failed: no such key: metadata do-not-publish")
+        self.assertEqual(facts["publicPolicyFailure"]["expressionSites"],
+                         [{"field": "spec.validations[0].expression"}])
+        self.assertNotIn(expression, json.dumps(facts))
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+        facts = self.response(f"expression '{expression} && do_not_publish' failed: no such key: metadata")
+        self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [])
+        self.assertNotIn("do_not_publish", json.dumps(facts))
+
+    def test_actual_supplied_field_locations_in_messages_and_status_causes_are_attributed(self):
+        for section in ("variables", "validations"):
+            field = f"spec.{section}[0].expression"
+            expected = {"field": field}
+            name = self.policy["spec"][section][0].get("name")
+            if name:
+                expected["name"] = name
+            facts = self.response(f"{field}: no such key: metadata")
+            self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [expected])
+            facts = self.response("evaluation failed", details={"kind": "Pod", "causes": [
+                {"field": field, "message": "no such key: metadata; do-not-publish"},
+            ]})
+            self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [expected])
+            self.assertEqual(facts["publicPolicyFailure"]["missingKeys"], ["metadata"])
+            self.assertNotIn("do-not-publish", json.dumps(facts))
+
+    def test_unknown_locations_and_merely_referenced_variables_do_not_invent_attribution(self):
+        for text in ("no such key: metadata", "references variables.a; no such key: metadata",
+                     "variable 'do-not-publish' failed: no such key: metadata",
+                     "spec.variables[999].expression failed: no such key: metadata",
+                     "spec.matchConditions[0].expression failed: no such key: metadata",
+                     "spec.variables[0].expression.do-not-publish failed: no such key: metadata",
+                     "spec.variables[0].do-not-publish failed: no such key: metadata"):
+            facts = self.response(text)
+            self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [])
+            self.assertEqual(facts["publicPolicyFailure"]["expressionClassification"], "unclassified")
+            self.assertNotIn("do-not-publish", json.dumps(facts))
+
+    def test_other_policies_name_prefixes_and_ambiguous_causes_cannot_supply_private_attribution(self):
+        for name in ("kars-private-consumption-namespace", "kars-private-consumption-do-not-publish"):
+            body = {"kind": "Status", "reason": "Invalid",
+                    "message": f'ValidatingAdmissionPolicy "{name}" denied request: no such key: metadata'}
+            self.assertNotIn("publicPolicyFailure", api_result(422, body, self.policies))
+        facts = self.response('policy "do-not-publish" failed: no such key: metadata')
+        self.assertEqual(facts["publicPolicyFailure"]["missingKeys"], [])
+        facts = self.response("evaluation failed", details={"causes": [{
+            "field": "spec.variables[0].expression",
+            "message": 'policy "do-not-publish" failed: no such key: metadata',
+        }]})
+        self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [])
+        self.assertEqual(facts["publicPolicyFailure"]["missingKeys"], [])
+        self.assertNotIn("do-not-publish", json.dumps(facts))
+
+    def test_changed_public_policy_cannot_expand_diagnostic_vocabulary(self):
+        changed = copy.deepcopy(self.policy)
+        changed["spec"]["variables"][0]["expression"] = "object.do_not_publish"
+        facts = self.response("variable 'a' failed: no such key: do_not_publish",
+                              policies={"kars-private-consumption": changed})
+        self.assertEqual(facts["publicPolicyFailure"]["missingKeyClassification"], "unclassified")
+        self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [])
+        self.assertNotIn("do_not_publish", json.dumps(facts))
+
+    def test_malformed_and_oversized_status_details_remain_bounded_and_unclassified(self):
+        for details in ([], {"causes": "do-not-publish"},
+                        {"causes": [None, False, "do-not-publish", {"field": 7, "message": []}]},
+                        {"causes": [{}] * 32 + [{"field": "spec.variables[0].expression",
+                                                 "message": "no such key: metadata"}]}):
+            facts = self.response("evaluation failed", details=details)
+            self.assertEqual(facts["publicPolicyFailure"]["expressionSites"], [])
+            self.assertEqual(facts["publicPolicyFailure"]["missingKeys"], [])
+            self.assertNotIn("do-not-publish", json.dumps(facts))
+        facts = self.response("do-not-publish " * 6000 + "no such key: metadata")
+        self.assertEqual(facts["publicPolicyFailure"]["missingKeys"], [])
+        self.assertLess(len(json.dumps(facts)), 1024)
+        facts = self.response("evaluation failed", details={"causes": [
+            {"field": f"spec.variables[{index}].expression", "message": "no such key: metadata"}
+            for index in range(len(self.policy["spec"]["variables"]))
+        ]})
+        self.assertEqual(len(facts["publicPolicyFailure"]["expressionSites"]), 8)
+        self.assertEqual(facts["publicPolicyFailure"]["expressionClassification"], "unclassified")
+
+    def test_recognized_422_diagnostics_never_turn_the_original_bootstrap_failure_into_a_pass(self):
+        deployment = {"kind": "Deployment", "metadata": {"name": "kars-controller"},
+                      "spec": {"template": {"metadata": {"labels": {}}, "spec": {"containers": []}}}}
+        snapshot = {"policies": [{"generation": 1, "observedGeneration": 1,
+                                  "typeChecked": True, "warnings": []}], "workloads": []}
+        def api(_port, _method, path, _body):
+            if path.endswith("pods?dryRun=All"):
+                return 422, {"kind": "Status", "reason": "Invalid",
+                             "message": self.header + "no such key: metadata"}
+            return 201, {}
+        with patch("sre_authority.bootstrap_probe.request", side_effect=api), \
+                patch("sre_authority.bootstrap_probe.upsert", return_value={"accepted": False, "httpStatus": 422}), \
+                patch("sre_authority.bootstrap_probe.collect", return_value=snapshot), \
+                patch("sre_authority.bootstrap_probe.time.monotonic", side_effect=[0, 1, 2, 3, 48]), \
+                patch("sre_authority.bootstrap_probe.time.sleep"), \
+                patch("sre_authority.bootstrap_probe.write_report") as report:
+            with self.assertRaisesRegex(RuntimeError, "did not create an admission-only Pod"):
+                exercise(Path("."), 1, [deployment], self.policies)
+        creation = next(call.args[2] for call in report.call_args_list if call.args[1] == "bootstrap-create.json")
+        self.assertEqual(creation["directPodDryRun"]["httpStatus"], 422)
+        self.assertEqual(creation["directPodDryRun"]["publicPolicyFailure"]["missingKeys"], ["metadata"])
+        self.assertFalse(creation["deployment"]["accepted"])
+        self.assertFalse(any(call.args[1] == "bootstrap-result.json" for call in report.call_args_list))
+
+
 if __name__ == "__main__":
     unittest.main()

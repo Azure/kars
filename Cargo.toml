@@ -11,6 +11,8 @@ members = [
     "tests/cncf-conformance",
 ]
 exclude = [
+    # Optional application: Bridge keeps its own dependency graph and lockfile.
+    "bridge/bff",
     # cargo-fuzz targets build with libfuzzer-sys (nightly-only). Excluded
     # from the workspace so stable `cargo build --workspace` is unaffected.
     # Run targets with: cargo +nightly fuzz run <target> (see fuzz/README.md).
@@ -62,6 +64,7 @@ serde_yaml = "0.9"
 
 # Azure identity (via REST — no SDK dependency)
 jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+rsa = "0.9.10"
 
 # Observability
 tracing = "0.1"

@@ -1,0 +1,44 @@
+[package]
+name = "kars-bridge-bff"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "kars Bridge backend-for-frontend — the only server-side path between the web app and the kars cluster."
+license = "MIT"
+publish = false
+
+[dependencies]
+axum = { version = "0.8", features = ["macros"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "signal", "process"] }
+tower = "0.5"
+tower-http = { version = "0.6", features = ["cors", "trace", "request-id", "util"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+# Used to build atomic (test-precondition + add/remove) PATCH bodies for
+# optimistic-concurrency read-modify-write against Secrets/ConfigMaps — this
+# stays on the `patch` RBAC verb (the BFF's ClusterRole never grants `update`,
+# which a PUT-based replace()/CAS would require). See cluster.rs
+# mutate_secret_keys / update_configmap_data.
+json-patch = "4"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+thiserror = "2"
+anyhow = "1"
+http = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+kube = { version = "0.99", default-features = false, features = ["client", "runtime", "derive", "rustls-tls", "jsonpatch"] }
+k8s-openapi = { version = "0.24", features = ["latest"] }
+schemars = "0.8"
+rustls = { version = "0.23", features = ["aws-lc-rs"] }
+base64 = "0.22"
+sha2 = "0.10"
+subtle = "2.6"
+ed25519-dalek = "2"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+jsonwebtoken = { version = "10", features = ["aws_lc_rs"] }
+tokio-stream = "0.1.18"
+async-stream = "0.3.6"
+hex = "0.4"
+
+[lints.clippy]
+all = "warn"

@@ -49,6 +49,7 @@ kars up --name prod-agent --region swedencentral --release   # provisions AKS + 
 | `kars dev --release --target local-k8s` | Same, on a local kind cluster |
 | `kars connect <name>` | Open the agent chat TUI |
 | `kars up --release` | Provision AKS + ACR + Foundry from signed public images (no build) |
+| `kars schemas prepare --release kars --namespace kars-system --chart <path>` | Prepare owned CRDs and published OpenAPI before a direct Helm installation |
 | `kars add` | Add a sandbox / runtime to an existing deployment |
 | `kars operator` | Live operator dashboard (agents, mesh, security posture) |
 | `kars --help` | Full command list |

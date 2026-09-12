@@ -18,5 +18,19 @@ profiles, and bundled Helm files. Test files are exempt.
    and a short verdict.
 3. End with two `Signed-off-by:` lines using real emails (author + reviewer).
 
+Add a **new record for the current change scope**. Modifying or renaming an
+older signed audit does not extend its approval to new capabilities. Identify
+the reviewed source head and base, distinguish source review from executed
+qualification, and retain unresolved findings and failed-run evidence honestly.
+The gate rejects an unavailable review base rather than checking an unrelated
+worktree diff.
+
+The gate checks record presence and distinct signer emails; it does not
+authenticate identities or verify that the prose covers the changed source.
+Reviewers must check those facts. An explicitly maintainer-authorized delegation
+must cite that authorization and disclose its actual participants and limits
+in the record, never imply that AI review was a second human review or that
+technical gates were waived. No delegation is inferred by default.
+
 These docs are intentionally **tracked** (committed with the PR), unlike the
 private `docs/internal/` planning folder.

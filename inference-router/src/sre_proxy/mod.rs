@@ -8,6 +8,7 @@ mod policy;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use crate::private_tls::{Listener, tls_from_pem};
 use axum::{
     Router,
     body::{Body, Bytes},
@@ -20,16 +21,11 @@ use backend::Backend;
 use futures::StreamExt;
 use policy::Route;
 use std::{
-    io::{self, BufReader},
-    net::SocketAddr,
     path::{Path, PathBuf},
     sync::Arc,
 };
-use tokio::{
-    net::{TcpListener, TcpStream},
-    sync::Semaphore,
-};
-use tokio_rustls::{TlsAcceptor, server::TlsStream};
+use tokio::{net::TcpListener, sync::Semaphore};
+use tokio_rustls::TlsAcceptor;
 
 const DIRECTORY: &str = "/etc/kars/sre-api";
 pub const PORT: u16 = 9446;
@@ -256,52 +252,12 @@ fn app(proxy: Proxy) -> Router {
         .with_state(proxy)
 }
 
-struct Listener {
-    tcp: TcpListener,
-    tls: TlsAcceptor,
-}
-
-impl axum::serve::Listener for Listener {
-    type Io = TlsStream<TcpStream>;
-    type Addr = SocketAddr;
-    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
-        loop {
-            match self.tcp.accept().await {
-                Ok((stream, address)) => {
-                    if let Ok(Ok(stream)) = tokio::time::timeout(
-                        std::time::Duration::from_secs(3),
-                        self.tls.accept(stream),
-                    )
-                    .await
-                    {
-                        return (stream, address);
-                    }
-                }
-                Err(_) => tokio::time::sleep(std::time::Duration::from_millis(100)).await,
-            }
-        }
-    }
-    fn local_addr(&self) -> io::Result<Self::Addr> {
-        self.tcp.local_addr()
-    }
-}
-
 fn tls(directory: &Path) -> Result<TlsAcceptor, String> {
-    let certificates = std::fs::File::open(directory.join("server-cert.pem"))
+    let certificates = std::fs::read(directory.join("server-cert.pem"))
         .map_err(|_| "SRE TLS certificate unavailable")?;
-    let certificates = rustls_pemfile::certs(&mut BufReader::new(certificates))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| "SRE TLS certificate invalid")?;
-    let key = std::fs::File::open(directory.join("server-key.pem"))
-        .map_err(|_| "SRE TLS key unavailable")?;
-    let key = rustls_pemfile::private_key(&mut BufReader::new(key))
-        .map_err(|_| "SRE TLS key invalid")?
-        .ok_or("SRE TLS private key missing")?;
-    let config = rustls::ServerConfig::builder()
-        .with_no_client_auth()
-        .with_single_cert(certificates, key)
-        .map_err(|_| "SRE TLS certificate/key mismatch")?;
-    Ok(TlsAcceptor::from(Arc::new(config)))
+    let key =
+        std::fs::read(directory.join("server-key.pem")).map_err(|_| "SRE TLS key unavailable")?;
+    tls_from_pem(&certificates, &key)
 }
 
 pub async fn start() -> Result<Option<tokio::task::JoinHandle<()>>, String> {

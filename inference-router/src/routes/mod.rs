@@ -45,10 +45,17 @@ mod mesh;
 pub use mesh::mesh_routes;
 
 mod access_request;
+mod observations;
+pub use observations::{
+    purpose_boundary as observation_purpose_boundary, routes as observation_routes,
+};
 mod mesh_token;
 mod task_telemetry;
 pub use access_request::routes as governed_service_routes;
+mod github_policy;
+mod github_proxy;
 mod model_routing;
+pub use github_proxy::routes as github_proxy_routes;
 pub use mesh_token::mesh_token_routes;
 
 mod egress;

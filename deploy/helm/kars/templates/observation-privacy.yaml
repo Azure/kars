@@ -1,0 +1,174 @@
+{{- $rpc := .Values.observationPrivacyRpc | default dict }}
+{{- if ($rpc.enabled | default false) }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: kars-observation-privacy
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: controller
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: controller
+    # Only the running TLS verifier advertises its actual certificate revision.
+    kars.azure.com/observation-privacy-revision: unavailable
+  ports:
+    - name: privacy-rpc
+      port: 9448
+      targetPort: 9448
+      protocol: TCP
+{{- end }}
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-observation-privacy-material
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["secrets", "configmaps"]
+  matchConditions:
+    - name: canonical-core-material
+      expression: >-
+        request.namespace == '{{ .Release.Namespace }}' &&
+        [object, oldObject].exists(o, o != null && o.metadata.name in
+          ['kars-observation-privacy-tls', 'kars-observation-privacy'])
+  variables:
+    - name: value
+      expression: "oldObject == null ? object : oldObject"
+  validations:
+    - expression: >-
+        (request.operation == 'DELETE' &&
+          authorizer.group('kars.azure.com').resource('karscredentialgrants')
+            .namespace(request.namespace).name('workspace').check('manage').allowed()) ||
+        (request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:kars-controller' &&
+          has(request.userInfo.uid) && request.userInfo.uid != '' &&
+          request.userInfo.uid == variables.value.metadata.?annotations.orValue({})
+            [?'kars.azure.com/privacy-controller-uid'].orValue('') &&
+          authorizer.group('kars.azure.com').resource('karscredentialgrants')
+            .namespace(request.namespace).name('workspace').check('project-credentials').allowed())
+      message: "Only the actual core controller UID issues privacy verification material; operators may retire it"
+      reason: Forbidden
+    - expression: >-
+        object == null ||
+        (object.metadata.?annotations.orValue({})[?'kars.azure.com/privacy-namespace-uid'].orValue('') ==
+          dyn(namespaceObject.metadata).uid &&
+         object.metadata.?annotations.orValue({})[?'kars.azure.com/privacy-controller-uid'].orValue('') == request.userInfo.uid)
+      message: "Privacy material requires the actual namespace and controller UIDs"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-observation-privacy-material
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-observation-privacy-material
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-observation-privacy-pods
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE"]
+        resources: ["pods", "pods/status", "pods/ephemeralcontainers"]
+  matchConditions:
+    - name: verifier-capability-change
+      expression: >-
+        request.namespace == '{{ .Release.Namespace }}' &&
+        (oldObject == null ?
+          'kars.azure.com/observation-privacy-revision' in object.metadata.?labels.orValue({}) :
+          (oldObject.metadata.?labels.orValue({})[?'kars.azure.com/observation-privacy-revision'].orValue('') !=
+            object.metadata.?labels.orValue({})[?'kars.azure.com/observation-privacy-revision'].orValue('') ||
+           ['kars.azure.com/privacy-controller-uid','kars.azure.com/privacy-namespace-uid'].exists(key,
+             oldObject.metadata.?annotations.orValue({})[?key].orValue('') !=
+               object.metadata.?annotations.orValue({})[?key].orValue(''))))
+  validations:
+    - expression: >-
+        request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:kars-controller' &&
+        has(request.userInfo.uid) && request.userInfo.uid != '' &&
+        object.metadata.?annotations.orValue({})[?'kars.azure.com/privacy-controller-uid'].orValue('') == request.userInfo.uid &&
+        object.metadata.?annotations.orValue({})[?'kars.azure.com/privacy-namespace-uid'].orValue('') == dyn(namespaceObject.metadata).uid &&
+        object.spec.serviceAccountName == 'kars-controller' &&
+        authorizer.group('kars.azure.com').resource('karscredentialgrants')
+          .namespace(request.namespace).name('workspace').check('project-credentials').allowed()
+      message: "Only a running core controller may advertise or retire its verified RPC capability"
+      reason: Forbidden
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-observation-privacy-pods
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-observation-privacy-pods
+  validationActions: [Deny, Audit]
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: kars-observation-privacy-service
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+      - apiGroups: [""]
+        apiVersions: ["v1"]
+        operations: ["CREATE", "UPDATE", "DELETE"]
+        resources: ["services"]
+  matchConditions:
+    - name: canonical-core-service
+      expression: >-
+        request.namespace == '{{ .Release.Namespace }}' &&
+        [object, oldObject].exists(o, o != null && o.metadata.name == 'kars-observation-privacy')
+  validations:
+    - expression: >-
+        authorizer.group('kars.azure.com').resource('karscredentialgrants')
+          .namespace(request.namespace).name('workspace').check('manage').allowed() ||
+        (request.userInfo.username == 'system:serviceaccount:{{ .Release.Namespace }}:kars-controller' &&
+          has(request.userInfo.uid) && request.userInfo.uid != '' &&
+          authorizer.group('kars.azure.com').resource('karscredentialgrants')
+            .namespace(request.namespace).name('workspace').check('project-credentials').allowed())
+      message: "The privacy verification Service requires explicit core operator or controller authority"
+      reason: Forbidden
+    - expression: >-
+        object == null ||
+        (object.spec.type == 'ClusterIP' && !has(object.spec.externalName) &&
+         object.spec.?externalIPs.orValue([]).size() == 0 &&
+         object.spec.ports.size() == 1 && object.spec.ports[0].port == 9448 &&
+         object.spec.ports[0].protocol == 'TCP' && object.spec.ports[0].targetPort == 9448 &&
+         object.spec.selector['app.kubernetes.io/name'] == 'kars' &&
+         object.spec.selector['app.kubernetes.io/component'] == 'controller' &&
+         object.spec.selector.all(key, key in ['app.kubernetes.io/name','app.kubernetes.io/component',
+           'kars.azure.com/observation-privacy-revision']))
+      message: "The verifier has only its fixed private TCP port and controller selector"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: kars-observation-privacy-service
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  policyName: kars-observation-privacy-service
+  validationActions: [Deny, Audit]

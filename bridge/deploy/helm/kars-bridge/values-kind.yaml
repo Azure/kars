@@ -1,0 +1,16 @@
+# kars Bridge — values overlay for local kind clusters.
+#   helm install kars-bridge deploy/helm/kars-bridge -n kars-system -f deploy/helm/kars-bridge/values-kind.yaml
+# Load the images into kind first:
+#   kind load docker-image kars-bridge-bff:dev kars-bridge-web:dev --name <cluster>
+bff:
+  image:
+    repository: kars-bridge-bff
+    tag: dev
+    pullPolicy: IfNotPresent
+web:
+  image:
+    repository: kars-bridge-web
+    tag: dev
+    pullPolicy: IfNotPresent
+ingress:
+  enabled: false

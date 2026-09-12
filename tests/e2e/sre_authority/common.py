@@ -15,6 +15,7 @@ import signal
 import ssl
 import subprocess
 import time
+from .schema_preparation_diagnostics import schema_preparation_failure
 
 CONTEXT = "kind-kars-e2e"
 SYSTEM = "kars-system"
@@ -63,6 +64,16 @@ def command_site():
 
 
 def command_error_category(stderr):
+    stages = {
+        "registrar", "controller-review", "release-inventory", "prerequisite-chart-render",
+        "action-schema-review", "helm-compatibility", "action-schema-migration",
+        "core-schema-preparation", "helm-server-dry-run", "helm-upgrade",
+        "template-ownership-review", "schema-publication", "template-authority-write",
+        "controller-rollout",
+    }
+    observed = set(re.findall(r"^SRE-STAGE-FAILURE ([a-z-]+)$", stderr, re.MULTILINE)) & stages
+    if observed:
+        return "sre-stage:" + (next(iter(observed)) if len(observed) == 1 else "ambiguous")
     status = re.search(r"Error from server \((Forbidden|Unauthorized|Invalid|NotFound|"
                        r"AlreadyExists|Conflict|BadRequest|InternalError|ServiceUnavailable)\)", stderr)
     if status:
@@ -243,6 +254,10 @@ class Harness:
             raise AssertionError(f"Command exceeded its bounded timeout at {command_site()}") from None
         result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
         if expected is not None:
+            if result.returncode != expected:
+                facts = schema_preparation_failure(stderr)
+                if facts:
+                    print("SRE-SCHEMA-PREPARATION-FACTS " + json.dumps(facts, sort_keys=True), flush=True)
             # Never echo command output or argv: token/Secret reads are captured.
             require(result.returncode == expected,
                     f"Command failed during {self.phase} at {command_site()}; "

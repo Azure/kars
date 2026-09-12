@@ -1,0 +1,183 @@
+# kars Bridge — least-privilege RBAC for the BFF ServiceAccount.
+#
+# The Bridge is a privileged Kubernetes API client: it authors envelope CRDs
+# (operator pattern) and reads back status/telemetry. The REAL authorization
+# boundary is this Role — not the BFF code. In dev the BFF runs locally with the
+# developer's kubeconfig; in-cluster it MUST run as this ServiceAccount so the
+# API server enforces exactly these verbs and nothing more.
+#
+# Security notes:
+#   - Writes are scoped to the kinds the Bridge authors; everything else is read-only.
+#   - Core supplies source-only and enrolled-store Roles after explicit operator
+#     grants. This manifest grants no Secret or Deployment mutation authority.
+#   - For audit fidelity, run the BFF behind user impersonation (Impersonate-User)
+#     or per-user tokens so the K8s audit log records the human, not this SA.
+#   - Governance CRDs ARE the security posture; gate privilege-WIDENING applies
+#     (broader egress / new tool / new MCP) behind the approval flow before apply.
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kars-bridge
+  namespace: kars-system
+  labels:
+    app.kubernetes.io/name: kars-bridge
+    app.kubernetes.io/component: bff
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-bridge
+  labels:
+    app.kubernetes.io/name: kars-bridge
+rules:
+  # ── Read the full kars CRD surface (status + envelope objects) ──────────────
+  - apiGroups: ["kars.azure.com"]
+    resources:
+      - karstasks
+      - karsteams
+      - karssandboxes
+      - toolpolicies
+      - mcpservers
+      - karsskills
+      - inferencepolicies
+      - karsapprovals
+      - egressapprovals
+      - karsreceipts
+      - karsprofiles
+      - karssreactions
+      - karsmemories
+      - karsevals
+      - karscredentialgrants
+    verbs: ["get", "list", "watch"]
+  # ── Author/edit the envelope objects the Bridge owns (Server-Side Apply) ────
+  #    `patch` covers apply (create-or-update); `create` covers first-author on
+  #    APIs that route a fresh object through create. `delete` covers the
+  #    explicit mission/team "Delete" action (delete_task/delete_team →
+  #    delete_kind, foreground cascade) — found missing live (2026-07-09):
+  #    every mission/team delete silently 403'd against the real
+  #    ServiceAccount (verification earlier in this file's history had only
+  #    ever run through a developer's cluster-admin kubeconfig). karssandboxes
+  #    doesn't need it — the standing bridge-orchestrator is only ever
+  #    halted (patch, un-launch), never CR-deleted by the BFF.
+  - apiGroups: ["kars.azure.com"]
+    resources:
+      - karstasks        # missions
+      - karsteams        # standing teams
+    verbs: ["create", "patch", "delete"]
+  - apiGroups: ["kars.azure.com"]
+    resources:
+      - karssandboxes    # standing bridge-orchestrator + halt/un-launch
+    verbs: ["create", "patch"]
+  # Operator-authored governance objects additionally support delete — the
+  # console offers an explicit Remove/Revoke. For egressapprovals, delete IS the
+  # revoke action (create-to-grant / delete-to-revoke).
+  #
+  # inferencepolicies + karsprofiles: real gap found live (2026-07-09) — both
+  # had a real visual editor + full apply/delete BFF routes (applyGovernance/
+  # deleteGovernance) wired since their respective critique items, but were
+  # NEVER granted write RBAC — only get/list/watch above. Every save/create/
+  # delete attempt against either kind has been silently 403ing since day one.
+  - apiGroups: ["kars.azure.com"]
+    resources:
+      - toolpolicies       # operator-authored governance
+      - mcpservers         # operator-authored connected services
+      - karsskills         # operator-authored skills
+      - egressapprovals    # HITL egress grants
+      - inferencepolicies  # operator-authored inference policies
+      - karsprofiles       # operator-authored team profile templates
+    verbs: ["create", "patch", "delete"]
+  # KarsEval supports create (launch a run) but has no delete route in the BFF.
+  - apiGroups: ["kars.azure.com"]
+    resources:
+      - karsevals
+    verbs: ["create", "patch"]
+  # ── SRE self-remediation proposals: approve/reject flips spec.approval.state ─
+  - apiGroups: ["kars.azure.com"]
+    resources:
+      - karssreactions
+    verbs: ["patch"]
+  # ── Steering inbox: recording a human decision only ever patches spec.decision ─
+  #    (the controller is the sole author of the KarsApproval object itself).
+  - apiGroups: ["kars.azure.com"]
+    resources:
+      - karsapprovals
+    verbs: ["patch"]
+  # ── Read CRD schemas (for client-side form hints / validation) ──────────────
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["get", "list"]
+  # ── Mission deliverables, status, and per-principal GitHub connection records
+  #    live in ConfigMaps (read + Bridge-owned
+  #    sweep-on-delete: mission/team delete removes the output/artifacts/trace/
+  #    review/commons/team-tasks ConfigMaps it authored — found missing live
+  #    (2026-07-09) alongside the karstasks/karsteams delete gap above) ────────
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch", "create", "patch", "update", "delete"]
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karscredentialgrants"]
+    resourceNames: ["workspace"]
+    verbs: ["bridge-adapter"]
+  # Core admission limits adapter namespace creation to kars-local-inference.
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get", "create"]
+  # ── Live sandbox data via the pods/proxy subresource (router :8443) ─────────
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["pods/proxy"]
+    verbs: ["get", "create"]
+  # Read-only AGT registry discovery for the retained mesh DID proof.
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    verbs: ["get"]
+  # ── Live deploy activity: real Kubernetes events (image pull, scheduling,
+  #    container start/fail) surfaced in the local-model deploy progress
+  #    tracker so the operator sees what's actually happening ───────────────
+  - apiGroups: [""]
+    resources: ["events"]
+    verbs: ["get", "list"]
+  # ── Local (in-cluster) inference — AI Runway's ModelDeployment CRD ──────────
+  #    kars does NOT install AI Runway/KAITO itself (see docs/local-inference.
+  #    md) — an operator does that once via their own helm/kubectl, exactly
+  #    like the GitHub App. The Bridge only manages ModelDeployment objects
+  #    it creates in its own `kars-local-inference` namespace on top of
+  #    whatever's already installed; this grant is a no-op (the CRD simply
+  #    won't exist) on a cluster where the operator hasn't set it up.
+  - apiGroups: ["airunway.ai"]
+    resources: ["modeldeployments"]
+    verbs: ["get", "list", "watch", "create", "patch", "delete"]
+  # ── Read-only Node capacity scan so the local-inference wizard only offers
+  #    GPU-tier models when the cluster can actually schedule them ───────────
+  - apiGroups: [""]
+    resources: ["nodes"]
+    verbs: ["get", "list"]
+  # ── Live utilization for Operator Fleet capacity monitoring ────────────────
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list"]
+  # Provider settings and Teams rollout/scale operations are core-owned.
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["authentication.k8s.io"]
+    resources: ["selfsubjectreviews"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kars-bridge
+  labels:
+    app.kubernetes.io/name: kars-bridge
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kars-bridge
+subjects:
+  - kind: ServiceAccount
+    name: kars-bridge
+    namespace: kars-system
+# Operator-enrolled, UID-bound credential access is reconciled by Kars core.

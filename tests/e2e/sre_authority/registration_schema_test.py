@@ -38,6 +38,40 @@ def invalid():
 
 
 class RegistrationSchemaTests(unittest.TestCase):
+    def test_crd_readiness_requires_a_real_established_condition_not_nullable_status(self):
+        established = {"type": "Established", "status": "True"}
+        self.assertTrue(schema.crd_established(200, {"status": {"conditions": [established]}}))
+        for body in (None, [], {}, {"status": None}, {"status": {}},
+                     {"status": {"conditions": None}}, {"status": {"conditions": []}},
+                     {"status": {"conditions": "Established"}},
+                     {"status": {"conditions": [None]}},
+                     {"status": {"conditions": [established, None]}},
+                     {"status": {"conditions": [{"type": "Established", "status": True}]}},
+                     {"status": {"conditions": [{"type": "Established", "status": "False"}]}}):
+            with self.subTest(body=body):
+                self.assertFalse(schema.crd_established(200, body))
+        self.assertFalse(schema.crd_established(503, {"status": {"conditions": [established]}}))
+
+    def test_namespace_patch_uses_merge_patch_without_losing_identity_fences(self):
+        body = {"metadata": {"uid": "namespace-uid", "resourceVersion": "42",
+                             "annotations": {"kars.azure.com/private-enabled": "true"}}}
+        for method in ("PATCH", "POST", "PUT", "GET"):
+            with self.subTest(method=method), patch.object(schema, "build_opener") as build:
+                submitted = None if method == "GET" else body
+                response = build.return_value.open.return_value
+                response.code = 200
+                response.read.return_value = json.dumps(body).encode()
+                self.assertEqual(schema.request(12345, method, "/api/v1/namespaces/fixture", submitted),
+                                 (200, body))
+                sent = build.return_value.open.call_args.args[0]
+                self.assertEqual(sent.get_method(), method)
+                self.assertEqual(sent.get_header("Content-type"),
+                                 "application/merge-patch+json" if method == "PATCH" else "application/json")
+                self.assertEqual(sent.get_header("Accept"), "application/json")
+                self.assertEqual(None if sent.data is None else json.loads(sent.data), submitted)
+                self.assertEqual(build.return_value.open.call_args.kwargs["timeout"], 15)
+                self.assertEqual(build.call_args.args[0].proxies, {})
+
     def test_native_kubectl_invalid_classification_does_not_echo_body(self):
         message = f'The CustomResourceDefinition "{schema.CRD_NAME}" is invalid: {PRIVATE}'
         self.assertEqual(command_error_category(message), "Invalid")

@@ -23,6 +23,11 @@ inferenceBudget:
   caBundle: ""
 
 # Controller configuration
+# Required for explicitly enrolled private observations. Does not expose a
+# general API or change standalone/Bridgeless behavior when disabled.
+observationPrivacyRpc:
+  enabled: false
+
 controller:
   image:
     repository: karsacr.azurecr.io/kars-controller

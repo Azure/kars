@@ -1,0 +1,92 @@
+# Contributing documentation
+
+Bridge documentation should be usable by someone without access to session
+history, private design notes, or a developer kubeconfig.
+
+## Page types
+
+- **Tutorial**: a complete learning journey.
+- **How-to**: one operational task.
+- **Concept**: architecture, boundaries, and rationale.
+- **Reference**: exact configuration, APIs, roles, and compatibility.
+
+## Rules
+
+- State that `Azure/kars:kars-bridge` is an integration preview where availability
+  matters; do not infer release readiness from source publication.
+- State the required Kars version/commit for deployment instructions.
+- Separate persona authorization from Kubernetes ServiceAccount RBAC.
+- Distinguish live-qualified support from Helm template portability.
+- Never link public readers to personal fork branches.
+- Never place credentials, cookies, identity seeds, private keys, or customer
+  resource names in examples.
+- Add new pages to `docs/SUMMARY.md`.
+
+## Validation
+
+```bash
+cd bridge
+make check
+(cd bff && cargo fmt --all -- --check)
+helm lint deploy/helm/kars-bridge
+helm template kars-bridge deploy/helm/kars-bridge \
+  | kubectl apply --dry-run=client -f -
+```
+
+Any documented write path must also be tested through the deployed
+`kars-bridge` ServiceAccount rather than only through a cluster-admin
+kubeconfig.
+
+## Permanent core/Bridge CI boundary
+
+The web DTO surface remains available from `@/lib/types`. Domain files under
+`web/src/lib/types/` use type-only cross-imports; the public barrel re-exports
+their complete API. They mirror BFF DTOs rather than owning server contracts.
+The only runtime values are the existing `TIER_LABELS` and `WIRING_LABELS`
+literal objects. The Node contract test checks the locked compiler, complete
+barrel exports, erased imports, inert runtime values and per-file bounds.
+Server-side client types are similarly re-exported from `@/lib/bff` through
+`bff-contracts.ts`; authentication, cookie forwarding, fetch and error handling
+remain in the original server module.
+
+The integration candidate's core Rust, CLI and Kind jobs check out the repository
+with `bridge/` physically absent. Core builds and runtime acceptance must not
+acquire a mandatory dependency on the add-on.
+
+Bridge native qualification emits its aggregate status for every PR targeting
+the supported integration branches. Only root documentation-only changes can
+skip native execution; CLI, runtime, mesh, chart, dependency, shipped-skill and
+unknown source changes require it. Core-only Kind scope excludes Bridge-only
+changes, which still require paired Bridge qualification. Pushes, manual runs
+and reusable CI callers retain full qualification.
+
+API/admission acceptance runs three isolated cold installs. Each builds the
+locked, same-source core CLI and calls `kars schemas prepare` with the exact
+chart, values, release, namespace and context used by the following Helm
+installation. Runtime acceptance uses that same core preparation entrypoint.
+Schema and admission warnings remain failures; no policy status or generation
+is changed merely to refresh a diagnostic.
+
+`Bridge component acceptance` requires the exact component job set: `addon`,
+`bff`, `dependencies`, `lockfiles`, `rust-dependencies`, `secrets`, `security`
+and `web`. It runs even for core-only PRs. Missing, unexpected, failed, cancelled
+or skipped component jobs cannot satisfy it; removing a workflow dependency
+must not silently turn incomplete evidence green. Keep the workflow `needs`
+list, aggregate policy and regression cases in agreement when changing this set.
+Together with `Require both native API and runtime acceptance`,
+it provides stable check names for the integration merge policy rather than
+relying on path-filtered jobs that may never report.
+
+The aggregate rejects failed scope selection, missing outputs, and failed,
+cancelled or unexpectedly skipped required jobs. An intentional documentation
+skip is reported as not executed, never as runtime evidence. Existing real
+add-on install/upgrade/uninstall checks retain their core resource/data
+preservation assertions.
+
+These workflow changes still require hosted qualification and integration into
+the required merge-check policy. See the
+[integration branch protection requirements](../../docs/operations/branch-protection.md#bridge-integration-branch)
+for activation order and exact required status names.
+Complete supported-version and standing-Team
+workflow coverage remains a separate acceptance requirement; passing scope or
+template checks alone does not establish compatibility.

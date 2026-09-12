@@ -590,16 +590,7 @@ use crypto::hex_sha256;
 /// Shared with `routes.rs` and `main.rs` admin-token checks — do not inline.
 /// `pub` (not `pub(crate)`) because `main.rs` compiles as the bin crate and
 /// imports `kars_inference_router::handoff` as an external crate.
-pub fn constant_time_eq(a: &[u8], b: &[u8]) -> bool {
-    if a.len() != b.len() {
-        return false;
-    }
-    let mut diff = 0u8;
-    for (x, y) in a.iter().zip(b.iter()) {
-        diff |= x ^ y;
-    }
-    diff == 0
-}
+pub use crate::constant_time::constant_time_eq;
 
 /// Current time as ISO 8601 string.
 fn iso_now() -> String {

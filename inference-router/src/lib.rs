@@ -25,6 +25,8 @@ pub mod blocklist;
 pub mod budget;
 pub mod config;
 pub mod config_mount;
+#[path = "../../shared/constant_time.rs"]
+mod constant_time;
 pub mod copilot_auth;
 pub mod deployment_health;
 pub mod egress_allowlist_loader;
@@ -32,6 +34,8 @@ pub mod egress_blocked;
 pub mod errors;
 pub mod failover;
 pub mod forward_proxy;
+mod github_app;
+mod github_services;
 pub mod governance;
 pub mod governed_services;
 pub mod guardrails;
@@ -46,14 +50,23 @@ pub mod mcp;
 pub mod memory_binding_loader;
 pub mod mesh;
 pub mod metrics;
+#[path = "../../shared/observation_privacy.rs"]
+pub mod observation_privacy;
+mod observation_privacy_client;
 pub mod policy_envelope;
 pub mod policy_status;
+#[path = "../../shared/private_tls.rs"]
+mod private_tls;
 pub mod provider;
 pub mod providers;
 pub mod proxy;
 pub mod rate_limiter;
 pub mod routes;
 pub mod safety;
+pub mod service_observation;
+pub mod service_observation_tls;
+#[path = "../../shared/service_observer.rs"]
+pub mod service_observer;
 pub mod sidecar_client;
 pub mod spawn;
 #[path = "../../shared/sre_privacy.rs"]

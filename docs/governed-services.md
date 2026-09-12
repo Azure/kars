@@ -1,14 +1,28 @@
 # Router governed services
 
+The separate [optional keyless GitHub service](github-services.md) supplies
+repository-scoped API/git access and real Actions job logs. Its operator-owned
+App enrollment does not widen this request queue or grant decisions.
+
 These APIs provide an in-process capability-request queue and bounded router
 telemetry. They do **not** deliver assignments, run agents, create approvals,
 grant capabilities, install resources, or provide a durable execution ledger.
 
 **Qualification gate:** the combined source includes the operator-authorized
-[SRE identity/migration prerequisite](how-to/sre-authority.md). Its real-API
-migration acceptance (#551) remains pending; merging its implementation locally
-does not establish successful hosted qualification or make this candidate ready
-for deployment. Changing mounts alone does not establish operator-only authority.
+[SRE identity/migration prerequisite](how-to/sre-authority.md). Qualification
+requires successful real-API migration and governed-service lifecycle checks on
+the actual candidate; merging an implementation locally is not deployment
+qualification. Changing mounts alone does not establish operator-only authority.
+
+The Kind service gate reports failures as `GOVERNED-SERVICES-FAILURE` followed
+by a bounded JSON record before removing its private temporary files. The record
+contains a fixed stage/category, numeric expected/actual HTTP status, and boolean
+credential-presence, identity-presence and scope-comparison results. Status `0`
+means no valid HTTP status was recorded, not an authentication denial. Boolean
+`false` can also mean that a later check was not reached; interpret it with the
+reported stage. Raw command errors, tokens, identities, scope IDs and response
+bodies are not emitted. The original failure and owned port-forward/file cleanup
+remain mandatory; these diagnostics do not qualify the failing operation.
 
 ## Identity and operator authentication
 

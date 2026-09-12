@@ -1,0 +1,234 @@
+# kars Bridge Helm values.
+#
+# The Bridge is ADDITIVE: it deploys on top of an existing kars install (kars
+# CRDs + controller in `namespace`). It never creates or replaces kars components.
+# Kubernetes-native templates. Each deployment requires environment-specific
+# identity, registry, ingress, CNI, inference, and compatibility validation.
+# Historical preview image defaults are retained for existing installations.
+# Source publication does not publish those images: new installs must supply
+# repositories built in an operator-controlled registry.
+
+# The namespace the Bridge runs in. The kars chart creates `kars-system`; the
+# Bridge joins it. Set createNamespace: true only when installing the Bridge into
+# a fresh, dedicated namespace. New installs cannot claim kars-system. Legacy
+# chart-owned namespaces remain in upgrades and are retained on uninstall;
+# keep createNamespace unchanged until the safe upgrade has been applied.
+# New release storage namespaces need Helm's --create-namespace with this
+# value false; a chart-owned workload namespace needs separate release storage.
+namespace: kars-system
+createNamespace: false
+
+# Core control/default workspace is independent of the private add-on namespace.
+core:
+  namespace: kars-system
+
+# imagePullSecrets: list of {name: <secret>} references to pre-created
+# `kubernetes.io/dockerconfigjson` Secrets in `namespace`, for pulling the
+# private BFF/web images. Empty ⇒ public images / node-identity pull.
+global:
+  imagePullSecrets: []
+  # e.g.
+  #   - name: myregistry-pull
+
+# Shared signing secret for external OIDC deployments. The web signs the
+# principal assertion with this key and the BFF verifies it independently.
+# idp.enabled uses idp.secretName automatically. When idp.enabled=false and
+# external OIDC is configured through web.extraEnv, set this Secret name.
+auth:
+  principalSecretName: ""
+  principalSecretKey: "session-secret"
+
+# ── BFF (Rust API) ───────────────────────────────────────────────────────────
+bff:
+  image:
+    # Override per environment: AKS -> <acr>.azurecr.io, EKS -> <account>.dkr.ecr.<region>.amazonaws.com,
+    # GKE -> <region>-docker.pkg.dev/<project>/<repo>, kind -> a locally loaded image.
+    repository: ghcr.io/pallakatos/kars-bridge-bff
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 8081
+  resources:
+    requests: { cpu: "50m", memory: "64Mi" }
+    limits: { cpu: "500m", memory: "256Mi" }
+  # Extra env merged into the BFF container (e.g. BRIDGE_OPERATOR, BRIDGE_ROLES,
+  # BRIDGE_ENGINEERING_POLLER_SECONDS; default 60, minimum 15).
+  extraEnv: []
+
+# ── Web (Next.js UI) ─────────────────────────────────────────────────────────
+web:
+  image:
+    repository: ghcr.io/pallakatos/kars-bridge-web
+    tag: "latest"
+    pullPolicy: IfNotPresent
+  replicas: 1
+  port: 3000
+  resources:
+    requests: { cpu: "50m", memory: "128Mi" }
+    limits: { cpu: "500m", memory: "512Mi" }
+  # Extra env merged into the web container. Notably:
+  #   BRIDGE_HEADLAMP_URL - deep-links the Console home + Cluster tools card to a
+  #     Kubernetes dashboard (Headlamp or any other) for deep pod/node/event
+  #     inspection. Point it at whatever URL your operators can actually reach
+  #     it at (an Ingress host, a NodePort, or a `kubectl port-forward` target
+  #     for local/kind demos) — the Bridge only deep-links, it doesn't proxy.
+  #     Example: --set web.extraEnv[0].name=BRIDGE_HEADLAMP_URL \
+  #              --set web.extraEnv[0].value=http://localhost:3903
+  #     Left unset, the card shows an honest "not linked" state instead of a
+  #     broken link.
+  #
+  #   BRIDGE_OIDC_ISSUER / BRIDGE_OIDC_CLIENT_ID / BRIDGE_OIDC_CLIENT_SECRET /
+  #     BRIDGE_SESSION_SECRET - connect a real OIDC identity provider (Entra
+  #     ID, Okta, Auth0, Keycloak, Dex, ...) for genuine per-user SSO: a real
+  #     Authorization Code + PKCE flow at /auth/login, ID-token signature/
+  #     issuer/audience/nonce verified against the provider's live JWKS, and a
+  #     signed Bridge session issued on success. Put BRIDGE_OIDC_CLIENT_SECRET
+  #     and BRIDGE_SESSION_SECRET in a K8s Secret (valueFrom.secretKeyRef),
+  #     never inline in values.yaml. Optional: BRIDGE_OIDC_REDIRECT_URI
+  #     (defaults to `{origin}/auth/callback`), BRIDGE_OIDC_SCOPES (default
+  #     "profile email"), BRIDGE_OIDC_ROLE_CLAIM (the ID-token claim carrying
+  #     group/role membership, default "roles"), and BRIDGE_OIDC_ROLE_MAP
+  #     (JSON mapping an IdP group/role name to a Bridge role, e.g.
+  #     '{"kars-admins":"admin","kars-operators":"operator"}'). Unmapped
+  #     claims grant zero roles (fail-closed) — see /console/access.
+  #     Left unset (the default — no IdP is registered anywhere in this
+  #     project), /auth/login returns an honest "SSO not configured" response
+  #     and the header's dev role-switch remains the way to preview roles.
+  extraEnv: []
+
+# ── Ingress (optional) ───────────────────────────────────────────────────────
+# Off by default so a bare install just exposes ClusterIP Services (reach them via
+# `kubectl port-forward`). Enable + set className/host per cloud:
+#   AKS: application-gateway | nginx   EKS: alb | nginx   GKE: gce | nginx   kind: nginx
+ingress:
+  enabled: false
+  className: ""
+  host: ""
+  annotations: {}
+  tls: []
+
+# The ServiceAccount + least-privilege ClusterRole the BFF runs under. The REAL
+# authorization boundary is this Role — keep it least-privilege.
+rbac:
+  create: true
+  serviceAccountName: kars-bridge
+
+# NetworkPolicies so the Bridge works under a namespace default-deny (kars ships
+# a kars-system-default-deny that drops pod-to-pod on the Bridge ports). These are
+# additive allow-rules: web -> BFF on the BFF port, and ingress to web + BFF on
+# their service ports. Disable only on clusters with no NetworkPolicy enforcement
+# or no default-deny (they are harmless there, but off by request is supported).
+networkPolicy:
+  create: true
+  observations:
+    enabled: false
+    # Explicit opt-in only: this additive policy must not accidentally become
+    # the first Egress policy selecting an otherwise unrestricted BFF.
+    existingIsolationConfirmed: false
+    # Exact, operator-reviewed runtime namespace names (for example kars-agent).
+    targetNamespaces: []
+
+# ── In-cluster IdP (Dex) for multi-user SSO ──────────────────────────────────
+# OFF by default: a bare install uses the dev role-switcher (no login). Turn ON
+# for a multi-user colleague ring reachable over a single
+#   kubectl port-forward svc/kars-bridge-web 3000:3000
+# with no public ingress. The web pod proxies /dex/* to the in-cluster Dex
+# Service, so the issuer is the browser origin + /dex — one port-forward, no
+# /etc/hosts. See templates/idp.yaml + web/src/app/dex/[...path]/route.ts.
+idp:
+  enabled: false
+  # Browser-facing issuer = {web origin}/dex. For the port-forward path this is
+  # localhost:3000/dex; behind a real ingress set it to https://<host>/dex.
+  issuer: "http://localhost:3000/dex"
+  clientId: "kars-bridge"
+  # Must match the browser origin the user actually loads the Bridge at.
+  redirectURIs:
+    - "http://localhost:3000/auth/callback"
+  scopes: "profile email groups"
+  # The ID-token claim Dex puts group membership in, mapped to Bridge roles.
+  roleClaim: "groups"
+  roleMap:
+    kars-employees: "user"
+    kars-operators: "operator"
+    kars-auditors: "auditor"
+  # In-cluster Service the web /dex proxy forwards to (NOT browser-facing).
+  # Empty derives `http://dex.<namespace>.svc.cluster.local:5556`.
+  dexUpstreamUrl: ""
+  # Secret holding client-secret + session-secret (64 chars each). Left empty,
+  # the chart generates stable random values and preserves them across upgrades.
+  secretName: "kars-bridge-oidc"
+  clientSecret: ""
+  sessionSecret: ""
+  dex:
+    image: "ghcr.io/dexidp/dex:v2.45.1"
+    enablePasswordDB: true
+    # Private-alpha seed users (bcrypt hash below = "password"). Replace with
+    # real per-colleague accounts, or drop these and wire `connectors` to a real
+    # upstream IdP. Passwords are only ever inside the cluster.
+    staticPasswords:
+      - email: "employee@kars.test"
+        username: "employee"
+        userID: "11111111-1111-4111-8111-111111111111"
+        hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+        groups: ["kars-employees"]
+      - email: "operator@kars.test"
+        username: "operator"
+        userID: "22222222-2222-4222-8222-222222222222"
+        hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+        groups: ["kars-operators"]
+      - email: "auditor@kars.test"
+        username: "auditor"
+        userID: "33333333-3333-4333-8333-333333333333"
+        hash: "$2a$10$2b2cU8CPhOTaGrs1HRQuAueS7JTT5ZHsHSzYiFPm1leZck7Mc8T4W"
+        groups: ["kars-auditors"]
+    # Upstream OIDC/social connectors (Entra ID, GitHub, ...). When set, prefer
+    # these over static passwords for real deployments.
+    connectors: []
+
+# Pod-level security context (rootless, read-only-friendly). Overridable per cloud
+# if a platform requires different fsGroup/seccomp defaults.
+podSecurityContext:
+  runAsNonRoot: true
+  seccompProfile:
+    type: RuntimeDefault
+
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+# ── Teams Gateway (optional Microsoft Teams HITL integration) ─────────────────
+# The gateway resources are installed at zero replicas by default so an admin can
+# bootstrap credentials from Connections. `enabled` controls the initial
+# replica count; the BFF scales it after secure configuration.
+#   1. An Entra App Registration with Bot Channel enabled + admin consent
+#   2. A Secret named `kars-bridge-teams` containing keys:
+#      client-id, tenant-id, client-secret, entra-role-map (JSON), bff-internal-secret
+#   3. The BFF must also mount bff-internal-secret via BRIDGE_TEAMS_INTERNAL_SECRET
+#
+# The dedicated Secret is NEVER propagated to sandbox pods.
+teamsGateway:
+  enabled: false
+  image:
+    repository: ghcr.io/pallakatos/kars-bridge-freeze-teams-gateway
+    tag: "latest"
+    pullPolicy: Always
+  replicas: 1
+  port: 3978
+  resources:
+    requests: { cpu: "50m", memory: "64Mi" }
+    limits: { cpu: "200m", memory: "256Mi" }
+  # Name of the dedicated K8s Secret holding Teams credentials. Keys:
+  #   client-id, tenant-id, client-secret, entra-role-map, bff-internal-secret
+  # entra-role-map is JSON:
+  # [{"entra_subject":"<oid>","bridge_subject":"<oidc-sub>","roles":["operator"],"name":"Alice"}]
+  secretName: "kars-bridge-teams"
+  conversationConfigMapName: "kars-teams-conversations"
+  extraEnv: []
+  # TLS Ingress for Teams webhook callbacks (routes to gateway, not web).
+  ingress:
+    enabled: false
+    className: ""
+    host: ""
+    path: "/api/messages"
+    tlsSecretName: ""
+    annotations: {}

@@ -7,6 +7,7 @@ import copy
 import json
 from pathlib import Path
 import re
+import runpy
 import subprocess
 import tempfile
 import time
@@ -34,6 +35,61 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_real_failed_command_relays_sanitized_preparation_facts_without_its_output(self):
+        facts = {"step": "data-returned-identity", "source": "cli/src/lib/sre-migration-data.ts",
+                 "kind": "KarsTask", "category": "local-check"}
+        stderr = "PRIVATE-RESPONSE\nSRE-SCHEMA-PREPARATION " + json.dumps(facts) + "\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            h = Harness.__new__(Harness)
+            h.work = h.root = Path(temporary)
+            h.deadline, h.phase = time.monotonic() + 20, "prepare"
+            with patch("builtins.print") as printed, self.assertRaisesRegex(AssertionError, "Command failed"):
+                h.run(["python3", "-c", f"import sys; sys.stderr.write({stderr!r}); sys.exit(1)"])
+            output = " ".join(str(call) for call in printed.call_args_list)
+            self.assertIn("SRE-SCHEMA-PREPARATION-FACTS", output)
+            self.assertIn("data-returned-identity", output)
+            self.assertNotIn("PRIVATE-RESPONSE", output)
+
+    def test_schema_preparation_diagnostics_preserve_only_fixed_child_source_and_shape(self):
+        from sre_authority.schema_preparation_diagnostics import schema_preparation_failure
+        facts = {"step": "schema-preview-identity", "source": "cli/src/lib/schema-stage.ts",
+                 "kind": "KarsBudgetAccount", "category": "local-check",
+                 "shape": {"uid": "string", "resourceVersion": "missing", "kind": "string", "apiVersion": "string"}}
+        prefix = "SRE-SCHEMA-PREPARATION "
+        self.assertEqual(schema_preparation_failure("PRIVATE\n" + prefix + json.dumps(facts) + "\nPRIVATE"), facts)
+        for key, value in (("step", "PRIVATE"), ("source", "PRIVATE"), ("kind", "PRIVATE"),
+                           ("raw", "PRIVATE"), ("field", "spec/PRIVATE"), ("reason", "PRIVATE"),
+                           ("shape", {"uid": "PRIVATE"})):
+            with self.subTest(key=key):
+                self.assertIsNone(schema_preparation_failure(prefix + json.dumps({**facts, key: value})))
+        self.assertIsNone(schema_preparation_failure(prefix + "{invalid PRIVATE"))
+        self.assertEqual(schema_preparation_failure((prefix + json.dumps(facts) + "\n") * 2),
+                         {"category": "ambiguous"})
+
+    def test_schema_preparation_diagnostic_vocabulary_matches_the_cli_source(self):
+        from sre_authority.schema_preparation_diagnostics import FIELDS, KINDS, SOURCES
+        root = Path(__file__).resolve().parents[3]
+        source = (root / "cli/src/lib/sre-schema-diagnostics.ts").read_text()
+        steps = re.search(r"const sources = \{(.*?)\} as const;", source, re.S).group(1)
+        self.assertEqual(dict(re.findall(r'"([^"]+)": "([^"]+)"', steps)), SOURCES)
+        for name, expected in (("kinds", KINDS), ("fields", FIELDS - {"unrecognized"})):
+            literal = re.search(rf"const {name} = new Set\(\[(.*?)\]\);", source, re.S).group(1)
+            self.assertEqual(set(re.findall(r'"([^"]+)"', literal)), expected)
+
+    def test_sre_stage_diagnostics_keep_only_fixed_known_phase_names(self):
+        from sre_authority.common import command_error_category
+        private = "DO-NOT-EMIT-PRIVATE-DATA"
+        for stage in ("action-schema-review", "helm-server-dry-run", "core-schema-preparation"):
+            value = command_error_category(f"{private}\nSRE-STAGE-FAILURE {stage}\n{private}")
+            self.assertEqual(value, "sre-stage:" + stage)
+            self.assertNotIn(private, value)
+        for value in (f"SRE-STAGE-FAILURE {private}",
+                      f"SRE-STAGE-FAILURE action-schema-review {private}"):
+            self.assertEqual(command_error_category(value), "unclassified")
+        self.assertEqual(command_error_category(
+            "SRE-STAGE-FAILURE action-schema-review\nSRE-STAGE-FAILURE helm-server-dry-run"),
+            "sre-stage:ambiguous")
+
     def test_hermes_runtime_assertion_verifies_exact_pin_and_runtime_without_blanket_standin_acceptance(self):
         helper = Path(__file__).resolve().parents[1] / "sre-authority.sh"
         cases = [
@@ -499,16 +555,17 @@ class HarnessTests(unittest.TestCase):
         root = Path(__file__).resolve().parents[3]
         workflow = (root / ".github/workflows/ci.yml").read_text()
         kind = workflow.split("  e2e-kind:", 1)[1].split("  bench-regression:", 1)[0]
-        expression = re.search(r"\| grep -E '([^']+)'", kind)
-        self.assertIsNotNone(expression)
-        pattern = expression.group(1)
+        self.assertIn("ci/bridge_contracts.py --output run --core-only", kind)
+        required = runpy.run_path(str(root / "ci/bridge_contracts.py"))["native_required"]
         for path in ("shared/sre_privacy.rs", "shared/another_security_module.rs",
-                     "controller/src/sre_authority.rs", "cli/src/lib/sre-authority.ts"):
+                     "controller/src/sre_authority.rs", "cli/src/lib/sre-authority.ts",
+                     "cli/src/lib/private-activation.ts", "runtimes/openclaw/skills/SKILL.md",
+                     "unrelated/shared/sre_privacy.rs"):
             with self.subTest(path=path):
-                self.assertRegex(path, pattern)
-        for path in ("docs/how-to/sre-authority.md", "unrelated/shared/sre_privacy.rs"):
+                self.assertTrue(required([path], core_only=True))
+        for path in ("docs/how-to/sre-authority.md", "bridge/web/src/page.tsx"):
             with self.subTest(path=path):
-                self.assertNotRegex(path, pattern)
+                self.assertFalse(required([path], core_only=True))
 
 
 if __name__ == "__main__":

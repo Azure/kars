@@ -1,4 +1,5 @@
 {{- $localInference := .Values.localInference | default dict }}
+{{- $privacyRpc := .Values.observationPrivacyRpc | default dict }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -60,6 +61,14 @@ spec:
               valueFrom:
                 fieldRef:
                   fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            {{- if ($privacyRpc.enabled | default false) }}
+            - name: KARS_OBSERVATION_PRIVACY_RPC_ENABLED
+              value: "true"
+            {{- end }}
             - name: AZURE_WI_CLIENT_ID
               value: {{ .Values.azure.workloadIdentity.clientId | quote }}
             - name: KARS_SANDBOX_NODE_SELECTOR_JSON
@@ -184,6 +193,11 @@ spec:
             - name: metrics
               containerPort: 9091
               protocol: TCP
+            {{- if ($privacyRpc.enabled | default false) }}
+            - name: privacy-rpc
+              containerPort: 9448
+              protocol: TCP
+            {{- end }}
           securityContext:
             readOnlyRootFilesystem: true
             allowPrivilegeEscalation: false
