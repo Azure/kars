@@ -68,6 +68,13 @@ function unchangedSecretMetadata(current: ObjectValue, before: ObjectValue, inpu
   };
   return current.type === "Opaque" && sameBody(comparable(current), comparable(before));
 }
+function projectionMetadataView(metadata: ObjectValue, before: ObjectValue): ObjectValue {
+  const comparable = structuredClone(metadata);
+  // Default kubectl JSON omits managedFields, whereas JSONPath retains them.
+  // Match only that printer difference; a captured field remains authoritative.
+  if (!Object.hasOwn(record(before.metadata), "managedFields")) delete comparable.managedFields;
+  return comparable;
+}
 function data(secret: ObjectValue): ObjectValue { return record(secret.data ?? {}); }
 function readyTask(task: ObjectValue, original: Json): boolean {
   const condition = array(at(task, "status", "conditions") ?? []);
@@ -261,8 +268,17 @@ export async function observeWriterSettlement(
     if (unchanged && gen(deployment) !== gen(before.deployment) && (!runtime.pauseSeen || gen(deployment) !== restoredGeneration)) throw new Error(ERROR);
     const projectionAfter = await readSecretMetadata(execute, reviewed(projection).name, ns);
     const deploymentAfter = await read(execute, "deployments.apps", reviewed(deployment).name, ns);
-    if (!projectionAfter || !unchangedSecretMetadata({ metadata: projectionAfter, type: "Opaque" },
-      { metadata: runtime.projection.metadata!, type: "Opaque" }) || !possibleTransition(deploymentAfter, runtime)) throw new Error(ERROR);
+    const checks = {
+      projectionMetadataPresent: projectionAfter !== undefined,
+      projectionMetadataMatches: projectionAfter !== undefined && unchangedSecretMetadata({
+        metadata: projectionMetadataView(projectionAfter, runtime.projection), type: "Opaque",
+      }, { metadata: runtime.projection.metadata!, type: "Opaque" }),
+      deploymentTransitionMatches: possibleTransition(deploymentAfter, runtime),
+    };
+    if (!checks.projectionMetadataPresent || !checks.projectionMetadataMatches || !checks.deploymentTransitionMatches) {
+      console.error(`KARS_PRIVATE_WRITER_RECHECK ${JSON.stringify(checks)}`);
+      throw new Error(ERROR);
+    }
     if (reviewed({ metadata: projectionAfter }).resourceVersion !== reviewed(projection).resourceVersion
       || reviewed(deploymentAfter).resourceVersion !== reviewed(deployment).resourceVersion) {
       allReady = false;
