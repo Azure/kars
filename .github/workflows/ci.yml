@@ -416,9 +416,11 @@ jobs:
           version: v1.30.5
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
       - name: Check public-schema diagnostic privacy
-        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test sre_authority.connection_proxy_test credential_schema_test credential_policy_schema_test eval_pod_admission_test private_consumption_test receipt_log_rotation_test governed_services_test
+        run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test sre_authority.connection_proxy_test credential_schema_test credential_policy_schema_test sandbox_condition_schema_test eval_pod_admission_test private_consumption_test receipt_log_rotation_test governed_services_test
       - name: Create the same disposable API server as the real harness
         run: kind create cluster --name kars-e2e --config tests/e2e/kind-config.yaml --kubeconfig "$KUBECONFIG"
+      - name: Prove native Sandbox condition generation pruning, retention and type validation
+        run: PYTHONPATH=tests/e2e python3 -m sandbox_condition_schema
       - name: Prove native historical Helm wait orders CRDs before hooks and permits schema upgrades
         run: PYTHONPATH=tests/e2e python3 -m sre_authority.legacy_crd_probe
       - name: Reset disposable cluster after historical Helm proof
@@ -457,6 +459,7 @@ jobs:
             e2e-sre-schema-diag/validation-instances.json
             e2e-sre-schema-diag/credential-namespace-uid.json
             e2e-sre-schema-diag/credential-policy-typechecking.json
+            e2e-sre-schema-diag/sandbox-condition-generation.json
             e2e-sre-schema-diag/namespace-accessor-candidate.json
             e2e-sre-schema-diag/namespace-accessor-candidate-instances.json
             e2e-sre-schema-diag/bootstrap-*.json

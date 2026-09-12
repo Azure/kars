@@ -11,6 +11,43 @@ import { CANONICAL_SCHEMAS, EVALUATOR_V2, MIGRATION } from "./sre-migration-cata
 import { planCoreHelmSchemas } from "./core-helm-schemas.js";
 
 describe("closed BASE365 SRE schema migration", () => {
+  it("qualifies only the exact optional Sandbox condition generation addition", async () => {
+    const f = migrationFixture();
+    const target = f.after.find(object => object.spec.names.kind === "KarsSandbox")!;
+    const previous = structuredClone(target);
+    const condition = previous.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.conditions.items;
+    expect(condition.properties.observedGeneration).toEqual({ type: "integer", format: "int64" });
+    expect(condition.required ?? []).not.toContain("observedGeneration");
+    delete condition.properties.observedGeneration;
+    expect(schemaDigest(normalizedCrd(previous))).toBe("da674a84c19c8ac64a1d96d04f79435c6899601426e25931feaca483f139b920");
+    expect(schemaDigest(normalizedCrd(target))).toBe("5d495b8cfe5e4526741a673161cbae0492812e2650c2f2d08c5e522a3bda946f");
+    expect(CANONICAL_SCHEMAS[target.metadata.name].after).toContain(schemaDigest(normalizedCrd(previous)));
+    expect(() => assertSchemaCompatibility(previous, target)).not.toThrow();
+    expect(await qualifySreSchemaMigration(f.execute, f.after, f.owner)).toBeDefined();
+    condition.properties.observedGeneration = { type: "string" };
+    expect(() => assertSchemaCompatibility(target, previous)).toThrow();
+    f.after[f.after.indexOf(target)] = previous;
+    await expect(qualifySreSchemaMigration(f.execute, f.after, f.owner)).rejects.toThrow();
+    expect(f.writes).toEqual([]);
+  });
+
+  it("upgrades a previously qualified Sandbox target on the strict ordinary path", async () => {
+    const f = migrationFixture();
+    for (const target of f.after) f.install(target);
+    const sandbox = f.objects.get("karssandboxes.kars.azure.com")!;
+    delete sandbox.spec.versions[0].schema.openAPIV3Schema.properties.status.properties.conditions.items.properties.observedGeneration;
+    f.objects.get("kars-controller")!.spec.replicas = 1;
+    const manifest = f.after.map(object => object.metadata.name === sandbox.metadata.name ? sandbox : object)
+      .map(object => JSON.stringify(object)).join("\n---\n");
+    const execute: typeof f.execute = async (file, args, options) => {
+      if (file === "helm" && args[0] === "get" && args[1] === "manifest") return { stdout: manifest };
+      return f.execute(file, args, options);
+    };
+    await stageCoreSchemaDocuments(execute, f.after, { ...f.owner, ...f.wait });
+    expect(f.writes).toHaveLength(1);
+    expect(f.writes[0].metadata.name).toBe(sandbox.metadata.name);
+  });
+
   it.each([false, true])("pins complete before/after schemas including evaluator-v2=%s", evalV2 => {
     const { before, after } = canonicalMigrationSchemas(evalV2);
     expect(before).toHaveLength(18);
