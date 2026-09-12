@@ -2,9 +2,14 @@
 // Licensed under the MIT License.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { execFile } from "node:child_process";
+import { createServer } from "node:http";
+import { devNull } from "node:os";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 import { applyReviewedGrant } from "../commands/credential-grants.js";
 import { continuityFixture, privateAuthoritySnapshot } from "./private-activation-fixtures.js";
-import { canonical, PRIVATE_PREFIX as P, type Execute } from "./private-activation.js";
+import { canonical, readSecretMetadata, PRIVATE_PREFIX as P, type Execute } from "./private-activation.js";
 import { captureGuardRetirement, refreshGuardRetirement } from "./private-activation-guard-retirement.js";
 import { captureWriterSettlement } from "./private-activation-writer-settle.js";
 
@@ -16,6 +21,43 @@ const REVISION = "deployment.kubernetes.io/revision";
 const AUTH = `sha256:${"a".repeat(64)}`;
 const consumer = "kars-late/Deployment/late";
 const data = { SLACK_BOT_TOKEN: Buffer.from("original-customer-token").toString("base64") };
+const managedFields = [{ manager: "kars-controller", operation: "Update", apiVersion: "v1",
+  fieldsType: "FieldsV1", fieldsV1: { "f:data": { ".": {}, "f:SLACK_BOT_TOKEN": {} } } }];
+
+async function projectionWire() {
+  let secret: any;
+  const requests: string[] = [];
+  const server = createServer((request, response) => {
+    const path = new URL(request.url!, "http://127.0.0.1").pathname;
+    requests.push(`${request.method} ${path}`);
+    const objects: Record<string, unknown> = {
+      "/api": { apiVersion: "v1", kind: "APIVersions", versions: ["v1"], serverAddressByClientCIDRs: [] },
+      "/apis": { apiVersion: "v1", kind: "APIGroupList", groups: [] },
+      "/api/v1": { apiVersion: "v1", kind: "APIResourceList", groupVersion: "v1",
+        resources: [{ name: "secrets", singularName: "secret", namespaced: true, kind: "Secret", verbs: ["get", "list"] }] },
+      [`/api/v1/namespaces/${secret?.metadata.namespace}/secrets/${secret?.metadata.name}`]: secret,
+    };
+    response.writeHead(path in objects ? 200 : 404, { "Content-Type": "application/json", Connection: "close" });
+    response.end(JSON.stringify(objects[path] ?? { apiVersion: "v1", kind: "Status", status: "Failure", reason: "NotFound", code: 404 }));
+  });
+  await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
+  const address = server.address();
+  if (!address || typeof address === "string") throw new Error("Loopback fixture address missing");
+  return {
+    requests,
+    get: async (args: string[], value: any) => {
+      secret = structuredClone({ apiVersion: "v1", ...value });
+      // A regular project file is a non-directory cache root: kubectl cannot
+      // create cache files, and the fixture never touches a user's kubeconfig.
+      const result = await promisify(execFile)("kubectl", [
+        "--kubeconfig", devNull, "--cache-dir", fileURLToPath(new URL("../../package.json", import.meta.url)),
+        "--server", `http://127.0.0.1:${address.port}`, "--request-timeout=3s", ...args,
+      ], { encoding: "utf8", timeout: 10_000, windowsHide: true });
+      return result.stdout;
+    },
+    close: () => new Promise<void>((resolve, reject) => server.close(error => error ? reject(error) : resolve())),
+  };
+}
 
 async function setup(originalRuntime = false) {
   const f = continuityFixture();
@@ -103,6 +145,7 @@ async function setup(originalRuntime = false) {
   let allowRestore = true;
   let restoreAt = 2;
   let emptyReads = 0;
+  let projectionPrinter: ((args: string[], secret: any) => Promise<string>) | undefined;
   let fault: ((stage: string) => void) | undefined;
   const restore = () => {
     restored = true;
@@ -122,7 +165,10 @@ async function setup(originalRuntime = false) {
     fault?.("restored");
   };
   const execute: Execute = async (args, inputValue) => {
-    const result = await f.execute(args, inputValue);
+    let result = await f.execute(args, inputValue);
+    if (projectionPrinter && args[0] === "get" && args[1] === "secret" && args[2] === projection.metadata.name) {
+      result = await projectionPrinter(args, structuredClone(projection));
+    }
     if (allowRestore && retired && !restored && args[0] === "get" && args[1] === "secret" && args[2] === projection.metadata.name) {
       if (++emptyReads === restoreAt) restore();
     }
@@ -176,12 +222,100 @@ async function setup(originalRuntime = false) {
     rootDeployment: f.deployment, rootPods: f.pods.get("core"), input, taskSpec: task.spec, sandboxSpec: sandbox.spec });
   return { ...f, execute, document, passiveExecute: f.execute, preserved, task, sandbox, namespace, deployment, bundle, projection, input, admin,
     fault: (callback: (stage: string) => void) => { fault = callback; }, restore, wasRestored: () => restored,
-    neverRestore: () => { allowRestore = false; }, delayRestore: () => { restoreAt = 8; } };
+    neverRestore: () => { allowRestore = false; }, delayRestore: () => { restoreAt = 8; },
+    projectionPrinter: (printer: (args: string[], secret: any) => Promise<string>) => { projectionPrinter = printer; } };
 }
 
 describe("late runtime authority across selected writer retirement", () => {
   beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => {}); });
   afterEach(() => { vi.restoreAllMocks(); });
+
+  it("proves the real JSON and metadata JSONPath printer views differ only in managedFields", async () => {
+    const f = await setup();
+    const wire = await projectionWire();
+    f.projection.metadata.managedFields = managedFields;
+    try {
+      const args = ["get", "secret", f.projection.metadata.name, "-n", "kars-late", "-o", "json"];
+      const full = JSON.parse(await wire.get(args, f.projection));
+      const metadata = await readSecretMetadata(args => wire.get(args, f.projection), f.projection.metadata.name, "kars-late");
+      expect(full.metadata).not.toHaveProperty("managedFields");
+      expect(metadata.managedFields).toEqual(managedFields);
+      const comparable = structuredClone(metadata);
+      delete comparable.managedFields;
+      expect(comparable).toEqual(full.metadata);
+      expect(metadata).not.toHaveProperty("data");
+      expect(JSON.stringify(metadata)).not.toContain(data.SLACK_BOT_TOKEN);
+      expect(wire.requests.every(request => request.startsWith("GET "))).toBe(true);
+    } finally { await wire.close(); }
+  }, 20_000);
+
+  it("completes shipped apply with the actual kubectl projection printer views", async () => {
+    const f = await setup();
+    const wire = await projectionWire();
+    f.projection.metadata.managedFields = managedFields;
+    f.projectionPrinter(wire.get);
+    const before = f.preserved();
+    try {
+      await applyReviewedGrant(f.execute, await f.document());
+      expect(f.namespace.metadata.annotations[`${P}state`]).toBe("Qualified");
+      expect(f.projection.data).toEqual(data);
+      expect(f.projection.metadata.managedFields).toEqual(managedFields);
+      expect(f.preserved()).toEqual(before);
+      expect(wire.requests.some(request => request.endsWith("/secrets/late-credential-projection"))).toBe(true);
+      expect(wire.requests.every(request => request.startsWith("GET "))).toBe(true);
+    } finally { await wire.close(); }
+  }, 30_000);
+
+  it.each(["labels", "annotations", "owner", "uid", "namespace", "captured-managed-fields", "deployment-transition"])(
+    "preserves the real-wire %s metadata fence", async fault => {
+      const f = await setup();
+      const wire = await projectionWire();
+      f.projection.metadata.managedFields = managedFields;
+      f.projectionPrinter(async (args, value) => {
+        const metadataOnly = args.includes("jsonpath-as-json={.metadata}");
+        const request = !metadataOnly && fault === "captured-managed-fields" ? [...args, "--show-managed-fields=true"] : args;
+        if (metadataOnly) {
+          if (fault === "labels") value.metadata.labels = { unreviewed: "must-not-be-logged" };
+          if (fault === "annotations") value.metadata.annotations.unreviewed = "must-not-be-logged";
+          if (fault === "owner") value.metadata.ownerReferences[0].uid = "changed-owner";
+          if (fault === "uid") value.metadata.uid = "changed-projection";
+          if (fault === "namespace") value.metadata.annotations[`${C}namespace-uid`] = "changed-namespace";
+          if (fault === "captured-managed-fields") value.metadata.managedFields[0].manager = "changed-manager";
+          if (fault === "deployment-transition") f.deployment.spec.template.spec.containers[0].image = "unreviewed-image";
+        }
+        return wire.get(request, value);
+      });
+      try {
+        await expect(applyReviewedGrant(f.execute, await f.document())).rejects.toThrow("captured runtime authority");
+        expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+        const markers = vi.mocked(console.error).mock.calls.map(([value]) => String(value))
+          .filter(value => value.startsWith("KARS_PRIVATE_WRITER_RECHECK "));
+        expect(markers).toEqual([`KARS_PRIVATE_WRITER_RECHECK ${JSON.stringify({
+          projectionMetadataPresent: true, projectionMetadataMatches: fault === "deployment-transition",
+          deploymentTransitionMatches: fault !== "deployment-transition",
+        })}`]);
+        expect(markers.join("")).not.toContain("must-not-be-logged");
+      } finally { await wire.close(); }
+    }, 30_000);
+
+  it("does not normalize a real-wire projection resourceVersion mismatch", async () => {
+    const f = await setup();
+    const wire = await projectionWire();
+    f.projection.metadata.managedFields = managedFields;
+    f.neverRestore();
+    f.projectionPrinter(async (args, value) => {
+      if (args.includes("jsonpath-as-json={.metadata}")) {
+        value.metadata.resourceVersion = "unreviewed-version";
+        vi.spyOn(Date, "now").mockReturnValue(Date.now() + 121_000);
+      }
+      return wire.get(args, value);
+    });
+    try {
+      await expect(applyReviewedGrant(f.execute, await f.document())).rejects.toThrow("awaiting fresh Task attestation");
+      expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+      expect(f.grant().spec.writers).toEqual([]);
+    } finally { await wire.close(); }
+  }, 30_000);
 
   it("reproduces the rejected null attestation in the original immediate post-retirement validation", async () => {
     const f = await setup();
