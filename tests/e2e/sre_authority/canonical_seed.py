@@ -24,6 +24,8 @@ WORKLOADS = (
     "/apis/batch/v1/jobs", "/apis/batch/v1/cronjobs",
 )
 NESTED_FIELD = "spec.action.params.opaque.nested"
+PENDING_POLICY = "kars-sre-pending-proposals"
+PENDING_REQUIREMENT = "SRE actions must be created Pending; approval is a separate operator action"
 
 
 def seed_definitions():
@@ -50,6 +52,10 @@ def nested_action_definition(*, after_migration):
     suffix = "after" if after_migration else "before"
     obj["metadata"]["name"] += f"-nested-{suffix}"
     obj["spec"]["action"]["params"]["opaque"] = {"nested": [1, "retained", True]}
+    if after_migration:
+        # The new CREATE-only guard requires Pending; the stored legacy
+        # Rejected action is preserved and is never approved or rewritten.
+        obj["spec"]["approval"]["state"] = "Pending"
     return obj
 
 
@@ -100,6 +106,10 @@ def seed_status(resource, code, body):
                 validation.add(category)
     message = body.get("message")
     if isinstance(message, str):
+        if (resource == "karssreaction" and code == 403 and body.get("reason") == "Forbidden"
+                and PENDING_REQUIREMENT in message[:16384]
+                and any(quoted in message[:16384] for quoted in (f"'{PENDING_POLICY}'", f'"{PENDING_POLICY}"'))):
+            report["admissionRules"] = [PENDING_POLICY]
         # BadRequest strict-decoding errors often have no structured causes.
         # Only exact field paths in our fixed public bodies may leave this parser.
         for field in re.findall(r'unknown field "([^"\r\n]{1,256})"', message[:16384]):
