@@ -35,6 +35,47 @@ class Response:
 
 
 class HarnessTests(unittest.TestCase):
+    def test_real_failed_command_relays_sanitized_preparation_facts_without_its_output(self):
+        facts = {"step": "data-returned-identity", "source": "cli/src/lib/sre-migration-data.ts",
+                 "kind": "KarsTask", "category": "local-check"}
+        stderr = "PRIVATE-RESPONSE\nSRE-SCHEMA-PREPARATION " + json.dumps(facts) + "\n"
+        with tempfile.TemporaryDirectory() as temporary:
+            h = Harness.__new__(Harness)
+            h.work = h.root = Path(temporary)
+            h.deadline, h.phase = time.monotonic() + 20, "prepare"
+            with patch("builtins.print") as printed, self.assertRaisesRegex(AssertionError, "Command failed"):
+                h.run(["python3", "-c", f"import sys; sys.stderr.write({stderr!r}); sys.exit(1)"])
+            output = " ".join(str(call) for call in printed.call_args_list)
+            self.assertIn("SRE-SCHEMA-PREPARATION-FACTS", output)
+            self.assertIn("data-returned-identity", output)
+            self.assertNotIn("PRIVATE-RESPONSE", output)
+
+    def test_schema_preparation_diagnostics_preserve_only_fixed_child_source_and_shape(self):
+        from sre_authority.schema_preparation_diagnostics import schema_preparation_failure
+        facts = {"step": "schema-preview-identity", "source": "cli/src/lib/schema-stage.ts",
+                 "kind": "KarsBudgetAccount", "category": "local-check",
+                 "shape": {"uid": "string", "resourceVersion": "missing", "kind": "string", "apiVersion": "string"}}
+        prefix = "SRE-SCHEMA-PREPARATION "
+        self.assertEqual(schema_preparation_failure("PRIVATE\n" + prefix + json.dumps(facts) + "\nPRIVATE"), facts)
+        for key, value in (("step", "PRIVATE"), ("source", "PRIVATE"), ("kind", "PRIVATE"),
+                           ("raw", "PRIVATE"), ("field", "spec/PRIVATE"), ("reason", "PRIVATE"),
+                           ("shape", {"uid": "PRIVATE"})):
+            with self.subTest(key=key):
+                self.assertIsNone(schema_preparation_failure(prefix + json.dumps({**facts, key: value})))
+        self.assertIsNone(schema_preparation_failure(prefix + "{invalid PRIVATE"))
+        self.assertEqual(schema_preparation_failure((prefix + json.dumps(facts) + "\n") * 2),
+                         {"category": "ambiguous"})
+
+    def test_schema_preparation_diagnostic_vocabulary_matches_the_cli_source(self):
+        from sre_authority.schema_preparation_diagnostics import FIELDS, KINDS, SOURCES
+        root = Path(__file__).resolve().parents[3]
+        source = (root / "cli/src/lib/sre-schema-diagnostics.ts").read_text()
+        steps = re.search(r"const sources = \{(.*?)\} as const;", source, re.S).group(1)
+        self.assertEqual(dict(re.findall(r'"([^"]+)": "([^"]+)"', steps)), SOURCES)
+        for name, expected in (("kinds", KINDS), ("fields", FIELDS - {"unrecognized"})):
+            literal = re.search(rf"const {name} = new Set\(\[(.*?)\]\);", source, re.S).group(1)
+            self.assertEqual(set(re.findall(r'"([^"]+)"', literal)), expected)
+
     def test_sre_stage_diagnostics_keep_only_fixed_known_phase_names(self):
         from sre_authority.common import command_error_category
         private = "DO-NOT-EMIT-PRIVATE-DATA"

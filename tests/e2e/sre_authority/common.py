@@ -15,6 +15,7 @@ import signal
 import ssl
 import subprocess
 import time
+from .schema_preparation_diagnostics import schema_preparation_failure
 
 CONTEXT = "kind-kars-e2e"
 SYSTEM = "kars-system"
@@ -253,6 +254,10 @@ class Harness:
             raise AssertionError(f"Command exceeded its bounded timeout at {command_site()}") from None
         result = subprocess.CompletedProcess(args, process.returncode, stdout, stderr)
         if expected is not None:
+            if result.returncode != expected:
+                facts = schema_preparation_failure(stderr)
+                if facts:
+                    print("SRE-SCHEMA-PREPARATION-FACTS " + json.dumps(facts, sort_keys=True), flush=True)
             # Never echo command output or argv: token/Secret reads are captured.
             require(result.returncode == expected,
                     f"Command failed during {self.phase} at {command_site()}; "

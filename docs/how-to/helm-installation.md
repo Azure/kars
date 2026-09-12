@@ -132,6 +132,12 @@ Before any real action/schema write, the CLI qualifies all schemas and a complet
 bounded inventory of affected objects, validates unchanged UID/RV-bound objects
 through **server dry-run PUTs**, and dry-runs every proposed CRD CREATE/SSA update.
 The full Helm stage is also server-previewed before applying the schema plan.
+An unpersisted CRD CREATE preview has an ephemeral UID but no storage
+resourceVersion. It is checked only as a preview of the exact proposed schema
+and ownership; its identity is never copied into the real CREATE. Existing
+objects, update previews and real publication still require their strict UID/RV
+identities. Fixed child-step diagnostics distinguish these checks without
+printing CR contents or raw API error bodies.
 Foreign ownership, customized/unknown before or after schemas, forbidden reads or
 dry-runs, incomplete inventories and late data/UID/RV changes stop the operation.
 The bound is 512 affected objects and 8 MiB total reviewed data; larger or actively
