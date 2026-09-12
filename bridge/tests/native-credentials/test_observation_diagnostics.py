@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from native_api import BRIDGE, CORE, WRITER, core, resource
 import api_outcome_diagnostics as api_outcomes
-from observation_diagnostics import TARGETS, VERSION, collect, project
+from observation_diagnostics import CLIENT_FIELDS, TARGETS, VERSION, collect, project
 
 
 def event(component="router", **updates):
@@ -82,6 +82,42 @@ def logs(*args, **kwargs):
 
 
 class ObservationDiagnosticsTests(unittest.TestCase):
+    def test_client_boundaries_are_fixed_value_free_and_do_not_claim_packet_delivery(self):
+        flags = {key: False for key in CLIENT_FIELDS}
+        flags.update(client_initialized=True, request_built=True, service_entered=True,
+                     dispatch_observable=True, after_auth_dispatch=True,
+                     config_observed=True, tls_verification=True)
+        raw = event(message="Private observation target client pending", stage="observer_target_client",
+                    http_status=0, url="private-url-canary", token="private-token-canary",
+                    certificate="private-certificate-canary", **flags)
+        self.assertEqual(project(raw, "router"), [
+            {"stage": "observer_target_client", "http_status": 0, **flags}])
+        self.assertNotIn("canary", json.dumps(project(raw, "router")))
+        self.assertEqual(project(raw, "controller"), [])
+        self.assertNotIn("packet", json.dumps(project(raw, "router")))
+
+    def test_client_boundary_fields_require_booleans_and_current_router_provenance(self):
+        flags = {key: False for key in CLIENT_FIELDS}
+        valid = json.loads(event(message="Private observation target client pending",
+                                 stage="observer_target_client", http_status=0, **flags))
+        for field in CLIENT_FIELDS:
+            for invalid in ("false", 0, None, [], {}):
+                value = copy.deepcopy(valid)
+                value["fields"][field] = invalid
+                self.assertEqual(project(json.dumps(value), "router"), [])
+            value = copy.deepcopy(valid)
+            del value["fields"][field]
+            self.assertEqual(project(json.dumps(value), "router"), [])
+        fixture = Fixture()
+        with patch("observation_diagnostics.command", return_value=json.dumps(valid)):
+            result = collect(SimpleNamespace(admin=fixture), TARGET)
+        self.assertEqual(result["samples"][1]["records"][0]["stage"], "observer_target_client")
+        fixture.objects[POD]["metadata"]["ownerReferences"][0]["uid"] = "replaced"
+        with patch("observation_diagnostics.command", return_value=json.dumps(valid)):
+            result = collect(SimpleNamespace(admin=fixture), TARGET)
+        self.assertFalse(result["samples"][1]["available"])
+        self.assertEqual(result["samples"][1]["records"], [])
+
     def test_only_fixed_fields_survive(self):
         result = project(event(error="private-body-canary", token="private-token-canary"), "router")
         self.assertEqual(result, [{"stage": "observer_target_read", "http_status": 403,

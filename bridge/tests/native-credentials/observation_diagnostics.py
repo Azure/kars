@@ -35,6 +35,13 @@ TARGETS = {
     "router": "kars_inference_router::observation_privacy",
 }
 
+CLIENT_FIELDS = (
+    "client_initialized", "request_built", "service_entered", "dispatch_observable", "after_auth_dispatch",
+    "response_headers", "config_observed", "https", "tls_verification",
+    "root_ca_present", "token_file_only", "proxy_configured",
+    "endpoint_environment_matches", "runtime_namespace_matches",
+)
+
 
 def project(raw, component):
     if component not in TARGETS:
@@ -48,9 +55,21 @@ def project(raw, component):
         if not isinstance(value, dict) or value.get("target") != TARGETS.get(component):
             continue
         fields = value.get("fields")
-        if not isinstance(fields, dict) or fields.get("message") != "Private observation readiness pending":
+        if not isinstance(fields, dict):
             continue
         stage, status = fields.get("stage"), fields.get("http_status")
+        if fields.get("message") == "Private observation target client pending":
+            if (component != "router" or stage != "observer_target_client"
+                    or type(status) is not int or not (status == 0 or 100 <= status <= 599)
+                    or any(type(fields.get(key)) is not bool for key in CLIENT_FIELDS)):
+                continue
+            record = {"stage": stage, "http_status": status,
+                      **{key: fields[key] for key in CLIENT_FIELDS}}
+            if not records or records[-1] != record:
+                records.append(record)
+            continue
+        if fields.get("message") != "Private observation readiness pending":
+            continue
         if (not isinstance(stage, str) or stage not in STAGES or type(status) is not int
                 or not (status == 0 or 100 <= status <= 599)
                 or type(fields.get("timeout")) is not bool or type(fields.get("connect")) is not bool):

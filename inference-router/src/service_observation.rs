@@ -17,6 +17,9 @@ use serde_json::json;
 use std::{path::Path, sync::Arc};
 use tokio::sync::OnceCell;
 
+#[path = "service_observation_client.rs"]
+mod client_diagnostics;
+
 pub struct Observer {
     binding: Binding,
     token: String,
@@ -79,7 +82,7 @@ impl Observer {
             .get_or_try_init(|| async {
                 let config = kube::Config::incluster()
                     .map_err(|_| "Observation metadata identity unavailable")?;
-                Client::try_from(config)
+                client_diagnostics::client(config)
                     .map_err(|_| "Observation metadata client unavailable".into())
             })
             .await
@@ -107,7 +110,12 @@ impl Observer {
             return Err("Observation service identity changed".into());
         }
         diagnostic.stage("observer_metadata_client");
+        let pending = client_diagnostics::Pending(client_diagnostics::Progress::new(format!(
+            "kars-{}",
+            scope.identity.sandbox.name
+        )));
         let client = self.client().await?;
+        pending.0.initialized();
         let namespace = scope.identity.sandbox.namespace.as_str();
         let sandbox_name = scope.identity.sandbox.name.as_str();
         let resource = ApiResource::from_gvk(&GroupVersionKind::gvk(
@@ -116,13 +124,20 @@ impl Observer {
             "KarsSandbox",
         ));
         diagnostic.stage("observer_target_read");
-        let sandbox = Api::<DynamicObject>::namespaced_with(client.clone(), namespace, &resource)
-            .get(sandbox_name)
+        let api = Api::<DynamicObject>::namespaced_with(client.clone(), namespace, &resource);
+        let mut request = kube::core::Request::new(api.resource_url())
+            .get(sandbox_name, &Default::default())
+            .map_err(|_| "Observation target request cannot be built")?;
+        request.extensions_mut().insert("get");
+        request.extensions_mut().insert(pending.0.clone());
+        pending.0.built();
+        let sandbox = client_diagnostics::read_target(client, request, &pending.0)
             .await
             .map_err(|error| {
                 diagnostic.api(&error);
                 "Observation target cannot be verified"
             })?;
+        pending.0.decoded();
         diagnostic.stage("observer_target_current");
         let observed = &sandbox.data["status"][STATUS_FIELD];
         if sandbox.metadata.uid.as_deref() != Some(scope.identity.sandbox.uid.as_str())
