@@ -452,6 +452,7 @@ jobs:
           path: |
             e2e-sre-schema-diag/versions.json
             e2e-sre-schema-diag/legacy-helm-readiness.json
+            e2e-sre-schema-diag/migration-seed-*.json
             e2e-sre-schema-diag/validation.json
             e2e-sre-schema-diag/validation-instances.json
             e2e-sre-schema-diag/credential-namespace-uid.json
