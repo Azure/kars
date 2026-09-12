@@ -53,6 +53,7 @@ def exercise(root):
             "apiServer": version, "legacyCommit": LEGACY_COMMIT,
             "historicalInstallAndPostInstallHook": "passed", "currentAuthorityServerDryRun": "passed",
             "historicalSeedStrictServerDryRuns": 5, "historicalSeedPersistence": "unchanged",
+            "historicalNestedParamsRejection": "passed",
             "controllerReplicas": 0, "legacyCRDs": 18, "crdCreation": "native-Helm-only"})
 
 
