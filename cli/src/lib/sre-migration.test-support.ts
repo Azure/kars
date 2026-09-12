@@ -79,6 +79,7 @@ export function canonicalMigrationSchemas(evalV2 = false): { before: ObjectMap[]
       removeBindings(spec);
       delete spec.properties.inferenceBudgetRef;
       delete root.properties.status.properties.serviceObservation;
+      delete root.properties.status.properties.conditions.items.properties.observedGeneration;
     }
     if (kind === "KarsSREAction") {
       const params = spec.properties.action.properties.params;

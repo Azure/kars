@@ -3,6 +3,7 @@
 
 // Complete normalized CRD specs: BASE365 8b206065608593667a40665b3f48225ef9ce278d
 // -> 470773c2 plus the independently approved b5ad6791 evaluator-v2 additions.
+// Also qualifies the optional Sandbox Condition observedGeneration addition.
 // Metadata/Helm retention is not part of these schema fingerprints.
 export const BASE365 = "8b206065608593667a40665b3f48225ef9ce278d";
 export const MIGRATION = "kars.azure.com/sre-base365-schema/v1";
@@ -25,7 +26,7 @@ export const CANONICAL_SCHEMAS: Readonly<Record<string, { before?: string; after
   "mcpservers.kars.azure.com": { before: "67f2913e504a28d92ed2cc773f75efe4d132de4dbe304330cccca222e93264fa", after: ["4f2b2d1c8e2b01235d48d1adc5fe8f45ad2362c623e519a64788106293430f1f"] },
   "toolpolicies.kars.azure.com": { before: "f594f5d274bb23e18e6a6f34227bb28a7dd20c7ebcfae8aa7975e3edea6c90f3", after: ["f594f5d274bb23e18e6a6f34227bb28a7dd20c7ebcfae8aa7975e3edea6c90f3"] },
   "trustgraphs.kars.azure.com": { before: "354d1f2405b0dd99fd963a49b2ec7e2a2dc702abe68a9fdc9b9088d3df412bf2", after: ["354d1f2405b0dd99fd963a49b2ec7e2a2dc702abe68a9fdc9b9088d3df412bf2"] },
-  "karssandboxes.kars.azure.com": { before: "d7ddb2d69dc654e3a457a4455c7de7e3f44ec42a9384a39e16816f012646e7da", after: ["da674a84c19c8ac64a1d96d04f79435c6899601426e25931feaca483f139b920"] },
+  "karssandboxes.kars.azure.com": { before: "d7ddb2d69dc654e3a457a4455c7de7e3f44ec42a9384a39e16816f012646e7da", after: ["da674a84c19c8ac64a1d96d04f79435c6899601426e25931feaca483f139b920", "5d495b8cfe5e4526741a673161cbae0492812e2650c2f2d08c5e522a3bda946f"] },
   "karspairings.kars.azure.com": { before: "18dd892fc268f575d67e44456a3031885645561c6b9ec1ae995faa659c8b2920", after: ["18dd892fc268f575d67e44456a3031885645561c6b9ec1ae995faa659c8b2920"] },
   "karsbudgetaccounts.kars.azure.com": { after: ["0706c8eb2b31308de59f6b388cf9744a0989ccdd7cc6173ef42c3eb331d91135"] },
   "karscredentialgrants.kars.azure.com": { after: ["5427f9dd6735d79b069abb24398161650c0dc56eed9dfc07dc92c094b4976b95"] },

@@ -43,6 +43,26 @@ means the object **is** degraded; for `Ready`, that it **is** ready.
 The sandbox carries a richer condition set because it owns the
 end-to-end runtime.
 
+`conditions[].observedGeneration` is an optional integer (`int64`) in the
+Helm schema, distinct from `status.observedGeneration`. Older Sandbox schemas
+omitted the per-condition property, so the API server pruned the generation
+the controller wrote. A top-level current generation alone does not establish
+current readiness.
+
+After installing the additive schema and updated controller, normal
+authoritative reconciliation backfills missing or stale generations on the
+conditions it computes. Same-status repairs retain transition timestamps,
+unrelated conditions and caller-supplied condition outcomes; the next identical
+reconcile is a no-op. Do not patch `Ready`, change customer intent to force a
+generation bump, or bypass the CLI's condition-generation check.
+
+The existing SRE CRD API CI lane runs
+`tests/e2e/sandbox_condition_schema.py` against its disposable API server.
+It owns a suspended fixture and writes only `SchemaProbe=Unknown`, proving the
+exact old schema prunes the field, the new schema retains an integer after a
+status write plus GET, and a wrong type is rejected at that field. This is
+schema evidence, not controller readiness or runtime qualification.
+
 | Type | `status` | Reasons emitted |
 |---|---|---|
 | `Ready` | True/False | `Created`, `Reconciled`, `SuspendedBySpec`, `Failed`, `AdapterMissing`, `OverlayMode`, `InferencePolicyNotFound`, `ToolPolicyNotFound`, `AwaitingFoundryProvisioning`, `AwaitingRouterEnforcement`, `RouterEnforcing` |
