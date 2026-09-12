@@ -47,6 +47,16 @@ class OperatorDiagnosticsTests(unittest.TestCase):
                      f"    at object (/cli/dist/lib/private-activation.js:1:2){PRIVATE}"):
             self.assertEqual(source_location(line), "unavailable")
 
+    def test_template_drift_uses_a_fixed_category_without_weakening_the_failure(self):
+        stderr = ("Error: Private consumer template changed after protection was enabled\n"
+                  f"    at reviewedOwner (/private/{PRIVATE}/cli/dist/lib/private-activation.js:680:23)\n")
+        with self.assertRaises(Failure) as failure:
+            operator_command("apply", sys.executable, "-c",
+                             "import sys; print(sys.argv[1],file=sys.stderr); sys.exit(1)", stderr, timeout=5)
+        self.assertEqual(str(failure.exception), "Native operator apply failed: consumer-template-drift "
+                         "(source=lib/private-activation:680)")
+        self.assertNotIn(PRIVATE, str(failure.exception))
+
     def test_late_scope_leaf_is_retained_instead_of_only_its_awaiting_caller(self):
         stderr = (
             f"{PRIVATE}\n"

@@ -16,6 +16,7 @@ from native_api import CORE, STATE, Failure, Setup, command, core, require, sche
 from observation_cases import ObservationCases
 from observation_diagnostics import collect as observation_diagnostics
 from observer_network_diagnostics import collect as observer_network_diagnostics
+from template_diagnostics import collect as template_diagnostics
 
 
 def diagnostics(setup):
@@ -116,6 +117,8 @@ def main():
             }
             if setup:
                 if name == "private-bff-observer-and-fresh-privacy-rpc":
+                    report["cases"][name]["enrollmentTemplateDrift"] = template_diagnostics(
+                        setup, observations.enrollment_templates, report["cases"][name]["failure"])
                     report["cases"][name]["observationReadiness"] = observation_diagnostics(
                         setup, observations.observer_target)
                     report["cases"][name]["actorApiOutcomes"] = api_outcome_diagnostics(
@@ -135,7 +138,8 @@ def main():
             save()
             print(json.dumps({"nativeCase": name, **{key: value for key, value in report["cases"][name].items()
                                                    if key not in ("metadataAtFailure", "observationReadiness",
-                                                                  "actorApiOutcomes", "observerApiReachability")}}), flush=True)
+                                                                  "actorApiOutcomes", "observerApiReachability",
+                                                                  "enrollmentTemplateDrift")}}), flush=True)
 
     def passed(name):
         return report["cases"].get(name, {}).get("result") == "passed"

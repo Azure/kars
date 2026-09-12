@@ -25,6 +25,7 @@ class ObservationCases:
     def __init__(self, setup, bff, lifecycle):
         self.setup, self.bff, self.lifecycle = setup, bff, lifecycle
         self.observer_target = None
+        self.enrollment_templates = None
 
     def target(self):
         require(self.observer_target is not None, "Independent native observation Task is not ready")
@@ -207,6 +208,11 @@ class ObservationCases:
         grant = self.setup.ready_grant(CORE)
         writer = self.setup.admin.get(core(BRIDGE, "serviceaccounts", WRITER))
         before = self.late_runtime_before()
+        self.enrollment_templates = {
+            "runtime": before["deployment"],
+            "controller": before["rootDeployment"],
+            "bff": self.setup.admin.get(resource(BRIDGE, "deployments", "kars-bridge-bff", "/apis/apps/v1")),
+        }
         enroll(self.setup, CORE, writer, grant["spec"]["agentKeys"], previous=grant, observations=[
             {"kind": "KarsSandbox", "namespace": CORE, "name": target["sandbox"], "uid": uid(value)},
         ])
