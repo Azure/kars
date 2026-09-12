@@ -17,7 +17,10 @@ describe("closed BASE365 SRE schema migration", () => {
     expect(after).toHaveLength(21);
     for (const object of before) expect(schemaDigest(normalizedCrd(object))).toBe(CANONICAL_SCHEMAS[object.metadata.name].before);
     for (const object of after) expect(CANONICAL_SCHEMAS[object.metadata.name].after).toContain(schemaDigest(normalizedCrd(object)));
-    if (evalV2) expect(schemaDigest(normalizedCrd(after.find(object => object.spec.names.kind === "KarsEval")!))).toBe(EVALUATOR_V2);
+    const evalCrd = after.find(object => object.spec.names.kind === "KarsEval")!;
+    const legacy = CANONICAL_SCHEMAS[evalCrd.metadata.name].after.filter(value => value !== EVALUATOR_V2);
+    expect(legacy).toHaveLength(1);
+    expect(schemaDigest(normalizedCrd(evalCrd))).toBe(evalV2 ? EVALUATOR_V2 : legacy[0]);
   });
 
   it.each([false, true])("preserves object data/UID/RV while applying only the qualified target (v2=%s)", async evalV2 => {
