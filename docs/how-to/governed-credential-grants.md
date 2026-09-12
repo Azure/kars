@@ -210,6 +210,13 @@ The complete target request, including body/error decoding, suppresses raw
 library logging; the caller emits bounded diagnostics outside that scope.
 Sibling requests keep their own logging and progress state.
 
+Operator command failures use `KARS_PRIVATE_COMMAND_FAILURE` with fixed phase,
+operation, resource-kind and server-reason classes plus a bounded exit code.
+The phase describes the attempted step, not a committed transition. Unknown
+reasons stay unknown; no HTTP status is inferred. Original argv, object names,
+values, stderr and error causes are not retained, and failed CAS operations
+are not retried or rebased by this diagnostic path.
+
 ## Operator workflow
 
 Private writer/observation activation is an additional review in the existing

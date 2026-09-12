@@ -5,6 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { applyReviewedGrant, credentialGrantsCommand } from "../commands/credential-grants.js";
 import { continuityFixture, privateAuthoritySnapshot } from "./private-activation-fixtures.js";
 import { PRIVATE_PREFIX as P, canonical, type Execute } from "./private-activation.js";
+import { PrivateCommandFailure } from "./private-activation-command-diagnostics.js";
 
 const HISTORY = `${P}root-retirement`;
 const VERSION = "kars.azure.com/services-credential-version";
@@ -134,6 +135,19 @@ describe("reviewed late runtime private enrollment", () => {
     vi.spyOn(console, "error").mockImplementation(() => {});
   });
   afterEach(() => { vi.restoreAllMocks(); });
+
+  it("sanitizes actual registered command process failures before exposing the exception", async () => {
+    cliProcess.execute.mockRejectedValue(Object.assign(new Error("private-argv-canary"), {
+      exitCode: 1, stderr: "Error from server (Forbidden): private-secret-canary", stdout: "private-data-canary",
+    }));
+    const result = await credentialGrantsCommand().parseAsync([
+      "preview", "--namespace", "private-name-canary", "--writer", "reader/bff",
+    ], { from: "user" }).then(() => undefined, error => error);
+    expect(result).toBeInstanceOf(PrivateCommandFailure);
+    expect(result.facts).toEqual({ version: 1, phase: "Unscoped", operation: "get",
+      resourceKind: "Namespace", serverReason: "Forbidden", exitCode: 1 });
+    expect(result.message + JSON.stringify(result)).not.toContain("canary");
+  });
 
   it("accepts an identical current Sandbox after an intervening status PATCH advances only resourceVersion", async () => {
     const f = await setup();

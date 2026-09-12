@@ -12,6 +12,7 @@ import {
 } from "../lib/private-activation.js";
 import { captureGuardRetirement, refreshGuardRetirement } from "../lib/private-activation-guard-retirement.js";
 import { captureWriterSettlement, observeWriterSettlement, settleWriterRetirement } from "../lib/private-activation-writer-settle.js";
+import { privateCommandFailure } from "../lib/private-activation-command-diagnostics.js";
 
 type Execute=(args:string[],input?:string)=>Promise<string>;
 const resource="karscredentialgrants.kars.azure.com";
@@ -195,8 +196,12 @@ export async function applyReviewedGrant(run:Execute,document:any):Promise<void>
 export function credentialGrantsCommand():Command {
   const command=new Command("grant").description("Preview and explicitly apply operator-owned credential authority");
   const execute=(context?:string):Execute=>async(args,input)=>{
-    const result=await execa("kubectl",[...(context?["--context",context]:[]),...args],{stdio:"pipe",...(input?{input}:{})});
-    return result.stdout;
+    try {
+      const result=await execa("kubectl",[...(context?["--context",context]:[]),...args],{stdio:"pipe",...(input?{input}:{})});
+      return result.stdout;
+    } catch(error) {
+      throw privateCommandFailure(error,args);
+    }
   };
   const repeat=(value:string,prior:string[])=>[...prior,value];
   command.command("preview").requiredOption("--namespace <namespace>")
