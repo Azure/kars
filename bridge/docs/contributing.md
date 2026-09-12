@@ -67,9 +67,13 @@ installation. Runtime acceptance uses that same core preparation entrypoint.
 Schema and admission warnings remain failures; no policy status or generation
 is changed merely to refresh a diagnostic.
 
-`Bridge component acceptance` aggregates every BFF, web, audit and add-on job
-and runs even for core-only PRs. Failed, cancelled or skipped component jobs
-cannot satisfy it. Together with `Require both native API and runtime acceptance`,
+`Bridge component acceptance` requires the exact component job set: `addon`,
+`bff`, `dependencies`, `lockfiles`, `rust-dependencies`, `secrets`, `security`
+and `web`. It runs even for core-only PRs. Missing, unexpected, failed, cancelled
+or skipped component jobs cannot satisfy it; removing a workflow dependency
+must not silently turn incomplete evidence green. Keep the workflow `needs`
+list, aggregate policy and regression cases in agreement when changing this set.
+Together with `Require both native API and runtime acceptance`,
 it provides stable check names for the integration merge policy rather than
 relying on path-filtered jobs that may never report.
 
@@ -80,6 +84,9 @@ add-on install/upgrade/uninstall checks retain their core resource/data
 preservation assertions.
 
 These workflow changes still require hosted qualification and integration into
-the required merge-check policy. Complete supported-version and standing-Team
+the required merge-check policy. See the
+[integration branch protection requirements](../../docs/operations/branch-protection.md#bridge-integration-branch)
+for activation order and exact required status names.
+Complete supported-version and standing-Team
 workflow coverage remains a separate acceptance requirement; passing scope or
 template checks alone does not establish compatibility.
