@@ -1,4 +1,4 @@
-# Branch Protection — `dev` and `main`
+# Branch Protection — `dev`, `main` and Bridge integration
 
 This is the canonical list of CI jobs that must be set as **required
 status checks** on `dev` and `main` for kars. Setting these as
@@ -57,3 +57,33 @@ Any new permanent CI row added under "supply-chain" or "conformance"
 should be added to the table above and to the branch-protection
 configuration in the same PR. Document the criterion in
 `docs/operations/supply-chain.md` if it gates a release surface.
+
+## Bridge integration branch
+
+`Azure/kars:kars-bridge` is the optional Bridge integration target. Its
+protection must retain all existing core, source-review and supply-chain
+requirements and additionally require these exact GitHub Actions status names:
+
+| Status name | Workflow | Required evidence |
+|---|---|---|
+| `Bridge component acceptance` | `bridge-ci.yml` | The complete BFF, web, dependency, lockfile, security and add-on lifecycle job set succeeds |
+| `Require both native API and runtime acceptance` | `bridge-native.yml` | Scope selection succeeds and both API/admission and runtime gates succeed, or an explicitly allowlisted documentation-only change reports no native execution |
+
+Bind both checks to the GitHub Actions app (ID `15368`), retain strict
+up-to-date-branch checking, and preserve the existing review, conversation
+resolution and administrator-enforcement settings. Do not replace the existing
+required checks or accept a similarly named status from another app.
+
+During initial publication, land the qualified core prerequisites first.
+Those core-only PRs do not yet contain the Bridge workflows and cannot report
+these statuses. After the complete application PR reports both aggregate
+checks, add them to the `kars-bridge` protection rule **before merging that PR**
+and verify the resulting rule and exact-head outcomes. Keep them required for
+subsequent core and Bridge changes. This document specifies the required
+configuration; it does not apply or attest to live branch protection.
+
+This integration policy does not change `main` or `dev`, normal releases, or
+standalone Kars installation. Core CI continues to build and exercise core with
+`bridge/` absent. Paired CI qualifies the optional add-on against the same
+immutable source, not every historical or future version combination; full
+standing-Team workflow acceptance remains a separate requirement.

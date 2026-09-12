@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import runpy
@@ -90,14 +91,53 @@ class ContractScopeTests(GitFixture):
 
 
 class ContractAggregateTests(unittest.TestCase):
+    components = (
+        "addon", "bff", "dependencies", "lockfiles",
+        "rust-dependencies", "secrets", "security", "web",
+    )
+
+    def component_success(self):
+        return {name: {"result": "success"} for name in self.components}
+
     def test_component_aggregate_rejects_missing_failed_or_skipped_jobs(self):
         check = runpy.run_path(str(CI / "bridge_component_results.py"))["require_success"]
-        check({"bff": {"result": "success"}, "web": {"result": "success"}})
+        check(self.component_success())
         for result in ({}, [], None, {"bff": {}}, {"bff": None},
                        {"bff": {"result": "success"}, "web": {"result": "failure"}},
                        {"bff": {"result": "skipped"}}, {"bff": {"result": "cancelled"}}):
             with self.subTest(result=result), self.assertRaises(ValueError):
                 check(result)
+        for name in self.components:
+            missing = self.component_success()
+            del missing[name]
+            with self.subTest(missing=name), self.assertRaises(ValueError):
+                check(missing)
+            for outcome in (None, {}, {"result": "failure"}, {"result": "cancelled"},
+                            {"result": "skipped"}, {"result": "neutral"}):
+                result = self.component_success()
+                result[name] = outcome
+                with self.subTest(job=name, outcome=outcome), self.assertRaises(ValueError):
+                    check(result)
+        unexpected = {**self.component_success(), "unexpected": {"result": "success"}}
+        with self.assertRaises(ValueError):
+            check(unexpected)
+
+    def test_component_workflow_entrypoint_requires_complete_results(self):
+        partial = self.component_success()
+        del partial["security"]
+        environment = {key: value for key, value in os.environ.items()
+                       if key != "COMPONENT_RESULTS"}
+        for payload, expected in ((json.dumps(self.component_success()), 0),
+                                  (json.dumps(partial), 1), ("not-json", 1),
+                                  ("null", 1), (None, 1)):
+            with self.subTest(payload=payload):
+                result = subprocess.run(
+                    ["python3", str(CI / "bridge_component_results.py")],
+                    text=True, capture_output=True, timeout=10,
+                    env={**environment, **({} if payload is None else
+                                          {"COMPONENT_RESULTS": payload})},
+                )
+                self.assertEqual(result.returncode, expected, result.stderr)
 
     def test_only_required_success_or_explicit_docs_skip_passes(self):
         for required, scope_result, api, runtime, expected in (
