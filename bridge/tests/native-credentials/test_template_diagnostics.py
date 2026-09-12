@@ -97,7 +97,7 @@ class TemplateDiagnosticsTests(unittest.TestCase):
             with self.assertRaises(Failure):
                 diagnostics.project(before, before, invalid, "a" * 64, "b" * 64)
 
-    def collect(self, *, mutate_review=None, changed_on_recheck=False, unavailable_hashes=False):
+    def collect(self, *, mutate_review=None, changed_on_recheck=False, unavailable_hashes=False, failure=FAILURE):
         baselines = {actor: deployment(actor) for actor in diagnostics.ACTORS}
         document = {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsCredentialGrant",
                     "metadata": {"name": "workspace", "namespace": "kars-system"},
@@ -124,7 +124,7 @@ class TemplateDiagnosticsTests(unittest.TestCase):
             with patch.object(diagnostics, "ROOT", root), \
                  patch.object(diagnostics, "hashes", side_effect=side_effect), \
                  redirect_stdout(output), redirect_stderr(output):
-                result = diagnostics.collect(SimpleNamespace(admin=SimpleNamespace(get=get)), baselines, FAILURE)
+                result = diagnostics.collect(SimpleNamespace(admin=SimpleNamespace(get=get)), baselines, failure)
             self.assertEqual(output.getvalue(), "")
             self.assertNotIn(PRIVATE, json.dumps(result))
             return result, reads
@@ -137,6 +137,11 @@ class TemplateDiagnosticsTests(unittest.TestCase):
         self.assertEqual(set(result["actors"]), set(diagnostics.ACTORS))
         self.assertEqual(len(reads), 6)
         self.assertTrue(all(value["currentMatchesReview"] for value in result["actors"].values()))
+
+    def test_writer_restoration_refusal_also_gets_value_free_template_comparisons(self):
+        result, reads = self.collect(failure="Native operator apply failed: writer-runtime-transition (source=unavailable)")
+        self.assertTrue(result["available"])
+        self.assertEqual(len(reads), 6)
 
     def test_changed_resource_or_failed_hashing_never_returns_partial_comparisons(self):
         for options in ({"changed_on_recheck": True}, {"unavailable_hashes": True}):

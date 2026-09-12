@@ -260,7 +260,7 @@ are never written to this evidence. Collection cannot qualify any assertion.
 TLS negatives, 9447/9448 paths, CNI peer denial, and credential rotation remain
 required unchanged.
 
-An operator template-drift refusal also records `enrollmentTemplateDrift`.
+An operator template-drift or writer-restoration refusal also records `enrollmentTemplateDrift`.
 It compares the fixture's pre-preview runtime, controller and BFF Deployment
 snapshots with the existing CLI review and current objects, using the shipped
 CLI's `templateDigest` (including its epoch normalization). Only fixed actor
@@ -269,6 +269,14 @@ private. `baselineMatchesReview` must be true before attributing differences
 to changes after review. Each current Deployment is UID/RV-rechecked; missing,
 ambiguous or changing evidence is explicitly unavailable. This failure-only
 diagnostic neither retries enrollment, refreshes approval nor qualifies a test.
+
+The CLI's `KARS_PRIVATE_WRITER_TRANSITION` marker is projected as one closed
+14-boolean group in the failure description. It distinguishes captured
+withdrawal/pause/refill witnesses, generation and replica expectations,
+projection and Kubernetes Deployment revisions, and invariant metadata/spec/
+template comparisons. Missing fields, duplicates, extra fields and non-booleans
+make the group unavailable. Compared values and hashes are never copied.
+The original refusal and all production deadlines remain unchanged.
 
 `observer_target_client` optionally carries an atomic group of five booleans:
 `transport_debug_observable`, `transport_trace_observable`,
