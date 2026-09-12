@@ -664,14 +664,26 @@ export function consumesPrivateAuthority(value: unknown, namespace: string, acti
           ["ALL", "SYS_ADMIN", "SYS_PTRACE", "SYS_MODULE", "SYS_RAWIO", "BPF", "PERFMON", "CHECKPOINT_RESTORE", "DAC_READ_SEARCH"].includes(String(k))));
 }
 
-export async function reviewedOwner(execute: Execute, pod: Json, scope: NamespaceReview): Promise<ReviewedConsumer | undefined> {
+export class PrivateConsumerTemplateChanged extends Error {
+  constructor() {
+    super("Private consumer template changed after protection was enabled");
+  }
+}
+
+export async function reviewedOwner(
+  execute: Execute, pod: Json, scope: NamespaceReview, onTemplateChange?: (current: RecordValue) => void,
+): Promise<ReviewedConsumer | undefined> {
   let current = record(pod);
   if (!current.kind) current = { ...current, kind: "Pod" };
   for (let depth = 0; depth < 4; depth++) {
     const id = reviewed(current, current.kind === "Pod");
     const approved = scope.consumers.find(c => c.object.uid === id.uid && c.kind === current.kind);
     if (approved) {
-      if (templateDigest(current) !== approved.templateDigest) throw new Error("Private consumer template changed after protection was enabled");
+      if (templateDigest(current) !== approved.templateDigest) {
+        // The hook observes the rejected snapshot; it cannot authorize it.
+        onTemplateChange?.(current);
+        throw new PrivateConsumerTemplateChanged();
+      }
       return approved;
     }
     const owners = list(at(current, "metadata", "ownerReferences") ?? []).map(record).filter(o => o.controller === true);

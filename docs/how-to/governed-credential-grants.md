@@ -315,6 +315,16 @@ The projection recheck aligns kubectl JSON and JSONPath views only for
 `managedFields` and all other metadata remain compared; this does not grant
 ownership or weaken source, value, revision or template checks.
 
+Task, Deployment and projection reads are not atomic. When an empty-projection
+or lineage-template check conflicts with a concurrent, recognized controller
+transition, apply rechecks the exact objects and retries observation within the
+same 120-second bound. Both the rejected and current Deployment snapshots must
+fit the captured transition; unrelated errors and observed unreviewed templates
+still fail. Historical withdrawal, pause and empty-revision witnesses are
+retained, never invented. Stable missing witnesses or authority drift still
+block enrollment. A final recheck after lineage inspection prevents reporting
+settlement from an outdated snapshot. No mutation or stale write is retried.
+
 For first qualification,
 namespace protection is then enabled in `Pending`, identities/templates are rechecked,
 and only approved authority-consuming controller replicas are paused. This
