@@ -16,6 +16,7 @@ from sre_authority.legacy_crds import (
     CRDS, IDENTITIES, preflight_legacy_crds, render_legacy_crds, validate_rendered_crds,
 )
 from sre_authority.registration_schema import CRD_NAME
+from sre_authority.task_schema_preview_test import TaskSchemaPreviewTests
 from sre_authority.registration_schema import request
 from sre_authority.canonical_migration import seed_data
 from sre_authority.canonical_migration_test import FakeHarness

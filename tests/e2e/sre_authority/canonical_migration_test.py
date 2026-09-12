@@ -14,6 +14,7 @@ from sre_authority.canonical_migration import (
     CRDS, STAGE, assert_data_unchanged, deny_late_conflicts, finish_data_proof, seed_data,
 )
 from sre_authority.canonical_seed import SEEDS, WORKLOADS, collection_path, nested_action_definition, seed_definitions
+from sre_authority.task_schema_conflicts import TASK_PATH
 
 
 class FakeHarness:
@@ -31,9 +32,17 @@ class FakeHarness:
                 "metadata": {"uid": "binding"}, "subjects": [{"name": "legacy"}, {"name": "unrelated"}]},
         }
         for name in ("karstasks.kars.azure.com", "karssreactions.kars.azure.com"):
-            self.objects[("crd", name)] = {"metadata": {"name": name, "uid": name, "resourceVersion": "1",
-                "annotations": {"meta.helm.sh/release-name": "kars"}},
-                "spec": {"versions": [{"schema": {"openAPIV3Schema": {"description": "canonical"}}}]}}
+            self.objects[("crd", name)] = {"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+                "metadata": {"name": name, "uid": name, "resourceVersion": "1",
+                "labels": {"app.kubernetes.io/managed-by": "Helm"},
+                "annotations": {"meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": "kars-system"},
+                "managedFields": [{"manager": "helm", "operation": "Apply", "fieldsV1": {"f:spec": {"f:versions": {}}}}]},
+                "spec": {"group": "kars.azure.com", "scope": "Namespaced",
+                    "names": {"kind": "KarsTask" if name == "karstasks.kars.azure.com" else "KarsSREAction",
+                              "plural": name.split(".")[0]},
+                    "versions": [{"name": "v1alpha1", "served": True, "storage": True,
+                        "schema": {"openAPIV3Schema": {"type": "object", "description": "canonical",
+                            "properties": {"spec": {"type": "object", "properties": {}}}}}}]}}
         self.calls = []
         self.rejections = []
         self.serial = 1
@@ -64,6 +73,10 @@ class FakeHarness:
         self.calls.append((method, path, copy.deepcopy(body)))
         parsed = urlsplit(path)
         if method == "GET":
+            if parsed.path == TASK_PATH:
+                assert status == 200 and not parsed.query
+                result = self.get("crd", "karstasks.kars.azure.com")
+                return SimpleNamespace(status_code=200, json=lambda: result)
             assert status == 200 and parse_qs(parsed.query) == {"limit": ["513"]}
             if parsed.path in WORKLOADS:
                 items = [self.get("deployment", "kars-controller")] if parsed.path.endswith("/deployments") else []
@@ -132,6 +145,9 @@ class CanonicalMigrationFixtureTests(unittest.TestCase):
         reporter = patch("sre_authority.canonical_seed.write_report")
         self.reporter = reporter.start()
         self.addCleanup(reporter.stop)
+        managers = patch("sre_authority.task_schema_conflicts.write_report")
+        managers.start()
+        self.addCleanup(managers.stop)
 
     def test_seed_uses_typed_inert_action_and_real_data_preservation_assertions(self):
         h = FakeHarness()
@@ -160,8 +176,9 @@ class CanonicalMigrationFixtureTests(unittest.TestCase):
         self.assertEqual(h.objects[("crd", "karstasks.kars.azure.com")]["spec"], before)
         self.assertEqual(h.objects[("crd", "karssreactions.kars.azure.com")], action)
         self.assertEqual(h.objects[("clusterrolebinding", "kars-sre-reader")]["subjects"], subjects)
-        self.assertTrue(all(method == "PATCH" and path == f"{CRDS}/karstasks.kars.azure.com"
+        self.assertTrue(all(method in ("GET", "PATCH") and path == f"{CRDS}/karstasks.kars.azure.com"
                             for method, path, _body in h.calls))
+        self.assertEqual(sum(method == "PATCH" for method, _path, _body in h.calls), 4)
 
     def test_cleanup_is_limited_to_measured_disposable_crs_with_exact_uid_rv(self):
         h = FakeHarness()

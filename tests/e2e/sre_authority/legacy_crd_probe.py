@@ -11,6 +11,7 @@ import types
 from sre_authority.bootstrap_probe import converted_objects
 from sre_authority.common import CONTEXT, Harness, SYSTEM, require
 from sre_authority.canonical_seed import dry_run_seed_data
+from sre_authority.task_schema_preview import exercise_task_restore_preview, require_task_payload_helper
 from sre_authority.fixtures import LEGACY_COMMIT, install_historical_chart
 from sre_authority.registration_schema import (
     CRD_NAME, CRD_PATH, create_registration_crd, kind_proxy, request, write_report,
@@ -49,6 +50,7 @@ def exercise(root):
     h.root, h.work = root, root / ".e2e-legacy-helm"
     h.work.mkdir(mode=0o700)
     h.deadline, h.phase = time.monotonic() + 300, "legacy-helm-proof"
+    require_task_payload_helper(h)
     with kind_proxy(root) as (port, version):
         require(re.fullmatch(r"v1\.31\.\d+(?:[-+].*)?", version.get("gitVersion", "")) is not None,
                 "Historical seed API proof requires the pinned Kubernetes 1.31 server")
@@ -61,6 +63,7 @@ def exercise(root):
         h.api = api
         install_historical_chart(h)
         dry_run_seed_data(h)
+        exercise_task_restore_preview(h)
         rendered = h.run(["helm", "template", "kars", str(root / "deploy/helm/kars"),
                          "--namespace", SYSTEM, "--show-only", "templates/crd-karssreregistration.yaml"])
         objects = converted_objects(h.k("create", "--dry-run=client", "--validate=strict",

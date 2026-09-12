@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { AsyncLocalStorage } from "node:async_hooks";
+import { schemaSsaConflict, type SsaConflictFacts } from "./schema-ssa-conflicts.js";
 
 const sources = {
   "helm-render": "core-helm-schemas",
@@ -85,9 +86,11 @@ export function schemaField(field: string): void {
   if (trace) trace.current.field = fields.has(field) ? field : "unrecognized";
 }
 
-function failureCategory(error: unknown): { category: string; reason?: string } {
+function failureCategory(error: unknown): { category: string; reason?: string } & Partial<SsaConflictFacts> {
   const value = record(error);
   const stderr = typeof value?.stderr === "string" ? value.stderr.slice(0, 16384) : "";
+  const conflict = schemaSsaConflict(stderr);
+  if (conflict) return { category: "api-rejection", reason: "Conflict", ...conflict };
   const reason = /^Error from server \((Forbidden|Unauthorized|Invalid|NotFound|AlreadyExists|Conflict|BadRequest|InternalError|ServiceUnavailable)\):/m.exec(stderr)?.[1];
   if (reason) return { category: "api-rejection", reason };
   if (value?.timedOut === true) return { category: "transport-timeout" };
