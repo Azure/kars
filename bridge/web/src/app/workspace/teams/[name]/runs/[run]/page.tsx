@@ -218,7 +218,7 @@ export default async function TeamRunPage({
       : null;
   const claimedPullRequest =
     task.result?.status === "error" &&
-    /github\.com\/[^/\s]+\/[^/\s]+\/pull\/\d+/i.test(task.result.output);
+    githubPullRequests(task.result.output).length > 0;
 
   return (
     <div className="space-y-6">
@@ -580,22 +580,37 @@ function RunUnavailable({ run }: { run: string }) {
   );
 }
 
-function archivedPullRequests(
-  text: string,
-  repos: string[],
-): Array<{ repo: string; number: number; url: string }> {
+function githubPullRequests(text: string): Array<{ repo: string; number: number; url: string }> {
   const found = new Map<string, { repo: string; number: number; url: string }>();
-  for (const segment of text.split("github.com/").slice(1)) {
-    const match = segment.match(/^([^/\s]+)\/([^/\s]+)\/pulls?\/(\d+)/);
+  for (const token of text.split(/[\s<>()"'`[\]]+/)) {
+    const candidate = token.replace(/[.,;:!?]+$/, "");
+    let parsed: URL;
+    try {
+      const bare = candidate.toLowerCase().startsWith("github.com/");
+      parsed = new URL(bare ? `https://${candidate}` : candidate);
+    } catch {
+      continue;
+    }
+    if ((parsed.protocol !== "https:" && parsed.protocol !== "http:")
+      || parsed.hostname !== "github.com" || parsed.port
+      || parsed.username || parsed.password) continue;
+    const match = /^\/([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+)\/pulls?\/([1-9]\d*)(?:\/|$)/.exec(parsed.pathname);
     if (!match) continue;
     const repo = `${match[1]}/${match[2]}`;
     const number = Number(match[3]);
+    if (!Number.isSafeInteger(number)) continue;
     const url = `https://github.com/${repo}/pull/${number}`;
     found.set(url, { repo, number, url });
   }
-  if (repos.length === 1) {
+  return [...found.values()];
+}
+
+function archivedPullRequests(text: string, repos: string[]): Array<{ repo: string; number: number; url: string }> {
+  const found = new Map(githubPullRequests(text).map((pr) => [pr.url, pr]));
+  if (repos.length === 1 && /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(repos[0])) {
     for (const match of text.matchAll(/\bPR\s*#(\d+)\b/gi)) {
       const number = Number(match[1]);
+      if (!Number.isSafeInteger(number) || number <= 0) continue;
       const repo = repos[0];
       const url = `https://github.com/${repo}/pull/${number}`;
       found.set(url, { repo, number, url });

@@ -68,6 +68,14 @@ localhost redirect because localhost refers to the browser pod itself.
 
 For ingress, set an HTTPS issuer and callback URI reachable by users and Dex.
 
+## Foundry service authentication
+
+The BFF's Foundry workload-identity token exchange and data-plane requests
+require HTTPS and do not follow redirects. `AZURE_AUTHORITY_HOST` must use
+HTTPS. Azure IMDS retains its fixed link-local HTTP endpoint through a separate
+client that bypasses proxies and redirects. This does not change the supported
+in-cluster web-to-BFF or Dex HTTP paths.
+
 ## Sessions and logout
 
 - Session cookies are signed.

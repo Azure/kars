@@ -10,6 +10,11 @@ const [base, file, patterns] = process.argv.slice(2);
 if (!base || !file || !patterns) {
   throw new Error("fail: source gate requires a base revision, file and marker patterns");
 }
+const markers = /TODO\b|FIXME\b|XXX\b|HACK\b|unimplemented!\(|\btodo!\(|panic!\("not[ _-]impl|\bplaceholder\b|\.stub\(\)|\.mock\(\)|return None; \/\/ placeholder|return Ok\(\(\)\); \/\/ stub/;
+// The shell gate shares this fixed policy; arguments must not become executable patterns.
+if (patterns !== markers.source.replaceAll("\\/", "/")) {
+  throw new Error("fail: source gate marker patterns differ from the fixed policy");
+}
 
 const source = execFileSync("git", ["show", `HEAD:${file}`], { encoding: "utf8" });
 const diff = execFileSync("git", ["diff", "--unified=0", `${base}...HEAD`, "--", file],
@@ -79,7 +84,6 @@ for (const [start, end] of ranges.sort((a, b) => a[0] - b[0])) {
 parts.push(source.slice(cursor));
 const original = source.split("\n");
 const masked = parts.join("").split("\n");
-const markers = new RegExp(patterns);
 let lineNumber;
 for (const line of diff.split("\n")) {
   const hunk = /^@@ -\d+(?:,\d+)? \+(\d+)(?:,\d+)? @@/.exec(line);

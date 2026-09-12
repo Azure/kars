@@ -83,8 +83,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npx --no-install tsc --noEmit
-      - name: Check credential form and shared DTO contracts
-        run: node --experimental-strip-types --test tests/credential-review.test.mjs tests/type-contract.test.mjs
+      - name: Check credential forms, DTOs, proxies and evidence links
+        run: node --experimental-strip-types --test tests/credential-review.test.mjs tests/type-contract.test.mjs tests/proxy-routes.test.mjs tests/team-run-links.test.mjs
       - name: Build the production web image without publishing
         run: docker build --tag kars-bridge-web-qualification:latest .
       - name: Start web with an immutable root filesystem

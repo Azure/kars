@@ -68,14 +68,14 @@ async function forward(req: NextRequest): Promise<Response> {
   let upstream: Response;
   try {
     upstream = await fetch(target, init);
-  } catch (err) {
+  } catch {
+    // OIDC URLs and fetch errors can contain codes or state; log only the event.
+    console.error("[bridge/dex] OIDC IdP upstream request failed");
     return new Response(
       JSON.stringify({
         error: {
           code: "bad_gateway",
           message: "OIDC IdP (Dex) unreachable",
-          detail: String(err),
-          target,
         },
       }),
       { status: 502, headers: { "content-type": "application/json" } },

@@ -63,10 +63,11 @@ pub struct FoundryStatus {
 
 /// Extract the host from an https URL, for DNS checks.
 fn host_of(url: &str) -> Option<String> {
-    let s = url
-        .strip_prefix("https://")
-        .or_else(|| url.strip_prefix("http://"))?;
-    Some(s.split(['/', ':']).next().unwrap_or(s).to_lowercase())
+    let url = reqwest::Url::parse(url).ok()?;
+    if url.scheme() != "https" || !url.username().is_empty() || url.password().is_some() {
+        return None;
+    }
+    url.host_str().map(str::to_string)
 }
 
 async fn resolves(host: &str) -> bool {
@@ -234,6 +235,15 @@ const FOUNDRY_API_VERSION: &str = "2025-05-01";
 /// The OAuth2 scope for the Foundry project data-plane.
 const FOUNDRY_SCOPE: &str = "https://ai.azure.com/.default";
 
+fn foundry_https_client(timeout: Duration) -> Result<reqwest::Client, reqwest::Error> {
+    reqwest::Client::builder()
+        .https_only(true)
+        // Neither the federated assertion nor a data-plane key may follow a redirect.
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(timeout)
+        .build()
+}
+
 /// Acquire an AAD bearer token for the Foundry data-plane using the same
 /// no-Azure-SDK REST paths the router uses, mirroring DefaultAzureCredential's
 /// order: (1) AKS **workload identity** (federated token file → AAD exchange),
@@ -241,10 +251,7 @@ const FOUNDRY_SCOPE: &str = "https://ai.azure.com/.default";
 /// dev — a kind cluster has no managed identity). Returns `(token, source)` or
 /// `None` when no credential is available.
 async fn foundry_bearer_token() -> Option<(String, &'static str)> {
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(8))
-        .build()
-        .ok()?;
+    let client = foundry_https_client(Duration::from_secs(8)).ok()?;
 
     // (1) Workload identity: federated token file + AAD token endpoint.
     if let (Ok(client_id), Ok(tenant), Ok(token_file)) = (
@@ -278,9 +285,18 @@ async fn foundry_bearer_token() -> Option<(String, &'static str)> {
         }
     }
 
-    // (2) IMDS managed identity.
-    let imds = "http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://ai.azure.com/";
-    if let Ok(resp) = client.get(imds).header("Metadata", "true").send().await
+    // (2) IMDS is a fixed link-local HTTP service, not a secret-bearing outbound
+    // request. Keep it off proxies and redirects, separate from the HTTPS client.
+    if let Ok(imds) = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(8))
+        .build()
+        && let Ok(resp) = imds
+            .get("http://169.254.169.254/metadata/identity/oauth2/token?api-version=2018-02-01&resource=https://ai.azure.com/")
+            .header("Metadata", "true")
+            .send()
+            .await
         && let Ok(v) = resp.json::<serde_json::Value>().await
         && let Some(t) = v.get("access_token").and_then(|t| t.as_str())
     {
@@ -435,9 +451,7 @@ pub async fn verify_foundry(State(state): State<AppState>) -> AppResult<Json<Fou
         },
     });
 
-    let http = reqwest::Client::builder()
-        .timeout(Duration::from_secs(10))
-        .build()
+    let http = foundry_https_client(Duration::from_secs(10))
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
 
     // 2. Determine the data-plane credential. Prefer an ambient AAD token
@@ -647,6 +661,30 @@ mod tests {
             Some("x.openai.azure.com")
         );
         assert_eq!(host_of("not a url"), None);
+    }
+
+    #[test]
+    fn project_host_requires_https_without_url_credentials() {
+        for url in [
+            "http://r.services.ai.azure.com/api/projects/p",
+            "https://",
+            "https://user@r.services.ai.azure.com/api/projects/p",
+            "https://user:password@r.services.ai.azure.com/api/projects/p",
+        ] {
+            assert_eq!(host_of(url), None, "{url}");
+        }
+    }
+
+    #[tokio::test]
+    async fn credential_client_rejects_plaintext_before_connecting() {
+        let client = foundry_https_client(Duration::from_secs(1)).unwrap();
+        for url in [
+            "http://127.0.0.1:9/oauth2/v2.0/token",
+            "http://127.0.0.1:9/api/projects/p/deployments",
+        ] {
+            let error = client.post(url).send().await.unwrap_err();
+            assert!(error.is_builder(), "{error}");
+        }
     }
 
     #[test]

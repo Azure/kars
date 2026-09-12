@@ -17,12 +17,18 @@ kubectl -n kars-system logs deploy/kars-controller --since=15m
 | Auditor can enter Workspace | Incorrect role implication | Auditor must not imply user |
 | Login follows localhost and fails in managed Playwright | Port-forward Dex split horizon | Use redirect-manual evidence or configure ingress issuer |
 | BFF returns Kubernetes 403 | Missing ServiceAccount verb | Test `kubectl auth can-i` as `kars-bridge` |
+| Web proxy returns `bad_gateway` (502) | BFF or Dex upstream request failed | Check the fixed web log marker, configured upstream and service endpoints |
 | Mission launch returns 422 | Budget or preflight failure | Read the structured error and Console budget/MCP status |
 | MCP appears Ready but tools fail | Stale generation/session or auth | Inspect `McpServer.status` and sandbox router logs |
 | Playwright opens a blank page mid-run | Session reaped or non-isolated server | Verify managed preset and router keepalive |
 | Team reuses another team’s role | Outdated parent-scoped spawn implementation | Upgrade Kars controller/router/runtime |
 | Team forgets earlier work | No harvested substantive deliverable | Inspect team commons and run health |
 | Delete works as admin but fails in Bridge | Developer kubeconfig hid RBAC gap | Test through deployed BFF ServiceAccount |
+
+Web proxy failures deliberately omit exception messages, upstream URLs, query
+parameters and stack traces from both the response and the web failure marker.
+Use the request timestamp to correlate BFF/Dex logs and Kubernetes events;
+do not enable logging of cookies, login codes or signed principal tokens.
 
 ## Managed MCP
 
