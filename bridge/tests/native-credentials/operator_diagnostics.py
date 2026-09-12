@@ -51,6 +51,19 @@ WRITER_CHECK_FIELDS = (
     ("projectionMetadataMatches", "metadata-matches"),
     ("deploymentTransitionMatches", "deployment"),
 )
+COMMAND_PREFIX = "KARS_PRIVATE_COMMAND_FAILURE "
+COMMAND_PHASES = {"Unscoped", "Review", "Pausing", "Retired", "Rotating", "Restoring", "Qualified"}
+COMMAND_OPERATIONS = {"get", "patch", "create", "auth", "other"}
+COMMAND_KINDS = {
+    "Namespace", "Deployment", "KarsSandbox", "KarsTask", "Secret", "ServiceAccount",
+    "Pod", "ReplicaSet", "AdmissionPolicy", "AdmissionBinding", "AuthorizationInventory",
+    "AuthorizationCheck", "Other",
+}
+COMMAND_REASONS = {
+    "Unknown", "BadRequest", "Unauthorized", "Forbidden", "NotFound", "AlreadyExists",
+    "Conflict", "Invalid", "Timeout", "ServerTimeout", "TooManyRequests", "ServiceUnavailable",
+    "InternalError", "MethodNotAllowed", "Gone", "RequestEntityTooLarge", "UnsupportedMediaType",
+}
 
 
 def category(stderr):
@@ -70,23 +83,29 @@ def source_location(stderr):
     return "unavailable"
 
 
+def _json_object(payload):
+    try:
+        # Preserve duplicate keys so ambiguous facts cannot silently overwrite each other.
+        pairs = json.loads(payload, object_pairs_hook=lambda values: values)
+    except json.JSONDecodeError:
+        return None
+    if (not isinstance(pairs, list) or not all(isinstance(pair, tuple) and len(pair) == 2
+                                             and isinstance(pair[0], str) for pair in pairs)):
+        return None
+    values = dict(pairs)
+    return values if len(values) == len(pairs) else None
+
+
 def _checks(stderr, prefix, fields):
     lines = [line for line in stderr.splitlines() if line.startswith(prefix)]
     if not lines:
         return ""
     if len(lines) != 1 or len(lines[0]) > 512:
         return "unavailable"
-    try:
-        # Preserve duplicate keys so ambiguous facts cannot silently overwrite each other.
-        pairs = json.loads(lines[0][len(prefix):], object_pairs_hook=lambda values: values)
-    except json.JSONDecodeError:
+    values = _json_object(lines[0][len(prefix):])
+    if (values is None or set(values) != {key for key, _ in fields}
+            or not all(isinstance(value, bool) for value in values.values())):
         return "unavailable"
-    if (not isinstance(pairs, list) or len(pairs) != len(fields)
-            or not all(isinstance(pair, tuple) and len(pair) == 2
-                       and isinstance(pair[0], str) and isinstance(pair[1], bool) for pair in pairs)
-            or {key for key, _ in pairs} != {key for key, _ in fields}):
-        return "unavailable"
-    values = dict(pairs)
     return ",".join(f"{label}={str(values[key]).lower()}" for key, label in fields)
 
 
@@ -96,6 +115,30 @@ def sandbox_checks(stderr):
 
 def writer_checks(stderr):
     return _checks(stderr, WRITER_CHECK_PREFIX, WRITER_CHECK_FIELDS)
+
+
+def command_facts(stderr):
+    prefixes = (COMMAND_PREFIX, "PrivateCommandFailure: " + COMMAND_PREFIX)
+    payloads = [line[len(prefix):] for line in stderr.splitlines()
+                for prefix in prefixes if line.startswith(prefix)]
+    if not payloads:
+        return ""
+    if len(payloads) != 1 or len(payloads[0]) > 512:
+        return "unavailable"
+    values = _json_object(payloads[0])
+    if values is None or set(values) != {"version", "phase", "operation", "resourceKind", "serverReason", "exitCode"}:
+        return "unavailable"
+    if (isinstance(values["version"], bool) or not isinstance(values["version"], int) or values["version"] != 1
+            or not all(isinstance(values[key], str) and values[key] in allowed
+                       for key, allowed in (("phase", COMMAND_PHASES), ("operation", COMMAND_OPERATIONS),
+                                            ("resourceKind", COMMAND_KINDS), ("serverReason", COMMAND_REASONS)))):
+        return "unavailable"
+    code = values["exitCode"]
+    if code is not None and (isinstance(code, bool) or not isinstance(code, int) or not 0 <= code <= 255):
+        return "unavailable"
+    exit_code = "unknown" if code is None else str(code)
+    return (f"phase={values['phase']},operation={values['operation']},kind={values['resourceKind']},"
+            f"reason={values['serverReason']},exit={exit_code}")
 
 
 def operator_command(stage, *args, timeout):
@@ -109,6 +152,9 @@ def operator_command(stage, *args, timeout):
         recheck = writer_checks(error.stderr)
         if recheck:
             details += f" (writer-recheck={recheck})"
+        facts = command_facts(error.stderr)
+        if facts:
+            details += f" (command={facts})"
         raise Failure(
             f"Native operator {stage} failed: {category(error.stderr)} "
             f"(source={source_location(error.stderr)}){details}"

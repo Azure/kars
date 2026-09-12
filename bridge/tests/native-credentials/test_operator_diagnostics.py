@@ -12,8 +12,8 @@ from unittest.mock import patch
 import native_api
 from native_api import Failure
 from operator_diagnostics import (
-    CHECK_PREFIX, ERRORS, WRITER_CHECK_PREFIX, category, operator_command,
-    sandbox_checks, source_location, writer_checks,
+    CHECK_PREFIX, COMMAND_PREFIX, ERRORS, WRITER_CHECK_PREFIX, category, command_facts,
+    operator_command, sandbox_checks, source_location, writer_checks,
 )
 
 PRIVATE = "DO-NOT-EMIT-TOKENS-OR-PRIVATE-API-BODIES"
@@ -123,6 +123,42 @@ class OperatorDiagnosticsTests(unittest.TestCase):
                       '"projectionMetadataPresent":false,"deploymentTransitionMatches":true}'):
             self.assertEqual(writer_checks(value), "unavailable")
         self.assertEqual(writer_checks(PRIVATE), "")
+
+    def test_actual_sanitized_command_failure_retains_only_closed_facts(self):
+        facts = {"version": 1, "phase": "Pausing", "operation": "patch", "resourceKind": "KarsSandbox",
+                 "serverReason": "Conflict", "exitCode": 1}
+        marker = COMMAND_PREFIX + json.dumps(facts)
+        expected = "phase=Pausing,operation=patch,kind=KarsSandbox,reason=Conflict,exit=1"
+        self.assertEqual(command_facts(marker), expected)
+        self.assertEqual(command_facts("PrivateCommandFailure: " + marker), expected)
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory(prefix="native-command-facts-") as directory, \
+             patch.object(native_api, "ROOT", Path(directory)), redirect_stdout(output), redirect_stderr(output):
+            with self.assertRaises(Failure) as failure:
+                operator_command("apply", sys.executable, "-c",
+                                 "import sys; print(sys.argv[1],file=sys.stderr); sys.exit(1)",
+                                 f"{PRIVATE}\nPrivateCommandFailure: {marker}\n{PRIVATE}", timeout=5)
+        self.assertIn("(command=" + expected + ")", str(failure.exception))
+        self.assertNotIn(PRIVATE, str(failure.exception))
+        self.assertEqual(output.getvalue(), "")
+
+    def test_command_fact_parser_rejects_extensions_duplicates_and_unknown_values(self):
+        facts = {"version": 1, "phase": "Unscoped", "operation": "other", "resourceKind": "Other",
+                 "serverReason": "Unknown", "exitCode": None}
+        self.assertIn("reason=Unknown,exit=unknown", command_facts(COMMAND_PREFIX + json.dumps(facts)))
+        invalid = [{**facts, key: PRIVATE} for key in ("phase", "operation", "resourceKind", "serverReason")]
+        invalid += [{**facts, "version": value} for value in (True, 1.0, 2)]
+        invalid += [{**facts, "exitCode": value} for value in (True, -1, 256, 1.5)]
+        invalid += [{**facts, "private": PRIVATE}, list(facts.items()), None]
+        for value in invalid:
+            with self.subTest(value=value):
+                self.assertEqual(command_facts(COMMAND_PREFIX + json.dumps(value)), "unavailable")
+        marker = COMMAND_PREFIX + json.dumps(facts)
+        for value in (marker + PRIVATE, marker + "\n" + marker, COMMAND_PREFIX + " " * 513,
+                      COMMAND_PREFIX + '{"version":1,"version":1,"phase":"Unscoped","operation":"other",'
+                      '"resourceKind":"Other","serverReason":"Unknown","exitCode":null}'):
+            self.assertEqual(command_facts(value), "unavailable")
+        self.assertEqual(command_facts(PRIVATE), "")
 
     def test_success_and_unknown_stage_do_not_change_authority(self):
         with tempfile.TemporaryDirectory(prefix="native-operator-success-") as directory, \
