@@ -55,6 +55,7 @@ class FakeHarness:
         self.serial = 1
         self.owned_mutations = []
         self.owned_previews = []
+        self.pending_proposals_enforced = False
         action = self.objects[("crd", "karssreactions.kars.azure.com")]
         action["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"] = {
             "spec": {"properties": {"action": {"properties": {
@@ -112,6 +113,7 @@ class FakeHarness:
         assert params.pop("additionalProperties") is True
         params["x-kubernetes-preserve-unknown-fields"] = True
         action["metadata"]["resourceVersion"] = str(int(action["metadata"]["resourceVersion"]) + 1)
+        self.pending_proposals_enforced = True
 
     def get(self, kind, name, *_args):
         return copy.deepcopy(self.objects.get((kind, name)))
@@ -146,8 +148,10 @@ class FakeHarness:
             query = parse_qs(parsed.query)
             assert query in ({"fieldManager": ["kubectl-create"], "fieldValidation": ["Strict"]},
                              {"fieldManager": ["kubectl-create"], "fieldValidation": ["Strict"], "dryRun": ["All"]})
+            rejected_after = nested_action_definition(after_migration=True)
+            rejected_after["spec"]["approval"]["state"] = "Rejected"
             nested = resource == "karssreaction" and body in (
-                nested_action_definition(after_migration=False), nested_action_definition(after_migration=True))
+                nested_action_definition(after_migration=False), nested_action_definition(after_migration=True), rejected_after)
             if nested:
                 assert query["dryRun"] == ["All"]
                 crd = self.objects[("crd", "karssreactions.kars.azure.com")]
@@ -161,6 +165,11 @@ class FakeHarness:
                 assert params == {"type": "object", "x-kubernetes-preserve-unknown-fields": True}
             else:
                 assert body == dict(seed_definitions())[resource]
+            if resource == "karssreaction" and self.pending_proposals_enforced and body["spec"]["approval"]["state"] != "Pending":
+                result = {"kind": "Status", "reason": "Forbidden", "message":
+                          "ValidatingAdmissionPolicy 'kars-sre-pending-proposals' denied request: "
+                          "SRE actions must be created Pending; approval is a separate operator action"}
+                return SimpleNamespace(status_code=403, json=lambda: result)
             if "dryRun" in query:
                 result = copy.deepcopy(body)
                 result["metadata"]["uid"] = "ephemeral-dry-run"
