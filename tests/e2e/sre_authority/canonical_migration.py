@@ -12,6 +12,7 @@ import hashlib
 import json
 
 from .common import SYSTEM, require
+from .canonical_seed import dry_run_seed_data, request_seed, seed_definitions
 
 CRDS = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions"
 STAGE = ("authority", "stage", "--controller-image", "kars-controller:e2e",
@@ -35,32 +36,11 @@ def seed_data(h):
     controller = h.get("deployment", "kars-controller", SYSTEM)
     require(controller["spec"].get("replicas") == 0,
             "Migration fixture must keep the real controller paused while measuring data")
-    envelope = {"tier": 1, "authorityCeiling": 1,
-                "budget": {"tokens": 20, "usdMicros": 0}}
-    definitions = [
-        ("karstask", "KarsTask", {"objective": "Inert migration data",
-                                "envelope": envelope, "execution": {"launch": False}}),
-        ("karsteam", "KarsTeam", {"charter": "Inert migration data",
-                                "envelope": envelope, "roster": []}),
-        ("mcpserver", "McpServer", {"url": "https://migration-fixture.invalid/",
-                                  "productionMode": False}),
-        ("karseval", "KarsEval", {"corpus": {"builtin": "sre"},
-                                "targetSandboxRef": {"name": "sre"}}),
-        ("karssreaction", "KarsSREAction", {
-            "action": {"type": "ScaleDeployment", "params": {
-                "namespace": SYSTEM, "name": "kars-controller", "replicas": 0,
-                "opaque": {"nested": [1, "retained", True]},
-            }},
-            "approval": {"state": "Rejected"},
-        }),
-    ]
+    dry_run_seed_data(h)
     fixtures = []
-    for resource, kind, spec in definitions:
-        name = f"e2e-migration-{resource}"
-        obj = h.create({"apiVersion": "kars.azure.com/v1alpha1", "kind": kind,
-                        "metadata": {"name": name, "namespace": SYSTEM},
-                        "spec": copy.deepcopy(spec)})
-        fixtures.append({"resource": resource, "name": name, "before": data_snapshot(obj)})
+    for resource, obj in seed_definitions():
+        created = request_seed(h, resource, obj, dry_run=False)
+        fixtures.append({"resource": resource, "name": created["metadata"]["name"], "before": data_snapshot(created)})
     h.passed("Native canonical migration fixture data created without launching workloads")
     return fixtures
 

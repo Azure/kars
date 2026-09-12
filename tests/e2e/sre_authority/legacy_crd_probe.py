@@ -4,11 +4,13 @@
 """Same-Kind historical Helm wait/upgrade proof without controller execution."""
 
 from pathlib import Path
+import re
 import time
 import types
 
 from sre_authority.bootstrap_probe import converted_objects
 from sre_authority.common import CONTEXT, Harness, SYSTEM, require
+from sre_authority.canonical_seed import dry_run_seed_data
 from sre_authority.fixtures import LEGACY_COMMIT, install_historical_chart
 from sre_authority.registration_schema import (
     create_registration_crd, kind_proxy, request, write_report,
@@ -21,6 +23,8 @@ def exercise(root):
     h.work.mkdir(mode=0o700)
     h.deadline, h.phase = time.monotonic() + 300, "legacy-helm-proof"
     with kind_proxy(root) as (port, version):
+        require(re.fullmatch(r"v1\.31\.\d+(?:[-+].*)?", version.get("gitVersion", "")) is not None,
+                "Historical seed API proof requires the pinned Kubernetes 1.31 server")
         def api(method, path, *, body=None, status=None):
             code, obj = request(port, method, path, body)
             if status is not None:
@@ -29,6 +33,7 @@ def exercise(root):
             return types.SimpleNamespace(status_code=code, json=lambda: obj)
         h.api = api
         install_historical_chart(h)
+        dry_run_seed_data(h)
         rendered = h.run(["helm", "template", "kars", str(root / "deploy/helm/kars"),
                          "--namespace", SYSTEM, "--show-only", "templates/crd-karssreregistration.yaml"])
         objects = converted_objects(h.k("create", "--dry-run=client", "--validate=strict",
@@ -47,6 +52,7 @@ def exercise(root):
         write_report(root, "legacy-helm-readiness.json", {
             "apiServer": version, "legacyCommit": LEGACY_COMMIT,
             "historicalInstallAndPostInstallHook": "passed", "currentAuthorityServerDryRun": "passed",
+            "historicalSeedStrictServerDryRuns": 5, "historicalSeedPersistence": "unchanged",
             "controllerReplicas": 0, "legacyCRDs": 18, "crdCreation": "native-Helm-only"})
 
 
