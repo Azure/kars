@@ -113,7 +113,12 @@ fn running_correct_status_is_untouched_including_messages_and_timestamps() {
     let mut desired = extra();
     desired.message = "new diagnostic text".into();
     desired.last_transition_time =
-        conditions::new_condition("Ignored", "Unknown", "Ignored", "", None).last_transition_time;
+        serde_json::from_value(json!("2026-01-02T00:00:00.123456789Z")).unwrap();
+    let expected_wire_time = json!("2026-01-02T00:00:00Z");
+    assert_eq!(
+        serde_json::to_value(&desired.last_transition_time).unwrap(),
+        expected_wire_time
+    );
     for _ in 0..3 {
         assert!(!reconcile_running(&mut sb, &[desired.clone()]));
         assert_eq!(serde_json::to_value(&sb).unwrap(), before);
@@ -196,7 +201,10 @@ fn real_extra_transition_is_preserved_and_then_settles() {
         conditions::TYPE_ALLOWLIST_AUTHORITATIVE,
     )
     .unwrap();
-    assert_eq!(condition.last_transition_time, desired.last_transition_time);
+    assert_eq!(
+        serde_json::to_value(&condition.last_transition_time).unwrap(),
+        expected_wire_time
+    );
     assert!(!reconcile_running(&mut sb, &[desired]));
 }
 
