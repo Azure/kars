@@ -22,7 +22,9 @@
 //! | 402    | `BudgetExceeded`  |
 //! | 403    | `Blocked`         |
 //! | 429    | `RateLimited`     |
-//! | other  | `Blocked` (with HTTP body as reason) |
+//! | 401/407 or auth challenge | inconclusive authentication failure |
+//! | 5xx | inconclusive upstream failure |
+//! | other | inconclusive protocol failure |
 //!
 //! The scenario kind unambiguously determines [`PolicyKindRef`] for
 //! denials in the v1 starter corpora (every starter case is single-
@@ -30,6 +32,7 @@
 //! [`crate::scenarios`]). If the router later surfaces
 //! `X-Azureclaw-Decision-By`, the transport will prefer that header.
 
+use crate::outcome::ReplayError;
 use anyhow::Context;
 use kars_eval_corpus::{Decision, PolicyKindRef};
 use reqwest::{Response, StatusCode};
@@ -37,6 +40,71 @@ use serde_json::Value;
 use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpStream;
+#[path = "../../shared/mcp_content.rs"]
+mod mcp_content;
+#[cfg(test)]
+#[path = "transport_negative_tests.rs"]
+mod negative_tests;
+
+const MAX_RESPONSE_BYTES: usize = 256 * 1024;
+
+async fn response_body(mut response: Response) -> Result<String, ReplayError> {
+    let mut bytes = Vec::new();
+    while let Some(chunk) = response.chunk().await.map_err(|error| {
+        if error.is_timeout() {
+            ReplayError::Timeout
+        } else {
+            ReplayError::BodyRead
+        }
+    })? {
+        if bytes.len().saturating_add(chunk.len()) > MAX_RESPONSE_BYTES {
+            return Err(ReplayError::BodyTooLarge);
+        }
+        bytes.extend_from_slice(&chunk);
+    }
+    String::from_utf8(bytes).map_err(|_| ReplayError::Protocol)
+}
+
+fn decision_headers(
+    headers: &reqwest::header::HeaderMap,
+) -> Result<(Option<Decision>, Option<PolicyKindRef>), ReplayError> {
+    if headers.contains_key("www-authenticate") || headers.contains_key("proxy-authenticate") {
+        return Err(ReplayError::Authentication);
+    }
+    let decision = headers
+        .get(DECISION_HEADER)
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(parse_decision_header)
+                .ok_or(ReplayError::Protocol)
+        })
+        .transpose()?;
+    let kind = headers
+        .get(DECISION_BY_HEADER)
+        .map(|value| {
+            value
+                .to_str()
+                .ok()
+                .and_then(parse_policy_kind_header)
+                .ok_or(ReplayError::Protocol)
+        })
+        .transpose()?;
+    Ok((decision, kind))
+}
+
+fn reason_header(headers: &reqwest::header::HeaderMap) -> Result<Option<String>, ReplayError> {
+    headers
+        .get(DECISION_REASON_HEADER)
+        .map(|value| {
+            value
+                .to_str()
+                .map(str::to_owned)
+                .map_err(|_| ReplayError::Protocol)
+        })
+        .transpose()
+}
 
 /// Header names the runner reads if present. None of these are required
 /// on the v1 router today; they are read opportunistically so a future
@@ -61,6 +129,7 @@ impl Transport {
     pub fn new(base: impl Into<String>, timeout: Duration) -> anyhow::Result<Self> {
         let client = reqwest::Client::builder()
             .timeout(timeout)
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .context("build reqwest client")?;
         let base = base.into();
@@ -118,28 +187,24 @@ impl Transport {
 pub async fn response_to_decision(
     response: Response,
     scenario_default_kind: PolicyKindRef,
-) -> ActualParts {
+) -> Result<ActualParts, ReplayError> {
     let status = response.status();
     let headers = response.headers().clone();
 
-    let header_decision = headers
-        .get(DECISION_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_decision_header);
+    let status_decision = decision_from_status(status)?;
+    let (header_decision, header_by_kind) = decision_headers(&headers)?;
 
-    let header_by_kind = headers
-        .get(DECISION_BY_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_policy_kind_header);
+    let header_reason = reason_header(&headers)?;
 
-    let header_reason = headers
-        .get(DECISION_REASON_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+    let body = response_body(response).await?;
+    if status.is_success() && status != StatusCode::NO_CONTENT {
+        let value = serde_json::from_str::<Value>(&body).map_err(|_| ReplayError::Protocol)?;
+        if !value.is_object() || value.get("error").is_some() {
+            return Err(ReplayError::Protocol);
+        }
+    }
 
-    let body = response.text().await.unwrap_or_default();
-
-    let decision = header_decision.unwrap_or_else(|| decision_from_status(status));
+    let decision = header_decision.unwrap_or(status_decision);
     let by_policy_kind = header_by_kind.or(if decision == Decision::Allowed {
         None
     } else {
@@ -148,11 +213,11 @@ pub async fn response_to_decision(
 
     let reason = header_reason.or_else(|| reason_from_body(&body));
 
-    ActualParts {
+    Ok(ActualParts {
         decision,
         by_policy_kind,
         reason,
-    }
+    })
 }
 
 /// Interpret an MCP JSON-RPC `tools/call` response.
@@ -161,15 +226,10 @@ pub async fn response_to_decision(
 /// HTTP status is almost always `200` regardless of whether the tool
 /// succeeded or was denied by policy. The decision lives in the body:
 ///
-/// - `error` member present (per JSON-RPC 2.0) → the *protocol* failed
-///   (parse error, method not found, invalid params, etc.). The runner
-///   maps these to [`Decision::Blocked`] with the error message as
-///   reason.
-/// - `result.isError == true` (per MCP spec) → the tool itself
-///   reported failure. The runner extracts the textual content as
-///   reason and maps to [`Decision::Blocked`] (with rate-limit/budget
-///   heuristics on the message text).
-/// - Otherwise → [`Decision::Allowed`].
+/// - JSON-RPC `error` or `result.isError` means inconclusive protocol/tool
+///   failure, not an inferred policy verdict from message substrings.
+/// - A valid, correctly correlated successful result means `Allowed`.
+/// - Malformed content is rejected using the router's shared typed decoder.
 ///
 /// Non-2xx HTTP statuses fall through to [`decision_from_status`] —
 /// the router's transport layer rejected the request before pipeline
@@ -177,30 +237,21 @@ pub async fn response_to_decision(
 pub async fn mcp_response_to_decision(
     response: Response,
     scenario_default_kind: PolicyKindRef,
-) -> ActualParts {
+) -> Result<ActualParts, ReplayError> {
     let status = response.status();
     let headers = response.headers().clone();
 
-    let header_decision = headers
-        .get(DECISION_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_decision_header);
-    let header_by_kind = headers
-        .get(DECISION_BY_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .and_then(parse_policy_kind_header);
-    let header_reason = headers
-        .get(DECISION_REASON_HEADER)
-        .and_then(|v| v.to_str().ok())
-        .map(str::to_string);
+    let status_decision = decision_from_status(status)?;
+    let (header_decision, header_by_kind) = decision_headers(&headers)?;
+    let header_reason = reason_header(&headers)?;
 
-    let body = response.text().await.unwrap_or_default();
+    let body = response_body(response).await?;
 
     let (body_decision, body_reason) = if status.is_success() {
-        interpret_mcp_envelope(&body).unwrap_or((Decision::Allowed, None))
+        interpret_mcp_envelope(&body).ok_or(ReplayError::Protocol)?
     } else {
         (
-            decision_from_status(status),
+            status_decision,
             reason_from_body(&body).or_else(|| Some(format!("router HTTP {}", status.as_u16()))),
         )
     };
@@ -213,94 +264,43 @@ pub async fn mcp_response_to_decision(
     });
     let reason = header_reason.or(body_reason);
 
-    ActualParts {
+    Ok(ActualParts {
         decision,
         by_policy_kind,
         reason,
-    }
+    })
 }
 
 /// Parse the JSON-RPC envelope. Returns `Some((decision, reason))` if
 /// the body was a valid JSON-RPC response we could interpret;
-/// otherwise `None` (transport caller treats `None` as Allowed when
-/// the HTTP status was 2xx).
+/// otherwise `None`. Protocol/tool errors are not proof of a policy denial.
 fn interpret_mcp_envelope(body: &str) -> Option<(Decision, Option<String>)> {
-    if body.is_empty() {
-        return Some((Decision::Allowed, None));
-    }
     let v: Value = serde_json::from_str(body).ok()?;
     let obj = v.as_object()?;
-
-    if let Some(err) = obj.get("error").and_then(|e| e.as_object()) {
-        let message = err
-            .get("message")
-            .and_then(|m| m.as_str())
-            .map(str::to_string);
-        let code = err.get("code").and_then(|c| c.as_i64()).unwrap_or(0);
-        let decision = decision_from_mcp_message(message.as_deref(), Some(code));
-        return Some((decision, message));
-    }
-
-    if let Some(result) = obj.get("result").and_then(|r| r.as_object()) {
-        let is_error = result
-            .get("isError")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        if is_error {
-            let msg = extract_content_text(result);
-            let decision = decision_from_mcp_message(msg.as_deref(), None);
-            return Some((decision, msg));
-        }
-        return Some((Decision::Allowed, None));
-    }
-
-    Some((Decision::Allowed, None))
-}
-
-/// Walk `result.content[]` (MCP-spec array of typed parts) and join
-/// every `text`-typed part into one string. Returns `None` if the
-/// content array is empty or has no text parts.
-fn extract_content_text(result: &serde_json::Map<String, Value>) -> Option<String> {
-    let arr = result.get("content")?.as_array()?;
-    let mut out = String::new();
-    for entry in arr {
-        let Some(o) = entry.as_object() else {
-            continue;
-        };
-        if o.get("type").and_then(|t| t.as_str()) != Some("text") {
-            continue;
-        }
-        if let Some(text) = o.get("text").and_then(|t| t.as_str()) {
-            if !out.is_empty() {
-                out.push('\n');
-            }
-            out.push_str(text);
-        }
-    }
-    if out.is_empty() { None } else { Some(out) }
-}
-
-/// Heuristic mapping of an MCP error-or-content message string onto a
-/// [`Decision`]. The router never speaks an explicit "decision" word
-/// in error messages today; we look for the same hints the operator
-/// would (case-insensitive substring scan against rate / budget /
-/// policy denial vocabulary).
-fn decision_from_mcp_message(message: Option<&str>, code: Option<i64>) -> Decision {
-    if let Some(msg) = message {
-        let lower = msg.to_ascii_lowercase();
-        if lower.contains("rate limit") || lower.contains("rate-limit") || lower.contains("429") {
-            return Decision::RateLimited;
-        }
-        if lower.contains("budget") || lower.contains("quota exceeded") || lower.contains("402") {
-            return Decision::BudgetExceeded;
-        }
-    }
-    if let Some(c) = code
-        && (-32768..=-32000).contains(&c)
+    if obj.get("jsonrpc")?.as_str()? != "2.0"
+        || obj.get("id")?.as_u64()? != 1
+        || obj.contains_key("error")
     {
-        return Decision::Blocked;
+        return None;
     }
-    Decision::Blocked
+    let result = obj.get("result")?.as_object()?;
+    if result
+        .get("isError")
+        .is_some_and(|value| value.as_bool() != Some(false))
+    {
+        return None;
+    }
+    let content = result.get("content")?.as_array()?;
+    if serde_json::from_value::<Vec<mcp_content::ToolContent>>(Value::Array(content.clone()))
+        .is_err()
+        || result
+            .get("structuredContent")
+            .is_some_and(|v| !v.is_object())
+        || result.get("_meta").is_some_and(|v| !v.is_object())
+    {
+        return None;
+    }
+    Some((Decision::Allowed, None))
 }
 
 /// Send a single HTTP `CONNECT <host>:<port> HTTP/1.1` request through
@@ -312,9 +312,9 @@ fn decision_from_mcp_message(message: Option<&str>, code: Option<i64>) -> Decisi
 /// | 200            | `Allowed`        | tunnel established (we close it)      |
 /// | 403            | `Blocked`        | blocklist hit or pending approval     |
 /// | 429            | `RateLimited`    | egress rate limit                     |
-/// | 502 / 504      | `Blocked`        | DNS / private-IP / upstream failure   |
-/// | any 4xx/5xx    | `Blocked`        | reason text scraped from status phrase|
-/// | transport err  | `Blocked`        | reason = `"transport error: ..."`     |
+/// | 502 / 504      | inconclusive     | upstream failure                     |
+/// | other errors   | inconclusive     | authentication/protocol failure      |
+/// | transport err  | inconclusive     | never a fabricated Blocked decision  |
 ///
 /// We never speak any bytes after the `CONNECT` request — if the
 /// proxy returns 200 we immediately close the socket; the runner does
@@ -325,7 +325,7 @@ pub async fn egress_connect_via_proxy(
     target_port: u16,
     case_id: &str,
     timeout: Duration,
-) -> ActualParts {
+) -> Result<ActualParts, ReplayError> {
     match tokio::time::timeout(
         timeout,
         send_connect(proxy_addr, target_host, target_port, case_id),
@@ -333,18 +333,15 @@ pub async fn egress_connect_via_proxy(
     .await
     {
         Ok(Ok((status, reason_phrase))) => {
-            let decision = match status {
-                200..=299 => Decision::Allowed,
-                429 => Decision::RateLimited,
-                402 => Decision::BudgetExceeded,
-                _ => Decision::Blocked,
-            };
+            let decision = decision_from_status(
+                StatusCode::from_u16(status).map_err(|_| ReplayError::Protocol)?,
+            )?;
             let reason = if decision == Decision::Allowed {
                 None
             } else {
                 Some(reason_phrase)
             };
-            ActualParts {
+            Ok(ActualParts {
                 decision,
                 by_policy_kind: if decision == Decision::Allowed {
                     None
@@ -352,18 +349,13 @@ pub async fn egress_connect_via_proxy(
                     Some(PolicyKindRef::EgressAllowlist)
                 },
                 reason,
-            }
+            })
         }
-        Ok(Err(e)) => ActualParts {
-            decision: Decision::Blocked,
-            by_policy_kind: Some(PolicyKindRef::EgressAllowlist),
-            reason: Some(format!("transport error: {e}")),
-        },
-        Err(_) => ActualParts {
-            decision: Decision::Blocked,
-            by_policy_kind: Some(PolicyKindRef::EgressAllowlist),
-            reason: Some(format!("CONNECT timed out after {}ms", timeout.as_millis())),
-        },
+        Ok(Err(error)) => Err(error
+            .downcast_ref::<ReplayError>()
+            .copied()
+            .unwrap_or(ReplayError::Transport)),
+        Err(_) => Err(ReplayError::Timeout),
     }
 }
 
@@ -407,7 +399,7 @@ async fn send_connect(
             break;
         }
         total += n;
-        if buf[..total].windows(2).any(|w| w == b"\r\n") {
+        if buf[..total].windows(4).any(|w| w == b"\r\n\r\n") {
             break;
         }
         if total == buf.len() {
@@ -419,6 +411,17 @@ async fn send_connect(
     let _ = stream.shutdown().await;
 
     let response = String::from_utf8_lossy(&buf[..total]);
+    if !response.contains("\r\n\r\n") {
+        return Err(ReplayError::Protocol.into());
+    }
+    if response.lines().skip(1).any(|line| {
+        line.split_once(':').is_some_and(|(name, _)| {
+            name.eq_ignore_ascii_case("proxy-authenticate")
+                || name.eq_ignore_ascii_case("www-authenticate")
+        })
+    }) {
+        return Err(ReplayError::Authentication.into());
+    }
     let first_line = response.lines().next().unwrap_or("");
     parse_http_status_line(first_line)
 }
@@ -426,16 +429,16 @@ async fn send_connect(
 fn parse_http_status_line(line: &str) -> anyhow::Result<(u16, String)> {
     // `HTTP/1.1 200 Connection Established`
     let mut parts = line.splitn(3, ' ');
-    let _version = parts
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("empty status line"))?;
-    let code = parts
-        .next()
-        .ok_or_else(|| anyhow::anyhow!("status line missing code: {line:?}"))?;
+    let version = parts.next().ok_or(ReplayError::Protocol)?;
+    if !matches!(version, "HTTP/1.0" | "HTTP/1.1") {
+        return Err(ReplayError::Protocol.into());
+    }
+    let code = parts.next().ok_or(ReplayError::Protocol)?;
     let phrase = parts.next().unwrap_or("").trim_end().to_string();
-    let code: u16 = code
-        .parse()
-        .with_context(|| format!("parse HTTP status code from {line:?}"))?;
+    let code: u16 = code.parse().map_err(|_| ReplayError::Protocol)?;
+    if !(100..=599).contains(&code) {
+        return Err(ReplayError::Protocol.into());
+    }
     Ok((code, phrase))
 }
 
@@ -449,15 +452,17 @@ pub struct ActualParts {
     pub reason: Option<String>,
 }
 
-fn decision_from_status(s: StatusCode) -> Decision {
+fn decision_from_status(s: StatusCode) -> Result<Decision, ReplayError> {
     if s.is_success() {
-        return Decision::Allowed;
+        return Ok(Decision::Allowed);
     }
     match s.as_u16() {
-        402 => Decision::BudgetExceeded,
-        403 => Decision::Blocked,
-        429 => Decision::RateLimited,
-        _ => Decision::Blocked,
+        402 => Ok(Decision::BudgetExceeded),
+        403 => Ok(Decision::Blocked),
+        429 => Ok(Decision::RateLimited),
+        401 | 407 => Err(ReplayError::Authentication),
+        500..=599 => Err(ReplayError::Upstream),
+        _ => Err(ReplayError::Protocol),
     }
 }
 
@@ -530,7 +535,7 @@ mod tests {
             .send()
             .await
             .unwrap();
-        response_to_decision(r, scenario_kind).await
+        response_to_decision(r, scenario_kind).await.unwrap()
     }
 
     #[tokio::test]
@@ -621,15 +626,20 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unknown_header_decision_falls_back_to_status() {
+    async fn unknown_header_decision_is_inconclusive() {
         let s = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/probe"))
             .respond_with(ResponseTemplate::new(403).insert_header(DECISION_HEADER, "Bogus"))
             .mount(&s)
             .await;
-        let parts = fetch(&s, PolicyKindRef::ToolPolicy).await;
-        assert_eq!(parts.decision, Decision::Blocked);
+        let response = reqwest::get(format!("{}/probe", s.uri())).await.unwrap();
+        assert_eq!(
+            response_to_decision(response, PolicyKindRef::ToolPolicy)
+                .await
+                .unwrap_err(),
+            ReplayError::Protocol
+        );
     }
 
     #[tokio::test]
