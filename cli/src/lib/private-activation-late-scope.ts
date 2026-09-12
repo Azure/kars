@@ -318,7 +318,7 @@ function supportedTemplate(deployment: unknown, scope: NamespaceReview, activati
 
 async function current(
   execute: Execute, activation: PrivateActivation, scope: NamespaceReview, root: string, state?: Receipt,
-): Promise<{ runtime: Runtime; deployment: ReturnType<typeof record>; pods: Json[]; namespace: ReturnType<typeof record> }> {
+): Promise<{ runtime: Runtime; snapshot: RuntimeSnapshot; deployment: ReturnType<typeof record>; pods: Json[]; namespace: ReturnType<typeof record> }> {
   if (scope.consumers.length !== 1 || scope.consumers[0]?.kind !== "Deployment") throw new Error(failure);
   const consumer = scope.consumers[0];
   const namespace = await namespaceFor(execute, scope);
@@ -384,7 +384,7 @@ async function current(
   if (state && ["Qualified", "Restoring"].includes(state.phase) && pods.some(pod =>
     state.captured.includes(reviewed(pod, true).uid) || at(pod, "metadata", "annotations", `${P}epoch`) !== state.epoch
     || at(pod, "metadata", "annotations", VERSION) !== `${state.qualified!.material.object.uid}:${state.qualified!.material.object.resourceVersion}`)) throw new Error(failure);
-  return { runtime, deployment, pods, namespace };
+  return { runtime, snapshot, deployment, pods, namespace };
 }
 
 /** Read-only. Public activation JSON remains v1; recovery lives only in the existing operator-only namespace field. */
@@ -406,6 +406,19 @@ export async function reviewLateScope(
     return "Qualified";
   }
   return "Late";
+}
+
+/** Apply-only witness, captured while the original Task authority is current. */
+export async function captureLateWriterScope(execute: Execute, activation: PrivateActivation, scope: NamespaceReview) {
+  if (scope.consumers.length !== 1 || scope.consumers[0]?.kind !== "Deployment") return undefined;
+  const namespace = await namespaceFor(execute, scope);
+  if (at(namespace, "metadata", "annotations", HISTORY) !== undefined
+    || at(namespace, "metadata", "annotations", "kars.azure.com/sandbox-name") === undefined) return undefined;
+  const live = await current(execute, activation, scope, "");
+  const snapshot = live.snapshot;
+  if (!snapshot.task || !at(snapshot.task, "spec", "blueprint", "credentialBindings")) return undefined;
+  return { scope: structuredClone(scope), namespace: live.namespace, deployment: live.deployment, pods: live.pods,
+    sandbox: snapshot.sandbox, task: snapshot.task, admin: await material(execute, scope, live.runtime) };
 }
 
 export async function stageLateScope(

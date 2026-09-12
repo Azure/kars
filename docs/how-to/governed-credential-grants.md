@@ -250,7 +250,21 @@ Unrelated non-consuming Pods are preserved.
 Apply rechecks the complete enforcing policy/binding specifications and their
 current type-check/observation status. When updating a grant, that grant's existing
 writer authority is retired first, including absence checks for its owned read
-Roles/Bindings; another workspace's grant is not reset. For first qualification,
+Roles/Bindings; another workspace's grant is not reset.
+
+For a verified late-enrollment v2 Task runtime, retirement may temporarily
+withdraw Task authorization while the controller observes the new grant
+generation. Apply waits up to 120 seconds for genuine re-attestation under the
+exact quiescent grant. Task/Sandbox identity and intent, source data, private
+material and executable templates remain pinned. An observed projection
+revocation requires a fresh refill revision distinct from both the original
+and empty revisions, consumed by the owned Deployment. Only those proven
+controller metadata transitions can advance; this is not a new user review,
+stale-digest reuse or an arbitrary revision refresh. Already-qualified scopes
+retain their independently verified path. Missing witnesses or other drift
+preserve retirement and require explicit recovery; no new authority is published.
+
+For first qualification,
 namespace protection is then enabled in `Pending`, identities/templates are rechecked,
 and only approved authority-consuming controller replicas are paused. This
 includes private material, privileged ServiceAccount automount/projected tokens,
