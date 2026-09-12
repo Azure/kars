@@ -578,7 +578,7 @@ Examples:
         const helmPath = requireBundledAsset("deploy/helm/kars");
         await recheckMeshOwnership(execa, mesh);
         await prepareCoreHelmSchemas(execa, buildHelmUpgradeArgs(ctx, helmPath, target, {
-          skipRuntimeImages: options.skipRuntimeImages, mesh,
+          skipRuntimeImages: options.skipRuntimeImages, mesh, forceConflicts: options.forceConflicts,
         }));
 
         // Pre-flight: a server-side dry-run detects fields owned by another

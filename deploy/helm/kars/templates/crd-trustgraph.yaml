@@ -20,6 +20,8 @@ metadata:
     app.kubernetes.io/name: kars
     app.kubernetes.io/component: crd
   name: trustgraphs.kars.azure.com
+  annotations:
+    helm.sh/resource-policy: keep
 spec:
   group: kars.azure.com
   names:
@@ -291,4 +293,3 @@ spec:
     storage: true
     subresources:
       status: {}
-
