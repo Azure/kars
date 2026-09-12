@@ -1,7 +1,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""The same bounded negative PATCH/restore used by full and early native tests."""
+"""Same-owner, operation-preserving SSA negatives for full and early native tests."""
 
 from contextlib import contextmanager
 import copy
@@ -10,6 +10,7 @@ import json
 from .common import SYSTEM, require
 from .registration_schema import CRD_PATH, write_report
 from .ssa_diagnostics import manager_class
+from .task_schema_helpers import payload_helper
 
 TASK_NAME = "karstasks.kars.azure.com"
 TASK_PATH = f"{CRD_PATH}/{TASK_NAME}"
@@ -68,42 +69,56 @@ def _values(obj):
         if key not in ("resourceVersion", "managedFields", "generation")}}
 
 
+def _owned_request(h, original, current, manifest, fault, restore):
+    request = payload_helper(h, "owned-request", {
+        "original": original, "current": current, "manifest": manifest, "fault": fault, "restore": restore})
+    require(request.get("args") == ["apply", "--server-side", "--field-manager=helm", "-f", "-", "-o", "json"]
+            and isinstance(request.get("input"), str), "Unexpected owned fixture SSA request")
+    preview = json.loads(h.k(*request["args"], "--dry-run=server", "--show-managed-fields=true",
+                             "--validate=strict", "--request-timeout=20s",
+                             data=request["input"], timeout=25))
+    _verify_owned(h, original, preview, fault, "restored" if restore else "changed")
+    require(preview["metadata"]["resourceVersion"] == current["metadata"]["resourceVersion"],
+            "Owned Task preview changed its reviewed resourceVersion")
+    require(read_task_schema(h) == current, "Task changed during owned SSA preflight; no mutation was issued")
+    h.k(*request["args"], "--validate=strict", "--request-timeout=20s",
+        data=request["input"], timeout=25)
+
+
+def _verify_owned(h, original, current, fault, state):
+    require(payload_helper(h, "owned-check", {
+        "original": original, "current": current, "fault": fault, "state": state}) == {"verified": True},
+        "Task fixture did not preserve its original ownership")
+
+
 @contextmanager
 def task_schema_conflict(h, fault):
     require(fault in ("owner", "schema"), "Unknown Task negative fixture")
     original = read_task_schema(h)
     require_task_owner(original)
+    manifest = h.run(["helm", "get", "manifest", "kars", "-n", SYSTEM], timeout=20)
     expected = copy.deepcopy(original)
-    patch = {"metadata": {"uid": original["metadata"]["uid"],
-                          "resourceVersion": original["metadata"]["resourceVersion"]}}
     if fault == "owner":
-        patch["metadata"]["annotations"] = {"meta.helm.sh/release-name": "foreign-fixture"}
         expected["metadata"]["annotations"]["meta.helm.sh/release-name"] = "foreign-fixture"
     else:
         expected["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["description"] = "Unreviewed public fixture description"
-        patch["spec"] = expected["spec"]
     before_managers = task_manager_facts(original)
-    # Deliberately preserve the original default-manager PATCH contract until
-    # native evidence establishes whether it changes SSA field ownership.
-    h.api("PATCH", TASK_PATH, body=patch, status=200)
+    _owned_request(h, original, original, manifest, fault, False)
     try:
         changed = read_task_schema(h)
         require(_values(changed) == _values(expected), "Task negative fixture changed outside its exact intended delta")
+        _verify_owned(h, original, changed, fault, "changed")
         yield changed
     finally:
         live = read_task_schema(h)
         require(_values(live) == _values(expected), "Task changed externally; fixture restoration was not issued")
-        restore = {"metadata": {"uid": original["metadata"]["uid"],
-                                "resourceVersion": live["metadata"]["resourceVersion"]},
-                   "spec": original["spec"]}
-        if fault == "owner":
-            restore["metadata"]["annotations"] = {
-                "meta.helm.sh/release-name": original["metadata"]["annotations"]["meta.helm.sh/release-name"]}
-        h.api("PATCH", TASK_PATH, body=restore, status=200)
+        _owned_request(h, original, live, manifest, fault, True)
         restored = read_task_schema(h)
         require(_values(restored) == _values(original), "Task fixture did not restore its exact original values and UID")
         require_task_owner(restored)
+        _verify_owned(h, original, restored, fault, "restored")
         write_report(h.root, f"migration-seed-task-{fault}-restore.json", {
             "kind": "KarsTask", "case": fault, "valuesAndUidRestored": True,
+            "originalHelmApplyOwnershipPreserved": True,
             "beforeManagers": before_managers, "afterManagers": task_manager_facts(restored),
         })
