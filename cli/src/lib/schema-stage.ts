@@ -3,13 +3,14 @@
 
 import {
   canonicalSchema, normalizedCrd, readSchemaObject, SCHEMA_DIGEST, schemaDigest, schemaDocuments,
-  schemaIdentity, schemaOwnerFields, verifySchemaOwner, type ObjectMap, type SchemaExecute, type SchemaOwner,
+  schemaIdentity, schemaOwnerFields, verifyNewSchemaPreviewOwner, verifySchemaOwner, type ObjectMap, type SchemaExecute, type SchemaOwner,
 } from "./schema-documents.js";
 import { waitForPublishedSchemas, type PublishedType, type SchemaWait } from "./schema-discovery.js";
 import { assertRollbackCompatibility, assertSchemaCompatibility, requireCrdRetention } from "./schema-compatibility.js";
 import {
   authorizesSreSchemaMigration, completeSreSchemaMigration, recheckSreSchemaMigration, recordSreSchemaWrite, type QualifiedSreMigration,
 } from "./sre-schema-migration.js";
+import { schemaStep } from "./sre-schema-diagnostics.js";
 
 interface PlannedSchema { desired: ObjectMap; current?: ObjectMap; uid?: string; change: boolean }
 export interface SchemaStageOptions extends SchemaOwner, SchemaWait {
@@ -92,6 +93,7 @@ export async function waitForInstalledCoreSchemas(
 export async function planCoreSchemaDocuments(
   execute: SchemaExecute, documents: ObjectMap[], options: SchemaStageOptions,
 ): Promise<() => Promise<{ schemas: number; published: true }>> {
+  schemaStep("schema-plan");
   validateOwner(options);
   documents = structuredClone(documents);
   if (options.reviewedSreMigration && options.rollbackDocuments) throw new Error("Reviewed SRE schema migration cannot use automatic rollback");
@@ -115,11 +117,14 @@ export async function planCoreSchemaDocuments(
       throw new Error(`Policy ${policy.metadata.name} parameter schema is absent from the exact chart`);
     }
   }
+  schemaStep("policy-review");
   await policySafety(execute, documents);
   const plans: PlannedSchema[] = [];
   let priorManifest: ObjectMap[] | undefined;
   for (const desired of crds) {
+    schemaStep("schema-plan-identity", desired.spec.names.kind);
     const current = await readSchemaObject(execute, "customresourcedefinition", desired.metadata.name);
+    schemaStep("schema-plan-identity", desired.spec.names.kind, current);
     if (options.reviewedSreMigration && !options.checkOnly
       && !authorizesSreSchemaMigration(options.reviewedSreMigration, current, desired)) {
       throw new Error("Schema plan differs from its qualified SRE migration snapshot");
@@ -137,6 +142,7 @@ export async function planCoreSchemaDocuments(
       if (options.checkOnly) throw new Error(`Schema ${desired.metadata.name} differs from the chart`);
       const recorded = current.metadata.annotations?.[SCHEMA_DIGEST] === schemaDigest(actual);
       if (!recorded) {
+        schemaStep("helm-schema-match", desired.spec.names.kind);
         if (owner.ownership !== "helm") throw new Error(`Customized or unrecorded schema ${desired.metadata.name}; no overwrite is permitted`);
         priorManifest ??= schemaDocuments((await execute("helm", ["get", "manifest", owner.release, "-n", owner.namespace],
           { stdio: "pipe" })).stdout);
@@ -173,25 +179,31 @@ export async function planCoreSchemaDocuments(
     await recheckSreSchemaMigration(options.reviewedSreMigration);
     for (const plan of plans.filter(plan => plan.change)) {
       const { object, args } = writeRequest(plan);
+      schemaStep("schema-server-preview", plan.desired.spec.names.kind);
       const checked: ObjectMap = JSON.parse((await execute("kubectl", [...args, "--dry-run=server", "--request-timeout=20s"],
         { stdio: "pipe", input: JSON.stringify(object), timeout: 25_000 })).stdout);
+      schemaStep("schema-preview-identity", plan.desired.spec.names.kind, checked);
       if ((plan.uid && schemaIdentity(checked).uid !== plan.uid)
         || canonicalSchema(normalizedCrd(checked)) !== canonicalSchema(normalizedCrd(plan.desired))) {
         throw new Error("Migration schema dry-run returned another identity or schema");
       }
-      verifySchemaOwner(checked, owner);
+      if (plan.current) verifySchemaOwner(checked, owner);
+      else verifyNewSchemaPreviewOwner(checked, owner);
     }
     await recheckSreSchemaMigration(options.reviewedSreMigration);
   }
   // Every plan and server dry-run completes before any real schema/action write.
   return async () => {
+    schemaStep("schema-plan");
     await options.beforeWrite?.();
     if (options.reviewedSreMigration) await recheckSreSchemaMigration(options.reviewedSreMigration);
     for (const plan of plans.filter(plan => plan.change)) {
       if (options.reviewedSreMigration) await recheckSreSchemaMigration(options.reviewedSreMigration, plan.desired.metadata.name);
       const { object, args } = writeRequest(plan);
+      schemaStep("schema-write", plan.desired.spec.names.kind);
       const applied: ObjectMap = JSON.parse((await execute("kubectl", [...args, "--request-timeout=20s"],
         { stdio: "pipe", input: JSON.stringify(object), timeout: 25_000 })).stdout);
+      schemaStep("schema-plan-identity", plan.desired.spec.names.kind, applied);
       const identity = schemaIdentity(applied);
       if ((plan.uid && plan.uid !== identity.uid) || applied.metadata.name !== plan.desired.metadata.name
         || canonicalSchema(normalizedCrd(applied)) !== canonicalSchema(normalizedCrd(plan.desired))) throw new Error("Schema write returned an unreviewed identity/spec");
@@ -202,6 +214,7 @@ export async function planCoreSchemaDocuments(
         await recheckSreSchemaMigration(options.reviewedSreMigration, plan.desired.metadata.name);
       }
     }
+    schemaStep("schema-publication");
     await waitForPublishedSchemas(execute, types, async () => {
       let established = true;
       for (const plan of plans) {
@@ -216,6 +229,7 @@ export async function planCoreSchemaDocuments(
       }
       return established;
     }, options);
+    schemaStep("policy-review");
     await existingPoliciesObserved(execute, documents, options);
     if (options.reviewedSreMigration) await completeSreSchemaMigration(options.reviewedSreMigration);
     return { schemas: crds.length, published: true };

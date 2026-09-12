@@ -201,11 +201,12 @@ describe("existing action API prerequisite compatibility", () => {
     const f = fixture(helm);
     const execute = vi.fn<Execute>(async (file, args, options) => {
       if (args[0] === "wait" && args.includes(`crd/${ACTION_CRD}`)
-        || (helm&&args.includes("/openapi/v3"))) throw new Error("Established timeout");
+        || (helm&&args.includes("/openapi/v3"))) throw Object.assign(new Error("Established timeout"), { timedOut: true });
       return f.execute(file, args, options);
     });
 
-    await expect(f.run(false, execute)).rejects.toThrow("Established timeout");
+    await expect(f.run(false, execute)).rejects.toThrow(
+      helm ? "schema-publication: transport-timeout" : "Established timeout");
     expect(execute.mock.calls.some(([, args, options]) => (args[0]==="upgrade"&&!args.includes("--dry-run=server"))
       || (args[0]==="create"&&JSON.parse(options.input!).kind!=="CustomResourceDefinition"))).toBe(false);
   });
@@ -214,8 +215,11 @@ describe("existing action API prerequisite compatibility", () => {
     const f = fixture(helm);
     const execute: Execute = (file, args, options) => (args[0] === "patch" && args[2] === ACTION_CRD)
       || (args[0] === "apply" && JSON.parse(options.input!).metadata.name === ACTION_CRD)
-      ? Promise.reject(new Error("Forbidden action API update")) : f.execute(file, args, options);
-    await expect(f.run(false, execute)).rejects.toThrow("Forbidden action API update");
+      ? Promise.reject(Object.assign(new Error("Forbidden action API update"), {
+        stderr: "Error from server (Forbidden): private response body",
+      })) : f.execute(file, args, options);
+    await expect(f.run(false, execute)).rejects.toThrow(
+      helm ? "schema-server-preview: Forbidden" : "Forbidden action API update");
     expect(f.execute.mock.calls.some(([, args]) => ["create", "upgrade"].includes(args[0]) && !args.includes("--dry-run=server"))).toBe(false);
   });
 
