@@ -9,12 +9,14 @@ try {
     "../../../cli/dist/lib/schema-write-request.js");
   const { normalizedCrd, schemaDocuments, schemaIdentity, verifySchemaOwner } = await import(
     "../../../cli/dist/lib/schema-documents.js");
-  if (typeof buildSchemaWriteRequest !== "function" || typeof verifySchemaWritePreview !== "function") {
+  const { ownedTaskRequest, verifyOwnedTaskState } = await import("./task_schema_owned.mjs");
+  if ([buildSchemaWriteRequest, verifySchemaWritePreview, ownedTaskRequest, verifyOwnedTaskState]
+    .some(helper => typeof helper !== "function")) {
     throw new Error("Required production helper exports are missing");
   }
   const mode = process.argv[2];
   phase = "mode";
-  if (process.argv.length !== 3 || !["check", "build", "validate"].includes(mode)) {
+  if (process.argv.length !== 3 || !["check", "build", "validate", "owned-request", "owned-check"].includes(mode)) {
     throw new Error("Unsupported internal fixture mode");
   }
   if (mode === "check") {
@@ -29,36 +31,41 @@ try {
       chunks.push(chunk);
     }
     const input = JSON.parse(Buffer.concat(chunks).toString("utf8"));
-    phase = "target";
-    if (typeof input.rendered !== "string") throw new Error("Missing rendered chart");
-    const documents = schemaDocuments(input.rendered);
-    if (documents.length !== 1) throw new Error("Exactly one Task CRD is required");
-    const desired = documents[0];
-    normalizedCrd(desired);
-    if (desired.metadata.name !== "karstasks.kars.azure.com" || desired.spec.names.kind !== "KarsTask"
-      || ["uid", "resourceVersion", "ownerReferences", "namespace"].some(key => key in desired.metadata)) {
-      throw new Error("Unreviewed Task chart identity");
-    }
-    const owner = { namespace: "kars-system", release: "kars", ownership: "helm" };
-    phase = "current-owner";
-    normalizedCrd(input.current);
-    verifySchemaOwner(input.current, owner);
-    if (input.current.metadata.name !== desired.metadata.name) throw new Error("Another current CRD");
-    const currentIdentity = schemaIdentity(input.current);
-    if (mode === "build") {
-      phase = "build";
-      const request = buildSchemaWriteRequest(desired, input.current, owner);
-      // Keep the JSON payload as a string: Python must not reserialize numbers.
-      process.stdout.write(JSON.stringify({ args: request.args, input: JSON.stringify(request.object) }));
+    if (mode === "owned-request" || mode === "owned-check") {
+      phase = mode;
+      process.stdout.write(JSON.stringify(mode === "owned-request" ? ownedTaskRequest(input) : verifyOwnedTaskState(input)));
     } else {
-      phase = "validate";
-      if (typeof input.returned !== "string") throw new Error("Missing raw API response");
-      const checked = JSON.parse(input.returned);
-      verifySchemaWritePreview(checked, desired, owner, currentIdentity.uid);
-      if (schemaIdentity(checked).resourceVersion !== currentIdentity.resourceVersion) {
-        throw new Error("Task preview changed its reviewed resourceVersion");
+      phase = "target";
+      if (typeof input.rendered !== "string") throw new Error("Missing rendered chart");
+      const documents = schemaDocuments(input.rendered);
+      if (documents.length !== 1) throw new Error("Exactly one Task CRD is required");
+      const desired = documents[0];
+      normalizedCrd(desired);
+      if (desired.metadata.name !== "karstasks.kars.azure.com" || desired.spec.names.kind !== "KarsTask"
+        || ["uid", "resourceVersion", "ownerReferences", "namespace"].some(key => key in desired.metadata)) {
+        throw new Error("Unreviewed Task chart identity");
       }
-      process.stdout.write(JSON.stringify({ validated: true }));
+      const owner = { namespace: "kars-system", release: "kars", ownership: "helm" };
+      phase = "current-owner";
+      normalizedCrd(input.current);
+      verifySchemaOwner(input.current, owner);
+      if (input.current.metadata.name !== desired.metadata.name) throw new Error("Another current CRD");
+      const currentIdentity = schemaIdentity(input.current);
+      if (mode === "build") {
+        phase = "build";
+        const request = buildSchemaWriteRequest(desired, input.current, owner);
+        // Keep the JSON payload as a string: Python must not reserialize numbers.
+        process.stdout.write(JSON.stringify({ args: request.args, input: JSON.stringify(request.object) }));
+      } else {
+        phase = "validate";
+        if (typeof input.returned !== "string") throw new Error("Missing raw API response");
+        const checked = JSON.parse(input.returned);
+        verifySchemaWritePreview(checked, desired, owner, currentIdentity.uid);
+        if (schemaIdentity(checked).resourceVersion !== currentIdentity.resourceVersion) {
+          throw new Error("Task preview changed its reviewed resourceVersion");
+        }
+        process.stdout.write(JSON.stringify({ validated: true }));
+      }
     }
   }
 } catch {
