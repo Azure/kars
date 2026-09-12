@@ -11,7 +11,7 @@ import { applyReviewedGrant } from "../commands/credential-grants.js";
 import { continuityFixture, privateAuthoritySnapshot } from "./private-activation-fixtures.js";
 import { canonical, readSecretMetadata, PRIVATE_PREFIX as P, type Execute } from "./private-activation.js";
 import { captureGuardRetirement, refreshGuardRetirement } from "./private-activation-guard-retirement.js";
-import { captureWriterSettlement } from "./private-activation-writer-settle.js";
+import { captureWriterSettlement, observeWriterSettlement } from "./private-activation-writer-settle.js";
 import { PrivateCommandFailure } from "./private-activation-command-diagnostics.js";
 
 const RESOURCE = "karscredentialgrants.kars.azure.com";
@@ -230,6 +230,189 @@ async function setup(originalRuntime = false) {
 describe("late runtime authority across selected writer retirement", () => {
   beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => {}); });
   afterEach(() => { vi.restoreAllMocks(); });
+
+  async function quiesced() {
+    const f = await setup();
+    const review = await f.document();
+    const settlement = await captureWriterSettlement(f.execute, review.spec.privateActivation, f.grant());
+    if (!settlement) throw new Error("Fixture requires a captured late runtime");
+    const beforeTask = structuredClone(f.task);
+    const beforeDeployment = structuredClone(f.deployment);
+    f.neverRestore();
+    await f.execute(["patch", RESOURCE, "workspace", "-n", "work", "--type=merge", "-p", JSON.stringify({
+      metadata: { uid: f.grant().metadata.uid, resourceVersion: f.grant().metadata.resourceVersion },
+      spec: { ...f.grant().spec, writers: [] },
+    })]);
+    f.calls.length = 0;
+    return { f, review, settlement, beforeTask, beforeDeployment };
+  }
+
+  it.each(["karstask", "deployments.apps"])(
+    "rereads a torn %s snapshot before judging the later empty projection", async kind => {
+      const { f, review, settlement, beforeTask, beforeDeployment } = await quiesced();
+      let stale = true;
+      const run: Execute = async (args, input) => {
+        const result = await f.execute(args, input);
+        if (stale && args[0] === "get" && args[1] === kind && args[2] === "late") {
+          stale = false;
+          return JSON.stringify(kind === "karstask" ? beforeTask : beforeDeployment);
+        }
+        return result;
+      };
+      await expect(observeWriterSettlement(run, review.spec.privateActivation, settlement)).resolves.toBe(false);
+      expect(stale).toBe(false);
+      expect(settlement.runtimes[0]!.emptyVersion).toBeUndefined();
+      expect(f.calls.every(args => args[0] === "get")).toBe(true);
+      expect(f.grant().spec.writers).toEqual([]);
+      expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+      await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(false);
+      expect(settlement.runtimes[0]!.emptyVersion).toBe(f.projection.metadata.resourceVersion);
+      f.restore();
+      await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(true);
+    });
+
+  it("still rejects a stable empty projection without the witnessed Task withdrawal", async () => {
+    const { f, review, settlement, beforeTask } = await quiesced();
+    f.task.status = beforeTask.status;
+    f.task.metadata.resourceVersion = beforeTask.metadata.resourceVersion;
+    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement))
+      .rejects.toThrow("Projection changed without the captured authority withdrawal and owned pause");
+    expect(settlement.runtimes[0]!.emptyVersion).toBeUndefined();
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    expect(f.grant().spec.writers).toEqual([]);
+  });
+
+  it.each([false, true])("handles an owned refill during lineage lookup without accepting template drift=%s", async unreviewed => {
+    const { f, review, settlement } = await quiesced();
+    let changed = false;
+    const run: Execute = async (args, input) => {
+      if (!changed && args[0] === "get" && args[1] === "pods" && args.includes("kars-late")) {
+        changed = true;
+        f.restore();
+        if (unreviewed) f.deployment.spec.template.spec.containers[0].image = "unreviewed-image";
+      }
+      return f.execute(args, input);
+    };
+    const result = observeWriterSettlement(run, review.spec.privateActivation, settlement);
+    if (unreviewed) {
+      await expect(result).rejects.toThrow(/template|authority/);
+    } else {
+      await expect(result).resolves.toBe(false);
+      expect(settlement.runtimes[0]!.emptyVersion).toBeDefined();
+      await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(true);
+    }
+    expect(changed).toBe(true);
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    expect(f.grant().spec.writers).toEqual([]);
+    expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+  });
+
+  it("never hides an observed unreviewed template behind a later valid Deployment", async () => {
+    const { f, review, settlement } = await quiesced();
+    let lineage = false;
+    let rejectedSnapshot = false;
+    const run: Execute = async (args, input) => {
+      if (!lineage && args[0] === "get" && args[1] === "pods" && args.includes("kars-late")) {
+        f.restore();
+        lineage = true;
+      }
+      const result = await f.execute(args, input);
+      if (lineage && args[0] === "get" && args[1] === "deployments.apps" && args[2] === "late") {
+        const observed = JSON.parse(result);
+        observed.spec.template.metadata.annotations.unreviewed = "private-template-canary";
+        rejectedSnapshot = true;
+        return JSON.stringify(observed);
+      }
+      return result;
+    };
+    await expect(observeWriterSettlement(run, review.spec.privateActivation, settlement))
+      .rejects.toThrow("Private consumer template changed after protection was enabled");
+    expect(rejectedSnapshot).toBe(true);
+    expect(f.deployment.spec.template.metadata.annotations.unreviewed).toBeUndefined();
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+  });
+
+  it("does not retry unrelated lineage lookup errors", async () => {
+    const { f, review, settlement } = await quiesced();
+    const failure = new Error("Unrelated owner lookup failure");
+    let lineage = false;
+    const run: Execute = async (args, input) => {
+      if (!lineage && args[0] === "get" && args[1] === "pods" && args.includes("kars-late")) {
+        f.restore();
+        lineage = true;
+      }
+      if (lineage && args[0] === "get" && args[1] === "replicasets.apps") throw failure;
+      return f.execute(args, input);
+    };
+    await expect(observeWriterSettlement(run, review.spec.privateActivation, settlement)).rejects.toBe(failure);
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+  });
+
+  it("rechecks projection identity after successful lineage lookup before reporting settlement", async () => {
+    const { f, review, settlement } = await quiesced();
+    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(false);
+    f.restore();
+    let lineage = false;
+    const run: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (args[0] === "get" && args[1] === "pods" && args.includes("kars-late")) lineage = true;
+      if (lineage && args[0] === "get" && args[1] === "deployments.apps" && args[2] === "late") {
+        f.projection.metadata.uid = "replacement";
+      }
+      return result;
+    };
+    await expect(observeWriterSettlement(run, review.spec.privateActivation, settlement))
+      .rejects.toThrow("captured runtime authority");
+    expect(settlement.runtimes[0]!.restored).toBeUndefined();
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+  });
+
+  it.each(["karstask", "deployments.apps"])("completes shipped apply after a torn %s retirement read", async kind => {
+    const f = await setup();
+    const review = await f.document();
+    const before = f.preserved();
+    const initial = structuredClone(kind === "karstask" ? f.task : f.deployment);
+    f.delayRestore();
+    let retired = false;
+    let stale = true;
+    const run: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (args[0] === "patch" && args[1] === RESOURCE && f.grant().spec.writers.length === 0) retired = true;
+      if (retired && stale && args[0] === "get" && args[1] === kind && args[2] === "late") {
+        stale = false;
+        return JSON.stringify(initial);
+      }
+      return result;
+    };
+    await applyReviewedGrant(run, review);
+    expect(stale).toBe(false);
+    expect(f.namespace.metadata.annotations[`${P}state`]).toBe("Qualified");
+    expect(f.preserved()).toEqual(before);
+    expect(f.projection.data).toEqual(data);
+    expect(f.task.status.envelopeDigest).toBe(AUTH);
+  });
+
+  it("does not invent withdrawal witnesses when revoke/refill completes between reads", async () => {
+    const f = await setup();
+    const review = await f.document();
+    const beforeTask = structuredClone(f.task);
+    let retired = false;
+    let stale = true;
+    const run: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (args[0] === "patch" && args[1] === RESOURCE && f.grant().spec.writers.length === 0) retired = true;
+      if (retired && stale && args[0] === "get" && args[1] === "karstask" && args[2] === "late") {
+        stale = false;
+        return JSON.stringify(beforeTask);
+      }
+      return result;
+    };
+    await expect(applyReviewedGrant(run, review)).rejects.toThrow("without witnessed fresh revoke/refill");
+    expect(f.wasRestored()).toBe(true);
+    expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+    expect(f.grant().spec.writers).toEqual([]);
+  });
 
   it("reports a Pending-induced status/RV race without retrying the stale suspend PATCH", async () => {
     const f = await setup();
