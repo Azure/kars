@@ -59,6 +59,77 @@ class ObservationCases:
         target = self.target()
         return self.bff.call("GET", f"/api/namespaces/{CORE}/tasks/{target['task']}/egress/learned")
 
+    def late_runtime_before(self):
+        target = self.target()
+        value, deployment, pod = running(self.setup, CORE, target["sandbox"])
+        namespace = f"kars-{target['sandbox']}"
+        agent = next(container for container in pod["spec"]["containers"] if container["name"] == "openclaw")
+        projection = next(entry["secretRef"]["name"] for entry in agent["envFrom"]
+                          if entry.get("secretRef", {}).get("optional") is False)
+        paths = [core(CORE, "secrets", SOURCE), core(CORE, "secrets", value["spec"]["credentialsRef"]["name"]),
+                 core(namespace, "secrets", projection)]
+        stored = [(path, self.setup.admin.get(path)) for path in paths]
+        root = self.setup.admin.get("/api/v1/namespaces/" + CORE)
+        return {
+            "sandbox": value, "deployment": deployment,
+            "task": self.setup.admin.get(resource(CORE, "karstasks", target["task"])),
+            "namespace": self.setup.admin.get("/api/v1/namespaces/" + namespace),
+            "pods": {uid(entry) for entry in self.setup.admin.get(core(namespace, "pods"))["items"]},
+            "admin": self.setup.admin.get(core(namespace, "secrets", "router-services-admin")),
+            "stored": stored,
+            "root": {key: value for key, value in root["metadata"].get("annotations", {}).items()
+                     if key.startswith("kars.azure.com/private-")},
+            "rootDeployment": self.setup.admin.get(resource(CORE, "deployments", "kars-controller", "/apis/apps/v1")),
+        }
+
+    def late_runtime_after(self, before):
+        target = self.target()
+        namespace = f"kars-{target['sandbox']}"
+        value, deployment, pod = running(self.setup, CORE, target["sandbox"])
+        task = self.setup.admin.get(resource(CORE, "karstasks", target["task"]))
+        current_namespace = self.setup.admin.get("/api/v1/namespaces/" + namespace)
+        require(uid(value) == uid(before["sandbox"]) and value["spec"] == before["sandbox"]["spec"]
+                and value["metadata"].get("ownerReferences") == before["sandbox"]["metadata"].get("ownerReferences")
+                and uid(task) == uid(before["task"]) and task["spec"] == before["task"]["spec"]
+                and uid(deployment) == uid(before["deployment"])
+                and uid(current_namespace) == uid(before["namespace"]),
+                "Late operator enrollment replaced runtime identities or changed customer intent")
+        current_pods = {uid(entry) for entry in self.setup.admin.get(core(namespace, "pods"))["items"]}
+        require(not current_pods.intersection(before["pods"]), "Old late-enrollment Pod UID survived retirement")
+        receipt = json.loads(current_namespace["metadata"]["annotations"]["kars.azure.com/private-root-retirement"])
+        require(receipt.get("version") == 4 and receipt.get("phase") == "Qualified"
+                and before["pods"].issubset(set(receipt.get("captured", []))),
+                "The real operator did not complete the captured late-runtime retirement")
+        for path, previous in before["stored"]:
+            current = self.setup.admin.get(path)
+            require(uid(current) == uid(previous) and current.get("data") == previous.get("data"),
+                    "Late enrollment replaced or changed source bundle/projection/customer credentials")
+        root = self.setup.admin.get("/api/v1/namespaces/" + CORE)
+        require({key: value for key, value in root["metadata"].get("annotations", {}).items()
+                 if key.startswith("kars.azure.com/private-")} == before["root"],
+                "Late enrollment changed the shared root epoch or retirement proof")
+        root_deployment = self.setup.admin.get(resource(CORE, "deployments", "kars-controller", "/apis/apps/v1"))
+        require(uid(root_deployment) == uid(before["rootDeployment"])
+                and root_deployment["spec"] == before["rootDeployment"]["spec"]
+                and root_deployment["metadata"]["generation"] == before["rootDeployment"]["metadata"]["generation"],
+                "Late enrollment restarted or changed the shared root Deployment")
+        admin = self.setup.admin.get(core(namespace, "secrets", "router-services-admin"))
+        require(uid(admin) == uid(before["admin"])
+                and admin["data"]["control-token"] != before["admin"]["data"]["control-token"],
+                "Late enrollment did not rotate the actual existing admin authentication key")
+        with forward(namespace, f"pod/{pod['metadata']['name']}", 19443, 8443):
+            for secret, expected in [(before["admin"], 401), (admin, 200)]:
+                token = base64.b64decode(secret["data"]["control-token"]).decode("ascii")
+                connection = http.client.HTTPConnection("127.0.0.1", 19443, timeout=20)
+                try:
+                    connection.request("GET", "/internal/access-requests", headers={"Authorization": f"Bearer {token}"})
+                    response = connection.getresponse()
+                    response.read(65536)
+                    require(response.status == expected,
+                            "Actual restarted router did not reject old admin authority and accept only the new key")
+                finally:
+                    connection.close()
+
     def enable(self):
         self.prepare_target()
         target = self.target()
@@ -109,10 +180,12 @@ class ObservationCases:
         until("BFF retains API connectivity under existing Cilium isolation", self.bff.ready, 30)
         grant = self.setup.ready_grant(CORE)
         writer = self.setup.admin.get(core(BRIDGE, "serviceaccounts", WRITER))
+        before = self.late_runtime_before()
         enroll(self.setup, CORE, writer, grant["spec"]["agentKeys"], previous=grant, observations=[
             {"kind": "KarsSandbox", "namespace": CORE, "name": target["sandbox"], "uid": uid(value)},
         ])
         self.ready()
+        self.late_runtime_after(before)
         until("real BFF-to-observer9447 and router-to-verifier9448", lambda:
               self.public().get("available") is True, 240)
 
