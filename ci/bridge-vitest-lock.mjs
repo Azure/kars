@@ -47,12 +47,17 @@ assert.deepEqual(after.packages[""], {
 assert.equal(after.packages["node_modules/qs"].version, "6.16.0");
 assert.equal(after.packages["node_modules/vitest"].version, "4.1.11");
 assert.equal(after.packages["node_modules/@vitest/mocker"].version, "4.1.11");
+assert.equal(after.packages["node_modules/vite"].version, before.packages["node_modules/vite"].version);
 const changed = [];
 for (const name of new Set([...Object.keys(before.packages), ...Object.keys(after.packages)])) {
   const old = before.packages[name];
   const current = after.packages[name];
   if (isDeepStrictEqual(old, current)) continue;
   assert.ok(allowed.has(name), `Unrelated package changed: ${name}`);
+  if (name !== "" && name !== "node_modules/qs") {
+    if (old && old.dev !== true) assert.deepEqual(current, old, `Production dependency changed: ${name}`);
+    if (current) assert.equal(current.dev, true, `New production dependency: ${name}`);
+  }
   if (current && name !== "") {
     assert.equal(typeof current.version, "string");
     assert.match(current.resolved, /^https:\/\/registry\.npmjs\.org\//);
