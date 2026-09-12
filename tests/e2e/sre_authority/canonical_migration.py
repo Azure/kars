@@ -13,6 +13,7 @@ import json
 
 from .common import SYSTEM, require
 from .canonical_seed import dry_run_seed_data, prove_nested_params_support, request_seed, seed_definitions
+from .task_schema_conflicts import task_schema_conflict
 
 CRDS = "/apis/apiextensions.k8s.io/v1/customresourcedefinitions"
 STAGE = ("authority", "stage", "--controller-image", "kars-controller:e2e",
@@ -54,23 +55,12 @@ def assert_data_unchanged(h, fixtures):
 
 def deny_late_conflicts(h, fixtures):
     """A final CRD conflict must prevent even the earlier action conversion."""
-    name = "karstasks.kars.azure.com"
-    original = h.get("crd", name)
     action = h.get("crd", "karssreactions.kars.azure.com")
     action_before = {"uid": action["metadata"]["uid"], "spec": copy.deepcopy(action["spec"])}
     binding = h.get("clusterrolebinding", "kars-sre-reader")
     subjects = copy.deepcopy(binding["subjects"])
     for fault in ("owner", "schema"):
-        current = h.get("crd", name)
-        patch = {"metadata": {"uid": current["metadata"]["uid"],
-                              "resourceVersion": current["metadata"]["resourceVersion"]}}
-        if fault == "owner":
-            patch["metadata"]["annotations"] = {"meta.helm.sh/release-name": "foreign-fixture"}
-        else:
-            patch["spec"] = copy.deepcopy(original["spec"])
-            patch["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["description"] = "Unreviewed public fixture description"
-        h.api("PATCH", f"{CRDS}/{name}", body=patch, status=200)
-        try:
+        with task_schema_conflict(h, fault):
             for mode, flags in (("preview", ("--dry-run",)), ("apply", ())):
                 rejected = h.cli(*STAGE, *flags, expected=None, timeout=180)
                 require(rejected.returncode != 0, "A foreign/custom schema unexpectedly qualified")
@@ -81,15 +71,6 @@ def deny_late_conflicts(h, fixtures):
                         "Migration preflight changed an existing subject")
                 assert_data_unchanged(h, fixtures)
                 h.passed(f"Native canonical migration {fault} conflict refused during {mode} before any action/schema conversion")
-        finally:
-            live = h.get("crd", name)
-            restore = {"metadata": {"uid": original["metadata"]["uid"],
-                                    "resourceVersion": live["metadata"]["resourceVersion"]},
-                       "spec": original["spec"]}
-            if fault == "owner":
-                restore["metadata"]["annotations"] = {
-                    "meta.helm.sh/release-name": original["metadata"]["annotations"]["meta.helm.sh/release-name"]}
-            h.api("PATCH", f"{CRDS}/{name}", body=restore, status=200)
 
 
 def finish_data_proof(h, fixtures):

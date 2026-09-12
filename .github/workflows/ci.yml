@@ -423,6 +423,14 @@ jobs:
         with:
           version: v1.30.5
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - name: Build same-source CLI for schema request parity
+        working-directory: cli
+        run: npm ci && npm run build
+      - name: Require the compiled production schema request helper
+        run: node tests/e2e/sre_authority/task_schema_payload.mjs check
       - name: Check public-schema diagnostic privacy
         run: PYTHONPATH=tests/e2e python3 -m unittest sre_authority.registration_schema_test sre_authority.bootstrap_probe_test sre_authority.binding_probe_test sre_authority.legacy_crds_test sre_authority.connection_proxy_test credential_schema_test credential_policy_schema_test sandbox_condition_schema_test eval_pod_admission_test private_consumption_test receipt_log_rotation_test governed_services_test
       - name: Create the same disposable API server as the real harness

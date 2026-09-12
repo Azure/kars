@@ -3,7 +3,7 @@
 
 import {
   canonicalSchema, normalizedCrd, readSchemaObject, SCHEMA_DIGEST, schemaDigest, schemaDocuments,
-  schemaIdentity, schemaOwnerFields, verifyNewSchemaPreviewOwner, verifySchemaOwner, type ObjectMap, type SchemaExecute, type SchemaOwner,
+  schemaIdentity, verifySchemaOwner, type ObjectMap, type SchemaExecute, type SchemaOwner,
 } from "./schema-documents.js";
 import { waitForPublishedSchemas, type PublishedType, type SchemaWait } from "./schema-discovery.js";
 import { assertRollbackCompatibility, assertSchemaCompatibility, requireCrdRetention } from "./schema-compatibility.js";
@@ -11,6 +11,7 @@ import {
   authorizesSreSchemaMigration, completeSreSchemaMigration, recheckSreSchemaMigration, recordSreSchemaWrite, type QualifiedSreMigration,
 } from "./sre-schema-migration.js";
 import { schemaStep } from "./sre-schema-diagnostics.js";
+import { buildSchemaWriteRequest, verifySchemaWritePreview } from "./schema-write-request.js";
 
 interface PlannedSchema { desired: ObjectMap; current?: ObjectMap; uid?: string; change: boolean }
 export interface SchemaStageOptions extends SchemaOwner, SchemaWait {
@@ -160,21 +161,7 @@ export async function planCoreSchemaDocuments(
     if (options.rollbackDocuments) assertRollbackCompatibility([current], options.rollbackDocuments);
     plans.push({ desired, current, uid: schemaIdentity(current).uid, change });
   }
-  const writeRequest = (plan: PlannedSchema) => {
-    const fields = schemaOwnerFields(owner);
-    const object = { apiVersion: plan.desired.apiVersion, kind: plan.desired.kind, spec: plan.desired.spec, metadata: {
-      ...plan.desired.metadata,
-      ...(plan.current ? schemaIdentity(plan.current) : {}),
-      labels: { ...plan.desired.metadata.labels, ...fields.labels },
-      annotations: { ...plan.desired.metadata.annotations, ...fields.annotations,
-        [SCHEMA_DIGEST]: schemaDigest(normalizedCrd(plan.desired)) },
-    } };
-    const manager = owner.ownership === "helm" ? "helm" : "kars-schema-stage";
-    const args = plan.current
-      ? ["apply", "--server-side", `--field-manager=${manager}`, "-f", "-", "-o", "json"]
-      : ["create", `--field-manager=${manager}`, "-f", "-", "-o", "json"];
-    return { object, args };
-  };
+  const writeRequest = (plan: PlannedSchema) => buildSchemaWriteRequest(plan.desired, plan.current, owner);
   if (options.reviewedSreMigration && !options.checkOnly) {
     await recheckSreSchemaMigration(options.reviewedSreMigration);
     for (const plan of plans.filter(plan => plan.change)) {
@@ -183,12 +170,7 @@ export async function planCoreSchemaDocuments(
       const checked: ObjectMap = JSON.parse((await execute("kubectl", [...args, "--dry-run=server", "--request-timeout=20s"],
         { stdio: "pipe", input: JSON.stringify(object), timeout: 25_000 })).stdout);
       schemaStep("schema-preview-identity", plan.desired.spec.names.kind, checked);
-      if ((plan.uid && schemaIdentity(checked).uid !== plan.uid)
-        || canonicalSchema(normalizedCrd(checked)) !== canonicalSchema(normalizedCrd(plan.desired))) {
-        throw new Error("Migration schema dry-run returned another identity or schema");
-      }
-      if (plan.current) verifySchemaOwner(checked, owner);
-      else verifyNewSchemaPreviewOwner(checked, owner);
+      verifySchemaWritePreview(checked, plan.desired, owner, plan.uid);
     }
     await recheckSreSchemaMigration(options.reviewedSreMigration);
   }
