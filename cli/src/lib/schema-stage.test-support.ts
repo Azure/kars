@@ -5,11 +5,12 @@ import { normalizedCrd, schemaDigest, SCHEMA_DIGEST, schemaOwnerFields, type Obj
 
 export function crd(kind = "KarsCredentialGrant", plural = "karscredentialgrants"): ObjectMap {
   return { apiVersion: "apiextensions.k8s.io/v1", kind: "CustomResourceDefinition",
-    metadata: { name: `${plural}.kars.azure.com`, labels: { "app.kubernetes.io/name": "kars" } },
+    metadata: { name: `${plural}.kars.azure.com`, labels: { "app.kubernetes.io/name": "kars" },
+      annotations: { "helm.sh/resource-policy": "keep" } },
     spec: { group: "kars.azure.com", names: { kind, plural, singular: kind.toLowerCase() }, scope: "Namespaced",
       versions: [{ name: "v1alpha1", served: true, storage: true, schema: { openAPIV3Schema: {
         type: "object", required: ["spec"], properties: { metadata: { type: "object" }, spec: {
-          type: "object", properties: { enabled: { type: "boolean", default: true }, workspaceUid: { type: "string" } },
+          type: "object", properties: { enabled: { type: "boolean" }, workspaceUid: { type: "string" } },
         } },
       } } }] } };
 }
@@ -27,7 +28,9 @@ export function schemaFixture(documents = [crd(), admission()]) {
   const requests: { file: string; args: readonly string[]; input?: string }[] = [];
   const writes: ObjectMap[] = [];
   const options = { established: true, published: true, resourceVisible: true, dangling: false,
-    changedType: false, duplicate: false, link: "/openapi/v3/apis/kars.azure.com/v1alpha1?hash=current" };
+    changedType: false, duplicate: false, releaseExists: true, helmVersion: "v4.1.3",
+    link: "/openapi/v3/apis/kars.azure.com/v1alpha1?hash=current" };
+  const history = [{ revision: 1, status: "deployed" }];
   let time = 0;
   let revision = 1;
   let onSleep = () => {};
@@ -35,8 +38,10 @@ export function schemaFixture(documents = [crd(), admission()]) {
   let beforeRaw = (_path: string) => {};
   const install = (object: ObjectMap, metadataOwner: SchemaOwner = owner) => {
     const result = structuredClone(object);
+    const fields = schemaOwnerFields(metadataOwner);
     result.metadata = { ...result.metadata, uid: `${result.metadata.name}-uid`, resourceVersion: String(revision++),
-      generation: 1, ...schemaOwnerFields(metadataOwner) };
+      generation: 1, labels: { ...result.metadata.labels, ...fields.labels },
+      annotations: { ...result.metadata.annotations, ...fields.annotations } };
     result.metadata.annotations[SCHEMA_DIGEST] = schemaDigest(normalizedCrd(result));
     result.status = { storedVersions: ["v1alpha1"], conditions: [{ type: "Established", status: "True" }] };
     objects.set(result.metadata.name, result);
@@ -45,8 +50,10 @@ export function schemaFixture(documents = [crd(), admission()]) {
   const execute: SchemaExecute = async (file, args, settings) => {
     requests.push({ file, args, input: settings.input });
     if (file === "helm") {
+      if (args[0] === "version") return { stdout: options.helmVersion };
       if (args[0] === "template") return { stdout: documents.map(document => JSON.stringify(document)).join("\n---\n") };
-      if (args[0] === "list") return { stdout: JSON.stringify([{ name: owner.release, namespace: owner.namespace }]) };
+      if (args[0] === "list") return { stdout: JSON.stringify(options.releaseExists ? [{ name: owner.release, namespace: owner.namespace }] : []) };
+      if (args[0] === "history") return { stdout: JSON.stringify(history) };
       if (args[0] === "get" && args[1] === "values") return { stdout: JSON.stringify({ preserved: "saved" }) };
       if (args[0] === "get" && args[1] === "manifest") return { stdout: documents.map(document => JSON.stringify(document)).join("\n---\n") };
       if (args[0] === "upgrade" || args[0] === "install") return { stdout: "" };
@@ -108,7 +115,7 @@ export function schemaFixture(documents = [crd(), admission()]) {
     }
     throw new Error(`Unexpected schema fixture request ${args.join(" ")}`);
   };
-  return { owner, objects, requests, writes, options, execute, install,
+  return { owner, objects, requests, writes, options, history, execute, install,
     wait: { timeoutMs: 1500, now: () => time, sleep: async (ms: number) => { time += ms; onSleep(); } },
     onSleep: (callback: () => void) => { onSleep = callback; },
     beforeWrite: (callback: (object: ObjectMap) => void) => { beforeWrite = callback; },
