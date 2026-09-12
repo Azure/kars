@@ -3,10 +3,13 @@
 
 import { listSreHelmReleases as listHelmReleases } from "./sre-helm.js";
 import { schemaDocuments, type ObjectMap, type SchemaExecute } from "./schema-documents.js";
-import { stageCoreSchemaDocuments, type SchemaStageOptions } from "./schema-stage.js";
+import { planCoreSchemaDocuments, stageCoreSchemaDocuments, type SchemaStageOptions } from "./schema-stage.js";
 import { canonicalSchema, normalizedCrd } from "./schema-documents.js";
 import { assertNoCrdRemoval, assertRollbackCompatibility } from "./schema-compatibility.js";
-import { prepareHelmFailureSafety, serverSchemaRenderFlags } from "./schema-helm-safety.js";
+import { enabledHelmFlag, prepareHelmFailureSafety, serverSchemaRenderFlags } from "./schema-helm-safety.js";
+import { qualifySreSchemaMigration, sreMigrationSummary } from "./sre-schema-migration.js";
+
+export interface CoreSchemaPreparation extends Partial<SchemaStageOptions> { base365SreMigration?: boolean }
 
 const valueFlags = new Set(["--set", "--set-string", "--set-json", "--set-file", "--set-literal", "--values", "-f"]);
 const ignoredValues = new Set(["--timeout", "--history-max", "--description", "--post-renderer", "--post-renderer-args"]);
@@ -79,26 +82,44 @@ export async function renderCoreSchemaChart(execute: SchemaExecute, args: readon
   return { run, documents: await render(upgrading), release, namespace, upgrading, serverRender: () => render(true) };
 }
 
-export async function prepareCoreHelmSchemas(
-  execute: SchemaExecute, args: readonly string[], options: Partial<SchemaStageOptions> = {},
-): Promise<{ schemas: number; published: true }> {
+export async function planCoreHelmSchemas(
+  execute: SchemaExecute, args: readonly string[], options: CoreSchemaPreparation = {},
+): Promise<() => Promise<{ schemas: number; published: true }>> {
+  if (options.base365SreMigration && ["--atomic", "--rollback-on-failure"].some(flag => enabledHelmFlag(args, flag))) {
+    throw new Error("The reviewed BASE365 SRE schema migration is explicitly non-atomic; no rollback flag may be dropped");
+  }
   const { run, documents, release, namespace, upgrading, serverRender } = await renderCoreSchemaChart(execute, args);
   const safety = await prepareHelmFailureSafety(run, args, documents, release, namespace, upgrading);
+  const reviewedSreMigration = options.base365SreMigration
+    ? await qualifySreSchemaMigration(run, documents, { release, namespace, ownership: "helm" }) : undefined;
   const stageOptions = { ...options, release, namespace, ownership: options.ownership ?? "helm",
-    rollbackDocuments: safety.rollbackDocuments, beforeWrite: safety.recheck };
-  const prepared = await stageCoreSchemaDocuments(run, documents, stageOptions);
-  // Render/apply is not a Helm install: Helm's server-side ownership import
-  // check would reject the deliberately template-owned CRDs.
-  if (stageOptions.ownership === "template") return prepared;
-  const actual = await serverRender();
-  const crds = (items: ObjectMap[]) => items.filter(object => object.kind === "CustomResourceDefinition")
-    .map(object => ({ name: object.metadata.name, spec: normalizedCrd(object), metadata: object.metadata }))
-    .sort((a, b) => a.name.localeCompare(b.name));
-  if (canonicalSchema(crds(actual)) !== canonicalSchema(crds(documents))) {
-    throw new Error("Server-aware chart CRDs differ from the bootstrap schema plan; explicit review is required");
-  }
+    rollbackDocuments: safety.rollbackDocuments, beforeWrite: safety.recheck, reviewedSreMigration };
+  const applySchemas = await planCoreSchemaDocuments(run, documents, stageOptions);
   await safety.recheck?.();
-  return stageCoreSchemaDocuments(run, actual, { ...stageOptions, checkOnly: true });
+  if (reviewedSreMigration) console.log(`SRE-SCHEMA-MIGRATION ${JSON.stringify({ ...sreMigrationSummary(reviewedSreMigration), state: "qualified" })}`);
+  return async () => {
+    const prepared = await applySchemas();
+    // Render/apply is not a Helm install: Helm's server-side ownership import
+    // check would reject the deliberately template-owned CRDs.
+    if (stageOptions.ownership === "template") return prepared;
+    const actual = await serverRender();
+    const crds = (items: ObjectMap[]) => items.filter(object => object.kind === "CustomResourceDefinition")
+      .map(object => ({ name: object.metadata.name, spec: normalizedCrd(object), metadata: object.metadata }))
+      .sort((a, b) => a.name.localeCompare(b.name));
+    if (canonicalSchema(crds(actual)) !== canonicalSchema(crds(documents))) {
+      throw new Error("Server-aware chart CRDs differ from the bootstrap schema plan; explicit review is required");
+    }
+    await safety.recheck?.();
+    const result = await stageCoreSchemaDocuments(run, actual, { ...stageOptions, checkOnly: true });
+    if (reviewedSreMigration) console.log(`SRE-SCHEMA-MIGRATION ${JSON.stringify({ ...sreMigrationSummary(reviewedSreMigration), state: "applied" })}`);
+    return result;
+  };
+}
+
+export async function prepareCoreHelmSchemas(
+  execute: SchemaExecute, args: readonly string[], options: CoreSchemaPreparation = {},
+): Promise<{ schemas: number; published: true }> {
+  return (await planCoreHelmSchemas(execute, args, options))();
 }
 
 /** Template installations share the same lifecycle; subsequent SSA excludes

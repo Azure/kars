@@ -6,8 +6,8 @@ import { assertDestroySafe,assertRollbackSafe,assertSafeMutation,enroll,preview,
 import { stageSource } from "./sre-source.js";
 import { stageAuthority } from "./sre-stage.js";
 import { readFileSync } from "node:fs";
-import { prepareCoreHelmSchemas } from "./core-helm-schemas.js";
-vi.mock("./core-helm-schemas.js", () => ({ prepareCoreHelmSchemas: vi.fn(async () => {}) }));
+import { planCoreHelmSchemas } from "./core-helm-schemas.js";
+vi.mock("./core-helm-schemas.js", () => ({ planCoreHelmSchemas: vi.fn(async () => async () => ({ schemas: 21, published: true })) }));
 vi.mock("./schema-stage.js", () => ({ waitForInstalledCoreSchemas: vi.fn(async () => {}) }));
 
 const actionCrd=readFileSync(new URL("../../../deploy/helm/kars/templates/crd-karssreaction.yaml",import.meta.url),"utf8");
@@ -226,14 +226,14 @@ describe("SRE cluster registrar boundary",()=>{
         if(file==="helm"&&args[0]==="upgrade")return {stdout:""};
         return f.execute(file,args,options);
       });
-      vi.mocked(prepareCoreHelmSchemas).mockClear();
+      vi.mocked(planCoreHelmSchemas).mockClear();
       await stageAuthority(execute,"chart","kars-system","kars","new/controller:latest","new/router:latest",dryRun);
-      const upgrade=execute.mock.calls.find(([file,args])=>file==="helm"&&args[0]==="upgrade");
+      const upgrade=execute.mock.calls.find(([file,args])=>file==="helm"&&args[0]==="upgrade"&&(dryRun||!args.includes("--dry-run=server")));
       expect(upgrade?.[1]).toContain("--reset-then-reuse-values");
       expect(upgrade?.[1]).toContain("sre.authorityStage=true");
       expect(upgrade?.[1]).toContain(dryRun?"--dry-run=server":version.startsWith("v4.")?"--wait=legacy":"--wait");
       expect(execute.mock.calls.some(([,args])=>args[0]==="install")).toBe(false);
-      expect(prepareCoreHelmSchemas).toHaveBeenCalledTimes(dryRun?0:1);
+      expect(planCoreHelmSchemas).toHaveBeenCalledTimes(1);
     } finally { warn.mockRestore(); }
   });
 
