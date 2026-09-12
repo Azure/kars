@@ -27,6 +27,15 @@ ERRORS = {
     "Late private credential provenance is missing or conflicting": "late-admin-provenance",
     "Reviewed runtime has not consumed its current controller-owned admin credential version": "late-admin-version",
     "Customized or missing late private credential keys require explicit operator recovery": "late-admin-keys",
+    "Writer retirement changed the captured runtime authority; preserve quiescence and obtain explicit operator recovery": "writer-authority-drift",
+    "Projection changed without the captured authority withdrawal and owned pause": "writer-projection-withdrawal",
+    "Projection revision advanced without witnessed fresh revoke/refill; exact review preserved": "writer-projection-refill",
+    "Unreviewed template or controller pause/restore generation changed": "writer-runtime-transition",
+    "Task lost authority for an unreviewed reason during writer retirement": "writer-task-authority",
+    "Stale Task attestation cannot settle writer retirement": "writer-stale-task-attestation",
+    "Consumer revision advanced without a witnessed owned pause; exact review preserved": "writer-unwitnessed-pause",
+    "Unreviewed consumer appeared during writer retirement": "writer-pod-lineage",
+    "Writer retirement is still awaiting fresh Task attestation and the captured owned runtime; no stale authority or new activation was published": "writer-settlement-timeout",
 }
 MODULES = (
     "commands/credential-grants", "lib/private-activation",
@@ -68,8 +77,12 @@ COMMAND_REASONS = {
 
 
 def category(stderr):
+    lines = set(stderr.splitlines())
     categories = {value for message, value in ERRORS.items()
-                  if f"Error: {message}" in stderr.splitlines()}
+                  if f"Error: {message}" in lines}
+    if any(f"{prefix}: Private consumer template changed after protection was enabled" in lines
+           for prefix in ("PrivateConsumerTemplateChanged", "PrivateConsumerTemplateChanged [Error]")):
+        categories.add("consumer-template-drift")
     return sorted(categories)[0] if categories else "unclassified-cli-error"
 
 

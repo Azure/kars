@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import {
-  at, canonical, digest, read, readSecretMetadata, record, reviewed, reviewedOwner, template, templateDigest,
+  at, canonical, digest, PrivateConsumerTemplateChanged, read, readSecretMetadata, record, reviewed, reviewedOwner, template, templateDigest,
   type Execute, type Json, type PrivateActivation,
 } from "./private-activation.js";
 import { captureLateWriterScope } from "./private-activation-late-scope.js";
@@ -113,6 +113,34 @@ function possibleTransition(current: ObjectValue, runtime: RuntimeReview): boole
   if (sameBody(current, expected, true, true)) return true;
   record(at(expected, "metadata", "annotations"))[REVISION] = at(before, "metadata", "annotations", REVISION)!;
   return at(current, "status", "observedGeneration") !== gen(current) && sameBody(current, expected, true, true);
+}
+
+async function snapshotCurrent(
+  execute: Execute, runtime: RuntimeReview, task: ObjectValue, deployment: ObjectValue, projection: ObjectValue,
+): Promise<boolean> {
+  const before = runtime.captured;
+  const namespace = before.scope.namespace.name;
+  const projectionAfter = await readSecretMetadata(execute, reviewed(projection).name, namespace);
+  const deploymentAfter = await read(execute, "deployments.apps", reviewed(deployment).name, namespace);
+  const taskAfter = await read(execute, "karstask", reviewed(task).name, String(at(before.task, "metadata", "namespace")));
+  const checks = {
+    projectionMetadataPresent: projectionAfter !== undefined,
+    projectionMetadataMatches: projectionAfter !== undefined && unchangedSecretMetadata({
+      metadata: projectionMetadataView(projectionAfter, runtime.projection), type: "Opaque",
+    }, { metadata: runtime.projection.metadata!, type: "Opaque" }),
+    deploymentTransitionMatches: possibleTransition(deployment, runtime) && possibleTransition(deploymentAfter, runtime),
+  };
+  if (!checks.projectionMetadataPresent || !checks.projectionMetadataMatches || !checks.deploymentTransitionMatches) {
+    console.error(`KARS_PRIVATE_WRITER_RECHECK ${JSON.stringify(checks)}`);
+    throw new Error(ERROR);
+  }
+  if (!sameBody(taskAfter, before.task, true)) throw new Error(ERROR);
+  if (!readyTask(taskAfter, before.task) && !withdrawn(taskAfter, before.task)) {
+    throw new Error("Task lost authority for an unreviewed reason during writer retirement");
+  }
+  return reviewed({ metadata: projectionAfter }).resourceVersion === reviewed(projection).resourceVersion
+    && reviewed(deploymentAfter).resourceVersion === reviewed(deployment).resourceVersion
+    && reviewed(taskAfter).resourceVersion === reviewed(task).resourceVersion;
 }
 
 export async function captureWriterSettlement(
@@ -246,7 +274,14 @@ export async function observeWriterSettlement(
       runtime.pauseSeen = true;
     }
     if (!projectionSame) {
-      if (!isPause || !runtime.withdrawnVersion || Object.keys(data(projection)).length) throw new Error("Projection changed without the captured authority withdrawal and owned pause");
+      if (Object.keys(data(projection)).length) throw new Error("Projection changed without the captured authority withdrawal and owned pause");
+      if (!isPause || !runtime.withdrawnVersion) {
+        if (!await snapshotCurrent(execute, runtime, task, deployment, projection)) {
+          allReady = false;
+          continue;
+        }
+        throw new Error("Projection changed without the captured authority withdrawal and owned pause");
+      }
       runtime.emptyVersion = reviewed(projection).resourceVersion;
     }
     const restored = bodySpec(before.deployment, initialReplicas, revision);
@@ -266,21 +301,7 @@ export async function observeWriterSettlement(
       throw new Error("Unreviewed template or controller pause/restore generation changed");
     }
     if (unchanged && gen(deployment) !== gen(before.deployment) && (!runtime.pauseSeen || gen(deployment) !== restoredGeneration)) throw new Error(ERROR);
-    const projectionAfter = await readSecretMetadata(execute, reviewed(projection).name, ns);
-    const deploymentAfter = await read(execute, "deployments.apps", reviewed(deployment).name, ns);
-    const checks = {
-      projectionMetadataPresent: projectionAfter !== undefined,
-      projectionMetadataMatches: projectionAfter !== undefined && unchangedSecretMetadata({
-        metadata: projectionMetadataView(projectionAfter, runtime.projection), type: "Opaque",
-      }, { metadata: runtime.projection.metadata!, type: "Opaque" }),
-      deploymentTransitionMatches: possibleTransition(deploymentAfter, runtime),
-    };
-    if (!checks.projectionMetadataPresent || !checks.projectionMetadataMatches || !checks.deploymentTransitionMatches) {
-      console.error(`KARS_PRIVATE_WRITER_RECHECK ${JSON.stringify(checks)}`);
-      throw new Error(ERROR);
-    }
-    if (reviewed({ metadata: projectionAfter }).resourceVersion !== reviewed(projection).resourceVersion
-      || reviewed(deploymentAfter).resourceVersion !== reviewed(deployment).resourceVersion) {
+    if (!await snapshotCurrent(execute, runtime, task, deployment, projection)) {
       allReady = false;
       continue;
     }
@@ -288,7 +309,24 @@ export async function observeWriterSettlement(
     if (at(list, "metadata", "continue")) throw new Error(ERROR);
     const pods = array(list.items);
     const liveScope = { ...before.scope, consumers: [{ ...before.scope.consumers[0]!, templateDigest: templateDigest(deployment) }] };
-    for (const pod of pods) if (!await reviewedOwner(execute, pod, liveScope)) throw new Error("Unreviewed consumer appeared during writer retirement");
+    let lineageChanged = false;
+    for (const pod of pods) {
+      let permittedTransition = false;
+      try {
+        if (!await reviewedOwner(execute, pod, liveScope, current => {
+          permittedTransition = possibleTransition(current, runtime);
+        })) throw new Error("Unreviewed consumer appeared during writer retirement");
+      } catch (error) {
+        if (!(error instanceof PrivateConsumerTemplateChanged) || !permittedTransition
+          || await snapshotCurrent(execute, runtime, task, deployment, projection)) throw error;
+        lineageChanged = true;
+        break;
+      }
+    }
+    if (lineageChanged || !await snapshotCurrent(execute, runtime, task, deployment, projection)) {
+      allReady = false;
+      continue;
+    }
     const oldGone = pods.every(pod => !before.pods.some(old => reviewed(old, true).uid === reviewed(pod, true).uid));
     const sandboxReady = at(sandbox, "status", "phase") === "Running"
       && at(sandbox, "status", "observedGeneration") === gen(before.sandbox)

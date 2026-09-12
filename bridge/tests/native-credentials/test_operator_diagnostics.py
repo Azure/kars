@@ -57,6 +57,15 @@ class OperatorDiagnosticsTests(unittest.TestCase):
                          "(source=lib/private-activation:680)")
         self.assertNotIn(PRIVATE, str(failure.exception))
 
+    def test_typed_template_errors_keep_only_the_exact_fixed_category(self):
+        message = "Private consumer template changed after protection was enabled"
+        for prefix in ("PrivateConsumerTemplateChanged", "PrivateConsumerTemplateChanged [Error]"):
+            line = f"{prefix}: {message}"
+            self.assertEqual(category(line), "consumer-template-drift")
+            self.assertEqual(category(line + PRIVATE), "unclassified-cli-error")
+            self.assertEqual(category(prefix + ": " + PRIVATE), "unclassified-cli-error")
+        self.assertEqual(category(f"{PRIVATE}: {message}"), "unclassified-cli-error")
+
     def test_late_scope_leaf_is_retained_instead_of_only_its_awaiting_caller(self):
         stderr = (
             f"{PRIVATE}\n"
