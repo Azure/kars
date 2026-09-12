@@ -4,18 +4,29 @@
 """Pure checks of the native fixture; no cluster or controller execution."""
 
 import copy
+from pathlib import Path
 from types import SimpleNamespace
 import unittest
+from unittest.mock import patch
+from urllib.parse import parse_qs, urlsplit
 
 from sre_authority.canonical_migration import (
     CRDS, STAGE, assert_data_unchanged, deny_late_conflicts, finish_data_proof, seed_data,
 )
+from sre_authority.canonical_seed import SEEDS, WORKLOADS, collection_path, seed_definitions
 
 
 class FakeHarness:
+    """Transport orchestration only; this is not Kubernetes schema validation."""
+
     def __init__(self):
+        self.root = Path("unused-fixture-report-root")
         self.objects = {
-            ("deployment", "kars-controller"): {"spec": {"replicas": 0}},
+            ("deployment", "kars-controller"): {
+                "apiVersion": "apps/v1", "kind": "Deployment",
+                "metadata": {"name": "kars-controller", "namespace": "kars-system",
+                             "uid": "controller", "resourceVersion": "1"},
+                "spec": {"replicas": 0}},
             ("clusterrolebinding", "kars-sre-reader"): {
                 "metadata": {"uid": "binding"}, "subjects": [{"name": "legacy"}, {"name": "unrelated"}]},
         }
@@ -37,8 +48,32 @@ class FakeHarness:
         self.objects[(result["kind"].lower(), result["metadata"]["name"])] = result
         return copy.deepcopy(result)
 
-    def api(self, method, path, *, body, status):
+    def api(self, method, path, *, body=None, status=None):
         self.calls.append((method, path, copy.deepcopy(body)))
+        parsed = urlsplit(path)
+        if method == "GET":
+            assert status == 200 and parse_qs(parsed.query) == {"limit": ["513"]}
+            if parsed.path in WORKLOADS:
+                items = [self.get("deployment", "kars-controller")] if parsed.path.endswith("/deployments") else []
+            else:
+                resource = next(resource for resource, _plural, _kind in SEEDS
+                                if collection_path(resource) == parsed.path)
+                items = [copy.deepcopy(obj) for (kind, _name), obj in self.objects.items() if kind == resource]
+            result = {"kind": "List", "metadata": {}, "items": items}
+            return SimpleNamespace(status_code=200, json=lambda: result)
+        if method == "POST":
+            resource = next(resource for resource, _plural, _kind in SEEDS
+                            if collection_path(resource) == parsed.path)
+            query = parse_qs(parsed.query)
+            assert query in ({"fieldManager": ["kubectl-create"], "fieldValidation": ["Strict"]},
+                             {"fieldManager": ["kubectl-create"], "fieldValidation": ["Strict"], "dryRun": ["All"]})
+            assert body == dict(seed_definitions())[resource]
+            if "dryRun" in query:
+                result = copy.deepcopy(body)
+                result["metadata"]["uid"] = "ephemeral-dry-run"
+            else:
+                result = self.create(body)
+            return SimpleNamespace(status_code=201, json=lambda: result)
         if method == "PATCH":
             current = self.objects[("crd", path.rsplit("/", 1)[1])]
             assert body["metadata"]["uid"] == current["metadata"]["uid"]
@@ -67,9 +102,15 @@ class FakeHarness:
 
 
 class CanonicalMigrationFixtureTests(unittest.TestCase):
-    def test_seed_uses_nonexecuting_valid_action_and_real_data_preservation_assertions(self):
+    def setUp(self):
+        reporter = patch("sre_authority.canonical_seed.write_report")
+        self.reporter = reporter.start()
+        self.addCleanup(reporter.stop)
+
+    def test_seed_uses_typed_inert_action_and_real_data_preservation_assertions(self):
         h = FakeHarness()
         fixtures = seed_data(h)
+        h.calls.clear()
         action = h.get("karssreaction", "e2e-migration-karssreaction")
         self.assertEqual(action["spec"]["approval"]["state"], "Rejected")
         self.assertEqual(action["spec"]["action"]["type"], "ScaleDeployment")
@@ -82,6 +123,7 @@ class CanonicalMigrationFixtureTests(unittest.TestCase):
     def test_negative_fixtures_use_the_public_cli_and_restore_only_exact_uid_rv_owned_schema(self):
         h = FakeHarness()
         fixtures = seed_data(h)
+        h.calls.clear()
         before = copy.deepcopy(h.objects[("crd", "karstasks.kars.azure.com")]["spec"])
         action = copy.deepcopy(h.objects[("crd", "karssreactions.kars.azure.com")])
         subjects = copy.deepcopy(h.objects[("clusterrolebinding", "kars-sre-reader")]["subjects"])
@@ -97,6 +139,7 @@ class CanonicalMigrationFixtureTests(unittest.TestCase):
     def test_cleanup_is_limited_to_measured_disposable_crs_with_exact_uid_rv(self):
         h = FakeHarness()
         fixtures = seed_data(h)
+        h.calls.clear()
         finish_data_proof(h, fixtures)
         self.assertEqual(len(h.calls), 5)
         self.assertTrue(all(method == "DELETE" and "/customresourcedefinitions/" not in path
