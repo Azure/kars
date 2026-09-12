@@ -48,6 +48,7 @@ assert.equal(after.packages["node_modules/qs"].version, "6.16.0");
 assert.equal(after.packages["node_modules/vitest"].version, "4.1.11");
 assert.equal(after.packages["node_modules/@vitest/mocker"].version, "4.1.11");
 assert.equal(after.packages["node_modules/vite"].version, before.packages["node_modules/vite"].version);
+assert.equal(after.packages["node_modules/rollup"].version, before.packages["node_modules/rollup"].version);
 const changed = [];
 for (const name of new Set([...Object.keys(before.packages), ...Object.keys(after.packages)])) {
   const old = before.packages[name];
