@@ -21,7 +21,12 @@
 //!
 //! Adding a field: append with `#[serde(skip_serializing_if = "Option::is_none")]`.
 //! Removing one: bump `REPORT_SCHEMA_VERSION` and update the reconciler in lockstep.
+//!
+//! v1 remains the default for conclusive runs. The builder negotiates v2 with
+//! `KARS_EVAL_REPORT_FORMAT=v2`; it adds explicit errored counts and `Errored`
+//! verdicts with `actual: null`. v2 omits raw reasons and scenario payloads.
 
+use crate::outcome::{Format, ReplayError};
 use kars_eval_corpus::{
     ActualDecision, Case, Expect, ObservedSample, Scenario, Verdict, VerdictFailure,
 };
@@ -49,6 +54,8 @@ pub struct RunReport {
     pub total: usize,
     pub passed: usize,
     pub failed: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub errored: Option<usize>,
     pub results: Vec<CaseReport>,
 }
 
@@ -59,7 +66,7 @@ pub struct CaseReport {
     pub tags: Vec<String>,
     pub scenario: ScenarioWire,
     pub expected: ExpectWire,
-    pub actual: ActualWire,
+    pub actual: Option<ActualWire>,
     pub verdict: VerdictWire,
     #[serde(rename = "durationMs")]
     pub duration_ms: u64,
@@ -129,6 +136,9 @@ pub enum VerdictWire {
     Fail {
         #[serde(flatten)]
         failure: FailureWire,
+    },
+    Errored {
+        category: ReplayError,
     },
 }
 
@@ -252,10 +262,67 @@ pub fn build_case_report(
         tags: case.tags.clone(),
         scenario: scenario_to_wire(&case.scenario),
         expected: expect_to_wire(&case.expect),
-        actual: actual_to_wire(actual),
+        actual: Some(actual_to_wire(actual)),
         verdict: verdict_to_wire(verdict),
         duration_ms,
     }
+}
+
+pub fn errored_case(case: &Case, category: ReplayError, duration_ms: u64) -> CaseReport {
+    CaseReport {
+        case_id: case.id.clone(),
+        tags: case.tags.clone(),
+        scenario: scenario_to_wire(&case.scenario),
+        expected: expect_to_wire(&case.expect),
+        actual: None,
+        verdict: VerdictWire::Errored { category },
+        duration_ms,
+    }
+}
+
+pub fn wire_report(report: &RunReport, format: Format) -> serde_json::Result<serde_json::Value> {
+    let mut value = serde_json::to_value(report)?;
+    if format == Format::V2 {
+        value["outcome"] = serde_json::json!(match crate::outcome::exit_code(
+            report.total,
+            report.failed,
+            report.errored.unwrap_or(0)
+        ) {
+            0 => "Passed",
+            1 => "PolicyFailure",
+            _ => "Inconclusive",
+        });
+        for case in value["results"].as_array_mut().expect("serialized cases") {
+            case["scenario"]
+                .as_object_mut()
+                .expect("scenario")
+                .retain(|key, _| key == "kind" || key == "messageCount");
+            case["expected"]
+                .as_object_mut()
+                .expect("expected")
+                .remove("reasonContains");
+            if let Some(actual) = case["actual"].as_object_mut() {
+                actual.remove("reason");
+                if let Some(observations) = actual
+                    .get_mut("observations")
+                    .and_then(|v| v.as_array_mut())
+                {
+                    for observation in observations {
+                        observation
+                            .as_object_mut()
+                            .expect("observation")
+                            .remove("reason");
+                    }
+                }
+            }
+            if case["verdict"]["reason"] == "ReasonContainsMissing" {
+                let verdict = case["verdict"].as_object_mut().expect("verdict");
+                verdict.remove("needle");
+                verdict.remove("actual");
+            }
+        }
+    }
+    Ok(value)
 }
 
 #[cfg(test)]

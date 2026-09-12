@@ -36,6 +36,7 @@ pub(super) fn runner_pod_spec_json(
             "env": [
                 {"name": "RUST_LOG", "value": "info"},
                 {"name": "KARS_EVAL_NAME", "value": eval_name},
+                {"name": "KARS_EVAL_REPORT_FORMAT", "value": "v2"},
             ],
             "volumeMounts": [{
                 "name": "corpus",
