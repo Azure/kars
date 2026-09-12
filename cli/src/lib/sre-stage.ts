@@ -5,8 +5,9 @@ import { parseAllDocuments } from "yaml";
 import { get, requireRegistrar, type ApiObject, type Execute } from "./sre-authority.js";
 import { listSreHelmReleases, sreHelmStageWait } from "./sre-helm.js";
 import { ACTION_CRD, planActionCrd } from "./sre-action-crd.js";
-import { prepareCoreHelmSchemas } from "./core-helm-schemas.js";
+import { planCoreHelmSchemas } from "./core-helm-schemas.js";
 import { waitForInstalledCoreSchemas } from "./schema-stage.js";
+import { planTemplateAuthoritySchemas } from "./sre-template-schema-plan.js";
 
 type StagePhase = "registrar" | "controller-review" | "release-inventory" | "prerequisite-chart-render"
   | "action-schema-review" | "helm-compatibility" | "action-schema-migration" | "core-schema-preparation"
@@ -74,24 +75,25 @@ async function stageAuthorityChecked(
   if(helm) {
     mark("helm-compatibility");
     const wait=await sreHelmStageWait(execute);
-    const args=["upgrade",release,chart,"--namespace",namespace,"--reset-then-reuse-values",
+    const baseArgs=["upgrade",release,chart,"--namespace",namespace,"--reset-then-reuse-values",
       "--set","sre.authorityStage=true",
       "--set-string",`controller.image.repository=${controllerRepository}`,
       "--set-string",`controller.image.tag=${controllerTag}`,
       "--set-string",`inferenceRouter.image.repository=${routerRepository}`,
-      "--set-string",`inferenceRouter.image.tag=${routerTag}`,
-      ...(dryRun?["--dry-run=server"]:[wait,"--timeout","8m"])];
+      "--set-string",`inferenceRouter.image.tag=${routerTag}`];
+    const args=[...baseArgs,...(dryRun?["--dry-run=server"]:[wait,"--timeout","8m"])];
+    // Qualify the complete schema/data plan before even the action-params
+    // conversion. The ordinary comparator remains strict outside this command.
+    mark("core-schema-preparation");
+    const applySchemas = await planCoreHelmSchemas(execute,args,{base365SreMigration:true});
+    mark("helm-server-dry-run");
+    await execute("helm",[...baseArgs,"--dry-run=server"],{stdio:"pipe"});
     if(!dryRun) {
-      // This explicit authority-stage command retains its existing complete-
-      // fingerprint migration, not a generic ownership-digest exception.
-      // It is non-atomic; ordinary/atomic upgrades cannot invoke this repair.
-      mark("action-schema-migration");
-      await stageAction();
       mark("core-schema-preparation");
-      await prepareCoreHelmSchemas(execute,args);
+      await applySchemas();
+      mark("helm-upgrade");
+      await execute("helm",args,{stdio:"pipe"});
     }
-    mark(dryRun?"helm-server-dry-run":"helm-upgrade");
-    await execute("helm",args,{stdio:"pipe"});
     return;
   }
   mark("template-ownership-review");
@@ -130,11 +132,13 @@ async function stageAuthorityChecked(
   main.image=controllerImage;
   main.env=(main.env??[]).filter((entry:{name:string})=>entry.name!=="INFERENCE_ROUTER_IMAGE");
   main.env.push({name:"INFERENCE_ROUTER_IMAGE",value:routerImage});
+  const recheckSchemas=await planTemplateAuthoritySchemas(execute,documents);
   if(dryRun) {
     console.log(`Would verify/CAS-repair the action API prerequisite, stage ${writes.length} authority objects and CAS-update controller ${controller.metadata.uid}@${controller.metadata.resourceVersion}`);
     return;
   }
   mark("action-schema-migration");
+  await recheckSchemas();
   await stageAction();
   for(const name of unchangedCrds) {
     await execute("kubectl",["wait","--for=condition=Established",`crd/${name}`,"--timeout=60s"],{stdio:"pipe"});
