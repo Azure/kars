@@ -7,6 +7,9 @@ use k8s_openapi::{ByteString, apimachinery::pkg::apis::meta::v1::OwnerReference}
 use kube::api::PostParams;
 use std::collections::{BTreeMap, BTreeSet};
 
+mod bundle;
+#[cfg(test)]
+mod bundle_tests;
 #[path = "targets.rs"]
 mod targets;
 #[cfg(test)]
@@ -476,6 +479,9 @@ pub(crate) async fn prepare(
 ) -> Result<Secret, String> {
     validate_bindings(bindings)?;
     let mut target_object = targets::read(client, target).await?;
+    if target.kind == "KarsSandbox" {
+        bundle::verify_bindings(&target_object, bindings)?;
+    }
     if target.kind == "KarsTask" {
         let task: crate::kars_task::KarsTask = serde_json::from_value(
             serde_json::to_value(&target_object).map_err(|_| "Task serialization failed")?,
@@ -500,7 +506,7 @@ pub(crate) async fn prepare(
         .map_err(|_| "Credential binding metadata serialization failed")?;
     let api: Api<Secret> = Api::namespaced(client.clone(), &target.namespace);
     let name = bundle_name(target);
-    let bundle_uid_key = "kars.azure.com/credential-bundle-uid";
+    let bundle_uid_key = bundle::UID_ANNOTATION;
     let mut bundle = match api
         .get_opt(&name)
         .await
@@ -518,6 +524,7 @@ pub(crate) async fn prepare(
             {
                 return Err("Existing credential bundle is not owned by the exact target".into());
             }
+            bundle::verify_owned(&source, target, &grant)?;
             source
         }
         None => {
@@ -533,17 +540,18 @@ pub(crate) async fn prepare(
                 .create(&PostParams::default(), &source)
                 .await
                 .map_err(|e| api_error("Create owned credential bundle anchor", e))?;
-            let resource = kube::core::ApiResource::from_gvk(&kube::core::GroupVersionKind::gvk(
-                "kars.azure.com",
-                "v1alpha1",
-                &target.kind,
-            ));
-            let targets: Api<kube::core::DynamicObject> =
-                Api::namespaced_with(client.clone(), &target.namespace, &resource);
-            target_object=targets.patch(&target.name,&PatchParams::default(),&Patch::Merge(json!({
-                "metadata":{"uid":target.uid,"resourceVersion":target_object.metadata.resource_version,
-                    "annotations":{bundle_uid_key:created.metadata.uid}}
-            }))).await.map_err(|e|api_error("Record actual credential bundle CREATE UID",e))?;
+            target_object = bundle::record_created(
+                client,
+                bundle::Creation {
+                    target,
+                    original: &target_object,
+                    bindings,
+                    grant: &grant,
+                    states: &states,
+                    created: &created,
+                },
+            )
+            .await?;
             created
         }
     };
