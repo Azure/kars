@@ -1,5 +1,6 @@
 """Project only fixed categories and allowlisted source locations from CLI errors."""
 
+import json
 import re
 
 from native_api import CommandFailure, Failure, command
@@ -36,6 +37,13 @@ MODULES = (
     "lib/schema-documents", "lib/schema-discovery",
     "lib/repo-assets",
 )
+CHECK_PREFIX = "KARS_PRIVATE_LATE_SANDBOX_CHECKS "
+CHECK_FIELDS = (
+    ("resourceVersionMatch", "rv"),
+    ("observedGenerationMatch", "generation"),
+    ("phaseRunningMatch", "running"),
+    ("readyConditionMatch", "ready"),
+)
 
 
 def category(stderr):
@@ -55,13 +63,35 @@ def source_location(stderr):
     return "unavailable"
 
 
+def sandbox_checks(stderr):
+    lines = [line for line in stderr.splitlines() if line.startswith(CHECK_PREFIX)]
+    if not lines:
+        return ""
+    if len(lines) != 1 or len(lines[0]) > 512:
+        return "unavailable"
+    try:
+        # Preserve duplicate keys so ambiguous facts cannot silently overwrite each other.
+        pairs = json.loads(lines[0][len(CHECK_PREFIX):], object_pairs_hook=lambda values: values)
+    except json.JSONDecodeError:
+        return "unavailable"
+    if (not isinstance(pairs, list) or len(pairs) != len(CHECK_FIELDS)
+            or not all(isinstance(pair, tuple) and len(pair) == 2
+                       and isinstance(pair[0], str) and isinstance(pair[1], bool) for pair in pairs)
+            or {key for key, _ in pairs} != {key for key, _ in CHECK_FIELDS}):
+        return "unavailable"
+    values = dict(pairs)
+    return ",".join(f"{label}={str(values[key]).lower()}" for key, label in CHECK_FIELDS)
+
+
 def operator_command(stage, *args, timeout):
     if stage not in ("preview", "apply", "schemas"):
         raise Failure("Unknown native operator enrollment stage")
     try:
         return command(*args, timeout=timeout)
     except CommandFailure as error:
+        checks = sandbox_checks(error.stderr)
+        details = f" (sandbox-checks={checks})" if checks else ""
         raise Failure(
             f"Native operator {stage} failed: {category(error.stderr)} "
-            f"(source={source_location(error.stderr)})"
+            f"(source={source_location(error.stderr)}){details}"
         ) from None

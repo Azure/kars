@@ -1,6 +1,7 @@
 """Run real subprocess failures and prove no CLI body is published."""
 
 import io
+import json
 from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 import sys
@@ -10,7 +11,7 @@ from unittest.mock import patch
 
 import native_api
 from native_api import Failure
-from operator_diagnostics import ERRORS, category, operator_command, source_location
+from operator_diagnostics import CHECK_PREFIX, ERRORS, category, operator_command, sandbox_checks, source_location
 
 PRIVATE = "DO-NOT-EMIT-TOKENS-OR-PRIVATE-API-BODIES"
 
@@ -55,6 +56,35 @@ class OperatorDiagnosticsTests(unittest.TestCase):
         self.assertNotIn(PRIVATE, category(stderr) + source_location(stderr))
         for module in ("private-activation-late-scope-private", "private-activation-late-scope/unknown"):
             self.assertEqual(source_location(f"    at function (/cli/dist/lib/{module}.js:1:2)"), "unavailable")
+
+    def test_actual_failure_retains_only_the_four_boolean_snapshot_checks(self):
+        facts = {"resourceVersionMatch": False, "observedGenerationMatch": True,
+                 "phaseRunningMatch": True, "readyConditionMatch": True}
+        stderr = f"{PRIVATE}\n{CHECK_PREFIX}{json.dumps(facts)}\n{PRIVATE}"
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory(prefix="native-operator-checks-") as directory, \
+             patch.object(native_api, "ROOT", Path(directory)), redirect_stdout(output), redirect_stderr(output):
+            with self.assertRaises(Failure) as failure:
+                operator_command("preview", sys.executable, "-c",
+                                 "import sys; print(sys.argv[1],file=sys.stderr); sys.exit(1)",
+                                 stderr, timeout=5)
+        self.assertIn("(sandbox-checks=rv=false,generation=true,running=true,ready=true)", str(failure.exception))
+        self.assertNotIn(PRIVATE, str(failure.exception))
+        self.assertEqual(output.getvalue(), "")
+
+    def test_malformed_ambiguous_or_extended_snapshot_checks_remain_unavailable(self):
+        valid = {"resourceVersionMatch": False, "observedGenerationMatch": True,
+                 "phaseRunningMatch": True, "readyConditionMatch": True}
+        for value in ({}, None, list(valid.items()), {**valid, "private": PRIVATE},
+                      {**valid, "resourceVersionMatch": 0}, {**valid, "phaseRunningMatch": PRIVATE}):
+            with self.subTest(value=value):
+                self.assertEqual(sandbox_checks(CHECK_PREFIX + json.dumps(value)), "unavailable")
+        line = CHECK_PREFIX + json.dumps(valid)
+        for value in (line + PRIVATE, line + "\n" + line, CHECK_PREFIX + " " * 512,
+                      CHECK_PREFIX + '{"resourceVersionMatch":false,"resourceVersionMatch":true,'
+                      '"phaseRunningMatch":true,"readyConditionMatch":true}'):
+            self.assertEqual(sandbox_checks(value), "unavailable")
+        self.assertEqual(sandbox_checks(PRIVATE), "")
 
     def test_success_and_unknown_stage_do_not_change_authority(self):
         with tempfile.TemporaryDirectory(prefix="native-operator-success-") as directory, \
