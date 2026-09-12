@@ -45,6 +45,12 @@ CHECK_FIELDS = (
     ("phaseRunningMatch", "running"),
     ("readyConditionMatch", "ready"),
 )
+WRITER_CHECK_PREFIX = "KARS_PRIVATE_WRITER_RECHECK "
+WRITER_CHECK_FIELDS = (
+    ("projectionMetadataPresent", "metadata-present"),
+    ("projectionMetadataMatches", "metadata-matches"),
+    ("deploymentTransitionMatches", "deployment"),
+)
 
 
 def category(stderr):
@@ -64,24 +70,32 @@ def source_location(stderr):
     return "unavailable"
 
 
-def sandbox_checks(stderr):
-    lines = [line for line in stderr.splitlines() if line.startswith(CHECK_PREFIX)]
+def _checks(stderr, prefix, fields):
+    lines = [line for line in stderr.splitlines() if line.startswith(prefix)]
     if not lines:
         return ""
     if len(lines) != 1 or len(lines[0]) > 512:
         return "unavailable"
     try:
         # Preserve duplicate keys so ambiguous facts cannot silently overwrite each other.
-        pairs = json.loads(lines[0][len(CHECK_PREFIX):], object_pairs_hook=lambda values: values)
+        pairs = json.loads(lines[0][len(prefix):], object_pairs_hook=lambda values: values)
     except json.JSONDecodeError:
         return "unavailable"
-    if (not isinstance(pairs, list) or len(pairs) != len(CHECK_FIELDS)
+    if (not isinstance(pairs, list) or len(pairs) != len(fields)
             or not all(isinstance(pair, tuple) and len(pair) == 2
                        and isinstance(pair[0], str) and isinstance(pair[1], bool) for pair in pairs)
-            or {key for key, _ in pairs} != {key for key, _ in CHECK_FIELDS}):
+            or {key for key, _ in pairs} != {key for key, _ in fields}):
         return "unavailable"
     values = dict(pairs)
-    return ",".join(f"{label}={str(values[key]).lower()}" for key, label in CHECK_FIELDS)
+    return ",".join(f"{label}={str(values[key]).lower()}" for key, label in fields)
+
+
+def sandbox_checks(stderr):
+    return _checks(stderr, CHECK_PREFIX, CHECK_FIELDS)
+
+
+def writer_checks(stderr):
+    return _checks(stderr, WRITER_CHECK_PREFIX, WRITER_CHECK_FIELDS)
 
 
 def operator_command(stage, *args, timeout):
@@ -92,6 +106,9 @@ def operator_command(stage, *args, timeout):
     except CommandFailure as error:
         checks = sandbox_checks(error.stderr)
         details = f" (sandbox-checks={checks})" if checks else ""
+        recheck = writer_checks(error.stderr)
+        if recheck:
+            details += f" (writer-recheck={recheck})"
         raise Failure(
             f"Native operator {stage} failed: {category(error.stderr)} "
             f"(source={source_location(error.stderr)}){details}"

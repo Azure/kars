@@ -11,7 +11,10 @@ from unittest.mock import patch
 
 import native_api
 from native_api import Failure
-from operator_diagnostics import CHECK_PREFIX, ERRORS, category, operator_command, sandbox_checks, source_location
+from operator_diagnostics import (
+    CHECK_PREFIX, ERRORS, WRITER_CHECK_PREFIX, category, operator_command,
+    sandbox_checks, source_location, writer_checks,
+)
 
 PRIVATE = "DO-NOT-EMIT-TOKENS-OR-PRIVATE-API-BODIES"
 
@@ -96,6 +99,30 @@ class OperatorDiagnosticsTests(unittest.TestCase):
                       '"phaseRunningMatch":true,"readyConditionMatch":true}'):
             self.assertEqual(sandbox_checks(value), "unavailable")
         self.assertEqual(sandbox_checks(PRIVATE), "")
+
+    def test_writer_recheck_retains_only_its_three_fixed_booleans(self):
+        facts = {"projectionMetadataPresent": True, "projectionMetadataMatches": False,
+                 "deploymentTransitionMatches": True}
+        marker = WRITER_CHECK_PREFIX + json.dumps(facts)
+        stderr = f"{PRIVATE}\n{marker}\n{PRIVATE}"
+        self.assertEqual(writer_checks(stderr), "metadata-present=true,metadata-matches=false,deployment=true")
+        output = io.StringIO()
+        with tempfile.TemporaryDirectory(prefix="native-writer-checks-") as directory, \
+             patch.object(native_api, "ROOT", Path(directory)), redirect_stdout(output), redirect_stderr(output):
+            with self.assertRaises(Failure) as failure:
+                operator_command("apply", sys.executable, "-c",
+                                 "import sys; print(sys.argv[1],file=sys.stderr); sys.exit(1)",
+                                 stderr, timeout=5)
+        self.assertIn("(writer-recheck=metadata-present=true,metadata-matches=false,deployment=true)", str(failure.exception))
+        self.assertNotIn(PRIVATE, str(failure.exception))
+        self.assertEqual(output.getvalue(), "")
+        for value in (marker + PRIVATE, marker + "\n" + marker,
+                      WRITER_CHECK_PREFIX + json.dumps({**facts, "private": PRIVATE}),
+                      WRITER_CHECK_PREFIX + json.dumps({**facts, "projectionMetadataMatches": 0}),
+                      WRITER_CHECK_PREFIX + '{"projectionMetadataPresent":true,'
+                      '"projectionMetadataPresent":false,"deploymentTransitionMatches":true}'):
+            self.assertEqual(writer_checks(value), "unavailable")
+        self.assertEqual(writer_checks(PRIVATE), "")
 
     def test_success_and_unknown_stage_do_not_change_authority(self):
         with tempfile.TemporaryDirectory(prefix="native-operator-success-") as directory, \
