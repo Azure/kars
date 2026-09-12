@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
-import { applyReviewedGrant } from "../commands/credential-grants.js";
+import { applyReviewedGrant, credentialGrantsCommand } from "../commands/credential-grants.js";
 import { continuityFixture, privateAuthoritySnapshot } from "./private-activation-fixtures.js";
 import { PRIVATE_PREFIX as P, canonical, type Execute } from "./private-activation.js";
 
@@ -13,6 +13,9 @@ const SOURCE = "kars.azure.com/sandbox-uid";
 const NS = "kars.azure.com/namespace-uid";
 const consumer = "kars-late/Deployment/late";
 const AUTHORIZATION = `sha256:${"a".repeat(64)}`;
+const SNAPSHOT_MARKER = "KARS_PRIVATE_LATE_SANDBOX_CHECKS ";
+const cliProcess = vi.hoisted(() => ({ execute: vi.fn() }));
+vi.mock("execa", () => ({ execa: cliProcess.execute }));
 
 async function setup(suspended: boolean | null = null) {
   const f = continuityFixture();
@@ -126,8 +129,221 @@ async function setup(suspended: boolean | null = null) {
 }
 
 describe("reviewed late runtime private enrollment", () => {
-  beforeEach(() => { vi.spyOn(console, "error").mockImplementation(() => {}); });
+  beforeEach(() => {
+    cliProcess.execute.mockReset();
+    vi.spyOn(console, "error").mockImplementation(() => {});
+  });
   afterEach(() => { vi.restoreAllMocks(); });
+
+  it("accepts an identical current Sandbox after an intervening status PATCH advances only resourceVersion", async () => {
+    const f = await setup();
+    let updated = false;
+    const statusUpdate: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (!updated && args[0] === "get" && args[1] === "karstask") {
+        updated = true;
+        f.sandbox.status = structuredClone(f.sandbox.status);
+        f.sandbox.metadata.resourceVersion = "2";
+      }
+      return result;
+    };
+    const before = f.preserved();
+    const review = await f.document(statusUpdate);
+    expect(updated).toBe(true);
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    expect(f.calls.filter(args => args[0] === "get" && args[1] === "karssandbox")).toHaveLength(3);
+    expect(f.calls.filter(args => args[0] === "get" && args[1] === "karstask")).toHaveLength(2);
+    expect(vi.mocked(console.error).mock.calls.some(([value]) => String(value).startsWith(SNAPSHOT_MARKER))).toBe(false);
+    await applyReviewedGrant(f.execute, review);
+    expect(f.preserved()).toEqual(before);
+    expect(f.sandbox.spec.suspended).toBeUndefined();
+  });
+
+  it.each(["same-status", "changed-spec", "stale-ready"])(
+    "exercises the shipped --observe preview and validation command with concurrent %s", async fault => {
+      const f = await setup();
+      const output = vi.spyOn(console, "log").mockImplementation(() => {});
+      let updated = false;
+      cliProcess.execute.mockImplementation(async (program: string, args: string[], options: { input?: string }) => {
+        expect(program).toBe("kubectl");
+        const stdout = await f.execute(args, options.input);
+        if (!updated && args[0] === "get" && args[1] === "karstask") {
+          updated = true;
+          f.sandbox.metadata.resourceVersion = "2";
+          if (fault === "same-status") f.sandbox.status = structuredClone(f.sandbox.status);
+          if (fault === "changed-spec") f.sandbox.spec.credentialsRef.uid = "unreviewed-source";
+          if (fault === "stale-ready") f.sandbox.status.conditions[0].observedGeneration = 0;
+        }
+        return { stdout };
+      });
+      const preview = credentialGrantsCommand().parseAsync([
+        "preview", "--namespace", "work", "--writer", "reader/bff", "--observe", "late",
+        "--private-root", "core", "--private-controller-profile", "kcm-certificate",
+        "--private-consumer", consumer,
+      ], { from: "user" });
+      if (fault === "same-status") {
+        await preview;
+        expect(output).toHaveBeenCalledTimes(1);
+        const review = JSON.parse(String(output.mock.calls[0]![0]));
+        expect(review.spec.observationTargets).toEqual([{ kind: "KarsSandbox", namespace: "work", name: "late", uid: "sandbox" }]);
+        expect(review.spec.privateActivation.phase).toBe("reviewed");
+        expect(JSON.stringify(review)).not.toContain("control-token");
+        expect(JSON.stringify(review)).not.toContain("conditions");
+      } else {
+        await expect(preview).rejects.toThrow();
+        expect(output).not.toHaveBeenCalled();
+      }
+      expect(updated).toBe(true);
+      expect(f.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
+      expect(f.namespace.metadata.annotations[HISTORY]).toBeUndefined();
+    });
+
+  it.each(["uid", "spec", "generation", "owner", "labels", "annotations", "finalizers", "managed-fields",
+    "namespace-binding", "observation-authority", "status-content"])(
+    "does not treat concurrent Sandbox %s drift as a harmless resourceVersion update", async fault => {
+      const f = await setup();
+      let changed = false;
+      const race: Execute = async (args, input) => {
+        const result = await f.execute(args, input);
+        if (!changed && args[0] === "get" && args[1] === "karstask") {
+          changed = true;
+          f.sandbox.metadata.resourceVersion = "2";
+          if (fault === "uid") f.sandbox.metadata.uid = "must-not-be-logged";
+          if (fault === "spec") f.sandbox.spec.credentialsRef.uid = "changed-source";
+          if (fault === "generation") f.sandbox.metadata.generation = 2;
+          if (fault === "owner") f.sandbox.metadata.ownerReferences[0].uid = "changed-task";
+          if (fault === "labels") f.sandbox.metadata.labels = { changed: "must-not-be-logged" };
+          if (fault === "annotations") f.sandbox.metadata.annotations.unreviewed = "must-not-be-logged";
+          if (fault === "finalizers") f.sandbox.metadata.finalizers = ["changed-finalizer"];
+          if (fault === "managed-fields") f.sandbox.metadata.managedFields = [{ manager: "changed-manager" }];
+          if (fault === "namespace-binding") f.sandbox.metadata.annotations[NS] = "changed-namespace";
+          if (fault === "observation-authority") f.sandbox.status.serviceObservation = { phase: "Prepared" };
+          if (fault === "status-content") f.sandbox.status.conditions[0].message = "changed-status";
+        }
+        return result;
+      };
+      await expect(f.document(race)).rejects.toThrow();
+      expect(changed).toBe(true);
+      expect(f.calls.every(args => args[0] === "get")).toBe(true);
+      const markers = vi.mocked(console.error).mock.calls.map(([value]) => String(value))
+        .filter(value => value.startsWith(SNAPSHOT_MARKER));
+      expect(markers).toEqual([`${SNAPSHOT_MARKER}{"resourceVersionMatch":false,"observedGenerationMatch":true,"phaseRunningMatch":true,"readyConditionMatch":true}`]);
+      expect(markers.join("")).not.toContain("must-not-be-logged");
+      expect(f.namespace.metadata.annotations[HISTORY]).toBeUndefined();
+    });
+
+  it.each(["observed-generation", "phase", "missing-ready", "false-ready", "stale-ready", "missing-ready-generation", "malformed-conditions"])(
+    "reports only fixed readiness match booleans for %s without a fallback", async fault => {
+      const f = await setup();
+      if (fault === "observed-generation") f.sandbox.status.observedGeneration = 0;
+      if (fault === "phase") f.sandbox.status.phase = "Degraded";
+      if (fault === "missing-ready") f.sandbox.status.conditions = [];
+      if (fault === "false-ready") f.sandbox.status.conditions[0].status = "False";
+      if (fault === "stale-ready") f.sandbox.status.conditions[0].observedGeneration = 0;
+      if (fault === "missing-ready-generation") delete f.sandbox.status.conditions[0].observedGeneration;
+      if (fault === "malformed-conditions") f.sandbox.status.conditions = {};
+      await expect(f.document()).rejects.toThrow();
+      const markers = vi.mocked(console.error).mock.calls.map(([value]) => String(value))
+        .filter(value => value.startsWith(SNAPSHOT_MARKER));
+      expect(markers).toHaveLength(1);
+      expect(JSON.parse(markers[0]!.slice(SNAPSHOT_MARKER.length))).toEqual({
+        resourceVersionMatch: true, observedGenerationMatch: fault !== "observed-generation",
+        phaseRunningMatch: fault !== "phase",
+        readyConditionMatch: ["observed-generation", "phase"].includes(fault),
+      });
+      expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    });
+
+  it.each(["task-spec", "task-owner", "task-uid", "task-authorization", "task-metadata",
+    "deployment-env", "deployment-metadata", "namespace"])(
+    "rechecks the bounded read set and preserves authority on concurrent %s drift", async fault => {
+      const f = await setup(true);
+      let changed = false;
+      const race: Execute = async (args, input) => {
+        const result = await f.execute(args, input);
+        if (!changed && args[0] === "get" && args[1] === "karstask") {
+          changed = true;
+          if (fault === "task-spec") f.task.spec.objective = "changed";
+          if (fault === "task-owner") f.task.metadata.ownerReferences = [{ uid: "changed-team" }];
+          if (fault === "task-uid") f.task.metadata.uid = "changed-task";
+          if (fault === "task-authorization") f.task.status.envelopeDigest = `sha256:${"b".repeat(64)}`;
+          if (fault === "task-metadata") f.task.metadata.labels = { changed: "authority" };
+          if (fault === "deployment-env") f.deployment.spec.template.spec.containers[0].env[0].value = "{}";
+          if (fault === "deployment-metadata") f.deployment.metadata.labels.changed = "authority";
+          if (fault === "namespace") f.namespace.metadata.annotations[SOURCE] = "changed-sandbox";
+        }
+        return result;
+      };
+      await expect(f.document(race)).rejects.toThrow();
+      expect(changed).toBe(true);
+      expect(f.calls.every(args => args[0] === "get")).toBe(true);
+      expect(f.namespace.metadata.annotations[HISTORY]).toBeUndefined();
+      expect(f.sandbox.spec.suspended).toBe(true);
+    });
+
+  it("accepts an identical Task status snapshot without rebasing its authority", async () => {
+    const f = await setup();
+    let updated = false;
+    const race: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (!updated && args[0] === "get" && args[1] === "karstask") {
+        updated = true;
+        f.task.metadata.resourceVersion = "2";
+      }
+      return result;
+    };
+    const review = await f.document(race);
+    expect(updated).toBe(true);
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    await applyReviewedGrant(f.execute, review);
+    expect(JSON.parse(f.namespace.metadata.annotations[HISTORY]).runtime.task.authorization).toBe(AUTHORIZATION);
+  });
+
+  it("does not promote a first-read stale Ready condition when the second read becomes current", async () => {
+    const f = await setup();
+    f.sandbox.status.conditions[0].observedGeneration = 0;
+    const race: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (args[0] === "get" && args[1] === "karstask") {
+        f.sandbox.status.conditions[0].observedGeneration = 1;
+        f.sandbox.metadata.resourceVersion = "2";
+      }
+      return result;
+    };
+    await expect(f.document(race)).rejects.toThrow();
+    expect(console.error).toHaveBeenCalledWith(`${SNAPSHOT_MARKER}{"resourceVersionMatch":false,"observedGenerationMatch":true,"phaseRunningMatch":true,"readyConditionMatch":true}`);
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+  });
+
+  it("revalidates the same snapshot constraints during apply before any mutation", async () => {
+    const f = await setup();
+    const review = await f.document();
+    f.calls.length = 0;
+    let changed = false;
+    const race: Execute = async (args, input) => {
+      const result = await f.execute(args, input);
+      if (!changed && args[0] === "get" && args[1] === "karstask") {
+        changed = true;
+        f.sandbox.metadata.resourceVersion = "2";
+        f.sandbox.spec.credentialsRef.uid = "changed-before-apply";
+      }
+      return result;
+    };
+    await expect(applyReviewedGrant(race, review)).rejects.toThrow();
+    expect(changed).toBe(true);
+    expect(f.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
+    expect(f.namespace.metadata.annotations[HISTORY]).toBeUndefined();
+  });
+
+  it("still rejects changed shared-root authority after preview before any mutation", async () => {
+    const f = await setup();
+    const review = await f.document();
+    f.objects.get(f.key("deployment", "kars-controller", "core")).spec.template.spec.containers[0].image = "changed-root";
+    f.calls.length = 0;
+    await expect(applyReviewedGrant(f.execute, review)).rejects.toThrow();
+    expect(f.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
+    expect(f.namespace.metadata.annotations[HISTORY]).toBeUndefined();
+  });
 
   it.each([null, false, true])("retires real owned Pod UIDs, verifies token rotation and restores suspension %s without touching shared authority", async original => {
     const f = await setup(original);
