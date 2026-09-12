@@ -29,7 +29,11 @@ fn ready(
             .generation
             .is_some_and(|generation| generation > 0)
         || !crate::kars_task_reconciler::task_is_ready(task)
-        || !task.spec.execution.launch
+        || !task
+            .spec
+            .execution
+            .as_ref()
+            .is_some_and(|execution| execution.launch)
         || task
             .spec
             .blueprint
