@@ -29,7 +29,12 @@ jobs:
       - name: Generate and verify the bounded lock delta
         working-directory: bridge/${{ matrix.project }}
         run: |
-          npm install --package-lock-only --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+          npm --version
+          if [ "$(basename "$PWD")" = teams-gateway ]; then
+            npm exec --yes --ignore-scripts --package=npm@11.6.0 -- npm install --package-lock-only --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+          else
+            npm install --package-lock-only --ignore-scripts --no-audit --no-fund --registry=https://registry.npmjs.org
+          fi
           git --no-pager diff -- package-lock.json
           if [ "$(basename "$PWD")" = teams-gateway ]; then
             node ../../ci/bridge-vitest-lock.mjs
