@@ -5,6 +5,7 @@ use super::*;
 use serde_json::Value;
 
 mod fixture;
+mod task_tests;
 
 fn assert_no_values(f: &fixture::Fixture) {
     let state = f.state.lock().unwrap();

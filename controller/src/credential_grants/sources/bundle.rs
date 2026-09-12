@@ -4,14 +4,33 @@
 //! Repair only an anchor CAS interrupted in this invocation after exclusive CREATE.
 //! No receipt is reconstructed from a GET, a name, or owner-shaped annotations.
 //! Recovery never writes Secret values and always requires a fresh prepare.
-//! Only Sandbox status/suspension churn is tolerated; grant/source revisions are
-//! not rebased, and a fresh prepare checks bindings against the live Sandbox spec.
+//! Sandbox status/suspension churn and narrowly verified materialized-Task
+//! execution status are tolerated; grant/source revisions are never rebased.
 //! Lost CREATE acknowledgements, changed authority and exhausted conflicts remain
 //! explicit errors; existing objects are never adopted, deleted or cleared here.
 
 use super::*;
 use kube::core::{ApiResource, DynamicObject, GroupVersionKind};
 use serde_json::Value;
+
+#[path = "bundle_task.rs"]
+mod task;
+
+#[derive(Clone, Copy)]
+pub(super) struct TaskConsumer<'a> {
+    pub sandbox: &'a crate::crd::KarsSandbox,
+    pub task: &'a crate::kars_task::KarsTask,
+}
+
+pub(super) async fn verify_task_caller(
+    client: &Client,
+    consumer: TaskConsumer<'_>,
+    target_object: &DynamicObject,
+    target: &CredentialTarget,
+    bindings: &CredentialBindings,
+) -> Result<(), String> {
+    task::verify_caller(client, consumer, target_object, target, bindings).await
+}
 
 pub(super) const UID_ANNOTATION: &str = "kars.azure.com/credential-bundle-uid";
 pub(super) const RECOVERY_PATCHES: usize = 2;
@@ -25,6 +44,7 @@ pub(super) struct Creation<'a> {
     pub grant: &'a KarsCredentialGrant,
     pub states: &'a [Value],
     pub created: &'a Secret,
+    pub task_consumer: Option<TaskConsumer<'a>>,
 }
 
 pub(super) fn verify_owned(
@@ -119,6 +139,9 @@ fn response(
     updated: DynamicObject,
     creation: &Creation<'_>,
 ) -> Result<DynamicObject, String> {
+    if creation.task_consumer.is_some() {
+        task::verify_transition(prior, &updated, creation.target, creation.bindings)?;
+    }
     if identity(&updated.metadata)?.1 == identity(&prior.metadata)?.1
         || annotation(&updated.metadata, UID_ANNOTATION) != creation.created.metadata.uid.as_deref()
         || authority_view(prior, creation.target, false)?
@@ -153,10 +176,16 @@ async fn recovery_snapshot(
 ) -> Result<DynamicObject, String> {
     let target = creation.target;
     let live = targets::read(client, target).await?;
-    if authority_view(creation.original, target, true)? != authority_view(&live, target, true)? {
-        return Err("Credential target authority changed during anchor recovery".into());
+    if let Some(consumer) = creation.task_consumer {
+        task::verify_transition(creation.original, &live, target, creation.bindings)?;
+        verify_task_caller(client, consumer, &live, target, creation.bindings).await?;
+    } else {
+        if authority_view(creation.original, target, true)? != authority_view(&live, target, true)?
+        {
+            return Err("Credential target authority changed during anchor recovery".into());
+        }
+        verify_bindings(&live, creation.bindings)?;
     }
-    verify_bindings(&live, creation.bindings)?;
     let grant = current(client, &target.namespace, &creation.bindings.grant).await?;
     if identity(&grant.metadata)? != identity(&creation.grant.metadata)?
         || grant.metadata.generation != creation.grant.metadata.generation
@@ -222,17 +251,27 @@ pub(super) async fn record_created(
         Ok(updated) => return response(creation.original, updated, &creation),
         Err(kube::Error::Api(error))
             if error.code == 409
-                && creation.target.kind == "KarsSandbox"
-                && creation
-                    .original
-                    .metadata
-                    .owner_references
-                    .as_ref()
-                    .is_none_or(|owners| {
-                        !owners
-                            .iter()
-                            .any(|owner| owner.kind == "KarsTask" && owner.controller == Some(true))
-                    }) => {}
+                && ((creation.target.kind == "KarsTask" && creation.task_consumer.is_some())
+                    || (creation.target.kind == "KarsSandbox"
+                        && creation
+                            .original
+                            .metadata
+                            .owner_references
+                            .as_ref()
+                            .is_none_or(|owners| {
+                                !owners.iter().any(|owner| {
+                                    owner.kind == "KarsTask" && owner.controller == Some(true)
+                                })
+                            }))) =>
+        {
+            tracing::warn!(
+                target_kind = %creation.target.kind,
+                namespace = %creation.target.namespace,
+                target = %creation.target.name,
+                status_code = 409,
+                "CredentialBundleExclusiveCreateAnchorCasConflict"
+            );
+        }
         Err(error) => {
             return Err(api_error(
                 "Record actual credential bundle CREATE UID",
