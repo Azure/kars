@@ -263,6 +263,10 @@ controller metadata transitions can advance; this is not a new user review,
 stale-digest reuse or an arbitrary revision refresh. Already-qualified scopes
 retain their independently verified path. Missing witnesses or other drift
 preserve retirement and require explicit recovery; no new authority is published.
+The projection recheck aligns kubectl JSON and JSONPath views only for
+`managedFields` absent from the captured JSON view. Originally captured
+`managedFields` and all other metadata remain compared; this does not grant
+ownership or weaken source, value, revision or template checks.
 
 For first qualification,
 namespace protection is then enabled in `Pending`, identities/templates are rechecked,
