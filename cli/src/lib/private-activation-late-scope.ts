@@ -8,6 +8,7 @@ import {
   type Execute, type Json, type NamespaceReview, type PrivateActivation, type ReviewedObject,
 } from "./private-activation.js";
 import { replicaIntent } from "./private-activation-retirement.js";
+import { scopedCommandFailure, type PrivateCommandPhase } from "./private-activation-command-diagnostics.js";
 
 const HISTORY = "kars.azure.com/private-root-retirement";
 const ADMIN = "router-services-admin";
@@ -424,9 +425,22 @@ export async function captureLateWriterScope(execute: Execute, activation: Priva
 export async function stageLateScope(
   execute: Execute, activation: PrivateActivation, scope: NamespaceReview, root: string, assertRoot: () => Promise<void>,
 ): Promise<void> {
+  let phase: PrivateCommandPhase = "Review";
+  const rawExecute = execute;
+  execute = async (args, input) => {
+    try { return await rawExecute(args, input); }
+    catch (error) { throw scopedCommandFailure(error, args, phase); }
+  };
+  const rawAssertRoot = assertRoot;
+  assertRoot = async () => {
+    try { await rawAssertRoot(); }
+    catch (error) { throw scopedCommandFailure(error, [], phase); }
+  };
   let state = receipt(await namespaceFor(execute, scope));
+  phase = state?.phase ?? "Review";
   let live = await current(execute, activation, scope, root, state);
   const save = async (next: Receipt, fields: Record<string, string> = {}) => {
+    phase = next.phase;
     await assertRoot();
     await patchNamespace(execute, scope, { ...fields, [HISTORY]: encoded(next) },
       { [HISTORY]: state ? encoded(state) : undefined }, true);
