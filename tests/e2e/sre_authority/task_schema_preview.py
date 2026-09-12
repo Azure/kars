@@ -3,24 +3,12 @@
 
 """Early native Task SSA probe; no schema migration or conflict workaround."""
 
-import json
-
 from .canonical_seed import _snapshot
 from .common import SYSTEM, command_error_category, require
 from .registration_schema import write_report
 from .ssa_diagnostics import ssa_conflict
 from .task_schema_conflicts import read_task_schema, require_task_owner, task_manager_facts, task_schema_conflict
-
-
-def payload_helper(h, mode, value=None):
-    args = ["node", str(h.root / "tests/e2e/sre_authority/task_schema_payload.mjs"), mode]
-    return json.loads(h.run(args, **({"data": json.dumps(value)} if value is not None else {}), timeout=20))
-
-
-def require_task_payload_helper(h):
-    require((h.root / "cli/dist/lib/schema-write-request.js").is_file(),
-            "Early Task SSA requires Node.js 22+ and a CLI build: run npm ci && npm run build in cli before the schema tests")
-    require(payload_helper(h, "check") == {"ready": True}, "Compiled production schema helper is unavailable")
+from .task_schema_helpers import payload_helper, require_task_payload_helper
 
 
 def task_preview(h, rendered, case):
