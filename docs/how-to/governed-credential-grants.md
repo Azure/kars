@@ -203,6 +203,13 @@ An HTTP 403 does not alone distinguish bearer rejection from a failed live
 proof. Diagnostics do not make `Prepared` ready, change denial responses,
 cache proofs, or replace TLS, network, rotation, and unauthorized-peer tests.
 
+`observer_target_client` adds request-local progress for client initialization,
+request construction, service entry, post-auth dispatch and response headers,
+plus bounded configuration-match facts. Dispatch does not prove packet delivery.
+The complete target request, including body/error decoding, suppresses raw
+library logging; the caller emits bounded diagnostics outside that scope.
+Sibling requests keep their own logging and progress state.
+
 ## Operator workflow
 
 Private writer/observation activation is an additional review in the existing
