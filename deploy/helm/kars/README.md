@@ -69,6 +69,12 @@ CRDs remain in the chart's tracked templates, not Helm's install-only `crds/`
 directory. Pre-created CRDs carry the exact intended Helm ownership, and the
 following Helm operation records/manages them normally. Later upgrades use the
 same schema preflight; they do not delete CRDs or customer resources.
+Every CRD is retained with `helm.sh/resource-policy: keep`. Automatic rollback
+also requires a compatible, retained previous successful release: pass the
+following operation's `--atomic`/`--rollback-on-failure` option to `schemas prepare`.
+An ownership match alone never permits removing fields or changing retained
+schema validation. Older releases without complete retention require a reviewed
+retention transition before atomic upgrades.
 
 For an existing AKS cluster, run `kars config adopt-aks` after Helm installation
 to write the local deployment context used by `kars upgrade`, `kars push`, and

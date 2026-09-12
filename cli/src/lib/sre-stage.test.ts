@@ -115,26 +115,18 @@ describe("existing action API prerequisite compatibility", () => {
     expect(f.existing.metadata.uid).toBe(before.metadata.uid);
     expect(f.existing.metadata.annotations["operator.example/keep"]).toBe("custom metadata");
     const calls = f.execute.mock.calls;
-    const patch = calls.findIndex(([, args, options]) => helm
-      ? args[0] === "apply" && JSON.parse(options.input!).metadata.name === ACTION_CRD
-      : args[0] === "patch" && args[2] === ACTION_CRD);
+    const patch = calls.findIndex(([, args]) => args[0] === "patch" && args[2] === ACTION_CRD);
     const wait = calls.findIndex(([, args]) => args.includes("/openapi/v3"));
     const dependent = calls.findIndex(([file, args, options]) => helm ? file === "helm" && args[0] === "upgrade"
       : args[0] === "create" && JSON.parse(options.input!).kind === "ValidatingAdmissionPolicy");
     expect(patch).toBeGreaterThan(0);
     expect(wait).toBeGreaterThan(patch);
     expect(dependent).toBeGreaterThan(wait);
-    if(helm) {
-      expect(JSON.parse(calls[patch][2].input!).metadata).toMatchObject({uid:"action-uid",resourceVersion:"17"});
-      expect(calls[patch][1]).toContain("--server-side");
-      expect(calls[patch][1]).not.toContain("--force-conflicts");
-    } else {
-      const operations = JSON.parse(calls[patch][1].at(-1)!);
-      expect(operations.slice(0, 2)).toEqual([
-        { op: "test", path: "/metadata/uid", value: "action-uid" },
-        { op: "test", path: "/metadata/resourceVersion", value: "17" },
-      ]);
-    }
+    const operations = JSON.parse(calls[patch][1].at(-1)!);
+    expect(operations.slice(0, 2)).toEqual([
+      { op: "test", path: "/metadata/uid", value: "action-uid" },
+      { op: "test", path: "/metadata/resourceVersion", value: "17" },
+    ]);
     expect(f.existing.metadata.annotations["kars.azure.com/sre-authority-staged"]).toBe(helm ? undefined : "kars-system");
     if (helm) expect(calls[dependent][1]).toEqual(expect.arrayContaining(["--wait=legacy", "--timeout", "8m"]));
   });
@@ -249,6 +241,42 @@ describe("existing action API prerequisite compatibility", () => {
       expect(params(f.existing).additionalProperties).toBe(true);
       expect(f.execute.mock.calls.some(([, args]) => ["patch", "create", "wait", "rollout"].includes(args[0]))).toBe(false);
     } finally { log.mockRestore(); }
+  });
+
+  it("keeps seeded registration, historical action schema, source UID, subjects and data unchanged during real CLI-shaped dry-run", async () => {
+    const f = fixture(true);
+    f.existing.status = { conditions: [{ type: "Established", status: "True" }] };
+    f.schemas.install(registration);
+    const source = { kind: "KarsSandbox", metadata: { name: "sre", uid: "historical-source", resourceVersion: "5" },
+      spec: { retained: "source" } };
+    const binding = { kind: "ClusterRoleBinding", metadata: { name: "kars-sre-reader", uid: "binding", resourceVersion: "7" },
+      subjects: [{ kind: "ServiceAccount", name: "sandbox", namespace: "kars-sre" },
+        { kind: "ServiceAccount", name: "unrelated", namespace: "operators" }] };
+    const data = { kind: "Secret", metadata: { name: "fixture-data", uid: "data", resourceVersion: "9" },
+      data: { opaque: "disposable-fixture-value" } };
+    for (const object of [source,binding,data]) f.schemas.objects.set(object.metadata.name,object);
+    const before = structuredClone([...f.schemas.objects]);
+    await f.run(true);
+    expect([...f.schemas.objects]).toEqual(before);
+    expect(f.execute.mock.calls.some(([,args])=>["create","apply","patch","delete","wait","rollout"].includes(args[0]))).toBe(false);
+    expect(f.execute.mock.calls.find(([file,args])=>file==="helm"&&args[0]==="upgrade")?.[1])
+      .toContain("--dry-run=server");
+    expect(params(f.existing).additionalProperties).toBe(true);
+  });
+
+  it("identifies an unclassified Helm dry-run failure without changing its error or applying the repair", async () => {
+    const f = fixture(true);
+    const failure = new Error("opaque disposable transport failure");
+    const report = vi.spyOn(console,"error").mockImplementation(()=>{});
+    const execute:Execute = (file,args,options) => file==="helm"&&args[0]==="upgrade"
+      ? Promise.reject(failure) : f.execute(file,args,options);
+    try {
+      await expect(f.run(true,execute)).rejects.toBe(failure);
+      expect(report).toHaveBeenCalledWith("SRE-STAGE-FAILURE helm-server-dry-run");
+      expect(report.mock.calls.flat().join(" ")).not.toContain(failure.message);
+      expect(params(f.existing).additionalProperties).toBe(true);
+      expect(f.execute.mock.calls.some(([,args])=>["create","apply","patch","delete"].includes(args[0]))).toBe(false);
+    } finally { report.mockRestore(); }
   });
 
   it.each(["v5.0.0", "invalid"])("rejects unsupported Helm %s before any prerequisite write", async version => {

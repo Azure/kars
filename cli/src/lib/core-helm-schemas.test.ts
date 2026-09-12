@@ -5,6 +5,7 @@ import { describe, expect, it } from "vitest";
 import { prepareCoreHelmSchemas, prepareCoreRollbackSchemas, prepareCoreTemplateSchemas } from "./core-helm-schemas.js";
 import { crd, admission, schemaFixture } from "./schema-stage.test-support.js";
 import type { SchemaExecute } from "./schema-documents.js";
+import { serverSchemaRenderFlags } from "./schema-helm-safety.js";
 
 describe("shared core schema entrypoints", () => {
   it("prepares a fresh Helm installation before policy installation, with matching release/context and values", async () => {
@@ -51,6 +52,38 @@ describe("shared core schema entrypoints", () => {
     expect(JSON.parse(remainder)).toEqual(admission());
     expect(f.writes).toHaveLength(1);
     expect(f.writes[0].metadata.labels["app.kubernetes.io/managed-by"]).toBe("kars-schema-stage");
+  });
+
+  it.each(["v3.13.0", "v3.16.0", "v4.1.3"])("uses real server capabilities with supported Helm %s", async version => {
+    const f = schemaFixture();
+    f.options.helmVersion = version;
+    const flags = await serverSchemaRenderFlags(f.execute);
+    expect(flags).toContain("--dry-run=server");
+    expect(flags.includes("--validate")).toBe(version.startsWith("v3."));
+  });
+
+  it.each(["v3.12.9", "v5.0.0", "invalid"])("rejects unsupported rendering semantics %s before writes", async version => {
+    const f = schemaFixture();
+    f.options.helmVersion = version;
+    await expect(prepareCoreHelmSchemas(f.execute, ["upgrade", "kars", "chart", "-n", "kars-system"])).rejects.toThrow("server dry-run");
+    expect(f.writes).toEqual([]);
+  });
+
+  it("does not accept different server-side CRDs after a fresh bootstrap plan", async () => {
+    const f = schemaFixture();
+    f.options.releaseExists = false;
+    const execute: SchemaExecute = async (file, args, options) => {
+      if (file === "helm" && args[0] === "template" && args.includes("--dry-run=server")) {
+        const changed = crd();
+        changed.spec.versions[0].schema.openAPIV3Schema.properties.spec.properties.fromLookup = { type: "string" };
+        return { stdout: JSON.stringify(changed) };
+      }
+      return f.execute(file, args, options);
+    };
+    await expect(prepareCoreHelmSchemas(execute, ["upgrade", "--install", "kars", "chart", "-n", "kars-system", "--atomic"]))
+      .rejects.toThrow("differ from the bootstrap");
+    expect(f.writes).toHaveLength(1);
+    expect(f.writes[0].spec).toEqual(crd().spec);
   });
 
   it("stages the exact previous Helm revision before returning an explicit rollback target", async () => {

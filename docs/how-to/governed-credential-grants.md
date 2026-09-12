@@ -35,6 +35,28 @@ An adapter may use this controller-owned status to recognize its own stored
 value after enrollment without reading values or accepting arbitrary version
 changes. Older cores without this evidence cannot authorize that transition.
 
+Internal bundle creation separately records
+`kars.azure.com/credential-bundle-uid` on the actual owning target. For a
+Task-owned runtime this is the Task, not its materialized Sandbox. A missing
+annotation on the child alone therefore does not establish a bundle failure.
+
+If a successful, acknowledged empty bundle CREATE is followed by a target
+resourceVersion conflict, core can retry only the metadata anchor, at most
+twice, while retaining that exact CREATE UID/resourceVersion and rechecking
+current ownership, grant, source and binding authority. This recovery supports
+bare Sandboxes and the verified Task-owned runtime caller; arbitrary Task or
+Team callers do not acquire a generic rebase permission. Task recovery also
+preserves the authorization digest, generation, spec, conditions and owner
+chain. Only the verified runtime reference and execution status/detail may
+advance. Successful anchor recovery requires fresh preparation before any
+credential value write; it never returns values cached by the conflicted call.
+
+Pre-existing unanchored lookalikes, lost CREATE acknowledgements, changed
+authority and persistent conflicts remain explicit failures. Core does not
+adopt or delete those bundles to clear an error. Fixed-stage controller
+diagnostics distinguish CREATE/anchor conflicts from later ownership refusals
+without exposing credential values.
+
 An enrolled provider/controller-settings store may only contain its
 purpose-specific keys. Core, not Bridge, applies typed provider environment
 updates and UID-bound Teams Deployment rollouts. Bridge has no Deployment patch

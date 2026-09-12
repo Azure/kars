@@ -21,16 +21,19 @@ the admission policies:
 ```bash
 kars schemas prepare --release kars --namespace kars-system \
   --chart deploy/helm/kars --context my-cluster \
-  --values my-values.yaml --timeout 120
+  --values my-values.yaml --timeout 120 --atomic
 helm upgrade --install kars deploy/helm/kars \
   --namespace kars-system --create-namespace --kube-context my-cluster \
-  --values my-values.yaml
+  --values my-values.yaml --atomic
 ```
 
 Repeat the same values files and `--set`/`--set-string` overrides in both commands.
 For a Helm upgrade using `--reuse-values` or `--reset-then-reuse-values`, pass that
 same option to `schemas prepare`; the helper reads the appropriate release values
 without printing them. `--check` verifies existing owned schemas without writes.
+Pass `--atomic` (or Helm 4's `--rollback-on-failure`) to preparation whenever the
+following Helm operation uses automatic rollback. The helper does not infer an
+external caller's later flags or silently remove them.
 The command uses the bundled chart when `--chart` is omitted. No Azure deployment,
 special controller, privileged Job, probe policy or Bridge-specific schema is
 involved.
@@ -45,7 +48,8 @@ existing narrowly fingerprinted action-schema repair is followed by the same
 published-schema gate before its policies are installed.
 CLI rollback resolves an explicit previous Helm revision, stages that recorded
 revision's schemas through the same gate, and refuses a rollback that would
-remove a CRD or whose release history changed during preparation.
+remove a CRD, change retained schema/data semantics, or whose release history
+changed during preparation.
 
 Preparation plans all CRDs before writing, refuses foreign/unmarked ownership,
 and never adopts resources by matching a name or label alone. Existing schemas
@@ -56,6 +60,82 @@ Updates use UID/resourceVersion-fenced server-side apply with no force conflicts
 Unrelated metadata and customer custom resources are not rewritten or deleted.
 An interrupted stage retains any already-created owned schemas for a safe retry;
 it does not roll back by deleting CRDs.
+
+### Schema compatibility and failure rollback
+
+Ownership evidence is not compatibility evidence. The same compatibility check
+applies to live schema updates, explicit rollback and automatic rollback targets.
+Every retained version must preserve its fields and types; defaults, required
+sets, constraints/CEL, map/list topology, unknown-field preservation, storage and
+conversion semantics cannot change under this automation. Optional non-defaulted
+properties may be added only where they do not narrow previously preserved
+arbitrary data. Descriptions/printer columns may change. Version migrations,
+field loss, changed validation or other unproven transitions fail before schema
+writes, even when the ownership digest or Helm manifest is valid.
+
+All 21 CRDs in the core chart carry `helm.sh/resource-policy: keep`. This remains
+in the rendered Helm release, not just transient live metadata, so failed fresh
+installs and newly introduced CRDs survive failure cleanup. CRD hooks, forced
+replacement/adoption and `--cleanup-on-fail` are refused because those paths
+cannot promise the same retention.
+
+For an atomic upgrade, preparation reads the **latest successful deployed or
+superseded** Helm revision, matching
+[Helm 3 atomic rollback selection](https://github.com/helm/helm/blob/v3.16.0/pkg/action/upgrade.go)
+and [Helm 4 rollback-on-failure](https://github.com/helm/helm/blob/v4.1.3/pkg/action/upgrade.go).
+It checks both proposed and live schemas against that rollback manifest before
+any schema write, and fences the release-history snapshot. An added field that
+the rollback schema would prune is blocked; a new CRD may proceed only with keep
+retention. Fresh installs and image-only/unchanged-schema atomic upgrades remain
+supported when the relevant retention contract is present.
+
+**Migration bounds:** a previous successful release without complete CRD
+retention cannot safely be an automatic rollback target. A separately approved
+retention-only release with unchanged schemas can establish that prerequisite;
+this tool does not perform it implicitly, edit Helm history or drop atomic.
+Incompatible schema/data changes require a separately reviewed migration with
+data preservation evidence. There is no force/confirmation override here. The
+existing explicit, non-atomic SRE authority-stage command retains only its
+previously reviewed full-fingerprint legacy action-params migration; ordinary
+upgrades and rollback do not gain that exception.
+
+SRE `authority stage --dry-run` remains a read-only server-side preview: it does
+not run the action-params conversion, schema writes, controller rollout or
+subject changes. A successful preview is not a completed migration. Failures
+emit `SRE-STAGE-FAILURE <fixed-stage>` before propagating the original error;
+the marker contains no command arguments, response bodies or raw cause.
+`prerequisite-chart-render`, `action-schema-review`, and `helm-server-dry-run`
+distinguish the principal pre-mutation failure points. Actual application uses
+`action-schema-migration` and `core-schema-preparation` before `helm-upgrade`.
+
+The historical BASE365 chart also differs from the current chart in Task/Team
+budget validation, MCP managed-mode validation and the Sandbox credentialsRef
+name pattern. The approved action-params conversion does not approve those
+additional schema transitions. The compatibility gate must continue to block
+an unreviewed whole-chart migration rather than weaken validation to make an
+SRE fixture pass.
+
+### Rendering and target identity
+
+An existing Helm release is rendered against its actual API server with live
+`lookup`, `.Capabilities` and release upgrade context. Helm 3.13+ uses
+`--dry-run=server --validate`; Helm 4 uses `--dry-run=server`.
+This matters for the chart's existing SRE source ownership checks:
+[Helm 3 template](https://github.com/helm/helm/blob/v3.16.0/cmd/helm/template.go)
+otherwise replaces capabilities with client defaults, while
+[Helm 4 server rendering](https://github.com/helm/helm/blob/v4.1.3/pkg/action/install.go)
+retains real capabilities and lookups. A cold cluster's initial client render is
+only a CRD bootstrap plan; after staging it must pass a full server-aware render
+and exact CRD recheck before policy/workload installation. A chart whose CRDs
+change between bootstrap and server rendering is explicitly unsupported, not
+silently reconciled to a different plan.
+The separate render/apply ownership mode retains its template-render semantics;
+it does not run Helm's install/adoption validation against non-Helm-owned CRDs.
+
+Local kind installation pins `kind-<requested cluster>` for render, schema
+preparation, namespace/credential preparation, final apply and controller
+rollout. Reusing an existing kind cluster never selects or rewrites the global
+current-context to make an ambient-context command appear safe.
 
 `Established` is necessary but insufficient. The gate checks the actual served
 resource mapping, fetches `/openapi/v3`, follows its server-relative hashed schema

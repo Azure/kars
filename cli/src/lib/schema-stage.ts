@@ -6,9 +6,14 @@ import {
   schemaIdentity, schemaOwnerFields, verifySchemaOwner, type ObjectMap, type SchemaExecute, type SchemaOwner,
 } from "./schema-documents.js";
 import { waitForPublishedSchemas, type PublishedType, type SchemaWait } from "./schema-discovery.js";
+import { assertRollbackCompatibility, assertSchemaCompatibility, requireCrdRetention } from "./schema-compatibility.js";
 
 interface PlannedSchema { desired: ObjectMap; current?: ObjectMap; uid?: string; change: boolean }
-export interface SchemaStageOptions extends SchemaOwner, SchemaWait { checkOnly?: boolean }
+export interface SchemaStageOptions extends SchemaOwner, SchemaWait {
+  checkOnly?: boolean;
+  rollbackDocuments?: ObjectMap[];
+  beforeWrite?: () => Promise<void>;
+}
 
 function validateOwner(owner: SchemaOwner): void {
   if (!/^[a-z0-9](?:[-a-z0-9.]*[a-z0-9])?$/.test(owner.release) || owner.release.length > 53
@@ -94,6 +99,8 @@ export async function stageCoreSchemaDocuments(
     if (crd.metadata.namespace || crd.metadata.uid || crd.metadata.resourceVersion || crd.metadata.ownerReferences?.length) {
       throw new Error("Chart CRDs must not carry live/foreign object identities");
     }
+    requireCrdRetention(crds);
+    if (options.rollbackDocuments) assertRollbackCompatibility(crds, options.rollbackDocuments);
   }
   const types = servedTypes(crds);
   for (const policy of documents.filter(object => object.kind === "ValidatingAdmissionPolicy" && object.spec?.paramKind)) {
@@ -132,10 +139,13 @@ export async function stageCoreSchemaDocuments(
         || (current.status?.storedVersions ?? []).some((version: string) => !wanted.versions.some((item: ObjectMap) => item.name === version))) {
         throw new Error(`Schema ${desired.metadata.name} requires an explicit identity/storage migration`);
       }
+      assertSchemaCompatibility(current, desired);
     }
+    if (options.rollbackDocuments) assertRollbackCompatibility([current], options.rollbackDocuments);
     plans.push({ desired, current, uid: schemaIdentity(current).uid, change });
   }
   // Plan every ownership/schema conflict before making the first write.
+  await options.beforeWrite?.();
   for (const plan of plans.filter(plan => plan.change)) {
     const fields = schemaOwnerFields(owner);
     const object = { apiVersion: plan.desired.apiVersion, kind: plan.desired.kind, spec: plan.desired.spec, metadata: {
