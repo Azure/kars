@@ -8,6 +8,7 @@ import { ACTION_CRD, planActionCrd } from "./sre-action-crd.js";
 import { planCoreHelmSchemas } from "./core-helm-schemas.js";
 import { waitForInstalledCoreSchemas } from "./schema-stage.js";
 import { planTemplateAuthoritySchemas } from "./sre-template-schema-plan.js";
+import { withSchemaPreparationDiagnostics } from "./sre-schema-diagnostics.js";
 
 type StagePhase = "registrar" | "controller-review" | "release-inventory" | "prerequisite-chart-render"
   | "action-schema-review" | "helm-compatibility" | "action-schema-migration" | "core-schema-preparation"
@@ -85,12 +86,13 @@ async function stageAuthorityChecked(
     // Qualify the complete schema/data plan before even the action-params
     // conversion. The ordinary comparator remains strict outside this command.
     mark("core-schema-preparation");
-    const applySchemas = await planCoreHelmSchemas(execute,args,{base365SreMigration:true});
+    const applySchemas = await withSchemaPreparationDiagnostics(
+      () => planCoreHelmSchemas(execute,args,{base365SreMigration:true}));
     mark("helm-server-dry-run");
     await execute("helm",[...baseArgs,"--dry-run=server"],{stdio:"pipe"});
     if(!dryRun) {
       mark("core-schema-preparation");
-      await applySchemas();
+      await withSchemaPreparationDiagnostics(applySchemas);
       mark("helm-upgrade");
       await execute("helm",args,{stdio:"pipe"});
     }

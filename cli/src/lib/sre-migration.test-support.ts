@@ -127,7 +127,7 @@ export function migrationFixture(evalV2 = false) {
       const object = JSON.parse(options.input!);
       onDryRun(object);
       return { stdout: JSON.stringify({ ...object, metadata: { ...object.metadata,
-        uid: object.metadata.uid ?? "dry-run-uid", resourceVersion: object.metadata.resourceVersion ?? "dry-run-version" } }) };
+        uid: object.metadata.uid ?? "dry-run-uid" } }) };
     }
     return base.execute(file, args, options);
   };

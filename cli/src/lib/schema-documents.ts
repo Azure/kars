@@ -89,6 +89,22 @@ export function schemaOwnerFields(owner: SchemaOwner): { labels: ObjectMap; anno
 
 export function verifySchemaOwner(object: ObjectMap, owner: SchemaOwner): void {
   schemaIdentity(object);
+  verifyOwnerMetadata(object, owner);
+}
+
+/** Kubernetes dry-run CREATE has an ephemeral UID but no storage revision.
+ * Never use this check for reads, updates, publication or a real create result. */
+export function verifyNewSchemaPreviewOwner(object: ObjectMap, owner: SchemaOwner): void {
+  normalizedCrd(object);
+  const metadata = object.metadata;
+  if (typeof metadata.uid !== "string" || !metadata.uid || metadata.namespace || metadata.deletionTimestamp
+    || (metadata.resourceVersion !== undefined && metadata.resourceVersion !== "")) {
+    throw new Error("New CRD preview must have an ephemeral UID and no persisted resourceVersion");
+  }
+  verifyOwnerMetadata(object, owner);
+}
+
+function verifyOwnerMetadata(object: ObjectMap, owner: SchemaOwner): void {
   const annotations = object.metadata.annotations ?? {};
   const manager = object.metadata.labels?.["app.kubernetes.io/managed-by"];
   const helm = owner.ownership === "helm" && manager === "Helm"
