@@ -11,6 +11,27 @@ import { CANONICAL_SCHEMAS, EVALUATOR_V2, MIGRATION } from "./sre-migration-cata
 import { planCoreHelmSchemas } from "./core-helm-schemas.js";
 
 describe("closed BASE365 SRE schema migration", () => {
+  it("accepts a new-CRD server CREATE preview without inventing a persisted resourceVersion", async () => {
+    const f = migrationFixture(true);
+    const execute: typeof f.execute = async (file, args, options) => {
+      const result = await f.execute(file, args, options);
+      if (file === "kubectl" && args[0] === "create" && args.includes("--dry-run=server")) {
+        const preview = JSON.parse(result.stdout);
+        delete preview.metadata.resourceVersion;
+        return { stdout: JSON.stringify(preview) };
+      }
+      return result;
+    };
+    const permit = await qualifySreSchemaMigration(execute, f.after, f.owner);
+    const apply = await planCoreSchemaDocuments(execute, f.after, { ...f.owner, ...f.wait, reviewedSreMigration: permit });
+    expect(f.writes).toEqual([]);
+    await apply();
+    for (const object of f.objects.values()) {
+      expect(object.metadata.resourceVersion).toBeTruthy();
+      expect(object.metadata.uid).not.toBe("dry-run-uid");
+    }
+  });
+
   it("qualifies only the exact optional Sandbox condition generation addition", async () => {
     const f = migrationFixture();
     const target = f.after.find(object => object.spec.names.kind === "KarsSandbox")!;

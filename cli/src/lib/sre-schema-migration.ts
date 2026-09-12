@@ -9,6 +9,7 @@ import {
 import { requireCrdRetention } from "./schema-compatibility.js";
 import { get, requireRegistrar } from "./sre-authority.js";
 import { qualifyMigrationData, recheckMigrationData, requireNoNewAuthorities, type MigrationDataSnapshot } from "./sre-migration-data.js";
+import { schemaStep } from "./sre-schema-diagnostics.js";
 
 export interface QualifiedSreMigration { readonly id: typeof MIGRATION }
 interface Review {
@@ -26,7 +27,9 @@ const requiresReviewedMigration = new Set([
 ]);
 
 async function quiescentController(execute: SchemaExecute, owner: SchemaOwner, expected?: ObjectMap): Promise<ObjectMap> {
+  schemaStep("controller-quiescence", "Deployment");
   const controller = await get(execute, "deployment", "kars-controller", owner.namespace);
+  schemaStep("controller-quiescence", "Deployment", controller);
   if (!controller || controller.metadata.name !== "kars-controller" || controller.metadata.namespace !== owner.namespace
     || controller.spec?.replicas !== 0
     || controller.spec?.template?.spec?.serviceAccountName !== "kars-controller"
@@ -50,24 +53,29 @@ export async function qualifySreSchemaMigration(
   execute: SchemaExecute, documents: ObjectMap[], owner: SchemaOwner,
 ): Promise<QualifiedSreMigration | undefined> {
   if (owner.ownership !== "helm") throw new Error("The canonical BASE365 migration requires its exact Helm owner");
+  schemaStep("registrar");
   await requireRegistrar(execute);
   const crds = documents.filter(object => object.kind === "CustomResourceDefinition");
   const schemas: Review["schemas"] = new Map();
   let needed = false;
   for (const desired of crds) {
+    schemaStep("schema-inventory", desired.spec?.names?.kind);
     const current = await readSchemaObject(execute, "customresourcedefinition", desired.metadata.name);
     if (current && requiresReviewedMigration.has(desired.metadata.name)
       && schemaDigest(normalizedCrd(current)) !== schemaDigest(normalizedCrd(desired))) needed = true;
     schemas.set(desired.metadata.name, { current, desired: structuredClone(desired), written: false });
   }
   if (!needed) return undefined;
+  schemaStep("schema-inventory");
   if (canonicalSchema([...schemas.keys()].sort()) !== canonicalSchema(Object.keys(CANONICAL_SCHEMAS).sort())) {
     throw new Error("BASE365 migration requires the complete canonical core CRD inventory");
   }
   const controller = await quiescentController(execute, owner);
+  schemaStep("schema-retention");
   requireCrdRetention(crds);
   const data: MigrationDataSnapshot[] = [];
   for (const [name, entry] of schemas) {
+    schemaStep("canonical-target", entry.desired.spec.names.kind);
     const allowed = CANONICAL_SCHEMAS[name];
     const after = schemaDigest(normalizedCrd(entry.desired));
     if (!allowed.after.includes(after)) throw new Error(`Unreviewed target schema in BASE365 migration: ${name}`);
@@ -75,15 +83,19 @@ export async function qualifySreSchemaMigration(
       if (allowed.before) throw new Error(`Historical BASE365 CRD is missing: ${name}`);
       continue;
     }
+    schemaStep("schema-owner", entry.desired.spec.names.kind, entry.current);
     verifySchemaOwner(entry.current, owner);
+    schemaStep("canonical-before", entry.desired.spec.names.kind);
     const before = schemaDigest(normalizedCrd(entry.current));
     if (before !== after && before !== allowed.before) throw new Error(`Live schema is not the exact BASE365 or qualified target: ${name}`);
+    schemaStep("stored-versions", entry.desired.spec.names.kind);
     if ((entry.current.status?.storedVersions ?? []).some((version: string) => version !== "v1alpha1")) {
       throw new Error("Canonical SRE migration cannot migrate another stored API version");
     }
     if (!allowed.before) await requireNoNewAuthorities(execute, entry.desired);
     if (before !== after) data.push(await qualifyMigrationData(execute, entry.current, entry.desired));
   }
+  schemaStep("schema-qualification");
   if (data.reduce((count, item) => count + item.count, 0) > 512
     || data.reduce((bytes, item) => bytes + item.bytes, 0) > 8 * 1024 * 1024) throw new Error("Complete migration data inventory exceeds its bound");
   const evalSchema = schemas.get("karsevals.kars.azure.com")!.desired;
@@ -108,6 +120,7 @@ export async function recheckSreSchemaMigration(plan: QualifiedSreMigration, nam
   await quiescentController(review.execute, review.owner, review.controller);
   for (const [key, entry] of review.schemas) {
     if (name && key !== name) continue;
+    schemaStep("migration-recheck", entry.desired.spec.names.kind);
     const current = await readSchemaObject(review.execute, "customresourcedefinition", key);
     if (!entry.current) {
       if (current) throw new Error("A new CRD appeared after migration review");

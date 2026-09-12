@@ -44,6 +44,35 @@ def flattened(historical):
 
 
 class LegacyCRDTests(unittest.TestCase):
+    def test_early_new_crd_preview_proves_no_persisted_revision_or_identity_reuse(self):
+        from sre_authority.legacy_crd_probe import preview_registration_identity
+        from sre_authority.registration_schema import CRD_PATH
+        obj = {"apiVersion": "apiextensions.k8s.io/v1", "kind": "CustomResourceDefinition",
+               "metadata": {"name": CRD_NAME}, "spec": {"scope": "Cluster"}}
+        before = copy.deepcopy(obj)
+        not_found = {"kind": "Status", "reason": "NotFound"}
+        preview = copy.deepcopy(obj)
+        preview["metadata"]["uid"] = "ephemeral-private-uid"
+        h = Mock(root=Path("unused"))
+        h.api.side_effect = [
+            types.SimpleNamespace(json=lambda: not_found),
+            types.SimpleNamespace(status_code=201, json=lambda: preview),
+            types.SimpleNamespace(json=lambda: not_found),
+        ]
+        with patch("sre_authority.legacy_crd_probe.write_report") as report:
+            preview_registration_identity(h, obj)
+        self.assertEqual(obj, before)
+        self.assertEqual([call.args for call in h.api.call_args_list], [
+            ("GET", f"{CRD_PATH}/{CRD_NAME}"),
+            ("POST", CRD_PATH + "?dryRun=All&fieldManager=helm&fieldValidation=Strict"),
+            ("GET", f"{CRD_PATH}/{CRD_NAME}"),
+        ])
+        facts = report.call_args.args[2]
+        self.assertTrue(facts["uidPresent"])
+        self.assertFalse(facts["resourceVersionPresent"])
+        self.assertNotIn("ephemeral-private-uid", json.dumps(facts))
+        h.create.assert_not_called()
+
     def test_render_requires_exact_historical_content_not_just_a_matching_name(self):
         historical = historical_objects()
         rendered = flattened(copy.deepcopy(historical))
