@@ -4,7 +4,9 @@
 """Pure checks of the native fixture; no cluster or controller execution."""
 
 import copy
+import json
 from pathlib import Path
+import subprocess
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -21,7 +23,7 @@ class FakeHarness:
     """Transport orchestration only; this is not Kubernetes schema validation."""
 
     def __init__(self):
-        self.root = Path("unused-fixture-report-root")
+        self.root = Path(__file__).resolve().parents[3]
         self.objects = {
             ("deployment", "kars-controller"): {
                 "apiVersion": "apps/v1", "kind": "Deployment",
@@ -36,7 +38,12 @@ class FakeHarness:
                 "metadata": {"name": name, "uid": name, "resourceVersion": "1",
                 "labels": {"app.kubernetes.io/managed-by": "Helm"},
                 "annotations": {"meta.helm.sh/release-name": "kars", "meta.helm.sh/release-namespace": "kars-system"},
-                "managedFields": [{"manager": "helm", "operation": "Apply", "fieldsV1": {"f:spec": {"f:versions": {}}}}]},
+                "managedFields": [{"manager": "helm", "operation": "Apply", "apiVersion": "apiextensions.k8s.io/v1",
+                    "fieldsType": "FieldsV1", "time": "2026-09-12T00:00:00Z", "fieldsV1": {
+                        "f:metadata": {
+                            "f:labels": {".": {}, "f:app.kubernetes.io/managed-by": {}},
+                            "f:annotations": {".": {}, "f:meta.helm.sh/release-name": {}, "f:meta.helm.sh/release-namespace": {}}},
+                        "f:spec": {"f:group": {}, "f:scope": {}, "f:names": {"f:kind": {}, "f:plural": {}}, "f:versions": {}}}}]},
                 "spec": {"group": "kars.azure.com", "scope": "Namespaced",
                     "names": {"kind": "KarsTask" if name == "karstasks.kars.azure.com" else "KarsSREAction",
                               "plural": name.split(".")[0]},
@@ -46,11 +53,58 @@ class FakeHarness:
         self.calls = []
         self.rejections = []
         self.serial = 1
+        self.owned_mutations = []
+        self.owned_previews = []
         action = self.objects[("crd", "karssreactions.kars.azure.com")]
         action["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"] = {
             "spec": {"properties": {"action": {"properties": {
                 "params": {"type": "object", "additionalProperties": True,
                            "description": "Public action params documentation"}}}}}}
+        self.manifest = copy.deepcopy(self.objects[("crd", "karstasks.kars.azure.com")])
+        for key in ("uid", "resourceVersion", "managedFields"):
+            self.manifest["metadata"].pop(key)
+
+    def run(self, args, data=None, timeout=20):
+        if args[:3] == ["helm", "get", "manifest"]:
+            return json.dumps(self.manifest)
+        assert args[:2] == ["node", str(self.root / "tests/e2e/sre_authority/task_schema_payload.mjs")]
+        result = subprocess.run(args, cwd=self.root, input=data, capture_output=True, text=True,
+                                timeout=timeout, check=False)
+        if result.returncode:
+            raise AssertionError(f"Task fixture helper rejected input at {args[2]}")
+        return result.stdout
+
+    def k(self, *args, data, timeout):
+        dry_run = "--dry-run=server" in args
+        assert args == ("apply", "--server-side", "--field-manager=helm", "-f", "-", "-o", "json",
+                        *(("--dry-run=server", "--show-managed-fields=true") if dry_run else ()),
+                        "--validate=strict", "--request-timeout=20s")
+        assert timeout == 25
+        body = json.loads(data)
+        current = self.objects[("crd", "karstasks.kars.azure.com")]
+        assert body["metadata"]["name"] == current["metadata"]["name"]
+        assert body["metadata"]["uid"] == current["metadata"]["uid"]
+        assert body["metadata"]["resourceVersion"] == current["metadata"]["resourceVersion"]
+        assert "managedFields" not in body["metadata"] and "status" not in body
+        (self.owned_previews if dry_run else self.owned_mutations).append(copy.deepcopy(body))
+        current = copy.deepcopy(current) if dry_run else current
+        def merge(target, patch):
+            for key, value in patch.items():
+                if isinstance(value, dict) and isinstance(target.get(key), dict):
+                    merge(target[key], value)
+                else:
+                    target[key] = copy.deepcopy(value)
+        merge(current, body)
+        if not dry_run:
+            current["metadata"]["resourceVersion"] = str(int(current["metadata"]["resourceVersion"]) + 1)
+        for key in ("categories", "shortNames"):
+            if current["spec"]["names"].get(key) == []:
+                del current["spec"]["names"][key]
+        current["metadata"]["generation"] = current["metadata"].get("generation", 1) + 1
+        selected = next(entry for entry in current["metadata"]["managedFields"]
+                        if entry["manager"] == "helm" and entry["operation"] == "Apply")
+        selected["time"] = f"2026-09-12T00:00:0{len(self.owned_mutations)}Z"
+        return json.dumps(current)
 
     def migrate_action_schema(self):
         action = self.objects[("crd", "karssreactions.kars.azure.com")]
@@ -176,9 +230,10 @@ class CanonicalMigrationFixtureTests(unittest.TestCase):
         self.assertEqual(h.objects[("crd", "karstasks.kars.azure.com")]["spec"], before)
         self.assertEqual(h.objects[("crd", "karssreactions.kars.azure.com")], action)
         self.assertEqual(h.objects[("clusterrolebinding", "kars-sre-reader")]["subjects"], subjects)
-        self.assertTrue(all(method in ("GET", "PATCH") and path == f"{CRDS}/karstasks.kars.azure.com"
+        self.assertTrue(all(method == "GET" and path == f"{CRDS}/karstasks.kars.azure.com"
                             for method, path, _body in h.calls))
-        self.assertEqual(sum(method == "PATCH" for method, _path, _body in h.calls), 4)
+        self.assertEqual(len(h.owned_mutations), 4)
+        self.assertEqual(len(h.owned_previews), 4)
 
     def test_cleanup_is_limited_to_measured_disposable_crs_with_exact_uid_rv(self):
         h = FakeHarness()
