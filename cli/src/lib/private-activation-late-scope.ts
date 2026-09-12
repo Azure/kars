@@ -4,7 +4,7 @@
 import { randomBytes } from "node:crypto";
 import {
   annotations, at, bundleDefinition, canonical, consumesPrivateAuthority, digest, patchNamespace,
-  PRIVATE_PREFIX as P, read, record, reviewed, reviewedOwner, template, templateDigest,
+  PRIVATE_PREFIX as P, read, readSecretMetadata, record, reviewed, reviewedOwner, template, templateDigest,
   type Execute, type Json, type NamespaceReview, type PrivateActivation, type ReviewedObject,
 } from "./private-activation.js";
 import { replicaIntent } from "./private-activation-retirement.js";
@@ -228,10 +228,8 @@ async function inventory(execute: Execute, scope: NamespaceReview): Promise<Json
 }
 
 async function secretMetadata(execute: Execute, scope: NamespaceReview, name: string): Promise<ReturnType<typeof record> | undefined> {
-  const raw = await execute(["get", "secret", name, "-n", scope.namespace.name, "--ignore-not-found",
-    "-o", "go-template={{json .metadata}}"]);
-  if (!raw.trim()) return undefined;
-  return record({ metadata: JSON.parse(raw) });
+  const metadata = await readSecretMetadata(execute, name, scope.namespace.name, true);
+  return metadata === undefined ? undefined : record({ metadata });
 }
 function ownedMaterial(secret: unknown, scope: NamespaceReview, runtime: Runtime): ReviewedObject {
   const identity = reviewed(secret);

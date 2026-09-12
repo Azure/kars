@@ -306,6 +306,11 @@ digest. Only metadata and `tls.crt` are read for this review, never `tls.key`.
 The namespace fence protects that exact configured Secret name, rather than
 guessing a default name or making every TLS Secret private.
 
+Metadata review uses kubectl's JSON metadata projection and accepts exactly one
+object. Optional absence does not hide authorization or transport errors. Budget
+TLS review rereads the same Secret identity after reading the public certificate;
+the CLI receives metadata and `tls.crt`, not the private `tls.key`.
+
 The review includes `root.replicaIntent`, including an explicit zero. Before
 pausing the root, apply persists this intent and an attempt bound to the reviewed
 namespace, ServiceAccount, Deployment, template, consumers, and bundle in

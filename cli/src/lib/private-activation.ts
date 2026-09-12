@@ -121,6 +121,20 @@ function rootEnvironment(deployment: unknown, name: string): string | undefined 
   return value;
 }
 
+export function readSecretMetadata(execute: Execute, name: string, namespace: string): Promise<RecordValue>;
+export function readSecretMetadata(execute: Execute, name: string, namespace: string, optional: true): Promise<RecordValue | undefined>;
+export async function readSecretMetadata(execute: Execute, name: string, namespace: string, optional = false): Promise<RecordValue | undefined> {
+  const raw = await execute(["get", "secret", name, "-n", namespace, ...(optional ? ["--ignore-not-found"] : []),
+    "-o", "jsonpath-as-json={.metadata}"]);
+  if (!raw.trim()) {
+    if (optional) return undefined;
+    throw new Error("Private Secret metadata projection is missing");
+  }
+  const projected = list(JSON.parse(raw));
+  if (projected.length !== 1) throw new Error("Private Secret metadata projection must contain exactly one object");
+  return record(projected[0]);
+}
+
 export async function reviewBudgetTls(execute: Execute, deployment: unknown, rootNamespace: string): Promise<BudgetTlsReview | undefined> {
   const enabled = rootEnvironment(deployment, "KARS_INFERENCE_BUDGET_ENABLED");
   if (enabled === undefined || enabled === "" || enabled === "false") return undefined;
@@ -137,7 +151,7 @@ export async function reviewBudgetTls(execute: Execute, deployment: unknown, roo
   if (podNamespace.length && value === undefined && downward !== "metadata.namespace") throw new Error("Root Pod namespace input requires explicit review");
   const namespace = configured || (typeof value === "string" ? value.trim() : downward ? rootNamespace : "") || "kars-system";
   const ns = reviewed(await read(execute, "namespace", namespace));
-  const metadata = JSON.parse(await execute(["get", "secret", name, "-n", namespace, "-o", "go-template={{json .metadata}}"]));
+  const metadata = await readSecretMetadata(execute, name, namespace);
   const secret = reviewed({ metadata });
   if (at(metadata, "annotations", "kars.azure.com/inference-budget-tls") !== "v1") {
     throw new Error("Budget TLS Secret is not the reviewed budget identity");
@@ -148,8 +162,7 @@ export async function reviewBudgetTls(execute: Execute, deployment: unknown, roo
   const certificate = await execute(["get", "secret", name, "-n", namespace, "-o", 'go-template={{index .data "tls.crt"}}']);
   const publicKey = new X509Certificate(Buffer.from(certificate.trim(), "base64")).publicKey
     .export({ format: "der", type: "spki" });
-  const after = reviewed({ metadata: JSON.parse(await execute(["get", "secret", name, "-n", namespace,
-    "-o", "go-template={{json .metadata}}"])) });
+  const after = reviewed({ metadata: await readSecretMetadata(execute, name, namespace) });
   if (canonical(after) !== canonical(secret) || reviewed(await read(execute, "namespace", namespace)).uid !== ns.uid) {
     throw new Error("Budget TLS identity changed during public-key review");
   }
