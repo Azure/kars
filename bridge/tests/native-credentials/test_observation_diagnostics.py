@@ -7,7 +7,7 @@ from unittest.mock import patch
 
 from native_api import BRIDGE, CORE, WRITER, core, resource
 import api_outcome_diagnostics as api_outcomes
-from observation_diagnostics import CLIENT_FIELDS, TARGETS, VERSION, collect, project
+from observation_diagnostics import CLIENT_FIELDS, CLIENT_TRANSPORT_FIELDS, TARGETS, VERSION, collect, project
 
 
 def event(component="router", **updates):
@@ -82,6 +82,33 @@ def logs(*args, **kwargs):
 
 
 class ObservationDiagnosticsTests(unittest.TestCase):
+    def test_transport_facts_are_optional_atomic_booleans_and_old_absence_stays_unknown(self):
+        flags = {key: False for key in CLIENT_FIELDS}
+        old = json.loads(event(message="Private observation target client pending",
+                               stage="observer_target_client", http_status=0, **flags))
+        old_record = project(json.dumps(old), "router")[0]
+        self.assertTrue(all(key not in old_record for key in CLIENT_TRANSPORT_FIELDS))
+        for started, connected, handshake in [(False, False, False), (True, False, False),
+                                               (True, True, False), (True, True, True)]:
+            value = copy.deepcopy(old)
+            transport = dict.fromkeys(CLIENT_TRANSPORT_FIELDS, True)
+            transport.update(tcp_connect_started=started, tcp_connected=connected,
+                             http_handshake_complete=handshake)
+            value["fields"].update(transport, endpoint="private-endpoint-canary",
+                                   error="private-error-canary", body="private-body-canary")
+            records = project(json.dumps(value), "router")
+            self.assertEqual(records, [{**old_record, **transport}])
+            self.assertNotIn("canary", json.dumps(records))
+            self.assertEqual(project(json.dumps(value), "controller"), [])
+        for key in CLIENT_TRANSPORT_FIELDS:
+            for invalid in ("private-value-canary", 0, None, [], {}):
+                value = copy.deepcopy(old)
+                value["fields"].update(dict.fromkeys(CLIENT_TRANSPORT_FIELDS, False))
+                value["fields"][key] = invalid
+                self.assertEqual(project(json.dumps(value), "router"), [])
+            del value["fields"][key]
+            self.assertEqual(project(json.dumps(value), "router"), [])
+
     def test_client_boundaries_are_fixed_value_free_and_do_not_claim_packet_delivery(self):
         flags = {key: False for key in CLIENT_FIELDS}
         flags.update(client_initialized=True, request_built=True, service_entered=True,

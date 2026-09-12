@@ -206,9 +206,42 @@ cache proofs, or replace TLS, network, rotation, and unauthorized-peer tests.
 `observer_target_client` adds request-local progress for client initialization,
 request construction, service entry, post-auth dispatch and response headers,
 plus bounded configuration-match facts. Dispatch does not prove packet delivery.
-The complete target request, including body/error decoding, suppresses raw
-library logging; the caller emits bounded diagnostics outside that scope.
-Sibling requests keep their own logging and progress state.
+`endpoint_environment_matches` compares effective HTTPS ports and canonical IP
+literals against the in-cluster environment. Locked kube-client 3.1.0 omits
+`:443` when constructing the in-cluster URI; an absent explicit URI port means
+443, not an endpoint mismatch. Missing/invalid environment values, another
+host/port, or a non-HTTPS URI still produce `false`.
+
+The optional transport diagnostic group contains only booleans:
+
+- `transport_debug_observable` / `transport_trace_observable`: service entry
+  occurred and the corresponding tracing level is compiled in; these do not
+  guarantee complete connection-event coverage.
+- `tcp_connect_started`: the locked hyper-util 0.1.20 connector reached its
+  fixed pre-connect event.
+- `tcp_connected`: that connector observed a successful TCP connection.
+- `http_handshake_complete`: hyper-util completed HTTP client connection
+  setup after the connector returned (including TLS for HTTPS). This is before
+  the background HTTP dispatcher is started, not proof of request delivery,
+  response headers, API authorization, or observer readiness.
+
+These are request-local observations made while the target service call/future
+is polled, not socket identifiers. A pooled connection can skip all three
+progress events. A speculative connection can emit events before a different
+pooled connection wins; its later work, and HTTP dispatcher futures spawned by
+hyper-util, do not inherit this subscriber automatically. Consequently, `false`
+does not prove a TCP/TLS failure, absence of traffic, or a CNI denial.
+
+The target service and body/error decoding use the scoped subscriber, which
+retains only fixed progress bits and discards raw library events. Literal
+matching stops before address/error suffixes; the caller emits bounded
+diagnostics outside that scope. Sibling requests keep their own logging and
+progress state. This is not process-wide instrumentation of spawned work.
+
+The native `Prepared` observer deadline's root cause remains unknown. Default
+port normalization fixes a diagnostic false-negative only; these additive
+observations do not fix the timeout or establish/exclude a network-policy
+cause. Hosted transport regressions and native qualification remain required.
 
 Operator command failures use `KARS_PRIVATE_COMMAND_FAILURE` with fixed phase,
 operation, resource-kind and server-reason classes plus a bounded exit code.

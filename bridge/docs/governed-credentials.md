@@ -253,11 +253,31 @@ The native observer enablement failure records `observationReadiness` alongside
 `metadataAtFailure` in `native.json`. Collection is read-only and bounded to
 the core controller and observation-target routers. Only the fixed core
 readiness stage vocabulary, numeric HTTP status (`0` means none recorded),
-timeout/connect booleans, and collection-availability booleans survive parsing.
+timeout/connect booleans, bounded `observer_target_client` configuration/progress
+booleans, and collection-availability booleans survive parsing.
 Raw logs, span fields, exception text, tokens, identities, and response bodies
 are never written to this evidence. Collection cannot qualify any assertion.
 TLS negatives, 9447/9448 paths, CNI peer denial, and credential rotation remain
 required unchanged.
+
+`observer_target_client` optionally carries an atomic group of five booleans:
+`transport_debug_observable`, `transport_trace_observable`,
+`tcp_connect_started`, `tcp_connected`, and `http_handshake_complete`.
+All five must be present and boolean if any is present; a partial or mistyped
+group discards the record. Older cores can omit the entire group: the collector
+preserves that absence as unknown, never synthesizing `false`. Extra upstream
+fields are discarded. Connection observations are positive-only, request-poll
+local facts, not wire/socket correlation: pooling can bypass events and spawned
+futures need not inherit the subscriber. Neither `false` nor compiled-level
+availability proves/excludes connectivity, TLS completion, or CNI denial.
+
+Core normalizes the default HTTPS port for `endpoint_environment_matches`:
+locked kube-client 3.1.0 omits explicit `:443` in its in-cluster URI. Older
+diagnostics therefore reported a false mismatch even for the matching API
+endpoint. This repairs diagnostic interpretation only. The native `Prepared`
+observer deadline's root cause remains unknown; no timeout fix or qualification
+is claimed. See the core [observer diagnostic contract](../../docs/how-to/governed-credential-grants.md)
+for HTTP-setup and spawned-work limitations.
 
 Labels and ServiceAccount names are only prefilters, never diagnostic
 provenance. The collector anchors the canonical controller Deployment and the

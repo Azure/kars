@@ -42,6 +42,12 @@ CLIENT_FIELDS = (
     "endpoint_environment_matches", "runtime_namespace_matches",
 )
 
+# Absent on older cores; absence is unknown, not a negative transport result.
+CLIENT_TRANSPORT_FIELDS = (
+    "transport_debug_observable", "transport_trace_observable",
+    "tcp_connect_started", "tcp_connected", "http_handshake_complete",
+)
+
 
 def project(raw, component):
     if component not in TARGETS:
@@ -65,6 +71,10 @@ def project(raw, component):
                 continue
             record = {"stage": stage, "http_status": status,
                       **{key: fields[key] for key in CLIENT_FIELDS}}
+            if any(key in fields for key in CLIENT_TRANSPORT_FIELDS):
+                if any(type(fields.get(key)) is not bool for key in CLIENT_TRANSPORT_FIELDS):
+                    continue
+                record.update({key: fields[key] for key in CLIENT_TRANSPORT_FIELDS})
             if not records or records[-1] != record:
                 records.append(record)
             continue
