@@ -63,16 +63,42 @@ class ObservationCases:
         target = self.target()
         value, deployment, pod = running(self.setup, CORE, target["sandbox"])
         namespace = f"kars-{target['sandbox']}"
-        agent = next(container for container in pod["spec"]["containers"] if container["name"] == "openclaw")
-        projection = next(entry["secretRef"]["name"] for entry in agent["envFrom"]
-                          if entry.get("secretRef", {}).get("optional") is False)
-        paths = [core(CORE, "secrets", SOURCE), core(CORE, "secrets", value["spec"]["credentialsRef"]["name"]),
-                 core(namespace, "secrets", projection)]
-        stored = [(path, self.setup.admin.get(path)) for path in paths]
+        agents = [container for container in pod["spec"]["containers"] if container["name"] == "openclaw"]
+        require(len(agents) == 1, "Late observation fixture requires its single OpenClaw consumer")
+        projections = [entry["secretRef"]["name"] for entry in agents[0].get("envFrom", [])
+                       if entry.get("secretRef", {}).get("optional") is False]
+        require(len(projections) == 1, "Late observation fixture requires its exact governed projection")
+        task = self.setup.admin.get(resource(CORE, "karstasks", target["task"]))
+        owners = [owner for owner in value["metadata"].get("ownerReferences", [])
+                  if owner.get("controller") is True]
+        require(len(owners) == 1 and owners[0].get("apiVersion") == "kars.azure.com/v1alpha1"
+                and owners[0].get("kind") == "KarsTask" and owners[0].get("name") == target["task"]
+                and owners[0].get("uid") == uid(task),
+                "Late observation Sandbox does not belong to the current Task")
+        bundle_path = core(CORE, "secrets", "kars-credential-bundle-karstask-" + target["task"])
+        bundle = self.setup.admin.get(bundle_path)
+        bundle_annotations = bundle["metadata"].get("annotations", {})
+        bundle_owners = [owner for owner in bundle["metadata"].get("ownerReferences", [])
+                         if owner.get("controller") is True]
+        require(task["metadata"].get("annotations", {}).get("kars.azure.com/credential-bundle-uid") == uid(bundle)
+                and bundle_annotations.get("kars.azure.com/credential-purpose") == "agent-bundle-v2"
+                and bundle_annotations.get("kars.azure.com/credential-target-kind") == "KarsTask"
+                and bundle_annotations.get("kars.azure.com/credential-target-uid") == uid(task)
+                and len(bundle_owners) == 1 and bundle_owners[0].get("apiVersion") == "kars.azure.com/v1alpha1"
+                and bundle_owners[0].get("kind") == "KarsTask" and bundle_owners[0].get("name") == target["task"]
+                and bundle_owners[0].get("uid") == uid(task),
+                "Late observation bundle does not match its current Task anchor and owner")
+        projection_path = core(namespace, "secrets", projections[0])
+        projection = self.setup.admin.get(projection_path)
+        require(projection["metadata"].get("annotations", {}).get("kars.azure.com/credential-source-uid") == uid(bundle),
+                "Late observation projection does not consume the anchored Task bundle")
+        source_path = core(CORE, "secrets", SOURCE)
+        stored = [(source_path, self.setup.admin.get(source_path)), (bundle_path, bundle),
+                  (projection_path, projection)]
         root = self.setup.admin.get("/api/v1/namespaces/" + CORE)
         return {
             "sandbox": value, "deployment": deployment,
-            "task": self.setup.admin.get(resource(CORE, "karstasks", target["task"])),
+            "task": task,
             "namespace": self.setup.admin.get("/api/v1/namespaces/" + namespace),
             "pods": {uid(entry) for entry in self.setup.admin.get(core(namespace, "pods"))["items"]},
             "admin": self.setup.admin.get(core(namespace, "secrets", "router-services-admin")),
