@@ -12,6 +12,8 @@ use kube::{
     core::DynamicObject,
 };
 use std::{
+    fmt,
+    net::IpAddr,
     sync::{
         Arc,
         atomic::{AtomicU16, Ordering},
@@ -21,6 +23,7 @@ use std::{
 use tower::{Layer, Service};
 use tracing::{
     Subscriber,
+    field::{Field, Visit},
     instrument::WithSubscriber,
     span::{Attributes, Id, Record},
 };
@@ -38,6 +41,12 @@ const TOKEN_FILE: u16 = 512;
 const PROXY: u16 = 1024;
 const ENVIRONMENT: u16 = 2048;
 const NAMESPACE: u16 = 4096;
+const TCP_STARTED: u16 = 8192;
+const TCP_CONNECTED: u16 = 16384;
+const HTTP_HANDSHAKE: u16 = 32768;
+
+const TCP_TARGET: &str = "hyper_util::client::legacy::connect::http";
+const HTTP_TARGET: &str = "hyper_util::client::legacy::client";
 
 #[derive(Clone)]
 pub(super) struct Progress {
@@ -98,6 +107,13 @@ impl Drop for Pending {
             dispatch_observable = bits & ENTERED != 0
                 && tracing::level_filters::STATIC_MAX_LEVEL >= tracing::level_filters::LevelFilter::DEBUG,
             after_auth_dispatch = bits & DISPATCH != 0,
+            transport_debug_observable = bits & ENTERED != 0
+                && tracing::level_filters::STATIC_MAX_LEVEL >= tracing::level_filters::LevelFilter::DEBUG,
+            transport_trace_observable = bits & ENTERED != 0
+                && tracing::level_filters::STATIC_MAX_LEVEL >= tracing::level_filters::LevelFilter::TRACE,
+            tcp_connect_started = bits & TCP_STARTED != 0,
+            tcp_connected = bits & TCP_CONNECTED != 0,
+            http_handshake_complete = bits & HTTP_HANDSHAKE != 0,
             response_headers = bits & HEADERS != 0,
             config_observed = bits & ENTERED != 0,
             https = bits & HTTPS != 0,
@@ -147,10 +163,8 @@ pub(super) fn client(config: Config) -> Result<Client, kube::Error> {
         bits |= TOKEN_FILE;
     }
     let host = std::env::var("KUBERNETES_SERVICE_HOST").ok();
-    let port = std::env::var("KUBERNETES_SERVICE_PORT")
-        .ok()
-        .and_then(|value| value.parse::<u16>().ok());
-    if host.as_deref() == config.cluster_url.host() && port == config.cluster_url.port_u16() {
+    let port = std::env::var("KUBERNETES_SERVICE_PORT").ok();
+    if endpoint_environment_matches(&config.cluster_url, host.as_deref(), port.as_deref()) {
         bits |= ENVIRONMENT;
     }
     let layer = ClientLayer {
@@ -158,6 +172,36 @@ pub(super) fn client(config: Config) -> Result<Client, kube::Error> {
         namespace: config.default_namespace.clone(),
     };
     Ok(ClientBuilder::try_from(config)?.with_layer(&layer).build())
+}
+
+fn endpoint_environment_matches(
+    uri: &axum::http::Uri,
+    host: Option<&str>,
+    port: Option<&str>,
+) -> bool {
+    let (Some(actual), Some(expected), Some(port)) = (
+        uri.host(),
+        host,
+        port.and_then(|value| value.parse::<u16>().ok()),
+    ) else {
+        return false;
+    };
+    // kube-client 3.1 incluster_env omits :443 and canonicalizes IP literals.
+    // An absent explicit URI port is not an absent HTTPS destination port.
+    if uri.scheme_str() != Some("https") || uri.port_u16().unwrap_or(443) != port {
+        return false;
+    }
+    let ip = |host: &str| {
+        host.strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .unwrap_or(host)
+            .parse::<IpAddr>()
+    };
+    match (ip(actual), ip(expected)) {
+        (Ok(actual), Ok(expected)) => actual == expected,
+        (Err(_), Err(_)) => actual.eq_ignore_ascii_case(expected),
+        _ => false,
+    }
 }
 
 struct Observed<S> {
@@ -221,14 +265,22 @@ where
 // kube-client 3.1's default builder places its HTTP trace span *inside* the
 // authentication layer (client/builder.rs). Observing that span proves dispatch
 // beyond auth, not a TCP connection or packet delivery. The scoped subscriber
-// discards every span field/event, including URLs and upstream error bodies.
+// discards every span field, including URLs and upstream error bodies.
+// hyper-util 0.1.20's fixed connector messages distinguish TCP progress from
+// HTTP connection setup (after TLS for HTTPS). These are positive-only facts:
+// pooled connections can skip them, and detached work is not attributed here.
 struct HttpBoundary(Progress);
 
 impl Subscriber for HttpBoundary {
     fn enabled(&self, metadata: &tracing::Metadata<'_>) -> bool {
-        metadata.is_span()
+        (metadata.is_span()
             && metadata.name() == "HTTP"
-            && metadata.target() == "kube_client::client::builder"
+            && metadata.target() == "kube_client::client::builder")
+            || (metadata.is_event()
+                && ((metadata.target() == TCP_TARGET
+                    && *metadata.level() == tracing::Level::DEBUG)
+                    || (metadata.target() == HTTP_TARGET
+                        && *metadata.level() == tracing::Level::TRACE)))
     }
     fn new_span(&self, attributes: &Attributes<'_>) -> Id {
         if self.enabled(attributes.metadata()) {
@@ -238,9 +290,79 @@ impl Subscriber for HttpBoundary {
     }
     fn record(&self, _: &Id, _: &Record<'_>) {}
     fn record_follows_from(&self, _: &Id, _: &Id) {}
-    fn event(&self, _: &tracing::Event<'_>) {}
+    fn event(&self, event: &tracing::Event<'_>) {
+        if self.enabled(event.metadata()) {
+            event.record(&mut TransportMessage {
+                progress: &self.0,
+                tcp: event.metadata().target() == TCP_TARGET,
+            });
+        }
+    }
     fn enter(&self, _: &Id) {}
     fn exit(&self, _: &Id) {}
+}
+
+struct TransportMessage<'a> {
+    progress: &'a Progress,
+    tcp: bool,
+}
+
+impl Visit for TransportMessage<'_> {
+    fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
+        if field.name() != "message" {
+            return;
+        }
+        let bits = if self.tcp {
+            if message_starts_with(value, "connecting to ") {
+                TCP_STARTED
+            } else if message_starts_with(value, "connected to ") {
+                TCP_CONNECTED
+            } else {
+                0
+            }
+        } else if message_starts_with(
+            value,
+            "http1 handshake complete, spawning background dispatcher task",
+        ) || message_starts_with(
+            value,
+            "http2 handshake complete, spawning background dispatcher task",
+        ) {
+            HTTP_HANDSHAKE
+        } else {
+            0
+        };
+        self.progress.set(bits);
+    }
+}
+
+fn message_starts_with(value: &dyn fmt::Debug, expected: &'static str) -> bool {
+    struct Prefix {
+        remaining: &'static [u8],
+        matched: bool,
+    }
+    impl fmt::Write for Prefix {
+        fn write_str(&mut self, value: &str) -> fmt::Result {
+            let count = value.len().min(self.remaining.len());
+            if value.as_bytes()[..count] != self.remaining[..count] {
+                return Err(fmt::Error);
+            }
+            self.remaining = &self.remaining[count..];
+            self.matched = self.remaining.is_empty();
+            if self.matched {
+                Err(fmt::Error)
+            } else {
+                Ok(())
+            }
+        }
+    }
+    // Compare only fixed literals, retain no message data, and stop formatting
+    // before the address/error suffix. Never forward an upstream event.
+    let mut prefix = Prefix {
+        remaining: expected.as_bytes(),
+        matched: false,
+    };
+    let _ = fmt::write(&mut prefix, format_args!("{value:?}"));
+    prefix.matched
 }
 
 #[cfg(test)]
