@@ -75,6 +75,7 @@ def deny_late_conflicts(h, fixtures):
 
 def finish_data_proof(h, fixtures):
     assert_data_unchanged(h, fixtures)
+    h.passed("Fixture data/UIDs/resourceVersions remain unchanged before the nested admission probe")
     prove_nested_params_support(h)
     assert_data_unchanged(h, fixtures)
     h.passed("Native BASE365-to-current schema migration preserved all fixture data/UIDs/resourceVersions")

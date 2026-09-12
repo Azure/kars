@@ -21,7 +21,7 @@ from sre_authority.registration_schema import request
 from sre_authority.canonical_migration import seed_data
 from sre_authority.canonical_migration_test import FakeHarness
 from sre_authority.canonical_seed import (
-    SEEDS, SeedRejected, collection_path, dry_run_seed_data, nested_action_definition,
+    PENDING_POLICY, PENDING_REQUIREMENT, SEEDS, SeedRejected, collection_path, dry_run_seed_data, nested_action_definition,
     prove_nested_params_support, request_seed, seed_definitions, seed_status,
 )
 
@@ -223,12 +223,15 @@ class CanonicalSeedProbeTests(unittest.TestCase):
         baseline = dict(seed_definitions())["karssreaction"]
         before = nested_action_definition(after_migration=False)
         after = nested_action_definition(after_migration=True)
-        self.assertEqual(before["spec"], after["spec"])
+        self.assertEqual(before["spec"]["action"], after["spec"]["action"])
+        self.assertEqual(before["spec"]["approval"], {"state": "Rejected"})
+        self.assertEqual(after["spec"]["approval"], {"state": "Pending"})
         for obj in (before, after):
             self.assertEqual(obj["spec"]["action"]["params"]["opaque"], {"nested": [1, "retained", True]})
             scalar = copy.deepcopy(obj)
             scalar["metadata"]["name"] = baseline["metadata"]["name"]
             scalar["spec"]["action"]["params"]["opaque"] = "retained"
+            scalar["spec"]["approval"]["state"] = "Rejected"
             self.assertEqual(scalar, baseline)
         self.assertEqual(len({obj["metadata"]["name"] for obj in (baseline, before, after)}), 3)
 
@@ -343,12 +346,60 @@ class CanonicalSeedProbeTests(unittest.TestCase):
         self.assertTrue(self.reporter.call_args.args[2]["matched"])
         self.assertEqual(self.reporter.call_args.args[2]["expectedHttpStatus"], 201)
 
+    def test_post_migration_proposal_is_pending_while_stored_legacy_action_remains_rejected(self):
+        h = FakeHarness()
+        fixtures = seed_data(h)
+        h.migrate_action_schema()
+        before = copy.deepcopy(h.objects)
+        h.calls.clear()
+        prove_nested_params_support(h)
+        posts = [(path, body) for method, path, body in h.calls if method == "POST"]
+        self.assertEqual(len(posts), 1)
+        self.assertIn("dryRun=All", posts[0][0])
+        self.assertIn("fieldValidation=Strict", posts[0][0])
+        self.assertEqual(posts[0][1]["spec"]["approval"], {"state": "Pending"})
+        self.assertEqual(h.get("karssreaction", "e2e-migration-karssreaction")["spec"]["approval"], {"state": "Rejected"})
+        self.assertEqual(h.objects, before)
+        self.assertEqual(len(fixtures), 5)
+
+    def test_stage_create_guard_rejects_old_after_probe_and_diagnostic_retains_only_the_named_rule(self):
+        h = FakeHarness()
+        h.migrate_action_schema()
+        old_probe = nested_action_definition(after_migration=True)
+        old_probe["spec"]["approval"]["state"] = "Rejected"
+        response = h.api("POST", collection_path("karssreaction")
+                         + "?fieldManager=kubectl-create&fieldValidation=Strict&dryRun=All", body=old_probe)
+        self.assertEqual(response.status_code, 403)
+        body = response.json()
+        body["message"] += " PRIVATE-RESPONSE-VALUE"
+        facts = seed_status("karssreaction", response.status_code, body)
+        self.assertEqual(facts["category"], "Forbidden")
+        self.assertEqual(facts["admissionRules"], [PENDING_POLICY])
+        self.assertNotIn("PRIVATE-RESPONSE-VALUE", json.dumps(facts))
+        self.assertNotIn("admissionRules", seed_status("karssreaction", 403, {
+            "kind": "Status", "reason": "Forbidden", "message": "unrelated RBAC denial"}))
+
+    def test_pending_contract_matches_the_shipped_create_only_deny_policy(self):
+        root = Path(__file__).resolve().parents[3]
+        source = (root / "deploy/helm/kars/templates/sre-authority-admission.yaml").read_text()
+        documents = source.split("\n---\n")
+        policy = next(document for document in documents if "kind: ValidatingAdmissionPolicy\n" in document
+                      and f"name: {PENDING_POLICY}\n" in document)
+        binding = next(document for document in documents if "kind: ValidatingAdmissionPolicyBinding\n" in document
+                       and f"name: {PENDING_POLICY}\n" in document)
+        for clause in ('operations: ["CREATE"]', 'resources: ["karssreactions"]', "failurePolicy: Fail",
+                       '"object.spec.approval.state == \'Pending\'"', PENDING_REQUIREMENT, "reason: Forbidden"):
+            self.assertIn(clause, policy)
+        self.assertIn(f"policyName: {PENDING_POLICY}", binding)
+        self.assertIn("validationActions: [Deny, Audit]", binding)
+
     def test_post_migration_acceptance_cannot_prune_change_or_add_nested_values_or_forge_ready(self):
         changes = (
             lambda body: body["spec"]["action"]["params"]["opaque"].pop("nested"),
             lambda body: body["spec"]["action"]["params"]["opaque"].update(nested=[1, "changed", True]),
             lambda body: body["spec"]["action"]["params"]["opaque"].update(nested=[1, "retained", 1]),
             lambda body: body["spec"]["action"]["params"]["opaque"].update(extra="unreviewed"),
+            lambda body: body["spec"]["approval"].update(state="Approved"),
             lambda body: body.update(status={"phase": "Ready"}),
         )
         for change in changes:
