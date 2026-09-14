@@ -37,3 +37,9 @@ technical gates were waived. No delegation is inferred by default.
 
 These docs are intentionally **tracked** (committed with the PR), unlike the
 private `docs/internal/` planning folder.
+
+The record must be newly added relative to the reviewed base. Modifying or
+renaming an old signed record does not approve a new capability. Formatting or
+copyright changes to historical records neither extend their sign-off scope nor
+reopen their completed approval decisions. A new capability still requires its
+own newly added, signed record, and an unavailable review base fails the gate.
