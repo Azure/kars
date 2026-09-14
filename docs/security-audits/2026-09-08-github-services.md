@@ -4,9 +4,9 @@ Licensed under the MIT License. -->
 # Capability audit — Bounded keyless GitHub services
 
 Date: 2026-09-08
-Status: Bounded automated review/repair closure complete. The missing privacy
-issuance/reuse wiring is closed in current source; final audit attestations and
-live GitHub/operator acceptance remain pending.
+Status: **Bounded source-approved under explicit maintainer delegation.**
+The missing privacy issuance/reuse wiring is closed in current source.
+Current-head technical gates and live GitHub/operator acceptance remain separate.
 
 ## Scope and provenance
 
@@ -92,7 +92,8 @@ Projection delay and already-dispatched work are not instantaneous revocation;
 external GitHub key/token revocation remains an operator responsibility.
 The separate native credential 18/18 result does not exercise a live GitHub
 App installation or establish that complete privacy-loss/rotation chain.
-No signature, whole-PR approval or live-service qualification is supplied here.
+This source trace does not supply whole-PR approval or live-service qualification.
+The bounded delegated source attestation is recorded below.
 
 ## Security contract
 
@@ -271,13 +272,40 @@ remain trust dependencies. Branch protections must deny App bypass before write
 is enabled. This candidate provides no durable budget broker, workflow engine,
 user approval ledger, or automatic worker enrollment.
 
-## Sign-offs
+## Bounded delegated source attestation (2026-09-14)
+
+Reviewed current source: `9ee285be5068c7bde7c694e7dccbab2ae8a51c32`, relative to
+integration base `b5ad6791f9085e908cbf3d16b5de9021eb4b43a7`. The subsequent
+`fbc24af2` is audit-text-only. This attestation combines the original bounded
+service/repair review recorded above with the independent current issuer,
+privacy-gate, projection and cache integration trace. It does not approve the
+complete Bridge application or every unrelated change in the prerequisite PR.
+
+The author attestation is exercised by Copilot under the maintainer's explicit
+[delegation](https://github.com/Azure/kars/pull/551#issuecomment-5615522306),
+not a claim that the maintainer personally reviewed this source. The final
+independent trace was performed by the separate read-only AI context
+`frozen-bridge-review` (`7f37ca6e-6256-4dd1-8064-d8fe6ac2fc92`), not a second
+human. The original service-repair reviewer did not approve its own fixes.
+
+Actual public Rust job `104105426223` at `03174dca` passed the enrolled issuer
+schema/canonicalization/adoption cases, private-purpose issuance/retirement/
+source-revision cases, and router incarnation/cache/token/proxy regressions.
+The reviewed production source is unchanged at `9ee285be`; only two unrelated
+CLI test expressions changed. Passing local fake-upstream and Kubernetes
+fixtures are not live GitHub App installation or instantaneous external
+revocation evidence.
 
 | Role | Name | Date | Decision |
 | --- | --- | --- | --- |
-| Independent security reviewer | Pending | Pending | Pending |
-| Runtime/controller maintainer | Pending | Pending | Pending |
-| Supply-chain reviewer | Pending | Pending | Pending |
+| Author source attestation | Copilot under explicit pallakatos delegation | 2026-09-14 | Approved for the exact bounded source scope |
+| Independent source review | Separate read-only Copilot context, not a human | 2026-09-14 | No blocker in the reviewed issuance/reuse integration |
 | Operator acceptance | Pending | Pending | Pending |
 
-No reviewer identity or signature is asserted by this document.
+All residual operational constraints above remain. Current-head protected
+checks and PR review are still required. No audit/check waiver, merge bypass,
+main promotion, release/image publication or customer/H100 deployment is
+authorized by this attestation.
+
+Signed-off-by: pallakatos (author source attestation through explicit maintainer-delegated AI review, not a claim of personal code review) <191481949+pallakatos@users.noreply.github.com>
+Signed-off-by: GitHub Copilot (independent-context delegated AI source review, not a second human) <223556219+Copilot@users.noreply.github.com>
