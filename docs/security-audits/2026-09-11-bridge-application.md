@@ -77,10 +77,24 @@ as locked/native proof. No local Rust build below the disk floor was used.
 
 ### Remaining conditions and scope limits
 
-Current full core CI `34897179070`, native qualification `34897179224`, required
-scanner results and the eventual combined integration head remain separate gates.
-The preceding `5e9a1fe5` native 18/18 result is controlled-no-LLM/no-active-SRE
-evidence, not execution of this source's complete standing-Team/GitHub journey.
+Exact `aa405635` subsequently passed
+[full core CI 34897179070](https://github.com/Azure/kars/actions/runs/34897179070):
+all 21 jobs, including **184/184 Kind cases**, actual historical schema migration
+and the public API/CEL preflight. Its
+[native run 34897179224](https://github.com/Azure/kars/actions/runs/34897179224)
+passed all **18 runtime cases**, three cold API installs and the required
+aggregate. Artifact `10370845677` binds both revisions to that source, reports
+rotation in 85.68 seconds, and sets runtime/network-policy qualification true.
+The lane remains controlled-no-LLM/no-active-SRE; active-SRE-combined qualification
+is false. These results do not demonstrate the complete live standing-Team/
+GitHub journey.
+
+The final application assembly now includes actual protected integration
+`e3d61351100e1091b0fc8b5220ac36e75a81848d`, which merged qualified Azure/kars#554.
+Composition `74d959b7` retained the entire pre-merge application tree unchanged;
+only duplicate CI insertion/test ordering and a documentation heading conflicted.
+This audit update does not change production source. The final current-base PR
+head must still establish its own required checks before application merge.
 The earlier API/CEL public-CRD wait failure is retained; bounded diagnostics do
 not establish its cause or turn it into a passing result.
 
