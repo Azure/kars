@@ -318,7 +318,9 @@ export async function observeWriterSettlement(
     }
     if (!projectionSame) {
       if (Object.keys(data(projection)).length) throw new Error("Projection changed without the captured authority withdrawal and owned pause");
-      if (!isPause || !runtime.withdrawnVersion) {
+      // Sandbox reconciliation can revoke the projection while the independent
+      // Task controller never observes the transient grant-readiness gap.
+      if (!isPause) {
         if (!await snapshotCurrent(execute, runtime, task, deployment, projection)) {
           allReady = false;
           continue;
