@@ -2,6 +2,12 @@
 // Licensed under the MIT License.
 
 import { afterEach, describe, expect, it, vi } from "vitest";
+import type {
+  CoreV1ApiCreateNamespacedConfigMapRequest,
+  CoreV1ApiReadNamespacedConfigMapRequest,
+  CoreV1ApiReplaceNamespacedConfigMapRequest,
+  V1ConfigMap,
+} from "@kubernetes/client-node";
 import {
   BffClient,
   type DecisionRequest,
@@ -17,6 +23,7 @@ import {
 import { loadConfig, parseRoleMappings, type TeamsGatewayConfig } from "../src/config.js";
 import {
   approvalMessageKey,
+  type CoreV1ApiLike,
   InMemoryConversationStore,
   KubernetesConversationStore,
 } from "../src/conversation-store.js";
@@ -306,17 +313,14 @@ describe("conversation store", () => {
   });
 
   it("persists bindings, message ids, and resource versions via ConfigMap API", async () => {
-    class FakeCoreV1Api {
-      public configMap:
-        | {
-            apiVersion: string;
-            kind: string;
-            metadata: { name: string; namespace: string; resourceVersion?: string | undefined };
-            data: Record<string, string>;
-          }
-        | undefined;
+    class FakeCoreV1Api implements CoreV1ApiLike {
+      public configMap: V1ConfigMap | undefined;
 
-      public async readNamespacedConfigMap(): Promise<unknown> {
+      public async readNamespacedConfigMap(
+        { name, namespace }: CoreV1ApiReadNamespacedConfigMapRequest
+      ): Promise<V1ConfigMap> {
+        expect(name).toBe("teams-store");
+        expect(namespace).toBe("kars-system");
         if (!this.configMap) {
           const error = Object.assign(new Error("Not Found"), {
             code: 404,
@@ -328,14 +332,8 @@ describe("conversation store", () => {
       }
 
       public async createNamespacedConfigMap(
-        namespace: string,
-        body: {
-          apiVersion?: string;
-          kind?: string;
-          metadata?: { name?: string; namespace?: string };
-          data?: Record<string, string>;
-        }
-      ): Promise<unknown> {
+        { namespace, body }: CoreV1ApiCreateNamespacedConfigMapRequest
+      ): Promise<V1ConfigMap> {
         this.configMap = {
           apiVersion: body.apiVersion ?? "v1",
           kind: body.kind ?? "ConfigMap",
@@ -350,15 +348,9 @@ describe("conversation store", () => {
       }
 
       public async replaceNamespacedConfigMap(
-        _name: string,
-        namespace: string,
-        body: {
-          apiVersion?: string;
-          kind?: string;
-          metadata?: { name?: string; namespace?: string; resourceVersion?: string | undefined };
-          data?: Record<string, string>;
-        }
-      ): Promise<unknown> {
+        { name, namespace, body }: CoreV1ApiReplaceNamespacedConfigMapRequest
+      ): Promise<V1ConfigMap> {
+        expect(name).toBe("teams-store");
         this.configMap = {
           apiVersion: body.apiVersion ?? "v1",
           kind: body.kind ?? "ConfigMap",
@@ -366,7 +358,7 @@ describe("conversation store", () => {
             name: body.metadata?.name ?? "teams-store",
             namespace,
             resourceVersion: String(
-              Number(this.configMap?.metadata.resourceVersion ?? "0") + 1
+              Number(this.configMap?.metadata?.resourceVersion ?? "0") + 1
             ),
           },
           data: body.data ?? {},
@@ -540,7 +532,8 @@ describe("main handler wiring", () => {
     ]);
   });
 
-  it("binds an unbound conversation via /bind before requiring an existing binding", async () => {
+  it.each(["kars-system", "bridge-private"])(
+    "binds and sends commands to core when gateway storage is in %s", async (storageNamespace) => {
     class FakeApp {
       public readonly handlers = new Map<string, (context: unknown) => unknown>();
       public readonly api = {
@@ -564,7 +557,7 @@ describe("main handler wiring", () => {
     const sendTeamCommand = vi.fn(async () => ({ success: true, message: "ok" }));
     const reconcileTeamApprovals = vi.fn(async () => undefined);
     registerAppHandlers(app, {
-      config: mockConfig(),
+      config: mockConfig({ conversationConfigMapNamespace: storageNamespace }),
       store,
       bff: {
         submitDecision: vi.fn(async () => ({ success: true, phase: "Denied" })),
@@ -594,10 +587,23 @@ describe("main handler wiring", () => {
       expect.objectContaining({
         teamName: "engineering",
         command: "bind",
+        namespace: "kars-system",
       })
     );
     expect(reconcileTeamApprovals).toHaveBeenCalledWith("engineering");
     expect(sent[0]?.text).toContain("Bound this conversation");
+    expect((await store.getByConversation("conv-3"))?.namespace).toBe("kars-system");
+    await messageHandler?.({
+      activity: {
+        text: "/status",
+        from: { aadObjectId: "oid-operator", name: "Alice" },
+        conversation: { id: "conv-3", tenantId: "tenant-id" },
+      },
+      send: async () => undefined,
+    });
+    expect(sendTeamCommand).toHaveBeenLastCalledWith(
+      expect.objectContaining({ teamName: "engineering", command: "status", namespace: "kars-system" })
+    );
   });
 
   it("reads requestChangesReason from action.data in the routed handler", async () => {

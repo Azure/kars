@@ -45,21 +45,10 @@ export interface ConversationStore {
   setLastResourceVersion(stream: string, value: string): Promise<void>;
 }
 
-interface CoreV1ApiLike {
-  readNamespacedConfigMap(
-    name: string,
-    namespace: string
-  ): Promise<unknown>;
-  createNamespacedConfigMap(
-    namespace: string,
-    body: V1ConfigMap
-  ): Promise<unknown>;
-  replaceNamespacedConfigMap(
-    name: string,
-    namespace: string,
-    body: V1ConfigMap
-  ): Promise<unknown>;
-}
+export type CoreV1ApiLike = Pick<
+  CoreV1Api,
+  "readNamespacedConfigMap" | "createNamespacedConfigMap" | "replaceNamespacedConfigMap"
+>;
 
 export interface KubernetesConversationStoreOptions {
   readonly namespace: string;
@@ -84,17 +73,6 @@ function normalizeString(value: unknown): string | undefined {
   }
   const trimmed = value.trim();
   return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function unwrapResponse<T>(response: unknown): T {
-  if (
-    typeof response === "object" &&
-    response !== null &&
-    "body" in response
-  ) {
-    return (response as { body: T }).body;
-  }
-  return response as T;
 }
 
 function statusCodeOf(error: unknown): number | undefined {
@@ -286,7 +264,7 @@ export class KubernetesConversationStore implements ConversationStore {
       if (!options.kubeConfig) {
         kubeConfig.loadFromCluster();
       }
-      this.api = kubeConfig.makeApiClient(CoreV1Api) as unknown as CoreV1ApiLike;
+      this.api = kubeConfig.makeApiClient(CoreV1Api);
     }
   }
 
@@ -375,12 +353,10 @@ export class KubernetesConversationStore implements ConversationStore {
 
   private async readConfigMap(): Promise<V1ConfigMap | undefined> {
     try {
-      return unwrapResponse<V1ConfigMap>(
-        await this.api.readNamespacedConfigMap(
-          this.configMapName,
-          this.namespace
-        )
-      );
+      return await this.api.readNamespacedConfigMap({
+        name: this.configMapName,
+        namespace: this.namespace,
+      });
     } catch (error) {
       if (statusCodeOf(error) === 404) {
         return undefined;
@@ -400,9 +376,10 @@ export class KubernetesConversationStore implements ConversationStore {
       data: this.serialize(),
     };
     try {
-      return unwrapResponse<V1ConfigMap>(
-        await this.api.createNamespacedConfigMap(this.namespace, configMap)
-      );
+      return await this.api.createNamespacedConfigMap({
+        namespace: this.namespace,
+        body: configMap,
+      });
     } catch (error) {
       if (statusCodeOf(error) === 409) {
         const existing = await this.readConfigMap();
@@ -434,11 +411,11 @@ export class KubernetesConversationStore implements ConversationStore {
       },
       data: this.serialize(),
     };
-    await this.api.replaceNamespacedConfigMap(
-      this.configMapName,
-      this.namespace,
-      body
-    );
+    await this.api.replaceNamespacedConfigMap({
+      name: this.configMapName,
+      namespace: this.namespace,
+      body,
+    });
   }
 
   private serialize(): Record<string, string> {

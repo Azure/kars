@@ -4,7 +4,7 @@
 # kars Bridge Helm values.
 #
 # The Bridge is ADDITIVE: it deploys on top of an existing kars install (kars
-# CRDs + controller in `namespace`). It never creates or replaces kars components.
+# CRDs + controller in `core.namespace`). It never creates or replaces kars components.
 # Kubernetes-native templates. Each deployment requires environment-specific
 # identity, registry, ingress, CNI, inference, and compatibility validation.
 # Historical preview image defaults are retained for existing installations.
@@ -209,6 +209,9 @@ affinity: {}
 #   3. The BFF must also mount bff-internal-secret via BRIDGE_TEAMS_INTERNAL_SECRET
 #
 # The dedicated Secret is NEVER propagated to sandbox pods.
+# Commands and Kars resource watches use core.namespace. Gateway workloads,
+# credentials and conversation ConfigMap stay in namespace. The release owns
+# a namespaced core-read Role/Binding, not any core workspace resources.
 teamsGateway:
   enabled: false
   image:

@@ -28,8 +28,7 @@ metadata:
     {{- include "kars-bridge.labels" . | nindent 4 }}
     app.kubernetes.io/component: teams-gateway
 ---
-# Least-privilege Role: watch KarsApprovals, read/write the conversation ConfigMap.
-# No cluster-wide write privileges.
+# Keep the existing storage Role/Binding in the add-on namespace on upgrades.
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -38,9 +37,6 @@ metadata:
   labels:
     {{- include "kars-bridge.labels" . | nindent 4 }}
 rules:
-  - apiGroups: ["kars.azure.com"]
-    resources: ["karsapprovals", "karstasks", "karsteams"]
-    verbs: ["get", "list", "watch"]
   - apiGroups: [""]
     resources: ["configmaps"]
     resourceNames: ["{{ .Values.teamsGateway.conversationConfigMapName }}"]
@@ -57,6 +53,37 @@ roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
   name: {{ .Release.Name }}-teams-gateway
+subjects:
+  - kind: ServiceAccount
+    name: kars-bridge-teams-gateway
+    namespace: {{ include "kars-bridge.namespace" . }}
+---
+# Only read core resources, binding the add-on's ServiceAccount across namespaces.
+# Include the add-on namespace in the name to avoid collisions between releases
+# with the same name in different namespaces sharing one core workspace.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ .Release.Name }}-{{ include "kars-bridge.namespace" . }}-teams-gateway-core-read
+  namespace: {{ include "kars-bridge.coreNamespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karsapprovals", "karstasks", "karsteams"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ .Release.Name }}-{{ include "kars-bridge.namespace" . }}-teams-gateway-core-read
+  namespace: {{ include "kars-bridge.coreNamespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ .Release.Name }}-{{ include "kars-bridge.namespace" . }}-teams-gateway-core-read
 subjects:
   - kind: ServiceAccount
     name: kars-bridge-teams-gateway
@@ -108,7 +135,7 @@ spec:
             - name: TEAMS_CONFIGMAP_NAME
               value: {{ .Values.teamsGateway.conversationConfigMapName | quote }}
             - name: TEAMS_WATCH_NAMESPACE
-              value: {{ include "kars-bridge.namespace" . | quote }}
+              value: {{ include "kars-bridge.coreNamespace" . | quote }}
             # All secrets from the dedicated kars-bridge-teams Secret
             - name: TEAMS_CLIENT_ID
               valueFrom:

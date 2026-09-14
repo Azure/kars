@@ -89,6 +89,11 @@ describe("BASE105 private release-value compatibility",()=>{
       expect(env.find((item:any)=>item.name==="BRIDGE_DEFAULT_NAMESPACE").value).toBe("kars-system");
       if(name.endsWith("bff"))expect(env.find((item:any)=>item.name==="BRIDGE_CORE_NAMESPACE").value).toBe("kars-system");
     }
+    const gateway=objects.find(item=>item.kind==="Deployment"&&item.metadata.name==="kars-bridge-teams-gateway");
+    expect(gateway.spec.template.spec.containers[0].env.find((item:any)=>item.name==="TEAMS_WATCH_NAMESPACE").value).toBe("kars-system");
+    const binding=objects.find(item=>item.kind==="RoleBinding"&&item.metadata.name==="kars-bridge-kars-system-teams-gateway-core-read");
+    expect(binding.metadata.namespace).toBe("kars-system");
+    expect(binding.roleRef.name).toBe("kars-bridge-kars-system-teams-gateway-core-read");
   });
   it("executes Helm lookup and preserves a formerly-owned namespace with default flags",async()=>{
     const {objects,calls}=await legacyRender([],true);
