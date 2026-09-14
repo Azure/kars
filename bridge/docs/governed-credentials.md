@@ -407,6 +407,28 @@ progress; observer readiness is not required. The policy is removed with
 its captured UID and current resourceVersion, and absence is verified. Replaced
 namespaces or policy objects are not deleted; unverified cleanup is explicit.
 
+Failure-only `baselinePackets` observes 30 seconds before the existing policy
+experiment; `policyWindowPackets` attempts to start before its CREATE. Both use
+the pinned node agent's read-only `cilium-dbg monitor --related-to <endpoint>`
+with only drop, trace and policy-verdict notifications. The
+[1.18.5 formatter](https://github.com/cilium/cilium/blob/v1.18.5/pkg/monitor/format/format.go)
+emits drop/trace JSON but **text** policy verdicts even with `--json`.
+Only validated API/Pod tuples, numeric identities, TCP flags, fixed verdicts and
+observation points survive projection; raw summary strings and payload data
+never enter artifacts. Each monitor is limited to 90 seconds, 256 KiB plus
+8 KiB cleanup drain, 8 KiB lines and 96 matching records. stdin closure reaps
+its exact remote child; an independent 95-second remote timeout with a
+2-second kill grace bounds orphan lifetime, and unverified cleanup is explicit.
+The existing UID/process/configuration fences are rechecked around collection.
+Packet times are **local receipt times**, not generation timestamps: Cilium's
+[wire records](https://github.com/cilium/cilium/blob/v1.18.5/pkg/monitor/datapath_trace.go)
+lack PID/socket/request correlation. Separately projected, timestamp-bounded
+router completions and Pod-bound authenticated audit arrivals cannot establish
+which packet belongs to which fresh router probe. `freshRouterRequest` and
+packet-to-request correlation therefore remain **unavailable**, not success;
+missing events are **unobserved** only when the source/cleanup permit that
+claim, never a denial. Trace forwarding is not a policy allow verdict.
+
 This is correlation evidence, not a production fix or CNI acceptance. Policy
 revision observations alone are not proof that a particular rule was realized,
 and Kubernetes object removal is not a claim about datapath convergence. No RBAC, TLS,
