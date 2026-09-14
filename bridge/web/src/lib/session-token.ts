@@ -11,7 +11,7 @@
 // change at the IdP takes effect on next login, not instantly).
 
 import { SignJWT, jwtVerify } from "jose";
-import type { Role } from "./config";
+import { ALL_ROLES, type Role } from "./config";
 import { oidcConfig } from "./oidc-config";
 
 export interface BridgeSession {
@@ -39,18 +39,19 @@ export async function signSession(session: BridgeSession): Promise<string> {
     .sign(secretKey(cfg.sessionSecret));
 }
 
-/** Verify + decode a session cookie. Returns `null` on any failure (expired,
- *  tampered, wrong key, or SSO no longer configured) — callers must fall back
- *  to the existing dev-role-switch/env-floor path, never treat a failure as
- *  "signed in with no roles". */
+/** Verify + decode a session cookie. Under SSO, any failure denies access;
+ *  it must never fall back to the dev role switch or env floor. */
 export async function verifySession(token: string): Promise<BridgeSession | null> {
   const cfg = oidcConfig();
   if (!cfg) return null;
   try {
     const { payload } = await jwtVerify(token, secretKey(cfg.sessionSecret), { algorithms: [ALG] });
-    if (!payload.sub) return null;
-    const roles = Array.isArray(payload.roles) ? (payload.roles as Role[]) : [];
-    return { sub: payload.sub, name: (payload.name as string | undefined) ?? payload.sub, roles };
+    if (!payload.sub || typeof payload.name !== "string") return null;
+    const roles = payload.roles;
+    const isRole = (role: unknown): role is Role =>
+      typeof role === "string" && ALL_ROLES.some((known) => known === role);
+    if (!Array.isArray(roles) || roles.length === 0 || !roles.every(isRole)) return null;
+    return { sub: payload.sub, name: payload.name, roles };
   } catch {
     return null;
   }

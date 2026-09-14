@@ -47,7 +47,7 @@ jobs:
           workspaces: bridge/bff
       - run: cargo fmt --all -- --check
       - run: cargo clippy --locked --all-targets -- -D warnings
-      - name: Require receipt trust regression registration
+      - name: Require trust and authorization regression registration
         run: |
           cargo test --locked -- --list > /tmp/kars-bridge-bff-tests.txt
           for name in \
@@ -62,7 +62,16 @@ jobs:
             routes::github::tests::connection_names_keep_the_original_raw_subject_and_eight_byte_digest \
             providers::receipt::tests::rfc8032_known_answer_and_malformed_signatures_keep_exact_verification_semantics \
             providers::credential_review::tests::legacy_v1_key_preserves_domain_null_byte_and_raw_secret_encoding \
-            providers::credential_review::tests::tag_comparison_requires_equal_length_and_every_byte_without_normalization
+            providers::credential_review::tests::tag_comparison_requires_equal_length_and_every_byte_without_normalization \
+            auth::admin_tests::admin_route_and_role_matrix_does_not_promote_operators_or_gate_reads \
+            auth::admin_tests::direct_bff_admin_mutations_deny_missing_forged_expired_and_non_admin_principals \
+            auth::admin_tests::budget_and_retention_handlers_require_admin_even_without_route_middleware \
+            auth::admin_tests::signed_admins_can_set_and_clear_each_budget_scope_and_retention \
+            auth::admin_tests::operator_reads_stay_available_while_user_and_auditor_console_reads_stay_denied \
+            routes::tasks::artifacts::tests::active_and_unknown_artifacts_download_unchanged_from_live_or_retained_tasks \
+            routes::tasks::artifacts::tests::passive_artifact_previews_keep_inline_viewing_without_mime_sniffing_or_byte_changes \
+            routes::tasks::artifacts::tests::artifact_head_has_the_same_protection_and_filename_is_header_safe \
+            routes::tasks::artifacts::tests::artifact_response_hardening_preserves_ownership_and_missing_file_denials
           do
             grep -Fx "$name: test" /tmp/kars-bridge-bff-tests.txt
           done
@@ -86,8 +95,8 @@ jobs:
       - run: npm ci
       - run: npm run lint
       - run: npx --no-install tsc --noEmit
-      - name: Check credential forms, DTOs, proxies and evidence links
-        run: node --experimental-strip-types --test tests/credential-review.test.mjs tests/type-contract.test.mjs tests/proxy-routes.test.mjs tests/team-run-links.test.mjs
+      - name: Check all web authorization, form, proxy and evidence contracts
+        run: node --experimental-strip-types --test tests/*.test.mjs
       - name: Build the production web image without publishing
         run: docker build --tag kars-bridge-web-qualification:latest .
       - name: Start web with an immutable root filesystem

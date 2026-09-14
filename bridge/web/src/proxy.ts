@@ -6,9 +6,9 @@
 // The Operator Console UI disables admin-only controls, but that is cosmetic: a
 // browser can call the BFF directly through the same-origin /api proxy. This
 // middleware runs on the WEB SERVER before the request reaches the proxy route
-// handler, so it enforces admin-only mutations for real — the role comes from the
-// httpOnly `bridge-role` cookie the browser cannot forge, falling back to the
-// BRIDGE_ROLES env floor, exactly like lib/session.ts.
+// handler. With SSO, authority comes only from verified signed session roles.
+// Dev-cookie/env roles are available only without SSO. The BFF independently
+// enforces the same admin requirement, including for direct API clients.
 //
 // The actual /api/* -> BFF proxying is done at RUNTIME by the catch-all route
 // handler app/api/[...path]/route.ts (it reads BRIDGE_BFF_URL per request, so the
@@ -16,33 +16,27 @@
 // destination at build time.
 
 import { NextResponse, type NextRequest } from "next/server";
-import { parseRoles, envRoles } from "@/lib/config";
+import { requestRoles } from "@/lib/request-roles";
 
 // (pathPrefix, methods) tuples that require the `admin` role.
 const ADMIN_ONLY: { prefix: string; methods: string[] }[] = [
-  { prefix: "/api/operator/inference-budgets", methods: ["PUT", "POST", "DELETE"] },
-  { prefix: "/api/operator/retention-policy", methods: ["PUT", "POST", "DELETE"] },
+  { prefix: "/api/operator/inference-budgets", methods: ["PUT", "POST", "PATCH", "DELETE"] },
+  { prefix: "/api/operator/retention-policy", methods: ["PUT", "POST", "PATCH", "DELETE"] },
 ];
 
-function isAdmin(req: NextRequest): boolean {
-  const cookie = req.cookies.get("bridge-role")?.value;
-  const roles = parseRoles(cookie) ?? envRoles();
-  return roles.includes("admin");
-}
-
-export function proxy(req: NextRequest) {
+export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const method = req.method.toUpperCase();
   const gated = ADMIN_ONLY.find(
-    (g) => pathname.startsWith(g.prefix) && g.methods.includes(method),
+    (g) => (pathname === g.prefix || pathname.startsWith(`${g.prefix}/`)) && g.methods.includes(method),
   );
-  if (gated && !isAdmin(req)) {
+  if (gated && !(await requestRoles((name) => req.cookies.get(name)?.value)).includes("admin")) {
     return NextResponse.json(
       {
         error: {
           code: "forbidden",
           message:
-            "Only a cluster or org admin can change this setting. Switch to the Admin role (or ask an admin).",
+            "Only a cluster or org admin can change this setting.",
         },
       },
       { status: 403 },

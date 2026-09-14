@@ -25,10 +25,11 @@
 // stored in the `kars-inference-budgets` ConfigMap (cluster-native, editable).
 
 use axum::Json;
-use axum::extract::{Path, State};
+use axum::extract::{Extension, Path, State};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 
+use crate::auth::{Principal, require_admin};
 use crate::error::{AppError, AppResult};
 use crate::kars::cluster::Cluster;
 use crate::state::AppState;
@@ -348,8 +349,10 @@ pub struct SetRuleRequest {
 /// `PUT /api/operator/inference-budgets/cluster` — set/clear the cluster cap.
 pub async fn set_cluster_budget(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Json(req): Json<SetRuleRequest>,
 ) -> AppResult<Json<BudgetsDto>> {
+    require_admin(&principal)?;
     let cluster = require_cluster(&state)?;
     let mut h = BudgetHierarchy::load(cluster).await;
     if req.clear {
@@ -371,9 +374,11 @@ pub async fn set_cluster_budget(
 /// `PUT /api/operator/inference-budgets/workspaces/{ns}` — set/clear a workspace.
 pub async fn set_workspace_budget(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(ns): Path<String>,
     Json(req): Json<SetRuleRequest>,
 ) -> AppResult<Json<BudgetsDto>> {
+    require_admin(&principal)?;
     if ns.trim().is_empty() {
         return Err(AppError::BadRequest(
             "workspace namespace is required".into(),
@@ -401,9 +406,11 @@ pub async fn set_workspace_budget(
 /// `PUT /api/operator/inference-budgets/users/{user}` — set/clear a per-user cap.
 pub async fn set_user_budget(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Path(user): Path<String>,
     Json(req): Json<SetRuleRequest>,
 ) -> AppResult<Json<BudgetsDto>> {
+    require_admin(&principal)?;
     if user.trim().is_empty() {
         return Err(AppError::BadRequest("user identity is required".into()));
     }

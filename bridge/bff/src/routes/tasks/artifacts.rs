@@ -11,6 +11,10 @@ use crate::state::AppState;
 use super::evidence::{ARTIFACT_PREVIEW_TOTAL_BYTES, artifact_preview};
 use super::{MissionArtifactDto, require_cluster};
 
+#[cfg(test)]
+#[path = "artifact_tests.rs"]
+mod tests;
+
 /// Sanitize a filename to the ConfigMap key form the controller uses (alnum,
 /// '-', '_', '.') so the manifest name can look up its stored content.
 fn artifact_key(name: &str) -> String {
@@ -27,8 +31,7 @@ fn artifact_key(name: &str) -> String {
     if k.is_empty() { "artifact".into() } else { k }
 }
 
-/// Best-effort content type from a filename extension, so a downloaded artifact
-/// opens sensibly in the browser instead of forcing a save dialog for text.
+/// Best-effort content type; only passive text and raster images may be inline.
 fn artifact_content_type(name: &str) -> &'static str {
     match name
         .rsplit('.')
@@ -49,10 +52,11 @@ fn artifact_content_type(name: &str) -> &'static str {
     }
 }
 
-/// `GET /api/tasks/:ns/:name/artifact/:file` — Bridge-native artifact fetch.
+/// `GET /api/namespaces/:ns/tasks/:name/artifact/:file` — Bridge-native artifact fetch.
 /// Streams one artifact file's bytes (text from `data`, binary from
 /// `binaryData`) so operators download deliverables in-product, never via
-/// `kubectl`. Inline for previewable types; attachment otherwise.
+/// `kubectl`. Agent-produced active content is always a download, never an
+/// authenticated same-origin document (including via the web API proxy).
 pub async fn download_artifact(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -62,21 +66,35 @@ pub async fn download_artifact(
     let cluster = require_cluster(&state)?;
     require_owned_task_or_output(cluster, &ns, &name, &principal).await?;
     let key = artifact_key(&file);
-    let (bytes, is_binary) = cluster
+    let (bytes, _) = cluster
         .read_mission_artifact_bytes(&name, &key)
         .await
         .ok_or(AppError::NotFound)?;
     let ctype = artifact_content_type(&file);
-    // Inline-render text/known media; force a download for opaque binaries.
-    let disposition = if is_binary && ctype == "application/octet-stream" {
-        format!("attachment; filename=\"{key}\"")
-    } else {
+    let disposition = if matches!(
+        ctype,
+        "text/markdown; charset=utf-8"
+            | "application/json; charset=utf-8"
+            | "text/csv; charset=utf-8"
+            | "application/yaml; charset=utf-8"
+            | "image/png"
+            | "image/jpeg"
+    ) {
         format!("inline; filename=\"{key}\"")
+    } else {
+        format!("attachment; filename=\"{key}\"")
     };
     axum::response::Response::builder()
         .header(header::CONTENT_TYPE, ctype)
         .header(header::CONTENT_DISPOSITION, disposition)
-        .header(header::CACHE_CONTROL, "private, max-age=60")
+        // Defense in depth for MIME confusion and clients that render downloads.
+        // No allow-scripts or allow-same-origin: a rendered document is opaque.
+        .header(
+            header::CONTENT_SECURITY_POLICY,
+            "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        )
+        .header(header::X_CONTENT_TYPE_OPTIONS, "nosniff")
+        .header(header::CACHE_CONTROL, "private, no-store")
         .body(axum::body::Body::from(bytes))
         .map_err(|e| AppError::Upstream(e.to_string()))
 }

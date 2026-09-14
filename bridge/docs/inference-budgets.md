@@ -15,10 +15,11 @@ flowchart LR
 ```
 
 Configure it in **Operator Console → Policies → Inference budgets**.
-The UI reserves cluster/workspace increases for admins. The current BFF groups
-many mutation routes under the operator persona, so deployments that require a
-hard admin boundary must verify server-side enforcement for their release. See
-[RBAC](rbac.md).
+All hierarchy changes (cluster, workspace, and user caps, including decreases
+and clearing a rule) require **admin**. Under SSO, both the web request proxy and
+the BFF enforce this from verified signed session roles. Operators can still
+read budgets and manage the separate per-sandbox inference policies. The dev
+role cookie and `BRIDGE_ROLES` cannot grant SSO admin access. See [RBAC](rbac.md).
 
 ## Enforcement modes
 
@@ -67,5 +68,6 @@ controller-generated from each mission's budget. On the same page an operator ca
 | GET | `/api/operator/inference-budgets` — hierarchy + live measured usage |
 | PUT | `/api/operator/inference-budgets/cluster` — set/clear the cluster cap |
 | PUT | `/api/operator/inference-budgets/workspaces/{ns}` — set/clear a workspace cap |
+| PUT | `/api/operator/inference-budgets/users/{user}` — set/clear a user cap |
 
 Utilization also surfaces on **Insights → Budget utilization** (live meters).

@@ -17,9 +17,14 @@ use axum::response::Response;
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode};
 use serde::{Deserialize, Serialize};
 
+use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
 pub const PRINCIPAL_HEADER: &str = "x-kars-principal-token";
+
+#[cfg(test)]
+#[path = "auth_admin_tests.rs"]
+mod admin_tests;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Principal {
@@ -43,6 +48,7 @@ enum RequiredPersona {
     User,
     Operator,
     Auditor,
+    Admin,
 }
 
 fn is_mutating(method: &Method) -> bool {
@@ -53,6 +59,16 @@ fn is_mutating(method: &Method) -> bool {
 }
 
 fn required_persona(path: &str, method: &Method) -> RequiredPersona {
+    if is_mutating(method)
+        && [
+            "/api/operator/inference-budgets",
+            "/api/operator/retention-policy",
+        ]
+        .iter()
+        .any(|prefix| path == *prefix || path.starts_with(&format!("{prefix}/")))
+    {
+        return RequiredPersona::Admin;
+    }
     if path == "/api/operator/audit" && *method == Method::GET {
         return RequiredPersona::Auditor;
     }
@@ -80,6 +96,17 @@ fn has_role(principal: &Principal, required: RequiredPersona) -> bool {
         RequiredPersona::User => has("user") || has("operator"),
         RequiredPersona::Operator => has("operator"),
         RequiredPersona::Auditor => has("auditor"),
+        RequiredPersona::Admin => false,
+    }
+}
+
+pub(crate) fn require_admin(principal: &Principal) -> AppResult<()> {
+    if has_role(principal, RequiredPersona::Admin) {
+        Ok(())
+    } else {
+        Err(AppError::Forbidden(
+            "only a cluster or org admin can change this setting".into(),
+        ))
     }
 }
 
