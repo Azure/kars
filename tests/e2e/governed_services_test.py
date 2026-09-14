@@ -39,9 +39,23 @@ elif name == "kubectl":
     args = args[2:]
     if args[0] == "port-forward":
         assert "--address" in args and "127.0.0.1" in args and ":8443" in args
+        starts = root / "forward-start-count"
+        starts.write_text(str(int(starts.read_text()) + 1 if starts.exists() else 1))
         (root / "forward-pid").write_text(str(os.getpid()))
-        if mode == "forward-exit":
-            sys.exit(1)
+        failures = {
+            "forward-not-running": "error: unable to forward port because pod is not running. Current status=Pending",
+            "forward-disconnected": "error: lost connection to pod",
+            "forward-upgrade": "error: error upgrading connection: private upgrade details",
+            "forward-bind": "error: unable to listen on any of the requested ports: private bind details",
+            "forward-port": "error: Service private-service does not have a service port 8443",
+            "forward-forbidden": "error: Error from server (Forbidden): private authorization details",
+            "forward-ambiguous": "error: lost connection to pod\nerror: error upgrading connection: private",
+            "forward-oversized": "x" * 65536 + "\nerror: lost connection to pod",
+        }
+        if mode in failures or mode == "forward-exit":
+            print(failures.get(mode, private), file=sys.stderr)
+            (root / "forward-exited").write_text("true")
+            sys.exit(23)
         def stopped(_signal, _frame):
             (root / "forward-stopped").write_text("true")
             sys.exit(0)
@@ -135,11 +149,13 @@ class GovernedServicesDiagnosticsTests(unittest.TestCase):
                 self.assertFalse(scratch.exists(), "Credential-bearing scratch files were retained")
                 count = root / "request-count"
                 requests = int(count.read_text()) if count.exists() else 0
-                if (root / "forward-pid").exists() and mode != "forward-exit":
+                if (root / "forward-start-count").exists():
+                    self.assertEqual((root / "forward-start-count").read_text(), "1")
+                if (root / "forward-pid").exists() and not (root / "forward-exited").exists():
                     self.assertTrue((root / "forward-stopped").exists(), "Owned forward was not stopped")
             finally:
                 pid_file = root / "forward-pid"
-                if pid_file.exists() and mode != "forward-exit" and not (root / "forward-stopped").exists():
+                if pid_file.exists() and not (root / "forward-exited").exists() and not (root / "forward-stopped").exists():
                     try:
                         os.kill(int(pid_file.read_text()), signal.SIGTERM)
                     except ProcessLookupError:
@@ -161,11 +177,14 @@ class GovernedServicesDiagnosticsTests(unittest.TestCase):
         self.assertEqual(set(fact), {
             "stage", "category", "expectedHttpStatus", "httpStatus", "operatorTokenPresent",
             "agentTokenPresent", "tokensDistinct", "sandboxUidPresent", "namespaceUidPresent",
-            "forwardStarted", "scopeChanged", "sandboxPreserved", "telemetryScopeMatches",
+            "forwardStarted", "forwardExitStatus", "scopeChanged", "sandboxPreserved", "telemetryScopeMatches",
         })
         for key, value in fact.items():
-            if key not in {"stage", "category", "expectedHttpStatus", "httpStatus"}:
+            if key not in {"stage", "category", "expectedHttpStatus", "httpStatus", "forwardExitStatus"}:
                 self.assertIsInstance(value, bool)
+        self.assertIs(type(fact["forwardExitStatus"]), int)
+        self.assertGreaterEqual(fact["forwardExitStatus"], -1)
+        self.assertLessEqual(fact["forwardExitStatus"], 255)
         if requests is not None:
             self.assertEqual(count, requests)
         return fact
@@ -179,6 +198,19 @@ class GovernedServicesDiagnosticsTests(unittest.TestCase):
     def test_forward_exit_is_reported_before_private_log_cleanup(self):
         fact = self.failure("forward-exit", "port-forward-start", "process-exited", 0)
         self.assertFalse(fact["forwardStarted"])
+        self.assertEqual(fact["forwardExitStatus"], 23)
+
+    def test_known_forward_failures_are_bounded_redacted_and_not_retried(self):
+        for mode, category in (
+            ("forward-not-running", "pod-not-running"), ("forward-disconnected", "pod-disconnected"),
+            ("forward-upgrade", "upgrade-failed"), ("forward-bind", "local-bind-failed"),
+            ("forward-port", "service-port-missing"), ("forward-forbidden", "forward-forbidden"),
+            ("forward-ambiguous", "process-exited"), ("forward-oversized", "process-exited"),
+        ):
+            with self.subTest(mode=mode):
+                fact = self.failure(mode, "port-forward-start", category, 0)
+                self.assertFalse(fact["forwardStarted"])
+                self.assertEqual(fact["forwardExitStatus"], 23)
 
     def test_unchanged_scope_still_fails_and_cleans_up(self):
         fact = self.failure("same-scope", "reset-scope-change", "assertion", 8)
