@@ -83,7 +83,7 @@ def load_policy(root):
     return policy
 
 
-def classification(path, policy):
+def classification(path, policy, data=b""):
     p = PurePosixPath(path)
     if path in policy["files"]:
         return dict(policy["files"][path])
@@ -92,7 +92,9 @@ def classification(path, policy):
             "category": "third-party", "notice": "NOTICE",
             "reason": "Vendored inputs retain their upstream/package licenses and checksums.",
         }
-    if "templates" in p.parts and p.suffix in (".yaml", ".yml", ".tpl", ".txt"):
+    if "templates" in p.parts and p.suffix in (".yaml", ".yml"):
+        return {"category": "header", "style": template_yaml_style(data)}
+    if "templates" in p.parts and p.suffix in (".tpl", ".txt"):
         return {"category": "header", "style": "helm"}
     if p.name.startswith("Dockerfile") and (p.name == "Dockerfile" or p.name[10:11] == "."):
         return {"category": "header", "style": "hash"}
@@ -163,6 +165,45 @@ def header_for(style, data):
     return STYLES[style].replace("\n", newline).encode("ascii")
 
 
+def yaml_document_start(data, start):
+    cursor = start
+    for line in data[start:].splitlines(keepends=True):
+        token = line.strip()
+        if re.fullmatch(rb"---(?:[ \t]+#.*)?", token):
+            if not line.endswith(b"\n"):
+                raise CoverageError("leading YAML document marker needs a terminating newline")
+            return cursor + len(line)
+        if token.startswith((b"--- ", b"---\t")):
+            raise CoverageError("inline YAML document content needs reviewed header placement")
+        if token and not token.startswith((b"#", b"%")):
+            break
+        cursor += len(line)
+    return start
+
+
+def yaml_license_prefix(data):
+    start = len(codecs.BOM_UTF8) if data.startswith(codecs.BOM_UTF8) else 0
+    for offset in (start, yaml_document_start(data, start)):
+        for style in ("hash", "helm"):
+            prefix = header_for(style, data[offset:])
+            if data[offset:].startswith(prefix):
+                return offset, prefix
+    return start, b""
+
+
+def template_yaml_style(data):
+    offset, prefix = yaml_license_prefix(data)
+    body = data[:offset] + data[offset + len(prefix):]
+    start = len(codecs.BOM_UTF8) if body.startswith(codecs.BOM_UTF8) else 0
+    for line in body[yaml_document_start(body, start):].splitlines():
+        token = line.strip()
+        if token and not token.startswith(b"#"):
+            # Only a leading Helm action can chomp a preceding license comment
+            # into the first YAML token. Plain/dual-use YAML must remain raw-parseable.
+            return "helm" if token.startswith(b"{{") else "hash"
+    return "hash"
+
+
 def has_header(data, offset, style):
     prefix = data[offset:].replace(b"\r\n", b"\n")
     expected = STYLES[style].encode("ascii").rstrip(b"\n")
@@ -193,6 +234,10 @@ def has_header(data, offset, style):
 
 def insertion(path, data, style):
     offset = anchor(path, data)
+    p = PurePosixPath(path)
+    if style == "hash" and "templates" in p.parts and p.suffix in (".yaml", ".yml"):
+        # A license-only chunk before "---" becomes an extra Helm document.
+        offset = yaml_document_start(data, offset)
     if has_header(data, offset, style):
         return offset, b""
     if PurePosixPath(path).suffix == ".rs":
@@ -202,6 +247,19 @@ def insertion(path, data, style):
         if attribute and has_header(data, offset + attribute.end(), style):
             return offset + attribute.end(), b""
     return offset, header_for(style, data)
+
+
+def header_edit(path, data, style):
+    offset, header = insertion(path, data, style)
+    if header and PurePosixPath(path).suffix in (".yaml", ".yml"):
+        start, previous = yaml_license_prefix(data)
+        if previous:
+            body = data[:start] + data[start + len(previous):]
+            destination, header = insertion(path, body, style)
+            # Relocate only our license block; preamble comments, delimiters and
+            # every other body byte retain their original order and content.
+            return start, len(previous), destination, header
+    return offset, 0, offset, header
 
 
 def tracked_files(root):
@@ -230,17 +288,23 @@ def process(root, paths, policy, apply=False):
         record = {"path": name}
         try:
             data, mode = file_bytes(root, name)
-            record.update(classification(name, policy))
+            record.update(classification(name, policy, data))
             if record["category"] == "header":
-                offset, header = insertion(name, data, record["style"])
-                record["status"] = "missing" if header else "present"
-                if header:
+                remove_offset, removed, offset, header = header_edit(name, data, record["style"])
+                record["status"] = "missing" if header or removed else "present"
+                if header or removed:
+                    body = data[:remove_offset] + data[remove_offset + removed:]
+                    updated = body[:offset] + header + body[offset:]
                     record.update({
                         "offset": offset, "inserted_bytes": len(header),
+                        "removed_offset": remove_offset,
+                        "removed_bytes": removed,
                         "before_sha256": hashlib.sha256(data).hexdigest(),
-                        "after_sha256": hashlib.sha256(data[:offset] + header + data[offset:]).hexdigest(),
+                        "after_sha256": hashlib.sha256(updated).hexdigest(),
                     })
-                    changes.append((name, data, mode, offset, header, record))
+                    if removed:
+                        record["diagnostic"] = "existing Microsoft + MIT header has incorrect syntax or placement"
+                    changes.append((name, data, mode, updated, record))
             else:
                 record["status"] = "covered-without-header"
         except (CoverageError, OSError, UnicodeError) as exc:
@@ -248,13 +312,13 @@ def process(root, paths, policy, apply=False):
         records.append(record)
     # Fail closed, before writing any file, if coverage is incomplete/unsafe.
     if apply and not any(r["status"] == "error" for r in records):
-        for name, data, mode, offset, header, record in changes:
+        for name, data, mode, updated, record in changes:
             current, current_mode = file_bytes(root, name)
             if current != data or current_mode != mode:
                 raise CoverageError(f"{name}: changed during inspection; nothing should overwrite another editor")
-        for name, data, mode, offset, header, record in changes:
+        for name, data, mode, updated, record in changes:
             target = root / name
-            target.write_bytes(data[:offset] + header + data[offset:])
+            target.write_bytes(updated)
             if target.stat().st_mode != mode:
                 raise CoverageError(f"{name}: file mode changed")
             record["status"] = "applied"
@@ -296,7 +360,8 @@ def main(argv=None):
                 output.write("\n")
         for record in records:
             if record["status"] in ("missing", "error"):
-                print(f"{record['path']}: {record.get('error', 'missing Microsoft + MIT header')}", file=sys.stderr)
+                detail = record.get("error", record.get("diagnostic", "missing Microsoft + MIT header"))
+                print(f"{record['path']}: {detail}", file=sys.stderr)
             elif args.verbose and record["status"] == "covered-without-header":
                 print(f"{record['path']}: {record['category']} via {record['notice']}: {record['reason']}")
         print(
