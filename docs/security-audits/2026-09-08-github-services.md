@@ -4,8 +4,9 @@ Licensed under the MIT License. -->
 # Capability audit — Bounded keyless GitHub services
 
 Date: 2026-09-08
-Status: Bounded automated review/repair closure complete; human sign-offs and
-cross-layer privacy qualification remain pending.
+Status: Bounded automated review/repair closure complete. The missing privacy
+issuance/reuse wiring is closed in current source; final audit attestations and
+live GitHub/operator acceptance remain pending.
 
 ## Scope and provenance
 
@@ -21,9 +22,9 @@ not adopted. New production authentication uses existing `jsonwebtoken` RS256,
 `reqwest`, and standard runtime libraries; no crypto implementation or dependency
 manifest/lock change is introduced.
 
-## Blocking deployment dependency
+## Historical deployment dependency
 
-This baseline predates the separately reviewed SRE-authority repair. The
+The original extraction baseline predates the separately reviewed SRE-authority repair. The
 historical agent-held SRE Kubernetes credential can read cluster-wide Secrets.
 Until that grant is removed through the qualified operator-authority migration,
 router-private GitHub App custody is **not established against that principal**.
@@ -47,6 +48,51 @@ and privacy-gated issuance have been wired.
 
 No cloud deployment, image/release publication, main promotion, public API
 mutation, or live GitHub App installation was performed as qualification.
+
+### Current source-wiring closure (2026-09-14)
+
+A bounded independent-context AI review traced actual issuance and reuse at
+core `03174dcaaa13cef956f4660074ce1f3dcc635c42`, also present in application
+`1d0fc5c96810d21f083196e8c6f654b4204ad2c1`. The relevant production files are
+unchanged at the subsequent test-only `9ee285be` and `5e9a1fe5` heads.
+The historical statement that the gate is absent or unwired no longer describes
+these candidates:
+
+- `controller/src/credential_grants/github.rs:331-388` revalidates the Sandbox,
+  grant, connection/App-store UID/resourceVersion and managed namespace before
+  calling `credentials::ensure_bound` with the GitHub purpose.
+- `controller/src/reconciler/governed_services/credentials.rs:317-342,518-546`
+  calls actual privacy readiness and `sre_authority::privacy_epoch` before the
+  unchanged-Secret fast path as well as issuance. Missing/stale privacy does not
+  authorize reuse; invalid proof quarantines material and pending migration
+  remains non-issuance.
+- `controller/src/sre_authority/live.rs:156-205` and
+  `shared/sre_privacy.rs:11-46` require live shared GET/LIST/WATCH denials and
+  current registration/epoch evidence. Absent registration does not skip the
+  denial checks.
+- Private-activation stamp changes require old-consumer retirement and a
+  genuinely different RSA key before requalification. Source revisions prevent
+  unchanged projection reuse. `inference-router/src/github_services.rs:56-100`
+  invalidates obsolete credential caches, and
+  `inference-router/src/routes/github_proxy.rs:180-199` rechecks the credential
+  incarnation after token acquisition.
+
+The review found no unguarded governed issuance/reuse path within this scope.
+Core run [34882574974](https://github.com/Azure/kars/actions/runs/34882574974)
+and application core run
+[34882574933](https://github.com/Azure/kars/actions/runs/34882574933) passed all
+21 jobs at the preceding revisions, including 184/184 Kind cases and actual
+historical SRE migration. That execution evidence accompanies, but does not
+replace, the source trace.
+
+This closes the missing source-integration finding, not complete deployment
+acceptance. Router token-cache hits rely on controller-gated projection and
+retirement, not a fresh SRE authorization review on every GitHub request.
+Projection delay and already-dispatched work are not instantaneous revocation;
+external GitHub key/token revocation remains an operator responsibility.
+The separate native credential 18/18 result does not exercise a live GitHub
+App installation or establish that complete privacy-loss/rotation chain.
+No signature, whole-PR approval or live-service qualification is supplied here.
 
 ## Security contract
 
@@ -100,8 +146,9 @@ The parent subsequently ran all 33 selected Rust cases successfully (27 authored
 GitHub cases and six existing provider cases), plus strict paired all-target
 Clippy and formatting. Only two new test layouts required formatting. The same
 independent automated reviewer found no significant issues in the bounded repair
-delta. This does not constitute a human sign-off. The privacy-epoch
-issuance/reuse integration remains independently deployment-blocking.
+delta. This does not constitute a human sign-off. At that review, privacy-epoch
+issuance/reuse integration remained deployment-blocking; its later source
+closure is recorded above with the remaining execution and approval limits.
 
 Ready selector under the parent's prescribed combined-crate lease:
 
@@ -158,7 +205,7 @@ Completed before the repairs above:
   passed without changing the gate or adding waivers. New Rust headers/module
   caps were also checked directly.
 
-Pending:
+Pending at the original review:
 
 - Independent reviewer assessment, supply-chain sign-off, forward-merged SRE
   boundary qualification, and real installation/operator acceptance are pending.
