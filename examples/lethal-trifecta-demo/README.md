@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Demo: The Lethal Trifecta, Defused
 
 > *"Any time you grant an LLM-based system access to private data, exposure to

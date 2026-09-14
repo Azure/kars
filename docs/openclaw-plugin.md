@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars OpenClaw plugin (`runtimes/openclaw/`)
 
 The **kars OpenClaw plugin** is the agent-side runtime surface for kars. When a sandbox boots, the [OpenClaw](https://github.com/openclawai/openclaw) gateway auto-discovers and loads the plugin from `~/.openclaw-data/extensions/kars/`. From that point on, the agent's tool surface is the **24 governance-aware tools** the plugin registers — every privileged OpenClaw built-in is replaced with a kars equivalent that routes through the inference router and is subject to AGT governance.

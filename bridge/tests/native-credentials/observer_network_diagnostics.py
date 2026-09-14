@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Failure-only exact API egress experiment; never changes acceptance results."""
 
 import copy

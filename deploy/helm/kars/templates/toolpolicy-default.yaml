@@ -1,4 +1,5 @@
-{{- if (.Values.governance | default dict).enabled | default true }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- if (.Values.governance | default dict).enabled | default true }}
 # kars-default ToolPolicy — the system-default AGT profile that the
 # controller falls back to when a KarsSandbox sets
 # `spec.governance.enabled=true` (the new default) and omits

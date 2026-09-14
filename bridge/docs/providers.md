@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Providers and model routing
 
 Bridge separates provider connections from per-mission model policy.

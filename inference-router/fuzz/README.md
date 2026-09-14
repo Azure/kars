@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Inference-router fuzz targets (s4)
 
 Fuzz targets for attacker-controlled parsers in the router. Targets are

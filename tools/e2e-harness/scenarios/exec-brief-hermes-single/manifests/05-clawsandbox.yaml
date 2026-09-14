@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 05-karssandbox.yaml — single-agent Hermes exec-brief sandbox.
 #
 # Runtime = Hermes (Nous Research). Same plugin contract as OpenClaw —

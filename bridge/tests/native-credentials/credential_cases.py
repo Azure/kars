@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Public BFF entrypoints under actual native writer RBAC and API audit."""
 
 import base64

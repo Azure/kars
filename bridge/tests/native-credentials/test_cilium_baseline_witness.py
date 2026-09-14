@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Controlled formats and failure checkpoints, not live Cilium qualification."""
 
 import json

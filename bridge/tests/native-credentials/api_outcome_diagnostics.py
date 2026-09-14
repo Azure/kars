@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Case-bounded metadata audit outcomes for two UID-proven native actors."""
 
 from collections import Counter

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Real Estate Appraisals — Q1 2026
 
 Welcome to the **Acme Appraisals** quarterly skill update. This skill

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Bridge — values overlay for local kind clusters.
 #   helm install kars-bridge deploy/helm/kars-bridge -n kars-system -f deploy/helm/kars-bridge/values-kind.yaml
 # Load the images into kind first:

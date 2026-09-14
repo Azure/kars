@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # BYO Strict-Mode Admission
 
 **Status:** shipped. Default `false`; recommended `true` in production.

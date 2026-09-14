@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars - ACR Module
 
 @description('ACR name (must be globally unique, alphanumeric)')

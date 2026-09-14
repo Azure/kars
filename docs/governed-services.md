@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Router governed services
 
 The separate [optional keyless GitHub service](github-services.md) supplies

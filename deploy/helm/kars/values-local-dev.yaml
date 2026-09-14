@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Local development overlay for kind-based dev mode.
 #
 # Usage (the CLI does this for you — see cli/src/commands/dev/local-k8s.ts):

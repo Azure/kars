@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Team workflows: from intent to reviewed outcome
 
 This guide ties together the Bridge concepts that appear across the Workspace:

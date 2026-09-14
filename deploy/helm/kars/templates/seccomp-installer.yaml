@@ -1,4 +1,5 @@
-{{- if .Values.sandbox.seccompProfile }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- if .Values.sandbox.seccompProfile }}
 # Seccomp Profile Installer DaemonSet
 # Deploys the kars-strict seccomp profile to every node so sandbox pods
 # can reference it as Localhost type under the restricted PodSecurity standard.

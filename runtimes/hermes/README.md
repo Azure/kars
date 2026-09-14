@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # `kars-runtime-hermes` — kars in-pod adapter for Hermes Agent
 
 Implements the kars **v1 runtime contract** for [Hermes Agent](https://hermes-agent.nousresearch.com/) (Nous Research). When this package is installed inside a kars sandbox pod, it registers itself as a Hermes plugin and wires Hermes into kars' governance, mesh, and orchestration plane.

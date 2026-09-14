@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars CLI — `@kars-runtime/cli`
 
 The command-line interface for **[kars](https://github.com/Azure/kars)** — a

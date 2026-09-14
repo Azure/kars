@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Qualification follows one immutable monorepo revision, never a stale core pin."""
 
 import os

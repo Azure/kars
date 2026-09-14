@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Administrative fixture setup, kept separate from the native BFF actor."""
 
 import base64

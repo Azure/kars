@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Fresh no-registration TLS proofs and real CNI paths, with no legacy fallback."""
 
 import base64

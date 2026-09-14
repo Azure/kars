@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Bridge — least-privilege RBAC for the BFF ServiceAccount.
 #
 # The Bridge is a privileged Kubernetes API client: it authors envelope CRDs

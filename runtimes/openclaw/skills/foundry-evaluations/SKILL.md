@@ -3,6 +3,9 @@ name: foundry-evaluations
 description: Evaluate agent quality using Foundry OpenAI Evals API. Create evaluations, run them against models, and analyze results.
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # Foundry Evaluations — OpenAI Evals API
 

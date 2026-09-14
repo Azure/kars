@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Generate only a disposable Kind topology with enforced CNI and metadata audit."""
 
 import json

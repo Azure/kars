@@ -1,4 +1,5 @@
-{{/* Common labels + names for the kars Bridge chart. */}}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{/* Common labels + names for the kars Bridge chart. */}}
 {{- define "kars-bridge.labels" -}}
 app.kubernetes.io/name: kars-bridge
 app.kubernetes.io/instance: {{ .Release.Name }}

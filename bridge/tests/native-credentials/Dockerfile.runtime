@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Controlled test runtime, extending the exact core egress-guard fixture.
 # No private image is published and no production runtime is replaced.
 FROM kars-native-runtime-base:latest

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security Audit — `kars upgrade` flow fixes + security-audit gate relocation (v0.1.21)
 
 Date: 2026-06-27

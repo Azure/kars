@@ -1,4 +1,5 @@
-{{- /*
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- /*
   Phase 1 deliverable (implementation-plan.md §7 / ADR-0001 D2 + D3).
 
   ValidatingAdmissionPolicy that enforces the "router is never publicly

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Test-runtime self-observation; no exec, Secret disclosure, or arbitrary IO."""
 
 from http.server import BaseHTTPRequestHandler, HTTPServer

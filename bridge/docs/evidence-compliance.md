@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Evidence, receipts, and compliance views
 
 Bridge presents Kars evidence; it does not turn evidence mappings into a

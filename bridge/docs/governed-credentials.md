@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Bridge governed credential adapter
 
 Bridge source is being integrated into **Azure/kars:kars-bridge** as an optional

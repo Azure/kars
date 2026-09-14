@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # mesh-roundtrip-hermes — Hermes Act 2 mesh end-to-end validation
 
 Smallest possible scenario that exercises the **Python AGT MeshClient**

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Pin Kind-imported Docker images using containerd's actual manifest identity."""
 
 import json

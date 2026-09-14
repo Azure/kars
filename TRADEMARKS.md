@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Trademarks
 
 This project may contain trademarks or logos for projects, products, or services.

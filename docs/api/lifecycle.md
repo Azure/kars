@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Lifecycle — what happens when you apply a CRD
 
 This page is the end-to-end story for every kars CRD: which CLI command writes it, what the controller does when it lands, what cluster artifacts get produced, and which component consumes those artifacts at runtime.

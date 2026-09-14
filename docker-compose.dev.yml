@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # ─────────────────────────────────────────────────────────────────────────────
 # docker-compose.dev.yml — local dev stack for inner-loop testing (plan T4)
 #

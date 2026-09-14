@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """kars_handoff_* — agent migration / escalation tools.
 
 Thin Python port of `runtimes/openclaw/src/core/agt-tools/agt.ts`

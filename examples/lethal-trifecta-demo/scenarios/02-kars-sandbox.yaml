@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # ── kars-managed agent: full nine-layer stack.
 # The controller reconciles the KarsSandbox below into:
 #   - dedicated namespace (already created)

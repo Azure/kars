@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars full-stack demo — one kubectl apply, every CRD wired up.
 #
 # Provisions a single agent named `demo-agent` with:

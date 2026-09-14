@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Kars Bridge documentation
 
 - [Documentation home](README.md)

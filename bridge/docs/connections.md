@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Connections
 
 The **Connections** tab is where a signed-in user connects services for work

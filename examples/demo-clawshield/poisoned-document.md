@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Poisoned Document — For Demo Purposes Only
 #
 # This file simulates a poisoned legal document containing an indirect

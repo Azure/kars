@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Pinned local TLS transport for API tests, not NetworkPolicy evidence."""
 
 from contextlib import contextmanager

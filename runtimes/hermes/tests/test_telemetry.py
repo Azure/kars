@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Unit tests for telemetry trust + signing-counter pushes."""
 
 from __future__ import annotations

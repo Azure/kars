@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 name: "Kars CodeQL Config"
 
 # No vendored AgentMesh source is present after the Phase 5.2 AGT-only migration.

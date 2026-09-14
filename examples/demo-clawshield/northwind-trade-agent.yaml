@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Northwind Traders — Trade Audit Agent
 # Isolation: enhanced (seccomp + runc on standard node pool)
 # Role: Validates trade records against compliance frameworks

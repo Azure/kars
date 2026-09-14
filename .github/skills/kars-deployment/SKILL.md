@@ -1,6 +1,9 @@
 ---
 description: "Kars deployment and infrastructure skill — how to deploy, build images, manage AKS, and troubleshoot."
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # Kars Deployment & Infrastructure
 

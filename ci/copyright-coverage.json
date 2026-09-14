@@ -1,0 +1,177 @@
+{
+  "version": 1,
+  "formats": {
+    ".json": {
+      "category": "repository-license",
+      "reason": "Strict JSON cannot contain comments; preserve manifests, lock data and fixtures byte-for-byte.",
+      "notice": "LICENSE"
+    },
+    ".excalidraw": {
+      "category": "repository-license",
+      "reason": "Managed diagram JSON is unchanged; do not add comments or rewrite drawing content.",
+      "notice": "LICENSE"
+    },
+    ".png": {
+      "category": "repository-license",
+      "reason": "Binary image; no literal text header.",
+      "notice": "LICENSE"
+    },
+    ".gif": {
+      "category": "repository-license",
+      "reason": "Binary animation; no literal text header.",
+      "notice": "LICENSE"
+    },
+    ".ico": {
+      "category": "repository-license",
+      "reason": "Binary icon; no literal text header.",
+      "notice": "LICENSE"
+    },
+    ".pptx": {
+      "category": "repository-license",
+      "reason": "Presentation archive; retain original bytes, no literal text header or metadata rewrite.",
+      "notice": "LICENSE"
+    },
+    ".svg": {
+      "category": "repository-license",
+      "reason": "Image asset kept byte-identical; upstream assets have separate path-specific ownership coverage.",
+      "notice": "LICENSE"
+    },
+    ".cast": {
+      "category": "repository-license",
+      "reason": "Asciinema JSON-lines recording; comments would invalidate recorded data.",
+      "notice": "LICENSE"
+    }
+  },
+  "files": {
+    "tools/headlamp-plugin/dist/main.js": {
+      "category": "generated",
+      "reason": "Reviewed Headlamp bundle produced by headlamp-plugin build in tools/headlamp-plugin/package.json; preserve bundled source/dependency notices and artifact bytes.",
+      "notice": "NOTICE"
+    },
+    "tools/headlamp-plugin/dist/package.json": {
+      "category": "generated",
+      "reason": "Reviewed packaged Headlamp manifest emitted with the bundle by the build script in tools/headlamp-plugin/package.json; preserve generated output and dependency licensing.",
+      "notice": "NOTICE"
+    },
+    "LICENSE": {
+      "category": "legal",
+      "reason": "Canonical Microsoft MIT license text; never prepend or replace legal notices.",
+      "notice": "LICENSE"
+    },
+    "NOTICE": {
+      "category": "legal",
+      "reason": "Third-party attribution document; preserve all original notices.",
+      "notice": "NOTICE"
+    },
+    "THIRD_PARTY_NOTICES.txt": {
+      "category": "legal",
+      "reason": "Third-party license texts are not Microsoft-authored source.",
+      "notice": "THIRD_PARTY_NOTICES.txt"
+    },
+    "Cargo.lock": {
+      "category": "repository-license",
+      "reason": "Generated dependency lockfile; no dependency/checksum changes for copyright policy.",
+      "notice": "LICENSE"
+    },
+    "bridge/bff/Cargo.lock": {
+      "category": "repository-license",
+      "reason": "Generated dependency lockfile; no dependency/checksum changes for copyright policy.",
+      "notice": "LICENSE"
+    },
+    ".agt-sdk/.keep": {
+      "category": "repository-license",
+      "reason": "Empty directory marker; preserve emptiness.",
+      "notice": "LICENSE"
+    },
+    "runtimes/wheels/.gitkeep": {
+      "category": "repository-license",
+      "reason": "Empty directory marker; preserve emptiness.",
+      "notice": "LICENSE"
+    },
+    "a2a-gateway/testdata/test-cert.pem": {
+      "category": "repository-license",
+      "reason": "Encoded certificate fixture; preserve signed bytes and parser input.",
+      "notice": "LICENSE"
+    },
+    "a2a-gateway/testdata/test-key.pem": {
+      "category": "repository-license",
+      "reason": "Encoded test-key fixture; preserve parser input (not a production credential).",
+      "notice": "LICENSE"
+    },
+    "docs/llms.txt": {
+      "category": "repository-license",
+      "reason": "Machine-consumed documentation index; preserve literal input text.",
+      "notice": "LICENSE"
+    },
+    "deploy/helm/kars/files/kars-default-agt-profile.yaml": {
+      "category": "repository-license",
+      "reason": "Embedded verbatim by Helm .Files.Get as ToolPolicy.agtProfile.inline. Its raw bytes feed the controller/router agt-profile.yaml digest contract; preserve the rendered payload and digest, not just parsed YAML.",
+      "notice": "LICENSE"
+    },
+    "tools/e2e-harness/scenarios/exec-brief-hermes-single/prompt.txt": {
+      "category": "repository-license",
+      "reason": "Literal agent prompt fixture; comments would change the tested input.",
+      "notice": "LICENSE"
+    },
+    "tools/e2e-harness/scenarios/exec-brief-hermes/prompt.txt": {
+      "category": "repository-license",
+      "reason": "Literal agent prompt fixture; comments would change the tested input.",
+      "notice": "LICENSE"
+    },
+    "tools/e2e-harness/scenarios/exec-brief/prompt.txt": {
+      "category": "repository-license",
+      "reason": "Literal agent prompt fixture; comments would change the tested input.",
+      "notice": "LICENSE"
+    },
+    "tools/e2e-harness/scenarios/mesh-roundtrip-hermes/prompt.txt": {
+      "category": "repository-license",
+      "reason": "Literal agent prompt fixture; comments would change the tested input.",
+      "notice": "LICENSE"
+    },
+    "cli/blocklists/seed-domains.txt": {
+      "category": "third-party",
+      "reason": "Generated OISD/URLhaus feed data plus local entries; retain source attribution, not blanket Microsoft ownership.",
+      "notice": "NOTICE"
+    },
+    "docs/site/mermaid-init.js": {
+      "category": "third-party",
+      "reason": "Upstream mdBook Mermaid initializer carries its own MPL-2.0 notice.",
+      "notice": "NOTICE"
+    },
+    "docs/site/mermaid.min.js": {
+      "category": "third-party",
+      "reason": "Bundled upstream Mermaid distribution; retain upstream licensing, do not rewrite minified code.",
+      "notice": "NOTICE"
+    },
+    "bridge/web/public/file.svg": {
+      "category": "third-party",
+      "reason": "Next.js scaffold asset; retain upstream provenance, no Microsoft ownership assertion.",
+      "notice": "NOTICE"
+    },
+    "bridge/web/public/globe.svg": {
+      "category": "third-party",
+      "reason": "Next.js scaffold asset; retain upstream provenance, no Microsoft ownership assertion.",
+      "notice": "NOTICE"
+    },
+    "bridge/web/public/next.svg": {
+      "category": "third-party",
+      "reason": "Next.js logo from scaffold; no Microsoft ownership or trademark assertion.",
+      "notice": "NOTICE"
+    },
+    "bridge/web/public/vercel.svg": {
+      "category": "third-party",
+      "reason": "Vercel logo from scaffold; no Microsoft ownership or trademark assertion.",
+      "notice": "NOTICE"
+    },
+    "bridge/web/public/window.svg": {
+      "category": "third-party",
+      "reason": "Next.js scaffold asset; retain upstream provenance, no Microsoft ownership assertion.",
+      "notice": "NOTICE"
+    },
+    "bridge/web/src/app/favicon.ico": {
+      "category": "third-party",
+      "reason": "Next.js scaffold icon; preserve asset pending any independent provenance review, no Microsoft ownership assertion.",
+      "notice": "NOTICE"
+    }
+  }
+}

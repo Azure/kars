@@ -1,4 +1,5 @@
-{{- $namespace := include "kars-bridge.namespace" . }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- $namespace := include "kars-bridge.namespace" . }}
 {{- $retainOwnedNamespace := false }}
 {{- $existing := dict }}
 {{- if .Release.IsUpgrade }}

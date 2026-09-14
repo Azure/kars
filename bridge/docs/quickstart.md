@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Private-preview quickstart
 
 This quickstart assumes access to the private Bridge images and a compatible

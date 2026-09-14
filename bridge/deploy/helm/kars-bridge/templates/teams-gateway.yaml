@@ -1,4 +1,5 @@
-# kars Bridge — Teams Gateway: dedicated ServiceAccount, RBAC, Deployment,
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}# kars Bridge — Teams Gateway: dedicated ServiceAccount, RBAC, Deployment,
 # Service, NetworkPolicy, and optional Ingress for Teams webhook callbacks.
 # Credentials live in a DEDICATED Secret (kars-bridge-teams), NEVER in the
 # workspace-channels Secret that gets propagated to sandbox pods.

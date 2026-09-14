@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Built AGT-Python wheels (regenerated from upstream by build-agt-wheels.sh)
 wheels/*.whl
 wheels/*.tar.gz

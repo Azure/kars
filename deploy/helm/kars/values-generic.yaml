@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Generic Kubernetes overlay for an existing non-AKS cluster.
 #
 # Azure/AKS defaults remain authoritative in values.yaml. This opt-in overlay

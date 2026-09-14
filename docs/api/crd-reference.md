@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # CRD reference
 
 kars exposes its API through **fifteen** CustomResourceDefinitions in the `kars.azure.com` group, all at version `v1alpha1`. **Thirteen are workload CRDs** you author per agent, task or policy (or, for `KarsSREAction`, that the SRE operator proposes on your behalf) — catalogued in [At a glance](#at-a-glance) below. **Two are infrastructure CRDs** you do not hand-write: [`KarsAuthConfig`](#karsauthconfig--cluster-trust-anchor) (a cluster-scoped singleton created by `kars mesh setup-trust`) and [`KarsPairing`](#infrastructure-crds) (a controller-internal binding record). This page is the canonical schema reference. For the prose explanation of how these fit together, see **[Architecture — CRDs as the API](../architecture.md#crds-as-the-api)**.

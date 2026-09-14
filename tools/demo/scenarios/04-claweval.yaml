@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Demo scenario step 4 — Run-now KarsEval against the demo sandbox.
 #
 # The reconciler immediately creates a one-shot Job (run-now annotation

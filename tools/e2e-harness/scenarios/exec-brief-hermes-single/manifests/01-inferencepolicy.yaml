@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 01-inferencepolicy.yaml — Foundry / Azure-OpenAI provider for the
 # single-agent Hermes exec-brief. Same provider requirement as the
 # canonical exec-brief: Foundry data-plane (web search, image gen,

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # AGT upstream relay + registry — Phase 4 of the agentmesh provider swap.
 #
 # This manifest deploys the upstream Microsoft Agent Governance Toolkit

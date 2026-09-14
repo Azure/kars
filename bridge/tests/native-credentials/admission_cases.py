@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Actual CEL evaluation with explicit setup-admin authority, not BFF issuance."""
 
 import base64

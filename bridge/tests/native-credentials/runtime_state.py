@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Observe the controlled runtime over the existing permitted gateway port."""
 
 import http.client

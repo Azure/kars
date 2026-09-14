@@ -1,4 +1,5 @@
-{{- if .Values.networkPolicy.create }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- if .Values.networkPolicy.create }}
 # kars Bridge — additive NetworkPolicies.
 #
 # kars applies a `kars-system-default-deny` policy that selects EVERY pod in the

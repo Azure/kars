@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Install Kars with Helm
 
 Use the Helm chart when the Kubernetes cluster, image access, inference backend,

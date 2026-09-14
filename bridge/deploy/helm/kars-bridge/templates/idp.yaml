@@ -1,4 +1,5 @@
-{{- if .Values.idp.enabled }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- if .Values.idp.enabled }}
 # kars Bridge — in-cluster IdP (Dex) for multi-user SSO.
 #
 # WHY THIS EXISTS: colleagues reach the Bridge over a single

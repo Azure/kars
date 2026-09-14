@@ -1,4 +1,5 @@
-{{- /*
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- /*
 Governed inference only. No prices, model limits, free providers, or TLS
 identities are guessed. Old/reused values without this block render no broker.
 */ -}}

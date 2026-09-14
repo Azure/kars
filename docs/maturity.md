@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Feature maturity & enforcement status
 
 kars is `v0.1.18`. Most of the control plane is enforced at runtime today, but some

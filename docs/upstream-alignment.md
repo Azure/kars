@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # OpenClaw upstream alignment
 
 **TL;DR** — kars does **not** fork OpenClaw. It uses only first-class extension

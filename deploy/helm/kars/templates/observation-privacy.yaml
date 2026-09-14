@@ -1,4 +1,5 @@
-{{- $rpc := .Values.observationPrivacyRpc | default dict }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- $rpc := .Values.observationPrivacyRpc | default dict }}
 {{- if ($rpc.enabled | default false) }}
 apiVersion: v1
 kind: Service

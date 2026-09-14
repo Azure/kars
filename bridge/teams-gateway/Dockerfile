@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 FROM node:22-slim AS builder
 WORKDIR /app
 COPY package.json package-lock.json ./

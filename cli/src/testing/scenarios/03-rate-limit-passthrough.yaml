@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Scenario 03 — rate-limit surface passthrough
 #
 # Foundry emits HTTP 429 with a `retry_after_seconds` field when a deployment

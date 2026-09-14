@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Chaos tier — operations guide
 
 The chaos tier is a permanent CI surface that protects

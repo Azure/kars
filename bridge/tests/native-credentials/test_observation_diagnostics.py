@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 import copy
 from datetime import datetime, timedelta, timezone
 import json

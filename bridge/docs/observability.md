@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Observability
 
 Bridge surfaces three complementary views of a run and the fleet, all from real

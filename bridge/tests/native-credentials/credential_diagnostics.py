@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Secret-free failure categories and private-scope metadata booleans."""
 
 import re

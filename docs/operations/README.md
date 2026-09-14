@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Operations
 
 How to operate kars in production. Each page is one operational concern, with the full runbook for that concern.

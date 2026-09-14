@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """http_fetch tool — Phase A1.4 (always-on).
 
 HTTP fetch routed through the inference router's ``/egress/fetch``

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Initial ownership must settle before reviewing a credential write."""
 
 import copy

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Confidential Agent — Kata VM isolation
 
 `basic-agent`'s twin, but with **per-pod dedicated-kernel isolation**

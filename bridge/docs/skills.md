@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Skills
 
 Skills are versioned packages that extend an agent with instructions,

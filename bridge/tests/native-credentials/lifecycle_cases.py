@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Real consumer lifecycle, namespace-resource continuity and ephemeral workspaces."""
 
 import base64

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Missions & teams
 
 Bridge runs work as either a one-shot **mission** or a standing **team**, both on

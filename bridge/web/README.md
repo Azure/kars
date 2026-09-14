@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Kars Bridge web
 
 The Next.js application provides three persona-scoped products:

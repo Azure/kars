@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # NemoClaw sandbox image — OpenClaw + NemoClaw plugin inside OpenShell
 #
 # Layers PR-specific code (plugin, blueprint, config, startup script) on top

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Exercise the shipped operator preview/apply path, never fabricated activation."""
 
 import json
