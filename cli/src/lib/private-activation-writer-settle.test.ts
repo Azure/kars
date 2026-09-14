@@ -75,7 +75,7 @@ async function projectionWire(delayResponseMs = 0) {
   };
 }
 
-async function setup(originalRuntime = false) {
+async function setup(originalRuntime = false, continuousTask = false) {
   const f = continuityFixture();
   if (originalRuntime) {
     await applyReviewedGrant(f.execute, { apiVersion: "kars.azure.com/v1alpha1", kind: "KarsCredentialGrant",
@@ -165,9 +165,11 @@ async function setup(originalRuntime = false) {
   let fault: ((stage: string) => void) | undefined;
   const restore = () => {
     restored = true;
-    task.status = { phase: "Ready", observedGeneration: 1, envelopeDigest: AUTH, sandboxRef: { name: "late" },
-      conditions: [{ type: "Ready", status: "True", observedGeneration: 1, reason: "Reconciled" }] };
-    bump(task);
+    if (!continuousTask) {
+      task.status = { phase: "Ready", observedGeneration: 1, envelopeDigest: AUTH, sandboxRef: { name: "late" },
+        conditions: [{ type: "Ready", status: "True", observedGeneration: 1, reason: "Reconciled" }] };
+      bump(task);
+    }
     sandbox.status = { phase: "Running", observedGeneration: 1, conditions: [{ type: "Ready", status: "True", observedGeneration: 1 }] };
     bump(sandbox);
     bundle.metadata.annotations[INPUTS] = JSON.stringify({ ...inputs, grantGeneration: f.grant().metadata.generation });
@@ -193,9 +195,11 @@ async function setup(originalRuntime = false) {
     if (args[1] === RESOURCE && patch.spec.writers.length === 0) {
       retired = true;
       f.grant().status.phase = "Ready";
-      task.status = { phase: "Degraded", observedGeneration: 1, envelopeDigest: null, sandboxRef: { name: "late" },
-        conditions: [{ type: "Ready", status: "False", observedGeneration: 1, reason: "CredentialAuthorityUnavailable" }] };
-      bump(task);
+      if (!continuousTask) {
+        task.status = { phase: "Degraded", observedGeneration: 1, envelopeDigest: null, sandboxRef: { name: "late" },
+          conditions: [{ type: "Ready", status: "False", observedGeneration: 1, reason: "CredentialAuthorityUnavailable" }] };
+        bump(task);
+      }
       sandbox.status = { phase: "Degraded", observedGeneration: 1, conditions: [
         { type: "Ready", status: "False", observedGeneration: 1, reason: "CredentialSourceUnavailable" }] };
       bump(sandbox);
@@ -276,7 +280,9 @@ describe("late runtime authority across selected writer retirement", () => {
       };
       await expect(observeWriterSettlement(run, review.spec.privateActivation, settlement)).resolves.toBe(false);
       expect(stale).toBe(false);
-      expect(settlement.runtimes[0]!.emptyVersion).toBeUndefined();
+      expect(settlement.runtimes[0]!.emptyVersion).toBe(
+        kind === "karstask" ? f.projection.metadata.resourceVersion : undefined);
+      expect(settlement.runtimes[0]!.restored).toBeUndefined();
       expect(f.calls.every(args => args[0] === "get")).toBe(true);
       expect(f.grant().spec.writers).toEqual([]);
       expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
@@ -286,15 +292,18 @@ describe("late runtime authority across selected writer retirement", () => {
       await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(true);
     });
 
-  it("still rejects a stable empty projection without the witnessed Task withdrawal", async () => {
-    const { f, review, settlement, beforeTask } = await quiesced();
-    f.task.status = beforeTask.status;
-    f.task.metadata.resourceVersion = beforeTask.metadata.resourceVersion;
-    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement))
-      .rejects.toThrow("Projection changed without the captured authority withdrawal and owned pause");
-    expect(settlement.runtimes[0]!.emptyVersion).toBeUndefined();
-    expect(f.calls.every(args => args[0] === "get")).toBe(true);
-    expect(f.grant().spec.writers).toEqual([]);
+  it("qualifies an observed owned revoke/refill while the independent Task stays Ready", async () => {
+    const f = await setup(false, true);
+    const review = await f.document();
+    const task = structuredClone(f.task);
+    const before = f.preserved();
+    f.delayRestore();
+    await applyReviewedGrant(f.execute, review);
+    expect(f.namespace.metadata.annotations[`${P}state`]).toBe("Qualified");
+    expect(f.task).toEqual(task);
+    expect(f.preserved()).toEqual(before);
+    expect(f.projection.data).toEqual(data);
+    expect(f.deployment.spec.replicas).toBe(1);
   });
 
   it("reports only boolean restoration differences while preserving the refusal", async () => {
@@ -433,19 +442,13 @@ describe("late runtime authority across selected writer retirement", () => {
     expect(f.task.status.envelopeDigest).toBe(AUTH);
   });
 
-  it("does not invent withdrawal witnesses when revoke/refill completes between reads", async () => {
+  it("does not invent an empty-projection witness when the whole revoke/refill cycle was missed", async () => {
     const f = await setup();
     const review = await f.document();
-    const beforeTask = structuredClone(f.task);
-    let retired = false;
-    let stale = true;
+    f.neverRestore();
     const run: Execute = async (args, input) => {
       const result = await f.execute(args, input);
-      if (args[0] === "patch" && args[1] === RESOURCE && f.grant().spec.writers.length === 0) retired = true;
-      if (retired && stale && args[0] === "get" && args[1] === "karstask" && args[2] === "late") {
-        stale = false;
-        return JSON.stringify(beforeTask);
-      }
+      if (args[0] === "patch" && args[1] === RESOURCE && f.grant().spec.writers.length === 0) f.restore();
       return result;
     };
     await expect(applyReviewedGrant(run, review)).rejects.toThrow("without witnessed fresh revoke/refill");
@@ -666,9 +669,10 @@ describe("late runtime authority across selected writer retirement", () => {
 
   it.each(["disabled", "keys", "grant-uid", "source", "source-uid", "task-spec", "task-uid", "task-owner",
     "task-generation", "sandbox-spec", "sandbox-uid", "sandbox-owner", "template", "private-key", "projection-key", "bundle-anchor",
-    "additional-private", "projection-uid", "bundle-data", "namespace", "deployment-uid", "deployment-generation"])(
-    "does not settle changed %s authority", async fault => {
-      const f = await setup();
+    "additional-private", "projection-uid", "bundle-data", "namespace", "deployment-uid", "deployment-generation", "unpaused"]
+    .flatMap(fault => [false, true].map(continuousTask => ({ fault, continuousTask }))))(
+    "does not settle changed $fault authority (Task continuously Ready: $continuousTask)", async ({ fault, continuousTask }) => {
+      const f = await setup(false, continuousTask);
       const review = await f.document();
       f.neverRestore();
       f.fault(stage => {
@@ -696,6 +700,7 @@ describe("late runtime authority across selected writer retirement", () => {
         if (fault === "namespace") f.namespace.metadata.annotations.unreviewed = "changed";
         if (fault === "deployment-uid") f.deployment.metadata.uid = "different";
         if (fault === "deployment-generation") f.deployment.metadata.generation += 4;
+        if (fault === "unpaused") { f.deployment.spec.replicas = 1; f.deployment.metadata.generation = 1; }
       });
       f.calls.length = 0;
       await expect(applyReviewedGrant(f.execute, review)).rejects.toThrow();
