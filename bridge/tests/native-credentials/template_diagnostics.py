@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Failure-only template comparisons; neither template values nor hashes are published."""
 
 import json

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Compatibility
 
 Bridge is version-coupled to Kars APIs, but is not a required core component.

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Retain the actual governed Task bundle, not an absent legacy credentialsRef."""
 
 import base64

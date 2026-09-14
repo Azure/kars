@@ -1,4 +1,5 @@
-{{- /*
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- /*
 Shared Microsoft Entra SDK auth-sidecar Deployment.
 
 Runs ONCE per cluster (2 replicas for HA). All sandbox inference-

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Minimal sandbox stand-in for the e2e distroless gate (test_sandbox_pod_starts).
 #
 # The real sandbox image (sandbox-images/openclaw) is ~3.8GB — far too heavy to

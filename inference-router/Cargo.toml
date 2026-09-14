@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 [package]
 name = "kars-inference-router"
 description = "High-performance inference router for kars — routes LLM calls to Azure OpenAI / AI Foundry with Managed Identity auth, content safety, and token budgets"

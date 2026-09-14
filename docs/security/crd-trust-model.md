@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # CRD trust model
 
 This page is the threat model and proof for kars's signed-CRD surface. The schema and per-CRD details are in **[CRD reference → Signing and verification](../api/crd-reference.md#signing-and-verification)**. This page answers three questions an SRE or security reviewer will ask:

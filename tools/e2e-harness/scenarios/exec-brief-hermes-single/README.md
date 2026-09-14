@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # exec-brief-hermes-single — single-agent variant on Hermes
 
 The canonical [`exec-brief`](../exec-brief/) scenario is a four-agent

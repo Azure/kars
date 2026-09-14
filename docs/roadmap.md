@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars Roadmap
 
 > Living document. The project is at **`v0.1.18`** — see [`CHANGELOG.md`](../CHANGELOG.md) for what's shipped. This roadmap lists the themes we are evolving the platform towards. Versions and ordering may change as we learn from production deployments.

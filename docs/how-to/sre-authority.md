@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Registered SRE authority and credential privacy
 
 SRE namespace occupancy is not authorization. The cluster-scoped

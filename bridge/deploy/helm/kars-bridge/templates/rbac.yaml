@@ -1,4 +1,5 @@
-{{- if .Values.rbac.create }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- if .Values.rbac.create }}
 # kars Bridge — least-privilege RBAC for the BFF ServiceAccount. The REAL
 # authorization boundary includes Kubernetes RBAC and the core grant admission
 # policies, not only BFF code. This ClusterRole has no Secret mutation or

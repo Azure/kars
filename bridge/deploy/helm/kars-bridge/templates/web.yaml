@@ -1,4 +1,5 @@
-apiVersion: apps/v1
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: kars-bridge-web

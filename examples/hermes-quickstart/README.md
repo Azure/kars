@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Hermes Quickstart — minimal kars Hermes-runtime example
 
 The smallest possible Hermes deployment: one [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT) in a `KarsSandbox` with the default isolation posture, the kars plugin auto-loaded, AGT governance on, and the agent joined to the mesh.

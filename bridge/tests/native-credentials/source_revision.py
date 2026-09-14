@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Bind Bridge/core qualification to the same checked-out monorepo commit."""
 
 import os

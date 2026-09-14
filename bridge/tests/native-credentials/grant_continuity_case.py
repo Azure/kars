@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Real operator updates must preserve other workspaces, not just render valid grants."""
 
 import copy

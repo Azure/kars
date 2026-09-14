@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Chaos tier (Phase 2 S16)
 
 Self-contained fault-injection test suite under `tests/chaos/`.

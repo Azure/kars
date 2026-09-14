@@ -1,4 +1,5 @@
-kars Bridge {{ .Chart.AppVersion }} installed in namespace {{ include "kars-bridge.namespace" . }} (release {{ .Release.Name }}).
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}kars Bridge {{ .Chart.AppVersion }} installed in namespace {{ include "kars-bridge.namespace" . }} (release {{ .Release.Name }}).
 
 This is an ADDITIVE layer on top of kars. It expects the kars CRDs + controller to
 already be present in the cluster. Install a compatible full Kars runtime from

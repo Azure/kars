@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # In-process fake router (CLI-side)
 
 Groundwork for the local dev-loop plan (plan items T1 / T4 / T5).

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 03-karsmemory.yaml — Foundry Memory Store binding for the exec-brief
 # sandbox. Lets the analyst persist its JSON artifact so later
 # sub-agent invocations (or a retry) can pick it up without re-running

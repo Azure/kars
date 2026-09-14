@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Bounded, read-only Cilium monitor evidence, never an acceptance oracle.
 
 Wire contract (v1.18.5): pkg/monitor/{datapath_drop,datapath_trace,dissect}.go.

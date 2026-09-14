@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Read-only, fixed-field Cilium 1.18.5 witnesses for the observer experiment."""
 
 import copy

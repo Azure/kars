@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Governed credential sources and operator stores
 
 This additive contract does not require Bridge. Direct credentials and the

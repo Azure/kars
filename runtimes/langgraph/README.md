@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars-runtime-langgraph
 
 In-pod adapter for the [LangGraph](https://github.com/langchain-ai/langgraph)

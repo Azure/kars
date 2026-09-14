@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 00-namespace.yaml — dedicated namespace for the single-agent Hermes
 # variant of exec-brief.
 #

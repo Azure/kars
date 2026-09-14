@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # drift — behavioral-equivalence proof for mechanical refactors
 
 `drift.py` compares two item manifests (produced by

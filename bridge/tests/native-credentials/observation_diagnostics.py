@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Failure-only projection of fixed core stages; raw logs never enter evidence."""
 
 import json

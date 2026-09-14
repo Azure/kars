@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars OpenClaw Sandbox — Base Image
 # Contains all heavy, rarely-changing dependencies: OS packages, Node.js,
 # Python, Go CLI tools, OpenClaw framework, extension symlinks, and user setup.

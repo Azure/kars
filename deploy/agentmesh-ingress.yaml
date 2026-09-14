@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # AgentMesh Global Ingress — AGIC (Application Gateway Ingress Controller)
 #
 # Exposes relay (WebSocket) and registry (HTTP) publicly with:

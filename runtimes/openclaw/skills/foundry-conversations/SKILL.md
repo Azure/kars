@@ -3,6 +3,9 @@ name: foundry-conversations
 description: Manage persistent conversations via Foundry Conversations API. Create conversations, add messages, and maintain history across sessions.
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # Foundry Conversations — Persistent Conversation Management
 

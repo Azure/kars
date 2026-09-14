@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Inference budgets
 
 Bridge adds a **hierarchy** over inference token spend, above the per-sandbox

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """kars default agent for the Hermes runtime — smoke test.
 
 This file is staged at /opt/kars-default-agent/main.py in the sandbox

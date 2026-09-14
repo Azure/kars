@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Kars Bridge application publication record
 
 Status: **draft assembly; no source sign-off or release approval claimed**.

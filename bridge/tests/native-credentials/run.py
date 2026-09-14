@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Hosted-only native acceptance. Each emitted marker records an actual outcome."""
 
 import json

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 [package]
 name = "kars-a2a-core"
 description = "Shared A2A 1.0.0 primitives — JWS verification, AgentCard parsing, signing-key helpers. Lifted from kars-inference-router so the public-edge a2a-gateway can reuse the same verifier."

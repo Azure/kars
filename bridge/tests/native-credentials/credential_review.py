@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Explicit operator metadata review/resubmission, not transport or status retries."""
 
 import copy

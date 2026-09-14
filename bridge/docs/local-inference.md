@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Local inference with AI Runway
 
 Bridge discovers and manages Kars-compatible in-cluster model deployments

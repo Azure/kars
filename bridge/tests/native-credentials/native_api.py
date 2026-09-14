@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Bounded real Kubernetes clients; actor contexts never inherit admin keys."""
 
 import base64

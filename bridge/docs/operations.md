@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Operations
 
 Bridge is stateless application code over Kubernetes-resident Kars resources.

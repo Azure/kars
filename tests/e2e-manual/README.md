@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Manual E2E suite
 
 This directory holds the **manually-runnable** end-to-end test matrix

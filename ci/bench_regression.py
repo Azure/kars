@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Bench-regression gate (Phase 2 S16).
 
 Reads a baseline JSON file with structure:

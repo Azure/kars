@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Approvals and egress
 
 Bridge presents governance requests in a shared inbox. Approval is a

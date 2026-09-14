@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Deploying kars Bridge
 
 kars Bridge is an **additive** layer on top of [kars](https://github.com/Azure/kars):

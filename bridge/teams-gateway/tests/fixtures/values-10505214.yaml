@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Bridge Helm values.
 #
 # The Bridge is ADDITIVE: it deploys on top of an existing kars install (kars

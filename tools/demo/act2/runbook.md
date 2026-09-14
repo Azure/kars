@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Act II — presenter runbook
 
 Use this when the kars-sre agent isn't built yet (S1-S5 in progress)

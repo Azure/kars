@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security Audit — MCP out-of-the-box: session keepalive, egress auto-derive, CLI update (v0.1.24)
 
 Date: 2026-06-30

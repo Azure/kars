@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Example: Confidential Agent
 # Uses Kata VM isolation for per-pod dedicated kernel.
 # Container escape attacks are trapped inside the VM, not the host.

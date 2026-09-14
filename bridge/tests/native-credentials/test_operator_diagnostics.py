@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Run real subprocess failures and prove no CLI body is published."""
 
 import io

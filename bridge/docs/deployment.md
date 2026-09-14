@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Deployment
 
 Kars Bridge is an additive Helm release installed into a compatible Kars

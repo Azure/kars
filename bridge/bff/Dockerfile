@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Bridge BFF — container image. Multi-stage: build the Rust binary against a
 # glibc base, then ship it on a slim Debian runtime. Cloud-agnostic: the image
 # runs identically on AKS, EKS, GKE, and local kind.

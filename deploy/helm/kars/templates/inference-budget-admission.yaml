@@ -1,4 +1,5 @@
-{{- $budget := .Values.inferenceBudget | default dict -}}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- $budget := .Values.inferenceBudget | default dict -}}
 {{- if ($budget.enabled | default false) -}}
 {{- $bundle := (.Files.Get "files/inference-budget-admission.json" | replace "__ACCOUNTING_NAMESPACE__" .Release.Namespace | fromJson) -}}
 {{- range $policy := $bundle.items }}

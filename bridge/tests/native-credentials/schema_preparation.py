@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Use the exact core operator's schema lifecycle before installing its policies."""
 
 import json

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # `@kars/runtime-langgraph-ts`
 
 In-pod adapter for **LangGraph (TypeScript / Node.js 22)** running on

@@ -3,6 +3,9 @@ name: foundry-agents
 description: Query and inspect Foundry prompt agents and invoke Foundry tools via the Responses API. OpenClaw is the orchestrator — Foundry provides managed AI services.
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # Foundry Services — Agent Tools via Responses API
 

@@ -1,4 +1,5 @@
-{{- define "kars.credentialIdentitySchema" -}}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- define "kars.credentialIdentitySchema" -}}
 type: object
 required: [name, uid]
 properties:

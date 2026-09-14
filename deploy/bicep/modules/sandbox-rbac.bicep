@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Sandbox + kubelet RBAC for the AKS cluster, with **idempotent** role-
 // assignment names.
 //

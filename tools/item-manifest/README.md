@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # item-manifest
 
 `syn`-based extractor for behavioral-equivalence proofs on large mechanical

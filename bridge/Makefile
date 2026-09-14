@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 .PHONY: dev bff web check check-bff check-web check-gateway install images image-gateway images-push helm-lint helm-test helm-install helm-install-kind
 
 # Run BFF + web together (Ctrl-C stops both).

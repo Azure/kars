@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 00-namespace.yaml — dedicated namespace for the exec-brief e2e sandbox.
 #
 # The controller installs KarsSandbox / InferencePolicy / ToolPolicy /

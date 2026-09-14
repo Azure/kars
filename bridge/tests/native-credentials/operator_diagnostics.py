@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Project only fixed categories and allowlisted source locations from CLI errors."""
 
 import json

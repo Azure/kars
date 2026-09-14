@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Tagged status-field controls; no live Cilium or Kubernetes qualification."""
 
 import copy

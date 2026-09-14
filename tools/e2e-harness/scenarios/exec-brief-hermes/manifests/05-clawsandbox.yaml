@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 05-clawsandbox.yaml — parent Hermes sandbox for multi-agent
 # exec-brief. Three sub-agents (analyst, viz, writer) are spawned at
 # runtime by the parent via kars_spawn; the router's spawn endpoint

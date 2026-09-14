@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Contributing documentation
 
 Bridge documentation should be usable by someone without access to session

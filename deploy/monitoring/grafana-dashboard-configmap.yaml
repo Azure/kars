@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Auto-generated from grafana-dashboard-kars-*.json — do not edit by hand.
 # Regenerate via: python3 scripts/regen-grafana-configmap.py (or this inline snippet).
 # The grafana_dashboard=1 label triggers the kps-grafana sidecar

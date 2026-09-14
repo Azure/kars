@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Bridge web (Next.js) — container image. Multi-stage standalone build, so
 # the runtime image ships only server.js + the minimal traced node_modules.
 # Cloud-agnostic: runs identically on AKS, EKS, GKE, and local kind.

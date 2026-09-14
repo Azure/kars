@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Architecture
 
 kars Bridge is a **thin product layer** over the kars substrate. It owns the

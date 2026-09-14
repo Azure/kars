@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security audits
 
 Lightweight, per-change security review records. The `security-audit-required`

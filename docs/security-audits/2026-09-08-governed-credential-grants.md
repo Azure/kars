@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Governed credential grants — qualification record
 
 Status: implementation candidate; **not a sign-off**. No author or independent

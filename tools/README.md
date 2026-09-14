@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # tools/
 
 Repo-local tooling that is **not** shipped in any deployable artifact.

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Prove template drift diagnostics retain only fixed, identity-bound facts."""
 
 import copy

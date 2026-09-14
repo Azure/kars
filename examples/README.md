@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars Examples
 
 End-to-end blueprints you can `kubectl apply -f` after running `kars up`.

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Kars Bridge documentation
 
 Kars Bridge turns Kars APIs into a governed human workflow for agent missions

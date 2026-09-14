@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """kars_spawn family — Phase A1.5.
 
 Spawn / status / destroy / list sub-agents via the inference-router's

@@ -1,4 +1,5 @@
-{{- $networkPolicy := .Values.networkPolicy | default dict }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- $networkPolicy := .Values.networkPolicy | default dict }}
 {{- $observations := $networkPolicy.observations | default dict }}
 {{- if ($observations.enabled | default false) }}
 {{- if not ($observations.existingIsolationConfirmed | default false) }}

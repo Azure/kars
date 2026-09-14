@@ -1,4 +1,5 @@
-{{- /*
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- /*
   Envelope-write lockdown (design note arch-D / §7).
 
   ValidatingAdmissionPolicy that makes a KarsTask / KarsTeam's *governance*

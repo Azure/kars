@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # MCP servers
 
 Bridge manages the Kars `McpServer` catalog and exposes two distinct modes.

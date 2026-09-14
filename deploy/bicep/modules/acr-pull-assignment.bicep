@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Reusable, **idempotent** AcrPull role assignment scoped to an ACR.
 //
 // `principalId` is a STRING parameter (legal in a roleAssignment `name`, unlike

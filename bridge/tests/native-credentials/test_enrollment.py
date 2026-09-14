@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Operator enrollment transport checks, not live native authority evidence."""
 
 import copy

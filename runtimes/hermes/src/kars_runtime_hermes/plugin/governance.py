@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """AGT policy gate — Phase A1.4.
 
 Every tool call goes through ``ctx.register_hook("pre_tool_call", ...)``

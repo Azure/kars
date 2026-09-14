@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Operator protocol orchestration tests, not native delivery evidence."""
 
 import copy

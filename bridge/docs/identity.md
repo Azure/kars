@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Identity and sign-in
 
 Bridge supports standards-based OIDC and an optional in-cluster Dex deployment.

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Scenario 01 — chat-completion happy path
 #
 # Fires a canonical Foundry chat completion against the FakeRouter using the

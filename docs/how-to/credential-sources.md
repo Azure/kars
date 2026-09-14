@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Workspace credential sources (v1)
 
 Credential sources are an **optional, explicit** alternative to the existing

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Effective identity-label selection; the original Pod rollout fences remain."""
 
 import copy

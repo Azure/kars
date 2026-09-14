@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security Audit — `kars upgrade` changelog + impact table + confirm (additive UX)
 
 Date: 2026-06-29

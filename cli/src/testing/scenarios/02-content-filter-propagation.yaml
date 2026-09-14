@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Scenario 02 — content-filter propagation
 #
 # The router's job is to pass through Foundry prompt_filter_results so that the

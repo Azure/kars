@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Internal Red-Team — Findings Log
 
 > Living log of internal red-team / adversarial-test exercises against kars. Each entry records what was tested, what was found, and how it was closed. Findings that are still open carry an `OPEN` tag and link to a tracking issue.

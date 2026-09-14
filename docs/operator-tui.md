@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Operator TUI — modular panels
 
 > Source: `cli/src/commands/operator/panels/`.

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Branch Protection — `dev`, `main` and Bridge integration
 
 This is the canonical list of CI jobs that must be set as **required

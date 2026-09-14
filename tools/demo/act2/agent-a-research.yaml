@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Agent A — the kars sandbox the showcase demo (Acts I + II) runs.
 #
 # Act I uses this sandbox to demonstrate the architecture in motion:

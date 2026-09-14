@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security model
 
 kars is a layered control plane. Each layer enforces a specific property; together they bound the blast radius of a compromised agent. This page documents what each layer does, what it does not do, and where the relevant code lives.

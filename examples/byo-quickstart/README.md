@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # BYO Runtime Quickstart
 
 A minimal **Bring-Your-Own** runtime for kars. Demonstrates the

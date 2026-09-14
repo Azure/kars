@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Real API prerequisite, deliberately independent of builds and SRE migration.
 
 There are no runtime credentials in this lane. Schema/admission failures are
