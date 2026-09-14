@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 04-mcpserver.yaml — DeepWiki MCP for the Hermes scenario. Same
 # public unauthenticated endpoint as the canonical exec-brief.
 # Hermes' native MCP client picks it up from

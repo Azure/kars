@@ -3,6 +3,9 @@ name: foundry-memory
 description: Persistent long-term memory via Foundry Memory Store APIs. User preferences and chat summaries survive pod restarts — no Foundry hosted agent needed.
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # Foundry Memory — Memory Store APIs
 

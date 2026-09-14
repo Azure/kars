@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Image versioning & release tagging
 
 kars produces eight container images: the controller, the

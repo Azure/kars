@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # MCP servers in kars
 
 For controller-owned Playwright/Everything workloads, see

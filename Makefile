@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Makefile
 # Usage: make build | make test | make lint | make images | make clean
 

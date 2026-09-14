@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 01-inferencepolicies.yaml — Foundry/AOAI provider for both sandboxes.
 ---
 apiVersion: kars.azure.com/v1alpha1

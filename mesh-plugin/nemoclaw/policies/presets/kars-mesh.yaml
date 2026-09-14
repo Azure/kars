@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars mesh federation — relay (WebSocket) and registry (REST)
 #
 # This preset enables NemoClaw/OpenShell sandbox agents to connect to an

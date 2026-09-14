@@ -5,6 +5,15 @@ import { parseAllDocuments } from "yaml";
 import { get, requireRegistrar, type ApiObject, type Execute } from "./sre-authority.js";
 import { listSreHelmReleases, sreHelmStageWait } from "./sre-helm.js";
 import { ACTION_CRD, planActionCrd } from "./sre-action-crd.js";
+import { planCoreHelmSchemas } from "./core-helm-schemas.js";
+import { waitForInstalledCoreSchemas } from "./schema-stage.js";
+import { planTemplateAuthoritySchemas } from "./sre-template-schema-plan.js";
+import { withSchemaPreparationDiagnostics } from "./sre-schema-diagnostics.js";
+
+type StagePhase = "registrar" | "controller-review" | "release-inventory" | "prerequisite-chart-render"
+  | "action-schema-review" | "helm-compatibility" | "action-schema-migration" | "core-schema-preparation"
+  | "helm-server-dry-run" | "helm-upgrade" | "template-ownership-review" | "schema-publication"
+  | "template-authority-write" | "controller-rollout";
 
 function parts(image: string): [string,string] {
   const index=image.lastIndexOf(":");
@@ -22,12 +31,29 @@ export async function stageAuthority(
   execute:Execute,chart:string,namespace:string,release:string,
   controllerImage:string,routerImage:string,dryRun:boolean,
 ):Promise<void> {
+  let phase: StagePhase = "registrar";
+  try {
+    await stageAuthorityChecked(execute,chart,namespace,release,controllerImage,routerImage,dryRun,
+      next => { phase = next; });
+  } catch (error) {
+    // Fixed source stage only: never include argv, API bodies or raw causes.
+    console.error(`SRE-STAGE-FAILURE ${phase}`);
+    throw error;
+  }
+}
+
+async function stageAuthorityChecked(
+  execute:Execute,chart:string,namespace:string,release:string,
+  controllerImage:string,routerImage:string,dryRun:boolean,mark:(phase:StagePhase)=>void,
+):Promise<void> {
   await requireRegistrar(execute);
+  mark("controller-review");
   const controller=await get(execute,"deployment","kars-controller",namespace);
   if(!controller)throw new Error("Install the core prerequisite first; authority staging does not provision a new cluster");
   if(controller.spec?.template?.spec?.serviceAccountName!=="kars-controller") {
     throw new Error("Controller uses a custom ServiceAccount; review and stage its minimal authority role explicitly");
   }
+  mark("release-inventory");
   const stdout=await listSreHelmReleases(execute,namespace);
   const releases=JSON.parse(stdout) as unknown;
   if(!Array.isArray(releases)||releases.some(item=>!item||typeof item.name!=="string"||item.namespace!==namespace)) {
@@ -36,6 +62,7 @@ export async function stageAuthority(
   const [controllerRepository,controllerTag]=parts(controllerImage);
   const [routerRepository,routerTag]=parts(routerImage);
   const helm=releases.some(item=>item.name===release);
+  mark("prerequisite-chart-render");
   const rendered=await execute("helm",["template",release,chart,"--namespace",namespace,
     "--set","sre.enabled=false","--set","azure.workloadIdentity.clientId=dummy"],{stdio:"pipe"});
   const documents=parseAllDocuments(rendered.stdout).map(doc=>{
@@ -44,19 +71,34 @@ export async function stageAuthority(
   }).filter((obj):obj is ApiObject=>!!obj);
   const actions=documents.filter(obj=>obj.kind==="CustomResourceDefinition"&&obj.metadata.name===ACTION_CRD);
   if(actions.length!==1)throw new Error("Exactly one compatible action CRD is required before staging authority policies");
+  mark("action-schema-review");
   const stageAction=await planActionCrd(execute,actions[0],namespace,release,helm);
   if(helm) {
+    mark("helm-compatibility");
     const wait=await sreHelmStageWait(execute);
-    if(!dryRun)await stageAction();
-    await execute("helm",["upgrade",release,chart,"--namespace",namespace,"--reset-then-reuse-values",
+    const baseArgs=["upgrade",release,chart,"--namespace",namespace,"--reset-then-reuse-values",
       "--set","sre.authorityStage=true",
       "--set-string",`controller.image.repository=${controllerRepository}`,
       "--set-string",`controller.image.tag=${controllerTag}`,
       "--set-string",`inferenceRouter.image.repository=${routerRepository}`,
-      "--set-string",`inferenceRouter.image.tag=${routerTag}`,
-      ...(dryRun?["--dry-run=server"]:[wait,"--timeout","8m"])],{stdio:"pipe"});
+      "--set-string",`inferenceRouter.image.tag=${routerTag}`];
+    const args=[...baseArgs,...(dryRun?["--dry-run=server"]:[wait,"--timeout","8m"])];
+    // Qualify the complete schema/data plan before even the action-params
+    // conversion. The ordinary comparator remains strict outside this command.
+    mark("core-schema-preparation");
+    const applySchemas = await withSchemaPreparationDiagnostics(
+      () => planCoreHelmSchemas(execute,args,{base365SreMigration:true}));
+    mark("helm-server-dry-run");
+    await execute("helm",[...baseArgs,"--dry-run=server"],{stdio:"pipe"});
+    if(!dryRun) {
+      mark("core-schema-preparation");
+      await withSchemaPreparationDiagnostics(applySchemas);
+      mark("helm-upgrade");
+      await execute("helm",args,{stdio:"pipe"});
+    }
     return;
   }
+  mark("template-ownership-review");
   if(controller.metadata.annotations?.["meta.helm.sh/release-name"]) {
     throw new Error("Controller reports Helm ownership that was not found; no template-mode adoption is allowed");
   }
@@ -92,17 +134,27 @@ export async function stageAuthority(
   main.image=controllerImage;
   main.env=(main.env??[]).filter((entry:{name:string})=>entry.name!=="INFERENCE_ROUTER_IMAGE");
   main.env.push({name:"INFERENCE_ROUTER_IMAGE",value:routerImage});
+  const recheckSchemas=await planTemplateAuthoritySchemas(execute,documents);
   if(dryRun) {
     console.log(`Would verify/CAS-repair the action API prerequisite, stage ${writes.length} authority objects and CAS-update controller ${controller.metadata.uid}@${controller.metadata.resourceVersion}`);
     return;
   }
+  mark("action-schema-migration");
+  await recheckSchemas();
   await stageAction();
   for(const name of unchangedCrds) {
     await execute("kubectl",["wait","--for=condition=Established",`crd/${name}`,"--timeout=60s"],{stdio:"pipe"});
   }
+  let schemasPublished=false;
   for(const {object,existing} of writes.sort((a,b)=>Number(b.object.kind==="CustomResourceDefinition")-Number(a.object.kind==="CustomResourceDefinition"))) {
+    if(object.kind!=="CustomResourceDefinition"&&!schemasPublished) {
+      mark("schema-publication");
+      await waitForInstalledCoreSchemas(execute,documents);
+      schemasPublished=true;
+    }
     const annotations={...object.metadata.annotations,
       "kars.azure.com/sre-authority-staged":namespace,"kars.azure.com/sre-authority-release":release};
+    mark("template-authority-write");
     if(existing) {
       await execute("kubectl",["patch",object.kind!.toLowerCase(),object.metadata.name!,"--type=merge","-p",JSON.stringify({
         ...object,metadata:{uid:existing.metadata.uid,resourceVersion:existing.metadata.resourceVersion,annotations},
@@ -116,6 +168,11 @@ export async function stageAuthority(
       await execute("kubectl",["wait","--for=condition=Established",`crd/${object.metadata.name}`,"--timeout=60s"],{stdio:"pipe"});
     }
   }
+  if(!schemasPublished) {
+    mark("schema-publication");
+    await waitForInstalledCoreSchemas(execute,documents);
+  }
+  mark("controller-rollout");
   await execute("kubectl",["patch","deployment","kars-controller","-n",namespace,"--type=merge","-p",JSON.stringify({
     metadata:{uid:controller.metadata.uid,resourceVersion:controller.metadata.resourceVersion},
     spec:{template:{spec:{containers}}},

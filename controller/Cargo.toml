@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 [package]
 name = "kars-controller"
 description = "Kubernetes operator for kars — manages KarsSandbox CRDs, sandbox lifecycle, policy enforcement, and Azure service connectors"
@@ -53,6 +56,7 @@ futures-util.workspace = true
 # HTTP client for Azure ARM API (federated credential creation)
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 jsonwebtoken.workspace = true
+rsa.workspace = true
 
 # HTTP server (controller metrics endpoint)
 axum = "0.8"
@@ -71,7 +75,7 @@ oci-client = { version = "=0.16.1", default-features = false, features = ["rustl
 # aws-lc-rs) enable both providers, which makes rustls 0.23.40+
 # refuse to auto-detect and panic on first TLS handshake. Pin to
 # `aws-lc-rs` to align with the rest of the workspace.
-rustls = { version = "0.23", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
+rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs", "std", "tls12"] }
 rcgen.workspace = true
 time.workspace = true
 regex = "1.12.3"

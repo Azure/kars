@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 blank_issues_enabled: true
 contact_links:
   - name: Security Vulnerabilities (Critical/High)

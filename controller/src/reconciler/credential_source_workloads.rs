@@ -2,13 +2,14 @@
 // Licensed under the MIT License.
 
 use super::*;
+use kube::api::ListParams;
 
 fn consumer(meta: &ObjectMeta, sandbox: &KarsSandbox, ns: &Namespace) -> bool {
     annotation(meta, SANDBOX_UID) == sandbox.metadata.uid.as_deref()
         && annotation(meta, NAMESPACE_UID) == ns.metadata.uid.as_deref()
 }
 
-fn owned(meta: &ObjectMeta, sandbox: &KarsSandbox, ns: &Namespace) -> Result<(), Error> {
+pub(super) fn owned(meta: &ObjectMeta, sandbox: &KarsSandbox, ns: &Namespace) -> Result<(), Error> {
     identity(meta)?;
     let labels = meta.labels.as_ref().cloned().unwrap_or_default();
     let authored = meta.managed_fields.as_ref().is_some_and(|fields| {
@@ -58,11 +59,12 @@ pub(super) async fn pause(
         return Ok(());
     }
     owned(&deployment.metadata, sandbox, ns)?;
-    let strategy = if sandbox.spec.credentials_ref.is_some() {
-        "Recreate"
-    } else {
-        "RollingUpdate"
-    };
+    let strategy =
+        if sandbox.spec.credentials_ref.is_some() || sandbox.spec.credential_bindings.is_some() {
+            "Recreate"
+        } else {
+            "RollingUpdate"
+        };
     if deployment.spec.as_ref().and_then(|spec| spec.replicas) == Some(0)
         && deployment
             .spec
@@ -114,4 +116,30 @@ pub(super) async fn current(
             .and_then(|spec| spec.template.metadata.as_ref())
             .and_then(|meta| annotation(meta, POD_VERSION))
             == Some(expected.as_str()))
+}
+
+pub(super) async fn quiescent(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    ns: &Namespace,
+) -> Result<bool, Error> {
+    namespace_current(client, sandbox, ns).await?;
+    let api: Api<Deployment> = Api::namespaced(client.clone(), &ns.name_any());
+    if let Some(deployment) = api
+        .get_opt(&sandbox.name_any())
+        .await
+        .map_err(|e| api_error("Read paused credential consumer", e))?
+    {
+        owned(&deployment.metadata, sandbox, ns)?;
+        if deployment.spec.as_ref().and_then(|spec| spec.replicas) != Some(0) {
+            return Ok(false);
+        }
+    }
+    // A namespace belongs to one sandbox. Include terminating/unlabelled Pods:
+    // a successful scale patch is not proof that old credentials stopped.
+    let pods = Api::<k8s_openapi::api::core::v1::Pod>::namespaced(client.clone(), &ns.name_any())
+        .list(&ListParams::default())
+        .await
+        .map_err(|e| api_error("Check credential consumer retirement", e))?;
+    Ok(pods.items.is_empty())
 }

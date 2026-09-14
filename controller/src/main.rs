@@ -23,10 +23,14 @@ mod auth_config;
 mod auth_config_reconciler;
 mod backoff;
 mod config_hash;
+#[path = "../../shared/constant_time.rs"]
+mod constant_time;
 mod crd;
 #[allow(dead_code)]
 // CRD-installation pipeline (Phase 1 close-out + future kubectl-claw-attest) consumes these helpers.
 mod crd_validations;
+mod credential_grant;
+mod credential_grants;
 mod credential_source;
 mod egress_allowlist_compile;
 mod egress_approval;
@@ -72,12 +76,20 @@ mod mcp_server_reconciler;
 mod mesh_peer;
 mod metrics;
 mod metrics_server;
+#[path = "../../shared/observation_privacy.rs"]
+mod observation_privacy;
 mod pairing;
 mod pairing_reconciler;
 mod policy_canonical;
 mod policy_fetcher;
+mod privacy_rpc;
+mod private_activation;
+#[path = "../../shared/private_tls.rs"]
+mod private_tls;
 mod providers;
 mod reconciler;
+#[path = "../../shared/service_observer.rs"]
+mod service_observer;
 mod signer_policy;
 mod sre_authority;
 #[path = "../../shared/sre_privacy.rs"]
@@ -144,6 +156,7 @@ async fn main() -> Result<()> {
     );
 
     let client = Client::try_default().await?;
+    privacy_rpc::start(client.clone());
     inference_budget::start(client.clone());
 
     // S7.E: Prometheus + health server. Default ON; opt out via
@@ -273,6 +286,10 @@ async fn main() -> Result<()> {
     let kars_eval_handle = {
         let client = client.clone();
         tokio::spawn(async move { kars_eval_reconciler::run(client).await })
+    };
+    let credential_grants_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { credential_grants::run(client).await })
     };
     let kars_task_handle = {
         let client = client.clone();
@@ -420,6 +437,9 @@ async fn main() -> Result<()> {
     let _ = metrics_handle;
 
     tokio::select! {
+        res = credential_grants_handle => {
+            tracing::error!(?res, "Credential grant controller stopped");
+        }
         res = &mut leader_future => {
             // Lost leadership (renewal failed) -> propagate so the pod
             // restarts and re-enters the election. Standard fail-stop

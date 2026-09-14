@@ -3,6 +3,9 @@ name: kars-spawn
 description: Spawn secure isolated sub-agent sandboxes, delegate tasks via AGT mesh, receive results, and destroy sub-agents. Uses the kars_spawn, kars_mesh_send, kars_mesh_inbox, and kars_spawn_destroy tools.
 metadata: {"openclaw": {"always": true}}
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # kars Sub-Agent Spawn
 

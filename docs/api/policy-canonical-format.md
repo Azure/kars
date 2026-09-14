@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Policy canonical format — per-kind byte rules
 
 > Byte-exact canonicalization rules for kars signed Policy artifacts.

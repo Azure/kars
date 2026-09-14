@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """kars — Hermes plugin entry point.
 
 Hermes discovers this plugin by scanning ``$HERMES_HOME/plugins/<name>/``

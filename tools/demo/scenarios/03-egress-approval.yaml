@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Demo scenario step 3 — Time-boxed egress approval.
 #
 # Demonstrates the EgressApproval overlay: a temporary grant to reach

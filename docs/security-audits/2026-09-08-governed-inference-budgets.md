@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security Audit — Governed inference budgets (v1)
 
 Date: **2026-09-08 UTC**

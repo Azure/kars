@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # exec-brief-hermes — multi-agent Hermes mesh e2e
 
 Parent Hermes sandbox uses `kars_spawn` to launch 3 Hermes sub-agents

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Contributing to kars 👋
 
 **Welcome — and thank you!** Whether you're fixing a typo, adding a plugin, or shipping your first-ever open-source pull request, you're exactly the kind of person this project is for. We're genuinely glad you're here.
@@ -45,7 +48,7 @@ git checkout -b my-first-contribution
 make test && make lint    # keep it green
 ```
 
-Add the two-line copyright header to any **new** file you create (details in [Code Style](#-code-style)).
+Apply copyright coverage to every **new** file you create (format-safe rules in [Code Style](#-code-style)).
 
 ### 4. Open your PR 🎉
 
@@ -209,16 +212,74 @@ Credentials live in a K8s secret named `<sandbox-name>-credentials` in the sandb
 
 ### Copyright headers
 
-Every kars-authored source file (`.rs`, `.ts`, `.tsx`, `.js`, `.sh`) **must** begin with the two-line Microsoft + MIT copyright header:
+The Microsoft + MIT policy applies repository-wide, including Bridge, documentation,
+configuration, templates and scripts. Every Kars-authored file that safely supports
+comments **must** carry the two-line notice in its format's comment syntax:
 
 ```
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 ```
 
-(Use `#` instead of `//` for shell scripts. For shell scripts with a shebang, the shebang stays on line 1 and the header follows on lines 2–3.)
+Use `//` for Rust, TypeScript/JavaScript (including TSX and MJS), and Bicep;
+`#` for shell/Python, YAML/TOML, Dockerfiles, Makefiles, ignore files, CODEOWNERS
+and environment examples; HTML comments for Markdown; CSS block comments for CSS;
+and Handlebars comments for `.hbs`. Plain YAML under a chart's `templates/`
+directory uses `#` too: CLI staging also reads some CRDs as raw YAML. YAML that
+begins with a Helm action (after any blank lines/YAML comments), plus `.tpl` and
+template `NOTES.txt`, uses Go-template comments with **no surrounding output
+whitespace**. A hash header before leading `{{- ... -}}` can be joined to
+`apiVersion` by trimming. The directory name alone does not determine YAML syntax.
 
-The CI gate `ci/check-copyright-headers.sh` enforces this on every PR. Add the header to any new file before opening your PR. Vendored code under `vendor/` is excluded — don't add Microsoft headers there.
+Use `scripts/apply-copyright-headers.sh` rather than rewriting files manually.
+It preserves original body bytes, line endings, file modes, author notices,
+shebangs, Python encoding cookies, Docker parser directives, Markdown frontmatter,
+CSS charset directives and frontend directive prologues. It is idempotent.
+For YAML with an incorrect comment style, it replaces only the exact existing
+Microsoft/MIT license prefix; original body bytes and author notices remain intact.
+For chart YAML with an initial `---`, the license is placed inside that first
+document, after the marker, rather than creating a separate comment-only Helm
+document. Existing preamble comments and document delimiters are not rewritten.
+Both existing commands share `ci/copyright_headers.py` (Python standard library).
+`ci/check-copyright-headers.sh` checks **every tracked file**, and fails on unknown
+formats, missing notices or unsafe inputs. Run the format regression tests with
+`python3 ci/tests/copyright_headers_test.py`.
+
+Some files cannot safely receive literal comments. `ci/copyright-coverage.json`
+explicitly records coverage under the existing root `LICENSE`/`NOTICE`: strict
+JSON, lockfiles, binary/image/presentation assets, managed drawings, recordings,
+encoded certificate fixtures, empty markers, literal prompt inputs and the
+Helm policy embedded verbatim into a resource string remain
+byte-identical. This is license coverage, **not a claim that binaries have text
+headers**. Vendored packages, upstream assets, generated output and third-party
+license texts retain their own ownership and notices; do not prepend Microsoft
+ownership to them or replace original attribution. The policy does not relicense
+third-party content. New special formats require a reviewed rule, not a blanket
+directory exemption for first-party sources.
+
+Generated status is never inferred from names such as `build`, `target`, `dist`,
+`coverage`, `.turbo`, `node_modules`, or the `.d.ts` suffix. Generated coverage
+requires an exact reviewed file entry with producer/provenance and a notice
+reference in `ci/copyright-coverage.json`. The current entries are only
+`tools/headlamp-plugin/dist/main.js` and `tools/headlamp-plugin/dist/package.json`.
+Handwritten sources in output-named directories and authored declarations need
+normal headers; unknown first-party formats still fail.
+
+The embedded Helm AGT policy has a raw-byte digest contract: the controller
+publishes its exact bytes as `agt-profile.yaml`, and the router confirms a
+length-prefixed SHA-256 over the filename and body. Adding a YAML comment would
+change that digest even if the parsed policy were identical, so this exact
+payload is explicitly covered without a literal header.
+
+The checker prints coverage totals, including non-header categories. Pass
+`--verbose` to list every non-header path and reason, or
+`--report copyright-report.json` for a complete machine-readable inventory.
+The applier accepts the same options; its report includes edit offsets, inserted
+and removed license-prefix lengths, and before/after SHA-256 hashes.
+`removed_offset` addresses the original file; `offset` addresses the body after
+removing the old license block. Reports are local artifacts, not source
+files to commit. Optional repository-relative paths limit a local check/apply;
+CI invokes the checker without paths, so there are no silent extension omissions.
 
 ### File size guidelines
 

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars — CNCF K8s AI Conformance Report
 
 > **Self-assessment, not an official certification.** This report is the output of a self-hosted harness that asserts the kars repository against the criteria listed below. It is not an official CNCF conformance certification.

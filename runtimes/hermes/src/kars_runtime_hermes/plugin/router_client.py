@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """HTTP client to the inference-router sidecar at ``http://127.0.0.1:8443``.
 
 Single source of truth for: base URL, admin-token discovery, default

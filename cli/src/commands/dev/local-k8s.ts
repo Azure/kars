@@ -32,6 +32,7 @@ import { resolveBundledAsset, requireBundledAsset, findRepoRootOrNull } from "..
 import { buildCopilotFallbackChain } from "../../github-copilot.js";
 import { CLAIM, prepareCredentialNamespace } from "../../lib/namespace-ownership.js";
 import { assertSafeMutation } from "../../lib/sre-authority.js";
+import { prepareCoreTemplateSchemas } from "../../lib/core-helm-schemas.js";
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -412,7 +413,7 @@ async function clusterExists(
   return stdout.split(/\r?\n/).map((s) => s.trim()).includes(name);
 }
 
-async function ensureCluster(
+export async function ensureCluster(
   kind: string,
   name: string,
   env: NodeJS.ProcessEnv,
@@ -826,14 +827,17 @@ function findRepoRoot(start: string): string {
   return cur;
 }
 
-async function helmInstall(
+export async function installLocalCoreChart(
   helm: string,
   kubectl: string,
+  clusterName: string,
   release: string,
   chartDir: string,
   valuesOverlays: string[],
   setArgs: string[] = [],
 ): Promise<void> {
+  if (!clusterName) throw new Error("The requested kind cluster must be explicit");
+  const context = `kind-${clusterName}`;
   // We render-then-apply (rather than `helm install`) to keep failures
   // visible: `kubectl apply -f -` shows precisely which resources didn't
   // accept admission. Phase 4 may switch to `helm install --atomic` once
@@ -845,6 +849,7 @@ async function helmInstall(
     "--namespace",
     "kars-system",
     "--include-crds",
+    "--kube-context", context,
   ];
   for (const overlay of valuesOverlays) {
     args.push("-f", overlay);
@@ -852,50 +857,17 @@ async function helmInstall(
   for (const kv of setArgs) {
     args.push("--set", kv);
   }
-  const { stdout } = await execa(helm, args);
-  // Two-pass apply to avoid the CRD-establishment race: instances of
-  // a CRD (e.g. our kars-default ToolPolicy) can't be created before
-  // the apiserver has Established the CRD itself, and a single
-  // `kubectl apply -f -` doesn't wait between them. Split the helm
-  // output into CRDs vs everything else, apply CRDs first, wait,
-  // then apply the rest. Idempotent — re-runs just re-apply.
-  const docs = stdout.split(/^---\s*$/m).filter(d => d.trim().length > 0);
-  const crdDocs: string[] = [];
-  const otherDocs: string[] = [];
-  for (const doc of docs) {
-    if (/^kind:\s*CustomResourceDefinition\s*$/m.test(doc)) crdDocs.push(doc);
-    else otherDocs.push(doc);
-  }
-  if (crdDocs.length > 0) {
-    await execa(
-      kubectl,
-      ["apply", "-f", "-", "--server-side", "--force-conflicts"],
-      { input: crdDocs.join("\n---\n"), stdio: ["pipe", "inherit", "inherit"] },
-    );
-    // Wait for each kars.azure.com CRD to be Established before
-    // applying CRs of those kinds. 60s budget is generous; usually <2s.
-    await execa(
-      kubectl,
-      ["wait", "--for=condition=Established", "--timeout=60s",
-        "crd", "-l", "app.kubernetes.io/name=kars"],
-      { stdio: "pipe" },
-    ).catch(async () => {
-      // Fallback: wait on the specific CRDs we know our chart ships.
-      await execa(kubectl, [
-        "wait", "--for=condition=Established", "--timeout=60s",
-        "crd/toolpolicies.kars.azure.com",
-        "crd/karssandboxes.kars.azure.com",
-        "crd/inferencepolicies.kars.azure.com",
-        "crd/karsmemories.kars.azure.com",
-        "crd/mcpservers.kars.azure.com",
-      ], { stdio: "pipe" }).catch(() => undefined);
-    });
-  }
+  const execute = (file: string, commandArgs: readonly string[], options: { stdio: "pipe"; input?: string; timeout?: number }) =>
+    execa(file === "kubectl" ? kubectl : helm,
+      [file === "kubectl" ? "--context" : "--kube-context", context, ...commandArgs], options);
+  const { stdout } = await execa(helm, [...args, "--dry-run=client"]);
+  const remainder = await prepareCoreTemplateSchemas(execute, stdout,
+    { release, namespace: "kars-system", ownership: "template" });
   await execa(
     kubectl,
-    ["apply", "-f", "-", "--server-side", "--force-conflicts"],
+    ["--context", context, "apply", "-f", "-", "--server-side"],
     {
-      input: otherDocs.join("\n---\n"),
+      input: remainder,
       stdio: ["pipe", "inherit", "inherit"],
     },
   );
@@ -921,6 +893,7 @@ async function helmInstall(
  */
 async function provisionDevCreds(
   kubectl: string,
+  context: string,
   creds: KarsConfig,
   mcpGithub: GithubMcpDecision = { enabled: false, envVarName: "COPILOT_GITHUB_TOKEN" },
 ): Promise<string> {
@@ -931,6 +904,7 @@ async function provisionDevCreds(
   // so re-running `kars dev` after rotating creds picks up the new
   // value without having to delete the secret first.
   const dryRun = await execa(kubectl, [
+    "--context", context,
     "create",
     "secret",
     "generic",
@@ -942,7 +916,7 @@ async function provisionDevCreds(
     "-o",
     "yaml",
   ]);
-  await execa(kubectl, ["apply", "-f", "-"], {
+  await execa(kubectl, ["--context", context, "apply", "-f", "-"], {
     input: dryRun.stdout,
     stdio: ["pipe", "inherit", "inherit"],
   });
@@ -952,6 +926,7 @@ async function provisionDevCreds(
   // below (so the token never lands in the values file).
   if (mcpGithub.enabled && mcpGithub.tokenSecretName && mcpGithub.tokenInline) {
     const mcpSecret = await execa(kubectl, [
+      "--context", context,
       "create",
       "secret",
       "generic",
@@ -963,7 +938,7 @@ async function provisionDevCreds(
       "-o",
       "yaml",
     ]);
-    await execa(kubectl, ["apply", "-f", "-"], {
+    await execa(kubectl, ["--context", context, "apply", "-f", "-"], {
       input: mcpSecret.stdout,
       stdio: ["pipe", "inherit", "inherit"],
     });
@@ -1578,17 +1553,17 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   }
   // Ensure the namespace exists before applying namespaced resources.
   try {
-    await execa(tools.kubectl, ["create", "namespace", "kars-system"]);
+    await execa(tools.kubectl, ["--context", `kind-${opts.clusterName}`, "create", "namespace", "kars-system"]);
   } catch {
     // Namespace already exists — proceed.
   }
   // Provision the dev-creds Secret + per-run overlay BEFORE helm-applying,
   // so the controller deployment picks up the secretKeyRef on its first
   // rollout (no second restart needed).
-  const credsOverlay = await provisionDevCreds(tools.kubectl, creds, mcpGithub);
+  const credsOverlay = await provisionDevCreds(tools.kubectl, `kind-${opts.clusterName}`, creds, mcpGithub);
   try {
     const meshProvider = opts.meshProvider ?? "agt";
-    await helmInstall(tools.helm, tools.kubectl, opts.name, chartDir, [
+    await installLocalCoreChart(tools.helm, tools.kubectl, opts.clusterName, opts.name, chartDir, [
       valuesOverlay,
       credsOverlay,
     ], [
@@ -1654,6 +1629,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // explicitly restarting catches that case.
   try {
     await execa(tools.kubectl, [
+      "--context", `kind-${opts.clusterName}`,
       "rollout",
       "restart",
       "deployment/kars-controller",
@@ -1671,6 +1647,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     await execa(
       tools.kubectl,
       [
+        "--context", `kind-${opts.clusterName}`,
         "rollout",
         "status",
         "deployment/kars-controller",

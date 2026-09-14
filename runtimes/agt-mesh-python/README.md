@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars-agt-mesh — Python AGT MeshClient for any Python agent framework
 
 **Status:** Act 2.1 — core MeshClient + Hermes adapter.

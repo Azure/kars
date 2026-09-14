@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Getting started
 
 One `npm i` and one `kars dev`, and you're talking to a secured AI agent on your laptop in about five minutes — no Azure account required.

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars runtime adapter — Anthropic Claude Agent SDK
 
 `kars_runtime_anthropic` is the in-pod adapter that wires the

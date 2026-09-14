@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Telegram Agent Example
 
 Deploy an AI agent connected to Telegram with optional Bing web search.

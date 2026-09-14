@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Capability audit - Evaluator runner compatibility
 
 Date: 2026-09-10

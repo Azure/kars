@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Secret Rotation Runbook
 
 This runbook covers rotation of every secret kars materialises: per-sandbox credentials, TLS certs, AgentMesh identities, and Azure-side credentials. Rotation never requires recompiling the controller or router.

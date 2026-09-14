@@ -113,8 +113,9 @@ def command(stage, args, *, root, data=None):
 
 def request(port, method, path, obj=None, *, accept="application/json"):
     body = None if obj is None else json.dumps(obj).encode()
+    content_type = "application/merge-patch+json" if method == "PATCH" else "application/json"
     req = Request(f"http://127.0.0.1:{port}{path}", data=body, method=method,
-                  headers={"Content-Type": "application/json", "Accept": accept})
+                  headers={"Content-Type": content_type, "Accept": accept})
     opener = build_opener(ProxyHandler({}))
     try:
         response = opener.open(req, timeout=15)
@@ -129,8 +130,33 @@ def request(port, method, path, obj=None, *, accept="application/json"):
         return code, None
 
 
+def crd_established(code, body):
+    if code != 200 or not isinstance(body, dict):
+        return False
+    status = body.get("status")
+    if not isinstance(status, dict):
+        return False
+    conditions = status.get("conditions")
+    return (isinstance(conditions, list)
+            and all(isinstance(condition, dict) for condition in conditions)
+            and any(condition.get("type") == "Established" and condition.get("status") == "True"
+                    for condition in conditions))
+
+
+def connection_proxy_arguments(namespaces):
+    if (len(namespaces) != 2 or not isinstance(namespaces[0], str)
+            or re.fullmatch(r"kars-cel-[a-f0-9]{32}", namespaces[0]) is None
+            or namespaces[1] != namespaces[0] + "-ordinary"):
+        raise RuntimeError("Connection admission proxy requires the two owned fixture namespaces")
+    names = "|".join(re.escape(name) for name in namespaces)
+    paths = (rf"^/version$|^/api/v1/namespaces/({names})/pods/phase-connect-absent/"
+             r"(exec|attach|portforward|proxy)$")
+    return ["--accept-paths", paths, "--reject-paths", "^$",
+            "--reject-methods", "^(POST|PUT|PATCH|DELETE|HEAD|OPTIONS|TRACE|CONNECT)$"]
+
+
 @contextlib.contextmanager
-def kind_proxy(root):
+def kind_proxy(root, *, connection_namespaces=()):
     # Read only redacted config to verify the exact disposable context/server.
     config = json.loads(command("context", ["kubectl", "--context", CONTEXT, "config", "view",
                                           "--minify", "-o", "json"], root=root))
@@ -142,9 +168,10 @@ def kind_proxy(root):
     with socket.socket() as listener:
         listener.bind(("127.0.0.1", 0))
         port = listener.getsockname()[1]
+    connection_args = connection_proxy_arguments(connection_namespaces) if connection_namespaces else []
     process = subprocess.Popen(
         ["kubectl", "--context", CONTEXT, "--request-timeout=15s", "proxy",
-         "--address=127.0.0.1", f"--port={port}"],
+         "--address=127.0.0.1", f"--port={port}", *connection_args],
         cwd=root, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
     )
     try:
@@ -195,8 +222,7 @@ def exercise_instances(root, port, obj, method, path, accepted, prefix):
     deadline = time.monotonic() + 45
     while time.monotonic() < deadline:
         code, current = request(port, "GET", f"{CRD_PATH}/{CRD_NAME}")
-        if code == 200 and any(condition.get("type") == "Established" and condition.get("status") == "True"
-                               for condition in current.get("status", {}).get("conditions", [])):
+        if crd_established(code, current):
             break
         time.sleep(0.5)
     else:

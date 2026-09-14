@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 02-toolpolicies.yaml — minimal AGT profiles for both mesh sandboxes.
 #
 # Inlines the same Act 2 Hermes built-in deny list as

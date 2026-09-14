@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars e2e-harness
 
 A scenario- and platform-pluggable end-to-end test harness for kars.

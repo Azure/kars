@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 01-inferencepolicy.yaml — Foundry / Azure-OpenAI provider for the
 # executive-brief sandbox. Must use a provider that unlocks the Foundry
 # data-plane (web search, image generation via gpt-image-1, code

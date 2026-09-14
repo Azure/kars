@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # `@kars/mesh` — the local-OpenClaw companion plugin (`mesh-plugin/`)
 
 `@kars/mesh` is the **local-OpenClaw companion plugin** that turns any local OpenClaw install into a mesh-federated client of a kars cluster. It is **not yet published on npm** — today you build it from source (`mesh-plugin/`) and load it into your local OpenClaw (see [Building and testing locally](#building-and-testing-locally)). The `@kars` npm scope is reserved for a future release. You build it on your laptop, pair it once to a kars cluster with a token, and from then on your local agent can:

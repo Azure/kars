@@ -3,6 +3,7 @@
 
 import type { Execute } from "./deployment-target.js";
 import { splitImage } from "./image-targets.js";
+import { prepareCoreHelmSchemas } from "./core-helm-schemas.js";
 
 export const MESH_NAMESPACE = "agentmesh";
 export type MeshComponent = "registry" | "relay";
@@ -235,8 +236,10 @@ export async function applyMeshImages(execute: Execute, mesh: MeshInstallation, 
   if (mesh.kind === "external") throw new Error("External AgentMesh is not managed by Kars; explicit mesh updates are refused.");
   await recheckMeshOwnership(execute, mesh);
   if (mesh.kind === "helm") {
-    await execute("helm", ["upgrade", mesh.release, chart, "--namespace", mesh.releaseNamespace,
-      "--reuse-values", ...meshImageValueArgs(images), "--atomic", "--wait", "--timeout", "8m"], { stdio: "pipe" });
+    const args = ["upgrade", mesh.release, chart, "--namespace", mesh.releaseNamespace,
+      "--reuse-values", ...meshImageValueArgs(images), "--atomic", "--wait", "--timeout", "8m"];
+    await prepareCoreHelmSchemas(execute, args);
+    await execute("helm", args, { stdio: "pipe" });
   } else {
     await updateLegacyMeshImages(execute, mesh, images);
   }

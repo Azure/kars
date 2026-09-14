@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security Audit — Egress learn/enforce flow repair (operator toggle + CLI approve/deny/enforce)
 
 Date: 2026-06-29

@@ -9,33 +9,17 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { runWorkloadProof } from "./budget-workload-cases.mjs";
+import { context, kubectl } from "./budget-api-kubectl.mjs";
 
 const require = createRequire(new URL("../../cli/package.json", import.meta.url));
 const { parseAllDocuments } = require("yaml");
 const root = fileURLToPath(new URL("../../", import.meta.url));
-const context = "kind-kars-budget-api";
 const namespace = "budget-api-fixture";
 const controller = `system:serviceaccount:${namespace}:kars-controller`;
 const principal = `system:serviceaccount:${namespace}:untrusted`;
 const audience = "kars.azure.com/governed-inference-budget";
 const shared = JSON.parse(readFileSync(new URL("../../deploy/helm/kars/files/inference-budget-admission.json", import.meta.url), "utf8")
   .replaceAll("__ACCOUNTING_NAMESPACE__", namespace));
-
-function kubectl(args, input, publicSchema = false) {
-  try {
-    return execFileSync("kubectl", ["--context", context, "--request-timeout=20s", ...args], {
-      cwd: root, encoding: "utf8", input: input === undefined ? undefined : JSON.stringify(input),
-      stdio: ["pipe", "pipe", "pipe"], timeout: 30_000,
-    });
-  } catch (error) {
-    if (publicSchema) {
-      // This opt-in is used ONLY for the four public CRDs and eight public VAPs
-      // below. Do not enable it for Secret/token/agent-response commands.
-      console.error(String(error.stderr ?? "").slice(0, 12_000));
-    }
-    throw new Error("Disposable budget API assertion command failed", { cause: undefined });
-  }
-}
 
 function create(value, as, publicSchema = false) {
   return JSON.parse(kubectl(["create", "-f", "-", "-o", "json", ...(as ? ["--as", as] : [])], value, publicSchema));
@@ -75,7 +59,7 @@ const definitions = parseAllDocuments(rendered).map((document) => {
 assert.equal(definitions.length, crdNames.length);
 for (const definition of definitions) {
   create(definition, undefined, true);
-  kubectl(["wait", "--for=condition=Established", `crd/${definition.metadata.name}`, "--timeout=60s"]);
+  kubectl(["wait", "--for=condition=Established", `crd/${definition.metadata.name}`, "--timeout=60s"], undefined, true);
 }
 for (const policy of shared.items) {
   create({ apiVersion: "admissionregistration.k8s.io/v1", kind: "ValidatingAdmissionPolicy",

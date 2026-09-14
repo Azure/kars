@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Control mapping
 
 This page maps kars's **shipped, enforced** controls (the ✅ rows in

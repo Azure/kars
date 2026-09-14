@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars Security Validation Report — 2026-03-23 snapshot
 
 > **What this is.** A frozen-in-time evidence dump from one specific validation

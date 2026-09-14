@@ -6,9 +6,11 @@ import json
 import os
 import re
 import sys
+import time
 import types
+import uuid
 
-from .common import AGENT, EPOCH, OPERATORS, PRIVATE, RUNTIME, STANDIN, SYSTEM, require
+from .common import AGENT, EPOCH, OPERATORS, PRIVATE, RUNTIME, STANDIN, SYSTEM, command_error_category, require
 from .admission import runtime_denials
 from .credential_paths import token_secret_denials
 
@@ -16,12 +18,39 @@ MARKER = "e2e-secret-value-must-not-cross-filter"
 SA_PATH = "/var/run/secrets/kubernetes.io/serviceaccount"
 
 
+def download_metrics(h, manifest, deadline):
+    budget = deadline - time.monotonic()
+    require(budget > 0, "Metrics manifest download exceeded its bounded deadline")
+    result = h.run([sys.executable, str(h.root / "ci/acquire_test_tools.py"), "metrics",
+                    "--destination", str(manifest), "--budget", str(budget)],
+                   timeout=budget, expected=None)
+    require(result.returncode == 0,
+            "Metrics manifest download failed; category=" + command_error_category(result.stderr))
+
+
+def apply_metrics(h, manifest, deadline):
+    budget = deadline - time.monotonic()
+    require(budget > 0, "Metrics manifest Kubernetes apply exceeded its bounded deadline")
+    result = h.k("apply", "-f", str(manifest), timeout=budget, expected=None)
+    require(result.returncode == 0,
+            "Metrics manifest Kubernetes apply failed; category=" + command_error_category(result.stderr))
+
+
 def install_metrics(h):
     # Real metrics-server on the disposable Kind cluster. This is not a fake
     # metrics API and does not change any production chart or SRE policy.
     if not h.get("apiservice", "v1beta1.metrics.k8s.io"):
-        h.k("apply", "-f", "https://github.com/kubernetes-sigs/metrics-server/releases/download/v0.7.2/components.yaml",
-            timeout=90)
+        deadline = min(h.deadline, time.monotonic() + 90)
+        work = h.work / ("metrics-" + uuid.uuid4().hex)
+        work.mkdir(mode=0o700)
+        manifest = work / "components.yaml"
+        try:
+            download_metrics(h, manifest, deadline)
+            apply_metrics(h, manifest, deadline)
+        finally:
+            manifest.unlink(missing_ok=True)
+            manifest.with_name("components.yaml.part").unlink(missing_ok=True)
+            work.rmdir()
         h.k("patch", "deployment", "metrics-server", "-n", "kube-system", "--type=json", "-p",
             json.dumps([{"op": "add", "path": "/spec/template/spec/containers/0/args/-",
                          "value": "--kubelet-insecure-tls"}]))

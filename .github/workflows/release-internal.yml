@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 name: Internal Release (private, wall-off)
 
 # Cuts a REAL release end-to-end with EVERY artefact stored behind the wall.

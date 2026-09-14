@@ -12,7 +12,7 @@ use serde::{Deserialize, Serialize};
 pub struct CredentialSourceRef {
     #[schemars(
         length(min = 1, max = 253),
-        regex(pattern = "^kars-credential-source-[a-z0-9][a-z0-9-]*$")
+        regex(pattern = "^kars-credential-(source|bundle)-[a-z0-9][a-z0-9-]*$")
     )]
     pub name: String,
     #[schemars(length(min = 1, max = 128), regex(pattern = "^[A-Za-z0-9-]+$"))]

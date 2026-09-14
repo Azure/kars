@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # A2A public-ingress gateway
 
 > **Status — partial (library-complete, edge-wiring in progress).** The inbound

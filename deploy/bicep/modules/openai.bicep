@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars - Azure OpenAI Module
 
 @description('Azure OpenAI account name')

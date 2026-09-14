@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Two namespaces — one per sandbox. The controller creates the
 # per-sandbox namespaces as `kars-<sandbox-name>` so we pre-create
 # them here for any credentials Secrets the driver wants to land

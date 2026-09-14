@@ -1,4 +1,5 @@
-{{- if .Values.monitoring.inspektorGadget.enabled }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- if .Values.monitoring.inspektorGadget.enabled }}
 # Inspektor Gadget is deployed via 'kubectl gadget deploy' (official method).
 # This is a placeholder — the actual DaemonSet is managed by the kubectl-gadget plugin.
 #

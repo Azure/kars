@@ -1,4 +1,5 @@
-{{- /*
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- /*
   Phase 1 deliverable (implementation-plan.md §7 item 13 / "core VAP set").
 
   ValidatingAdmissionPolicy that blocks posture *downgrades* on pods

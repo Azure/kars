@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Behavioral Conformance Corpus
 
 Protocol invariants beyond happy-path — the net that catches

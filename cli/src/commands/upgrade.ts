@@ -32,6 +32,7 @@ import { connectDeploymentTarget } from "../lib/deployment-target.js";
 import { restartController, restartSandboxes } from "../lib/deployment-rollout.js";
 import { inspectNamespaceOwnership } from "../lib/namespace-ownership.js";
 import { assertRollbackSafe, assertSafeMutation } from "../lib/sre-authority.js";
+import { prepareCoreHelmSchemas, prepareCoreRollbackSchemas } from "../lib/core-helm-schemas.js";
 import {
   assertMeshReleaseConsistency, inspectMeshInstallation, meshImageValueArgs,
   readReleaseValues, recheckMeshOwnership, releaseMeshImages, restartMesh, updateLegacyMeshImages,
@@ -300,7 +301,7 @@ function reportFieldManagerConflicts(conflicts: FieldManagerConflict[]): void {
   console.error(chalk.yellow(
     `\n  ⚠ Pre-flight: ${conflicts.length} field(s) on this cluster are owned by another\n` +
     `  field manager, not Helm. Server-side apply will NOT overwrite them, so the\n` +
-    `  upgrade was stopped before any change — exactly so it can't half-apply.\n`,
+    `  workload/policy upgrade was stopped. Prepared owned schemas may remain.\n`,
   ));
   for (const c of conflicts) {
     console.error(chalk.yellow(`  • ${c.kind} ${c.object}`));
@@ -455,7 +456,8 @@ Examples:
         if (options.rollback) {
           await assertRollbackSafe(execa);
           stepper.step("Rolling back to the previous Helm revision...");
-          await execa("helm", ["rollback", "kars", "-n", NS, "--wait", "--timeout", "8m"], { stdio: "pipe" });
+          const revision = await prepareCoreRollbackSchemas(execa, "kars", NS);
+          await execa("helm", ["rollback", "kars", String(revision), "-n", NS, "--wait", "--timeout", "8m"], { stdio: "pipe" });
           stepper.done("Helm release rolled back");
 
           stepper.step("Restarting workloads...");
@@ -575,19 +577,22 @@ Examples:
         stepper.step("Upgrading controller + CRDs (atomic Helm upgrade)...");
         const helmPath = requireBundledAsset("deploy/helm/kars");
         await recheckMeshOwnership(execa, mesh);
+        await prepareCoreHelmSchemas(execa, buildHelmUpgradeArgs(ctx, helmPath, target, {
+          skipRuntimeImages: options.skipRuntimeImages, mesh, forceConflicts: options.forceConflicts,
+        }));
 
         // Pre-flight: a server-side dry-run detects fields owned by another
         // field manager (e.g. a manual `kubectl set env`). Helm v4 applies
         // server-side, so such a field makes the real apply — AND its atomic
         // rollback — fail with a conflict, leaving the release wedged. Catch it
-        // here, before any mutation, and let the operator decide rather than
-        // silently overwriting a field a live operator may legitimately own.
+        // here, before workload/policy mutation, and let the operator decide.
+        // The separately qualified owned schemas may already be staged.
         const pf = await preflightFieldManagerConflicts(execa, ctx, helmPath, target, {
           skipRuntimeImages: options.skipRuntimeImages,
           mesh,
         });
         if (pf.conflicts.length > 0 && !options.forceConflicts) {
-          stepper.fail("Field-manager conflict — upgrade stopped before any change");
+          stepper.fail("Field-manager conflict — workload/policy upgrade stopped");
           reportFieldManagerConflicts(pf.conflicts);
           process.exit(1);
         }

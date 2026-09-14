@@ -1,4 +1,5 @@
-{{- $mesh := .Values.agentMesh | default dict }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- $mesh := .Values.agentMesh | default dict }}
 {{- if $mesh.enabled }}
 {{- $namespace := $mesh.namespace | default "agentmesh" }}
 {{- if ne $namespace "agentmesh" }}

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars Full-Stack Demo
 
 One `kubectl apply` provisions everything kars can wire to a single agent:

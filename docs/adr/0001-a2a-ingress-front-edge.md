@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # ADR 0001: A2A 1.0 ingress — single gateway, router never publicly exposed
 
 **Status:** Accepted

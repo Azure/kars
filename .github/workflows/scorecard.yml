@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 name: OpenSSF Scorecard
 
 # OpenSSF Scorecard runs weekly + on push to main, but ONLY when the

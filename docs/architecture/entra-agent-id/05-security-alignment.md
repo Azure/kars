@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Conditional Access + custom security attributes (Phase 5)
 
 > **Audience**: operators rolling out kars in tenants where Entra

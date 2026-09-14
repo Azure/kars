@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Azure permissions required for `kars up`
 
 `kars up` provisions a complete secure-by-default AKS runtime: cluster,

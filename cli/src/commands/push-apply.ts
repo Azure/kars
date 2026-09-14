@@ -13,6 +13,7 @@ import { inspectCoreInstallation, recheckCoreOwnership, requireHealthyDeployment
 import { inspectSandboxPlans, refreshSandboxImages } from "../lib/sandbox-image-apply.js";
 import { inspectManagedMcpPlans, refreshManagedMcpImages } from "../lib/managed-mcp-image-apply.js";
 import { assertSafeMutation } from "../lib/sre-authority.js";
+import { prepareCoreHelmSchemas } from "../lib/core-helm-schemas.js";
 
 export interface PushApplyResult {
   applied: string[];
@@ -71,8 +72,10 @@ export async function applyPushedImages(
     await verifyMeshHealth(execute, mesh, meshImages);
   }
   for (const plan of helmPlans.values()) {
-    await execute("helm", ["upgrade", plan.release, chart, "--namespace", plan.namespace,
-      "--reuse-values", ...plan.args, "--atomic", "--wait", "--timeout", "8m"], { stdio: "pipe" });
+    const args = ["upgrade", plan.release, chart, "--namespace", plan.namespace,
+      "--reuse-values", ...plan.args, "--atomic", "--wait", "--timeout", "8m"];
+    await prepareCoreHelmSchemas(execute, args);
+    await execute("helm", args, { stdio: "pipe" });
   }
   if (selectedMesh && mesh?.kind === "helm") {
     await restartMesh(execute, mesh, Object.keys(meshImages) as Array<"registry" | "relay">);

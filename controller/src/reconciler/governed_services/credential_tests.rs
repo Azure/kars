@@ -19,6 +19,9 @@ const SECRETS: &str = "/api/v1/namespaces/kars-normal/secrets";
 const REG: &str = "/apis/kars.azure.com/v1alpha1/karssreregistrations/canonical";
 const DEPLOY: &str = "/apis/apps/v1/namespaces/kars-normal/deployments/normal";
 
+#[path = "private_purpose_tests.rs"]
+mod private_purpose_tests;
+
 fn source() -> KarsSandbox {
     serde_json::from_value(json!({
         "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsSandbox",
@@ -123,7 +126,10 @@ fn merge(value: &mut Value, patch: &Value) {
 
 async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
     let server = MockServer::start().await;
-    let state = Arc::new(Mutex::new(State::default()));
+    let state = Arc::new(Mutex::new(State {
+        objects: BTreeMap::from([(format!("/api/v1/namespaces/{NS}"), json!(namespace()))]),
+        ..Default::default()
+    }));
     let handler = state.clone();
     Mock::given(|_: &wiremock::Request| true).respond_with(move |request: &wiremock::Request| {
         let mut state = handler.lock().unwrap();
@@ -172,12 +178,14 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
             }
         }
         if (method == "POST" && path == SECRETS)
-            || (method == "PATCH" && path == format!("{SECRETS}/{SECRET}"))
+            || (method == "PATCH" && path.starts_with(&format!("{SECRETS}/")))
         {
             if state.conflict {
                 return failure(409);
             }
-            let key = format!("{SECRETS}/{SECRET}");
+            let key = if method == "POST" {
+                format!("{SECRETS}/{}",body["metadata"]["name"].as_str().unwrap())
+            } else { path.to_string() };
             let mut value = if method == "PATCH" {
                 let existing = state.objects.get(&key).unwrap().clone();
                 assert_eq!(body["metadata"]["uid"], existing["metadata"]["uid"]);
@@ -191,8 +199,8 @@ async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
             };
             merge(&mut value, &body);
             value["metadata"]["resourceVersion"] = version.to_string().into();
-            if let Some(material) = body["stringData"]["control-token"].as_str() {
-                value["data"]["control-token"] = STANDARD.encode(material).into();
+            for (key,material) in body["stringData"].as_object().into_iter().flatten() {
+                value["data"][key] = STANDARD.encode(material.as_str().unwrap()).into();
             }
             value.as_object_mut().unwrap().remove("stringData");
             if state.wrong_write_stamp {
@@ -321,8 +329,22 @@ async fn current_ready_epoch_is_required_and_recorded_before_control_token_creat
         state
             .calls
             .iter()
+            .take_while(|(method, path, _)| !(method == "POST" && path == SECRETS))
             .filter(|(_, path, _)| path.contains("/validatingadmissionpolicies/"))
-            .count(),
+            .map(|(_, path, _)| path)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
+        14
+    );
+    assert_eq!(
+        state
+            .calls
+            .iter()
+            .take_while(|(method, path, _)| !(method == "POST" && path == SECRETS))
+            .filter(|(_, path, _)| path.contains("/validatingadmissionpolicybindings/"))
+            .map(|(_, path, _)| path)
+            .collect::<std::collections::BTreeSet<_>>()
+            .len(),
         14
     );
 }
@@ -460,6 +482,30 @@ async fn already_qualified_control_is_reused_without_reissuing_or_touching_forei
         "secret:7"
     );
     assert_eq!(secret_writes(&state.lock().unwrap()), 0);
+}
+
+#[tokio::test]
+async fn missing_or_replaced_live_namespace_never_receives_new_control_material() {
+    for missing in [false, true] {
+        let (_server, client, state) = fixture().await;
+        {
+            let mut state = state.lock().unwrap();
+            let path = format!("/api/v1/namespaces/{NS}");
+            if missing {
+                state.objects.remove(&path);
+            } else {
+                state.objects.get_mut(&path).unwrap()["metadata"]["uid"] = "replacement".into();
+            }
+        }
+        assert!(
+            credentials::ensure(&client, &source(), &namespace())
+                .await
+                .is_err()
+        );
+        let state = state.lock().unwrap();
+        assert_eq!(token_issuances(&state), 0);
+        assert_eq!(secret_writes(&state), 0);
+    }
 }
 
 #[tokio::test]

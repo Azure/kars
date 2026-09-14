@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # ADR Index
 
 Architecture Decision Records for kars. Each ADR is immutable

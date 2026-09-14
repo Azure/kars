@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Demo scenario step 2 — ToolPolicy gates a sensitive tool.
 #
 # Demonstrates approval-required path: an outbound HTTP tool needs

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """
 kars default agent for the Microsoft Agent Framework Python runtime.
 

@@ -1,4 +1,5 @@
-{{- /*
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- /*
   kars Bridge completeness floor (design note §24b, roadmap item 4).
 
   ValidatingAdmissionPolicy that enforces the *create-time* completeness

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars Azure Monitor Dashboards
 
 ## Token Usage per Sandbox (KQL)

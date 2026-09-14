@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 name: Security Issue
 description: Report a security vulnerability (for critical vulnerabilities, use MSRC per SECURITY.md)
 body:

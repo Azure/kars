@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars — Supply-Chain Hardening
 
 This document describes the kars build, sign, and verify pipeline

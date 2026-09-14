@@ -138,6 +138,56 @@ fn canonical_form(value: &serde_json::Value) -> serde_json::Value {
 mod tests {
     use super::*;
 
+    #[test]
+    fn helm_sandbox_retains_standard_condition_observed_generation() {
+        use kube::CustomResourceExt;
+        use serde::Deserialize;
+
+        let chart = concat!(env!("CARGO_MANIFEST_DIR"), "/../deploy/helm/kars");
+        let output = std::process::Command::new("helm")
+            .args([
+                "template",
+                "kars",
+                chart,
+                "--namespace",
+                "kars-system",
+                "--show-only",
+                "templates/crd.yaml",
+            ])
+            .output()
+            .expect("Helm is required for Sandbox condition drift detection");
+        assert!(output.status.success(), "Helm failed to render Sandbox CRD");
+        let documents: Vec<serde_json::Value> =
+            serde_yaml::Deserializer::from_slice(&output.stdout)
+                .map(|document| {
+                    serde_json::Value::deserialize(document).expect("rendered CRD YAML")
+                })
+                .collect();
+        let helm = documents
+            .iter()
+            .find(|document| document["metadata"]["name"] == "karssandboxes.kars.azure.com")
+            .expect("rendered Sandbox CRD");
+        let rust = serde_json::to_value(crate::crd::KarsSandbox::crd()).unwrap();
+        let path =
+            "/spec/versions/0/schema/openAPIV3Schema/properties/status/properties/conditions/items";
+        let rust_condition = rust.pointer(path).expect("generated standard Condition");
+        let helm_condition = helm.pointer(path).expect("Helm Condition");
+        for condition in [rust_condition, helm_condition] {
+            let field = &condition["properties"]["observedGeneration"];
+            assert_eq!(field["type"], "integer");
+            assert_eq!(field["format"], "int64");
+            assert!(field.get("default").is_none());
+            assert!(!condition["required"].as_array().is_some_and(|required| {
+                required.iter().any(|field| field == "observedGeneration")
+            }));
+        }
+        assert!(
+            helm_condition
+                .get("x-kubernetes-preserve-unknown-fields")
+                .is_none()
+        );
+    }
+
     /// One-shot dumper. Run via:
     ///
     ///   DUMP_MCP_CRD_YAML=1 cargo test --bin kars-controller \
@@ -189,6 +239,25 @@ mod tests {
                 );
                 return;
             }
+        };
+        let helm_text = if helm_text.contains("{{") {
+            let path = std::path::Path::new(helm_path);
+            let chart = path.parent().unwrap().parent().unwrap();
+            let template = format!("templates/{}", path.file_name().unwrap().to_str().unwrap());
+            let output = std::process::Command::new("helm")
+                .args(["template", "kars"])
+                .arg(chart)
+                .args(["--namespace", "kars-system", "--show-only", &template])
+                .output()
+                .expect("Helm is required to compare rendered CRD templates");
+            assert!(
+                output.status.success(),
+                "Helm failed rendering {label}: {}",
+                String::from_utf8_lossy(&output.stderr)
+            );
+            String::from_utf8(output.stdout).expect("rendered Helm schema must be UTF-8")
+        } else {
+            helm_text
         };
         let helm_crd: serde_json::Value =
             serde_yaml::from_str(&helm_text).expect("helm crd YAML must parse as JSON value");

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # cargo-deny configuration — S17 supply-chain row.
 #
 # Enforced by `.github/workflows/ci.yml :: cargo-deny` (required PR row;

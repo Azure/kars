@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Blueprint 06 — Sovereign / air-gapped
 
 > "We run regulated, classified, sovereign-cloud, or fully air-gapped workloads. There is no public internet. There is no commercial Foundry endpoint. There is no Microsoft-hosted MCP catalogue. We still want kars's isolation + governance + audit guarantees, on locally-hosted models, with everything reproducible from a signed bundle."
