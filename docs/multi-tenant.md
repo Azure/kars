@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Multi-Tenant Namespace Isolation
 
 Each sandbox runs in its own Kubernetes namespace with independent security boundaries. No shared state between tenants.

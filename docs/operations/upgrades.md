@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Upgrades & rollback
 
 This runbook covers moving a running kars cluster from one release to the next,

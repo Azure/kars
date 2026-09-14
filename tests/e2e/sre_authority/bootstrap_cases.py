@@ -17,10 +17,16 @@ USER = "system:serviceaccount:e2e-sre-bootstrap:tenant"
 DEPLOYMENT_CONTROLLER = "system:serviceaccount:kube-system:deployment-controller"
 
 
-def as_tenant(port, path, obj, *, user=USER, method="POST"):
-    req = Request(f"http://127.0.0.1:{port}{path}", data=json.dumps(obj).encode(), method=method,
-                  headers={"Content-Type": "application/json", "Accept": "application/json",
-                           "Impersonate-User": user})
+def as_tenant(port, path, obj, *, user=USER, method="POST", uid=None):
+    headers = {"Content-Type": "application/json", "Accept": "application/json",
+               "Impersonate-User": user}
+    if uid is not None:
+        if not isinstance(uid, str) or not uid or len(uid) > 128 or not all(c.isalnum() or c == "-" for c in uid):
+            raise RuntimeError("Admission fixture UID is invalid")
+        headers["Impersonate-Uid"] = uid
+    req = Request(f"http://127.0.0.1:{port}{path}",
+                  data=None if method == "GET" else json.dumps(obj).encode(), method=method,
+                  headers=headers)
     try:
         response = build_opener(ProxyHandler({})).open(req, timeout=15)
     except HTTPError as error:

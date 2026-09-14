@@ -15,6 +15,7 @@ import { cliReleaseTag } from "../../lib/version.js";
 import { rolloutRestartAll } from "../upgrade.js";
 import { inspectNamespaceOwnership } from "../../lib/namespace-ownership.js";
 import { assertSafeMutation } from "../../lib/sre-authority.js";
+import { prepareCoreHelmSchemas } from "../../lib/core-helm-schemas.js";
 
 export interface UpOptionsForUpgrade {
   upgrade?: boolean;
@@ -126,6 +127,7 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
         } catch { /* non-critical */ }
 
         spin = ora("Upgrading Helm release...").start();
+        await prepareCoreHelmSchemas(execa, helmArgs);
         await execa("helm", helmArgs, { stdio: "pipe" });
         spin.succeed("Helm upgraded");
 

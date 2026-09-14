@@ -1,4 +1,7 @@
 ---
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Controller ServiceAccount
 apiVersion: v1
 kind: ServiceAccount
@@ -81,6 +84,10 @@ rules:
   - apiGroups: [""]
     resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
     verbs: ["get", "list", "watch", "create", "update", "patch", "delete"]
+  # Read the actual parent UID for private consumption provenance.
+  - apiGroups: [""]
+    resources: ["replicationcontrollers"]
+    verbs: ["get"]
   # Read pod logs (for offload result relay)
   - apiGroups: [""]
     resources: ["pods/log"]

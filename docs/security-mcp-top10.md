@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # OWASP MCP Top 10 (2025) — kars controls matrix
 
 Internal mapping. Each row answers: what kars surface takes the hit,

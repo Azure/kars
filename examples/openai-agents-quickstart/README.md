@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # OpenAI Agents Python — Quickstart
 
 This blueprint hosts an [OpenAI Agents SDK](https://github.com/openai/openai-agents-python) (Python)

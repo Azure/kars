@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # LOC budget — per internal Phase 1 plan §4.2.
 #
 # `ci/check-loc.sh` enforces:

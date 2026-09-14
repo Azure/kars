@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Agent credential-source capability review — 2026-09-07
 
 **Status:** additive candidate with maintainer sign-off received; independent

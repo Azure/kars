@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Per-sandbox identity (Entra Agent ID)
 
 Every kars sandbox runs under its own **Microsoft Entra Agent ID**.

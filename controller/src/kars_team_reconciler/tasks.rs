@@ -125,6 +125,22 @@ pub(super) async fn reconcile_revocations(
     let list = tasks.list(&ListParams::default()).await?;
     for task in list.items.iter().filter(|task| owned(&task.metadata, team)) {
         let role = task.annotations().get(ANNOT_TEAM_ROLE).map(String::as_str);
+        let rebinding = crate::kars_task_reconciler::rebind::pending(task);
+        let within = |desired: &KarsTaskSpec| {
+            within_seat(&task.spec, desired)
+                || (rebinding
+                    && within_seat(
+                        &without_credentials(&task.spec),
+                        &without_credentials(desired),
+                    ))
+        };
+        let attenuated = spec_attenuation_violations(&task.spec, &principal).is_empty()
+            || (rebinding
+                && spec_attenuation_violations(
+                    &without_credentials(&task.spec),
+                    &without_credentials(&principal),
+                )
+                .is_empty());
         let authorized = match role {
             Some("principal") => task.name_any() == specs::principal_name(team),
             Some("member") => team.spec.roster.iter().any(|role| {
@@ -134,8 +150,8 @@ pub(super) async fn reconcile_revocations(
                         .parent_ref
                         .as_ref()
                         .is_some_and(|reference| reference.name == specs::principal_name(team))
-                    && within_seat(&task.spec, &specs::member_spec(team, role))
-                    && spec_attenuation_violations(&task.spec, &principal).is_empty()
+                    && within(&specs::member_spec(team, role))
+                    && attenuated
             }),
             Some("taskforce") => {
                 task.spec
@@ -144,7 +160,7 @@ pub(super) async fn reconcile_revocations(
                     .is_some_and(|reference| reference.name == specs::principal_name(team))
                     && specs::envelope_errors(&task.spec.envelope).is_empty()
                     && specs::policy_errors(&task.spec).is_empty()
-                    && spec_attenuation_violations(&task.spec, &principal).is_empty()
+                    && attenuated
             }
             _ => false,
         };
@@ -152,9 +168,18 @@ pub(super) async fn reconcile_revocations(
             retire(tasks, task).await?;
         } else if team.spec.paused
             || specs::unsupported_budget(&task.spec.envelope)
-            || (role == Some("principal") && !within_seat(&task.spec, &principal))
+            || (role == Some("principal") && !within(&principal))
         {
             idle(tasks, task).await?;
+        }
+
+        fn without_credentials(spec: &KarsTaskSpec) -> KarsTaskSpec {
+            let mut value = spec.clone();
+            if let Some(blueprint) = value.blueprint.as_mut() {
+                blueprint.credential_bindings = None;
+                blueprint.github_binding = None;
+            }
+            value
         }
     }
     Ok(())
@@ -221,6 +246,9 @@ pub(super) async fn apply_task(
             if team.spec.paused {
                 return idle(tasks, old).await;
             }
+            return Ok(old.clone());
+        }
+        if crate::kars_task_reconciler::rebind::pending(old) && !team.spec.paused {
             return Ok(old.clone());
         }
         if within_seat(&old.spec, &spec) {

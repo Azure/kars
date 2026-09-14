@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # @kars/mesh — OpenClaw Federation Plugin
 
 > **Status — build from source (not yet published).** This plugin is **not yet

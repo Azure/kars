@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Conformance Runner — distroless (build-once pattern)
 #
 # A `KarsEval` run spawns this as an ephemeral K8s Job; the runner

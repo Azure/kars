@@ -1,6 +1,9 @@
 ---
 description: "Kars AGT E2E encryption skill — how the Signal Protocol inter-agent messaging works, how to debug it, and what was patched."
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # AGT E2E Encrypted Inter-Agent Communication
 

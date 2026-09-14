@@ -10,6 +10,14 @@ use serde_json::json;
 
 use crate::crd::SandboxConfig;
 
+pub(crate) fn build_pod_labels(name: &str) -> std::collections::BTreeMap<String, String> {
+    std::collections::BTreeMap::from([
+        ("kars.azure.com/sandbox".into(), name.into()),
+        ("kars.azure.com/component".into(), "sandbox".into()),
+        ("azure.workload.identity/use".into(), "true".into()),
+    ])
+}
+
 /// Build pod security context, conditionally including SELinux options and
 /// choosing between RuntimeDefault and Localhost seccomp profiles.
 /// For Kata (confidential), we use RuntimeDefault since the VM provides isolation.

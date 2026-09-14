@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # `tools/demo/` — scripted end-to-end walkthrough
 
 A single shell script that exercises the full kars stack across the

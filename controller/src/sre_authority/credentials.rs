@@ -183,6 +183,20 @@ async fn ensure_with_connection(
     super::live::verify(client, reg).await?;
     super::check_secret_denial(client, RUNTIME_NAMESPACE).await?;
     super::credential_guard::scan(client, reg).await?;
+    let runtime = Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone())
+        .get(RUNTIME_NAMESPACE)
+        .await
+        .map_err(|e| api_error("Read private activation namespace", e))?;
+    let source =
+        Api::<crate::crd::KarsSandbox>::namespaced(client.clone(), &reg.spec.sandbox.namespace)
+            .get(&reg.spec.sandbox.name)
+            .await
+            .map_err(|e| api_error("Read private activation source", e))?;
+    if source.metadata.uid.as_deref() != Some(reg.spec.sandbox.uid.as_str()) {
+        return Err("Private activation source was replaced".into());
+    }
+    let consumption_epoch =
+        crate::private_activation::for_sandbox(client, &source, &runtime).await?;
     let mut private = secret(client, reg, PRIVATE_SECRET).await?;
     if private
         .metadata
@@ -190,6 +204,7 @@ async fn ensure_with_connection(
         .as_ref()
         .and_then(|a| a.get(EPOCH))
         != Some(&reg.epoch())
+        || !crate::private_activation::stamp_matches(&private, consumption_epoch.as_deref())
         || (reg
             .status
             .as_ref()
@@ -229,7 +244,8 @@ async fn ensure_with_connection(
         .annotations
         .as_ref()
         .and_then(|a| a.get(EPOCH))
-        == Some(&epoch);
+        == Some(&epoch)
+        && crate::private_activation::stamp_matches(&private, consumption_epoch.as_deref());
     let tls_valid = same_epoch
         && tls_expiry > now + 172_800
         && [
@@ -241,6 +257,9 @@ async fn ensure_with_connection(
         .iter()
         .all(|key| data(&private, key).is_some());
     let mut private_annotations = annotations(reg);
+    if let Some(epoch) = &consumption_epoch {
+        private_annotations[crate::private_activation::EPOCH] = epoch.clone().into();
+    }
     if !tls_valid {
         let identity = crate::providers::sre_tls::issue()?;
         let proxy_token = crate::providers::signing::generate_service_token();

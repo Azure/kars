@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # A2A gateway operations
 
 > Companion to `docs/architecture/a2a-gateway.md`. Read that first.

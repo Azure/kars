@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars-runtime-pydantic-ai
 
 In-pod adapter for the [Pydantic-AI](https://ai.pydantic.dev/) agent

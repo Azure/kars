@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Entra Agent ID — Architecture Index
 
 > kars per-sandbox Entra Agent ID with **shared auth-sidecar** architecture.

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars CLI Reference
 
 kars ships **dozens of top-level commands** organised by purpose: **Lifecycle**,

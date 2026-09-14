@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars Hermes plugin (`runtimes/hermes/`)
 
 The **kars Hermes plugin** is the agent-side runtime surface for kars on top of the [Hermes Agent](https://github.com/NousResearch/hermes-agent) (Nous Research, MIT) — a Python 3.11+ agent harness with **20+ messaging channels**, **18+ inference providers**, **70+ built-in tools**, and a native MCP client. When a Hermes sandbox boots, the Hermes gateway auto-discovers the kars plugin from `$HERMES_HOME/plugins/kars/` and loads it; from that point on the agent's tool surface is the governance-aware kars tools the plugin registers plus the 6 Hermes built-ins kars explicitly denies.

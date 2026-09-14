@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Showcase asset builders
 
 ## Pitch deck (15 slides)

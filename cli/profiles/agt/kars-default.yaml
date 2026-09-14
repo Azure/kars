@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars AGT Governance Policy — agentmesh PolicyEngine format
 #
 # Uses agentmesh PolicyEngine action-pattern matching (glob: shell:*, inference:*).

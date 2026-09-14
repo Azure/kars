@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Governed inference budgets — v1 contract
 
 **Implementation candidate, not yet qualified for publication.** Only the new

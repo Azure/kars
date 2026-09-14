@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Helm chart packaging
 
 The kars Helm chart lives under [`deploy/helm/kars/`](../../deploy/helm/kars). This page documents how the chart is **versioned** and how a maintainer **packages** it for a release.

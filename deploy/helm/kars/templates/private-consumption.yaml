@@ -1,0 +1,6 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- $bundle := .Files.Get "files/private-consumption.json" | fromJson }}
+{{- range $bundle.objects }}
+---
+{{ toYaml . }}
+{{- end }}

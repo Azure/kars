@@ -360,7 +360,7 @@ mod regressions;
 mod closure_tests;
 
 #[cfg(test)]
-mod tests {
+pub(super) mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::Arc;
@@ -369,7 +369,7 @@ mod tests {
         matchers::{body_partial_json, header, path},
     };
 
-    pub(super) fn test_state(config: crate::config::Config) -> AppState {
+    pub(in crate::routes) fn test_state(config: crate::config::Config) -> AppState {
         let policy_status = Arc::new(crate::policy_status::PolicyStatusRegistry::new());
         let governance = Arc::new(crate::governance::Governance::new_with_status(
             "test",

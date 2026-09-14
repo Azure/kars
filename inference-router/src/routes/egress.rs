@@ -62,12 +62,16 @@ async fn egress_learned_blocked(
 
 /// GET /egress/learned — list all domains observed during learn mode.
 async fn egress_learned(State(state): State<AppState>) -> impl IntoResponse {
+    Json(learned_projection(&state).await)
+}
+
+pub(super) async fn learned_projection(state: &AppState) -> serde_json::Value {
     let domains = state.blocklist.get_learned_domains().await;
-    Json(serde_json::json!({
+    serde_json::json!({
         "learn_mode": state.blocklist.is_learn_mode(),
         "count": domains.len(),
         "domains": domains,
-    }))
+    })
 }
 
 /// POST /egress/learn — toggle learn mode at runtime.

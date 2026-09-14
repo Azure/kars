@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 name: ci-gates
 
 on:
@@ -47,6 +50,10 @@ jobs:
       - name: Make scripts executable
         run: chmod +x ci/*.sh
 
+      - name: Verify fresh audit-record boundaries
+        if: matrix.gate == 'security-audit-required'
+        run: python3 -m unittest discover -s ci/tests -p security_audit_gate_test.py
+
       - name: Run gate ${{ matrix.gate }}
         shell: bash
         env:
@@ -59,5 +66,8 @@ jobs:
             no-null-provider-prod)     ./ci/no-null-provider-prod.sh ;;
             security-audit-required)   ./ci/security-audit-required.sh ;;
             a2a-module-isolation)      ./ci/a2a-module-isolation.sh ;;
-            copyright-headers)         ./ci/check-copyright-headers.sh ;;
+            copyright-headers)
+              python3 ci/tests/copyright_headers_test.py
+              ./ci/check-copyright-headers.sh
+              ;;
           esac

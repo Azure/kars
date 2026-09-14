@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Sandbox namespace ownership (claim v1)
 
 KarsSandbox CRs are namespaced, but their runtime namespace remains

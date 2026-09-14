@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 03-karsmemory.yaml — Foundry Memory Store binding for the
 # single-agent Hermes exec-brief. The agent persists the analyst JSON
 # under key='analyst.json' via foundry_memory upsert so a follow-up

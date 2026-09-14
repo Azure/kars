@@ -9,6 +9,10 @@ const { execute } = vi.hoisted(() => ({
 }));
 vi.mock("execa", () => ({ execa: execute }));
 vi.mock("../lib/repo-assets.js", () => ({ requireBundledAsset: () => "/test/chart" }));
+vi.mock("../lib/core-helm-schemas.js", () => ({
+  prepareCoreHelmSchemas: vi.fn(async () => {}),
+  prepareCoreTemplateSchemas: vi.fn(async (_execute, rendered) => rendered),
+}));
 
 const releases = JSON.stringify([{ name: "kars", namespace: "kars-system" }]);
 const controller = JSON.stringify({

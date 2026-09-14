@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars KarsAuthConfig CRD
 #
 # DO NOT EDIT BY HAND. This file is the helm-side mirror of the Rust
@@ -14,6 +17,8 @@ apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
 metadata:
   name: karsauthconfigs.kars.azure.com
+  annotations:
+    helm.sh/resource-policy: keep
   labels:
     app.kubernetes.io/name: kars
     app.kubernetes.io/component: crd

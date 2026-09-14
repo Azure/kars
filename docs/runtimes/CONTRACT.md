@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Kars Runtime Contract — v1
 
 **Status**: stable contract; runtimes adopting this spec are first-class peers of OpenClaw.

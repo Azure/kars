@@ -3,6 +3,9 @@ name: foundry-code
 description: Python code execution via Azure AI Foundry Responses API with code_interpreter tool. Data analysis, charts, and math in a managed sandbox.
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # Foundry Code — Code Interpreter (Responses API)
 

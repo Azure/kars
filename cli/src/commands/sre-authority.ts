@@ -29,7 +29,9 @@ export function authorityCommand(): Command {
       const execute = executor(options.context);
       await stageAuthority(execute,requireBundledAsset("deploy/helm/kars"),options.namespace,options.release,
         options.controllerImage,options.routerImage,!!options.dryRun);
-      console.log("Authority controller staged. Preview and explicitly enroll the exact SRE source/grants before normal upgrades.");
+      console.log(options.dryRun
+        ? "Authority stage server-side preview completed without deployment changes; no controller or schema migration was applied."
+        : "Authority controller staged. Preview and explicitly enroll the exact SRE source/grants before normal upgrades.");
     });
   common("preview").description("Read exact enrollment identities and legacy grants; no mutations")
     .action(async options => {

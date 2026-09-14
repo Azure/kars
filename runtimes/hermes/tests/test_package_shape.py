@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Basic import-shape sanity tests — runs in CI without Hermes installed."""
 
 from __future__ import annotations

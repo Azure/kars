@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Managed MCP capability audit — 2026-09-08
 
 Status: **Source audit approved under explicit maintainer delegation**.

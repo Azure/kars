@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Supply-chain posture & OpenSSF Scorecard notes
 
 This document records kars's supply-chain decisions and how we address — or

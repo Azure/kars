@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Channels & external plugins
 
 Messaging channels (Telegram, Slack, Discord, WhatsApp) and **third-party** search/scrape API integrations (Brave, Tavily, Exa, Firecrawl, Perplexity, OpenAI) extend your kars agent with external communication and search capabilities. Configuration is via CLI flags — the sandbox entrypoint auto-configures everything from environment variables at startup.

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 02-toolpolicy.yaml — ToolPolicy CR for the single-agent Hermes
 # exec-brief. Inlines the kars-default AGT profile (same source of
 # truth as cli/profiles/agt/kars-default.yaml) so the in-pod

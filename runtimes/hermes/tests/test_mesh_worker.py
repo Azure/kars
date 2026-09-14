@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Unit tests for mesh_worker hooks — specifically the trust-publish
 hook that surfaces inbound peers in the operator's per-sandbox AGT
 panel.

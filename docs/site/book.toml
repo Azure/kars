@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 [book]
 title = "kars — Documentation"
 description = "kars: a secure runtime for AI agents on Azure Kubernetes Service. Per-agent sandbox isolation, declarative governance via CRDs, end-to-end encrypted inter-agent messaging, and a Rust router that enforces every external call."

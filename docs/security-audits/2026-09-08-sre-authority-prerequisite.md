@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security audit — registered SRE credential authority
 
 Status: **source audit approved under explicit maintainer delegation**.

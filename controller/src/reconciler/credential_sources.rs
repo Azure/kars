@@ -26,6 +26,38 @@ mod projection;
 #[path = "credential_source_workloads.rs"]
 mod workloads;
 
+pub(super) fn refresh_interval(sandbox: &KarsSandbox) -> std::time::Duration {
+    let governed = sandbox.spec.credentials_ref.is_some()
+        || sandbox.spec.credential_bindings.is_some()
+        || sandbox.spec.github_binding.is_some();
+    std::time::Duration::from_secs(if governed { 30 } else { 300 })
+}
+
+pub(crate) async fn pause_owned(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+) -> Result<(), Error> {
+    namespace_current(client, sandbox, namespace).await?;
+    workloads::pause(client, sandbox, namespace, false).await
+}
+
+pub(crate) async fn quiescent_owned(
+    client: &Client,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+) -> Result<bool, Error> {
+    workloads::quiescent(client, sandbox, namespace).await
+}
+
+pub(crate) fn validate_owned_deployment(
+    deployment: &Deployment,
+    sandbox: &KarsSandbox,
+    namespace: &Namespace,
+) -> Result<(), Error> {
+    workloads::owned(&deployment.metadata, sandbox, namespace)
+}
+
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
     #[error("CredentialSourceUnavailable: {0}")]
@@ -192,6 +224,55 @@ async fn read_source(
     ns: &Namespace,
     default_image: &str,
 ) -> Result<Secret, Error> {
+    if sandbox.spec.credential_bindings.is_some()
+        || sandbox
+            .spec
+            .credentials_ref
+            .as_ref()
+            .is_some_and(|r| r.name.starts_with(crate::credential_grant::BUNDLE_PREFIX))
+    {
+        let source = crate::credential_grants::sources::for_sandbox(client, sandbox)
+            .await
+            .map_err(|_| {
+                Error::Invalid("governed credential source or operator grant is unavailable")
+            })?;
+        if sandbox
+            .spec
+            .upstream_compatibility
+            .as_ref()
+            .is_some_and(|value| value.is_overlay_mode())
+        {
+            return Err(Error::Invalid(
+                "governed credentials require a controller-managed runtime",
+            ));
+        }
+        let plan = super::runtime::build_runtime_plan(&sandbox.spec.runtime, default_image)
+            .map_err(|_| Error::Invalid("governed credential runtime configuration is invalid"))?;
+        let inputs: Value = annotation(&source.metadata, crate::credential_grant::INPUT_STATE)
+            .and_then(|value| serde_json::from_str(value).ok())
+            .ok_or(Error::Invalid("credential binding evidence missing"))?;
+        let keys = inputs["bindings"]["sources"]
+            .as_array()
+            .into_iter()
+            .flatten()
+            .flat_map(|selection| selection["keys"].as_array().into_iter().flatten())
+            .filter_map(Value::as_str)
+            .collect::<Vec<_>>();
+        if keys
+            .iter()
+            .any(|key| plan.runtime_extra_env.contains_key(*key))
+            || plan.raw_env.iter().any(|entry| {
+                entry["name"]
+                    .as_str()
+                    .is_some_and(|key| keys.contains(&key))
+            })
+        {
+            return Err(Error::Invalid(
+                "governed credentials conflict with runtime environment overrides",
+            ));
+        }
+        return Ok(source);
+    }
     let reference = sandbox
         .spec
         .credentials_ref
@@ -268,6 +349,17 @@ async fn inputs_current(
 ) -> Result<(), Error> {
     sandbox_current(client, sandbox).await?;
     namespace_current(client, sandbox, ns).await?;
+    if annotation(&source.metadata, PURPOSE) == Some(crate::credential_grant::BUNDLE_PURPOSE) {
+        let current = crate::credential_grants::sources::for_sandbox(client, sandbox)
+            .await
+            .map_err(|_| Error::Invalid("governed credential inputs are no longer authorized"))?;
+        if identity(&current.metadata)? != identity(&source.metadata)? {
+            return Err(Error::Invalid(
+                "governed credential bundle changed before projection write",
+            ));
+        }
+        return Ok(());
+    }
     let api: Api<Secret> =
         Api::namespaced(client.clone(), &sandbox.namespace().unwrap_or_default());
     let live = metadata(&api, &source.name_any())
@@ -288,6 +380,8 @@ pub enum Mode {
         version: String,
         source_uid: String,
         source_version: String,
+        source_keys: Vec<String>,
+        source_inputs: Option<Value>,
     },
 }
 
@@ -347,11 +441,18 @@ impl Mode {
                 version,
                 source_uid,
                 source_version,
+                source_keys,
+                source_inputs,
             } => (
                 "True",
-                "Projected",
+                if source_inputs.is_some() {
+                    "GovernedProjected"
+                } else {
+                    "Projected"
+                },
                 json!({"sourceUid": source_uid, "sourceVersion": source_version,
-                    "projectionUid": uid, "projectionVersion": version})
+                    "projectionUid": uid, "projectionVersion": version,
+                    "configuredKeys":source_keys,"inputs":source_inputs})
                 .to_string(),
             ),
             Self::Legacy if prior.is_some() => (
@@ -392,8 +493,19 @@ pub async fn reconcile(
     default_image: &str,
 ) -> Result<Mode, Error> {
     let ns = ns.ok_or(Error::Invalid("runtime namespace is not verified"))?;
-    let result = if sandbox.spec.credentials_ref.is_some() {
+    let configured =
+        sandbox.spec.credentials_ref.is_some() || sandbox.spec.credential_bindings.is_some();
+    let was_governed = sandbox.status.as_ref().is_some_and(|status| {
+        status.conditions.iter().any(|condition| {
+            condition.type_ == "CredentialsReady" && condition.reason == "GovernedProjected"
+        })
+    });
+    let result = if configured {
         project(client, sandbox, ns, default_image).await
+    } else if was_governed {
+        Err(Error::Invalid(
+            "governed credential bindings were removed; legacy values remain disabled",
+        ))
     } else {
         projection::detach(client, sandbox, ns)
             .await
@@ -402,8 +514,7 @@ pub async fn reconcile(
     if let Err(error) = result {
         // Try both operations: a transient Deployment error must not skip
         // projection revocation, or vice versa. Never echo API request bodies.
-        let stopped =
-            workloads::pause(client, sandbox, ns, sandbox.spec.credentials_ref.is_none()).await;
+        let stopped = workloads::pause(client, sandbox, ns, !configured).await;
         let revoked = projection::revoke(client, sandbox, ns, false).await;
         let failure = stopped.err().or_else(|| revoked.err()).unwrap_or(error);
         report(client, sandbox, &failure).await?;
@@ -441,6 +552,14 @@ async fn project(
         version: identity(&current.metadata)?.1.into(),
         source_uid: identity(&source.metadata)?.0.into(),
         source_version: identity(&source.metadata)?.1.into(),
+        source_keys: source
+            .data
+            .iter()
+            .flatten()
+            .map(|(key, _)| key.clone())
+            .collect(),
+        source_inputs: annotation(&source.metadata, crate::credential_grant::INPUT_STATE)
+            .and_then(|value| serde_json::from_str(value).ok()),
     };
     if changed || !workloads::current(client, sandbox, ns, &mode).await? {
         workloads::pause(client, sandbox, ns, false).await?;
@@ -465,6 +584,14 @@ async fn project(
             version: identity(&written.metadata)?.1.into(),
             source_uid: identity(&source.metadata)?.0.into(),
             source_version: identity(&source.metadata)?.1.into(),
+            source_keys: source
+                .data
+                .iter()
+                .flatten()
+                .map(|(key, _)| key.clone())
+                .collect(),
+            source_inputs: annotation(&source.metadata, crate::credential_grant::INPUT_STATE)
+                .and_then(|value| serde_json::from_str(value).ok()),
         };
     }
     Ok(mode)

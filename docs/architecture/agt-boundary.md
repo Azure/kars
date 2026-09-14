@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # AGT Boundary — what kars consumes vs. what kars builds
 
 > Defines the operational seam between [Microsoft AGT](https://github.com/microsoft/agent-governance-toolkit) and kars: what kars imports, what it builds in-tree, and the four provider contracts that keep them aligned.

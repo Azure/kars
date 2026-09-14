@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 05-karssandbox.yaml — the actual sandbox that runs the executive-brief
 # pipeline. Three sub-agents (analyst, viz, writer) are spawned at
 # runtime by the parent agent based on the prompt's coordination

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 00-playwright-mcp.yaml — the Playwright MCP server, in-cluster.
 #
 # This is an ordinary Deployment + Service running Microsoft's official

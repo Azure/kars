@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Walkthrough: The Lethal Trifecta, Defused
 
 A timed, ~7-minute live or recorded demo. Two AKS namespaces, one

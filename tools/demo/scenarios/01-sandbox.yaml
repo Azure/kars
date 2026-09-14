@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Demo scenario step 1 — minimal governed sandbox.
 #
 # Applies an InferencePolicy + KarsSandbox, expects router echo Ready.

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Two Hermes sandboxes. Both use the same image (kars-runtime-hermes:latest)
 # the controller picks via RuntimeKind::Hermes; the only difference is
 # which one is LLM-driven (mesh-ping-hermes) vs which one runs the

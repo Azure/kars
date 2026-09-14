@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 name: Perf Nightly (k6)
 
 # Phase 2 S16. Wall-clock perf smoke against the inference router.

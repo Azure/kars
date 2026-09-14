@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Unit tests for kars_spawn family + kars_discover."""
 
 from __future__ import annotations

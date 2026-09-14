@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Example: Basic Hermes Agent
 # Minimal Hermes-runtime sandbox — the kars plugin auto-loads, the agent
 # joins the AGT mesh (verified-tier when foundryRbac is set in the
