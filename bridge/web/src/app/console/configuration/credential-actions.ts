@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use server";
 
 import { BffError, putCredential, reviewCredential } from "@/lib/bff";

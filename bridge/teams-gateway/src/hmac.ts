@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — Teams Gateway: HMAC-SHA256 authentication for internal endpoints.
 
 import { createHmac, timingSafeEqual } from "node:crypto";

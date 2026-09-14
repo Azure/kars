@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — "Delete team" server action. Permanently removes a standing
 // team via the BFF (which deletes the KarsTeam and sweeps its runs, member
 // sandboxes, shared memory, task backlog, and channel secret). Destructive and

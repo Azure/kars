@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — Governance steering: the HITL approval inbox.
 //
 // These endpoints back the steering inbox — the fleet-wide list of human

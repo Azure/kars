@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { TeamsGatewayConfig } from "./config.js";
 import { log } from "./log.js";
 

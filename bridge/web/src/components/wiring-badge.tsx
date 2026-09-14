@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge web — wiring-status badge. Communicates honest implementation
 // status: live (green), partial (amber), not wired (neutral/dashed).
 

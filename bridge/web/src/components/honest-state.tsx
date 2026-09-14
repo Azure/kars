@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — the honesty grammar.
 //
 // A single, reusable component for the three distinct "no data" situations the

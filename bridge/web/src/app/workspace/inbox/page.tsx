@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Inbox. The fleet-wide decision queue. Every card
 // answers what/by-which-role/why/impact before the buttons (no rubber-stamping).
 

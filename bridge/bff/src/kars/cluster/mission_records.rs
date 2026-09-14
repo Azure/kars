@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::{Cluster, MissionOutputRecord};
 use crate::providers::signing::sha256_hex;
 use k8s_openapi::api::core::v1::ConfigMap;

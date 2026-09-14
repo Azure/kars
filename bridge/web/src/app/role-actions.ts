@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use server";
 
 // kars Bridge — set the DEV role-simulation cookie. No SSO yet, so this lets one

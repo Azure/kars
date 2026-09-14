@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — task-scoped approvals panel. Shows the human decisions gating
 // this task (the steering surface, in the task's own context), with inline
 // approve/deny for any still pending.

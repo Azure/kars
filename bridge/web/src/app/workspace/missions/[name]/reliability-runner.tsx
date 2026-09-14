@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // Reliability runner — the pass^k trigger. Runs a delivered mission's EXACT

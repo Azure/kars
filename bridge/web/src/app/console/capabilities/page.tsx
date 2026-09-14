@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — Agent capabilities. What teams/agents may be
 // granted: versioned skills, ready-made team profiles, MCP services (bounded
 // by a tool policy), and per-agent runtime credentials. Split out of the

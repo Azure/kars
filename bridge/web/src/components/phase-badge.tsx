@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge web — map a KarsTask phase to a status-badge tone.
 
 import { StatusBadge } from "@/components/status-badge";

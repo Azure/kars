@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Governed credential adapter. Values stay in native, operator-authorized Secrets.
 
 use super::cluster::Cluster;

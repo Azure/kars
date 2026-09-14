@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // kars-SRE remediation-proposal approve/reject control. Mirrors SkillApproval:

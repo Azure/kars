@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — Auditor surface home. The read-only tamper-evident record and
 // independent verification, rendered from the shared AuditView (identical to the
 // Console's audit page, minus every operator write-control).

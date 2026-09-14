@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — the kars-sre self-remediation approval surface.
 //
 // Backs the operator "SRE Actions" console page: the kars-sre agent

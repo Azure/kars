@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge web — value formatting helpers. Disciplined, audit-friendly
 // rendering of machine values (counts, budgets, money).
 

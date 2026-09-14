@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge web — server-side BFF client.
 //
 // This module runs only on the Next.js server. It is the single place the

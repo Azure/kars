@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // A real Rubik's cube rendered in CSS 3D — six faces, each a 3×3 grid of

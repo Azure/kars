@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — reliability runner (pass^k) server action.
 //
 // Replicates a delivered mission's EXACT package k times so the efficiency

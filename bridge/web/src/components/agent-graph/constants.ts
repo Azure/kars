@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 export const AGENT_WIDTH = 248;
 
 export const AGENT_HEIGHT = 128;

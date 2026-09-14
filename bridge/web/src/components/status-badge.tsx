@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge web — status badge. A small, accessible indicator used across
 // the trust/verification surfaces.
 

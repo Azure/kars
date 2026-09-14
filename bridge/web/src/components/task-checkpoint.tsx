@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { TaskCheckpoint } from "@/lib/types";
 
 const TONE: Record<TaskCheckpoint["status"], string> = {

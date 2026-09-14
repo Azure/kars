@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — the shared Auditor view. Rendered both inside the Operator
 // Console (/console/audit) and on the dedicated read-only Auditor surface
 // (/audit), so the two never drift. It is entirely read-only: a chain-integrity

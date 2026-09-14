@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — curated catalog of popular MCP servers, so an operator can add a
 // connected service in one click instead of hand-authoring a McpServer spec.
 //

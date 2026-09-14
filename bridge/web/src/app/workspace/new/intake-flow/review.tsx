@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { SegmentedTier } from "@/components/segmented-tier";
 import { OrchestrationCube } from "@/components/orchestration-cube";
 import { Icon } from "@/components/icon";

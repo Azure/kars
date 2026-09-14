@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { Section } from "@/components/ui";
 import type { ClusterCapacity, Sandbox } from "@/lib/types";
 

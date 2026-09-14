@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — Insights. Fleet-wide efficiency + governance,
 // graphical. Structural facts are real; runtime token/latency render the
 // honest "needs a real run" state, never fabricated zeros.

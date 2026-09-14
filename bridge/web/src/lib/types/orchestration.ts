@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { BlueprintEgress, BlueprintModel, ExecutionPlan } from "./missions";
 import type { EngineeringSignal } from "./teams";
 

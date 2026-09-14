@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — the employee shell.
 //
 // Consumer-grade chrome: warm, generous spacing, the product identity, the

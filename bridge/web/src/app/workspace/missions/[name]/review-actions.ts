@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — artifact review server action (§16). request_changes re-drives
 // the producing task on the reviewer's delta.
 "use server";

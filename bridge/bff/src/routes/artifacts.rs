@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — the cross-mission Artifacts index.
 //
 // The Artifacts surface (design note §16) lists the real deliverables missions

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Skills. The USER side of the skill trust gate: upload
 // a skill package, watch it move through operator review, and see which skills
 // are approved + usable to assign to a task or team. Uploading proposes

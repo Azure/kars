@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use kube::ResourceExt;
 use serde::Serialize;
 

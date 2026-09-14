@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Copyright (c) Pal Lakatos-Toth.
 // kars Bridge BFF — runtime configuration loaded from the environment.
 //

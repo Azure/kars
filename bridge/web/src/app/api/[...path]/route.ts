@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — runtime same-origin /api/* proxy to the BFF.
 //
 // Why a route handler (not a next.config rewrite): a standalone build freezes a

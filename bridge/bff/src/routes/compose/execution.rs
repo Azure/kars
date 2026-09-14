@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::client::extract_json;
 use super::{ComposeDelegation, ComposeDelegationRole};
 

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — pre-flight validation gate (design note §20).
 //
 // The riskiest moment is the handoff from an edited package to a running agent

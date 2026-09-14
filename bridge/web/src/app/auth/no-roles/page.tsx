@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — honest landing for a real SSO login that mapped to zero
 // roles. Fail-closed by design (lib/oidc.ts rolesFromClaims): an
 // unrecognized or absent role claim never grants a default role.

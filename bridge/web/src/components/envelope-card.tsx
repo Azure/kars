@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge web — trust-envelope visualization.
 //
 // Renders the authority a task holds as a precise, scannable card: the

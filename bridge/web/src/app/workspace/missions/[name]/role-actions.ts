@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — add a delegated role to a mission (the §12 org chart).
 //
 // A "role" is a child KarsTask whose authority is a verified subset of the

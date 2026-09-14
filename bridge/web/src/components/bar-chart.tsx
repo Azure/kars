@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — simple, dependency-free horizontal bar chart for count data.
 // Renders real values only; an empty series renders nothing (caller shows the
 // honest empty state).

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::mission_records::{
     mission_evidence_key, mission_output_candidate, project_mission_output_record,
     select_mission_evidence_records, select_mission_output_records, trace_record_identity,

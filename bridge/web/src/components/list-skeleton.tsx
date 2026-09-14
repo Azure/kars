@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { Skeleton } from "@/components/ui";
 
 /// A shared loading scaffold for the workspace list pages (missions, teams,

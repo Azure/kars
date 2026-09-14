@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { NextConfig } from "next";
 
 // NOTE: the same-origin /api/* proxy to the BFF is handled at RUNTIME in

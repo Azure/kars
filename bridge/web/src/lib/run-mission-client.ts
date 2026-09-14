@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 export async function runMissionClient(
   namespace: string,
   name: string,

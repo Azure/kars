@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — mission run (drive a real governed model run, capture it).
 //
 // This makes a "mission" actually DO something instead of a sandbox sitting

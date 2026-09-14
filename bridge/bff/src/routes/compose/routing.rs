@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use crate::routes::options::ModelOption;
 
 pub(super) fn orchestrator_quality_score(deployment: &str) -> Option<i64> {

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — Configuration. The hub for the CLUSTER this
 // runs on: the inference provider, Azure AI Foundry connection, the models it
 // serves, cluster add-ons (SRE agent, Headlamp), and the platform GitHub App.

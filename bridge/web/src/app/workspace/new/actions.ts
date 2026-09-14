@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — mission intake server action.
 //
 // Creates a governed mission from the reviewed package. The user never sees a

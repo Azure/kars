@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { TeamsGatewayConfig } from "./config.js";
 import type { CardVerdict } from "./cards.js";
 import type { ResolvedPrincipal } from "./identity.js";

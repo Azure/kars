@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — remediation identity and compatibility with persisted intake.
 
 use crate::providers::signing::sha256;

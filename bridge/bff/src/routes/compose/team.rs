@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // ─── Team orchestrator: charter → org chart ──────────────────────────────────
 //
 // The symmetric counterpart to the mission orchestrator. From a standing-team

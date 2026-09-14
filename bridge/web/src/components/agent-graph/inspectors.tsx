@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type * as React from "react";
 import { Icon } from "@/components/icon";
 import type { AgentIdentity, Receipt } from "@/lib/types";

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // Deploy a local (in-cluster / AI Runway) model — used in the Model catalogue,

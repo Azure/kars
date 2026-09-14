@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — Teams Gateway: structured logging with automatic secret redaction.
 
 export type LogLevel = "info" | "warn" | "error" | "debug";

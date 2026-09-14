@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — system / wiring introspection.
 //
 // Delivery Constraint #5 (honest wiring visibility): the product must never

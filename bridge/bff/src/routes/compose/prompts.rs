@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /// Build the system prompt enumerating the real building blocks + the strict
 /// JSON contract. The model is told it may ONLY use these exact identifiers,
 /// and is given the learned efficiency frontier so its model choice is grounded

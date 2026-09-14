@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — task API DTOs + handlers.
 //
 // These endpoints are the browser's only way to touch KarsTask resources.

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — operator Foundry onboarding.
 //
 // The admin connects an Azure AI Foundry project so the cluster can use Foundry

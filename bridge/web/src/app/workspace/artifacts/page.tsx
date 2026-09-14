@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Artifacts. The cross-mission deliverable index.
 //
 // Lists the REAL deliverables missions have produced — the files captured by

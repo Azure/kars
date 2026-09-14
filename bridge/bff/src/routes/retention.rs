@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — cluster-wide mission/team-run retention policy.
 //
 // Kars intentionally keeps mission/team-run records (KarsTask CRs) after

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::mission::option_named;
 use super::{ComposeTeamProposal, is_non_autonomous_harness};
 

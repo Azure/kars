@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — SSO login entry point.
 //
 // GET /auth/login: when SSO is configured, starts a real OIDC Authorization

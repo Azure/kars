@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Connections. Where a USER connects their own GitHub
 // repos so their agents can open pull requests (keyless). Operator-level App
 // setup lives in the Console; each user's GitHub connection is isolated.

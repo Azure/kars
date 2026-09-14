@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Mission detail server presentation; page fetching and routing stay in ./page.
 
 import Link from "next/link";

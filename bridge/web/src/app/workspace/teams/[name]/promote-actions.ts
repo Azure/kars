@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — team promotion server action (§12). Records a requested higher
 // tier; the controller opens a human approval and widens the envelope only on
 // approval (the BFF never raises the envelope directly).

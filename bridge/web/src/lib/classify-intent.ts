@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Intent classifier for the unified intent-first intake.
 //
 // One intent box decides whether the work is a MISSION (a focused, one-off task

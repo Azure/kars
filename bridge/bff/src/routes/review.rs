@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — artifact review loop (design note §16).
 //
 // A deliverable isn't done until a human accepts it. This surface turns the

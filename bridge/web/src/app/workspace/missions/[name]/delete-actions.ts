@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — "Delete mission" server action. Permanently removes a mission
 // via the BFF (which deletes the KarsTask and sweeps its deliverable, files,
 // trace, and review record). Destructive and irreversible; the control gates it

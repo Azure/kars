@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { MissionArtifact, TaskDetail, TeamDetail, TeamRole } from "./types";
 
 export interface CollaborationEvent {

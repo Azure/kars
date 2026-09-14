@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 export type CredentialKind = "KarsSandbox" | "KarsTask" | "KarsTeam";
 export interface CredentialInput {
   kind: CredentialKind;

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — Teams Gateway: configuration (fail-closed).
 //
 // All identity and routing configuration is required. The gateway refuses to

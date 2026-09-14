@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::*;
 use crate::providers::receipt::ReceiptTestSigner as SigningKey;
 use crate::providers::signing::sha256_hex;

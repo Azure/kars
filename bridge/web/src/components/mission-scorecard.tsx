@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — mission scorecard (graphical, honest).
 //
 // The efficiency numbers the plan promises to deliver to USERS. Structural

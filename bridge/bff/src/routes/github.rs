@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — Connect GitHub (keyless git write, §14).
 //
 // Per-principal self-service GitHub connection. The Bridge holds the shared kars

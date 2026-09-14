@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Missions list. Plain-language projection of the task
 // fleet, filterable by what the user cares about (running / ready / blocked).
 

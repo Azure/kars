@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — Safety evals (KarsEval).
 //
 // The quality/safety lifecycle: each KarsEval replays a curated adversarial

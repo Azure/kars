@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Copyright (c) Pal Lakatos-Toth.
 // Integration tests for the kars Bridge BFF router. Exercises the public
 // HTTP surface in-process (no socket bind) via tower's oneshot. These run

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { IAdaptiveCard } from "@microsoft/teams.cards";
 
 export interface ApprovalEvent {

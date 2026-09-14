@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import Link from "next/link";
 import { DeliverableBody } from "@/components/deliverable-view";
 import { HonestState } from "@/components/honest-state";

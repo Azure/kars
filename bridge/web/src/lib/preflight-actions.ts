@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — shared pre-flight validation action. Validates a launch package
 // (mission OR team) against the live cluster: model served, tool policy compiled,
 // MCP servers reconciled + endpoints resolve, egress hosts resolve, budget/tier

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // GatewayWatcher wire and collaborator types; no runtime initialization.
 
 export interface Metadata {

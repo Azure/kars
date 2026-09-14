@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — the live mission map (design note §4). A single
 // at-a-glance view of a governed run: the delegation tree (principal + reports
 // + sub-agents) with each node's authority tier, the live token burn against

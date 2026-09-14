@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge web — render an envelope digest as a verifiable, copyable
 // monospace chip. The digest is the value a Governance Receipt binds to, so
 // it is presented as evidence, not decoration.

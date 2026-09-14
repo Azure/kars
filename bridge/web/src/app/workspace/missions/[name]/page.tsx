@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Mission detail (the live mission canvas).
 //
 // The user projection of a governed task: the objective, an always-visible

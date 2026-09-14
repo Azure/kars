@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 export function modelKey(provider: string, deployment: string) {
   return `${provider}::${deployment}`;
 }

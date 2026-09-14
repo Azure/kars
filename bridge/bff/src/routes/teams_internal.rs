@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — Internal Teams gateway endpoints.
 //
 // Authenticated by X-Teams-Internal-Secret. The gateway sends the Entra subject;

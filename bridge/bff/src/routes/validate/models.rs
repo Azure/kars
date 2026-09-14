@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — models pre-flight checks.
 
 use super::{Check, CheckStatus};

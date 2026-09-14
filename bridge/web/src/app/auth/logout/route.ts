@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — SSO logout.
 //
 // POST /auth/logout: clears the Bridge's own session cookie. Also redirects

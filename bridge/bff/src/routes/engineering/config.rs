@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — config helpers for engineering intake.
 
 use std::collections::{BTreeMap, BTreeSet};

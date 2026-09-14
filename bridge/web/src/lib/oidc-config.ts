@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — OIDC SSO configuration (server-only).
 //
 // Generic, config-only OIDC Authorization Code + PKCE client: point it at any

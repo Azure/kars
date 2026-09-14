@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — server-side session/RBAC resolution.
 //
 // Roles come from, in priority order:
