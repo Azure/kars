@@ -38,7 +38,7 @@ class HeaderTests(unittest.TestCase):
         return path
 
     def apply(self, name, data, expected_offset=None):
-        rule = headers.classification(name, self.policy)
+        rule = headers.classification(name, self.policy, data)
         offset, block = headers.insertion(name, data, rule["style"])
         if expected_offset is not None:
             self.assertEqual(offset, expected_offset)
@@ -147,7 +147,7 @@ class HeaderTests(unittest.TestCase):
         self.apply("a.css", prefix + b'\n@import "theme.css";\n', len(prefix))
 
     def test_template_headers_never_emit_or_trim_whitespace(self):
-        for path in ("chart/templates/config.yaml", "chart/templates/NOTES.txt", "a.tpl", "a.hbs"):
+        for path in ("chart/templates/NOTES.txt", "a.tpl", "a.hbs"):
             for body in (
                 b'{{- if .Values.enabled -}}\nkey: value\n{{- end -}}\n',
                 b'  leading whitespace\n{{- /* existing comment */ -}}\n',
@@ -158,6 +158,163 @@ class HeaderTests(unittest.TestCase):
                     self.assertTrue(after.endswith(body))
                     marker = b"--}}" if path.endswith(".hbs") else b"*/}}"
                     self.assertEqual(after.split(marker, 1)[1], body)
+
+    def test_plain_template_yaml_normalizes_only_its_license_prefix(self):
+        for suffix in (".yaml", ".yml"):
+            for bom, newline in ((b"", b"\n"), (b"", b"\r\n"), (codecs.BOM_UTF8, b"\r\n")):
+                for document in (b"", b"---\n"):
+                    body = (
+                        b"# Original author notice\n" + document
+                        + b"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: plain"
+                    ).replace(b"\n", newline)
+                    name = "chart/templates/plain" + suffix
+                    previous = headers.header_for("helm", body)
+                    bad = bom + previous + body
+                    path = self.write(name, bad)
+                    path.chmod(0o640)
+                    result, = headers.process(self.root, [name], self.policy)
+                    self.assertEqual(result["style"], "hash")
+                    self.assertEqual(result["status"], "missing")
+                    self.assertEqual(path.read_bytes(), bad)
+                    result, = headers.process(self.root, [name], self.policy, apply=True)
+                    self.assertEqual(result["removed_bytes"], len(previous))
+                    self.assertEqual(result["removed_offset"], len(bom))
+                    destination = body.index(b"---") + 3 + len(newline) if document else 0
+                    self.assertEqual(result["offset"], len(bom) + destination)
+                    expected = bom + body[:destination] + headers.header_for("hash", body) + body[destination:]
+                    self.assertEqual(path.read_bytes(), expected)
+                    self.assertEqual(path.stat().st_mode & 0o777, 0o640)
+                    self.assertEqual(result["after_sha256"], hashlib.sha256(expected).hexdigest())
+                    again, = headers.process(self.root, [name], self.policy, apply=True)
+                    self.assertEqual(again["status"], "present")
+                    self.assertEqual(path.read_bytes(), expected)
+        invalid = headers.STYLES["helm"].encode() + b"\x00"
+        path = self.write("chart/templates/unsafe.yaml", invalid)
+        result, = headers.process(self.root, ["chart/templates/unsafe.yaml"], self.policy, apply=True)
+        self.assertEqual(result["status"], "error")
+        self.assertEqual(path.read_bytes(), invalid)
+
+    def test_chart_yaml_keeps_its_initial_document_marker_before_the_license(self):
+        name = "chart/templates/plain.yaml"
+        for preamble in (b"---\n", b"\n# Original note\n--- # document\n", b"%YAML 1.2\n---\n"):
+            body = preamble + b"apiVersion: v1\nkind: ConfigMap\nmetadata:\n  name: example\n"
+            expected = preamble + headers.STYLES["hash"].encode() + body[len(preamble):]
+            self.assertEqual(self.apply(name, body, len(preamble)), expected)
+            path = self.write(name, headers.STYLES["hash"].encode() + body)
+            result, = headers.process(self.root, [name], self.policy, apply=True)
+            self.assertEqual(result["removed_offset"], 0)
+            self.assertEqual(result["offset"], len(preamble))
+            self.assertEqual(path.read_bytes(), expected)
+        for body in (b"---", b"--- {kind: ConfigMap}\n"):
+            with self.assertRaises(headers.CoverageError):
+                headers.classification(name, self.policy, body)
+
+    def test_leading_helm_controls_keep_output_neutral_license_comments(self):
+        for prefix in (b"", b"\n  ", b"# Original comment\n\n"):
+            body = prefix + (
+                b"{{- if .Values.enabled -}}\napiVersion: v1\nkind: ConfigMap\n"
+                b"metadata:\n  name: controlled\n{{- end -}}\n"
+            )
+            name = "chart/templates/controlled.yaml"
+            self.assertEqual(headers.classification(name, self.policy, body)["style"], "helm")
+            self.assertEqual(self.apply(name, body), headers.STYLES["helm"].encode() + body)
+            path = self.write(name, headers.STYLES["hash"].encode() + body)
+            result, = headers.process(self.root, [name], self.policy, apply=True)
+            self.assertEqual(result["removed_bytes"], len(headers.STYLES["hash"].encode()))
+            self.assertEqual(path.read_bytes(), headers.STYLES["helm"].encode() + body)
+            again, = headers.process(self.root, [name], self.policy, apply=True)
+            self.assertEqual(again["status"], "present")
+
+    @unittest.skipUnless(shutil.which("helm"), "Helm not installed")
+    def test_dual_use_yaml_raw_parse_and_helm_resources_are_preserved(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML is not installed")
+        fixtures = {
+            "chart/Chart.yaml": b"apiVersion: v2\nname: fixture\nversion: 0.1.0\n",
+            "chart/values.yaml": b"enabled: true\n",
+            "chart/templates/plain.yaml": (
+                b"---\napiVersion: v1\nkind: ConfigMap\nmetadata:\n"
+                b"  name: plain\n  namespace: '{{ .Release.Namespace }}'\n"
+                b"data:\n  literal: |\n    preserve these exact bytes\n"
+            ),
+            "chart/templates/controlled.yaml": (
+                b"{{- if .Values.enabled -}}\napiVersion: v1\nkind: ConfigMap\n"
+                b"metadata:\n  name: controlled\n{{- end -}}\n"
+            ),
+        }
+        for name, body in fixtures.items():
+            self.write(name, body)
+        command = ["helm", "template", "fixture", str(self.root / "chart")]
+        def resources():
+            return list(yaml.safe_load_all(subprocess.check_output(command)))
+        before = resources()
+        self.assertEqual(len(before), 2)
+        self.assertTrue(all(isinstance(doc, dict) for doc in before))
+        name = "chart/templates/plain.yaml"
+        plain = self.root / name
+        raw_before = list(yaml.safe_load_all(plain.read_bytes()))
+        plain.write_bytes(headers.STYLES["helm"].encode() + fixtures[name])
+        with self.assertRaises(yaml.YAMLError):
+            list(yaml.safe_load_all(plain.read_bytes()))
+        records = headers.process(self.root, list(fixtures), self.policy, apply=True)
+        self.assertTrue(all(r["status"] == "applied" for r in records))
+        self.assertEqual(list(yaml.safe_load_all(plain.read_bytes())), raw_before)
+        self.assertEqual(resources(), before)
+        self.assertEqual(plain.read_bytes(), b"---\n" + headers.STYLES["hash"].encode() + fixtures[name][4:])
+        self.assertTrue(all(r["status"] == "present" for r in headers.process(
+            self.root, list(fixtures), self.policy, apply=True,
+        )))
+
+    @unittest.skipUnless(shutil.which("helm"), "Helm not installed")
+    def test_all_crd_consumers_preserve_document_counts_and_schema_json(self):
+        try:
+            import yaml
+        except ImportError:
+            self.skipTest("PyYAML is not installed")
+        chart = ROOT / "deploy/helm/kars"
+        crds = sorted((chart / "templates").glob("crd*.yaml"))
+        self.assertEqual(len(crds), 20)
+        before_chart = self.root / "license-free-chart"
+        shutil.copytree(chart, before_chart)
+        bare = {}
+        for path in crds:
+            data = path.read_bytes()
+            offset, license_block = headers.yaml_license_prefix(data)
+            self.assertTrue(license_block, path.name)
+            bare[path.name] = data[:offset] + data[offset + len(license_block):]
+            (before_chart / "templates" / path.name).write_bytes(bare[path.name])
+
+        def render(directory, name):
+            return subprocess.check_output([
+                "helm", "template", "kars", str(directory), "--namespace", "kars-system",
+                "--show-only", "templates/" + name,
+            ])
+
+        raw_only = {"crd-karsbudgetaccount.yaml", "crd-karssreaction.yaml", "crd-karssreregistration.yaml"}
+        for path in crds:
+            with self.subTest(crd=path.name):
+                source = path.read_bytes()
+                rendered = render(chart, path.name)
+                rendered_before = render(before_chart, path.name)
+                # Do not discard empty documents: single-document consumers reject them.
+                self.assertEqual(
+                    list(yaml.safe_load_all(rendered)),
+                    list(yaml.safe_load_all(rendered_before)),
+                )
+                actual = rendered if b"{{" in source and path.name not in raw_only else source
+                original = rendered_before if b"{{" in bare[path.name] and path.name not in raw_only else bare[path.name]
+                actual_docs = list(yaml.safe_load_all(actual))
+                expected_count = 2 if path.name == "crd.yaml" else 1
+                self.assertEqual(len(actual_docs), expected_count)
+                self.assertTrue(all(isinstance(doc, dict) for doc in actual_docs))
+                self.assertEqual(actual_docs, list(yaml.safe_load_all(original)))
+                if expected_count == 1:
+                    self.assertEqual(yaml.safe_load(actual), yaml.safe_load(original))
+                for doc in actual_docs:
+                    self.assertEqual(doc["kind"], "CustomResourceDefinition")
+                    self.assertIn("openAPIV3Schema", doc["spec"]["versions"][0]["schema"])
 
     def test_original_attribution_and_legacy_annotation_preserved(self):
         body = b"// Copyright (c) 2026 Original Author\n// SPDX-License-Identifier: MIT\nfn main() {}\n"

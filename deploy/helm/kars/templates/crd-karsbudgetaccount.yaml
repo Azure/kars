@@ -1,5 +1,7 @@
-{{/* Copyright (c) Microsoft Corporation.
-Licensed under the MIT License. */}}# Copyright (c) Microsoft Corporation.
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 apiVersion: apiextensions.k8s.io/v1
 kind: CustomResourceDefinition
