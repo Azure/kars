@@ -54,17 +54,6 @@ function normalizeString(value: unknown): string | undefined {
   return trimmed.length > 0 ? trimmed : undefined;
 }
 
-function unwrapResponse<T>(response: unknown): T {
-  if (
-    typeof response === "object" &&
-    response !== null &&
-    "body" in response
-  ) {
-    return (response as { body: T }).body;
-  }
-  return response as T;
-}
-
 function statusCodeOf(error: unknown): number | undefined {
   if (typeof error !== "object" || error === null) {
     return undefined;
@@ -251,10 +240,7 @@ export class GatewayWatcher {
       const kubeConfig = new KubeConfig();
       kubeConfig.loadFromCluster();
       this.customObjectsApi =
-        (options?.customObjectsApi ??
-          (kubeConfig.makeApiClient(
-            CustomObjectsApi
-          ) as unknown as CustomObjectsApiLike));
+        options?.customObjectsApi ?? kubeConfig.makeApiClient(CustomObjectsApi);
       this.watch = options?.watch ?? new Watch(kubeConfig);
     }
   }
@@ -431,14 +417,13 @@ export class GatewayWatcher {
     readonly items: readonly T[];
     readonly resourceVersion: string;
   }> {
-    const response = unwrapResponse<KubernetesList<T>>(
-      await this.customObjectsApi.listNamespacedCustomObject(
-        GROUP,
-        VERSION,
-        this.config.watchNamespace,
-        plural
-      )
-    );
+    const response: KubernetesList<T> =
+      await this.customObjectsApi.listNamespacedCustomObject({
+        group: GROUP,
+        version: VERSION,
+        namespace: this.config.watchNamespace,
+        plural,
+      });
     const resourceVersion = normalizeString(
       response.metadata?.resourceVersion
     );

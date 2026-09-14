@@ -12,6 +12,7 @@ import {
   type V1Namespace,
   type V1NetworkPolicy,
   type V1Role,
+  type V1RoleBinding,
 } from "@kubernetes/client-node";
 import { describe, expect, it } from "vitest";
 
@@ -149,7 +150,9 @@ describe("Bridge optional add-on boundary (offline Helm manifests)", () => {
       expect(namespace.metadata?.name).toBe("bridge-workspace");
       expect(namespace.metadata?.annotations?.["helm.sh/resource-policy"]).toBe("keep");
       for (const item of resources.filter((item) => item.metadata?.namespace)) {
-        expect(item.metadata?.namespace).toBe("bridge-workspace");
+        const coreRead = ["Role", "RoleBinding"].includes(item.kind!)
+          && item.metadata?.name === "kars-bridge-bridge-workspace-teams-gateway-core-read";
+        expect(item.metadata?.namespace).toBe(coreRead ? "kars-system" : "bridge-workspace");
       }
     }
   });
@@ -224,6 +227,70 @@ describe("Bridge optional add-on boundary (offline Helm manifests)", () => {
     const resources = render("--set", "teamsGateway.enabled=true,teamsGateway.replicas=2");
     expect(resource<V1Deployment>(resources, "Deployment", "kars-bridge-teams-gateway").spec?.replicas)
       .toBe(2);
+  });
+
+  it.each([
+    { namespace: "bridge-private", core: "kars-system" },
+    { namespace: "bridge-private", core: "core-workspace" },
+    { namespace: "kars-system", core: "kars-system" },
+    { namespace: "shared-workspace", core: "shared-workspace" },
+  ].flatMap((scenario) => [false, true].map((upgrade) => ({ ...scenario, upgrade }))))(
+    "keeps gateway commands/watches in $core and storage/identity in $namespace (upgrade=$upgrade)", ({ namespace, core, upgrade }) => {
+    const resources = render("--set",
+      `namespace=${namespace},core.namespace=${core},teamsGateway.enabled=true,createNamespace=false,teamsGateway.conversationConfigMapName=custom-store`,
+      ...(upgrade ? ["--is-upgrade"] : []));
+    const gateway = resource<V1Deployment>(resources, "Deployment", "kars-bridge-teams-gateway");
+    const pod = gateway.spec!.template.spec!;
+    const env = pod.containers[0]!.env!;
+    expect(gateway.metadata?.namespace).toBe(namespace);
+    expect(pod.serviceAccountName).toBe("kars-bridge-teams-gateway");
+    expect(env.find((item) => item.name === "TEAMS_CONFIGMAP_NAMESPACE")?.value).toBe(namespace);
+    expect(env.find((item) => item.name === "TEAMS_CONFIGMAP_NAME")?.value).toBe("custom-store");
+    expect(env.find((item) => item.name === "TEAMS_WATCH_NAMESPACE")?.value).toBe(core);
+    expect(env.find((item) => item.name === "TEAMS_BFF_BASE_URL")?.value)
+      .toBe(`http://kars-bridge-bff.${namespace}.svc.cluster.local:8081`);
+    expect(resource(resources, "ConfigMap", "custom-store").metadata?.namespace).toBe(namespace);
+    expect(resource(resources, "ServiceAccount", pod.serviceAccountName!).metadata?.namespace).toBe(namespace);
+    expect(resource(resources, "Service", "kars-bridge-teams-gateway").metadata?.namespace).toBe(namespace);
+    const coreName = `kars-bridge-${namespace}-teams-gateway-core-read`;
+    const storageRole = resource<V1Role>(resources, "Role", "kars-bridge-teams-gateway");
+    const coreRole = resource<V1Role>(resources, "Role", coreName);
+    expect(storageRole.metadata?.namespace).toBe(namespace);
+    expect(storageRole.rules).toEqual([{
+      apiGroups: [""], resources: ["configmaps"], resourceNames: ["custom-store"], verbs: ["get", "patch", "update"],
+    }]);
+    expect(coreRole.metadata?.namespace).toBe(core);
+    expect(coreRole.rules).toEqual([{
+      apiGroups: ["kars.azure.com"], resources: ["karsapprovals", "karstasks", "karsteams"], verbs: ["get", "list", "watch"],
+    }]);
+    const gatewayBindings = resources.filter((item) =>
+      ["RoleBinding", "ClusterRoleBinding"].includes(item.kind!)
+      && (item as V1RoleBinding).subjects?.some((subject) => subject.name === pod.serviceAccountName));
+    expect(gatewayBindings).toHaveLength(2);
+    for (const [name, targetNamespace] of [["kars-bridge-teams-gateway", namespace], [coreName, core]]) {
+      const binding = resource<V1RoleBinding>(gatewayBindings, "RoleBinding", name!);
+      expect(binding.metadata?.namespace).toBe(targetNamespace);
+      expect(binding.roleRef).toEqual({ apiGroup: "rbac.authorization.k8s.io", kind: "Role", name });
+      expect(binding.subjects).toEqual([{ kind: "ServiceAccount", name: pod.serviceAccountName, namespace }]);
+      expect(binding.metadata?.labels?.["app.kubernetes.io/instance"]).toBe("kars-bridge");
+      expect(binding.metadata?.annotations?.["helm.sh/resource-policy"]).toBeUndefined();
+    }
+    expect(resources.filter((item) => item.kind === "Namespace")).toEqual([]);
+    if (namespace !== core) {
+      expect(resources.filter((item) => item.metadata?.namespace === core)
+        .map((item) => `${item.kind}/${item.metadata?.name}`).sort())
+        .toEqual([`Role/${coreName}`, `RoleBinding/${coreName}`]);
+    }
+  });
+
+  it("gives identically named releases in different add-on namespaces distinct core-read RBAC", () => {
+    const roleNames = ["bridge-one", "bridge-two"].map((namespace) =>
+      render("--set", `namespace=${namespace},core.namespace=kars-system`)
+        .filter((item) => item.metadata?.namespace === "kars-system")
+        .map((item) => `${item.kind}/${item.metadata?.name}`));
+    expect(roleNames[0]).toHaveLength(2);
+    expect(roleNames[1]).toHaveLength(2);
+    expect(roleNames[0]!.some((name) => roleNames[1]!.includes(name))).toBe(false);
   });
 
   it("leaves all credential and Deployment mutation authority to core grants in both manifests", () => {

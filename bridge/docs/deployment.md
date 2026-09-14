@@ -105,6 +105,24 @@ tenant/bot credentials do not block the web surface. Enable the gateway only
 after its dedicated credentials and role mapping are configured; web OIDC
 authentication is a separate requirement.
 
+For Teams in a dedicated add-on namespace, set `namespace: bridge-private` and
+`core.namespace: kars-system` (or the existing core workspace name).
+`TEAMS_WATCH_NAMESPACE` follows `core.namespace` for `/bind`, subsequent team
+commands and Kars approval/task/team watches. `TEAMS_CONFIGMAP_NAMESPACE`, the
+gateway ServiceAccount, credentials and conversation ConfigMap remain in the
+add-on namespace. Do not override only the watch environment variable: RBAC
+must target the same core workspace.
+
+The existing `<release>-teams-gateway` Role/Binding retain their names and
+ConfigMap-only permissions in the add-on namespace. A separate
+`<release>-<addon-namespace>-teams-gateway-core-read` Role/Binding grants only
+`get/list/watch` on Kars approvals, tasks and teams in `core.namespace` to the
+add-on ServiceAccount. The Helm caller needs permission to manage this
+release-owned RBAC in the **existing** core namespace; the chart neither creates
+nor adopts that namespace or its Kars resources. Same-namespace installations
+use the same two bounded Roles. These resources remain installed at zero
+gateway replicas so later credential configuration can enable the gateway.
+
 ## Receipt trust anchors
 
 For independently pinned receipt verification, configure the BFF with
@@ -215,6 +233,12 @@ dedicated namespace with `createNamespace: true`, the namespace is annotated wit
 `helm.sh/resource-policy: keep`, so Helm leaves it behind rather than
 cascade-deleting namespaced Kars resources. Remove an empty retained namespace
 explicitly only after inspecting its contents.
+
+Teams removal also deletes the release-owned core-read Role/Binding from the
+configured core namespace and the gateway's conversation ConfigMap from the
+add-on namespace. Back up the ConfigMap first if conversation bindings,
+approval message IDs and watch checkpoints must survive a reinstall. Neither
+the core namespace nor its workloads or user data are part of this deletion.
 
 The retention annotation must be present in the **installed release manifest**
 before uninstalling. Upgrades inspect the configured namespace's Helm ownership

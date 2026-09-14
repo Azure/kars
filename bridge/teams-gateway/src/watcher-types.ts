@@ -3,6 +3,8 @@
 
 // GatewayWatcher wire and collaborator types; no runtime initialization.
 
+import type { CustomObjectsApi, Watch } from "@kubernetes/client-node";
+
 export interface Metadata {
   readonly name?: string | undefined;
   readonly namespace?: string | undefined;
@@ -81,33 +83,9 @@ export interface KubernetesList<T> {
   } | undefined;
 }
 
-export interface CustomObjectsApiLike {
-  listNamespacedCustomObject(
-    group: string,
-    version: string,
-    namespace: string,
-    plural: string,
-    pretty?: string,
-    allowWatchBookmarks?: boolean,
-    _continue?: string,
-    fieldSelector?: string,
-    labelSelector?: string,
-    limit?: number,
-    resourceVersion?: string,
-    resourceVersionMatch?: string,
-    timeoutSeconds?: number,
-    watch?: boolean
-  ): Promise<unknown>;
-}
+export type CustomObjectsApiLike = Pick<CustomObjectsApi, "listNamespacedCustomObject">;
 
-export interface WatchLike {
-  watch(
-    path: string,
-    queryParams: Record<string, string | number | boolean | undefined>,
-    callback: (phase: string, apiObj: unknown, watchObj?: unknown) => void,
-    done: (err: unknown) => void
-  ): Promise<AbortController>;
-}
+export type WatchLike = Pick<Watch, "watch">;
 
 export interface TeamsMessenger {
   readonly api?: {
