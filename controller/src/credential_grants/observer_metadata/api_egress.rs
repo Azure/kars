@@ -161,6 +161,7 @@ pub(super) async fn ensure(
     super::super::verify(client, grant).await?;
     claim::recheck(client, sandbox, namespace)
         .await
+        .map(|_| ())
         .map_err(|_| "Observer API namespace changed during policy issuance".to_string())
 }
 
