@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # k6 perf smoke (Phase 2 S16)
 
 The k6 smoke test exercises the inference router at modest concurrency

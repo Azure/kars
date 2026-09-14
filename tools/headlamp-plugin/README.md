@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars Headlamp Plugin
 
 Adds an **kars** sidebar to the [Headlamp](https://headlamp.dev/) Kubernetes

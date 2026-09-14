@@ -1,4 +1,5 @@
-{{- /*
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- /*
   Phase 2 / S7.F (implementation-plan.md §10.4 #4 — VAP/MAP expansion
   beyond the Phase 1 core set).
 

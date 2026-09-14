@@ -3,6 +3,9 @@ name: foundry-deployments
 description: Query model deployments, connections, and indexes in the Foundry project. Discover available models and infrastructure.
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # Foundry Infrastructure — Deployments, Connections & Indexes
 

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # osv-scanner ignore config — accepted, triaged advisories.
 #
 # Each entry is a vulnerability with NO upstream fix (unmaintained or no-patch

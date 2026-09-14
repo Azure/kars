@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security Audit — Foundry memory MCP Accept header (fix runtime memory end-to-end)
 
 Date: 2026-06-27

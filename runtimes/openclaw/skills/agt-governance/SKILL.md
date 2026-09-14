@@ -3,6 +3,9 @@ name: agt-governance
 description: Behavioral governance for OpenClaw agents via AGT — tool-level policy, inter-agent trust, audit logging.
 metadata: {"openclaw": {"requires": {"env": ["AGT_GOVERNANCE_ENABLED"]}, "primaryEnv": "AGT_GOVERNANCE_ENABLED"}}
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # AGT Governance — Tool Policy, Trust, and Audit
 

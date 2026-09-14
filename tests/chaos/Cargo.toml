@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 [package]
 name = "kars-chaos-tests"
 description = "Phase 2 S16 — fault-injection chaos tier (K8s API flakes, Foundry 429 storms, Entra rotation, AGT relay timeouts)"

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Optional keyless GitHub engineering services
 
 The router can authenticate a bounded set of GitHub repository operations with

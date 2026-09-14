@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Blueprint 04 — Managed public offload service
 
 > "I run a managed kars offering. Maybe I'm a hyperscale SaaS, maybe I'm a 3-person MSP, maybe I'm a community co-op renting capacity to hobbyists. My customers want to offload heavier or sensitive agent tasks — bigger models, longer runs, parallel fan-out — that don't fit on their laptops. I want to host them all on one cluster, in different Entra tenants, none with kubectl access, all onboarded by token, all isolated from each other and from me at every layer including the host kernel."

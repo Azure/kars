@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Allowlisted fn body mutations for the q1 routes split (waves 1-5).
 #
 # Format: one fn leaf-name per line; '#' starts a comment. Each entry MUST

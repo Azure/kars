@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Trust + signing-counter telemetry pushes — Phase A1.10.
 
 After successful peer interactions: push trust update to the router's

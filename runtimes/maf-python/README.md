@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars runtime adapter — Microsoft Agent Framework (Python)
 
 `kars_runtime_maf_python` is the in-pod adapter that wires the

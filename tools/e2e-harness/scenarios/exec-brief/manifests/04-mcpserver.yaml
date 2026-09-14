@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 04-mcpserver.yaml — register an external MCP server the analyst can
 # call alongside foundry_web_search. We use DeepWiki's hosted MCP
 # (https://mcp.deepwiki.com/mcp), which serves

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 02-karssandbox.yaml — a browser-automation agent that consumes the
 # Playwright MCP. OpenClaw runtime, default kars hardening, governance on.
 #

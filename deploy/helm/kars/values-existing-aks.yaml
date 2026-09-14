@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Existing AKS installation template.
 #
 # Copy this file, replace every REPLACE_ME value, and install with:

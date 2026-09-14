@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Microsoft Agent Framework (MAF) — Quickstart
 
 This blueprint hosts a [Microsoft Agent Framework](https://github.com/microsoft/agent-framework)

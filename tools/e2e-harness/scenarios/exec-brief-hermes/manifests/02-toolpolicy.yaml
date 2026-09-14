@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 02-toolpolicy.yaml — single AGT profile attached to the parent
 # sandbox. The kars_spawn helper points every child's CRD at
 # `<parent>-toolpolicy` so all sub-agents share this profile (same

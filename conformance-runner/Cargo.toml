@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 [package]
 name = "kars-conformance-runner"
 description = "In-cluster runner that replays signed KarsEval corpora against the live inference router and emits per-case verdicts. Consumed by the KarsEval reconciler (slice 6.3) which launches one runner Pod per scheduled run; the binary is endpoint-agnostic and CR-agnostic — it reads a corpus path + router base URL, writes a JSON report, exits non-zero on judge failures."

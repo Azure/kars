@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Entra Agent ID — Runtime Token Flow
 
 This document captures the architecture that was validated end-to-end on

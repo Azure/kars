@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 01-mcpserver.yaml — register the Playwright MCP server with kars.
 #
 # The McpServer CR is the declarative "this MCP exists and these tools are

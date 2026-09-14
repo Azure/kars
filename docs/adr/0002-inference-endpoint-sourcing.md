@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # ADR 0002: Inference endpoint sourcing — cluster-wide via env vars; no per-sandbox CR override
 
 **Status:** Accepted

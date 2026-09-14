@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Controller — distroless (build-once pattern)
 #
 # Built from a pre-compiled binary produced by the `build-rust` CI job

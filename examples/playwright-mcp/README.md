@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars Example: Browser-automation agent on a Playwright MCP
 
 A sandboxed OpenClaw agent that drives a **real headless Chromium** through the

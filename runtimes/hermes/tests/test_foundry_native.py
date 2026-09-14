@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Unit tests for the 4 new native Foundry tools in Hermes plugin
 (web_search, code_execute, image_generation, file_search) plus the
 shared `_extract_response_text` helper.

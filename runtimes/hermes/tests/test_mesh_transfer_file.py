@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Unit tests for kars_mesh_transfer_file (sender side) and
 mesh_worker._maybe_save_file_transfer (receiver side).
 

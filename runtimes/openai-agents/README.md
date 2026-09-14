@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars runtime adapter — OpenAI Agents (Python)
 
 `kars_runtime_openai_agents` is the in-pod adapter that wires the

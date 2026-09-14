@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Capability audit — Scoped router governed services
 
 Date: 2026-09-08

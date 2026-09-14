@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 <div align="center">
 
 <img src="assets/logo.png" alt="kars logo" width="128" />

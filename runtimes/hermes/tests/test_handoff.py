@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Unit tests for kars_handoff_* family — status, request, confirm.
 
 The Hermes plugin's handoff module is a thin wrapper over the

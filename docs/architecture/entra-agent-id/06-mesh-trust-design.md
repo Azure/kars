@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Entra-signed AGT mesh trust (design + status)
 
 > **Status: shipped.** Verified end-to-end on AKS (`kars up --mesh-trust=entra`),

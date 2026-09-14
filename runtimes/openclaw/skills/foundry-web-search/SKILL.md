@@ -3,6 +3,9 @@ name: foundry-web-search
 description: Real-time web search via Azure AI Foundry Responses API with bing_grounding tool. Get current information with citations — no egress policy needed.
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # Foundry Web Search — Bing Grounding (Responses API)
 

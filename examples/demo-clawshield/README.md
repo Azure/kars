@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Operation Claw Shield — multi-tenant attack-simulation demo
 
 A 30-minute scripted demo showing **three tenants on one cluster**

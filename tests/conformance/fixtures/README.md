@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Conformance corpus fixtures
 
 Vendored test vectors and fixtures for protocol-invariant tests.

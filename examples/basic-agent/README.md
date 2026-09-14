@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Basic Agent — minimal kars example
 
 The smallest possible end-to-end kars deployment: one OpenClaw

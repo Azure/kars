@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """kars_mesh_* tool implementations — Act 2 (Python AGT MeshClient).
 
 Replaces the Act 1 stubs at ``mesh_stubs.py`` with real implementations

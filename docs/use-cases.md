@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars Use Cases
 
 Six fully-shipped use cases covering every deployment pattern from laptop inner-loop to cross-organisation A2A federation. All six are implemented end-to-end and exercised by the compat / conformance / e2e harness before any merge.

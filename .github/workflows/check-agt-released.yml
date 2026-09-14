@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 name: Check AGT Released
 
 # Runs daily to detect when Microsoft AGT publishes a release that

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Managed MCP workloads
 
 Kars can deploy the reviewed `playwright` and `everything` MCP presets. An

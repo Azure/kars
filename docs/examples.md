@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Examples catalogue
 
 Eight end-to-end examples live under [`examples/`](https://github.com/Azure/kars/tree/main/examples). Each one is a self-contained `kubectl apply -f` after `kars up`. All examples share the same control-plane install and isolation guarantees — only the agent runtime image changes. (For higher-level *deployment shapes* — who runs what, where the trust boundary sits — see [Blueprints](blueprints/00-index.md) instead.)

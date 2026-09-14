@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security Audit — canonical LangGraph runtime flag
 
 Date: 2026-08-25

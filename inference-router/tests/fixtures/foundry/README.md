@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Sanitized Azure / Foundry fixtures
 
 These JSON files are **sanitized copies** of real Azure AI Foundry / Azure OpenAI

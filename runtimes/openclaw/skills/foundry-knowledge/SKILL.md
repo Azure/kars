@@ -3,6 +3,9 @@ name: foundry-knowledge
 description: Knowledge retrieval (RAG) via Foundry file_search and azure_ai_search tools. Agentic retrieval with citations — uses Responses API.
 metadata: {"openclaw": {"requires": {"env": ["FOUNDRY_PROJECT_ENDPOINT"]}, "primaryEnv": "FOUNDRY_PROJECT_ENDPOINT"}}
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 
 # Foundry Knowledge — File Search & Azure AI Search (Responses API)
 

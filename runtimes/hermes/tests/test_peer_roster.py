@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Unit tests for peer-roster auto-prepend on kars_mesh_send.
 
 Mirrors OpenClaw's `spawnedRoster` logic at

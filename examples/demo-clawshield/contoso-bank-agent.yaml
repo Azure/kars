@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Contoso Bank — Financial Compliance Agent
 # Isolation: enhanced (seccomp + runc on standard node pool)
 # Role: Analyzes transaction records, generates compliance reports

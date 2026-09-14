@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Unit tests for router_client.call header forwarding."""
 
 from __future__ import annotations

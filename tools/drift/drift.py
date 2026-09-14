@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Q1 refactor drift checker.
 
 Compares a baseline item manifest against a post-refactor manifest and

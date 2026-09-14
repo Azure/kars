@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Example: Basic OpenClaw Agent
 # This creates a sandboxed OpenClaw agent with default security settings.
 

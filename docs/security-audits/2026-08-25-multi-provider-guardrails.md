@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security Audit, Multi-provider LLM upstreams + pluggable guardrail pipeline (PR #488)
 
 Date: 2026-08-25

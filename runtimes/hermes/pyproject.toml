@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 [build-system]
 requires = ["hatchling>=1.18"]
 build-backend = "hatchling.build"

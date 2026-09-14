@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 [package]
 name = "kars-controller"
 description = "Kubernetes operator for kars — manages KarsSandbox CRDs, sandbox lifecycle, policy enforcement, and Azure service connectors"

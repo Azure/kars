@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Null-provider admission fixtures — negative case.
 # Production-style KarsSandbox (no dev-only label) declaring noop/null/
 # disabled providers. The ValidatingAdmissionPolicy in
