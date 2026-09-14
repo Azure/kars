@@ -25,7 +25,8 @@ ENDPOINT_OUTPUT = (
     r'{[0].status.policy.realized.policy-revision}{"\t"}'
     r'{[0].status.policy.realized.policy-enabled}{"\t"}'
     r'{[0].status.external-identifiers.k8s-namespace}{"\t"}'
-    r'{[0].status.external-identifiers.k8s-pod-name}{"\n"}'
+    r'{[0].status.external-identifiers.k8s-pod-name}{"\t"}'
+    r'{[0].status.identity.labels}{"\n"}'
 )
 UNAVAILABLE = "Cilium diagnostic provenance unavailable"
 STAGES = frozenset("""
@@ -37,6 +38,7 @@ kube_proxy_exec kube_proxy_framing kube_proxy_fields
 endpoint_read endpoint_identity endpoint_owner endpoint_fields endpoint_addresses endpoint_pins
 endpoint_exec endpoint_framing endpoint_projection_fields endpoint_projection_pins endpoint_revision_bounds
 endpoint_recheck endpoint_snapshot_match cnp_list_read cnp_inventory cnp_identity cnp_digest
+endpoint_labels endpoint_label_projection endpoint_inventory_read endpoint_inventory
 anchor_read anchor_identity cnp_recheck network_recheck complete
 """.split())
 FACT_KEYS = frozenset("""
@@ -54,6 +56,7 @@ endpointIdValid securityIdValid podUidMatches addressesMatch nodeMatchesPod node
 numericFieldsValid endpointIdMatches securityIdMatches policyModeRecognized namespaceFieldMatches
 podFieldMatches realizedAheadOfDesired desiredRevisionValid realizedRevisionValid bindingMatches
 specShape specsShape managedFieldsShape authorityMatches anchorKind configurationMatches
+labelsShape labelsMatch selectorMatchesIdentity inventoryMatches
 """.split())
 FACT_VALUES = frozenset("""
 object array null string number boolean other missing empty true false json-null
@@ -220,6 +223,21 @@ def policies(setup, namespace, temporary_name, witness=None):
     return result
 
 
+def identity_labels(raw):
+    """Cilium v1.18.5 Identity.Labels / EndpointIdentity.Labels wire strings."""
+    values = network.bounded_items(raw, 128)
+    require(values, UNAVAILABLE)
+    labels = {}
+    for value in values:
+        require(isinstance(value, str) and 0 < len(value) <= 512
+                and not any(character.isspace() or ord(character) < 32 for character in value), UNAVAILABLE)
+        key, _, text = value.partition("=")
+        require(re.fullmatch(r"[a-z][a-z0-9-]*:[A-Za-z0-9_.:/-]{1,253}", key)
+                and key not in labels, UNAVAILABLE)
+        labels[key] = text
+    return labels
+
+
 def endpoint_binding(endpoint, pod, agent, witness=None):
     checkpoint(witness, "endpoint_identity", **identity_facts(endpoint))
     metadata = network.metadata(endpoint)
@@ -270,8 +288,42 @@ def endpoint_binding(endpoint, pod, agent, witness=None):
     require(addresses and addresses == pod_addresses
             and node_ip == network.private_ip(pod["status"]["hostIP"])
             == network.private_ip(agent["status"]["hostIP"]), UNAVAILABLE)
+    checkpoint(witness, "endpoint_labels", labelsShape=shape(status["identity"].get("labels")))
+    labels = identity_labels(status["identity"].get("labels"))
+    expected_labels = {
+        "k8s:" + network.SANDBOX_LABEL: pod["metadata"]["labels"][network.SANDBOX_LABEL],
+        "k8s:io.kubernetes.pod.namespace": pod["metadata"]["namespace"],
+    }
+    selected = all(labels.get(key) == value for key, value in expected_labels.items())
+    checkpoint(witness, "endpoint_labels", selectorMatchesIdentity=selected)
+    require(selected, UNAVAILABLE)
     return {"uid": metadata["uid"], "podUid": identity(pod)[0], "endpointId": endpoint_id,
-            "securityIdentity": security_id, "nodeAddress": node_ip, "addresses": addresses}
+            "securityIdentity": security_id, "nodeAddress": node_ip, "addresses": addresses,
+            "identityLabelsDigest": network.spec_digest(labels)}
+
+
+def endpoint_inventory(setup, base, agent, bindings, witness):
+    """Require every CNP-selected CEP to represent one of the exact current Pods."""
+    path = resource(base["actor"]["namespace"], "ciliumendpoints", group=CILIUM)
+    listed = api_read(setup, path, witness, "endpoint_inventory_read")
+    values = network.complete_inventory(listed, 64)
+    selected = {}
+    pods = {item["name"]: base["actor"]["anchors"][
+        core(base["actor"]["namespace"], "pods", item["name"])] for item in base["actor"]["pods"]}
+    selector = network.cilium_selector(base)
+    for endpoint in values:
+        metadata = network.metadata(endpoint)
+        require(metadata.get("namespace") == base["actor"]["namespace"], UNAVAILABLE)
+        labels = identity_labels(endpoint["status"]["identity"].get("labels"))
+        if not network.matches(selector, labels):
+            continue
+        name = metadata["name"]
+        require(name in pods, UNAVAILABLE)
+        endpoint_path = resource(base["actor"]["namespace"], "ciliumendpoints", name, CILIUM)
+        require(endpoint_path not in selected, UNAVAILABLE)
+        selected[endpoint_path] = endpoint_binding(endpoint, pods[name], agent, witness)
+    checkpoint(witness, "endpoint_inventory", count=len(selected), inventoryMatches=selected == bindings)
+    require(selected == bindings, UNAVAILABLE)
 
 
 def endpoint_revision(fields, binding, pod, witness=None):
@@ -440,7 +492,13 @@ def _snapshot(setup, target, temporary_name, witness):
         binding = endpoint_binding(endpoint, pod, agent, witness)
         checkpoint(witness, "endpoint_exec", exitStatus=None, timedOut=False)
         fields = read_projection(agent, binding["endpointId"], witness=witness)
-        revision = endpoint_revision(fields, binding, pod, witness)
+        revision = endpoint_revision(fields[:7], binding, pod, witness)
+        checkpoint(witness, "endpoint_label_projection", fieldCount=len(fields))
+        require(len(fields) == 8, UNAVAILABLE)
+        labels = identity_labels(json.loads(fields[7]))
+        labels_match = network.spec_digest(labels) == binding["identityLabelsDigest"]
+        checkpoint(witness, "endpoint_label_projection", labelsMatch=labels_match)
+        require(labels_match, UNAVAILABLE)
         expected &= revision["policyEnabled"] in ("egress", "both")
         current = api_read(setup, path, witness, "endpoint_recheck")
         current_binding = endpoint_binding(current, pod, agent, witness)
@@ -448,6 +506,7 @@ def _snapshot(setup, target, temporary_name, witness):
         require(current_binding == binding, UNAVAILABLE)
         bindings[path] = binding
         endpoints.append({"identity": network.metadata(current), "podUid": item["uid"], **revision})
+    endpoint_inventory(setup, base, agent, bindings, witness)
     baseline = policies(setup, base["actor"]["namespace"], temporary_name, witness)
     policy_identities = {}
     policy_facts = []
@@ -476,16 +535,20 @@ def _snapshot(setup, target, temporary_name, witness):
         "configMap": desired_config, "effectiveAgentConfig": effective_config,
         "configurationMatchesExpected": expected, "agent": network.metadata(agent),
         "daemonSet": network.metadata(daemonset), "endpoints": endpoints,
+        "endpointSelector": network.cilium_selector(base),
+        "selectorIdentityLabelsVerified": True, "matchingEndpointInventoryVerified": True,
+        "podTemplateHashUsedOnlyForPodProvenance": True,
         "baselineCiliumNetworkPolicies": policy_facts, "policyRevisionIsNotRuleSpecificProof": True}
     base["stable"]["cilium"] = {
         "anchors": {path: identity(value) for path, value in anchors.items()},
         "configDigest": network.spec_digest(config.get("data")), "effectiveConfig": effective_config,
         "agentProcess": (statuses[0]["containerID"], statuses[0]["restartCount"]),
-        "endpoints": bindings, "policies": policy_identities}
+        "endpoints": bindings, "endpointSelector": network.cilium_selector(base), "policies": policy_identities}
     checkpoint(witness, "network_recheck")
     current_base = network.snapshot(setup, target)
     require(current_base["stable"] == {
         key: value for key, value in base["stable"].items() if key != "cilium"}, UNAVAILABLE)
+    endpoint_inventory(setup, base, agent, bindings, witness)
     base["ready"] = current_base["ready"]
     base["actor"] = current_base["actor"]
     if witness is not None:

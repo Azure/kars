@@ -25,6 +25,7 @@ UNAVAILABLE = "Observer network diagnostic provenance unavailable"
 API_SERVICE = core("default", "services", "kubernetes")
 API_ENDPOINTS = core("default", "endpoints", "kubernetes")
 SELECTOR_KEYS = ("kars.azure.com/sandbox", "pod-template-hash")
+SANDBOX_LABEL = SELECTOR_KEYS[0]
 
 
 def loopback_origin(server):
@@ -99,6 +100,16 @@ def recheck_snapshot_actor(setup, actor, source_path):
 def bounded_items(value, maximum):
     require(isinstance(value, list) and len(value) <= maximum, UNAVAILABLE)
     return value
+
+
+def complete_inventory(value, maximum):
+    require(isinstance(value, dict) and isinstance(value.get("metadata", {}), dict), UNAVAILABLE)
+    metadata = value.get("metadata", {})
+    remaining = metadata.get("remainingItemCount")
+    continuation = metadata.get("continue", "")
+    require(isinstance(continuation, str) and not continuation
+            and (remaining is None or (type(remaining) is int and remaining == 0)), UNAVAILABLE)
+    return bounded_items(value["items"], maximum)
 
 
 def metadata(value):
@@ -275,8 +286,12 @@ def snapshot(setup, target, temporary_name=None):
                 and statuses[0].get("ready") is True and statuses[0].get("containerID")
                 and type(statuses[0].get("restartCount")) is int, UNAVAILABLE)
         pod_processes.append((identity(pod)[0], statuses[0]["containerID"], statuses[0]["restartCount"]))
-    all_pods = bounded_items(setup.admin.get(core(namespace, "pods"))["items"], 64)
-    consumers = [pod for pod in all_pods if matches(selector, pod["metadata"].get("labels", {}))]
+    all_pods = complete_inventory(setup.admin.get(core(namespace, "pods")), 64)
+    # The CNP uses identity-relevant labels; the rollout hash remains a separate
+    # provenance fence. Count old/foreign rollouts that the CNP could also select.
+    consumers = [pod for pod in all_pods if matches(
+        {"matchLabels": {SANDBOX_LABEL: selector["matchLabels"][SANDBOX_LABEL]}},
+        pod["metadata"].get("labels", {}))]
     require(sorted(identity(pod)[0] for pod in consumers) == sorted(item["uid"] for item in actor["pods"]),
             "Diagnostic selector has unknown or foreign consumers")
     require(all(pod["metadata"].get("namespace") == namespace
@@ -316,17 +331,27 @@ def snapshot(setup, target, temporary_name=None):
             "ready": source["status"]["serviceObservation"]["phase"] == "Ready"}
 
 
+def cilium_selector(before):
+    return {"matchLabels": {
+        "k8s:" + SANDBOX_LABEL: before["selector"]["matchLabels"][SANDBOX_LABEL],
+        "k8s:io.kubernetes.pod.namespace": before["actor"]["namespace"],
+    }}
+
+
 def policy_plan(before, name):
     ports = sorted({target["port"] for target in before["facts"]["destinations"]})
     require(ports == [443, 6443] and all(type(target["port"]) is int for target in before["facts"]["destinations"]),
             UNAVAILABLE)
+    selector = cilium_selector(before)
+    require(before["facts"]["cilium"]["endpointSelector"] == selector
+            and before["stable"]["cilium"]["endpointSelector"] == selector, UNAVAILABLE)
     return {"apiVersion": "cilium.io/v2", "kind": "CiliumNetworkPolicy",
             "metadata": {"name": name, "namespace": before["actor"]["namespace"],
                          "ownerReferences": [{"apiVersion": "apps/v1", "kind": "Deployment",
                              "name": before["deployment"]["metadata"]["name"],
                              "uid": identity(before["deployment"])[0],
                              "controller": False, "blockOwnerDeletion": False}]},
-            "spec": {"endpointSelector": copy.deepcopy(before["selector"]),
+            "spec": {"endpointSelector": selector,
                      "egress": [{"toEntities": ["kube-apiserver"],
                                  "toPorts": [{"ports": [{"protocol": "TCP", "port": str(port)}
                                                         for port in ports]}]}]}}
@@ -418,7 +443,8 @@ def collect(setup, target, failed_case):
             result["ciliumStableChecks"] = {
                 key: observed["stable"].get("cilium", {}).get(key)
                 == before["stable"].get("cilium", {}).get(key)
-                for key in ("anchors", "configDigest", "effectiveConfig", "agentProcess", "endpoints", "policies")
+                for key in ("anchors", "configDigest", "effectiveConfig", "agentProcess", "endpoints",
+                            "endpointSelector", "policies")
             }
             require(observed["stable"] == before["stable"], UNAVAILABLE)
             return observed
