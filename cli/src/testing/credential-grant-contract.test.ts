@@ -208,9 +208,9 @@ describe("governed credential public contract",()=>{
 
   it("limits optional observer Cilium permissions to the controller and namespaced policies",()=>{
     const owners=manifests.filter(item=>["Role","ClusterRole"].includes(item.kind)
-      &&item.rules?.some((rule:{apiGroups?:string[]})=>rule.apiGroups?.includes("cilium.io")));
+      &&item.rules?.some((rule:{apiGroups?:string[]})=>rule.apiGroups?.some(group=>group==="cilium.io")));
     expect(owners.map(item=>item.metadata.name)).toEqual(["kars-credential-grant-controller"]);
-    expect(owners[0].rules.filter((rule:{apiGroups:string[]})=>rule.apiGroups.includes("cilium.io")))
+    expect(owners[0].rules.filter((rule:{apiGroups:string[]})=>rule.apiGroups.some(group=>group==="cilium.io")))
       .toEqual([{apiGroups:["cilium.io"],resources:["ciliumnetworkpolicies"],
         verbs:["get","list","create","update","delete"]}]);
     expect(resource("ClusterRoleBinding","kars-credential-grant-controller").subjects)
