@@ -23,7 +23,7 @@ fn read_error(resource: &'static str, error: kube::Error) -> String {
     }
 }
 
-pub(super) async fn rules(
+pub(crate) async fn rules(
     client: &Client,
     service_host: &str,
     service_port: &str,

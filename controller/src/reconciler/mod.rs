@@ -50,7 +50,7 @@ pub(crate) mod trustgraph_mount;
 use mcp_egress::mcp_egress_rule;
 
 mod pod_spec;
-mod sre_egress;
+pub(crate) mod sre_egress;
 pub(crate) use pod_spec::{
     build_egress_guard_command, build_pod_labels, build_pod_security_context, isolation_scheduling,
     sandbox_node_selector_from,

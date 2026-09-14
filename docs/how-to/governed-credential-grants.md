@@ -104,7 +104,8 @@ or legacy routes, even through the legacy loopback exception. Bridge pins the
 controller-issued CA and Sandbox-UID hostname, resolves only the verified
 Pod/ReplicaSet/Deployment lineage, and disables redirects, ambient trust roots
 and proxy discovery. Missing capability is an error, never a legacy fallback.
-Core adds only the receiver-scoped runtime ingress policy. Existing BFF egress
+Core adds the receiver-scoped runtime ingress policy and approved observer
+runtime/verifier paths described below. Existing BFF egress
 isolation must explicitly permit that verified runtime's TCP 9447 before
 observation enrollment is usable. Core must not create an egress-only policy
 that accidentally isolates a previously unrestricted BFF and blocks its
@@ -117,6 +118,40 @@ to the selected runtime namespace and Sandbox Pods. The private chart's
 `networkPolicy.observations` option is off by default, requires confirmation
 of **existing** isolation, and accepts only explicitly reviewed target namespace
 names. It does not replace the existing API/provider/OIDC/GitHub egress baseline.
+
+The observer router also requires HTTPS access to the canonical Kubernetes API
+for its existing authenticated metadata checks. Only an explicitly approved
+current observation target, after the runtime/controller isolation preflight,
+receives this path. Its existing grant-owned runtime NetworkPolicy includes
+exact API Service and ready Endpoint `/32` or `/128` destinations with their
+validated HTTPS ports, using the same canonical-target validator as SRE.
+No ordinary Sandbox receives this additional policy.
+
+When the `cilium.io/v2` API is already installed, core additionally owns a
+namespace-scoped CiliumNetworkPolicy with only `toEntities: [kube-apiserver]`
+and those validated TCP ports. Its selector uses source-qualified Sandbox and
+namespace labels, never `pod-template-hash` (excluded from Cilium identities by
+default). This handles Cilium's API entity classification; it does not install
+or configure Cilium, add a CiliumClusterwideNetworkPolicy, or allow world/nodes.
+A genuine discovery `404 NotFound` keeps the portable non-Cilium path.
+Authorization, transport and malformed discovery errors block issuance rather
+than silently treating Cilium as absent.
+
+The chart grants **only the controller** `get/list/create/update/delete` on the
+namespaced `ciliumnetworkpolicies` resource through its existing controller
+ClusterRole/Binding. These permissions are not granted to agents, Bridge, or
+users; controller calls use namespaced policy APIs, not clusterwide policy
+inventory. Existing namespace-label patch permission maintains a durable
+`kars.azure.com/observer-api-policy=v1` cleanup index. That label grants no
+network access and remains until namespace deletion, so interrupted cleanup
+cannot hide a policy after other metadata has gone. Grant UID, target UID,
+namespace UID, namespace ownership and generation checks authorize lifecycle
+operations. Owned policy replacement/deletion uses UID/resourceVersion fences;
+replacement removes stale `specs`, extra ingress and other policy extensions
+instead of merging them. Removed targets, disabled/deleted grants and stale
+generations revoke the CNP even after partial RBAC/NetworkPolicy cleanup.
+The UID-1000 egress guard, API authentication, TLS validation and original
+observer-readiness deadline are unchanged.
 
 ### Controller privacy verification RPC
 

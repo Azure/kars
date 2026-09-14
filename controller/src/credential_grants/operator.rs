@@ -286,8 +286,8 @@ async fn publish(
 }
 
 pub(super) async fn revoke(client: &Client, grant: &KarsCredentialGrant) -> Result<(), String> {
-    super::observer_rbac::revoke(client, grant).await?;
-    super::observer_metadata::revoke(client, grant).await?;
+    let metadata = super::observer_metadata::revoke(client, grant).await;
+    let rbac = super::observer_rbac::revoke(client, grant).await;
     let workspace = grant.namespace().ok_or("Observation workspace missing")?;
     for sandbox in Api::<KarsSandbox>::namespaced(client.clone(), &workspace)
         .list(&ListParams::default())
@@ -308,7 +308,7 @@ pub(super) async fn revoke(client: &Client, grant: &KarsCredentialGrant) -> Resu
             retire(client, &sandbox, &namespace).await?;
         }
     }
-    Ok(())
+    metadata.and(rbac)
 }
 
 async fn retire(
