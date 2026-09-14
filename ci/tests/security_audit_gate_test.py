@@ -72,6 +72,23 @@ class SecurityAuditGateTests(GitFixture):
         self.commit()
         self.assertEqual(self.gate().returncode, 0)
 
+    def test_historical_header_changes_do_not_reopen_a_completed_scope(self):
+        historical = "# Previously accepted scope\nSigned-off-by: Author <author@example.invalid>\n"
+        self.write(OLD, historical)
+        self.commit()
+        self.base = self.git("rev-parse", "HEAD").strip()
+        self.capability()
+        self.write(OLD, "<!-- Copyright (c) Microsoft Corporation.\n"
+                        "Licensed under the MIT License. -->\n\n" + historical)
+        self.write(NEW, SIGNED.replace("Approved old scope", "Current scope"))
+        self.commit()
+        self.assertEqual(self.gate().returncode, 0)
+        self.write(NEW, "# Current source review pending\n")
+        self.commit()
+        result = self.gate()
+        self.assertEqual(result.returncode, 1)
+        self.assertIn(NEW, result.stderr)
+
     def test_missing_review_base_cannot_fall_back_to_an_empty_worktree_diff(self):
         self.capability()
         self.commit()
