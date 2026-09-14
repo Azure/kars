@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 name: CI
 
 on:
@@ -709,12 +712,14 @@ jobs:
           # save cost.
           save-if: false
 
+      - name: Test bounded CI dependency acquisition
+        run: python3 -m unittest discover -s ci/tests -p acquisition_test.py
+
       - name: Install kind
         if: steps.paths.outputs.run == 'true'
-        uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
-        with:
-          install_only: true
-          version: v0.24.0
+        # Official v0.24.0 checksum; bounded HTTPS acquisition, no tool-cache
+        # fallback or implicit kubectl install. Cluster lifecycle is unchanged.
+        run: python3 ci/acquire_test_tools.py kind
 
       - name: Install kubectl
         if: steps.paths.outputs.run == 'true'
