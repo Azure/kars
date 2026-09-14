@@ -249,6 +249,15 @@ remain subject to the separate private Rust plan, and real Kind/CNI plus private
 adapter TLS/API lifecycle acceptance are still required. Native Kubernetes GET
 is name-authorized RBAC; no complete raw-GET UID-bound claim is made.
 
+Native late-enrollment acceptance distinguishes the initial writer-retirement
+Pods from the private-key retirement receipt's later baseline. The writer phase
+can replace Pods before the v4 receipt is created, so those UID sets need not
+match. No Pod from either captured set may remain. The qualified v4 receipt must
+bind the same Sandbox, Task, Deployment, workspace, Task authorization and
+original admin Secret UID. Source/bundle/projection preservation, unchanged
+shared-root state, real key rotation, old-key denial and new-key acceptance
+remain required; no receipt or retirement evidence is synthesized by the test.
+
 The native observer enablement failure records `observationReadiness` alongside
 `metadataAtFailure` in `native.json`. Collection is read-only and bounded to
 the core controller and observation-target routers. Only the fixed core
