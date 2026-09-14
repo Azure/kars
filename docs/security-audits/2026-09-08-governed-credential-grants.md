@@ -3,17 +3,83 @@ Licensed under the MIT License. -->
 
 # Governed credential grants — qualification record
 
-Status: implementation candidate; **not a sign-off**. No author or independent
-reviewer signatures are supplied. Existing audit gates remain required.
+Status: **Bounded source-approved under explicit maintainer delegation.**
+Current-head technical gates, required PR review and operational acceptance
+remain separate. Historical candidate failures below are not relabeled passing.
 
 ## Scope
 
 Metadata-only operator grants, native Secret source authoring, UID-bound
 Sandbox/Task/Team delivery, explicit workspace/Team/target precedence, legacy
 preflight/import, purpose-bound operator stores, private read-only egress
-observations, and a real App-store-to-router GitHub issuer. Private Bridge
-adapts to the public core contract; it is not copied into
-this repository.
+observations, and a real App-store-to-router GitHub issuer. This core prerequisite
+does not require Bridge. The complete optional application is separately reviewed
+in Azure/kars#563 and is not approved by this credential-source attestation.
+
+## Current delegated source attestation (2026-09-14)
+
+Reviewed source: `9ee285be5068c7bde7c694e7dccbab2ae8a51c32`.
+Integration base: `b5ad6791f9085e908cbf3d16b5de9021eb4b43a7`.
+The subsequent `fbc24af2` changes only the GitHub audit narrative, not production
+source. The attestation binds the reviewed capability, not every file in the PR.
+
+The maintainer explicitly authorized publication sign-offs after focused-agent
+review rounds in
+[comment 5615522306](https://github.com/Azure/kars/pull/551#issuecomment-5615522306).
+The author attestation is exercised by Copilot under that delegation, not a claim
+of personal code review by the maintainer. Independent closure was performed by
+the separate read-only AI context `frozen-bridge-review`
+(`7f37ca6e-6256-4dd1-8064-d8fe6ac2fc92`), not a second human.
+Neither a passing audit script nor the signatures below authenticate a human
+review that did not occur.
+
+The final integrated review found no high-confidence blocker in these seams:
+
+| Reviewed seam | Source evidence and retained boundary |
+| --- | --- |
+| Reviewed enrollment and publication | `cli/src/commands/credential-grants.ts:128-207` and `cli/src/lib/private-activation.ts:335-430`: reviewed identity/root/profile/consumer fences, writer retirement acknowledgement and current UID/RV publication |
+| Late enrollment, recovery and rotation | `cli/src/lib/private-activation-late-scope.ts:425-560` and `controller/src/private_activation/late_scope.rs:201-376`: captured intent, old-Pod retirement, changed authentication material and controller-verified restoration |
+| Shared-root continuity | `cli/src/lib/private-activation-continuity.ts:186-385` and `cli/src/lib/private-activation-writer-settle.ts:264-433`: sealed root history, retained scope epochs, current Task/source authority and actual pause/refill/restore transitions |
+| Source delivery and bundle recovery | `controller/src/credential_grants/sources.rs:480-640` and `sources/bundle.rs:176-307`: current target/grant/source versions before writes; recovery limited to this invocation's acknowledged empty CREATE, never stale-value replay |
+| Task/Team pause and resume | `controller/src/credential_grants/readiness.rs:17-84`, `controller/src/kars_team_reconciler/credential_bindings.rs:31-145` and `controller/src/kars_task_rebind.rs:39-247`: withdrawn readiness, acknowledged quiescence and fresh owned authority before hold release |
+| Private observation and RPC | `controller/src/credential_grants/operator.rs:20-150`, `inference-router/src/service_observation.rs:88-340` and `controller/src/privacy_rpc/authority.rs:77-280`: current purpose/recipient/target/credential/privacy checks, not a general Secret, proxy or mutation service |
+| Authority and network retirement | `controller/src/credential_grants/writers/permissions.rs:180-208`, `writers/guards.rs:130-221`, matching admission definitions and `observer_metadata/api_egress.rs:223-350`: deny indeterminate dangerous authority, require read-role absence, preserve namespace/ownership/deletion fences |
+| Schema lifecycle | `cli/src/lib/schema-stage.ts:95-218`, `core-helm-schemas.ts:86-166`, `sre-schema-migration.ts:50-153` and actual install/upgrade/rollback/removal callers: schema-before-admission ordering, no foreign adoption or lossy rollback, explicit canonical migration |
+| Core independence | `controller/src/private_activation/runtime.rs:16-59`: absent, disabled and unrelated unselected activation stays unchanged; private RPC remains opt-in |
+
+The separate GitHub record supplies the reviewed actual issuance/reuse/cache
+closure. This record does not extend it to live GitHub App acceptance.
+
+### Executed evidence and remaining limits
+
+Production source is unchanged from `03174dcaaa13cef956f4660074ce1f3dcc635c42`;
+`9ee285be` only clarifies two CLI test expressions. At `03174dca`,
+[public CI 34882574974](https://github.com/Azure/kars/actions/runs/34882574974)
+passed all 21 jobs. Rust job `104105426223` actually executed **3,066 tests,
+zero skipped**, including bundle recovery, Task rebind, late scope, private RPC
+and GitHub/private-purpose/cache cases. Kind passed **184/184**, including actual
+historical schema/SRE migration, authority denials and lifecycle cleanup.
+The 31 corrected Helm templates retain their non-header body bytes and the
+actual raw-YAML/document boundaries.
+
+The paired `1d0fc5c9` application passed all 21 core jobs, all 11 component jobs
+and all 18 native cases plus three cold API installs. Its native lane is
+`controlled-no-LLM-agent` / `no-active-sre-native`. It does not establish active-SRE
+combined, live GitHub, H100/model-serving or complete standing-Team acceptance.
+The separate application source review remains independently required.
+
+This is not an exhaustive approval of unrelated controller/router capabilities,
+all historical/custom schema variants, external SDK/provider behavior or every
+changed file. Existing `/sandbox` storage remains ephemeral `emptyDir`; Pod
+retirement can discard Pod-local files. No persistence guarantee or new storage
+requirement is introduced.
+
+Current and future PR heads still require their own protected checks and review.
+This source attestation does not waive failures, authorize a merge bypass, approve
+main/release/image promotion or permit a customer/H100 deployment.
+
+Signed-off-by: pallakatos (author source attestation through explicit maintainer-delegated AI review, not a claim of personal code review) <191481949+pallakatos@users.noreply.github.com>
+Signed-off-by: GitHub Copilot (independent-context delegated AI source review, not a second human) <223556219+Copilot@users.noreply.github.com>
 
 ## Enforced boundaries
 
@@ -38,7 +104,7 @@ this repository.
 - No raw credential values in the grant schema, metadata status, preview files
   or diagnostic messages.
 
-## Current validation
+## Historical implementation and validation
 
 ### Shared-root workspace continuity candidate
 
@@ -747,7 +813,7 @@ API tests alone cannot qualify those claims.
 
 Any author waiver on earlier publication PRs does not apply to this change.
 
-## Explicit open blockers
+## Historical blockers before subsequent qualification
 
 - The first direct Cargo lease was released unused because the newly required
   privacy closure had not yet been forwarded. The exact
@@ -787,7 +853,9 @@ Any author waiver on earlier publication PRs does not apply to this change.
   enrollment/preflight is implemented with explicit private chart opt-in and
   remains subject to real CNI/API qualification.
 
-These are not waived and the candidate is not ready for publication or rollout.
+At that checkpoint these blockers were not waived and that candidate was not
+ready for publication or rollout. Current source closure and the still-separate
+operational acceptance limits are recorded in the dated attestation above.
 
 ## Guarded Rust command record and pending private plan
 
