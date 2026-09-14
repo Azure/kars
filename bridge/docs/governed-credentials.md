@@ -400,7 +400,8 @@ One CREATE-only, Deployment-owned **namespace-scoped CiliumNetworkPolicy**
 permits only `toEntities: [kube-apiserver]` and the observed TCP HTTPS ports
 443/6443, as described by the
 [tagged entity semantics](https://github.com/cilium/cilium/blob/v1.18.5/Documentation/security/policy/language.rst#L247-L288).
-It uses the actual Sandbox and Pod-template-hash labels, never an empty/global
+It uses only the source-qualified `k8s:kars.azure.com/sandbox` and
+`k8s:io.kubernetes.pod.namespace` identity labels, never an empty/global
 selector, `host`, `remote-node`, `cluster`, `world`, `toServices`, or a global
 Cilium configuration change. An observer without existing matching Kubernetes
 egress isolation gets no new policy. A 60-second observation deadline bounds
@@ -410,6 +411,21 @@ Sandbox GET. Any observed API response, including 403, is diagnostic transport
 progress; observer readiness is not required. The policy is removed with
 its captured UID and current resourceVersion, and absence is verified. Replaced
 namespaces or policy objects are not deleted; unverified cleanup is explicit.
+
+The diagnostic rollout selector remains separate: Cilium 1.18.5
+[excludes `pod-template-hash` from identity labels by default](https://github.com/cilium/cilium/blob/v1.18.5/pkg/labelsfilter/filter.go).
+Copying that Kubernetes Pod predicate into a CNP can therefore select no
+endpoint. Before creating the corrected diagnostic CNP, the collector requires
+its two labels in the exact Pod-owned CEP identity and verifies the entire
+identity-label digest against the pinned agent's `endpoint get` projection.
+It keeps the full current rollout hash, Deployment, Pod UID, process and API
+fences. All namespace Pods carrying the Sandbox label—not only the current
+rollout—and all CNP-matching CEPs must represent exactly the captured consumers.
+Missing, duplicate, foreign, old-rollout or changed matching consumers fail
+closed; inventories are rechecked before and during intervention, and detected
+changes trigger owned-policy cleanup. This is a snapshot/recheck fence, not an
+atomic guarantee against future Pod creation. Only the validated selector and
+proof booleans enter evidence; arbitrary identity-label strings do not.
 
 Failure-only `baselinePackets` observes 30 seconds before the existing policy
 experiment; `policyWindowPackets` attempts to start before its CREATE. Both use

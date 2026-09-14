@@ -110,17 +110,24 @@ class NetworkFixture(Fixture):
                 {"name": "cilium-agent", "ready": True, "containerID": "private-cilium-container-canary",
                  "restartCount": 0}]}}
         self.objects[CEP] = {
+            "kind": "CiliumEndpoint",
             "metadata": {"name": "agent-pod", "namespace": RUNTIME, "uid": "cep-uid", "resourceVersion": "1",
                          "ownerReferences": [{"apiVersion": "v1", "kind": "Pod", "name": "agent-pod",
                                               "uid": "agent-pod-uid"}]},
-            "status": {"id": 123, "identity": {"id": 12345, "labels": ["private-label-canary"]},
+            "status": {"id": 123, "identity": {"id": 12345, "labels": [
+                "k8s:kars.azure.com/sandbox=agent", "k8s:io.kubernetes.pod.namespace=" + RUNTIME,
+                "k8s:private=private-label-canary"]},
                        "networking": {"node": "172.18.0.2", "addressing": [{"ipv4": "10.244.1.10"}]},
                        "log": ["private-endpoint-log-canary"]}}
         self.effective_config = ["[]", "true", "true"]
         self.kube_proxy_status = ["False"]
         self.policy_revisions = [7, 7]
+        self.identity_labels = copy.deepcopy(self.objects[CEP]["status"]["identity"]["labels"])
 
     def get(self, path):
+        if path.endswith("/ciliumendpoints"):
+            return {"items": copy.deepcopy([item for item in self.objects.values()
+                                           if item.get("kind") == "CiliumEndpoint"])}
         if path.endswith("/networkpolicies"):
             return {"items": copy.deepcopy([item for item in self.objects.values()
                                            if item.get("kind") == "NetworkPolicy"])}
@@ -133,7 +140,7 @@ class NetworkFixture(Fixture):
         if endpoint_id is None:
             return self.effective_config
         return [str(endpoint_id), "12345", *(str(value) for value in self.policy_revisions),
-                "both", RUNTIME, "agent-pod"]
+                "both", RUNTIME, "agent-pod", json.dumps(self.identity_labels)]
 
     def read_kube_proxy_projection(self, _agent, witness=None):
         return self.kube_proxy_status
@@ -326,7 +333,8 @@ class ObserverNetworkTests(unittest.TestCase):
         self.assertEqual(policy["apiVersion"], "cilium.io/v2")
         self.assertTrue(self.api.created[0][0].endswith("/ciliumnetworkpolicies"))
         self.assertEqual(policy["spec"], {
-            "endpointSelector": {"matchLabels": {"kars.azure.com/sandbox": "agent", "pod-template-hash": "abc123"}},
+            "endpointSelector": {"matchLabels": {"k8s:kars.azure.com/sandbox": "agent",
+                                                "k8s:io.kubernetes.pod.namespace": RUNTIME}},
             "egress": [{"toEntities": ["kube-apiserver"], "toPorts": [{"ports": [
                 {"protocol": "TCP", "port": "443"}, {"protocol": "TCP", "port": "6443"}]}]}]})
         self.assertTrue(result["apiResponseObserved"])
@@ -471,7 +479,8 @@ class ObserverNetworkTests(unittest.TestCase):
         service = self.api.objects[network.API_SERVICE]
         service["spec"].update(clusterIP="fd00::1", clusterIPs=["fd00::1"])
         self.api.objects[network.API_ENDPOINTS]["subsets"][0]["addresses"] = [{"ip": "fd01::2"}]
-        plan = network.policy_plan(network.snapshot(self.setup, TARGET), "diagnostic")
+        self.assertTrue(self.collect()["policyCreated"])
+        plan = self.api.created[0][1]
         self.assertEqual(plan["spec"]["egress"], [{"toEntities": ["kube-apiserver"], "toPorts": [{"ports": [
             {"protocol": "TCP", "port": "443"}, {"protocol": "TCP", "port": "6443"}]}]}])
 

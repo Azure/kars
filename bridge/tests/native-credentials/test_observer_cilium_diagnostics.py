@@ -197,7 +197,7 @@ class CiliumObserverTests(unittest.TestCase):
         for projection in (cilium.CONFIG_OUTPUT, cilium.KUBE_PROXY_OUTPUT, cilium.ENDPOINT_OUTPUT):
             self.assertTrue(projection.startswith("jsonpath="))
             self.assertNotIn(".log", projection)
-            self.assertNotIn(".labels", projection)
+            self.assertNotIn(".labels", projection.replace("{[0].status.identity.labels}", ""))
             self.assertNotIn("token", projection)
 
     def test_projection_bounds_and_unknown_outputs_fail_closed(self):
