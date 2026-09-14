@@ -539,6 +539,8 @@ jobs:
           version: v0.24.0
       - name: Restore existing YAML and test dependencies
         run: npm ci --prefix cli
+      - name: Verify public schema diagnostic and credential redaction boundaries
+        run: node --test tests/e2e/budget-api-kubectl.test.mjs
       - name: Create disposable supported apiserver before any Rust image build
         run: kind create cluster --name kars-budget-api --image kindest/node:v1.31.0 --config tests/e2e/kind-config.yaml
       - name: Validate real CRD/CEL and Pod audience identity
