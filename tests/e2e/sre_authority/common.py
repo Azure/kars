@@ -64,6 +64,12 @@ def command_site():
 
 
 def command_error_category(stderr):
+    acquisition = re.findall(
+        r"^CI-ACQUISITION-FAILURE (http-[1-5][0-9]{2}|deadline|timeout|transport|"
+        r"invalid-status|invalid-size|local-io|checksum-format|checksum-mismatch|"
+        r"unsupported-platform|ci-environment)$", stderr, re.MULTILINE)
+    if acquisition:
+        return "ci-acquisition:" + (acquisition[0] if len(set(acquisition)) == 1 else "ambiguous")
     stages = {
         "registrar", "controller-review", "release-inventory", "prerequisite-chart-render",
         "action-schema-review", "helm-compatibility", "action-schema-migration",
