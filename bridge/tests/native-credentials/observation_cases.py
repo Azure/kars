@@ -124,9 +124,31 @@ class ObservationCases:
         current_pods = {uid(entry) for entry in self.setup.admin.get(core(namespace, "pods"))["items"]}
         require(not current_pods.intersection(before["pods"]), "Old late-enrollment Pod UID survived retirement")
         receipt = json.loads(current_namespace["metadata"]["annotations"]["kars.azure.com/private-root-retirement"])
-        require(receipt.get("version") == 4 and receipt.get("phase") == "Qualified"
-                and before["pods"].issubset(set(receipt.get("captured", []))),
-                "The real operator did not complete the captured late-runtime retirement")
+        retirement_error = "The real operator did not qualify the bound private-retirement receipt"
+        require(isinstance(receipt, dict) and type(receipt.get("version")) is int
+                and receipt["version"] == 4 and receipt.get("phase") == "Qualified", retirement_error)
+        captured = receipt.get("captured")
+        require(isinstance(captured, list)
+                and all(isinstance(value, str) and value for value in captured)
+                and len(set(captured)) == len(captured), retirement_error)
+        # Writer retirement may replace the original Pods before private-key
+        # retirement starts. Each phase's actual captured generation must be gone.
+        require(not current_pods.intersection(captured), "Private-retirement Pod UID survived retirement")
+        for path, expected in (
+            (("runtime", "workspace"), CORE),
+            (("runtime", "sandbox", "name"), before["sandbox"]["metadata"]["name"]),
+            (("runtime", "sandbox", "uid"), uid(before["sandbox"])),
+            (("runtime", "task", "object", "name"), before["task"]["metadata"]["name"]),
+            (("runtime", "task", "object", "uid"), uid(before["task"])),
+            (("runtime", "task", "authorization"), before["task"].get("status", {}).get("envelopeDigest")),
+            (("deployment", "name"), before["deployment"]["metadata"]["name"]),
+            (("deployment", "uid"), uid(before["deployment"])),
+            (("baseline", "object", "uid"), uid(before["admin"])),
+        ):
+            actual = receipt
+            for field in path:
+                actual = actual.get(field) if isinstance(actual, dict) else None
+            require(isinstance(expected, str) and bool(expected) and actual == expected, retirement_error)
         for path, previous in before["stored"]:
             current = self.setup.admin.get(path)
             require(uid(current) == uid(previous) and current.get("data") == previous.get("data"),
