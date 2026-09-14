@@ -19,6 +19,7 @@ from native_api import CORE, STATE, Failure, Setup, command, core, require, sche
 from observation_cases import ObservationCases
 from observation_diagnostics import collect as observation_diagnostics
 from observer_network_diagnostics import collect as observer_network_diagnostics
+from rotation_diagnostics import collect as rotation_diagnostics
 from template_diagnostics import collect as template_diagnostics
 
 
@@ -119,6 +120,11 @@ def main():
                 "failure": str(error) if isinstance(error, Failure) else type(error).__name__,
             }
             if setup:
+                if name == "observer-rotation-current-bearer-and-revocation":
+                    save()
+                    report["cases"][name]["rotationFailureSnapshot"] = rotation_diagnostics(
+                        setup, observations.observer_target, report["cases"][name], started_at)
+                    save()
                 if name == "private-bff-observer-and-fresh-privacy-rpc":
                     report["cases"][name]["enrollmentTemplateDrift"] = template_diagnostics(
                         setup, observations.enrollment_templates, report["cases"][name]["failure"])
@@ -142,7 +148,7 @@ def main():
             print(json.dumps({"nativeCase": name, **{key: value for key, value in report["cases"][name].items()
                                                    if key not in ("metadataAtFailure", "observationReadiness",
                                                                   "actorApiOutcomes", "observerApiReachability",
-                                                                  "enrollmentTemplateDrift")}}), flush=True)
+                                                                  "enrollmentTemplateDrift", "rotationFailureSnapshot")}}), flush=True)
 
     def passed(name):
         return report["cases"].get(name, {}).get("result") == "passed"
