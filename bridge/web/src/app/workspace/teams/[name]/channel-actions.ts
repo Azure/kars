@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — team communication-channel server actions. Tokens are sent to
 // the BFF (which stores them only in a K8s Secret) and never returned to the
 // browser. GET/state reports enablement plus route-qualification status.

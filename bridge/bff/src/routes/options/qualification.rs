@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — launch options qualification.
 
 use super::{Options, QualifiedResource, QualifiedResourceSelection, QualifiedRoute, RefOption};

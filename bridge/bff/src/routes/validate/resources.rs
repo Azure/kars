@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — resources pre-flight checks.
 
 use super::network::{resolves, url_host};

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Governed credential adapter — controller and Teams integration operations.
 
 use super::*;

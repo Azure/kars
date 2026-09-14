@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // kars Bridge — Team composer. Intent → a visual org chart. The user gives a

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — SSO callback.
 //
 // GET /auth/callback: completes the OIDC Authorization Code + PKCE flow —

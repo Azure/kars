@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // kars Bridge — in-browser receipt verification for the mission surface. The

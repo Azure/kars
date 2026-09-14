@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // kars Bridge — "Run now" control. Triggers an immediate team run so a team

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — OIDC Authorization Code + PKCE client (server-only).
 //
 // Standards-compliant against any OIDC-conformant IdP: discovery document,

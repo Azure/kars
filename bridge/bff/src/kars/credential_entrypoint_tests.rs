@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::*;
 
 const FIRST: &str = "/apis/kars.azure.com/v1alpha1/namespaces/work/karsteams/first";

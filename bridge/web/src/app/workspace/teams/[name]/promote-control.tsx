@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // kars Bridge — team promotion control (§12). Requests a higher autonomy tier;

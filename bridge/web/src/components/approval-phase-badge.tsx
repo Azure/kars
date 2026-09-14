@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — approval phase badge.
 
 export function ApprovalPhaseBadge({ phase }: { phase: string }) {

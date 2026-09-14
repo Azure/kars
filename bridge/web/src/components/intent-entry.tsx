@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // Unified intent-first intake. One box: describe the outcome. Bridge classifies

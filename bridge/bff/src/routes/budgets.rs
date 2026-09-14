@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — hierarchical, editable inference token budgets.
 //
 // The user asked for a real budget HIERARCHY over inference token spend:

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — the Journey rail. ONE lifecycle spine, rendered identically
 // across the product so every surface tells the same story: a unit of work
 // (mission or team) always moves through Describe → Compose → Review → Launch →

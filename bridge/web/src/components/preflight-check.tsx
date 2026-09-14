@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // kars Bridge — shared pre-flight check. The SAME honest, cluster-grounded

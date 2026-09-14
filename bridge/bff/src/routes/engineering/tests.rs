@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — engineering intake regression tests.
 use k8s_openapi::api::core::v1::ConfigMap;
 

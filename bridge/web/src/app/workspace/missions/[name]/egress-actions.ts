@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — request temporary website access for a mission.
 //
 // Files an EgressApproval the controller reconciles through human approval; the

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — Access & roles. The multi-user surface: the four
 // differentiated permission sets, what each can do, the current principal, and an
 // honest disclosure that there is no SSO yet (the real boundary is the Bridge's

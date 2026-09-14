@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // Per-mission autonomy promotion (§12). Requests a higher tier; the controller

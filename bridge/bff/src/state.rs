@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — shared application state.
 //
 // Holds the optional cluster handle. Cluster connectivity is *optional* at

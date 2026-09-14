@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Liveness/readiness endpoint. Intentionally does NO upstream (BFF) work so the
 // kubelet probe reflects "this web server can accept traffic", not "the BFF is
 // reachable" — the SSR pages (e.g. /workspace) do a BFF round-trip and are far

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — "Run now" server action. Triggers an immediate team run by
 // setting the controller's `run-now` annotation via the BFF. The controller
 // mints one taskforce run under the normal readiness gates and clears the

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — Fleet Health (shift-triage home).
 // Sandbox phase counts, the degraded list, and substrate scope. Operator
 // truth: zeros are legitimate and useful here (operators count resources).

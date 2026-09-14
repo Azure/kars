@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — the platform/SRE shell.
 //
 // Dense, information-first chrome. Unlike the Workspace, Kubernetes context is

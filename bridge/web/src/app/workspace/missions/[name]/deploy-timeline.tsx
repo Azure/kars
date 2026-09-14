@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — the live Deploy timeline (design note FL/REQ15:
 // "dynamically watch agents deploy"). The journey rail shows the high-level
 // beat; this fills the Build→Run gap with the granular, real provisioning

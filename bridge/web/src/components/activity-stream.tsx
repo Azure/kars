@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — live activity stream.
 //
 // The plan's Mission Map right-rail: the real tool-call / round trace and token

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::super::{
     GithubDependabotAlert, append_bounded_tasks, dependabot_alert_task, merge_discovered_tasks,
 };

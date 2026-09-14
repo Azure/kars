@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — structured AGT tool-policy builder. Instead of hand-writing the
 // agentmesh PolicyEngine YAML (the "embarrassing" part), the operator toggles
 // capability presets and adds optional custom allow/deny rules; this module

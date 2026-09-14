@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::Cluster;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::{Api, ListParams};

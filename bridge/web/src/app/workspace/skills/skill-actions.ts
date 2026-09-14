@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use server";
 
 // kars Bridge Workspace — user skill submission (server action). A team member

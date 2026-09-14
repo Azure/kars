@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::{NO_CHANGE_SENTINEL, RunBlockedDto, looks_scaffolded};
 
 /// Classify a transport-`ok` run whose body is really a STOP condition (not a

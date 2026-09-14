@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — the dedicated Auditor surface. A THIRD product surface, separate
 // from the employee Workspace and the operator Console: entirely read-only, with
 // no policy/skill/fleet write-controls and an auditor identity. An auditor

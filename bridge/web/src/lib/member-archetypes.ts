@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — reusable team MEMBER archetypes.
 //
 // Pre-defined role templates ("a Rust engineer", "a Financial analyst") an

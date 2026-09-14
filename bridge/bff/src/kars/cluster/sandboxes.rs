@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::{Cluster, ContainerState, PodHealth};
 use k8s_openapi::api::core::v1::{ConfigMap, Pod};
 use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams};

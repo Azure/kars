@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { normalize } from "./activity";
 import {
   ACTION_LIMIT,

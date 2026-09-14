@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — New team. Server shell that loads the real cluster building
 // blocks (models, harnesses) so the org-chart composer can offer per-role
 // harness + model choices. When ?profile=<name> is present, the team is

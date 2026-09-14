@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Team detail. The standing org's command surface:
 // its charter, who it watches and on what cadence, its org chart (principal +
 // roster, each a verified subset of the team's authority), and the live

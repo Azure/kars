@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::egress::complete_egress_recommendation;
 use super::execution::{
     apply_weighted_role_budget_floors, execution_plan_error_from_raw, parse_execution_plan,

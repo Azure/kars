@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — Loop engineering catalog (2026).
 //
 // "Loop engineering" is the 2026 discipline that supersedes one-shot prompt

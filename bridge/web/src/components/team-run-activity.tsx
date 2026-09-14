@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { TeamRunEvidence } from "@/lib/team-run-evidence";
 
 function label(value: string): string {

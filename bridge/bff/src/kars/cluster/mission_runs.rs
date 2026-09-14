@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::{AgentIdentity, Cluster, MeshRunOutcome};
 use crate::providers::signing::sha256_hex;
 use base64::Engine as _;

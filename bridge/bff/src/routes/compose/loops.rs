@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use axum::Json;
 use axum::extract::State;
 use serde::Serialize;

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::BlueprintDto;
 use super::ExecutionPhaseDto;
 use super::ExecutionPlanDto;

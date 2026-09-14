@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — signed session cookie (server-only).
 //
 // A real OIDC login mints one of these: a compact, HS256-signed JWT (never

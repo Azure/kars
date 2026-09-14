@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — shared UI primitives. One consistent visual language so every
 // page stops being an undifferentiated stack of gray boxes. Hierarchy comes
 // from these: PageHeader (eyebrow + title + lead), Section (titled block),

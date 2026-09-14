@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::cluster::Cluster;
 use super::credentials::*;
 use axum::{

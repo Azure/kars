@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { ActivityEvent, SubAgent } from "@/lib/types";
 import { actionFromEvent, destinationsFrom, normalize } from "./activity";
 import type { AgentExecution, ToolEvent } from "./types";

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   BffClient,

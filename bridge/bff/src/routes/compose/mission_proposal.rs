@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::client::extract_json;
 use super::egress::complete_egress_recommendation;
 use super::execution::{

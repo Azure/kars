@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — server-side RBAC enforcement at the edge.
 //
 // The Operator Console UI disables admin-only controls, but that is cosmetic: a

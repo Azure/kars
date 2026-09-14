@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Home. Action-led, not a stat dashboard: the single
 // "Start a mission" entry point + your in-flight missions + anything waiting on
 // you. Honest empty state on a fresh cluster (no zeroed cards that imply

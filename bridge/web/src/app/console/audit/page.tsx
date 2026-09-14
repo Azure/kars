@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — Audit. The auditor's working surface, rendered
 // from the shared AuditView so the Console and the dedicated /audit surface
 // never drift. A chain-integrity verdict, then every Governance Receipt as an

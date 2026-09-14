@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use kube::api::DynamicObject;
 use serde::{Deserialize, Serialize};
 

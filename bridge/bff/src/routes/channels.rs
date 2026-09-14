@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — workspace-level, AGENT-AGNOSTIC communication channels.
 //
 // The user asked to move channel wiring (Telegram / Slack / Discord / WhatsApp)

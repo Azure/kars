@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — cross-harness efficiency frontier (design note §3B, Pillar
 // B). Built entirely from the REAL per-run telemetry the router captures on
 // every mission run and the controller persists (mission-output ConfigMap +

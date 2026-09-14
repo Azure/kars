@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Copyright (c) Pal Lakatos-Toth.
 // kars Bridge BFF — secure backend-for-frontend for the kars Bridge web app.
 //

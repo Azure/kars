@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::{
     Cluster, DeployActivity, DeployCondition, DeployPodState, GpuNodeSummary,
     LOCAL_INFERENCE_NAMESPACE, LocalDeployLiveStatus,

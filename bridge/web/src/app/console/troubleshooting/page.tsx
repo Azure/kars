@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — System / wiring view. Delivery Constraint #5: the product
 // never hides an un-wired gap behind a finished screen. This page shows the
 // true, cluster-read status of every stage of the governed-agent pipeline.

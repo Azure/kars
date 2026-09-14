@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — Governance Receipt API.
 //
 // Read endpoints project the signed predicate, never unsigned claim echoes.

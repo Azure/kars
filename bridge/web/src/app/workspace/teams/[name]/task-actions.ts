@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — team task backlog server actions. Add/remove discrete tasks on a
 // standing team; the controller drains the oldest `pending` task on its next run
 // (cadence or Run now) and marks it `done` when that run delivers.

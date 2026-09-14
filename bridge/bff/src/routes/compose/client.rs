@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 /// Find and parse the first top-level JSON object in a model response (it may be
 /// fenced or prefixed with prose). Returns `None` when there's no parseable object.
 pub(super) fn extract_json_object(raw: &str) -> Option<serde_json::Value> {

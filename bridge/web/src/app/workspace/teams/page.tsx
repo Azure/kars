@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Teams list. Standing orgs that run continuously
 // under a charter — distinct from Missions (finite task forces). Each Team's
 // charter loop mints task-force work on a cadence (autonomous monitoring).

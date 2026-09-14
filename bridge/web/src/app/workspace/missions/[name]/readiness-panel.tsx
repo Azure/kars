@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Pre-flight access readiness (design note FL5).
 //
 // Before (and during) a run, the operator must be able to see — at a glance —

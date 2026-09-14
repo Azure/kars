@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — Sandboxes. Every sandbox (lead + spawned
 // sub-agents), with phase, runtime, isolation, parent, and the conditions table
 // for troubleshooting. Real reads from KarsSandbox. The list itself is a

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { MissionDelegation } from "./orchestration";
 import type { PullRequestRef } from "./workspace";
 // kars Bridge web — shared types mirroring the BFF API DTOs.

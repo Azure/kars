@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — a small, dependency-free line-icon set. Emoji render
 // differently per-OS, can't inherit color/size, and read as amateur; these are
 // consistent 1.5px-stroke glyphs that inherit `currentColor` and align to a

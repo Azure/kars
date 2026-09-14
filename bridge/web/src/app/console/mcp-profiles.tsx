@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use client";
 
 // Operator MCP profiles — curate named, vetted bundles of McpServers so users

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — envelope pre-flight checks.
 
 use super::{Check, CheckStatus};

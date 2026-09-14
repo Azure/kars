@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — Active agents. The plain answer to "what is working
 // right now, and what just finished?" Sourced from real run telemetry (not idle
 // pods): live runs pulse with what they're doing this second; recent runs show

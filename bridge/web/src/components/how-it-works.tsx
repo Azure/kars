@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import Link from "next/link";
 
 /// The three-beat "how kars Bridge works" explainer. Extracted so it can be

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { Dispatch, SetStateAction } from "react";
 import type {
   Blueprint,

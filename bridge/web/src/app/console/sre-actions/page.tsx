@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — SRE Actions. The kars-sre agent's
 // self-remediation proposal surface: it diagnoses a workload incident and
 // proposes ONE typed fix (KarsSREAction, closed action set); an operator

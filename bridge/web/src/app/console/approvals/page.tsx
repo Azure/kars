@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — Approvals. Operator-side governance gates:
 // temporary egress widenings (EgressApproval) the platform team grants, and a
 // pointer to fleet-wide steering decisions. Real reads.

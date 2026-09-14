@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Private observations are separate from legacy admin, control and App credentials.
 
 use super::{cluster::Cluster, credentials::failure};

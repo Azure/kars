@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — cluster access.
 //
 // The BFF is the only process that holds a cluster client. The browser never

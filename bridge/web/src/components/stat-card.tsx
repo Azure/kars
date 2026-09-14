@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — compact metric tile for the command-center + console overviews.
 // Shares the premium value-first treatment of `ui.tsx`'s <Stat/> so KPI tiles
 // look identical in the Workspace and the Operator Console (one visual

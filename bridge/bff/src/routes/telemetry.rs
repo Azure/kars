@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — live telemetry stream (§8). Streams the WHOLE agent tree's
 // real per-round / per-tool activity as it happens, so the activity stream and
 // the expanding flow graph tick in flight instead of only at delivery.

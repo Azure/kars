@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 
 
 // ─── Artifacts index (cross-mission deliverables, §16) ───────────────────────

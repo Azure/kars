@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — launch-package options.
 //
 // The editable launch package (§20 of the design note) must be composed from

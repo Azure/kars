@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Workspace — mission status projection.
 //
 // Projects operator governance vocabulary (Ready/Degraded/Pending + execution

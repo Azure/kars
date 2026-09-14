@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge Operator Console — Policies. Inventory of the governance config:
 // connected MCP servers, tool policies, inference policies, and temporary
 // egress approvals. All real reads via the operator API.

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type * as React from "react";
 import { useState } from "react";
 import { useFormStatus } from "react-dom";

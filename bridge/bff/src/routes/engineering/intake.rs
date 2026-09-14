@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — intake helpers for engineering intake.
 
 use crate::providers::signing::sha256;

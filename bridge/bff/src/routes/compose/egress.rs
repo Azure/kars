@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::ComposeEgress;
 
 pub(super) fn complete_egress_recommendation(

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — team digests (design note §20). The standing-operation
 // report stream that surfaces in the steering inbox: each team publishes a
 // periodic digest (runs/delivered/tokens/knowledge/health), and the inbox shows

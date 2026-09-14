@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use server";
 
 // kars Bridge Operator Console — GitHub App self-service setup. Replaces the

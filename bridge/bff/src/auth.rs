@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — authenticated principal and persona authorization boundary.
 //
 // The Next.js web tier verifies the user's OIDC-derived `bridge-session` cookie

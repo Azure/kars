@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import type { ActivityEvent } from "@/lib/types";
 
 export type ToolEvent = Extract<ActivityEvent, { kind: "tool" }>;

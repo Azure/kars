@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { redirect } from "next/navigation";
 
 // The product opens on the Workspace (the employee surface). Operators switch

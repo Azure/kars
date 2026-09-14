@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge web — runtime configuration.
 //
 // All values are read server-side. The browser never receives cluster

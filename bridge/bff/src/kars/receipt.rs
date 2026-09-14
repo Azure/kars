@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — typed view of the `KarsReceipt` CRD.
 //
 // CONTRACT OWNERSHIP: the `KarsReceipt` schema is owned by core kars

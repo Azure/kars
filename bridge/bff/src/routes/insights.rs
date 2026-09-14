@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — Insights / efficiency metrics API.
 //
 // HONESTY CONTRACT (design note §24, UX honesty grammar):

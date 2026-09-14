@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::{
     cluster::Cluster,
     credential_contract::{CredentialBindings, Identity, Selection, Target},

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { CustomObjectsApi, KubeConfig, Watch } from "@kubernetes/client-node";
 import type { App } from "@microsoft/teams.apps";
 import {

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — same-origin OIDC IdP proxy (/dex/* → in-cluster Dex).
 //
 // Why: colleagues reach the Bridge over a single `kubectl port-forward

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge — smart deliverable renderer. Turns an agent's raw markdown output
 // into a well-formatted, TYPED document: it classifies what the agent produced
 // (report / recommendation / action plan / note), lifts a summary into a

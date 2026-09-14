@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 use super::*;
 use base64::{Engine, engine::general_purpose::STANDARD};
 

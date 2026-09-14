@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — durable GitHub engineering intake for standing teams.
 //
 // This is intentionally Bridge-owned integration workflow. Source configuration,

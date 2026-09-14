@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 "use server";
 
 // kars Bridge Operator Console — live model discovery, server-side. Client

@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — qualification requirement regression tests.
 
 use super::{blueprint_to_dto, qualification_requirements};

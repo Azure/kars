@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // kars Bridge BFF — the launch-package orchestrator (§20 "intent → package").
 //
 // Turns a plain-language objective into a *proposed*, fully-governed launch
