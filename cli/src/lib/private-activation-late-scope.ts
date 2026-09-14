@@ -8,7 +8,7 @@ import {
   type Execute, type Json, type NamespaceReview, type PrivateActivation, type ReviewedObject,
 } from "./private-activation.js";
 import { replicaIntent } from "./private-activation-retirement.js";
-import { scopedCommandFailure, type PrivateCommandPhase } from "./private-activation-command-diagnostics.js";
+import { PrivateCommandFailure, scopedCommandFailure, type PrivateCommandPhase } from "./private-activation-command-diagnostics.js";
 
 const HISTORY = "kars.azure.com/private-root-retirement";
 const ADMIN = "router-services-admin";
@@ -456,12 +456,33 @@ export async function stageLateScope(
   if (!state) throw new Error(failure);
   const deadline = Date.now() + 120_000;
   if (state.phase === "Pausing") {
-    live = await current(execute, activation, scope, root, state);
-    if (live.runtime.suspended !== true) {
+    let conflict: { error: PrivateCommandFailure; resourceVersion: string } | undefined;
+    for (let attempt = 0; ; attempt++) {
+      if (conflict && Date.now() >= deadline) throw conflict.error;
+      live = await current(execute, activation, scope, root, state);
+      if (live.runtime.suspended === true) break;
+      if (conflict) {
+        if (live.runtime.sandbox.resourceVersion === conflict.resourceVersion) throw conflict.error;
+        if ((await material(execute, scope, live.runtime)).key !== state.baseline.key) {
+          throw new Error("Late private key changed before retirement; no pre-retirement rotation was qualified");
+        }
+      }
       await assertRoot();
-      await execute(["patch", "karssandbox", state.runtime.sandbox.name, "-n", state.runtime.workspace, "--type=merge", "-p",
-        JSON.stringify({ metadata: { uid: live.runtime.sandbox.uid, resourceVersion: live.runtime.sandbox.resourceVersion },
-          spec: { suspended: true } })]);
+      if (conflict && Date.now() >= deadline) throw conflict.error;
+      try {
+        await execute(["patch", "karssandbox", state.runtime.sandbox.name, "-n", state.runtime.workspace, "--type=merge", "-p",
+          JSON.stringify({ metadata: { uid: live.runtime.sandbox.uid, resourceVersion: live.runtime.sandbox.resourceVersion },
+            spec: { suspended: true } })]);
+        break;
+      } catch (error) {
+        if (!(error instanceof PrivateCommandFailure) || error.facts.serverReason !== "Conflict"
+          || error.facts.phase !== "Pausing" || error.facts.operation !== "patch"
+          || error.facts.resourceKind !== "KarsSandbox" || error.facts.exitCode !== 1
+          || attempt >= 2) throw error;
+        // A rejected write cannot refresh approval: recheck the full receipt,
+        // runtime, Task and private material before using a different revision.
+        conflict = { error, resourceVersion: live.runtime.sandbox.resourceVersion };
+      }
     }
     live = await current(execute, activation, scope, root, state);
     if (replicaIntent(live.deployment) !== 0) {
