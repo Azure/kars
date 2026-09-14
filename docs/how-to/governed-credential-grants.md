@@ -301,15 +301,22 @@ Roles/Bindings; another workspace's grant is not reset.
 
 For a verified late-enrollment v2 Task runtime, retirement may temporarily
 withdraw Task authorization while the controller observes the new grant
-generation. Apply waits up to 120 seconds for genuine re-attestation under the
+generation. Apply waits up to 120 seconds for current authority under the
 exact quiescent grant. Task/Sandbox identity and intent, source data, private
 material and executable templates remain pinned. An observed projection
 revocation requires a fresh refill revision distinct from both the original
 and empty revisions, consumed by the owned Deployment. Only those proven
 controller metadata transitions can advance; this is not a new user review,
 stale-digest reuse or an arbitrary revision refresh. Already-qualified scopes
-retain their independently verified path. Missing witnesses or other drift
+retain their independently verified path. Missing retirement/refill witnesses or other drift
 preserve retirement and require explicit recovery; no new authority is published.
+The Sandbox and Task controllers reconcile independently: the Sandbox may pause
+and empty its projection while the Task remains Ready. Apply therefore requires
+the actual owned pause and empty projection, not observation of an incidental
+Task-status transition. Current Task authorization, the revalidated grant/input
+generation, fresh refill, consumed Deployment revision and old-Pod retirement
+are still required. If Task authorization was observed withdrawn, a fresh
+Ready attestation is required; the captured digest is never substituted for it.
 The projection recheck aligns kubectl JSON and JSONPath views only for
 `managedFields` absent from the captured JSON view. Originally captured
 `managedFields` and all other metadata remain compared; this does not grant
