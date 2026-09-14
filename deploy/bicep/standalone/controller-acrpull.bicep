@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 // Standalone Bicep that grants the controller workload identity
 // AcrPull on a specific ACR.
 //

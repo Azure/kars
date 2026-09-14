@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Quickstart
 
 Get a governed, sandboxed agent running on your laptop in **three commands** — no Azure account, no Rust, no clone.

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security Audit — dependency and CI security baseline recovery
 
 Date: 2026-08-24

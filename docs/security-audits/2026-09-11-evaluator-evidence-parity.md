@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Evaluator evidence parity - bounded delegated source approval
 
 Date: 2026-09-11

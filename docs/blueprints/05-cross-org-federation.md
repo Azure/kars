@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Blueprint 05 — Cross-org federation
 
 > "We're two organisations who want our agents to collaborate. Each side runs their own kars cluster. Neither side trusts the other's network, the other's Foundry quota, or the other's audit destination. We want E2E-encrypted, mutually-policy-evaluated agent-to-agent collaboration without merging trust domains."

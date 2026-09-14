@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # `KarsEval` — Policy Conformance Runner
 
 `KarsEval` is the **operator-facing surface** for replaying a signed

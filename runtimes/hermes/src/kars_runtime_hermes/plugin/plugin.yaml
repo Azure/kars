@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 name: kars
 version: "0.1.0"
 description: "kars in-pod adapter — wires Hermes into AGT governance, sub-agent spawn, Foundry tools, MCP, channels"

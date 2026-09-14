@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # ── Naked claw — vanilla OpenClaw with ONLY a domain-only egress
 # allowlist. No kars control plane. This is the strawman that
 # falls to the lethal trifecta. We deploy it as a plain Pod

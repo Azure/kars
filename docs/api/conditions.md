@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Conditions Taxonomy — kars CRDs
 
 Every kars CRD exposes a `status.conditions[]` array following the

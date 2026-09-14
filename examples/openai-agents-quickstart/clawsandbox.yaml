@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Example: OpenAI Agents Python runtime
 #
 # Hosts an OpenAI Agents SDK (Python) agent inside an kars sandbox.

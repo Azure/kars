@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Deployment blueprints
 
 Six concrete shapes for running kars. Each blueprint pins down **who runs what**, **where the trust boundary sits**, and **the main flow** end to end.

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Foundry tool wrappers — Phase A1.7.
 
 **Design**: Hermes ships with a strong native MCP client; the kars

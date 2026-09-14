@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Null-provider admission fixtures — positive case.
 # Dev-labelled KarsSandbox explicitly opts into a null provider. The
 # ValidatingAdmissionPolicy in deploy/helm/kars/templates/

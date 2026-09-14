@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # GitOps mode for egress allowlists
 
 This walkthrough covers the **sign-by-default** + **`--emit-manifest`**

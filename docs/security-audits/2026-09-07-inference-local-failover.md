@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Security Audit — Inference routing and local failover
 
 Date: 2026-09-07

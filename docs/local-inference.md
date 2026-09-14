@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Local inference and model failover
 
 Kars can route to operator-configured OpenAI-compatible endpoints alongside

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Kars Helm chart
 
 This chart installs the Kars CRDs, controller, RBAC, admission controls,

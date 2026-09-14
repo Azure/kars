@@ -1,4 +1,7 @@
 # syntax=docker/dockerfile:1.7
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 #
 # kars runtime image: LangGraph (LangChain.js) for TypeScript /
 # Node.js 22.

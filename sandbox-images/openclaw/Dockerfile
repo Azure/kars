@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars OpenClaw Sandbox Image
 # Slim overlay on top of kars-sandbox-base — adds only the router binary,
 # kars plugin, vendored SDK, and entrypoint.

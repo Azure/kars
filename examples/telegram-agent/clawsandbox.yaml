@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Example: Telegram-Connected Agent
 #
 # Deploys an OpenClaw agent with Telegram channel integration.

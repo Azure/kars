@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 name: Image Cache Publish
 
 # Publishes runtime container images (controller, inference-router,

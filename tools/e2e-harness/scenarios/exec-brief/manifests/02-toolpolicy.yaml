@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 02-toolpolicy.yaml — single ToolPolicy CR for the exec-brief sandbox.
 #
 # `agtProfile.inline` is the **verbatim** contents of the canonical

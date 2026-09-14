@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # STRIDE Threat Model — kars
 
 > Companion to [`docs/security.md`](../security.md) (defense-in-depth layers). This document classifies the threats kars mitigates using STRIDE (Spoofing, Tampering, Repudiation, Information disclosure, Denial of service, Elevation of privilege) across the four primary trust boundaries.

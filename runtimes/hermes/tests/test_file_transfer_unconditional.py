@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Regression guard: file_transfer auto-save runs even with
 KARS_MESH_AUTO_RESPONDER off.
 

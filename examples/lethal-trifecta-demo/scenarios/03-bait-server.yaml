@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Cluster-internal HTTP server that hosts the poisoned skill.
 # Same Deployment lives in both namespaces so each agent fetches
 # its skill from "next door" and the demo doesn't depend on

@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars Example: Microsoft Agent Framework (MAF) runtime
 #
 # Hosts a Microsoft Agent Framework (Python) agent inside an kars

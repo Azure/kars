@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Act II — the infrastructure break.
 #
 # Scenario: "the platform team's GitOps refactor lands a hardening

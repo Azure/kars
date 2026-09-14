@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars - Azure Developer CLI (azd) template
 # Deploy with: azd init --template Azure/kars && azd up
 

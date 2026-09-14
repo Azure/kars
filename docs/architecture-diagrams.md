@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Architecture diagrams
 
 Every diagram on this page is rendered from Mermaid in the source markdown. The rendered site (mdBook) shows them as SVG; on GitHub they render natively. If you are reading the source, paste any code block into [mermaid.live](https://mermaid.live) for a rendered preview.

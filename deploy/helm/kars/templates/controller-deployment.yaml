@@ -1,4 +1,5 @@
-{{- $localInference := .Values.localInference | default dict }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- $localInference := .Values.localInference | default dict }}
 {{- $privacyRpc := .Values.observationPrivacyRpc | default dict }}
 apiVersion: apps/v1
 kind: Deployment

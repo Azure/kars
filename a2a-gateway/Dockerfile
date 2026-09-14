@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # kars A2A Gateway — distroless (build-once pattern)
 #
 # Public A2A 1.0.0 ingress edge. Built from a pre-compiled binary

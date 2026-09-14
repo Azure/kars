@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kars Compatibility Suite (`tests/compat/`)
 
 **Status:** Phase 0 skeleton. Grows with every Phase-0→Phase-4 decomposition.

@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Hermes runtime — troubleshooting runbook
 
 A short, scoped runbook for the most common Hermes-specific issues. For the broader kars operator surface (sandboxes, mesh, governance) see the [Operations guide](../operations/README.md) and the [Operator TUI](../operator-tui.md) guide.

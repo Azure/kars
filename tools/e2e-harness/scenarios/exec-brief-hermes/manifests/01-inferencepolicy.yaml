@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # 01-inferencepolicy.yaml — Foundry/AOAI provider for the multi-agent
 # exec-brief-hermes scenario. The parent spawns 3 sub-agents (analyst,
 # viz, writer) at runtime via kars_spawn; sub-agents are spawned as

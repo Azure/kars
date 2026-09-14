@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """Unit tests for the AGT governance pre_tool_call hook."""
 
 from __future__ import annotations

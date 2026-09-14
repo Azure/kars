@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """kars-runtime-hermes — in-pod adapter that wires Hermes into kars governance.
 
 Public API: just import the package; Hermes' plugin discovery finds

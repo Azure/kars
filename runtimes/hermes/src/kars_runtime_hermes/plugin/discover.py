@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 """kars_discover — Phase A1.6.
 
 Look up peer agents in the AGT registry via the router's
