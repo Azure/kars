@@ -59,6 +59,20 @@ metadata proves the same repository, manifest and package. If that evidence is
 missing or ambiguous, the old history remains intact, the new versioned work is
 tracked separately, and intake reports the ambiguity for review.
 
+Open alerts for one target are aggregated by alert number, independent of poll
+order. Comparison uses structured advisory and dependency facts, not titles,
+candidate PR links, or poll timestamps. Unassigned pending work is refreshed in
+place. Once a run or assignment nonce exists, its approved input is immutable:
+new findings become a separate follow-up backlog task, dependent on unfinished
+prior work. Completed task IDs, runs and PR evidence stay intact. Findings already
+represented in retained work do not endlessly reopen on unchanged polls.
+
+Only a complete successful open-alert scan can remove absent findings from
+unassigned work. Empty pending work is labelled a source-only retirement, not a
+delivered fix. Truncated scans retain unresolved pending findings; a later complete
+scan determines withdrawals. Follow-ups include only newly observed source facts
+and links to prior backlog/run evidence.
+
 A PR title mentioning the package or advisory is only a search hint. It does
 not prove that the PR fixes this manifest, does not mark remediation delivered,
 and does not suppress new work. The assigned agent must inspect the actual diff
@@ -167,6 +181,13 @@ Examples:
 
 Internal evidence files such as `collaboration.jsonl` and
 `subagent-telemetry.jsonl` remain durable even after child sandboxes are gone.
+
+Role artifact attribution is **recorded** only when explicit producer metadata
+matches the role. An explicit different producer wins over a role-looking filename
+or path. Files without producer metadata may be grouped using **inferred**
+attribution, which is labelled per file; unmatched producers remain visible
+without claiming a roster role. Neither recorded nor inferred artifact ownership
+proves a structured handback or overrides run nonces and partial-persistence status.
 
 ## 5. Checkpoint and restart
 

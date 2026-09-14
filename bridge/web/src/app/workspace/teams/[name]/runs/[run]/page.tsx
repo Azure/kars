@@ -18,6 +18,7 @@ import { analyzeTeamRun } from "@/lib/team-run-evidence";
 import { currentPrincipal } from "@/lib/session";
 import type { ReactNode } from "react";
 import { HaltTeamRunButton } from "./halt-button";
+import { ArtifactSummary } from "./artifact-summary";
 
 export const dynamic = "force-dynamic";
 
@@ -491,13 +492,7 @@ export default async function TeamRunPage({
                   <div className="mt-3 space-y-3">
                     {evidence.roles.flatMap((r) => r.artifacts.map((a) => (
                       <details key={`${r.role.name}-${a.name}`} className="rounded-lg border border-border bg-surface-muted/30">
-                        <summary className="cursor-pointer px-4 py-3">
-                          <span className="font-medium">{a.name}</span>
-                          <span className="ml-2 text-xs text-foreground-muted">
-                            from {r.role.name.replace(/-/g, " ")}
-                            {r.artifactAttribution === "inferred" ? " · inferred attribution" : ""}
-                          </span>
-                        </summary>
+                        <ArtifactSummary artifact={a} role={r.role} />
                         <div className="border-t border-border px-4 py-3">
                           <ArtifactBody
                             artifact={a}
@@ -508,10 +503,7 @@ export default async function TeamRunPage({
                     )))}
                     {evidence.unattributedArtifacts.map((a) => (
                       <details key={`unattributed-${a.name}`} className="rounded-lg border border-border bg-surface-muted/30">
-                        <summary className="cursor-pointer px-4 py-3">
-                          <span className="font-medium">{a.name}</span>
-                          <span className="ml-2 text-xs text-foreground-muted">principal or unattributed</span>
-                        </summary>
+                        <ArtifactSummary artifact={a} />
                         <div className="border-t border-border px-4 py-3">
                           <ArtifactBody
                             artifact={a}

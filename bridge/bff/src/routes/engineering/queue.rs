@@ -10,7 +10,9 @@ use chrono::Utc;
 use crate::kars::cluster::Cluster;
 use crate::routes::teams::read_task_list;
 
-use super::remediation::match_remediation_task;
+use super::remediation::{
+    RemediationUpdate, aggregate_remediation_tasks, match_remediation_task, plan_remediation_update,
+};
 use super::{EngineeringSourceConfig, MAX_ITEMS_PER_SYNC, TeamTaskDto};
 
 pub(super) fn merge_discovered_tasks(
@@ -28,7 +30,22 @@ pub(super) fn merge_discovered_tasks(
         .map(|(index, task)| (task.id.clone(), index))
         .collect::<BTreeMap<_, _>>();
     let mut added = 0;
-    for mut task in discovered {
+    for mut task in aggregate_remediation_tasks(discovered) {
+        match plan_remediation_update(&mut task, &existing) {
+            RemediationUpdate::Unchanged => continue,
+            RemediationUpdate::Write(updated) => {
+                let updated = *updated;
+                if let Some(index) = positions.get(&updated.id).copied() {
+                    existing[index] = updated;
+                } else {
+                    positions.insert(updated.id.clone(), existing.len());
+                    existing.push(updated);
+                    added += 1;
+                }
+                continue;
+            }
+            RemediationUpdate::NotRemediation => {}
+        }
         let (matching_id, _) = match_remediation_task(&mut task, |id| {
             positions
                 .get(id)
@@ -43,13 +60,17 @@ pub(super) fn merge_discovered_tasks(
                 || task.id.starts_with("github-pr-feedback-");
             let renewable_pr_control =
                 task.id.starts_with("github-pr-fix-") || task.id.starts_with("github-pr-dedupe-");
-            if renewable_alert && current.status == "pending" && task.status == "done" {
-                current.title = task.title;
-                current.description = task.description;
-                current.status = "done".into();
-                current.run = None;
-                current.done_at = task.done_at;
-                current.stuck_since = None;
+            if renewable_alert && task.status == "done" {
+                if current.status == "pending"
+                    && current.run.is_none()
+                    && current.assignment_nonce.is_none()
+                {
+                    current.title = task.title;
+                    current.description = task.description;
+                    current.status = "done".into();
+                    current.done_at = task.done_at;
+                    current.stuck_since = None;
+                }
             } else if current.status == "done"
                 && (renewable_human_decision
                     || ((renewable_alert || renewable_pr_control)
@@ -92,55 +113,77 @@ fn engineering_task_requires_review(task_id: &str) -> bool {
 
 pub(super) fn append_bounded_tasks(
     target: &mut Vec<TeamTaskDto>,
-    known_tasks: &mut BTreeMap<String, (String, String)>,
+    known_tasks: &mut BTreeMap<String, TeamTaskDto>,
     incoming: Vec<TeamTaskDto>,
     queued_slots_used: &mut usize,
     attempt_cap: usize,
 ) -> bool {
-    let mut queue_candidates = Vec::new();
-    for mut task in incoming {
+    let remaining = MAX_ITEMS_PER_SYNC
+        .saturating_sub(*queued_slots_used)
+        .min(attempt_cap);
+    let mut accepted = 0;
+    let mut truncated = false;
+    for mut task in aggregate_remediation_tasks(incoming) {
+        let existing = known_tasks.values().cloned().collect::<Vec<_>>();
+        match plan_remediation_update(&mut task, &existing) {
+            RemediationUpdate::Unchanged => continue,
+            RemediationUpdate::Write(updated) => {
+                let updated = *updated;
+                let needs_slot = !known_tasks.contains_key(&updated.id);
+                if needs_slot && accepted >= remaining {
+                    truncated = true;
+                    continue;
+                }
+                accepted += usize::from(needs_slot);
+                known_tasks.insert(updated.id.clone(), updated);
+                // Carry the source observation, not the plan: the final CAS must recheck
+                // assignment ownership and completed history against its fresh backlog.
+                target.push(task);
+                continue;
+            }
+            RemediationUpdate::NotRemediation => {}
+        }
         let (matching_id, _) = match_remediation_task(&mut task, |id| {
-            known_tasks
-                .get(id)
-                .map(|(_, description)| description.as_str())
+            known_tasks.get(id).map(|task| task.description.as_str())
         });
         let renewable_alert = task.id.starts_with("dependabot-alert-")
             || task.id.starts_with("code-scanning-alert-")
             || task.id.starts_with("secret-scanning-alert-");
         match known_tasks.get(&matching_id) {
             None => {
-                known_tasks.insert(
-                    task.id.clone(),
-                    (task.status.clone(), task.description.clone()),
-                );
-                queue_candidates.push(task);
+                if accepted >= remaining {
+                    truncated = true;
+                    continue;
+                }
+                known_tasks.insert(task.id.clone(), task.clone());
+                accepted += 1;
+                target.push(task);
             }
-            Some((status, description)) => {
-                let reopen =
-                    renewable_alert && status == "done" && description != &task.description;
+            Some(current) => {
+                let reopen = renewable_alert
+                    && current.status == "done"
+                    && current.description != task.description;
                 if reopen {
-                    known_tasks.insert(
-                        task.id.clone(),
-                        ("pending".into(), task.description.clone()),
-                    );
-                    queue_candidates.push(task);
+                    if accepted >= remaining {
+                        truncated = true;
+                        continue;
+                    }
+                    known_tasks.insert(task.id.clone(), task.clone());
+                    accepted += 1;
+                    target.push(task);
                 } else if renewable_alert
-                    && matches!(status.as_str(), "pending" | "active")
-                    && description != &task.description
+                    && matches!(current.status.as_str(), "pending" | "active")
+                    && current.description != task.description
                 {
-                    known_tasks.insert(task.id.clone(), (status.clone(), task.description.clone()));
+                    let mut updated = current.clone();
+                    updated.description = task.description.clone();
+                    known_tasks.insert(matching_id, updated);
                     target.push(task);
                 }
             }
         }
     }
-    let remaining = MAX_ITEMS_PER_SYNC
-        .saturating_sub(*queued_slots_used)
-        .min(attempt_cap);
-    let truncated = queue_candidates.len() > remaining;
-    queue_candidates.truncate(remaining);
-    *queued_slots_used += queue_candidates.len();
-    target.extend(queue_candidates);
+    *queued_slots_used += accepted;
     truncated
 }
 
