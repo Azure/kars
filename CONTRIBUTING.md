@@ -224,14 +224,22 @@ comments **must** carry the two-line notice in its format's comment syntax:
 Use `//` for Rust, TypeScript/JavaScript (including TSX and MJS), and Bicep;
 `#` for shell/Python, YAML/TOML, Dockerfiles, Makefiles, ignore files, CODEOWNERS
 and environment examples; HTML comments for Markdown; CSS block comments for CSS;
-and Handlebars comments for `.hbs`. Helm templates (including template YAML and
-`NOTES.txt`) use Go-template comments with **no surrounding output whitespace**,
-not YAML comments that can interact with `{{- ... -}}` trimming.
+and Handlebars comments for `.hbs`. Plain YAML under a chart's `templates/`
+directory uses `#` too: CLI staging also reads some CRDs as raw YAML. YAML that
+begins with a Helm action (after any blank lines/YAML comments), plus `.tpl` and
+template `NOTES.txt`, uses Go-template comments with **no surrounding output
+whitespace**. A hash header before leading `{{- ... -}}` can be joined to
+`apiVersion` by trimming. The directory name alone does not determine YAML syntax.
 
 Use `scripts/apply-copyright-headers.sh` rather than rewriting files manually.
 It preserves original body bytes, line endings, file modes, author notices,
 shebangs, Python encoding cookies, Docker parser directives, Markdown frontmatter,
 CSS charset directives and frontend directive prologues. It is idempotent.
+For YAML with an incorrect comment style, it replaces only the exact existing
+Microsoft/MIT license prefix; original body bytes and author notices remain intact.
+For chart YAML with an initial `---`, the license is placed inside that first
+document, after the marker, rather than creating a separate comment-only Helm
+document. Existing preamble comments and document delimiters are not rewritten.
 Both existing commands share `ci/copyright_headers.py` (Python standard library).
 `ci/check-copyright-headers.sh` checks **every tracked file**, and fails on unknown
 formats, missing notices or unsafe inputs. Run the format regression tests with
@@ -266,8 +274,10 @@ payload is explicitly covered without a literal header.
 The checker prints coverage totals, including non-header categories. Pass
 `--verbose` to list every non-header path and reason, or
 `--report copyright-report.json` for a complete machine-readable inventory.
-The applier accepts the same options; its report includes insertion offsets,
-lengths and before/after SHA-256 hashes. Reports are local artifacts, not source
+The applier accepts the same options; its report includes edit offsets, inserted
+and removed license-prefix lengths, and before/after SHA-256 hashes.
+`removed_offset` addresses the original file; `offset` addresses the body after
+removing the old license block. Reports are local artifacts, not source
 files to commit. Optional repository-relative paths limit a local check/apply;
 CI invokes the checker without paths, so there are no silent extension omissions.
 
