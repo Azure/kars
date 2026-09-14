@@ -9,6 +9,7 @@ test_governed_services() (
     local scratch forward_pid="" port="" token agent_token scope request_id new_scope code
     local sandbox_uid namespace_uid
     local stage=setup category=command expected_status=0 actual_status=0
+    local forward_exit=-1 # Exit status has not been observed yet.
     local token_present=false agent_token_present=false tokens_distinct=false
     local sandbox_present=false namespace_present=false forward_started=false
     local scope_changed=false sandbox_preserved=false telemetry_scope_matches=false
@@ -16,10 +17,10 @@ test_governed_services() (
     exec 3>&2
     exec 2>"$scratch/commands.log"
     governed_failure() {
-        printf 'GOVERNED-SERVICES-FAILURE {"stage":"%s","category":"%s","expectedHttpStatus":%s,"httpStatus":%s,"operatorTokenPresent":%s,"agentTokenPresent":%s,"tokensDistinct":%s,"sandboxUidPresent":%s,"namespaceUidPresent":%s,"forwardStarted":%s,"scopeChanged":%s,"sandboxPreserved":%s,"telemetryScopeMatches":%s}\n' \
+        printf 'GOVERNED-SERVICES-FAILURE {"stage":"%s","category":"%s","expectedHttpStatus":%s,"httpStatus":%s,"operatorTokenPresent":%s,"agentTokenPresent":%s,"tokensDistinct":%s,"sandboxUidPresent":%s,"namespaceUidPresent":%s,"forwardStarted":%s,"forwardExitStatus":%s,"scopeChanged":%s,"sandboxPreserved":%s,"telemetryScopeMatches":%s}\n' \
             "$stage" "$category" "$expected_status" "$actual_status" \
             "$token_present" "$agent_token_present" "$tokens_distinct" \
-            "$sandbox_present" "$namespace_present" "$forward_started" \
+            "$sandbox_present" "$namespace_present" "$forward_started" "$forward_exit" \
             "$scope_changed" "$sandbox_preserved" "$telemetry_scope_matches" >&3
     }
     service_stage() {
@@ -92,7 +93,27 @@ PY
     forward_pid=$!
     local deadline=$(($(date +%s) + 30))
     while [ "$(date +%s)" -lt "$deadline" ]; do
-        kill -0 "$forward_pid" 2>/dev/null || { category=process-exited; return 1; }
+        if ! kill -0 "$forward_pid" 2>/dev/null; then
+            if wait "$forward_pid"; then forward_exit=0; else forward_exit=$?; fi
+            forward_pid=""
+            category=$(python3 - "$scratch/forward.log" <<'PY'
+import re, sys
+with open(sys.argv[1], "rb") as source:
+    text = source.read(65536).decode("utf-8", errors="replace")
+patterns = {
+    "pod-not-running": r"^error: unable to forward port because pod is not running\. Current status=",
+    "pod-disconnected": r"^error: lost connection to pod\b",
+    "upgrade-failed": r"^error: error upgrading connection:",
+    "local-bind-failed": r"unable to listen on any of the requested ports",
+    "service-port-missing": r"^error: Service .+ does not have a service port ",
+    "forward-forbidden": r"^error: .*(?:\(Forbidden\)|forbidden:)",
+}
+matched = [name for name, pattern in patterns.items() if re.search(pattern, text, re.MULTILINE)]
+print(matched[0] if len(matched) == 1 else "process-exited")
+PY
+            ) || { category=classification-failed; return 1; }
+            return 1
+        fi
         port=$(sed -n 's/^Forwarding from 127\.0\.0\.1:\([0-9]*\) ->.*/\1/p' "$scratch/forward.log" | head -1)
         [ -z "$port" ] || break
         sleep 1
