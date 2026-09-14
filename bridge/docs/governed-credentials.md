@@ -278,6 +278,10 @@ template comparisons. Missing fields, duplicates, extra fields and non-booleans
 make the group unavailable. Compared values and hashes are never copied.
 The original refusal and all production deadlines remain unchanged.
 
+The native workflow runs all `test_*.py` diagnostic contracts in its scope job
+before starting the cluster lanes. These parser, provenance and cleanup tests
+must pass; they do not substitute for the live API and runtime acceptance jobs.
+
 `observer_target_client` optionally carries an atomic group of five booleans:
 `transport_debug_observable`, `transport_trace_observable`,
 `tcp_connect_started`, `tcp_connected`, and `http_handshake_complete`.

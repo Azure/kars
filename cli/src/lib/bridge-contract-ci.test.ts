@@ -78,6 +78,9 @@ describe("permanent core and Bridge CI boundary", () => {
     expect(mapping(scope.outputs).required).toBe("${{ steps.scope.outputs.required }}");
     const steps = jobSteps(native, "contract-scope");
     expect(steps.some(step => String(step.run).includes("ci/bridge_contracts.py"))).toBe(true);
+    const diagnostics = steps.find(step => step.name === "Verify native diagnostic contracts");
+    expect(diagnostics?.run).toBe("PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bridge/tests/native-credentials -p 'test_*.py'");
+    expect(diagnostics?.["continue-on-error"]).toBeUndefined();
     const checkout = steps.find(step => String(step.uses).startsWith("actions/checkout@"));
     expect(mapping(checkout?.with)["fetch-depth"]).toBe(0);
     const api = mapping(mapping(native.jobs)["api-admission"]);
