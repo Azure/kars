@@ -40,6 +40,8 @@ jobs:
           persist-credentials: false
       - name: Verify contract scope and aggregate behavior
         run: python3 -m unittest discover -s ci/tests -p bridge_contracts_test.py
+      - name: Verify native diagnostic contracts
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bridge/tests/native-credentials -p 'test_*.py'
       - id: scope
         run: |
           python3 ci/bridge_contracts.py \
