@@ -57,6 +57,24 @@ recommendation / action / note, with an "in brief" summary). A **pull request** 
 agent opened is a first-class delivery type, shown as an artifact chip (repo +
 number + link) — see [Connections → GitHub](connections.md).
 
+### Artifact viewing and downloads
+
+Mission and team-run artifact links share
+`GET /api/namespaces/{ns}/tasks/{name}/artifact/{file}`, including retained
+artifacts after the task CR is deleted. Ownership checks still apply.
+Artifact bytes are untrusted agent output: HTML, SVG, PDF, and unknown formats
+are served as **attachments**, even when using **Open** rather than **Download**.
+Passive text/structured-data formats and PNG/JPEG retain inline viewing.
+Downloads preserve the original bytes; file names are sanitized for headers.
+
+Every raw artifact response carries `X-Content-Type-Options: nosniff`, private
+no-store caching, and a restrictive CSP with `sandbox` (no script or same-origin
+permissions), blocked external resources, forms, base URLs, and framing. The
+same-origin web API proxy preserves these headers and streams bytes unchanged.
+This response boundary—not `noopener` or a link's `download` attribute—prevents
+agent-produced executable content from inheriting the authenticated Bridge
+origin. Downloaded files remain untrusted; inspect them before opening locally.
+
 For the detailed relationship between engineering intake, backlog milestones,
 runs, activity, role artifacts, principal deliverables, review gates,
 checkpoints, and team memory, see

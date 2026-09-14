@@ -19,9 +19,13 @@
 // (the controller pins them to `0` unconditionally) — only individual
 // missions and team RUN records are eligible.
 
-use axum::{Json, extract::State};
+use axum::{
+    Json,
+    extract::{Extension, State},
+};
 use serde::{Deserialize, Serialize};
 
+use crate::auth::{Principal, require_admin};
 use crate::error::{AppError, AppResult};
 use crate::kars::cluster::Cluster;
 use crate::state::AppState;
@@ -74,12 +78,13 @@ pub struct SetRetentionPolicyRequest {
     pub default_ttl_seconds: i64,
 }
 
-/// `PUT /api/operator/retention-policy` — admin-only (gated at the web-proxy
-/// layer, same pattern as inference budgets).
+/// `PUT /api/operator/retention-policy` — admin-only in the BFF and web proxy.
 pub async fn set_retention_policy(
     State(state): State<AppState>,
+    Extension(principal): Extension<Principal>,
     Json(body): Json<SetRetentionPolicyRequest>,
 ) -> AppResult<Json<RetentionPolicyDto>> {
+    require_admin(&principal)?;
     let cluster = require_cluster(&state)?;
     if body.default_ttl_seconds < 0 {
         return Err(AppError::BadRequest(

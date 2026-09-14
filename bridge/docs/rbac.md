@@ -22,6 +22,7 @@ Neither layer replaces the other.
 | Use Operator Console | No | No | Yes | Yes |
 | Manage policies, MCP, skills, and approvals | No | No | Yes | Yes |
 | Administrative configuration | No | No | Limited | Yes |
+| Change cluster/workspace/user inference budgets or cluster retention | No | No | No | Yes |
 
 Role implication:
 
@@ -63,6 +64,21 @@ The UI reserves some configuration actions for admins, but do not treat UI
 hiding as a hard admin boundary unless the BFF route itself requires admin.
 Before public release, every admin-only operation must have explicit
 server-side enforcement and direct API tests.
+
+Inference-budget hierarchy and cluster retention mutations have explicit
+admin checks in both BFF middleware and handlers. Their current write routes
+are `PUT /api/operator/inference-budgets/cluster`,
+`PUT /api/operator/inference-budgets/workspaces/{ns}`,
+`PUT /api/operator/inference-budgets/users/{user}`, and
+`PUT /api/operator/retention-policy`. This includes setting, lowering, disabling,
+and clearing settings, not only increases. Operators retain GET access.
+Direct BFF requests without a valid signed principal receive 401 under SSO;
+valid non-admin principals receive 403 for these writes.
+
+The web request proxy uses the same signed-session role resolver as server
+components. Under SSO, an absent/invalid session yields no roles, and neither
+`bridge-role=admin` nor an admin `BRIDGE_ROLES` floor grants access. Local
+development fallbacks remain limited to the non-SSO, single-developer mode.
 
 ## Kubernetes RBAC
 

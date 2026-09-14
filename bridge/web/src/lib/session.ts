@@ -13,10 +13,8 @@
 //   3. the `BRIDGE_ROLES` env floor (`lib/config.ts::envRoles`);
 //   4. default: all roles (single-developer dev convenience).
 //
-// Whether or not SSO is configured, the REAL authorization boundary remains
-// the Bridge's Kubernetes ServiceAccount RBAC (deploy/rbac.yaml) — the roles
-// resolved here only drive which UI affordances render, never what the BFF
-// is actually allowed to do against the cluster.
+// Under SSO there is no dev fallback. The web and BFF independently verify
+// signed roles; the Kubernetes ServiceAccount is a separate aggregate boundary.
 
 import { cookies } from "next/headers";
 import {
@@ -29,6 +27,7 @@ import {
 } from "./config";
 import { ssoConfigured } from "./oidc-config";
 import { verifySession, SESSION_COOKIE } from "./session-token";
+import { requestRoles } from "./request-roles";
 
 const COOKIE = "bridge-role";
 
@@ -42,22 +41,8 @@ async function oidcSession() {
 
 /** The active roles for this request (real SSO session → dev cookie → env floor). */
 export async function sessionRoles(): Promise<Role[]> {
-  const session = await oidcSession();
-  if (session) return expandRoles(session.roles);
-
-  // When SSO is configured, there is NO dev-cookie / env-floor fallback. A
-  // missing or invalid session means "not signed in" → ZERO roles, and the
-  // layout guards (+ the /workspace guard) redirect to /auth/login. This closes
-  // the hole where an unauthenticated request would otherwise inherit the
-  // `bridge-role` dev cookie or the `BRIDGE_ROLES` floor (which defaults to ALL
-  // roles) — i.e. full access with no login. Dev fallbacks apply ONLY when no
-  // IdP is configured (single-developer local mode).
-  if (ssoConfigured()) return [];
-
   const jar = await cookies();
-  const fromCookie = parseRoles(jar.get(COOKIE)?.value);
-  if (fromCookie) return fromCookie;
-  return envRoles();
+  return requestRoles((name) => jar.get(name)?.value);
 }
 
 export async function hasRole(role: Role): Promise<boolean> {
@@ -108,8 +93,9 @@ export async function currentPrincipal(): Promise<{
       ssoSignedIn: false,
     };
   }
-  const simulated = !!parseRoles(cookieVal);
-  const roles = simulated ? expandRoles(parseRoles(cookieVal)!) : envRoles();
+  const parsedRoles = parseRoles(cookieVal);
+  const simulated = parsedRoles !== null;
+  const roles = parsedRoles ?? envRoles();
   const primary = primaryRole(roles);
   const name =
     (simulated ? `${ROLE_META[primary].label.toLowerCase().replace(/\s+/g, "-")}@local` : undefined) ??

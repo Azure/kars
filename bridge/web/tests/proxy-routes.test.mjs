@@ -136,6 +136,43 @@ test("api: streams SSE unchanged while removing hop-by-hop response headers", as
   assert.equal(await response.text(), "data: event\n\n");
 });
 
+test("api: preserves the artifact download, sandbox, and nosniff boundary for same-origin browser navigation", async () => {
+  const policy = "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  const payload = new TextEncoder().encode("<script>fetch('/api/operator/retention-policy')</script>\0");
+  for (const [file, mime, disposition] of [
+    ["report.html", "text/html; charset=utf-8", "attachment"],
+    ["diagram.svg", "image/svg+xml", "attachment"],
+    ["report.pdf", "application/pdf", "attachment"],
+    ["notes.txt", "text/markdown; charset=utf-8", "inline"],
+    ["image.png", "image/png", "inline"],
+  ]) {
+    for (const method of ["GET", "HEAD"]) {
+      const upstream = new Response(method === "HEAD" ? null : payload, { headers: {
+        "content-type": mime,
+        "content-disposition": `${disposition}; filename="${file}"`,
+        "content-security-policy": policy,
+        "x-content-type-options": "nosniff",
+        "cache-control": "private, no-store",
+        connection: "keep-alive",
+      } });
+      const service = proxy("api", { sso: true, fetch: async () => upstream });
+      const response = await service.routes[method](request("api", {
+        method, token: "signed-session",
+        suffix: `/namespaces/work/tasks/task/artifact/${file}`,
+      }));
+      assert.equal(response.status, 200);
+      assert.equal(response.body, upstream.body, "artifact bytes must be streamed, never rewritten");
+      assert.equal(response.headers.get("content-disposition"), `${disposition}; filename="${file}"`);
+      assert.equal(response.headers.get("content-type"), mime);
+      assert.equal(response.headers.get("content-security-policy"), policy);
+      assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+      assert.equal(response.headers.get("cache-control"), "private, no-store");
+      assert.equal(response.headers.get("connection"), null);
+      assert.deepEqual(new Uint8Array(await response.arrayBuffer()), method === "HEAD" ? new Uint8Array() : payload);
+    }
+  }
+});
+
 test("dex: forwards login cookies, redirects, and separate Set-Cookie headers", async () => {
   const headers = new Headers({ location: "/auth/callback?code=opaque", connection: "keep-alive" });
   headers.append("set-cookie", "csrf=one; Path=/dex; HttpOnly");
