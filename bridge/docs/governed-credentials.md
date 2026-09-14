@@ -473,6 +473,25 @@ deadline and core pin are unchanged.
 Run the dependency-free provenance, fencing and cleanup tests with:
 `PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s tests/native-credentials -p 'test_*.py'`.
 
+### Failure-time rotation snapshot
+
+The rotation case's exact current-grant/writer timeout adds
+`rotationFailureSnapshot` synchronously, saving the failed result and snapshot
+before the later writer-uninstall case can restart the controller. It records
+up to two lineage-bound controller Pod identities, restart counts and fixed
+termination reasons/exit codes/signals; the canonical grant's current/observed
+generations; and namespace/grant-bound observer Secret and CNP metadata.
+Secret/CNP requests require Kubernetes `PartialObjectMetadata` representations
+and reject full-object fallback: no Secret data or policy bodies are retained.
+Existing controller warnings from the first bound Pod are limited to 128 lines,
+64 KiB and 16 projected records; arbitrary errors, termination messages and log
+fields are discarded. Missing reconciliation stages remain `unavailable`.
+Reads have a 40-second scheduling budget, at most 48 GETs and per-operation
+timeouts up to 10 seconds; the existing CLI-origin check has its own 10-second
+bound. Metadata inventories are capped at 32 CNPs and rechecked for drift.
+This is diagnostic-only: it adds no retries, changes no readiness deadline and
+cannot turn the original failure into a pass.
+
 ### Actor-scoped native API outcomes
 
 Only the two failing native cases collect `actorApiOutcomes`: credential

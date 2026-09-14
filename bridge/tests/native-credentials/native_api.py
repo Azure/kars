@@ -145,14 +145,15 @@ class Api:
         self.token = token
         self.server = server
 
-    def request(self, method, path, body=None, expected=(200,), patch_type=None):
-        headers = {"Accept": "application/json"}
+    def request(self, method, path, body=None, expected=(200,), patch_type=None, *,
+                accept="application/json", timeout=15):
+        headers = {"Accept": accept}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
         if body is not None:
             headers["Content-Type"] = patch_type or "application/json"
         connection = http.client.HTTPSConnection(
-            self.host, self.port, context=self.context, timeout=15,
+            self.host, self.port, context=self.context, timeout=timeout,
         )
         try:
             connection.request(method, path, body=None if body is None else json.dumps(body),
