@@ -30,6 +30,7 @@ use super::intake::{
 use super::queue::{append_bounded_tasks, ensure_auto_run_for_backlog, merge_into_backlog};
 use super::remediation::{
     description_matches_remediation, match_remediation_task, note_candidate_pulls,
+    remediation_snapshot,
 };
 use super::review::{collect_review_items, dedupe_followup_task};
 use super::{
@@ -91,12 +92,7 @@ async fn perform_sync(
     let existing_backlog = read_task_list(&cluster.read_team_tasks(&config.team_name).await);
     let mut known_tasks = existing_backlog
         .iter()
-        .map(|task| {
-            (
-                task.id.clone(),
-                (task.status.clone(), task.description.clone()),
-            )
-        })
+        .map(|task| (task.id.clone(), task.clone()))
         .collect::<BTreeMap<_, _>>();
     let attempt_count = config
         .repos
@@ -158,20 +154,20 @@ async fn perform_sync(
                                 let mut task = dependabot_alert_task(repo, alert, &now);
                                 let (matching_id, identity_warning) =
                                     match_remediation_task(&mut task, |id| {
-                                        known_tasks
-                                            .get(id)
-                                            .map(|(_, description)| description.as_str())
+                                        known_tasks.get(id).map(|task| task.description.as_str())
                                     });
                                 if let Some(warning) = identity_warning {
                                     errors.push(warning);
                                 }
                                 let legacy_ids = known_tasks
                                     .iter()
-                                    .filter(|(id, (status, description))| {
+                                    .filter(|(id, task)| {
                                         id.starts_with("dependabot-alert-")
-                                            && status == "pending"
+                                            && task.status == "pending"
+                                            && task.run.is_none()
+                                            && task.assignment_nonce.is_none()
                                             && description_matches_remediation(
-                                                description,
+                                                &task.description,
                                                 repo,
                                                 alert.dependency.manifest_path.as_deref(),
                                                 &alert.dependency.package.name,
@@ -182,10 +178,7 @@ async fn perform_sync(
                                 for legacy_id in legacy_ids {
                                     let retirement =
                                         legacy_alert_retirement(&legacy_id, &matching_id, &now);
-                                    known_tasks.insert(
-                                        legacy_id,
-                                        ("done".into(), retirement.description.clone()),
-                                    );
+                                    known_tasks.insert(legacy_id, retirement.clone());
                                     tasks.push(retirement);
                                 }
                                 let covering_pulls = open_pull_coverage
@@ -207,6 +200,13 @@ async fn perform_sync(
                                 note_candidate_pulls(&mut task, &covering_pulls);
                                 signal_tasks.push(task);
                             }
+                            let signal_tasks = remediation_snapshot(
+                                signal_tasks,
+                                &known_tasks,
+                                repo,
+                                !alerts.truncated,
+                                &now,
+                            );
                             let bounded = append_bounded_tasks(
                                 &mut tasks,
                                 &mut known_tasks,

@@ -101,13 +101,14 @@ function roleScore(role: TeamRole, artifact: MissionArtifact): number {
   const normalize = (value: string) => value.toLowerCase().replace(/[^a-z0-9]+/g, "");
   const roleId = normalize(role.name);
   if (!roleId) return 0;
+  const producer = artifact.source_agent?.trim();
+  // An explicit producer is authoritative; paths cannot contradict it.
+  if (producer) return normalize(producer) === roleId ? 110 : 0;
   const provenance = [
     artifact.name,
-    artifact.source_agent ?? "",
     artifact.source_path ?? "",
   ].map(normalize);
-  if (normalize(artifact.source_agent ?? "") === roleId) return 110;
-  if (provenance.some((value) => value.includes(roleId))) return 100;
+  if (provenance.some((value) => value.includes(roleId))) return 90;
   const roleText = `${role.name} ${role.system_prompt ?? ""}`.toLowerCase();
   const artifactText = `${artifact.name} ${artifact.source_path ?? ""}`.toLowerCase();
   if (
@@ -129,6 +130,14 @@ function roleScore(role: TeamRole, artifact: MissionArtifact): number {
     return 60;
   }
   return 0;
+}
+
+export function artifactRoleAttribution(
+  role: TeamRole,
+  artifact: MissionArtifact,
+): RoleEvidence["artifactAttribution"] {
+  const score = roleScore(role, artifact);
+  return score === 110 ? "recorded" : score > 0 ? "inferred" : "none";
 }
 
 function rolePlan(task: TaskEvidenceInput): {
@@ -251,7 +260,7 @@ export function analyzeTeamRun(team: TeamEvidenceInput, task: TaskEvidenceInput)
     if (ranked[0]) {
       assigned.set(artifact.name, {
         role: ranked[0].role,
-        inferred: ranked[0].score < 100,
+        inferred: ranked[0].score !== 110,
       });
     }
   }
@@ -324,9 +333,9 @@ export function analyzeTeamRun(team: TeamEvidenceInput, task: TaskEvidenceInput)
         event: "role_artifact_recovered",
         agent: null,
         member: role.role.name,
-        outcome: "delivered",
+        outcome: null,
         message_id: null,
-        preview: `${role.artifacts.length} retained artifact${role.artifacts.length === 1 ? "" : "s"}`,
+        preview: `${role.artifacts.length} retained artifact${role.artifacts.length === 1 ? "" : "s"} · ${role.artifactAttribution} attribution; not a structured handback`,
         source: "artifact-derived",
       });
     }

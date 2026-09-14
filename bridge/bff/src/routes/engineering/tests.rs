@@ -358,10 +358,7 @@ fn changed_pending_alert_flows_through_without_using_queue_capacity() {
     let mut refreshed = task("secret-scanning-alert-abc", "pending");
     refreshed.description = "updated_at=new".into();
     let mut candidates = Vec::new();
-    let mut known = BTreeMap::from([(
-        existing.id.clone(),
-        (existing.status.clone(), existing.description.clone()),
-    )]);
+    let mut known = BTreeMap::from([(existing.id.clone(), existing.clone())]);
     let mut queued_slots = 0;
     assert!(!append_bounded_tasks(
         &mut candidates,

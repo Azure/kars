@@ -21,7 +21,7 @@ fn discovered(repo: &str, path: Option<&str>, package: &str, number: u64) -> Tea
     dependabot_alert_task(repo, &alert, "2026-09-11T00:00:00Z")
 }
 
-fn legacy(repo: &str, path: Option<&str>, package: &str, status: &str) -> TeamTaskDto {
+pub(super) fn legacy(repo: &str, path: Option<&str>, package: &str, status: &str) -> TeamTaskDto {
     let mut task = discovered(repo, path, package, 17);
     let id = RemediationIdentity::new(repo, path, package).legacy_work_id();
     task.description = task.description.replace(&task.id, &id);
@@ -36,7 +36,7 @@ fn legacy(repo: &str, path: Option<&str>, package: &str, status: &str) -> TeamTa
     task
 }
 
-fn snapshot(task: &TeamTaskDto) -> serde_json::Value {
+pub(super) fn snapshot(task: &TeamTaskDto) -> serde_json::Value {
     serde_json::to_value(task).unwrap()
 }
 
@@ -158,7 +158,7 @@ fn proven_legacy_work_resumes_without_changing_state_or_existing_links() {
         let mut linked = discovered("acme/api", Some("consumer/package-lock.json"), "vite", 19);
         linked.depends_on = vec![original.id.clone()];
         let before = vec![snapshot(&original), snapshot(&linked)];
-        let candidate = discovered("acme/api", Some("Services/package-lock.json"), "vite", 99);
+        let candidate = discovered("acme/api", Some("Services/package-lock.json"), "vite", 17);
         let (merged, queued) = merge_discovered_tasks(vec![original, linked], vec![candidate]);
         assert_eq!(queued, 0, "{status}");
         assert_eq!(merged.iter().map(snapshot).collect::<Vec<_>>(), before);
@@ -171,7 +171,7 @@ fn legacy_explicit_null_manifest_can_resume_but_unknown_is_distinct() {
     let before = snapshot(&original);
     let (merged, queued) = merge_discovered_tasks(
         vec![original],
-        vec![discovered("ACME/API", None, "vite", 99)],
+        vec![discovered("ACME/API", None, "vite", 17)],
     );
     assert_eq!(queued, 0);
     assert_eq!(snapshot(&merged[0]), before);
@@ -194,12 +194,16 @@ fn distinct_completed_legacy_manifest_does_not_swallow_new_work() {
         let original = legacy("acme/api", Some(original_path), "vite", "done");
         let before = snapshot(&original);
         let candidate = discovered("acme/api", Some(new_path), "vite", 18);
-        let candidate_before = snapshot(&candidate);
         let (merged, queued) = merge_discovered_tasks(vec![original], vec![candidate.clone()]);
         assert_eq!(queued, 1);
         assert_eq!(merged.len(), 2);
         assert_eq!(snapshot(&merged[0]), before);
-        assert_eq!(snapshot(&merged[1]), candidate_before);
+        assert_eq!(merged[1].id, candidate.id);
+        assert_eq!(merged[1].status, candidate.status);
+        assert_eq!(
+            observations(&merged[1].description).unwrap()[0].evidence_key(),
+            observations(&candidate.description).unwrap()[0].evidence_key()
+        );
         let (repeated, queued) = merge_discovered_tasks(merged, vec![candidate]);
         assert_eq!(queued, 0);
         assert_eq!(repeated.len(), 2);
@@ -325,10 +329,7 @@ fn admission_reuses_proven_legacy_work_without_spending_queue_capacity() {
         "active",
     );
     let before = snapshot(&original);
-    let mut known = BTreeMap::from([(
-        original.id.clone(),
-        (original.status.clone(), original.description.clone()),
-    )]);
+    let mut known = BTreeMap::from([(original.id.clone(), original.clone())]);
     let mut admitted = Vec::new();
     let mut slots = 0;
     let distinct = discovered("acme/api", Some("services/package-lock.json"), "vite", 18);
@@ -336,7 +337,7 @@ fn admission_reuses_proven_legacy_work_without_spending_queue_capacity() {
         &mut admitted,
         &mut known,
         vec![
-            discovered("acme/api", Some("Services/package-lock.json"), "vite", 99),
+            discovered("acme/api", Some("Services/package-lock.json"), "vite", 17),
             distinct.clone(),
         ],
         &mut slots,

@@ -71,7 +71,23 @@ jobs:
             routes::tasks::artifacts::tests::active_and_unknown_artifacts_download_unchanged_from_live_or_retained_tasks \
             routes::tasks::artifacts::tests::passive_artifact_previews_keep_inline_viewing_without_mime_sniffing_or_byte_changes \
             routes::tasks::artifacts::tests::artifact_head_has_the_same_protection_and_filename_is_header_safe \
-            routes::tasks::artifacts::tests::artifact_response_hardening_preserves_ownership_and_missing_file_denials
+            routes::tasks::artifacts::tests::artifact_response_hardening_preserves_ownership_and_missing_file_denials \
+            routes::engineering::remediation::renewal_tests::current_producer_new_advisory_after_done_gets_followup_not_lost_or_replayed \
+            routes::engineering::remediation::renewal_tests::completed_source_ignores_poll_time_titles_and_pr_candidates_but_not_changed_fix_facts \
+            routes::engineering::remediation::renewal_tests::current_producer_pending_source_refreshes_without_spending_capacity_or_changing_identity \
+            routes::engineering::remediation::renewal_tests::active_approved_and_nonce_bound_pending_inputs_are_frozen_with_dependent_followups \
+            routes::engineering::remediation::renewal_tests::current_producer_aggregation_is_order_independent_and_removes_only_closed_pending_findings \
+            routes::engineering::remediation::renewal_tests::full_empty_snapshot_retires_unassigned_source_without_claiming_delivery_or_erasing_runs \
+            routes::engineering::remediation::renewal_tests::refreshed_followup_preserves_original_history_and_withdrawn_findings_are_not_reintroduced \
+            routes::engineering::remediation::renewal_tests::proven_legacy_history_remains_immutable_when_current_producer_finds_a_new_alert \
+            routes::engineering::remediation::renewal_tests::final_merge_rechecks_assignment_and_completion_after_admission \
+            routes::engineering::remediation::renewal_tests::direct_final_merge_aggregates_current_producer_and_preserves_completed_pr_evidence \
+            routes::engineering::remediation::renewal_tests::remediation_queue_cap_retries_new_followups_but_allows_unassigned_refreshes \
+            routes::engineering::remediation::renewal_tests::missing_v2_original_metadata_cannot_authorize_overwriting_a_completed_row \
+            routes::engineering::remediation::renewal_tests::legacy_retirement_cannot_rewrite_a_concurrently_assigned_pending_task \
+            routes::engineering::remediation::renewal_tests::duplicated_alert_pages_keep_latest_facts_and_all_pr_candidate_links_in_either_order \
+            routes::engineering::remediation::renewal_tests::partial_poll_refreshes_seen_alerts_without_discarding_unseen_pending_findings \
+            routes::engineering::remediation::renewal_tests::source_withdrawal_final_merge_does_not_change_a_newly_assigned_v2_task
           do
             grep -Fx "$name: test" /tmp/kars-bridge-bff-tests.txt
           done
