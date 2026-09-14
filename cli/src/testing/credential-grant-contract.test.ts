@@ -206,6 +206,19 @@ describe("governed credential public contract",()=>{
     expect(runtime).toContain("set.uid().as_deref() != Some(owner.uid.as_str())");
   });
 
+  it("limits optional observer Cilium permissions to the controller and namespaced policies",()=>{
+    const owners=manifests.filter(item=>["Role","ClusterRole"].includes(item.kind)
+      &&item.rules?.some((rule:{apiGroups?:string[]})=>rule.apiGroups?.includes("cilium.io")));
+    expect(owners.map(item=>item.metadata.name)).toEqual(["kars-credential-grant-controller"]);
+    expect(owners[0].rules.filter((rule:{apiGroups:string[]})=>rule.apiGroups.includes("cilium.io")))
+      .toEqual([{apiGroups:["cilium.io"],resources:["ciliumnetworkpolicies"],
+        verbs:["get","list","create","update","delete"]}]);
+    expect(resource("ClusterRoleBinding","kars-credential-grant-controller").subjects)
+      .toEqual([{kind:"ServiceAccount",namespace:"kars-system",name:"kars-controller"}]);
+    expect(manifests.some(item=>["CiliumNetworkPolicy","CiliumClusterwideNetworkPolicy"].includes(item.kind)))
+      .toBe(false);
+  });
+
   it("gates ordinary Task readiness before execution and preserves state during credential failure",()=>{
     const task=source("controller/src/kars_task_reconciler.rs");
     expect(task.indexOf("readiness::enforce(")).toBeLessThan(task.indexOf("reconcile_execution(&ctx.client"));
