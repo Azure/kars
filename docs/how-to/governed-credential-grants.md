@@ -541,7 +541,17 @@ including completed v4 scopes. If it disappears or is replaced, no replacement
 is adopted or created; explicit operator recovery is required. Ordinary core
 creation and existing v3 scope handling do not acquire this v4 identity fence.
 
-Re-preview after a CAS conflict or lost response resumes the recorded attempt,
+During `Pausing`, a confirmed Kubernetes `Conflict` on the Sandbox suspension
+PATCH permits at most three total attempts within the existing 120-second
+bound. Each attempt revalidates the full recorded scope, runtime and Task,
+and the shared-root proof. A replacement attempt requires a different live
+resourceVersion and the unchanged private-key baseline; it never replays the
+rejected PATCH. An already-applied, fully verified suspension needs no duplicate
+write. Replaced identities, changed intent/templates/authority, unchanged
+versions, exhausted bounds, and non-conflict or ambiguous failures still stop
+enrollment. This exception does not cover other mutations or refresh approval.
+
+Re-preview after an unresolved CAS conflict or lost response resumes the recorded attempt,
 original intent and epoch; it cannot adopt changed templates/specifications or
 invent missing retirement evidence. Failure preserves suspension and recovery
 records. Task, Sandbox, namespace, source bundles, projections, agent keys and

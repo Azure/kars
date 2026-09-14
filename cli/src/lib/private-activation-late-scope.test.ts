@@ -136,6 +136,139 @@ describe("reviewed late runtime private enrollment", () => {
   });
   afterEach(() => { vi.restoreAllMocks(); });
 
+  it.each(["uid", "spec", "task", "template", "namespace", "root", "private-key", "unchanged-version", "deadline"])(
+    "does not retry a pause conflict after %s changes or lacks a fresh version", async fault => {
+      const f = await setup();
+      const review = await f.document();
+      let attempts = 0;
+      const run: Execute = async (args, input) => {
+        if (args[0] === "patch" && args[1] === "karssandbox"
+          && JSON.parse(args[args.indexOf("-p") + 1]!).spec.suspended === true) {
+          attempts++;
+          if (fault !== "unchanged-version") f.sandbox.metadata.resourceVersion = "fresh-version";
+          if (fault === "uid") f.sandbox.metadata.uid = "replacement";
+          if (fault === "spec") f.sandbox.spec.unreviewed = true;
+          if (fault === "task") f.task.status.envelopeDigest = `sha256:${"b".repeat(64)}`;
+          if (fault === "template") f.deployment.spec.template.spec.containers[0].image = "unreviewed";
+          if (fault === "namespace") f.namespace.metadata.annotations[`${P}state`] = "Qualified";
+          if (fault === "root") f.objects.get(f.key("namespace", "core")).metadata.annotations[HISTORY] = "{}";
+          if (fault === "private-key") f.secret.data["control-token"] = Buffer.from("C".repeat(64)).toString("base64");
+          if (fault === "deadline") vi.spyOn(Date, "now").mockReturnValue(Date.now() + 121_000);
+          throw Object.assign(new Error("private-command-canary"), {
+            exitCode: 1, stderr: "Error from server (Conflict): private-object-canary",
+          });
+        }
+        return f.execute(args, input);
+      };
+      const failure = await applyReviewedGrant(run, review).then(() => undefined, error => error);
+      expect(failure).toBeInstanceOf(Error);
+      expect(failure).not.toBeInstanceOf(TypeError);
+      expect(failure.message + JSON.stringify(failure)).not.toContain("canary");
+      expect(attempts).toBe(1);
+      expect(f.namespace.metadata.annotations[`${P}state`]).toBe(fault === "namespace" ? "Qualified" : "Pending");
+      expect(f.sandbox.spec.suspended).toBeUndefined();
+      expect(f.grant().spec.writers).toEqual([]);
+    });
+
+  it.each(["Forbidden", "Timeout", "Unknown"])("does not retry an ambiguous or %s pause error", async reason => {
+    const f = await setup();
+    const review = await f.document();
+    let attempts = 0;
+    const run: Execute = async (args, input) => {
+      if (args[0] === "patch" && args[1] === "karssandbox"
+        && JSON.parse(args[args.indexOf("-p") + 1]!).spec.suspended === true) {
+        attempts++;
+        throw Object.assign(new Error("private-command-canary"), {
+          exitCode: 1, stderr: reason === "Unknown" ? "private-error-canary" : `Error from server (${reason}): private-error-canary`,
+        });
+      }
+      return f.execute(args, input);
+    };
+    const failure = await applyReviewedGrant(run, review).then(() => undefined, error => error);
+    expect(failure).toBeInstanceOf(PrivateCommandFailure);
+    expect(failure.facts.serverReason).toBe(reason);
+    expect(failure.message).not.toContain("canary");
+    expect(attempts).toBe(1);
+  });
+
+  it("bounds repeated known pause conflicts and preserves the last sanitized failure", async () => {
+    const f = await setup();
+    const review = await f.document();
+    const versions: string[] = [];
+    const run: Execute = async (args, input) => {
+      if (args[0] === "patch" && args[1] === "karssandbox"
+        && JSON.parse(args[args.indexOf("-p") + 1]!).spec.suspended === true) {
+        const patch = JSON.parse(args[args.indexOf("-p") + 1]!);
+        expect(patch.metadata.uid).toBe(f.sandbox.metadata.uid);
+        expect(patch.metadata.resourceVersion).toBe(f.sandbox.metadata.resourceVersion);
+        versions.push(patch.metadata.resourceVersion);
+        f.sandbox.metadata.resourceVersion = `${versions.length + 1}`;
+        throw Object.assign(new Error("private-command-canary"), {
+          exitCode: 1, stderr: "Error from server (Conflict): private-object-canary",
+        });
+      }
+      return f.execute(args, input);
+    };
+    const failure = await applyReviewedGrant(run, review).then(() => undefined, error => error);
+    expect(failure).toBeInstanceOf(PrivateCommandFailure);
+    expect(failure.facts).toMatchObject({ phase: "Pausing", operation: "patch", resourceKind: "KarsSandbox", serverReason: "Conflict" });
+    expect(versions).toHaveLength(3);
+    expect(new Set(versions).size).toBe(3);
+    expect(f.namespace.metadata.annotations[`${P}state`]).toBe("Pending");
+    expect(f.sandbox.spec.suspended).toBeUndefined();
+    expect(f.grant().spec.writers).toEqual([]);
+  });
+
+  it("recognizes an already-applied reviewed pause without issuing another suspend update", async () => {
+    const f = await setup();
+    const review = await f.document();
+    let attempts = 0;
+    const before = f.preserved();
+    const run: Execute = async (args, input) => {
+      if (args[0] === "patch" && args[1] === "karssandbox"
+        && JSON.parse(args[args.indexOf("-p") + 1]!).spec.suspended === true) {
+        attempts++;
+        await f.execute(args, input);
+        throw Object.assign(new Error("concurrent reviewed pause"), {
+          exitCode: 1, stderr: "Error from server (Conflict): changed version",
+        });
+      }
+      return f.execute(args, input);
+    };
+    await applyReviewedGrant(run, review);
+    expect(attempts).toBe(1);
+    expect(f.namespace.metadata.annotations[`${P}state`]).toBe("Qualified");
+    expect(f.preserved()).toEqual(before);
+    expect(f.sandbox.spec.suspended).toBeUndefined();
+    expect(f.deployment.spec.replicas).toBe(1);
+  });
+
+  it("does not issue another pause if revalidation consumes the remaining deadline", async () => {
+    const f = await setup();
+    const review = await f.document();
+    let attempts = 0;
+    let expired = false;
+    const run: Execute = async (args, input) => {
+      if (args[0] === "patch" && args[1] === "karssandbox") {
+        attempts++;
+        f.sandbox.metadata.resourceVersion = "fresh-version";
+        throw Object.assign(new Error("conflict"), {
+          exitCode: 1, stderr: "Error from server (Conflict): changed version",
+        });
+      }
+      const result = await f.execute(args, input);
+      if (attempts && !expired && args[0] === "get" && args[1] === "deployment" && args[2] === "kars-controller") {
+        expired = true;
+        vi.spyOn(Date, "now").mockReturnValue(Date.now() + 121_000);
+      }
+      return result;
+    };
+    await expect(applyReviewedGrant(run, review)).rejects.toBeInstanceOf(PrivateCommandFailure);
+    expect(expired).toBe(true);
+    expect(attempts).toBe(1);
+    expect(f.sandbox.spec.suspended).toBeUndefined();
+  });
+
   it("sanitizes actual registered command process failures before exposing the exception", async () => {
     cliProcess.execute.mockRejectedValue(Object.assign(new Error("private-argv-canary"), {
       exitCode: 1, stderr: "Error from server (Forbidden): private-secret-canary", stdout: "private-data-canary",

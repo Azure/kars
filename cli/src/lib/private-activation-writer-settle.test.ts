@@ -12,7 +12,6 @@ import { continuityFixture, privateAuthoritySnapshot } from "./private-activatio
 import { canonical, readSecretMetadata, PRIVATE_PREFIX as P, type Execute } from "./private-activation.js";
 import { captureGuardRetirement, refreshGuardRetirement } from "./private-activation-guard-retirement.js";
 import { captureWriterSettlement, observeWriterSettlement } from "./private-activation-writer-settle.js";
-import { PrivateCommandFailure } from "./private-activation-command-diagnostics.js";
 
 const RESOURCE = "karscredentialgrants.kars.azure.com";
 const C = "kars.azure.com/credential-";
@@ -455,22 +454,29 @@ describe("late runtime authority across selected writer retirement", () => {
     expect(f.grant().spec.writers).toEqual([]);
   });
 
-  it("reports a Pending-induced status/RV race without retrying the stale suspend PATCH", async () => {
+  it("recovers a Pending-induced status/RV race using a freshly revalidated suspend PATCH", async () => {
     const f = await setup();
     const review = await f.document();
     let pending = false;
     let captured = false;
     let advanced = false;
     let suspendAttempts = 0;
+    const versions: string[] = [];
+    const before = f.preserved();
     const run: Execute = async (args, input) => {
-      if (pending && args[0] === "patch" && args[1] === "karssandbox") {
+      if (pending && args[0] === "patch" && args[1] === "karssandbox"
+        && JSON.parse(args[args.indexOf("-p") + 1]!).spec.suspended === true) {
         suspendAttempts++;
         const patch = JSON.parse(args[args.indexOf("-p") + 1]!);
+        versions.push(patch.metadata.resourceVersion);
         expect(patch.metadata.uid).toBe(f.sandbox.metadata.uid);
-        expect(patch.metadata.resourceVersion).not.toBe(f.sandbox.metadata.resourceVersion);
-        throw Object.assign(new Error("private-command-and-argv-canary"), {
-          exitCode: 1, stderr: "Error from server (Conflict): private-object-name-canary",
-        });
+        if (suspendAttempts === 1) {
+          expect(patch.metadata.resourceVersion).not.toBe(f.sandbox.metadata.resourceVersion);
+          throw Object.assign(new Error("private-command-and-argv-canary"), {
+            exitCode: 1, stderr: "Error from server (Conflict): private-object-name-canary",
+          });
+        }
+        expect(patch.metadata.resourceVersion).toBe(f.sandbox.metadata.resourceVersion);
       }
       const result = await f.execute(args, input);
       if (args[0] === "patch" && args[1] === "namespace" && args[2] === "kars-late"
@@ -485,19 +491,15 @@ describe("late runtime authority across selected writer retirement", () => {
       }
       return result;
     };
-    const failure = await applyReviewedGrant(run, review).then(() => undefined, error => error);
-    expect(failure).toBeInstanceOf(PrivateCommandFailure);
-    expect(failure.facts).toEqual({ version: 1, phase: "Pausing", operation: "patch",
-      resourceKind: "KarsSandbox", serverReason: "Conflict", exitCode: 1 });
-    expect(failure.message + JSON.stringify(failure)).not.toContain("canary");
+    await applyReviewedGrant(run, review);
     expect(advanced).toBe(true);
-    expect(suspendAttempts).toBe(1);
-    expect(f.namespace.metadata.annotations[`${P}state`]).toBe("Pending");
-    expect(f.sandbox.metadata.generation).toBe(1);
+    expect(suspendAttempts).toBe(2);
+    expect(new Set(versions).size).toBe(2);
+    expect(f.namespace.metadata.annotations[`${P}state`]).toBe("Qualified");
     expect(f.sandbox.spec.suspended).toBeUndefined();
     expect(f.deployment.spec.replicas).toBe(1);
     expect(f.task.status.envelopeDigest).toBe(AUTH);
-    expect(f.grant().spec.writers).toEqual([]);
+    expect(f.preserved()).toEqual(before);
   });
 
   it("proves the real JSON and metadata JSONPath printer views differ only in managedFields", async () => {
