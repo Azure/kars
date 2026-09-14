@@ -360,6 +360,7 @@ def remove_policy(setup, before, path, created):
 
 def collect(setup, target, failed_case):
     from observer_cilium_diagnostics import snapshot as cilium_snapshot
+    from observer_packet_diagnostics import start as start_packets
 
     result = {"diagnosticOnly": True, "originalResult": "failed", "available": False,
               "category": "not-eligible", "policyCreated": False, "cleanup": "not-required",
@@ -368,6 +369,9 @@ def collect(setup, target, failed_case):
             or failed_case.get("failure") != FAILURE):
         return result
     before = created = path = None
+    baseline_packets = policy_packets = None
+    baseline_packets_stable = False
+    packets_stable = False
     try:
         result["stage"] = "disposable-host"
         require(os.environ.get("GITHUB_ACTIONS") == "true"
@@ -419,12 +423,21 @@ def collect(setup, target, failed_case):
             require(observed["stable"] == before["stable"], UNAVAILABLE)
             return observed
 
+        # Only the already-failed case gains this read-only baseline window.
+        # This does not extend the original readiness deadline or issue a probe.
+        baseline_packets = start_packets(before)
+        time.sleep(30)
+        current = recheck("packet-baseline")
+        result["baselinePackets"] = baseline_packets.finish(setup, target, True)
         current = recheck("pre-create")
+        baseline_packets_stable = True
         if current["ready"]:
             result.update(category="already-ready-without-intervention", samePodObserverReady=True)
             return result
         require(selected_origin(setup) == origin, "Diagnostic API origin changed before policy creation")
         desired = policy_plan(before, name)
+        # Subscribe before the write: no late monitor can establish a missed SYN.
+        policy_packets = start_packets(before)
         result["stage"] = "temporary-policy-create"
         result["cleanup"] = "creation-unconfirmed"
         candidate = setup.admin.create(resource(before["actor"]["namespace"], "ciliumnetworkpolicies", group=CILIUM), desired)
@@ -435,6 +448,11 @@ def collect(setup, target, failed_case):
         result.update(policyCreated=True, policy=metadata(created), cleanup="pending")
         require(created["spec"] == desired["spec"], "Diagnostic policy was mutated")
         started = datetime.now(timezone.utc)
+        result["packetPolicyBoundary"] = {
+            "createdAt": started.isoformat(),
+            "monitorLaunchAttemptedBeforeCreate": True,
+            "receiptTimingDoesNotProvePolicyRealization": True,
+        }
         deadline = time.monotonic() + 60
         result["category"] = "no-progress-observed"
         result["stage"] = "same-pod-observation"
@@ -455,6 +473,9 @@ def collect(setup, target, failed_case):
                 break
             time.sleep(5)
         recheck("final", name)
+        result["policyWindowPackets"] = policy_packets.finish(setup, target, True)
+        recheck("after-packet-requests", name)
+        packets_stable = True
     except READ_ERRORS:
         result["category"] = "provenance-or-operation-unavailable"
         if result.get("stage") == "baseline-snapshot" and result.get("baselineSnapshot"):
@@ -462,6 +483,18 @@ def collect(setup, target, failed_case):
         if result.get("observationStage"):
             result["observationStoppingStage"] = result["observationStage"]
     finally:
+        for label, window in (("baselinePackets", baseline_packets), ("policyWindowPackets", policy_packets)):
+            if window is not None:
+                evidence = window.close()
+                if label not in result:
+                    result[label] = {**evidence, "available": False, "category": "provenance-unverified",
+                                     "events": [], "provenanceUnchanged": False}
+        if policy_packets is not None and not packets_stable and "policyWindowPackets" in result:
+            result["policyWindowPackets"].update(available=False, category="provenance-unverified",
+                                                  events=[], requests={}, provenanceUnchanged=False)
+        if baseline_packets is not None and not baseline_packets_stable and "baselinePackets" in result:
+            result["baselinePackets"].update(available=False, category="provenance-unverified",
+                                              events=[], requests={}, provenanceUnchanged=False)
         if created is not None:
             try:
                 result["cleanup"] = remove_policy(setup, before, path, created)

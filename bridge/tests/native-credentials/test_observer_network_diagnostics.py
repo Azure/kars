@@ -13,6 +13,7 @@ from native_api import CORE, Failure, core, resource
 from observation_diagnostics import VERSION
 import observer_network_diagnostics as network
 import observer_cilium_diagnostics as cilium
+import observer_packet_diagnostics as packets
 from test_observation_diagnostics import Fixture, SANDBOX, RUNTIME, POD, DEPLOYMENT, REPLICA_SET
 
 TARGET = {"workspace": CORE, "sandbox": "agent", "uid": "sandbox-uid", "task": "native-observation-task"}
@@ -181,6 +182,8 @@ class ObserverNetworkTests(unittest.TestCase):
                 patch.object(cilium, "read_projection", side_effect=self.api.read_projection), \
                 patch.object(cilium, "read_kube_proxy_projection", side_effect=self.api.read_kube_proxy_projection), \
                 patch.object(network, "api_outcomes", return_value=outcomes), \
+                patch.object(packets, "start", return_value=SimpleNamespace(
+                    finish=lambda *_args: packets.empty_result(), close=packets.empty_result)), \
                 patch.object(network.time, "sleep"):
             return network.collect(self.setup, TARGET, failed)
 
