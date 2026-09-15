@@ -2,8 +2,10 @@
 // Licensed under the MIT License.
 
 import type { Execute } from "./deployment-target.js";
+import { assertControllerMutationAllowed } from "./private-root-upgrade-guard.js";
 
 export async function restartController(execute: Execute): Promise<void> {
+  await assertControllerMutationAllowed(execute);
   await execute("kubectl", ["rollout", "restart", "deployment/kars-controller", "-n", "kars-system"], { stdio: "pipe" });
   await execute("kubectl", ["rollout", "status", "deployment/kars-controller", "-n", "kars-system", "--timeout=300s"], { stdio: "pipe" });
 }

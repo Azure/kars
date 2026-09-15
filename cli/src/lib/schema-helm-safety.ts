@@ -20,7 +20,7 @@ export async function serverSchemaRenderFlags(execute: SchemaExecute): Promise<s
 
 export async function prepareHelmFailureSafety(
   execute: SchemaExecute, args: readonly string[], documents: ObjectMap[], release: string, namespace: string, upgrading: boolean,
-): Promise<{ rollbackDocuments?: ObjectMap[]; recheck?: () => Promise<void> }> {
+): Promise<{ activeDocuments?: ObjectMap[]; rollbackDocuments?: ObjectMap[]; recheck?: () => Promise<void> }> {
   if (["--cleanup-on-fail", "--force", "--force-replace", "--force-conflicts", "--take-ownership"]
     .some(flag => enabledHelmFlag(args, flag))) {
     throw new Error("Forced replacement/adoption or cleanup-on-fail cannot preserve core schemas; explicit migration is required");
@@ -39,7 +39,8 @@ export async function prepareHelmFailureSafety(
   const current = Math.max(...snapshot.map(item => item.revision));
   const manifest = async (revision: number) => schemaDocuments((await execute("helm",
     ["get", "manifest", release, "-n", namespace, "--revision", String(revision)], { stdio: "pipe" })).stdout);
-  assertNoCrdRemoval(await manifest(current), documents);
+  const activeDocuments = await manifest(current);
+  assertNoCrdRemoval(activeDocuments, documents);
   const atomic = enabledHelmFlag(args, "--atomic") || enabledHelmFlag(args, "--rollback-on-failure");
   let rollbackDocuments: ObjectMap[] | undefined;
   if (atomic) {
@@ -51,7 +52,7 @@ export async function prepareHelmFailureSafety(
     assertNoCrdRemoval(rollbackDocuments, documents);
     assertRollbackCompatibility(documents, rollbackDocuments);
   }
-  return { rollbackDocuments, recheck: async () => {
+  return { activeDocuments, rollbackDocuments, recheck: async () => {
     if (canonicalSchema(await history()) !== canonicalSchema(snapshot)) {
       throw new Error("Helm history changed during schema preparation; no operation was issued");
     }
