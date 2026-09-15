@@ -354,79 +354,6 @@ async fn granted_token_is_stored_before_authorized_and_late_failures_never_claim
             api.fail_patch = fault == "patch_denied";
         }
 
-        #[tokio::test]
-        async fn production_handlers_reject_malformed_inputs_and_missing_grants_without_oauth() {
-            let f = fixture().await;
-            f.api.lock().unwrap().missing_grant = true;
-            let app = Router::new()
-                .route("/start", post(copilot_login_start))
-                .route("/poll", post(copilot_login_poll))
-                .with_state(AppState::for_test_client(f.client.clone(), "kars-system"));
-            for body in [
-                json!({"device_code":{"private":PRIVATE}}),
-                json!({"device_code":PRIVATE,"interval":"invalid"}),
-            ] {
-                let request = Request::builder()
-                    .method("POST")
-                    .uri("/poll")
-                    .header("content-type", "application/json")
-                    .body(Body::from(body.to_string()))
-                    .unwrap();
-                let (status, body) = response(app.clone().oneshot(request).await.unwrap()).await;
-                assert_eq!(status, StatusCode::BAD_REQUEST);
-                assert_eq!(body["error"]["code"], "copilot_invalid_request");
-            }
-            assert!(f.api.lock().unwrap().calls.is_empty());
-            for path in ["/start", "/poll"] {
-                let request = Request::builder()
-                    .method("POST")
-                    .uri(path)
-                    .header("content-type", "application/json")
-                    .body(Body::from(json!({"device_code":PRIVATE}).to_string()))
-                    .unwrap();
-                let (status, body) = response(app.clone().oneshot(request).await.unwrap()).await;
-                assert_eq!(status, StatusCode::CONFLICT);
-                assert_eq!(body, contract()["not_ready"]);
-            }
-            assert!(
-                f.api
-                    .lock()
-                    .unwrap()
-                    .calls
-                    .iter()
-                    .all(|(method, path)| *method == Method::GET && path == GRANT)
-            );
-        }
-
-        #[tokio::test]
-        async fn failed_or_malformed_seat_verification_never_stores_credentials() {
-            let f = fixture().await;
-            f.api.lock().unwrap().poll = json!({"access_token":PRIVATE,"token_type":"bearer"});
-            for (status, seat) in [
-                (403, json!({"message":PRIVATE})),
-                (500, json!({"token":PRIVATE})),
-                (200, json!({"token":"","chat_enabled":true})),
-                (200, json!({"token":PRIVATE,"chat_enabled":false})),
-                (200, json!({"error":PRIVATE})),
-            ] {
-                {
-                    let mut api = f.api.lock().unwrap();
-                    api.seat_status = status;
-                    api.seat = seat;
-                }
-                let (status, body) = poll_response(&f, None).await;
-                assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
-                assert_eq!(body["error"]["code"], "copilot_seat_unavailable");
-            }
-            assert!(
-                !f.api
-                    .lock()
-                    .unwrap()
-                    .calls
-                    .iter()
-                    .any(|(method, path)| *method == Method::PATCH || path == "/oauth/models")
-            );
-        }
         let (status, body) = poll_response(&f, None).await;
         let api = f.api.lock().unwrap();
         assert_eq!(
@@ -449,4 +376,78 @@ async fn granted_token_is_stored_before_authorized_and_late_failures_never_claim
             assert!(!api.calls.iter().any(|(_, p)| p == "/oauth/models"));
         }
     }
+}
+
+#[tokio::test]
+async fn production_handlers_reject_malformed_inputs_and_missing_grants_without_oauth() {
+    let f = fixture().await;
+    f.api.lock().unwrap().missing_grant = true;
+    let app = Router::new()
+        .route("/start", post(copilot_login_start))
+        .route("/poll", post(copilot_login_poll))
+        .with_state(AppState::for_test_client(f.client.clone(), "kars-system"));
+    for body in [
+        json!({"device_code":{"private":PRIVATE}}),
+        json!({"device_code":PRIVATE,"interval":"invalid"}),
+    ] {
+        let request = Request::builder()
+            .method("POST")
+            .uri("/poll")
+            .header("content-type", "application/json")
+            .body(Body::from(body.to_string()))
+            .unwrap();
+        let (status, body) = response(app.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert_eq!(body["error"]["code"], "copilot_invalid_request");
+    }
+    assert!(f.api.lock().unwrap().calls.is_empty());
+    for path in ["/start", "/poll"] {
+        let request = Request::builder()
+            .method("POST")
+            .uri(path)
+            .header("content-type", "application/json")
+            .body(Body::from(json!({"device_code":PRIVATE}).to_string()))
+            .unwrap();
+        let (status, body) = response(app.clone().oneshot(request).await.unwrap()).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(body, contract()["not_ready"]);
+    }
+    assert!(
+        f.api
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .all(|(method, path)| *method == Method::GET && path == GRANT)
+    );
+}
+
+#[tokio::test]
+async fn failed_or_malformed_seat_verification_never_stores_credentials() {
+    let f = fixture().await;
+    f.api.lock().unwrap().poll = json!({"access_token":PRIVATE,"token_type":"bearer"});
+    for (status, seat) in [
+        (403, json!({"message":PRIVATE})),
+        (500, json!({"token":PRIVATE})),
+        (200, json!({"token":"","chat_enabled":true})),
+        (200, json!({"token":PRIVATE,"chat_enabled":false})),
+        (200, json!({"error":PRIVATE})),
+    ] {
+        {
+            let mut api = f.api.lock().unwrap();
+            api.seat_status = status;
+            api.seat = seat;
+        }
+        let (status, body) = poll_response(&f, None).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(body["error"]["code"], "copilot_seat_unavailable");
+    }
+    assert!(
+        !f.api
+            .lock()
+            .unwrap()
+            .calls
+            .iter()
+            .any(|(method, path)| *method == Method::PATCH || path == "/oauth/models")
+    );
 }
