@@ -6,6 +6,22 @@ use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::{Api, ListParams};
 
 impl Cluster {
+    /// Fixed, read-only optional witness inputs. Preserve 404 versus empty data
+    /// versus API failure, and retain object identity for publisher validation.
+    pub async fn datapath_witness_configmap(
+        &self,
+        settings: bool,
+    ) -> Result<Option<ConfigMap>, kube::Error> {
+        let name = if settings {
+            "kars-datapath-witness-settings"
+        } else {
+            "kars-datapath-witness"
+        };
+        Api::<ConfigMap>::namespaced(self.client.clone(), "kars-system")
+            .get_opt(name)
+            .await
+    }
+
     /// Read the operator-curated MCP profiles (named vetted server bundles),
     /// stored as `profiles.json` in the `kars-mcp-profiles` ConfigMap. Returns
     /// `[]` when unset. A profile is `{name, summary, servers:[mcpserver names]}`.
