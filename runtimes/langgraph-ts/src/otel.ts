@@ -45,7 +45,7 @@ export async function initTelemetry(
     | undefined;
   try {
     api = await import('@opentelemetry/api');
-    const { Resource } = await import('@opentelemetry/resources');
+    const { resourceFromAttributes } = await import('@opentelemetry/resources');
     const {
       ATTR_SERVICE_NAME,
       ATTR_SERVICE_VERSION,
@@ -83,7 +83,7 @@ export async function initTelemetry(
         DEFAULT_OTLP_METRICS_ENDPOINT,
       );
 
-    const resource = new Resource({
+    const resource = resourceFromAttributes({
       [ATTR_SERVICE_NAME]: opts.serviceName,
       [ATTR_SERVICE_VERSION]: opts.serviceVersion ?? '0.1.0',
       'service.namespace': 'kars',
@@ -91,10 +91,12 @@ export async function initTelemetry(
       'kars.runtime.language': 'typescript',
     });
 
-    const tracerProvider = new NodeTracerProvider({ resource });
-    tracerProvider.addSpanProcessor(
-      new BatchSpanProcessor(new OTLPTraceExporter({ url: tracesUrl })),
-    );
+    const tracerProvider = new NodeTracerProvider({
+      resource,
+      spanProcessors: [
+        new BatchSpanProcessor(new OTLPTraceExporter({ url: tracesUrl })),
+      ],
+    });
     tracerProvider.register();
 
     const meterProvider = new MeterProvider({

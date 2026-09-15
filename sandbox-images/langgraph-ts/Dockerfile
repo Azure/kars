@@ -36,8 +36,8 @@ FROM mcr.microsoft.com/azurelinux/base/nodejs:24 AS builder
 
 WORKDIR /build/runtime
 
-COPY runtimes/langgraph-ts/package.json runtimes/langgraph-ts/tsconfig.json ./
-RUN npm install --no-audit --no-fund --no-package-lock
+COPY runtimes/langgraph-ts/package.json runtimes/langgraph-ts/package-lock.json runtimes/langgraph-ts/tsconfig.json ./
+RUN npm ci --no-audit --no-fund
 
 COPY runtimes/langgraph-ts/src ./src
 RUN ./node_modules/.bin/tsc -p .
@@ -51,8 +51,8 @@ LABEL org.kars.runtime.language="typescript"
 
 WORKDIR /opt/kars-runtime-langgraph-ts
 
-COPY runtimes/langgraph-ts/package.json ./
-RUN npm install --omit=dev --no-audit --no-fund --no-package-lock
+COPY runtimes/langgraph-ts/package.json runtimes/langgraph-ts/package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 
 COPY --from=builder /build/runtime/dist ./dist
 
