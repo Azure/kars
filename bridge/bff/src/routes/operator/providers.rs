@@ -10,7 +10,6 @@ use serde::Serialize;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
-use super::additional_providers::{INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET};
 use super::{require_cluster, upstream};
 
 // ─── Provider onboarding (model providers for missions + envelope gen) ───────
@@ -127,127 +126,6 @@ pub struct DiscoveredModelDto {
 /// the seat sees a consistent client identity across discovery and inference.
 const COPILOT_EDITOR_VERSION: &str = "vscode/1.107.0";
 const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
-/// Public OAuth client id for the GitHub Copilot device-flow integration — the
-/// SAME id the CLI's `copilotDeviceLogin` uses (cli/src/github-copilot.ts). A
-/// token minted through this flow is authorized for the `copilot_internal/v2/
-/// token` exchange, unlike a stock `gh auth login` token (which 404s there).
-const COPILOT_OAUTH_CLIENT_ID: &str = "Iv1.b507a08c87ecfe98";
-
-/// `POST /api/operator/providers/copilot/login/start` — begin the GitHub
-/// device-flow OAuth so the operator can sign in to Copilot properly (no
-/// hand-pasted token). Returns the user code + verification URL to show, and
-/// the device code the client polls with.
-pub async fn copilot_login_start() -> AppResult<Json<serde_json::Value>> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-    let resp = client
-        .post("https://github.com/login/device/code")
-        .header("Accept", "application/json")
-        .header("User-Agent", "kars-bridge")
-        .json(&serde_json::json!({ "client_id": COPILOT_OAUTH_CLIENT_ID, "scope": "read:user" }))
-        .send()
-        .await
-        .map_err(|e| AppError::Upstream(format!("device-code request failed: {e}")))?;
-    if !resp.status().is_success() {
-        return Err(AppError::Upstream(format!(
-            "GitHub device-code returned {}",
-            resp.status()
-        )));
-    }
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Upstream(format!("bad device-code JSON: {e}")))?;
-    Ok(Json(serde_json::json!({
-        "device_code": body.get("device_code").and_then(|v| v.as_str()).unwrap_or_default(),
-        "user_code": body.get("user_code").and_then(|v| v.as_str()).unwrap_or_default(),
-        "verification_uri": body.get("verification_uri").and_then(|v| v.as_str()).unwrap_or("https://github.com/login/device"),
-        "interval": body.get("interval").and_then(|v| v.as_u64()).unwrap_or(5),
-        "expires_in": body.get("expires_in").and_then(|v| v.as_u64()).unwrap_or(900),
-    })))
-}
-
-#[derive(Debug, serde::Deserialize)]
-pub struct CopilotLoginPollRequest {
-    pub device_code: String,
-}
-
-/// `POST /api/operator/providers/copilot/login/poll` — poll the device flow.
-/// While the user hasn't approved yet, returns `{status:"pending"}`. On
-/// approval it: (1) verifies the minted token is Copilot-entitled, (2) stores
-/// it server-side as the Copilot provider credential (COPILOT_GITHUB_TOKEN in
-/// the shared providers secret) — the token NEVER returns to the browser,
-/// (3) busts the live-catalog cache, and (4) returns the seat's live model
-/// list so the wizard can show it immediately.
-pub async fn copilot_login_poll(
-    State(state): State<AppState>,
-    Json(req): Json<CopilotLoginPollRequest>,
-) -> AppResult<Json<serde_json::Value>> {
-    let cluster = require_cluster(&state)?;
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-    let resp = client
-        .post("https://github.com/login/oauth/access_token")
-        .header("Accept", "application/json")
-        .header("User-Agent", "kars-bridge")
-        .json(&serde_json::json!({
-            "client_id": COPILOT_OAUTH_CLIENT_ID,
-            "device_code": req.device_code,
-            "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
-        }))
-        .send()
-        .await
-        .map_err(|e| AppError::Upstream(format!("device poll failed: {e}")))?;
-    let body: serde_json::Value = resp
-        .json()
-        .await
-        .map_err(|e| AppError::Upstream(format!("bad poll JSON: {e}")))?;
-
-    if let Some(token) = body
-        .get("access_token")
-        .and_then(|v| v.as_str())
-        .filter(|t| !t.is_empty())
-    {
-        // Verify the seat is genuinely Copilot-entitled before storing.
-        copilot_jwt(token).await?;
-        // Store server-side as the Copilot provider credential (never returned
-        // to the browser). Also refresh the controller's default credential so
-        // a cluster whose default IS Copilot starts working immediately.
-        cluster
-            .mutate_secret_keys(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET, |keys| {
-                keys.insert("COPILOT_GITHUB_TOKEN".to_string(), token.to_string());
-            })
-            .await
-            .map_err(upstream)?;
-        // Fresh token → invalidate any cached catalog for the old one.
-        invalidate_copilot_catalog_cache();
-        let models = copilot_catalog_cached(token).await;
-        return Ok(Json(serde_json::json!({
-            "status": "authorized",
-            "models": models.iter().map(|(id, rec, detail)| serde_json::json!({"id": id, "recommended": rec, "detail": detail})).collect::<Vec<_>>(),
-        })));
-    }
-
-    match body.get("error").and_then(|v| v.as_str()) {
-        Some("authorization_pending") | Some("slow_down") => {
-            Ok(Json(serde_json::json!({ "status": "pending" })))
-        }
-        Some("expired_token") => Err(AppError::Rejected(
-            "The sign-in code expired before it was approved. Start again.".into(),
-        )),
-        Some("access_denied") => Err(AppError::Rejected(
-            "Sign-in was cancelled on GitHub.".into(),
-        )),
-        Some(other) => Err(AppError::Upstream(format!(
-            "GitHub device flow error: {other}"
-        ))),
-        None => Ok(Json(serde_json::json!({ "status": "pending" }))),
-    }
-}
 
 /// Exchange a GitHub OAuth token / PAT for a short-lived Copilot JWT — the
 /// exact same endpoint (and `chat_enabled` eligibility semantics) the CLI's
@@ -261,8 +139,21 @@ pub(crate) async fn copilot_jwt(gh_token: &str) -> Result<String, AppError> {
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    copilot_jwt_with_client(
+        gh_token,
+        &client,
+        "https://api.github.com/copilot_internal/v2/token",
+    )
+    .await
+}
+
+pub(super) async fn copilot_jwt_with_client(
+    gh_token: &str,
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> Result<String, AppError> {
     let resp = client
-        .get("https://api.github.com/copilot_internal/v2/token")
+        .get(endpoint)
         .header("Authorization", format!("token {gh_token}"))
         .header("Accept", "application/json")
         .header("User-Agent", "kars-bridge")
@@ -405,8 +296,16 @@ pub(crate) async fn fetch_copilot_models(jwt: &str) -> Result<Vec<DiscoveredMode
         .timeout(std::time::Duration::from_secs(10))
         .build()
         .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    fetch_copilot_models_with_client(jwt, &client, "https://api.githubcopilot.com/models").await
+}
+
+pub(super) async fn fetch_copilot_models_with_client(
+    jwt: &str,
+    client: &reqwest::Client,
+    endpoint: &str,
+) -> Result<Vec<DiscoveredModelDto>, AppError> {
     let resp = client
-        .get("https://api.githubcopilot.com/models")
+        .get(endpoint)
         .header("Authorization", format!("Bearer {jwt}"))
         .header("Editor-Version", COPILOT_EDITOR_VERSION)
         .header("Copilot-Integration-Id", COPILOT_INTEGRATION_ID)

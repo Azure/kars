@@ -3,11 +3,12 @@
 
 "use client";
 
-import { useEffect, useRef, useState, useTransition } from "react";
+import { useEffect, useRef, useState } from "react";
 import { copilotLoginStartAction, copilotLoginPollAction } from "./copilot-login-actions";
 import { Icon } from "@/components/icon";
 import type { DiscoveredModel } from "@/lib/types";
-import type { CopilotLoginStart } from "@/lib/bff";
+import type { CopilotLoginStart, CopilotPendingReason } from "@/lib/bff-contracts";
+import { createCopilotLoginController } from "@/lib/copilot-login";
 
 export function CopilotSignIn({
   signedIn,
@@ -16,43 +17,27 @@ export function CopilotSignIn({
   signedIn: boolean;
   onAuthorized: (models: DiscoveredModel[]) => void;
 }) {
-  const [starting, startStarting] = useTransition();
+  const [starting, setStarting] = useState(false);
   const [flow, setFlow] = useState<CopilotLoginStart | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [pending, setPending] = useState<CopilotPendingReason | undefined>();
+  const controller = useRef<ReturnType<typeof createCopilotLoginController> | null>(null);
+  const authorized = useRef(onAuthorized);
+  useEffect(() => { authorized.current = onAuthorized; }, [onAuthorized]);
 
-  // Poll once a flow is active.
   useEffect(() => {
-    if (!flow) return;
-    let cancelled = false;
-    const started = Date.now();
-    const tick = async () => {
-      if (cancelled) return;
-      if (Date.now() - started > flow.expires_in * 1000) {
-        setError("The sign-in code expired. Start again.");
-        setFlow(null);
-        return;
-      }
-      const r = await copilotLoginPollAction(flow.device_code);
-      if (cancelled) return;
-      if (r.status === "authorized") {
-        if (pollRef.current) clearInterval(pollRef.current);
-        setFlow(null);
-        onAuthorized(r.models);
-      } else if (r.status === "error") {
-        if (pollRef.current) clearInterval(pollRef.current);
-        setError(r.error);
-        setFlow(null);
-      }
-    };
-    pollRef.current = setInterval(() => void tick(), Math.max(flow.interval, 3) * 1000);
-    return () => {
-      cancelled = true;
-      if (pollRef.current) clearInterval(pollRef.current);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [flow]);
+    const current = createCopilotLoginController({
+      start: copilotLoginStartAction, poll: copilotLoginPollAction,
+    }, {
+      flow: setFlow, starting: setStarting, error: setError, pending: setPending,
+      authorized: models => authorized.current(models),
+    });
+    controller.current = current;
+    return () => { current.dispose(); controller.current = null; };
+  }, []);
+
+  useEffect(() => { if (signedIn) controller.current?.cancel(); }, [signedIn]);
 
   if (signedIn) {
     return (
@@ -63,12 +48,8 @@ export function CopilotSignIn({
   }
 
   function begin() {
-    setError(null);
-    startStarting(async () => {
-      const r = await copilotLoginStartAction();
-      if (r.ok) setFlow(r.data);
-      else setError(r.error);
-    });
+    setCopied(false);
+    void controller.current?.begin();
   }
 
   if (!flow) {
@@ -80,6 +61,7 @@ export function CopilotSignIn({
         <button type="button" onClick={begin} disabled={starting} className="inline-flex items-center gap-1.5 rounded-lg bg-signal px-3 py-2 text-xs font-semibold text-signal-fg disabled:opacity-50">
           <Icon name="link" size={13} /> {starting ? "Starting…" : "Sign in with GitHub"}
         </button>
+        {starting && <button type="button" onClick={() => controller.current?.cancel()} className="ml-2 text-xs text-foreground-muted">Cancel sign-in</button>}
         {error && <p className="text-[11px] text-danger">{error}</p>}
       </div>
     );
@@ -100,7 +82,7 @@ export function CopilotSignIn({
             <code className="rounded border border-border bg-surface-muted px-2 py-0.5 font-mono text-sm tracking-widest">{flow.user_code}</code>
             <button
               type="button"
-              onClick={() => { navigator.clipboard?.writeText(flow.user_code); setCopied(true); setTimeout(() => setCopied(false), 1500); }}
+              onClick={() => { void navigator.clipboard?.writeText(flow.user_code).catch(() => {}); setCopied(true); }}
               className="rounded border border-border px-1.5 py-0.5 text-[10px] font-medium text-foreground-muted hover:text-signal"
             >
               {copied ? "copied" : "copy"}
@@ -109,8 +91,10 @@ export function CopilotSignIn({
         </li>
       </ol>
       <p className="flex items-center gap-1.5 text-[11px] text-foreground-muted">
-        <span className="h-2 w-2 animate-pulse rounded-full bg-signal" /> Waiting for approval…
+        <span className="h-2 w-2 animate-pulse rounded-full bg-signal" />
+        {pending === "slow_down" ? "GitHub requested slower polling — waiting before checking again…" : pending === "authorization_pending" ? "Waiting for approval…" : "Checking sign-in status…"}
       </p>
+      <button type="button" onClick={() => controller.current?.cancel()} className="text-xs text-foreground-muted">Cancel sign-in</button>
       {error && <p className="text-[11px] text-danger">{error}</p>}
     </div>
   );
