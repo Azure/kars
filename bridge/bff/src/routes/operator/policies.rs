@@ -22,6 +22,9 @@ pub struct McpServerDto {
     pub namespace: String,
     pub url: Option<String>,
     pub phase: Option<String>,
+    pub status_current: bool,
+    pub status_reason: Option<String>,
+    pub status_message: Option<String>,
     pub mode: Option<String>,
     pub endpoint: Option<String>,
     pub workload_ref: Option<String>,
@@ -37,6 +40,18 @@ pub struct McpServerDto {
 fn to_mcp(o: &DynamicObject) -> McpServerDto {
     let sp = spec(o);
     let st = status(o);
+    let generation = o.metadata.generation.filter(|generation| *generation > 0);
+    let ready = st
+        .get("conditions")
+        .and_then(Value::as_array)
+        .and_then(|conditions| {
+            conditions.iter().find(|condition| {
+                condition.get("type").and_then(Value::as_str) == Some("Ready")
+                    && generation.is_some()
+                    && condition.get("observedGeneration").and_then(Value::as_i64) == generation
+            })
+        })
+        .filter(|_| st.get("observedGeneration").and_then(Value::as_i64) == generation);
     let allowed_tools = sp
         .get("allowedTools")
         .and_then(|t| t.as_array())
@@ -51,6 +66,9 @@ fn to_mcp(o: &DynamicObject) -> McpServerDto {
         namespace: ns_of(o),
         url: s(st, "endpoint").or_else(|| s(sp, "url")),
         phase: s(st, "phase"),
+        status_current: ready.is_some(),
+        status_reason: ready.and_then(|condition| s(condition, "reason")),
+        status_message: ready.and_then(|condition| s(condition, "message")),
         mode: s(st, "mode"),
         endpoint: s(st, "endpoint"),
         workload_ref: s(st, "workloadRef"),
@@ -537,8 +555,81 @@ pub async fn delete_egress(
 
 #[cfg(test)]
 mod tests {
-    use super::apply_err;
+    use super::{apply_err, to_mcp};
     use crate::error::AppError;
+    use kube::core::DynamicObject;
+    use serde_json::json;
+
+    fn mcp() -> DynamicObject {
+        serde_json::from_value(json!({
+            "apiVersion": "kars.azure.com/v1alpha1", "kind": "McpServer",
+            "metadata": {"name": "playwright", "namespace": "kars-system", "generation": 2},
+            "spec": {"managed": {"preset": "playwright"}, "allowedTools": ["*"]},
+            "status": {
+                "phase": "Pending", "observedGeneration": 2,
+                "conditions": [{
+                    "type": "Ready", "status": "False", "observedGeneration": 2,
+                    "reason": "ManagedMcpPending",
+                    "message": "The explicitly configured pull Secret is absent from the managed MCP namespace"
+                }]
+            }
+        })).unwrap()
+    }
+
+    #[test]
+    fn mcp_pending_dto_preserves_the_current_controller_blocker() {
+        let dto = serde_json::to_value(to_mcp(&mcp())).unwrap();
+        assert_eq!(dto["phase"], "Pending");
+        assert_eq!(dto["status_current"], true);
+        assert_eq!(dto["status_reason"], "ManagedMcpPending");
+        assert_eq!(
+            dto["status_message"],
+            "The explicitly configured pull Secret is absent from the managed MCP namespace"
+        );
+        assert_eq!(dto["allowed_tools"], json!(["*"]));
+        assert_eq!(dto["spec"]["managed"]["preset"], "playwright");
+    }
+
+    #[test]
+    fn mcp_dto_does_not_present_stale_or_missing_conditions_as_current() {
+        for change in ["resource", "status", "condition", "missing", "unversioned"] {
+            let mut object = mcp();
+            match change {
+                "resource" => object.metadata.generation = Some(3),
+                "status" => object.data["status"]["observedGeneration"] = json!(1),
+                "condition" => {
+                    object.data["status"]["conditions"][0]["observedGeneration"] = json!(1)
+                }
+                "missing" => object.data["status"]["conditions"] = json!([]),
+                "unversioned" => object.metadata.generation = None,
+                _ => unreachable!(),
+            }
+            let dto = to_mcp(&object);
+            assert!(!dto.status_current, "{change}");
+            assert!(dto.status_reason.is_none(), "{change}");
+            assert!(dto.status_message.is_none(), "{change}");
+        }
+    }
+
+    #[test]
+    fn mcp_dto_keeps_ready_and_degraded_controller_messages() {
+        for (phase, condition_status, reason) in [
+            ("Ready", "True", "Reconciled"),
+            ("Degraded", "False", "ManagedMcpUnqualified"),
+        ] {
+            let mut object = mcp();
+            object.data["status"]["phase"] = json!(phase);
+            let condition = &mut object.data["status"]["conditions"][0];
+            condition["status"] = json!(condition_status);
+            condition["reason"] = json!(reason);
+            condition["message"] = json!("Controller diagnostic");
+            let dto = to_mcp(&object);
+            assert!(dto.status_current);
+            assert_eq!(dto.phase.as_deref(), Some(phase));
+            assert_eq!(dto.status_reason.as_deref(), Some(reason));
+            assert_eq!(dto.status_message.as_deref(), Some("Controller diagnostic"));
+        }
+    }
 
     fn api_err(code: u16, message: &str) -> kube::Error {
         kube::Error::Api(kube::core::ErrorResponse {

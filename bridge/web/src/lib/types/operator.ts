@@ -59,6 +59,9 @@ export interface McpServer {
   namespace: string;
   url: string | null;
   phase: string | null;
+  status_current?: boolean;
+  status_reason?: string | null;
+  status_message?: string | null;
   mode: "Managed" | "External" | null;
   endpoint: string | null;
   workload_ref: string | null;
