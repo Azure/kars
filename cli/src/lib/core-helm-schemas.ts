@@ -9,6 +9,7 @@ import { assertNoCrdRemoval, assertRollbackCompatibility } from "./schema-compat
 import { enabledHelmFlag, prepareHelmFailureSafety, serverSchemaRenderFlags } from "./schema-helm-safety.js";
 import { qualifySreSchemaMigration, sreMigrationSummary } from "./sre-schema-migration.js";
 import { schemaStep } from "./sre-schema-diagnostics.js";
+import { assertRenderedControllersMutable } from "./private-root-upgrade-guard.js";
 
 export interface CoreSchemaPreparation extends Partial<SchemaStageOptions> { base365SreMigration?: boolean }
 
@@ -104,12 +105,15 @@ export async function planCoreHelmSchemas(
   await safety.recheck?.();
   if (reviewedSreMigration) console.log(`SRE-SCHEMA-MIGRATION ${JSON.stringify({ ...sreMigrationSummary(reviewedSreMigration), state: "qualified" })}`);
   return async () => {
+    await assertRenderedControllersMutable(run,
+      [...documents, ...(safety.activeDocuments ?? []), ...(safety.rollbackDocuments ?? [])], namespace);
     const prepared = await applySchemas();
     // Render/apply is not a Helm install: Helm's server-side ownership import
     // check would reject the deliberately template-owned CRDs.
     if (stageOptions.ownership === "template") return prepared;
     schemaStep("helm-render");
     const actual = await serverRender();
+    await assertRenderedControllersMutable(run, actual, namespace);
     const crds = (items: ObjectMap[]) => items.filter(object => object.kind === "CustomResourceDefinition")
       .map(object => ({ name: object.metadata.name, spec: normalizedCrd(object), metadata: object.metadata }))
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -136,6 +140,7 @@ export async function prepareCoreTemplateSchemas(
   execute: SchemaExecute, rendered: string, options: SchemaStageOptions,
 ): Promise<string> {
   const documents = schemaDocuments(rendered);
+  await assertRenderedControllersMutable(execute, documents, options.namespace);
   await stageCoreSchemaDocuments(execute, documents, options);
   return documents.filter((object: ObjectMap) => object.kind !== "CustomResourceDefinition").map(object => JSON.stringify(object)).join("\n---\n");
 }
@@ -155,6 +160,7 @@ export async function prepareCoreRollbackSchemas(execute: SchemaExecute, release
     ["get", "manifest", release, "-n", namespace, "--revision", String(revision)], { stdio: "pipe" })).stdout);
   const previous = await manifest(target);
   const active = await manifest(current);
+  await assertRenderedControllersMutable(execute, [...active, ...previous], namespace);
   assertNoCrdRemoval(active, previous);
   assertRollbackCompatibility(active, previous);
   await stageCoreSchemaDocuments(execute, previous, { release, namespace, ownership: "helm",
