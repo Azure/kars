@@ -202,11 +202,20 @@ admission policies. The existing GPU model and cluster infrastructure were retai
 That was **not** a flawless or end-to-end accepted installation. Actual follow-up
 found missing registry access, incomplete seccomp-installer reinstatement, a
 GPU-pool selector that prevented orchestrator scheduling, AKS admitted-Pod
-enrollment incompatibility, provider device-polling defects, and a managed-MCP
-pull Secret not yet restored into the new claimed namespace. These failures
-must remain in the installation record until their individual recovery and
-functional outcomes are verified. Passing component CI is not a substitute for
-that live acceptance.
+enrollment incompatibility, provider device-polling defects, and a missing
+managed-MCP pull Secret. Preserve these failures alongside their individual
+recovery outcomes. Passing component CI is not a substitute for live acceptance.
+
+The managed-MCP incident was subsequently recovered on the same installed public
+source. After strict server dry-run and fresh ownership/identity checks, only the
+original approved, configured pull credential was restored into the newly claimed
+MCP namespace using CREATE-only semantics. The existing controller then reconciled
+Playwright to current-generation Ready, discovered 24 tools and produced a Ready
+Pod using the configured immutable image. Independent follow-up confirmed those
+observations and unchanged protected model/cluster namespace identities. No
+controller, ServiceAccount, MCP spec or readiness override was needed. This
+recovery does not qualify general node registry access, the other unresolved
+installation prerequisites or the complete Home-to-Team journey.
 
 The destructive cleanup of old, explicitly disposable lab Teams and duplicate
 Helm releases was specific to that reset. It is not a customer upgrade procedure,
