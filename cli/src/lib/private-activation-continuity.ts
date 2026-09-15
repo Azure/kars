@@ -4,7 +4,7 @@
 import { randomBytes } from "node:crypto";
 import {
   annotations, at, canonical, consumesPrivateAuthority, digest, kinds, patchNamespace,
-  PRIVATE_PREFIX, read, record, reviewed, reviewedOwner, template, templateDigest,
+  PRIVATE_PREFIX, read, record, requiresPrivatePodReview, reviewed, reviewedOwner, template, templateDigest,
   validateActivationShape, validateQualifiedMetadata,
   type Execute, type Json, type NamespaceReview, type PrivateActivation,
 } from "./private-activation.js";
@@ -107,12 +107,12 @@ async function consumers(
   }
   for (const pod of await pods(execute, scope)) {
     if (captured.includes(reviewed(pod, true).uid)) throw new Error("Captured old private consumer UID remains; retirement recovery was preserved");
-    if (!consumesPrivateAuthority(pod, scope.namespace.name, activation)) continue;
+    if (!await requiresPrivatePodReview(execute, pod, scope, activation)) continue;
     if (!qualified) {
       throw new Error("Additional scope still consumes private authority; owner-specific retirement/rotation is required without restarting the shared root");
     }
     if (at(pod, "metadata", "annotations", `${PRIVATE_PREFIX}epoch`) !== scope.epoch
-      || !await reviewedOwner(execute, pod, scope)) {
+      || !await reviewedOwner(execute, pod, scope, undefined, activation.root)) {
       throw new Error("Unreviewed or stale-epoch private consumer in shared qualification; existing authority was preserved");
     }
   }
