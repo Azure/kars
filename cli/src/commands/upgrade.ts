@@ -30,6 +30,7 @@ import { requireBundledAsset } from "../lib/repo-assets.js";
 import { RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
 import { connectDeploymentTarget } from "../lib/deployment-target.js";
 import { restartController, restartSandboxes } from "../lib/deployment-rollout.js";
+import { assertControllerMutationAllowed, PrivateRootUpgradeBlocked } from "../lib/private-root-upgrade-guard.js";
 import { inspectNamespaceOwnership } from "../lib/namespace-ownership.js";
 import { assertRollbackSafe, assertSafeMutation } from "../lib/sre-authority.js";
 import { prepareCoreHelmSchemas, prepareCoreRollbackSchemas } from "../lib/core-helm-schemas.js";
@@ -454,6 +455,11 @@ Examples:
 
         // ── Rollback path ─────────────────────────────────────────────
         if (options.rollback) {
+          if (options.dryRun) {
+            console.log("Would roll back the Kars Helm release and restart its workloads; no changes made.");
+            return;
+          }
+          await assertControllerMutationAllowed(execa);
           await assertRollbackSafe(execa);
           stepper.step("Rolling back to the previous Helm revision...");
           const revision = await prepareCoreRollbackSchemas(execa, "kars", NS);
@@ -543,6 +549,7 @@ Examples:
         }
 
         // ── Step 3: Import target release images into ACR ─────────────
+        await assertControllerMutationAllowed(execa);
         stepper.step(`Importing ${target} images into ${acrName}...`);
         let requiredFailures = 0;
         for (const img of images) {
@@ -678,6 +685,10 @@ Examples:
         process.exit(0);
       } catch (err) {
         stepper.stop();
+        if (err instanceof PrivateRootUpgradeBlocked) {
+          console.error(chalk.red(`\n  Upgrade stopped: ${err.message}\n`));
+          process.exit(1);
+        }
         const e = err as { stderr?: string; stdout?: string; message?: string };
         const msg = err instanceof Error ? err.message : String(err);
         // If a field-manager conflict slipped past the pre-flight (e.g. a field
@@ -781,6 +792,7 @@ async function detectVersionByImageDigest(execa: Execa): Promise<string | undefi
 
 /** `az acr import --force` one image. Returns true on success. */
 async function acrImport(execa: Execa, acrName: string, src: string, target: string): Promise<boolean> {
+  await assertControllerMutationAllowed(execa);
   return execa("az", [
     "acr", "import", "--name", acrName, "--source", src, "--image", target, "--force",
   ], { stdio: "pipe" }).then(() => true).catch(() => false);
@@ -789,6 +801,7 @@ async function acrImport(execa: Execa, acrName: string, src: string, target: str
 /** Restart actual mesh workloads first and wait for every changed deployment.
  * A failed inventory, restart, or rollout is an upgrade failure. */
 export async function rolloutRestartAll(execa: Execa, installation?: MeshInstallation): Promise<void> {
+  await assertControllerMutationAllowed(execa);
   const mesh = installation ?? await inspectMeshInstallation(execa);
   await restartMesh(execa, mesh);
   await restartController(execa);

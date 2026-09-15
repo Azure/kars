@@ -24,6 +24,7 @@ import type { Stepper } from "../../stepper.js";
 import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
 import { stageRustBinaries } from "../../lib/stage-rust-bin.js";
 import { isPhaseSkippable, markPhaseDone, type ResumeTopology } from "./resume.js";
+import { assertControllerMutationAllowed } from "../../lib/private-root-upgrade-guard.js";
 
 export interface AcquireImagesContext {
   stepper: Stepper;
@@ -46,6 +47,7 @@ export interface AcquireImagesContext {
 /** Acquire all kars images into the user's ACR per the chosen source. */
 export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
   const { stepper, options, acrLoginServer, acr, repoRoot, resumeFromPhase, resumeTopology } = ctx;
+  await assertControllerMutationAllowed(execa);
 
   // --release [version]: pull the PUBLIC signed GHCR release images
   // instead of building or importing from a private source ACR. Bare
@@ -99,6 +101,7 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     let releaseFailures = 0;
     for (const img of releaseImages) {
       stepper.update(`Importing ${img.target} from ${img.src}...`);
+      await assertControllerMutationAllowed(execa);
       try {
         await execa("az", [
           "acr", "import",
@@ -145,6 +148,7 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
       await execa("docker", args, { stdio: "pipe" });
       // Push with retry — ACR tokens/connections can go stale after long builds
       for (let attempt = 1; attempt <= 3; attempt++) {
+        await assertControllerMutationAllowed(execa);
         try {
           stepper.update(`Pushing ${tag}${attempt > 1 ? ` (retry ${attempt}/3)` : ""}...`);
           if (attempt > 1) await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
@@ -237,6 +241,7 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     // references them by tag.
     for (const tag of ["agentmesh-relay-agt:latest", "agentmesh-registry-agt:latest"]) {
       stepper.update(`Importing ${tag} from ${options.sourceAcr}...`);
+      await assertControllerMutationAllowed(execa);
       await execa("az", [
         "acr", "import",
         "--name", acr,
@@ -281,6 +286,7 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     let customerFailures = 0;
     for (const img of images) {
       stepper.update(`Importing ${img.target}...`);
+      await assertControllerMutationAllowed(execa);
       try {
         await execa("az", [
           "acr", "import",

@@ -316,7 +316,7 @@ describe("rolloutRestartAll — refreshes every workload, mesh first", () => {
 
   it("restarts the mesh BEFORE the controller (so deps come up against new mesh)", async () => {
     const calls: string[][] = [];
-    await rolloutRestartAll(fakeExeca((_bin, args) => args[0] === "get" ? '{"items":[]}' : "", calls), legacyMesh);
+    await rolloutRestartAll(fakeExeca((_bin, args) => args[0] === "get" && args[1] === "deployments" ? '{"items":[]}' : "", calls), legacyMesh);
     const order = calls
       .filter((c) => c[0] === "kubectl" && c[1] === "rollout" && c[2] === "restart")
       .map((c) => c.join(" "));
@@ -328,7 +328,7 @@ describe("rolloutRestartAll — refreshes every workload, mesh first", () => {
 
   it("propagates restart failures instead of reporting a success-shaped outcome", async () => {
     const calls: string[][] = [];
-    const execa = fakeExeca(() => "THROW", calls);
+    const execa = fakeExeca((_bin, args) => args[0] === "get" && args[1] === "namespace" ? "" : "THROW", calls);
     await expect(rolloutRestartAll(execa, legacyMesh)).rejects.toThrow("command failed");
   });
 });
