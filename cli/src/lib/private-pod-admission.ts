@@ -3,7 +3,7 @@
 
 import { createHash } from "node:crypto";
 import {
-  at, canonical, digest, kinds, read, record, reviewed, template, templateDigest,
+  at, canonical, digest, implicitMemoryPressureToleration, kinds, read, record, reviewed, template, templateDigest,
   type Execute, type Json, type NamespaceReview, type PrivateActivation,
 } from "./private-activation.js";
 import { PrivateCommandFailure, privateCommandFailure } from "./private-activation-command-diagnostics.js";
@@ -206,11 +206,8 @@ function supportedSpec(parent: ObjectValue, admitted: ObjectValue, account: Obje
       tolerations.push({ key, operator: "Exists", effect: "NoExecute", tolerationSeconds: 300 });
     }
   }
-  const resourceHolders = [spec, ...array(spec.containers ?? []), ...array(spec.initContainers ?? [])];
-  const notBestEffort = resourceHolders.some(c => ["requests", "limits"].some(type =>
-    ["cpu", "memory"].some(resource => Number.parseFloat(String(at(c, "resources", type, resource) ?? "0")) > 0)));
-  const memory = { key: "node.kubernetes.io/memory-pressure", operator: "Exists", effect: "NoSchedule" };
-  if (notBestEffort && !tolerations.some(t => canonical(t) === canonical(memory))) tolerations.push(memory);
+  const memory = implicitMemoryPressureToleration(spec);
+  if (memory && !tolerations.some(t => canonical(t) === canonical(memory))) tolerations.push(memory);
   spec.tolerations = tolerations;
   return spec;
 }

@@ -751,6 +751,15 @@ export async function reviewedOwner(
   return undefined;
 }
 
+export function implicitMemoryPressureToleration(spec: unknown): RecordValue | undefined {
+  const holders = [spec, ...list(at(spec, "containers") ?? []), ...list(at(spec, "initContainers") ?? [])];
+  const nonBestEffort = holders.some(holder => ["requests", "limits"].some(type =>
+    ["cpu", "memory"].some(resource => Number.parseFloat(String(at(holder, "resources", type, resource) ?? "0")) > 0)));
+  return nonBestEffort
+    ? { key: "node.kubernetes.io/memory-pressure", operator: "Exists", effect: "NoSchedule" }
+    : undefined;
+}
+
 export function matchesReviewedExecution(current: unknown, parent: unknown, pod: boolean): boolean {
   const actual = executionSpec(current, pod);
   const expected = executionSpec(parent, false);
@@ -764,6 +773,13 @@ export function matchesReviewedExecution(current: unknown, parent: unknown, pod:
         [key, ""].includes(String(at(value, "key") ?? ""))
         && ["NoExecute", ""].includes(String(at(value, "effect") ?? "")))) continue;
       const index = tolerations.findIndex(value => canonical(value) === canonical(implicit));
+      if (index >= 0) tolerations.splice(index, 1);
+    }
+    const memory = implicitMemoryPressureToleration(parent);
+    if (memory && !reviewedTolerations.some(value =>
+      [memory.key, ""].includes(String(at(value, "key") ?? ""))
+      && ["NoSchedule", ""].includes(String(at(value, "effect") ?? "")))) {
+      const index = tolerations.findIndex(value => canonical(value) === canonical(memory));
       if (index >= 0) tolerations.splice(index, 1);
     }
     if (tolerations.length) actual.tolerations = tolerations;
