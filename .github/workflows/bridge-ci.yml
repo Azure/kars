@@ -85,6 +85,7 @@ jobs:
             routes::operator::copilot_transport::tests::github_endpoints_use_fixed_https_urls_and_methods \
             routes::operator::copilot_transport::tests::github_transport_rejects_http_before_connecting \
             routes::operator::copilot_transport::tests::loopback_fixture_rejects_non_loopback_addresses \
+            routes::operator::copilot_transport::tests::loopback_fixture_uses_fixed_urls_and_pinned_socket_routing \
             routes::operator::copilot_transport::tests::github_tls_transport_preserves_oauth_and_copilot_requests \
             routes::operator::copilot_transport::tests::github_tls_transport_does_not_follow_redirects \
             routes::operator::copilot_transport::tests::github_transport_rejects_untrusted_certificates_and_hostnames \
