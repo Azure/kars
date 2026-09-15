@@ -8,6 +8,12 @@ import re
 
 from native_api import CommandFailure, Failure, command
 
+ROOT_ADMISSION_ERROR = (
+    "Consumer execution differs from the reviewed controller template; "
+    "Pod admission could not be verified; preserve the original review and consumer"
+)
+ROOT_ADMISSION_CHECKS = ("identity", "metadata", "ownership", "inputs", "execution", "response", "snapshots")
+
 ERRORS = {
     "Private admission differs from the complete required bundle; upgrade core prerequisites before enrollment": "admission-bundle-mismatch",
     "Private admission is not currently observed and type-checked": "admission-not-observed",
@@ -40,8 +46,13 @@ ERRORS = {
     "Unreviewed consumer appeared during writer retirement": "writer-pod-lineage",
     "Writer retirement is still awaiting fresh Task attestation and the captured owned runtime; no stale authority or new activation was published": "writer-settlement-timeout",
 }
+ERRORS.update({
+    f"{ROOT_ADMISSION_ERROR} (check: {check})": f"root-pod-admission-{check}"
+    for check in ROOT_ADMISSION_CHECKS
+})
 MODULES = (
     "commands/credential-grants", "lib/private-activation",
+    "lib/private-pod-admission",
     "lib/private-activation-retirement", "lib/kube-bootstrap", "lib/kube-context",
     "lib/private-activation-continuity",
     "lib/private-activation-guard-retirement",

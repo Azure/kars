@@ -72,10 +72,12 @@ class SchemaPreparationTests(unittest.TestCase):
             return ""
         with patch.object(boot, "prepare_schemas", side_effect=prepared), \
              patch.object(boot, "command", side_effect=command), \
-             patch.object(boot, "private_file"), \
+             patch.object(boot, "private_file") as private_file, \
              patch.object(boot, "loaded_image", side_effect=lambda name: name + ":latest"), \
              redirect_stdout(io.StringIO()):
             boot.install_core(setup)
+        values = json.loads(private_file.call_args.args[1])
+        self.assertEqual(values.get("azure", {}).get("workloadIdentity"), {"enabled": False})
         self.assertEqual(calls[0], ("prepare", ".native/core-values.json", "kind-bridge-native"))
         self.assertEqual(calls[1][:4], ("helm", "install", "kars", ".native/core/deploy/helm/kars"))
         self.assertIn(".native/core-values.json", calls[1])
