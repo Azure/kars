@@ -11,6 +11,49 @@ explains what happens, how to verify, and how to roll back.
 > stacks "upgrade" by recreating the ephemeral container/kind cluster from the
 > newer images — there is nothing stateful to migrate.
 
+## Private-qualified roots: controller changes are currently blocked
+
+The upgrade procedures below are for roots without private qualification or
+retirement evidence. A completed private qualification seals the controller
+template; keeping the Deployment UID does not make an image, env or rollout
+annotation change compatible. There is not yet a supported root-template
+upgrade/requalification transaction.
+
+Controller-changing operations stop with `KARS_PRIVATE_ROOT_UPGRADE_BLOCKED`
+before image publication, schema writes, Helm mutation or restarts when the
+target root has private evidence. This includes Pending/restoring attempts,
+completed proofs, retained epochs and malformed or unknown private receipts.
+Unreadable or malformed API evidence produces `KARS_PRIVATE_ROOT_CHECK_UNAVAILABLE`,
+not an assumption that the root is unqualified. Diagnostics do not print private
+proofs, templates or command stderr.
+
+The guard covers `upgrade`/rollback, `up`/fast upgrade, controller-affecting
+`push --apply`, shared schema-apply entrypoints and controller rollout helpers.
+Full `up` checks an existing AKS before provisioning, using its existing
+discovery/connection operations. Only an authoritative absent-cluster result
+selects fresh installation; permission and transport failures stop the operation.
+Context-bound `push` also checks publication without `--apply` when its mutable
+tag is used by a root container. It connects to the saved deployment rather than
+inspecting an unrelated ambient Kubernetes context.
+
+Read-only previews, including `up --upgrade --dry-run` and
+`upgrade --rollback --dry-run`, remain non-mutating. Original
+`credentials grant preview`/`apply` recovery is not intercepted. Finishing that
+recovery does **not** authorize a later root-template change. Do not clear proofs,
+delete grants or use force/rollback flags to bypass the refusal.
+
+Bridge-only and sandbox-only operations that do not touch the root remain
+available. In particular, `push --only sandbox --apply` is **not** root-unchanged:
+it updates the controller's `SANDBOX_IMAGE` configuration and restarts it.
+Unrelated image publication, and publication of a tag from which the root is
+already digest-pinned, do not themselves authorize or trigger a root restart.
+Standalone publication without a saved cluster target retains its existing
+behavior; it is not proof that no other deployment consumes that registry.
+
+This is a client-side refusal guard, not the missing migration protocol or an
+atomic lock against concurrent operators. No root/grant metadata, controller
+policy or admission permissions are changed by the check.
+
 ---
 
 ## 1. Two ways to move forward

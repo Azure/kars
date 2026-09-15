@@ -4,6 +4,7 @@
 import type { Execute } from "./deployment-target.js";
 import { controllerEnv, coreImageValues, type PushedImage } from "./image-targets.js";
 import { readReleaseValues } from "./mesh-release.js";
+import { assertControllerMutationAllowed } from "./private-root-upgrade-guard.js";
 
 export interface DeploymentRecord {
   metadata: { name: string; namespace: string; resourceVersion?: string; generation?: number; labels?: Record<string, string>; annotations?: Record<string, string>; ownerReferences?: unknown[] };
@@ -56,6 +57,7 @@ export async function recheckCoreOwnership(execute: Execute, core: CoreInstallat
 
 export async function updateLegacyCore(execute: Execute, core: CoreInstallation, images: PushedImage[]): Promise<void> {
   if (core.kind !== "legacy") throw new Error("Direct controller updates require unmanaged ownership");
+  await assertControllerMutationAllowed(execute, core.deployment.metadata.namespace);
   const verified = await inspectCoreInstallation(execute);
   if (verified.kind !== "legacy") throw new Error("Controller ownership changed before its legacy update");
   const current = verified.deployment;

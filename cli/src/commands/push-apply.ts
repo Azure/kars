@@ -14,6 +14,7 @@ import { inspectSandboxPlans, refreshSandboxImages } from "../lib/sandbox-image-
 import { inspectManagedMcpPlans, refreshManagedMcpImages } from "../lib/managed-mcp-image-apply.js";
 import { assertSafeMutation } from "../lib/sre-authority.js";
 import { prepareCoreHelmSchemas } from "../lib/core-helm-schemas.js";
+import { assertControllerMutationAllowed } from "../lib/private-root-upgrade-guard.js";
 
 export interface PushApplyResult {
   applied: string[];
@@ -45,6 +46,8 @@ export async function applyPushedImages(
     throw new Error("External or absent AgentMesh cannot be updated; choose explicit core targets instead.");
   }
   if (core?.kind === "helm" && mesh) assertMeshReleaseConsistency(mesh, core.values);
+  if (core) await assertControllerMutationAllowed(execute, core.deployment.metadata.namespace);
+  if (selectedMesh && mesh?.kind === "helm") await assertControllerMutationAllowed(execute, mesh.releaseNamespace);
   await assertSafeMutation(execute);
   const artifacts = await resolvePushedArtifacts(execute, deployable);
   const coreImages = artifacts.filter(item => !isMesh(item));
