@@ -171,6 +171,8 @@ AKS admission changes; it does not remove this separate upgrade limitation.
 Do not clear qualification metadata, replace the sealed binding, or delete grants
 as a workaround. An existing installation needing a controller-template change
 must wait for a reviewed migration path.
+The lifecycle work is tracked in
+[Azure/kars#567](https://github.com/Azure/kars/issues/567).
 
 ### Verify managed tools and the user journey
 
