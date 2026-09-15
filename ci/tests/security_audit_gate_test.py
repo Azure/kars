@@ -66,6 +66,12 @@ class SecurityAuditGateTests(GitFixture):
         self.commit()
         self.assertEqual(self.gate().returncode, 0)
 
+    def test_documentation_only_changes_do_not_require_capability_approval(self):
+        self.old_approval()
+        self.write(OLD, SIGNED + "\nTypographic clarification.\n")
+        self.commit()
+        self.assertEqual(self.gate().returncode, 0)
+
     def test_historical_header_changes_do_not_reopen_a_completed_scope(self):
         historical = "# Previously accepted scope\nSigned-off-by: Author <author@example.invalid>\n"
         self.write(OLD, historical)
@@ -82,12 +88,6 @@ class SecurityAuditGateTests(GitFixture):
         result = self.gate()
         self.assertEqual(result.returncode, 1)
         self.assertIn(NEW, result.stderr)
-
-    def test_documentation_only_changes_do_not_require_capability_approval(self):
-        self.old_approval()
-        self.write(OLD, SIGNED + "\nTypographic clarification.\n")
-        self.commit()
-        self.assertEqual(self.gate().returncode, 0)
 
     def test_missing_review_base_cannot_fall_back_to_an_empty_worktree_diff(self):
         self.capability()

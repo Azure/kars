@@ -1,0 +1,254 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+name: Bridge CI
+
+on:
+  pull_request:
+    branches: [main, dev, kars-bridge]
+  push:
+    branches: [main, kars-bridge]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bridge-ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  bridge-required-gates:
+    name: Bridge component acceptance
+    needs: [addon, bff, dependencies, lockfiles, rust-dependencies, secrets, security, web]
+    if: always()
+    runs-on: ubuntu-22.04
+    env:
+      COMPONENT_RESULTS: ${{ toJSON(needs) }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: python3 ci/bridge_component_results.py
+
+  bff:
+    name: BFF build and test
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge/bff
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          workspaces: bridge/bff
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Require trust and authorization regression registration
+        run: |
+          cargo test --locked -- --list > /tmp/kars-bridge-bff-tests.txt
+          for name in \
+            routes::receipts::anchor::tests::pins_follow_the_controller_raw_key_fingerprint_contract \
+            routes::receipts::anchor::tests::copied_key_id_cannot_substitute_another_public_key \
+            routes::receipts::anchor::tests::malformed_empty_mismatched_or_missing_pins_fail_closed \
+            kars::receipt_log::tests::receipt_endpoint_still_requires_signed_payload_binding_and_full_overflow_inclusion \
+            providers::signing::tests::sha256_matches_standard_known_answers_without_normalizing_bytes \
+            kars::credential_review::digest_tests::review_digest_preserves_compact_sorted_json_and_full_hex_width \
+            kars::receipt_log::digest_tests::chain_hash_keeps_decimal_sequence_and_exact_pipe_framing \
+            routes::artifacts::digest_tests::artifact_addresses_keep_the_existing_sixteen_byte_short_form \
+            routes::github::tests::connection_names_keep_the_original_raw_subject_and_eight_byte_digest \
+            providers::receipt::tests::rfc8032_known_answer_and_malformed_signatures_keep_exact_verification_semantics \
+            providers::credential_review::tests::legacy_v1_key_preserves_domain_null_byte_and_raw_secret_encoding \
+            providers::credential_review::tests::tag_comparison_requires_equal_length_and_every_byte_without_normalization \
+            auth::admin_tests::admin_route_and_role_matrix_does_not_promote_operators_or_gate_reads \
+            auth::admin_tests::direct_bff_admin_mutations_deny_missing_forged_expired_and_non_admin_principals \
+            auth::admin_tests::budget_and_retention_handlers_require_admin_even_without_route_middleware \
+            auth::admin_tests::signed_admins_can_set_and_clear_each_budget_scope_and_retention \
+            auth::admin_tests::operator_reads_stay_available_while_user_and_auditor_console_reads_stay_denied \
+            routes::tasks::artifacts::tests::active_and_unknown_artifacts_download_unchanged_from_live_or_retained_tasks \
+            routes::tasks::artifacts::tests::passive_artifact_previews_keep_inline_viewing_without_mime_sniffing_or_byte_changes \
+            routes::tasks::artifacts::tests::artifact_head_has_the_same_protection_and_filename_is_header_safe \
+            routes::tasks::artifacts::tests::artifact_response_hardening_preserves_ownership_and_missing_file_denials \
+            routes::engineering::remediation::renewal_tests::current_producer_new_advisory_after_done_gets_followup_not_lost_or_replayed \
+            routes::engineering::remediation::renewal_tests::completed_source_ignores_poll_time_titles_and_pr_candidates_but_not_changed_fix_facts \
+            routes::engineering::remediation::renewal_tests::current_producer_pending_source_refreshes_without_spending_capacity_or_changing_identity \
+            routes::engineering::remediation::renewal_tests::active_approved_and_nonce_bound_pending_inputs_are_frozen_with_dependent_followups \
+            routes::engineering::remediation::renewal_tests::current_producer_aggregation_is_order_independent_and_removes_only_closed_pending_findings \
+            routes::engineering::remediation::renewal_tests::full_empty_snapshot_retires_unassigned_source_without_claiming_delivery_or_erasing_runs \
+            routes::engineering::remediation::renewal_tests::refreshed_followup_preserves_original_history_and_withdrawn_findings_are_not_reintroduced \
+            routes::engineering::remediation::renewal_tests::proven_legacy_history_remains_immutable_when_current_producer_finds_a_new_alert \
+            routes::engineering::remediation::renewal_tests::final_merge_rechecks_assignment_and_completion_after_admission \
+            routes::engineering::remediation::renewal_tests::direct_final_merge_aggregates_current_producer_and_preserves_completed_pr_evidence \
+            routes::engineering::remediation::renewal_tests::remediation_queue_cap_retries_new_followups_but_allows_unassigned_refreshes \
+            routes::engineering::remediation::renewal_tests::missing_v2_original_metadata_cannot_authorize_overwriting_a_completed_row \
+            routes::engineering::remediation::renewal_tests::legacy_retirement_cannot_rewrite_a_concurrently_assigned_pending_task \
+            routes::engineering::remediation::renewal_tests::duplicated_alert_pages_keep_latest_facts_and_all_pr_candidate_links_in_either_order \
+            routes::engineering::remediation::renewal_tests::partial_poll_refreshes_seen_alerts_without_discarding_unseen_pending_findings \
+            routes::engineering::remediation::renewal_tests::source_withdrawal_final_merge_does_not_change_a_newly_assigned_v2_task
+          do
+            grep -Fx "$name: test" /tmp/kars-bridge-bff-tests.txt
+          done
+      - run: cargo test --locked
+      - name: Check explicit credential review orchestration
+        run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../tests/native-credentials python3 -m unittest discover -s ../tests/native-credentials -p test_credential_review.py
+
+  web:
+    name: Web build and lint
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: bridge/web
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: bridge/web/package-lock.json
+      - run: npm ci
+      - run: npm run lint
+      - run: npx --no-install tsc --noEmit
+      - name: Check all web authorization, form, proxy and evidence contracts
+        run: node --experimental-strip-types --test tests/*.test.mjs
+      - name: Build the production web image without publishing
+        run: docker build --tag kars-bridge-web-qualification:latest .
+      - name: Start web with an immutable root filesystem
+        run: |
+          container=$(docker run --detach --read-only --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --tmpfs /tmp:rw,noexec,nosuid,size=134217728,uid=10001,gid=10001 \
+            --tmpfs /app/.next/cache:rw,noexec,nosuid,size=268435456,uid=10001,gid=10001 \
+            --publish 127.0.0.1:3000:3000 --env HOSTNAME=0.0.0.0 \
+            kars-bridge-web-qualification:latest)
+          echo "WEB_CONTAINER_ID=$container" >> "$GITHUB_ENV"
+          curl --fail --retry 20 --retry-all-errors --retry-delay 1 \
+            --max-time 10 http://127.0.0.1:3000/api/health
+          docker exec "$container" node -e '
+            const fs = require("node:fs");
+            const assert = require("node:assert/strict");
+            fs.writeFileSync("/app/.next/cache/qualification", "cache works");
+            fs.writeFileSync("/tmp/qualification", "temporary writes work");
+            assert.throws(() => fs.writeFileSync("/app/qualification", "denied"),
+              error => error.code === "EROFS" || error.code === "EACCES");
+          '
+          docker exec "$container" node --input-type=module -e '
+            import assert from "node:assert/strict";
+            import sharp from "sharp";
+            const image = await sharp(Buffer.from([255, 0, 0, 255]),
+              { raw: { width: 1, height: 1, channels: 4 } }).resize(2, 2).png().toBuffer();
+            const metadata = await sharp(image).metadata();
+            assert.equal(metadata.width, 2);
+            assert.equal(metadata.height, 2);
+            assert.equal(metadata.format, "png");
+          '
+      - name: Remove the qualification container
+        if: always()
+        run: |
+          if [ -n "${WEB_CONTAINER_ID:-}" ]; then
+            docker logs "$WEB_CONTAINER_ID"
+            docker rm --force "$WEB_CONTAINER_ID"
+          fi
+
+  addon:
+    name: Add-on install and uninstall
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+          cache: npm
+          cache-dependency-path: bridge/teams-gateway/package-lock.json
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+      - run: npm ci
+        working-directory: bridge/teams-gateway
+      - run: npm run lint && npm run typecheck && npm run build && npm test
+        working-directory: bridge/teams-gateway
+      - run: helm lint bridge/deploy/helm/kars-bridge
+      - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
+        with:
+          cluster_name: bridge-addon-lifecycle
+          kubeconfig: ${{ runner.temp }}/bridge-addon-kubeconfig
+      - name: Exercise real Helm removal in a disposable cluster
+        working-directory: bridge/teams-gateway
+        env:
+          BRIDGE_TEST_KIND_LIFECYCLE: '1'
+          BRIDGE_TEST_KUBECONFIG: ${{ runner.temp }}/bridge-addon-kubeconfig
+        run: npm test -- tests/chart-lifecycle.test.ts
+
+  dependencies:
+    name: Dependency audit (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [web, teams-gateway]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - run: node ci/npm-audit-bulk.mjs bridge/${{ matrix.project }}/package-lock.json
+
+  rust-dependencies:
+    name: Rust dependency audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: taiki-e/install-action@ba47c86ac325773530516bb756137ac718732518 # v2.86.5
+        with:
+          tool: cargo-audit
+      - run: cargo audit --file bridge/bff/Cargo.lock
+
+  lockfiles:
+    name: Lockfile consistency (${{ matrix.project }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        project: [web, teams-gateway]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: '22'
+      - name: Resolve without installing packages or running dependency scripts
+        working-directory: bridge/${{ matrix.project }}
+        run: npm install --package-lock-only --ignore-scripts --no-audit
+      - name: Require the resolved lockfile to be committed
+        run: git diff --exit-code -- bridge/${{ matrix.project }}/package-lock.json
+      - name: Retain the generated lockfile for review
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: proposed-lockfile-${{ matrix.project }}
+          path: bridge/${{ matrix.project }}/package-lock.json
+          if-no-files-found: error
+          retention-days: 7
+
+  security:
+    name: Source and configuration security
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          scan-type: fs
+          scan-ref: bridge
+          scanners: misconfig,secret
+          severity: HIGH,CRITICAL
+          exit-code: '1'
+
+  secrets:
+    name: Secret scanning
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+      - uses: trufflesecurity/trufflehog@30d5bb91af1a771378349dbbb0c82129392acf70 # v3.95.6
+        with:
+          extra_args: --only-verified

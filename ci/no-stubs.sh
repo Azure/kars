@@ -12,9 +12,12 @@
 # on the same line. Reviewer must sign off in the security-audit doc.
 #
 # Scope: production code only.
+# JS/TS field syntax uses the CLI's locked TypeScript parser. Comment/value
+# markers remain checked, including on lines with legitimate UI fields.
 set -euo pipefail
 
 BASE_REF="${BASE_REF:-origin/main}"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(git rev-parse --show-toplevel)"
 cd "$REPO_ROOT"
 
@@ -26,6 +29,9 @@ PROD_PATHS=(
   'runtimes/openclaw/src/'
   'sandbox-images/'
   'cli/profiles/'
+  'bridge/bff/src/'
+  'bridge/web/src/'
+  'bridge/teams-gateway/src/'
 )
 
 # Patterns that indicate an unfinished production code path.
@@ -55,18 +61,21 @@ for f in "${changed[@]}"; do
   esac
   [ -f "$f" ] || continue
 
-  # For each ADDED line in the diff, check pattern.
+  case "$f" in
+    *.ts|*.tsx|*.js|*.jsx|*.mjs|*.cjs)
+      if ! node "$SCRIPT_DIR/no-stubs-ts.mjs" "$BASE_REF" "$f" "$PATTERNS"; then
+        fail=1
+      fi
+      continue;;
+  esac
+
+  # Filter once per file; full product imports must not fork twice per source line.
   while IFS= read -r line; do
     stripped="${line#+}"
-    # Override-aware
-    if printf '%s' "$stripped" | grep -qE 'ci:stub-ok:'; then
-      continue
-    fi
-    if printf '%s' "$stripped" | grep -qE "$PATTERNS"; then
-      echo "fail: $f: new stub/placeholder introduced: ${stripped:0:160}" >&2
-      fail=1
-    fi
-  done < <(git diff "${BASE_REF}...HEAD" -- "$f" 2>/dev/null | grep -E '^\+[^+]')
+    echo "fail: $f: new stub/placeholder introduced: ${stripped:0:160}" >&2
+    fail=1
+  done < <(git diff "${BASE_REF}...HEAD" -- "$f" 2>/dev/null |
+    grep -E '^\+[^+]' | grep -E "$PATTERNS" | grep -vE 'ci:stub-ok:')
 done
 
 exit $fail
