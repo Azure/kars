@@ -68,8 +68,21 @@ jobs:
             auth::admin_tests::budget_and_retention_handlers_require_admin_even_without_route_middleware \
             auth::admin_tests::signed_admins_can_set_and_clear_each_budget_scope_and_retention \
             auth::admin_tests::operator_reads_stay_available_while_user_and_auditor_console_reads_stay_denied \
+            routes::operator::copilot_login::tests::device_login_wire_contract_and_cumulative_slowdown_use_real_http_client \
+            routes::operator::copilot_login::tests::missing_or_unready_grant_and_replaced_store_prevent_all_oauth_requests \
+            routes::operator::copilot_login::tests::invalid_and_non_success_upstream_responses_are_never_pending_or_echoed \
+            routes::operator::copilot_login::tests::start_response_validation_blocks_empty_codes_and_untrusted_verification_urls \
+            routes::operator::copilot_login::tests::expiry_and_denial_are_terminal_not_pending \
+            routes::operator::copilot_login::tests::granted_token_is_stored_before_authorized_and_late_failures_never_claim_success \
             routes::operator::copilot_login::tests::production_handlers_reject_malformed_inputs_and_missing_grants_without_oauth \
             routes::operator::copilot_login::tests::failed_or_malformed_seat_verification_never_stores_credentials \
+            routes::operator::copilot_login::tests::device_login_redirects_never_replay_codes_or_mutate_credentials \
+            routes::operator::copilot_transport::tests::github_endpoints_use_fixed_https_urls_and_methods \
+            routes::operator::copilot_transport::tests::github_transport_rejects_http_before_connecting \
+            routes::operator::copilot_transport::tests::loopback_fixture_rejects_non_loopback_addresses \
+            routes::operator::copilot_transport::tests::github_tls_transport_preserves_oauth_and_copilot_requests \
+            routes::operator::copilot_transport::tests::github_tls_transport_does_not_follow_redirects \
+            routes::operator::copilot_transport::tests::github_transport_rejects_untrusted_certificates_and_hostnames \
             routes::tasks::artifacts::tests::active_and_unknown_artifacts_download_unchanged_from_live_or_retained_tasks \
             routes::tasks::artifacts::tests::passive_artifact_previews_keep_inline_viewing_without_mime_sniffing_or_byte_changes \
             routes::tasks::artifacts::tests::artifact_head_has_the_same_protection_and_filename_is_header_safe \
