@@ -3,6 +3,9 @@
 
 use reqwest::{Client, ClientBuilder, Method, RequestBuilder};
 
+#[cfg(test)]
+const LOOPBACK_HOST: &str = "localhost";
+
 #[derive(Clone, Copy)]
 pub(super) enum CopilotEndpoint {
     DeviceCode,
@@ -27,6 +30,16 @@ impl CopilotEndpoint {
             Self::Seat | Self::Models => Method::GET,
         }
     }
+
+    #[cfg(test)]
+    fn loopback_url(self) -> &'static str {
+        match self {
+            Self::DeviceCode => "http://localhost/login/device/code",
+            Self::AccessToken => "http://localhost/login/oauth/access_token",
+            Self::Seat => "http://localhost/copilot_internal/v2/token",
+            Self::Models => "http://localhost/models",
+        }
+    }
 }
 
 /// The client and destinations are owned together: callers cannot substitute
@@ -34,7 +47,7 @@ impl CopilotEndpoint {
 pub(super) struct CopilotClient {
     client: Client,
     #[cfg(test)]
-    loopback: Option<std::net::SocketAddr>,
+    loopback: bool,
 }
 
 impl CopilotClient {
@@ -49,20 +62,16 @@ impl CopilotClient {
         Ok(Self {
             client: Self::builder().build()?,
             #[cfg(test)]
-            loopback: None,
+            loopback: false,
         })
     }
 
     pub(super) fn request(&self, endpoint: CopilotEndpoint) -> RequestBuilder {
         #[cfg(test)]
-        if let Some(address) = self.loopback {
-            let path = reqwest::Url::parse(endpoint.url())
-                .expect("static GitHub URL")
-                .path()
-                .to_owned();
+        if self.loopback {
             return self
                 .client
-                .request(endpoint.method(), format!("http://{address}{path}"));
+                .request(endpoint.method(), endpoint.loopback_url());
         }
         self.client.request(endpoint.method(), endpoint.url())
     }
@@ -76,10 +85,12 @@ impl CopilotClient {
             client: Self::builder()
                 .https_only(false)
                 .no_proxy()
+                // Routing belongs to client construction, never credential-bearing URLs.
+                .resolve(LOOPBACK_HOST, address)
                 .timeout(std::time::Duration::from_secs(3))
                 .build()
                 .unwrap(),
-            loopback: Some(address),
+            loopback: true,
         }
     }
 }
