@@ -68,6 +68,8 @@ jobs:
             auth::admin_tests::budget_and_retention_handlers_require_admin_even_without_route_middleware \
             auth::admin_tests::signed_admins_can_set_and_clear_each_budget_scope_and_retention \
             auth::admin_tests::operator_reads_stay_available_while_user_and_auditor_console_reads_stay_denied \
+            routes::operator::copilot_login::tests::production_handlers_reject_malformed_inputs_and_missing_grants_without_oauth \
+            routes::operator::copilot_login::tests::failed_or_malformed_seat_verification_never_stores_credentials \
             routes::tasks::artifacts::tests::active_and_unknown_artifacts_download_unchanged_from_live_or_retained_tasks \
             routes::tasks::artifacts::tests::passive_artifact_previews_keep_inline_viewing_without_mime_sniffing_or_byte_changes \
             routes::tasks::artifacts::tests::artifact_head_has_the_same_protection_and_filename_is_header_safe \
