@@ -1,0 +1,66 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: aggregator
+  namespace: kars-witness-gadget
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels: {app.kubernetes.io/component: aggregator, app.kubernetes.io/instance: kars-datapath-witness}
+  template:
+    metadata:
+      labels:
+        {{- include "witness.labels" . | nindent 8 }}
+        app.kubernetes.io/component: aggregator
+      annotations:
+        checksum/config: {{ include "witness.config" . | sha256sum }}
+        kars.azure.com/release-revision: {{ .Release.Revision | quote }}
+    spec:
+      serviceAccountName: aggregator
+      nodeSelector: {kubernetes.io/os: linux}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile: {type: RuntimeDefault}
+      {{- with .Values.aggregator.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: aggregator
+          image: {{ required "aggregator.image must be an operator-published image digest" .Values.aggregator.image | quote }}
+          imagePullPolicy: Always
+          env:
+            - {name: WITNESS_REVISION, value: {{ .Release.Revision | quote }}}
+            - {name: WITNESS_CONFIG_DIGEST, value: {{ include "witness.config" . | sha256sum | quote }}}
+            - {name: HOME, value: /tmp}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+          readinessProbe:
+            exec: {command: ["python3", "/opt/witness/witness.py", "--health"]}
+            periodSeconds: 10
+          resources:
+            requests: {cpu: 50m, memory: 128Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: config, mountPath: /etc/witness, readOnly: true}
+            - {name: tmp, mountPath: /tmp}
+      volumes:
+        - name: config
+          configMap: {name: witness-runtime}
+        - name: tmp
+          emptyDir: {sizeLimit: 64Mi}
+{{- end }}

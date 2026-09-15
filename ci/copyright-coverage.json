@@ -68,6 +68,21 @@
       "reason": "Third-party license texts are not Microsoft-authored source.",
       "notice": "THIRD_PARTY_NOTICES.txt"
     },
+    "deploy/helm/kars-datapath-witness/LICENSE-IG": {
+      "category": "legal",
+      "reason": "Unmodified upstream Inspektor Gadget Apache-2.0 license; retain its exact bytes, not a Microsoft MIT header.",
+      "notice": "NOTICE"
+    },
+    "deploy/helm/kars-datapath-witness/THIRD_PARTY_NOTICES.md": {
+      "category": "legal",
+      "reason": "Scoped upstream attribution and redistribution notice; preserves Apache-2.0 ownership and separately identifies MIT Kars integration changes.",
+      "notice": "NOTICE"
+    },
+    "deploy/helm/kars-datapath-witness/templates/gadget.yaml": {
+      "category": "third-party",
+      "reason": "Adapted from the upstream Inspektor Gadget v0.53.2 DaemonSet; existing notices distinguish Apache-2.0 upstream material from MIT Kars integration changes.",
+      "notice": "NOTICE"
+    },
     "Cargo.lock": {
       "category": "repository-license",
       "reason": "Generated dependency lockfile; no dependency/checksum changes for copyright policy.",

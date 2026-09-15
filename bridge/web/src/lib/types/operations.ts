@@ -236,9 +236,8 @@ export interface PodHealth {
   waiting_reason: string | null;
 }
 
-/** Datapath-completeness witness — the optional eBPF (Inspektor Gadget) witness
- * cross-checks kernel-observed egress against each sandbox's declared allowlist.
- * `enabled: false` => the witness isn't installed (show enable instructions). */
+/** Optional, partial DNS/TCP observation, not enforcement or attestation.
+ * `enabled` is a compatibility freshness flag, never installation state. */
 export interface DatapathWitnessSandbox {
   namespace: string;
   sandbox: string;
@@ -248,6 +247,7 @@ export interface DatapathWitnessSandbox {
   beyond_declared: string[];
   unused_declared: string[];
   verdict: "COMPLIANT" | "BEYOND-DECLARED" | "LEARN" | string;
+  egress_mode?: "Learn" | "Strict" | null;
 }
 export interface DatapathWitness {
   enabled: boolean;
@@ -255,6 +255,18 @@ export interface DatapathWitness {
   window_seconds: number | null;
   sandboxes: DatapathWitnessSandbox[];
   install_hint: string;
+  /** Optional for rolling upgrades from older BFFs. Missing means unknown. */
+  state?: "missing" | "pending" | "disabled" | "stale" | "invalid" | "unavailable" | "observed" | "empty" | "legacy";
+  requested_enabled?: boolean | null;
+  settings_state?: "known" | "missing" | "invalid" | "unavailable";
+  installation_state?: "unknown";
+  diagnostic?: string;
+  age_seconds?: number | null;
+  max_age_seconds?: number;
+  coverage?: "partial" | "unknown";
+  nodes_targeted?: string[];
+  nodes_with_events?: string[];
+  event_count?: number | null;
 }
 
 /** A single cross-agent activity event in the fleet live feed. */

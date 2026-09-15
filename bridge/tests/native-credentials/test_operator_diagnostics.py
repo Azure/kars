@@ -16,7 +16,8 @@ import native_api
 from native_api import Failure
 from operator_diagnostics import (
     CHECK_PREFIX, COMMAND_PREFIX, ERRORS, TRANSITION_FIELDS, TRANSITION_PREFIX, WRITER_CHECK_PREFIX, category, command_facts,
-    operator_command, sandbox_checks, source_location, transition_checks, writer_checks,
+    POD_EXECUTION_FIELDS, POD_EXECUTION_PREFIX, operator_command, pod_execution_checks,
+    sandbox_checks, source_location, transition_checks, writer_checks,
 )
 
 PRIVATE = "DO-NOT-EMIT-TOKENS-OR-PRIVATE-API-BODIES"
@@ -60,6 +61,27 @@ class OperatorDiagnosticsTests(unittest.TestCase):
                          "(source=lib/private-activation:680)")
         self.assertNotIn(PRIVATE, str(failure.exception))
 
+    def test_root_admission_failure_retains_only_the_closed_check_and_leaf_module(self):
+        message = ("Consumer execution differs from the reviewed controller template; "
+                   "Pod admission could not be verified; preserve the original review and consumer")
+        for check in ("identity", "metadata", "ownership", "inputs", "execution", "response", "snapshots"):
+            self.assertEqual(category(f"Error: {message} (check: {check})"),
+                             f"root-pod-admission-{check}")
+        self.assertEqual(category(f"Error: {message} (check: {PRIVATE})"), "unclassified-cli-error")
+        self.assertEqual(category(f"Error: {message} (check: execution){PRIVATE}"), "unclassified-cli-error")
+        stderr = (f"{PRIVATE}\nError: {message} (check: execution)\n"
+                  f"    at verifyRootPodAdmission (/private/{PRIVATE}/cli/dist/lib/private-pod-admission.js:295:15)\n"
+                  "    at reviewedOwner (/cli/dist/lib/private-activation.js:730:17)\n")
+        with self.assertRaises(Failure) as failure:
+            operator_command("preview", sys.executable, "-c",
+                             "import sys; print(sys.argv[1],file=sys.stderr); sys.exit(1)", stderr, timeout=5)
+        self.assertEqual(str(failure.exception),
+                         "Native operator preview failed: root-pod-admission-execution "
+                         "(source=lib/private-pod-admission:295)")
+        self.assertNotIn(PRIVATE, str(failure.exception))
+        self.assertEqual(source_location(
+            "    at function (/cli/dist/lib/private-pod-admission-private.js:1:2)"), "unavailable")
+
     def test_typed_template_errors_keep_only_the_exact_fixed_category(self):
         message = "Private consumer template changed after protection was enabled"
         for prefix in ("PrivateConsumerTemplateChanged", "PrivateConsumerTemplateChanged [Error]"):
@@ -68,6 +90,31 @@ class OperatorDiagnosticsTests(unittest.TestCase):
             self.assertEqual(category(line + PRIVATE), "unclassified-cli-error")
             self.assertEqual(category(prefix + ": " + PRIVATE), "unclassified-cli-error")
         self.assertEqual(category(f"{PRIVATE}: {message}"), "unclassified-cli-error")
+
+    def test_pod_execution_differences_are_fixed_booleans_and_keep_the_original_failure(self):
+        facts = {key: True for key, _ in POD_EXECUTION_FIELDS}
+        facts.update(rootNamespaceMatches=False, rootDeploymentMatches=False, imagesMatch=False)
+        marker = POD_EXECUTION_PREFIX + json.dumps(facts)
+        stderr = (f"{PRIVATE}\n{marker}\n"
+                  "Error: Consumer execution differs from the reviewed controller template; "
+                  "Pod admission could not be verified; preserve the original review and consumer (check: identity)\n")
+        with self.assertRaises(Failure) as failure:
+            operator_command("preview", sys.executable, "-c",
+                             "import sys; print(sys.argv[1],file=sys.stderr); sys.exit(1)", stderr, timeout=5)
+        message = str(failure.exception)
+        self.assertIn("root-pod-admission-identity", message)
+        self.assertIn("pod-execution=root-namespace=false,root-deployment=false,images=false", message)
+        self.assertIn("tolerations=true", message)
+        self.assertNotIn(PRIVATE, message)
+        for invalid in (
+            marker + PRIVATE, marker + "\n" + marker,
+            POD_EXECUTION_PREFIX + json.dumps({**facts, "private": PRIVATE}),
+            POD_EXECUTION_PREFIX + json.dumps({**facts, "imagesMatch": 0}),
+            POD_EXECUTION_PREFIX + json.dumps({key: value for key, value in facts.items() if key != "imagesMatch"}),
+            POD_EXECUTION_PREFIX + '{"imagesMatch":true,"imagesMatch":false}',
+        ):
+            self.assertEqual(pod_execution_checks(invalid), "unavailable")
+        self.assertEqual(pod_execution_checks(PRIVATE), "")
 
     def test_restoration_failure_retains_only_the_closed_boolean_snapshot(self):
         facts = {key: True for key, _ in TRANSITION_FIELDS}

@@ -11,10 +11,33 @@ selected for migration.
 
 Private activation compares each live consumer against its reviewed owner
 template. Kubernetes' two standard, admission-injected 300-second
-`NoExecute` tolerations do not make that execution different. Explicit
-tolerations, nonstandard durations, duplicate entries and every credential,
+`NoExecute` tolerations do not make that execution different. The exact
+`node.kubernetes.io/memory-pressure` `Exists`/`NoSchedule` toleration is also
+recognized when the reviewed template requests or limits positive CPU or memory,
+including init containers or supported Pod-level resources. This shared QoS
+rule applies to non-root consumers as well as the root; it does not grant
+non-root consumers the AKS root-only admission fallback. Zero or unrelated
+resource requests, changed tolerations, duplicate entries, explicit wildcard
+policies and every credential,
 container and host-authority change still require exact review; custom
 admission mutations are not silently ignored.
+
+A Workload Identity opt-in label alone does not turn an exactly matching
+non-root consumer into the root controller, even in the root namespace.
+Mandatory root replay is selected through the pinned Deployment's owning
+ReplicaSet lineage. The root still requires actual Workload Identity admission
+when opted in; non-root execution changes still fail ordinary exact review and
+do not gain the root-only fallback.
+Before returning the pinned root Deployment, mandatory replay is also enforced
+regardless of the traversal path. A direct Pod-to-Deployment owner reference
+cannot substitute for the supported root ReplicaSet lineage.
+
+If the root admission fallback rejects a consumer, the CLI reports only fixed
+boolean execution-comparison categories and whether its namespace/Deployment
+match the root. These use the same normalized comparison as enforcement;
+no Pod values, environment names, credentials, images or hashes are emitted.
+The original refusal remains authoritative. This diagnostic does not prove
+which admission plugin ran or turn a rejected consumer into an approved one.
 
 `KarsCredentialGrant/workspace` is a **metadata-only**, namespaced operator
 delegation. It pins the workspace UID, writer ServiceAccount UIDs, permitted
@@ -332,6 +355,67 @@ an ownership change, a different execution template, or an incomplete inventory
 blocks activation; it is not deleted or adopted to make qualification pass.
 Unrelated non-consuming Pods are preserved.
 
+Preview and apply both inventory live private consumers before the first
+protective write. These checks do not replace the retirement, post-restore or
+publication race fences. In particular, a root descendant cannot evade review
+by changing its ServiceAccount.
+
+For the reviewed root Deployment → ReplicaSet → Pod path, the CLI can verify
+the standard AKS Workload Identity token/env/mount additions, ServiceAccount
+image-pull-secret defaults and non-BestEffort memory-pressure toleration without
+adding the Pod to `--private-consumer`. It checks the **complete execution and
+network metadata**, not an `AZURE_*`/volume/toleration ignore list. The original
+namespace, root ServiceAccount and Deployment identities and template remain
+pinned. Pod and owner UID/resourceVersion snapshots, namespace admission
+metadata and ServiceAccount configuration are rechecked around the comparison.
+An existing reviewed Azure client env remains exact even when the ServiceAccount
+has no client-ID annotation; missing annotations never authorize a new client env.
+The existing ordinary Kubernetes comparison and explicit Pod-template review
+remain available; this fallback does not authorize arbitrary workload/webhook
+mutations, sidecars, proxy injection or other identity providers.
+
+The fallback sends one **server dry-run CREATE** per Pod verification using a
+synthetic name and the full owner-derived Pod template. The raw API request
+always includes `dryRun=All&fieldValidation=Strict`, with a 30-second request
+timeout. No Pod is persisted, started, executed or deleted, and no Events or
+credentials are requested. Kubernetes rejects webhooks that cannot participate
+without side effects. This uses the operator's existing Pod-create/read
+authority; the CLI adds no RBAC permissions or impersonation. The dry-run result
+must match both a restricted derivation of supported admission changes and the
+actual Pod, including exact token audiences, paths, permissions, existing env,
+containers and security settings. Only scheduler-assigned `nodeName` (when not
+template-pinned), the generated API-token volume name, empty lists and toleration
+ordering are normalized. Unknown runtime fields are retained and strict server
+validation must reject unsupported fields rather than prune them.
+
+On Kubernetes 1.35, the dry-run also replays topology-label admission with the
+actual Pod's fenced `nodeName`; the returned region/zone labels must match the
+Pod exactly. No Nodes are read or modified. Kars's post-start privacy-RPC
+publication markers are separately checked against the reviewed enabled
+controller, namespace/ServiceAccount UIDs, the current public
+`kars-observation-privacy` ConfigMap descriptor and its exact revision-selected
+Service UID/selector. Both objects are re-read with UID/resourceVersion/content
+fences. Those named ConfigMap/Service reads fetch no Secret or private key.
+This verifies an existing publication marker; it does not mint an RPC capability,
+change its protocol, or excuse other network labels/annotations. Neither
+publication markers nor topology labels are silently stripped to pass admission.
+
+Admission denial, unsafe/unsupported mutation, incomplete evidence or drift
+fails closed with redacted diagnostics; there is no real-create fallback or
+automatic retry. A name- or caller-dependent webhook must still produce the
+same complete supported result; otherwise use explicit operator review.
+Raw templates, environment values and admission responses stay in memory and
+are not added to the exported review or retirement receipt.
+
+If an older CLI stopped after restoring the root with `Qualified` namespace
+state, a `restoring` retirement record and no published grant, use the corrected
+**public CLI** to freshly preview and apply the **original exact scope**.
+Successful verification reuses the existing retirement binding, captured UIDs,
+epochs and replica intent; it does not restart an already-restored root.
+Do not add its Pod as a new consumer, erase annotations, change the sealed
+controller template or widen the scope to bypass a failed check. A second
+workspace can enroll only after the original completion is verified.
+
 Apply rechecks the complete enforcing policy/binding specifications and their
 current type-check/observation status. When updating a grant, that grant's existing
 writer authority is retired first, including absence checks for its owned read
@@ -369,6 +453,14 @@ still fail. Historical withdrawal, pause and empty-revision witnesses are
 retained, never invented. Stable missing witnesses or authority drift still
 block enrollment. A final recheck after lineage inspection prevents reporting
 settlement from an outdated snapshot. No mutation or stale write is retried.
+
+A Kubernetes `Recreate` rollout can report the new `observedGeneration` before
+creating its new ReplicaSet and updating `deployment.kubernetes.io/revision`.
+The exact restored template with the captured old rollout revision remains
+pending within the same deadline; it cannot complete retirement even if other
+readiness fields are current. Completion still requires the exact next rollout
+revision and all identity, refill, lineage and retirement witnesses. Missing,
+malformed or unexpected revisions, and unrelated template changes, still fail.
 
 If restoration validation still refuses the observed state, the CLI emits
 `KARS_PRIVATE_WRITER_TRANSITION` with fixed booleans distinguishing generation,

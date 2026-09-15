@@ -8,6 +8,12 @@ import re
 
 from native_api import CommandFailure, Failure, command
 
+ROOT_ADMISSION_ERROR = (
+    "Consumer execution differs from the reviewed controller template; "
+    "Pod admission could not be verified; preserve the original review and consumer"
+)
+ROOT_ADMISSION_CHECKS = ("identity", "metadata", "ownership", "inputs", "execution", "response", "snapshots")
+
 ERRORS = {
     "Private admission differs from the complete required bundle; upgrade core prerequisites before enrollment": "admission-bundle-mismatch",
     "Private admission is not currently observed and type-checked": "admission-not-observed",
@@ -40,8 +46,13 @@ ERRORS = {
     "Unreviewed consumer appeared during writer retirement": "writer-pod-lineage",
     "Writer retirement is still awaiting fresh Task attestation and the captured owned runtime; no stale authority or new activation was published": "writer-settlement-timeout",
 }
+ERRORS.update({
+    f"{ROOT_ADMISSION_ERROR} (check: {check})": f"root-pod-admission-{check}"
+    for check in ROOT_ADMISSION_CHECKS
+})
 MODULES = (
     "commands/credential-grants", "lib/private-activation",
+    "lib/private-pod-admission",
     "lib/private-activation-retirement", "lib/kube-bootstrap", "lib/kube-context",
     "lib/private-activation-continuity",
     "lib/private-activation-guard-retirement",
@@ -72,6 +83,16 @@ TRANSITION_FIELDS = (
     ("projectionMatches", "projection-version"), ("revisionMatches", "deployment-revision"),
     ("metadataMatches", "metadata"), ("specMatches", "spec"),
     ("templateMatches", "template"), ("replicasMatches", "replicas"),
+)
+POD_EXECUTION_PREFIX = "KARS_PRIVATE_POD_EXECUTION "
+POD_EXECUTION_FIELDS = (
+    ("rootNamespaceMatches", "root-namespace"), ("rootDeploymentMatches", "root-deployment"),
+    ("imagesMatch", "images"), ("environmentsMatch", "environment"),
+    ("commandsMatch", "commands"), ("mountsMatch", "mounts"),
+    ("containerSecurityMatches", "container-security"), ("containerResourcesMatch", "container-resources"),
+    ("otherContainerFieldsMatch", "other-container"), ("initContainersMatch", "init-containers"),
+    ("volumesMatch", "volumes"), ("tolerationsMatch", "tolerations"),
+    ("serviceAccountMatch", "service-account"), ("otherPodSpecMatch", "other-pod-spec"),
 )
 COMMAND_PREFIX = "KARS_PRIVATE_COMMAND_FAILURE "
 COMMAND_PHASES = {"Unscoped", "Review", "Pausing", "Retired", "Rotating", "Restoring", "Qualified"}
@@ -147,6 +168,10 @@ def transition_checks(stderr):
     return _checks(stderr, TRANSITION_PREFIX, TRANSITION_FIELDS)
 
 
+def pod_execution_checks(stderr):
+    return _checks(stderr, POD_EXECUTION_PREFIX, POD_EXECUTION_FIELDS)
+
+
 def command_facts(stderr):
     prefixes = (COMMAND_PREFIX, "PrivateCommandFailure: " + COMMAND_PREFIX)
     payloads = [line[len(prefix):] for line in stderr.splitlines()
@@ -185,6 +210,9 @@ def operator_command(stage, *args, timeout):
         transition = transition_checks(error.stderr)
         if transition:
             details += f" (writer-transition={transition})"
+        execution = pod_execution_checks(error.stderr)
+        if execution:
+            details += f" (pod-execution={execution})"
         facts = command_facts(error.stderr)
         if facts:
             details += f" (command={facts})"

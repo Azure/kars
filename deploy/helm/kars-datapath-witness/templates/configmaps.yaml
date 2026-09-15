@@ -1,0 +1,85 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kars-datapath-witness-settings
+  namespace: kars-system
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+data:
+  settings.json: {{ dict "schema_version" 1 "enabled" .Values.enabled "release_revision" .Release.Revision "config_digest" (include "witness.config" . | sha256sum) "sandboxes" .Values.sandboxes | toJson | quote }}
+{{- if .Values.enabled }}
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kars-witness-gadget
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+    pod-security.kubernetes.io/enforce: privileged
+    pod-security.kubernetes.io/audit: restricted
+    pod-security.kubernetes.io/warn: restricted
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+    helm.sh/resource-policy: keep
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kars-datapath-witness
+  namespace: kars-system
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+# The runtime can update this precreated object, never create arbitrary ConfigMaps.
+data: {}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: witness-runtime
+  namespace: kars-witness-gadget
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+data:
+  config.json: {{ include "witness.config" . | quote }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: gadget
+  namespace: kars-witness-gadget
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+data:
+  config.yaml: |
+    gadget-namespace: kars-witness-gadget
+    daemon-log-level: info
+    events-buffer-length: 4096
+    containerd-socketpath: /run/containerd/containerd.sock
+    operator:
+      kubemanager:
+        hook-mode: fanotify+ebpf
+        fallback-podinformer: false
+      oci:
+        verify-image: true
+        allowed-gadgets:
+          - {{ .Values.gadget.dnsImage | quote }}
+          - {{ .Values.gadget.tcpImage | quote }}
+        public-keys:
+          - |
+            -----BEGIN PUBLIC KEY-----
+            MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAEoDOC0gYSxZTopenGmX3ZFvQ1DSfh
+            Ir4EKRt5jC+mXaJ7c7J+oREskYMn/SfZdRHNSOjLTZUMDm60zpXGhkFecg==
+            -----END PUBLIC KEY-----
+      otel-metrics:
+        otel-metrics-listen: false
+{{- end }}

@@ -59,6 +59,11 @@ jobs:
             kars::credential_review::digest_tests::review_digest_preserves_compact_sorted_json_and_full_hex_width \
             kars::receipt_log::digest_tests::chain_hash_keeps_decimal_sequence_and_exact_pipe_framing \
             routes::artifacts::digest_tests::artifact_addresses_keep_the_existing_sixteen_byte_short_form \
+            routes::operator::audit::datapath::tests::witness_missing_is_unknown_not_not_installed_and_intent_is_separate \
+            routes::operator::audit::datapath::tests::witness_fresh_and_empty_samples_never_claim_complete_coverage \
+            routes::operator::audit::datapath::tests::witness_malformed_stale_future_and_identity_fail_closed \
+            routes::operator::audit::datapath::tests::witness_empty_configmaps_legacy_and_failed_capture_are_distinct \
+            routes::operator::audit::datapath::tests::witness_route_only_gets_two_fixed_configmaps_and_preserves_api_errors \
             routes::github::tests::connection_names_keep_the_original_raw_subject_and_eight_byte_digest \
             providers::receipt::tests::rfc8032_known_answer_and_malformed_signatures_keep_exact_verification_semantics \
             providers::credential_review::tests::legacy_v1_key_preserves_domain_null_byte_and_raw_secret_encoding \
@@ -68,6 +73,22 @@ jobs:
             auth::admin_tests::budget_and_retention_handlers_require_admin_even_without_route_middleware \
             auth::admin_tests::signed_admins_can_set_and_clear_each_budget_scope_and_retention \
             auth::admin_tests::operator_reads_stay_available_while_user_and_auditor_console_reads_stay_denied \
+            routes::operator::copilot_login::tests::device_login_wire_contract_and_cumulative_slowdown_use_real_http_client \
+            routes::operator::copilot_login::tests::missing_or_unready_grant_and_replaced_store_prevent_all_oauth_requests \
+            routes::operator::copilot_login::tests::invalid_and_non_success_upstream_responses_are_never_pending_or_echoed \
+            routes::operator::copilot_login::tests::start_response_validation_blocks_empty_codes_and_untrusted_verification_urls \
+            routes::operator::copilot_login::tests::expiry_and_denial_are_terminal_not_pending \
+            routes::operator::copilot_login::tests::granted_token_is_stored_before_authorized_and_late_failures_never_claim_success \
+            routes::operator::copilot_login::tests::production_handlers_reject_malformed_inputs_and_missing_grants_without_oauth \
+            routes::operator::copilot_login::tests::failed_or_malformed_seat_verification_never_stores_credentials \
+            routes::operator::copilot_login::tests::device_login_redirects_never_replay_codes_or_mutate_credentials \
+            routes::operator::copilot_transport::tests::github_endpoints_use_fixed_https_urls_and_methods \
+            routes::operator::copilot_transport::tests::github_transport_rejects_http_before_connecting \
+            routes::operator::copilot_transport::tests::loopback_fixture_rejects_non_loopback_addresses \
+            routes::operator::copilot_transport::tests::loopback_fixture_uses_fixed_urls_and_pinned_socket_routing \
+            routes::operator::copilot_transport::tests::github_tls_transport_preserves_oauth_and_copilot_requests \
+            routes::operator::copilot_transport::tests::github_tls_transport_does_not_follow_redirects \
+            routes::operator::copilot_transport::tests::github_transport_rejects_untrusted_certificates_and_hostnames \
             routes::tasks::artifacts::tests::active_and_unknown_artifacts_download_unchanged_from_live_or_retained_tasks \
             routes::tasks::artifacts::tests::passive_artifact_previews_keep_inline_viewing_without_mime_sniffing_or_byte_changes \
             routes::tasks::artifacts::tests::artifact_head_has_the_same_protection_and_filename_is_header_safe \
@@ -94,6 +115,8 @@ jobs:
       - run: cargo test --locked
       - name: Check explicit credential review orchestration
         run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../tests/native-credentials python3 -m unittest discover -s ../tests/native-credentials -p test_credential_review.py
+      - name: Check witness producer and BFF matching agreement
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/routes/operator -p datapath_matching_contract_test.py
 
   web:
     name: Web build and lint
@@ -168,6 +191,35 @@ jobs:
       - run: npm run lint && npm run typecheck && npm run build && npm test
         working-directory: bridge/teams-gateway
       - run: helm lint bridge/deploy/helm/kars-bridge
+      - name: Optional witness runtime and server-side ownership contracts
+        run: |
+          python3 -m pip install -r deploy/ebpf-witness/tests/requirements.txt
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/ebpf-witness/aggregator
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/ebpf-witness/tests -p test_chart.py
+      - name: Build the public witness image without publishing
+        run: |
+          docker build --platform linux/amd64 \
+            --build-arg PYTHON_BASE=python:3.12-alpine3.22@sha256:a190708a2dec1bd18b1decb539f8e8f5407abaa9bf39cacda583f7f8c11db322 \
+            --build-arg SOURCE_REVISION="$GITHUB_SHA" \
+            --file deploy/ebpf-witness/aggregator/Dockerfile \
+            --tag kars-witness-qualification:latest .
+          docker run --rm --read-only --network none --cap-drop ALL \
+            --security-opt no-new-privileges --entrypoint python3 \
+            kars-witness-qualification:latest -c '
+          import json, pathlib, subprocess
+          metadata = json.loads(pathlib.Path("/opt/witness/build.json").read_text())
+          assert metadata["ig_version"] == "v0.53.2"
+          assert metadata["architecture"] == "amd64"
+          assert len(metadata["source_revision"]) == 40
+          subprocess.run(["kubectl-gadget", "version", "--help"], check=True, capture_output=True)
+          print(json.dumps(metadata))
+          ' > "$RUNNER_TEMP/witness-image-build.json"
+      - name: Retain witness image build provenance (not kernel qualification)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: witness-image-build-${{ github.sha }}
+          path: ${{ runner.temp }}/witness-image-build.json
+          if-no-files-found: error
       - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: bridge-addon-lifecycle
@@ -178,6 +230,11 @@ jobs:
           BRIDGE_TEST_KIND_LIFECYCLE: '1'
           BRIDGE_TEST_KUBECONFIG: ${{ runner.temp }}/bridge-addon-kubeconfig
         run: npm test -- tests/chart-lifecycle.test.ts
+      - name: Exercise guarded witness enable/off/removal without claiming kernel coverage
+        env:
+          WITNESS_TEST_KIND_LIFECYCLE: '1'
+          WITNESS_TEST_KUBECONFIG: ${{ runner.temp }}/bridge-addon-kubeconfig
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/ebpf-witness/tests -p test_kind_lifecycle.py
 
   dependencies:
     name: Dependency audit (${{ matrix.project }})

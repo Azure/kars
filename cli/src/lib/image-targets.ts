@@ -27,6 +27,15 @@ export const MANAGED_MCP_IMAGE_TARGET = {
 export const PUSH_COMPONENTS = ["controller", "router", "sandbox", "sandbox-base", "relay", "registry",
   MANAGED_MCP_IMAGE_TARGET.name, ...RUNTIME_IMAGE_TARGETS.map(item => item.name)];
 
+export function pushImageTag(name: string): string {
+  const repository = name === "controller" ? "kars-controller" : name === "router" ? "kars-inference-router"
+    : name === "sandbox" ? "openclaw-sandbox" : name === "sandbox-base" ? "kars-sandbox-base"
+    : name === "relay" || name === "registry" ? `agentmesh-${name}-agt`
+    : name === MANAGED_MCP_IMAGE_TARGET.name ? MANAGED_MCP_IMAGE_TARGET.repo : runtimeTarget(name)?.repo;
+  if (!repository) throw new Error("Unknown pushed component; no image publication target exists");
+  return `${repository}:latest`;
+}
+
 export function splitImage(image: string): { repository: string; tag: string } {
   const withoutDigest = image.split("@")[0];
   const index = withoutDigest.lastIndexOf(":");

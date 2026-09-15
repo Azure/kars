@@ -27,6 +27,7 @@ async function fixture() {
   }
   const execute=vi.fn(async(args:string[])=>{
     if(args[0]==="auth")return "yes";
+    if(args[0]==="get"&&args[1]==="pods")return JSON.stringify({metadata:{},items:[]});
     const namespace=args.includes("-n")?args[args.indexOf("-n")+1]:"";
     return JSON.stringify(objects[`${args[1]}/${namespace}/${args[2]}`]??null);
   });

@@ -1,37 +1,30 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// kars Bridge Operator Console — Datapath witness.
-//
-// Surfaces the OPTIONAL eBPF (Inspektor Gadget) datapath-completeness witness:
-// an independent, kernel-level attestation of what each sandbox ACTUALLY sends
-// on the network, cross-checked against the controller-declared egress
-// allowlist. The Bridge only reads the `kars-datapath-witness` ConfigMap the
-// witness publishes — enforcement stays with the router proxy + NetworkPolicy;
-// this page only ATTESTS. When the witness isn't installed, we show honest
-// enable instructions — never fabricated data.
-
 import { PageHeader, Stat, Badge } from "@/components/ui";
-import { Icon } from "@/components/icon";
+import { DatapathSetup } from "@/components/datapath-setup";
 import { getDatapathWitness } from "@/lib/bff";
+import { witnessPresentation } from "@/lib/datapath-witness";
+import { canAdminister } from "@/lib/session";
 import type { DatapathWitness, DatapathWitnessSandbox } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
 function verdictTone(v: string): "ok" | "warn" | "muted" {
-  if (v === "COMPLIANT") return "ok";
   if (v === "BEYOND-DECLARED") return "warn";
   return "muted";
 }
 
 function verdictLabel(v: string): string {
-  if (v === "COMPLIANT") return "Compliant";
-  if (v === "BEYOND-DECLARED") return "Beyond declared";
-  if (v === "LEARN") return "Learn / unconstrained";
+  if (v === "COMPLIANT" || v === "NO-BEYOND-OBSERVED") return "No beyond-declared DNS in sample";
+  if (v === "BEYOND-DECLARED") return "DNS beyond baseline";
+  if (v === "NO-TRAFFIC") return "No external events / unproven";
+  if (v === "LEARN") return "Learn mode";
   return v;
 }
 
 export default async function DatapathWitnessPage() {
+  const isAdmin = await canAdminister();
   let witness: DatapathWitness | null = null;
   let error = false;
   try {
@@ -40,10 +33,9 @@ export default async function DatapathWitnessPage() {
     error = true;
   }
 
-  const enabled = !!witness?.enabled;
-  const sandboxes = witness?.sandboxes ?? [];
+  const presentation = witnessPresentation(witness);
+  const sandboxes = presentation.fresh ? witness?.sandboxes ?? [] : [];
   const beyond = sandboxes.filter((s) => s.verdict === "BEYOND-DECLARED").length;
-  const compliant = sandboxes.filter((s) => s.verdict === "COMPLIANT").length;
   const learn = sandboxes.filter((s) => s.verdict === "LEARN").length;
 
   return (
@@ -51,7 +43,7 @@ export default async function DatapathWitnessPage() {
       <PageHeader
         eyebrow="Operator Console"
         title="Datapath witness"
-        lead="An independent, kernel-level (eBPF) attestation of what each sandbox actually sends on the network — cross-checked against the controller-declared egress allowlist. Enforcement stays with the router proxy and NetworkPolicy; this witness only attests."
+        lead="Optional, sampled kernel DNS/TCP observations compared with controller-declared baselines. Observational, not enforcing, and not a complete-kernel-coverage attestation. Core Kars does not require Bridge or this add-on."
       />
 
       {error && (
@@ -60,29 +52,48 @@ export default async function DatapathWitnessPage() {
         </div>
       )}
 
-      {!error && !enabled && <NotEnabled hint={witness?.install_hint} />}
+      {!error && (
+        <div className="kb-card space-y-3 p-5">
+          <Badge tone={presentation.state === "invalid" || presentation.state === "unavailable" || presentation.state === "stale" ? "warn" : "muted"}>
+            {presentation.label}
+          </Badge>
+          <p className="text-sm text-foreground-muted">{presentation.diagnostic}</p>
+          <p className="text-xs text-foreground-muted">
+            As of page load: operator intent {presentation.requested} · Installation: unknown (Bridge reads reports,
+            not Helm or workload inventory). Missing reports can coexist with running legacy observers.
+          </p>
+          {witness?.generated_at && (
+            <p className="text-xs text-foreground-muted">
+              Report timestamp: {witness.generated_at} · freshness limit: 180 seconds.
+            </p>
+          )}
+        </div>
+      )}
+      {isAdmin ? <DatapathSetup /> : (
+        <p className="text-sm text-foreground-muted">
+          Ask a Bridge admin for setup details. Enablement and removal must be performed by a cluster operator outside Bridge.
+        </p>
+      )}
 
-      {!error && enabled && (
+      {!error && presentation.fresh && (
         <>
           <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
-            <Stat label="Sandboxes witnessed" value={sandboxes.length} />
-            <Stat label="Beyond declared" value={beyond} accent={beyond > 0} />
-            <Stat label="Compliant" value={compliant} />
-            <Stat label="Learn / unconstrained" value={learn} />
+            <Stat label="Sandboxes in scope" value={sandboxes.length} />
+            <Stat label="DNS beyond baseline" value={beyond} accent={beyond > 0} />
+            <Stat label="In-scope events" value={witness?.event_count ?? 0} />
+            <Stat label="Learn mode" value={learn} />
           </div>
 
           <div className="flex flex-wrap items-center gap-2 text-xs text-foreground-muted">
-            <span aria-hidden className="inline-flex h-1.5 w-1.5 rounded-full bg-ok kb-pulse" />
-            Live from the eBPF witness
-            {witness?.generated_at && (
-              <span>· last observed {new Date(witness.generated_at).toLocaleTimeString()}</span>
-            )}
+            Partial sample, not a live stream
             {witness?.window_seconds && <span>· {witness.window_seconds}s capture window</span>}
+            <span>· {witness?.nodes_with_events?.length ?? 0} nodes with in-scope events /
+              {" "}{witness?.nodes_targeted?.length ?? 0} targeted</span>
           </div>
 
           {sandboxes.length === 0 ? (
             <div className="rounded-xl border border-dashed border-border bg-surface-muted/30 px-4 py-8 text-center text-sm text-foreground-muted">
-              The witness is running but hasn&apos;t observed any sandbox egress yet.
+              No sandbox records in this sample. This does not demonstrate observation coverage.
             </div>
           ) : (
             <ul className="space-y-3">
@@ -94,13 +105,13 @@ export default async function DatapathWitnessPage() {
 
           <p className="text-xs leading-relaxed text-foreground-muted">
             <span className="font-medium text-foreground">How to read this.</span> DNS = host
-            intent; TCP connects = the actual external datapath. A{" "}
-            <span className="font-medium text-warning">beyond-declared</span> host means the kernel
-            observed egress to a host that isn&apos;t in the sandbox&apos;s signed allowlist — in{" "}
-            <code className="rounded bg-surface-muted px-1">strict</code> mode the router proxy
-            should have blocked the connect; a DNS-only observation is intent without a connect.{" "}
-            <span className="font-medium text-foreground-muted">Learn</span> means no host allowlist
-            is published yet — the observed set is the baseline you would promote into strict.
+            intent, not proof of a connection. External TCP connect events include failed attempts
+            and are not correlated to DNS names. The comparison uses the controller&apos;s compiled
+            baseline, not its runtime approval overlays, and does not verify a signature. Learn is
+            an explicit enforcement mode; an empty Strict baseline is deny-all, not unconstrained.
+            Neither empty traffic, ready pods, nor absence of beyond-baseline DNS proves complete kernel coverage.
+            UDP other than DNS, cached DNS, attribution gaps, and gaps between windows remain outside
+            this evidence. Reload to read the latest report.
           </p>
         </>
       )}
@@ -122,7 +133,8 @@ function WitnessRow({ s }: { s: DatapathWitnessSandbox }) {
       </div>
 
       <div className="mt-3 grid gap-3 sm:grid-cols-3">
-        <HostSet label="Declared allowlist" hosts={s.declared_hosts} empty="none (unconstrained)" />
+        <HostSet label="Declared baseline" hosts={s.declared_hosts}
+          empty={s.egress_mode === "Strict" ? "empty baseline (Strict deny-all)" : "empty baseline (Learn)"} />
         <HostSet
           label="Observed (DNS)"
           hosts={s.observed_dns}
@@ -131,7 +143,7 @@ function WitnessRow({ s }: { s: DatapathWitnessSandbox }) {
         />
         <div className="min-w-0">
           <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-foreground-muted">
-            External connects
+            External TCP connect events (attempts)
           </p>
           <p className="text-sm tabular-nums">{s.observed_connects}</p>
           {s.beyond_declared.length > 0 && (
@@ -206,41 +218,6 @@ function HostSet({
           ))}
         </ul>
       )}
-    </div>
-  );
-}
-
-function NotEnabled({ hint }: { hint?: string }) {
-  return (
-    <div className="kb-card p-6">
-      <div className="flex items-start gap-3">
-        <span aria-hidden className="text-xl">
-          <Icon name="eye" size={22} />
-        </span>
-        <div className="min-w-0 space-y-3">
-          <div>
-            <h2 className="text-sm font-semibold">Datapath witness not enabled</h2>
-            <p className="mt-1 text-sm text-foreground-muted">
-              The eBPF witness is optional and off by default — it installs a privileged Inspektor
-              Gadget DaemonSet plus a small aggregator. When enabled, every sandbox&apos;s
-              kernel-observed egress is cross-checked here against its declared allowlist, live.
-            </p>
-          </div>
-          <div>
-            <p className="mb-1 text-[11px] font-semibold uppercase tracking-wide text-foreground-muted">
-              Enable on the cluster
-            </p>
-            <pre className="overflow-x-auto rounded-lg border border-border bg-surface-muted p-3 font-mono text-xs">
-              {hint ?? "KARS_EBPF_WITNESS=1 deploy/ebpf-witness/install.sh --continuous"}
-            </pre>
-          </div>
-          <p className="text-xs text-foreground-muted">
-            Requires a Linux kernel with BTF on every node. Read-only: the witness never blocks or
-            modifies traffic. See{" "}
-            <code className="rounded bg-surface-muted px-1">deploy/ebpf-witness/README.md</code>.
-          </p>
-        </div>
-      </div>
     </div>
   );
 }

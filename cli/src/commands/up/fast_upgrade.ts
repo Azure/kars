@@ -16,6 +16,7 @@ import { rolloutRestartAll } from "../upgrade.js";
 import { inspectNamespaceOwnership } from "../../lib/namespace-ownership.js";
 import { assertSafeMutation } from "../../lib/sre-authority.js";
 import { prepareCoreHelmSchemas } from "../../lib/core-helm-schemas.js";
+import { assertControllerMutationAllowed } from "../../lib/private-root-upgrade-guard.js";
 
 export interface UpOptionsForUpgrade {
   upgrade?: boolean;
@@ -39,6 +40,11 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
         let spin = ora("Connecting to AKS...").start();
         await execa("az", ["aks", "get-credentials", "--name", ctx.aksCluster, "--resource-group", ctx.resourceGroup, "--overwrite-existing"], { stdio: "pipe" });
         spin.succeed("AKS connected");
+        if (options.dryRun) {
+          console.log("Would upgrade the cached Kars Helm release and restart its workloads; no changes made.");
+          return;
+        }
+        await assertControllerMutationAllowed(execa);
         for (const result of await inspectNamespaceOwnership(execa)) console.log(result);
         await assertSafeMutation(execa);
 
