@@ -421,7 +421,11 @@ test_runtime_openclaw() {
 # downstream artefact (ConfigMap or Secret) and updates
 # `.status.conditions[]`. The tests below assert the *contract*:
 #
-#   apply CR  →  downstream ConfigMap exists  →  Ready=True condition
+#   apply CR  →  downstream ConfigMap exists  →  current, coherent status
+#
+# ConfigMap publication can precede status publication. Read status fields from
+# one response and retain truthful Compiled/Pending states where no router has
+# confirmed enforcement; do not manufacture Ready from the ConfigMap alone.
 #
 # We do NOT exercise the runtime data-plane (no Foundry calls, no AGT
 # relay, no real OAuth) — only that the controller wires CR → cluster
@@ -518,6 +522,8 @@ spec:
       provider: azure-openai
       deployment: gpt-4.1
 EOF
+    local ip_deadline
+    ip_deadline=$(($(date +%s) + 45))
     if wait_for_resource configmap inferencepolicy-e2e-inferencepolicy-profile kars-system 45; then
         pass "InferencePolicy → profile ConfigMap created"
     else
@@ -531,12 +537,13 @@ EOF
     # NoSandboxesReferencing if the e2e-test sandbox's router isn't
     # reachable). Asserting Ready=True here would be a §3 violation —
     # the controller *correctly* refuses to lie. The compiled
-    # ConfigMap check above is the controller's complete output;
+    # ConfigMap and current status are the controller's output;
     # router enforcement is exercised in unit + integration tests.
-    local ip_phase ip_ready ip_reason
-    ip_phase=$(kubectl get inferencepolicy e2e-inferencepolicy -n kars-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    ip_ready=$(kubectl get inferencepolicy e2e-inferencepolicy -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-    ip_reason=$(kubectl get inferencepolicy e2e-inferencepolicy -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    local ip_phase="" ip_ready="" ip_reason="" ip_snapshot
+    if ip_snapshot=$(python3 "$SCRIPT_DIR/cr_status.py" --kind inferencepolicy \
+        --name e2e-inferencepolicy --namespace kars-system --deadline "$ip_deadline"); then
+        IFS='|' read -r ip_phase ip_ready ip_reason <<<"$ip_snapshot"
+    fi
     case "$ip_phase|$ip_ready|$ip_reason" in
         Compiled\|False\|AwaitingRouterEnforcement|Compiled\|False\|NoSandboxesReferencing|Ready\|True\|RouterEnforcing|Ready\|True\|*)
             pass "InferencePolicy: phase=$ip_phase ready=$ip_ready reason=$ip_reason (§3 honest state)"
@@ -608,6 +615,8 @@ spec:
     name: e2e-test
   scope: "agent_e2e-test"
 EOF
+    local mem_deadline
+    mem_deadline=$(($(date +%s) + 45))
     if wait_for_resource configmap karsmemory-e2e-karsmemory-binding kars-system 45; then
         pass "KarsMemory → binding ConfigMap created"
     else
@@ -620,10 +629,11 @@ EOF
     # with Ready=False / reason=NoSandboxesReferencing or
     # AwaitingRouterEnforcement. Asserting the legacy
     # Pending/AwaitingFoundryProvisioning is incorrect after Slice 3a.
-    local mem_phase mem_ready mem_reason
-    mem_phase=$(kubectl get karsmemory e2e-karsmemory -n kars-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    mem_ready=$(kubectl get karsmemory e2e-karsmemory -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-    mem_reason=$(kubectl get karsmemory e2e-karsmemory -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
+    local mem_phase="" mem_ready="" mem_reason="" mem_snapshot
+    if mem_snapshot=$(python3 "$SCRIPT_DIR/cr_status.py" --kind karsmemory \
+        --name e2e-karsmemory --namespace kars-system --deadline "$mem_deadline"); then
+        IFS='|' read -r mem_phase mem_ready mem_reason <<<"$mem_snapshot"
+    fi
     case "$mem_phase|$mem_ready|$mem_reason" in
         Compiled\|False\|NoSandboxesReferencing|Compiled\|False\|AwaitingRouterEnforcement|Ready\|True\|RouterEnforcing)
             pass "KarsMemory: phase=$mem_phase ready=$mem_ready reason=$mem_reason (§3 honest state, Slice 3a)"
@@ -661,19 +671,12 @@ EOF
     fi
     # Wait for the controller to stamp status (phase=Pending Ready=False
     # is the honest state until a Job/CronJob run completes).
-    local phase ready reason
-    for _ in $(seq 1 15); do
-        phase=$(kubectl get karseval e2e-karseval -n kars-system \
-            -o jsonpath='{.status.phase}' 2>/dev/null || true)
-        ready=$(kubectl get karseval e2e-karseval -n kars-system \
-            -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-        reason=$(kubectl get karseval e2e-karseval -n kars-system \
-            -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
-        if [[ "$phase" == "Pending" && "$ready" == "False" ]]; then
-            break
-        fi
-        sleep 2
-    done
+    local phase="" ready="" reason="" eval_snapshot eval_deadline
+    eval_deadline=$(($(date +%s) + 30))
+    if eval_snapshot=$(python3 "$SCRIPT_DIR/cr_status.py" --kind karseval \
+        --name e2e-karseval --namespace kars-system --deadline "$eval_deadline"); then
+        IFS='|' read -r phase ready reason <<<"$eval_snapshot"
+    fi
     if [[ "$phase" == "Pending" && "$ready" == "False" ]]; then
         pass "KarsEval: phase=Pending ready=False reason=$reason (§3 honest state, slice 6.3)"
     else
@@ -1079,19 +1082,12 @@ EOF
     # The reconciler must at minimum stamp observedGeneration and
     # hostCount within ~45s. Don't gate on Ready=True because the
     # sibling sandbox is unlikely to be Ready in Kind.
-    local deadline ea_phase ea_ready ea_reason ea_hosts ea_observed
+    local deadline ea_phase="" ea_ready="" ea_reason="" ea_hosts="" ea_snapshot
     deadline=$(($(date +%s) + 45))
-    while [ "$(date +%s)" -lt "$deadline" ]; do
-        ea_observed=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.status.observedGeneration}' 2>/dev/null || true)
-        if [ -n "$ea_observed" ] && [ "$ea_observed" != "0" ]; then
-            break
-        fi
-        sleep 2
-    done
-    ea_phase=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.status.phase}' 2>/dev/null || true)
-    ea_ready=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].status}' 2>/dev/null || true)
-    ea_reason=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.status.conditions[?(@.type=="Ready")].reason}' 2>/dev/null || true)
-    ea_hosts=$(kubectl get egressapproval e2e-egress-approval -n kars-system -o jsonpath='{.status.hostCount}' 2>/dev/null || true)
+    if ea_snapshot=$(python3 "$SCRIPT_DIR/cr_status.py" --kind egressapproval \
+        --name e2e-egress-approval --namespace kars-system --deadline "$deadline"); then
+        IFS='|' read -r ea_phase ea_ready ea_reason ea_hosts <<<"$ea_snapshot"
+    fi
 
     if [ "$ea_hosts" = "2" ]; then
         pass "EgressApproval: status.hostCount=2 (reconciler ran)"

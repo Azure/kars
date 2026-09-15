@@ -21,6 +21,8 @@ use kube::{
 use serde_json::{Value, json};
 use std::collections::BTreeMap;
 
+#[path = "credential_source_diagnostics.rs"]
+mod diagnostics;
 #[path = "credential_source_projection.rs"]
 mod projection;
 #[path = "credential_source_workloads.rs"]
@@ -62,6 +64,13 @@ pub(crate) fn validate_owned_deployment(
 pub enum Error {
     #[error("CredentialSourceUnavailable: {0}")]
     Invalid(&'static str),
+    #[error(
+        "CredentialSourceUnavailable: governed credential source or operator grant is unavailable [{category}; code={code:?}]"
+    )]
+    Governed {
+        category: &'static str,
+        code: Option<u16>,
+    },
     #[error("CredentialSourceUnavailable: {stage} failed (Kubernetes status {code:?})")]
     Api {
         stage: &'static str,
@@ -233,8 +242,9 @@ async fn read_source(
     {
         let source = crate::credential_grants::sources::for_sandbox(client, sandbox)
             .await
-            .map_err(|_| {
-                Error::Invalid("governed credential source or operator grant is unavailable")
+            .map_err(|reason| {
+                let (category, code) = diagnostics::classify(&reason);
+                Error::Governed { category, code }
             })?;
         if sandbox
             .spec

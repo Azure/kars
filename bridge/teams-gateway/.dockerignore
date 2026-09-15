@@ -1,0 +1,9 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+node_modules
+dist
+.git
+*.md
+tests
+vitest.config.ts
