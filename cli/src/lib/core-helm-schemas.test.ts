@@ -36,6 +36,31 @@ describe("shared core schema entrypoints", () => {
     expect(f.writes).toEqual([]);
   });
 
+  it.each([true, false])("preserves protected-root schema verification only for checkOnly=%s", async checkOnly => {
+    const f = schemaFixture([crd(), admission(), root]);
+    f.install(crd());
+    f.objects.set("namespace/kars-system", protectedNamespace);
+    const result = prepareCoreHelmSchemas(f.execute, ["upgrade", "kars", "chart", "-n", "kars-system"], { checkOnly });
+    if (checkOnly) {
+      await expect(result).resolves.toEqual({ schemas: 1, published: true });
+      expect(f.requests.filter(request => request.file === "helm" && request.args[0] === "template")).toHaveLength(2);
+      expect(f.requests.some(request => request.args.includes("/openapi/v3"))).toBe(true);
+    } else {
+      await expect(result).rejects.toThrow("KARS_PRIVATE_ROOT_UPGRADE_BLOCKED");
+    }
+    expect(f.writes).toEqual([]);
+    expect(f.requests.some(request => ["create", "apply", "patch", "delete", "rollback", "upgrade"].includes(request.args[0]!))).toBe(false);
+  });
+
+  it("still rejects an unstaged schema during protected-root read-only verification without writing", async () => {
+    const f = schemaFixture([crd(), admission(), root]);
+    f.objects.set("namespace/kars-system", protectedNamespace);
+    await expect(prepareCoreHelmSchemas(f.execute, ["upgrade", "kars", "chart", "-n", "kars-system"], { checkOnly: true }))
+      .rejects.toThrow();
+    expect(f.writes).toEqual([]);
+    expect(f.requests.some(request => request.args[0] === "create" || request.args[0] === "apply")).toBe(false);
+  });
+
   it("also refuses a Helm plan that would remove the protected controller", async () => {
     const f = schemaFixture([crd(), admission()]);
     f.objects.set("namespace/kars-system", protectedNamespace);
