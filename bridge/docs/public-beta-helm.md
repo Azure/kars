@@ -174,6 +174,29 @@ must wait for a reviewed migration path.
 The lifecycle work is tracked in
 [Azure/kars#567](https://github.com/Azure/kars/issues/567).
 
+The CLI now refuses controller-changing upgrade, image-publication and restart
+paths before their first mutation when private qualification or retirement
+evidence exists. Missing permissions or malformed evidence do not mean an
+unqualified installation. Read-only schema `--check`, genuine root-free
+operations and original credential-recovery commands remain available. This
+client-side preflight is not an atomic operator lock or the missing migration
+protocol; direct Helm or Kubernetes writes must not bypass the restriction.
+
+### Optional datapath witness
+
+The witness is a separate, default-off operator-owned Helm add-on, not part of
+the core or Bridge installation transaction. Admin UI commands point to the
+[witness installation and guarded removal procedure](../../deploy/ebpf-witness/README.md).
+Enabling requires an approved aggregator image, explicit sandbox scope and
+privileged kernel-capture approval. A missing report does not prove that no
+legacy observer is installed; ownership collisions must be resolved without
+adoption or duplicate installation.
+
+Capture can include all namespaces on targeted Linux nodes even though only
+selected sandbox aggregates are retained. Keep it off on shared GPU nodes
+unless the operator explicitly approves that observation scope. Neither Helm
+success nor a fresh report establishes complete kernel coverage or enforcement.
+
 ### Verify managed tools and the user journey
 
 For managed MCPs, the controller first creates and claims its separate namespace.
