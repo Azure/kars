@@ -105,15 +105,17 @@ export async function planCoreHelmSchemas(
   await safety.recheck?.();
   if (reviewedSreMigration) console.log(`SRE-SCHEMA-MIGRATION ${JSON.stringify({ ...sreMigrationSummary(reviewedSreMigration), state: "qualified" })}`);
   return async () => {
-    await assertRenderedControllersMutable(run,
-      [...documents, ...(safety.activeDocuments ?? []), ...(safety.rollbackDocuments ?? [])], namespace);
+    if (!options.checkOnly) {
+      await assertRenderedControllersMutable(run,
+        [...documents, ...(safety.activeDocuments ?? []), ...(safety.rollbackDocuments ?? [])], namespace);
+    }
     const prepared = await applySchemas();
     // Render/apply is not a Helm install: Helm's server-side ownership import
     // check would reject the deliberately template-owned CRDs.
     if (stageOptions.ownership === "template") return prepared;
     schemaStep("helm-render");
     const actual = await serverRender();
-    await assertRenderedControllersMutable(run, actual, namespace);
+    if (!options.checkOnly) await assertRenderedControllersMutable(run, actual, namespace);
     const crds = (items: ObjectMap[]) => items.filter(object => object.kind === "CustomResourceDefinition")
       .map(object => ({ name: object.metadata.name, spec: normalizedCrd(object), metadata: object.metadata }))
       .sort((a, b) => a.name.localeCompare(b.name));
