@@ -49,6 +49,11 @@ never authorized; an operator must inspect provider state before another sign-in
 There is no token escrow or automatic resume after token consumption.
 
 Polling is serial and stops at the original expiry even if a request hangs.
+If a persistence-capable poll is still in flight at that deadline, the UI reports
+an unconfirmed outcome and directs the operator to inspect provider state before
+retrying. Late responses cannot replace that warning or authorize the UI. A
+deadline with no poll in flight, or an explicit upstream expiry received before
+the deadline, remains definitive expiry.
 GitHub `slow_down` responses increase the delay by at least five seconds,
 cumulatively; the advertised interval is also respected. A delay above 900
 seconds or an HTTP rate-limit response stops polling with guidance rather than

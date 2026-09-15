@@ -67,18 +67,60 @@ function controller(poll, options = {}) {
   return { time, view, calls, control };
 }
 
-test("polling stays serial while the prior promise is unresolved and expires even while hung", async () => {
-  const pending = deferred();
-  const h = controller(() => pending.promise);
+for (const outcome of ["authorized", "storage_unconfirmed", "transport_rejected"]) {
+  test(`deadline with an unresolved poll retains an unconfirmed outcome after late ${outcome}`, async () => {
+    const pending = deferred();
+    const h = controller(() => pending.promise);
+    await h.control.begin();
+    await h.time.advance(39_999);
+    assert.equal(h.calls.length, 1);
+    assert.ok(h.view.state.flow);
+    await h.time.advance(1);
+    assert.equal(h.view.state.flow, null);
+    assert.equal(h.view.state.error, login.copilotErrors.copilot_outcome_unconfirmed);
+    assert.match(h.view.state.error, /Inspect provider state before retrying/);
+    assert.notEqual(h.view.state.error, login.copilotErrors.copilot_expired);
+    const state = JSON.stringify(h.view.state), events = h.view.events.length;
+    if (outcome === "transport_rejected") pending.reject(new Error(PRIVATE));
+    else pending.resolve(outcome === "authorized" ? { ...contract.authorized, access_token: PRIVATE }
+      : { status: "error", error: login.copilotErrors.copilot_storage_unconfirmed, token: PRIVATE });
+    await flush();
+    await h.time.advance(900_000);
+    assert.equal(JSON.stringify(h.view.state), state);
+    assert.equal(h.view.events.length, events);
+    assert.equal(JSON.stringify(h.view.state).includes(PRIVATE), false);
+    assert.equal(h.view.state.authorized.length, 0);
+    assert.equal(h.calls.length, 1);
+    assert.deepEqual(h.time.deadlines(), []);
+  });
+}
+
+test("deadline without an in-flight poll remains definitive expiry and stops all polling", async () => {
+  const h = controller(async () => contract.pending);
   await h.control.begin();
   await h.time.advance(39_999);
-  assert.equal(h.calls.length, 1);
-  assert.ok(h.view.state.flow);
+  assert.equal(h.calls.length, 7);
   await h.time.advance(1);
   assert.equal(h.view.state.flow, null);
   assert.equal(h.view.state.error, login.copilotErrors.copilot_expired);
-  pending.resolve(contract.authorized);
-  await flush();
+  const events = h.view.events.length;
+  await h.time.advance(900_000);
+  assert.equal(h.view.events.length, events);
+  assert.equal(h.calls.length, 7);
+  assert.equal(h.view.state.authorized.length, 0);
+  assert.deepEqual(h.time.deadlines(), []);
+});
+
+test("an explicit upstream expired_token result remains definitive before the local deadline", async () => {
+  const h = controller(async () => ({ status: "error", error: login.copilotErrors.copilot_expired }));
+  await h.control.begin();
+  await h.time.advance(5000);
+  assert.equal(h.view.state.flow, null);
+  assert.equal(h.view.state.error, login.copilotErrors.copilot_expired);
+  const events = h.view.events.length;
+  await h.time.advance(900_000);
+  assert.equal(h.view.events.length, events);
+  assert.equal(h.calls.length, 1);
   assert.equal(h.view.state.authorized.length, 0);
   assert.deepEqual(h.time.deadlines(), []);
 });
