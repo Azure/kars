@@ -209,7 +209,7 @@ impl TlsFixture {
         }
         CopilotClient {
             client: builder.build().unwrap(),
-            loopback: None,
+            loopback: false,
         }
     }
 }
@@ -283,6 +283,55 @@ fn loopback_fixture_rejects_non_loopback_addresses() {
         assert!(
             std::panic::catch_unwind(|| CopilotClient::loopback(address.parse().unwrap())).is_err()
         );
+    }
+}
+
+#[tokio::test]
+async fn loopback_fixture_uses_fixed_urls_and_pinned_socket_routing() {
+    async fn handle(
+        method: Method,
+        uri: axum::http::Uri,
+        headers: axum::http::HeaderMap,
+    ) -> axum::Json<serde_json::Value> {
+        assert!(headers.contains_key("authorization"));
+        axum::Json(json!({
+            "method":method.as_str(),
+            "path":uri.path(),
+            "host":headers["host"].to_str().unwrap(),
+        }))
+    }
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let address = listener.local_addr().unwrap();
+    let client = CopilotClient::loopback(address);
+    let mut servers = tokio::task::JoinSet::new();
+    servers.spawn(async move {
+        axum::serve(listener, axum::Router::new().fallback(handle))
+            .await
+            .unwrap();
+    });
+    for endpoint in ENDPOINTS {
+        let request = client.request(endpoint).bearer_auth(TOKEN).build().unwrap();
+        let expected_path = reqwest::Url::parse(endpoint.url())
+            .unwrap()
+            .path()
+            .to_owned();
+        let url = request.url();
+        assert_eq!(url.scheme(), "http");
+        assert_eq!(url.host_str(), Some("localhost"));
+        assert_eq!(url.path(), expected_path);
+        assert!(url.port().is_none());
+        assert!(url.query().is_none() && url.fragment().is_none());
+        assert!(url.username().is_empty() && url.password().is_none());
+        let response = client.client.execute(request).await.unwrap();
+        assert_eq!(response.status(), reqwest::StatusCode::OK);
+        let body: serde_json::Value = response.json().await.unwrap();
+        assert_eq!(body["method"], endpoint.method().as_str());
+        assert_eq!(body["path"], expected_path);
+        assert_eq!(body["host"], "localhost");
     }
 }
 
