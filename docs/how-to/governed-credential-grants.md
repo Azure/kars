@@ -22,6 +22,13 @@ policies and every credential,
 container and host-authority change still require exact review; custom
 admission mutations are not silently ignored.
 
+A Workload Identity opt-in label alone does not turn an exactly matching
+non-root consumer into the root controller, even in the root namespace.
+Mandatory root replay is selected through the pinned Deployment's owning
+ReplicaSet lineage. The root still requires actual Workload Identity admission
+when opted in; non-root execution changes still fail ordinary exact review and
+do not gain the root-only fallback.
+
 If the root admission fallback rejects a consumer, the CLI reports only fixed
 boolean execution-comparison categories and whether its namespace/Deployment
 match the root. These use the same normalized comparison as enforcement;

@@ -6,7 +6,7 @@ import { createHash } from "node:crypto";
 import { applyReviewedGrant } from "../commands/credential-grants.js";
 import { continuityFixture, rootPod } from "./private-activation-fixtures.js";
 import {
-  PRIVATE_PREFIX as P, previewPrivateActivation, templateDigest, validatePrivateActivation, validateQualifiedActivation,
+  PRIVATE_PREFIX as P, matchesReviewedExecution, previewPrivateActivation, templateDigest, validatePrivateActivation, validateQualifiedActivation,
   type Execute,
 } from "./private-activation.js";
 
@@ -343,6 +343,19 @@ describe("AKS admitted private root consumers", () => {
       p.spec = { serviceAccountName: "kars-controller", containers: [{ name: "controller", image: "fixture", command: ["controller"] }] };
     }],
   ];
+  it("still requires actual root Workload Identity admission when ordinary execution matches", async () => {
+    const f = setup();
+    const pod = f.pod();
+    const parent = f.objects.get(f.key("replicasets.apps", pod.metadata.ownerReferences[0].name, "core"));
+    pod.spec = { ...structuredClone(parent.spec.template.spec), nodeName: "aks-node" };
+    expect(matchesReviewedExecution(pod.spec, parent.spec.template.spec, true)).toBe(true);
+    const before = f.preserved();
+    await expect(f.preview()).rejects.toThrow("Pod admission could not be verified");
+    expect(f.preserved()).toEqual(before);
+    expect(f.readOnly()).toBe(true);
+    expect(f.grant()).toBeUndefined();
+  });
+
   it.each(mutations)("rejects unexplained %s before protective writes in preview and actual apply", async (_name, mutate) => {
     const f = setup();
     const document = await f.document();
