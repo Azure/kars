@@ -723,7 +723,9 @@ export async function reviewedOwner(
         onTemplateChange?.(current);
         throw new PrivateConsumerTemplateChanged();
       }
-      if (admissionRequired) {
+      const rootOptIn = root && current.kind === "Deployment" && id.uid === root.deployment.uid
+        && at(template(current), "metadata", "labels", "azure.workload.identity/use") === "true";
+      if (admissionRequired || rootOptIn) {
         if (!root) throw new Error("Consumer execution differs from the reviewed controller template; preserve it for explicit Pod review");
         const execution = chain[0]?.kind === "Pod" && chain[1]
           ? privateExecutionComparison(template(chain[0]).spec, template(chain[1]).spec, true) : undefined;

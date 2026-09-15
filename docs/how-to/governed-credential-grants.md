@@ -28,6 +28,9 @@ Mandatory root replay is selected through the pinned Deployment's owning
 ReplicaSet lineage. The root still requires actual Workload Identity admission
 when opted in; non-root execution changes still fail ordinary exact review and
 do not gain the root-only fallback.
+Before returning the pinned root Deployment, mandatory replay is also enforced
+regardless of the traversal path. A direct Pod-to-Deployment owner reference
+cannot substitute for the supported root ReplicaSet lineage.
 
 If the root admission fallback rejects a consumer, the CLI reports only fixed
 boolean execution-comparison categories and whether its namespace/Deployment

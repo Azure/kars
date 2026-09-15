@@ -356,6 +356,25 @@ describe("AKS admitted private root consumers", () => {
     expect(f.grant()).toBeUndefined();
   });
 
+  it("rejects a direct Pod-to-root Deployment owner even when execution matches", async () => {
+    const f = setup();
+    const document = await f.document();
+    const pod = f.pod();
+    pod.spec = { ...structuredClone(f.deployment.spec.template.spec), nodeName: "aks-node" };
+    pod.metadata.ownerReferences = [{
+      apiVersion: "apps/v1", kind: "Deployment", name: f.deployment.metadata.name,
+      uid: f.deployment.metadata.uid, controller: true, blockOwnerDeletion: true,
+    }];
+    expect(matchesReviewedExecution(pod.spec, f.deployment.spec.template.spec, true)).toBe(true);
+    const before = f.preserved();
+    f.calls.length = 0;
+    await expect(f.preview()).rejects.toThrow("check: identity");
+    await expect(applyReviewedGrant(f.execute, document)).rejects.toThrow("check: identity");
+    expect(f.preserved()).toEqual(before);
+    expect(f.readOnly()).toBe(true);
+    expect(f.grant()).toBeUndefined();
+  });
+
   it.each(mutations)("rejects unexplained %s before protective writes in preview and actual apply", async (_name, mutate) => {
     const f = setup();
     const document = await f.document();
