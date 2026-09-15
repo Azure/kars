@@ -183,6 +183,17 @@ describe("generic private activation staging", () => {
       .some(key => key.startsWith(`${PRIVATE_PREFIX}pod-`))).toBe(false);
   });
 
+  it("preserves an unrelated non-consuming Pod whose ReplicaSet no longer exists", async () => {
+    const f = fixture();
+    const pod = { kind: "Pod", metadata: { name: "unrelated", namespace: "core", uid: "unrelated", resourceVersion: "1",
+      ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "removed", uid: "removed", controller: true }] },
+      spec: { serviceAccountName: "default", containers: [{ name: "unrelated", image: "fixture" }] } };
+    f.pods.set("core", [pod]);
+    const before = structuredClone(pod);
+    await stagePrivateActivation(f.execute, await f.preview());
+    expect(f.pods.get("core")).toEqual([before]);
+  });
+
   it.each([0, 2])("keeps reviewed replica intent %s through two-apply post-retirement budget rotation", async replicas => {
     const f = budgetFixture(replicas);
     const first = await f.preview();
@@ -361,11 +372,14 @@ describe("generic private activation staging", () => {
     const f = budgetFixture();
     await expect(stagePrivateActivation(f.execute, await f.preview())).rejects.toThrow("operator rotation");
     f.rotate(1);
+    const review = await f.preview();
+    const saved = structuredClone(f.state());
     f.pods.set("core", [{ ...rootPod(f), spec: { automountServiceAccountToken: false,
       serviceAccountName: "kars-controller", containers: [{ name: "holder", image: "fixture" }] } }]);
     f.controls.terminating = true;
-    const review = await f.preview();
-    await expect(stagePrivateActivation(f.execute, review)).rejects.toThrow("authority reappeared");
+    await expect(f.preview()).rejects.toThrow("Consumer execution differs");
+    await expect(stagePrivateActivation(f.execute, review)).rejects.toThrow("Consumer execution differs");
+    expect(f.state()).toEqual(saved);
     expect(f.events).not.toContain("epoch");
     expect(f.deployment.spec.replicas).toBe(0);
   });
@@ -550,7 +564,9 @@ describe("generic private activation staging", () => {
     await expect(stagePrivateActivation(f.execute, review)).rejects.toThrow("Unexplained private consumer preserved");
     expect(f.calls.some(args => args[0] === "delete")).toBe(false);
     expect(f.objects.get(f.key("namespace", "work")).metadata.annotations[`${PRIVATE_PREFIX}epoch`]).toBeUndefined();
-    expect(f.objects.get(f.key("namespace", "work")).metadata.annotations[`${PRIVATE_PREFIX}state`]).toBe("Pending");
+    expect(f.objects.get(f.key("namespace", "work")).metadata.annotations[`${PRIVATE_PREFIX}state`]).toBeUndefined();
+    expect(f.calls.every(args => ["get", "auth"].includes(args[0]!))).toBe(true);
+    await expect(f.preview()).rejects.toThrow("Unexplained private consumer preserved");
   });
 
   it("does not accept a forged Pod execution merely because it names the reviewed ReplicaSet owner", async () => {
