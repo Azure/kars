@@ -12,6 +12,7 @@ import {
   completePrivateQualification, reviewPrivateContinuity, stageSharedActivation,
   verifySharedPublication,
 } from "./private-activation-continuity.js";
+import { verifyRootPodAdmission } from "./private-pod-admission.js";
 
 export type Execute = (args: string[], input?: string) => Promise<string>;
 export type Json = null | boolean | number | string | Json[] | { [key: string]: Json };
@@ -261,7 +262,40 @@ export async function previewPrivateActivation(
     profile: profile as PrivateActivation["profile"], controllerUids, namespaces,
   };
   await reviewPrivateContinuity(execute, activation, true);
+  await preflightPrivateConsumers(execute, activation);
   return activation;
+}
+
+async function preflightPrivateConsumers(execute: Execute, activation: PrivateActivation): Promise<void> {
+  for (const scope of activation.namespaces) {
+    const inventory = record(JSON.parse(await execute(["get", "pods", "-n", scope.namespace.name, "--chunk-size=0", "-o", "json"])));
+    if (at(inventory, "metadata", "continue")) throw new Error("Private consumer preflight inventory is incomplete");
+    for (const pod of list(inventory.items)) {
+      reviewed(pod, true);
+      if (await requiresPrivatePodReview(execute, pod, scope, activation)
+        && !await reviewedOwner(execute, pod, scope, undefined, activation.root)) {
+        throw new Error("Unexplained private consumer preserved; explicitly review its actual owner before activation");
+      }
+    }
+  }
+}
+
+export async function requiresPrivatePodReview(
+  execute: Execute, pod: Json, scope: NamespaceReview, activation: PrivateActivation,
+): Promise<boolean> {
+  if (consumesPrivateAuthority(pod, scope.namespace.name, activation)) return true;
+  if (scope.namespace.name !== activation.root.namespace.name) return false;
+  const owners = list(at(pod, "metadata", "ownerReferences") ?? []).filter(owner => at(owner, "controller") === true);
+  if (owners.length !== 1 || at(owners[0], "kind") !== "ReplicaSet" || typeof at(owners[0], "name") !== "string") return false;
+  const raw = await execute(["get", kinds.ReplicaSet!, at(owners[0], "name") as string,
+    "-n", scope.namespace.name, "--ignore-not-found", "-o", "json"]);
+  if (!raw.trim()) return false;
+  const parent = record(JSON.parse(raw));
+  reviewed(parent);
+  // A changed ServiceAccount must not hide a root descendant from preflight or
+  // completion. Ownership here only selects review; reviewedOwner authorizes it.
+  return list(at(parent, "metadata", "ownerReferences") ?? []).some(owner =>
+    at(owner, "controller") === true && at(owner, "uid") === activation.root.deployment.uid);
 }
 
 export async function verifyOwnedRuntimeNamespace(execute: Execute, workspace: string, namespace: string): Promise<void> {
@@ -379,6 +413,7 @@ export async function validatePrivateActivation(execute: Execute, activation: Pr
     }
   }
   await reviewPrivateContinuity(execute, activation);
+  await preflightPrivateConsumers(execute, activation);
 }
 
 export function annotations(activation: PrivateActivation, scope: NamespaceReview, state: string): Record<string, string> {
@@ -457,7 +492,7 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
       if (!captured.get(scope.namespace.name)?.has(reviewed(pod, true).uid)
         && !consumesPrivateAuthority(pod, scope.namespace.name, staged)) continue;
       if (retirement.phase === "retired") throw new Error("Private authority reappeared after the retirement baseline; preserve protection for operator review");
-      const owner = await reviewedOwner(execute, pod, scope);
+      const owner = await reviewedOwner(execute, pod, scope, undefined, staged.root);
       if (!owner) throw new Error("Unexplained private consumer preserved; explicitly review its actual owner before activation");
       if (!["Deployment", "ReplicaSet", "StatefulSet", "ReplicationController"].includes(owner.kind)) {
         throw new Error("This reviewed private consumer requires its existing owner-specific retirement before activation; it was preserved");
@@ -496,7 +531,7 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
       for (const pod of list(inventory.items)) {
         const capturedUid = captured.get(scope.namespace.name)?.has(reviewed(pod, true).uid);
         if (!capturedUid && !consumesPrivateAuthority(pod, scope.namespace.name, staged)) continue;
-        if (!await reviewedOwner(execute, pod, scope)) throw new Error("Unexplained private consumer preserved during retirement");
+        if (!await reviewedOwner(execute, pod, scope, undefined, staged.root)) throw new Error("Unexplained private consumer preserved during retirement");
         pending = true;
       }
     }
@@ -672,10 +707,14 @@ export class PrivateConsumerTemplateChanged extends Error {
 
 export async function reviewedOwner(
   execute: Execute, pod: Json, scope: NamespaceReview, onTemplateChange?: (current: RecordValue) => void,
+  root?: PrivateActivation["root"],
 ): Promise<ReviewedConsumer | undefined> {
   let current = record(pod);
   if (!current.kind) current = { ...current, kind: "Pod" };
+  const chain: RecordValue[] = [];
+  let admissionRequired = false;
   for (let depth = 0; depth < 4; depth++) {
+    chain.push(current);
     const id = reviewed(current, current.kind === "Pod");
     const approved = scope.consumers.find(c => c.object.uid === id.uid && c.kind === current.kind);
     if (approved) {
@@ -683,6 +722,10 @@ export async function reviewedOwner(
         // The hook observes the rejected snapshot; it cannot authorize it.
         onTemplateChange?.(current);
         throw new PrivateConsumerTemplateChanged();
+      }
+      if (admissionRequired) {
+        if (!root) throw new Error("Consumer execution differs from the reviewed controller template; preserve it for explicit Pod review");
+        await verifyRootPodAdmission(execute, chain, scope, root);
       }
       return approved;
     }
@@ -695,8 +738,13 @@ export async function reviewedOwner(
     if (owner.apiVersion !== version) throw new Error("Private consumer owner API identity is invalid");
     const parent = await read(execute, kinds[owner.kind], owner.name, scope.namespace.name);
     if (reviewed(parent).uid !== owner.uid) throw new Error("Private consumer owner was replaced");
+    if (root && current.kind === "Pod"
+      && at(template(parent), "metadata", "labels", "azure.workload.identity/use") === "true") admissionRequired = true;
     if (!matchesReviewedExecution(template(current).spec, template(parent).spec, current.kind === "Pod")) {
-      throw new Error("Consumer execution differs from the reviewed controller template; preserve it for explicit Pod review");
+      if (current.kind !== "Pod" || !root) {
+        throw new Error("Consumer execution differs from the reviewed controller template; preserve it for explicit Pod review");
+      }
+      admissionRequired = true;
     }
     current = parent;
   }
