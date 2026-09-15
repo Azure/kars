@@ -39,6 +39,9 @@ elif name == "kubectl":
     args = args[2:]
     if args[0] == "port-forward":
         assert "--address" in args and "127.0.0.1" in args and ":8443" in args
+        if mode == "phase-lag" and not (root / "rollout-ready").exists():
+            print("error: unable to forward port because pod is not running. Current status=Pending", file=sys.stderr)
+            sys.exit(23)
         starts = root / "forward-start-count"
         starts.write_text(str(int(starts.read_text()) + 1 if starts.exists() else 1))
         (root / "forward-pid").write_text(str(os.getpid()))
@@ -63,6 +66,14 @@ elif name == "kubectl":
         print("Forwarding from 127.0.0.1:18443 -> 8443", flush=True)
         while True:
             time.sleep(1)
+    elif args[0] == "rollout":
+        assert args[1:3] == ["status", "deployment/e2e-test"]
+        assert "-n" in args and "kars-e2e-test" in args
+        assert "--timeout=90s" in args and "--request-timeout=95s" in args
+        assert not (root / "forward-start-count").exists()
+        if mode == "rollout-timeout":
+            sys.exit(1)
+        (root / "rollout-ready").write_text("true")
     elif args[1] == "secret":
         if mode == "token-read-failure":
             sys.exit(1)
@@ -194,6 +205,17 @@ class GovernedServicesDiagnosticsTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(result.stdout + result.stderr, "")
         self.assertEqual(requests, 11)
+
+    def test_waits_for_rollout_even_when_a_previous_router_probe_could_succeed(self):
+        result, requests = self.run_gate("phase-lag")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout + result.stderr, "")
+        self.assertEqual(requests, 11)
+
+    def test_unready_rollout_fails_before_forwarding_or_sending_credentials(self):
+        fact = self.failure("rollout-timeout", "pod-readiness", "rollout-not-ready", 0)
+        self.assertFalse(fact["forwardStarted"])
+        self.assertEqual(fact["forwardExitStatus"], -1)
 
     def test_forward_exit_is_reported_before_private_log_cleanup(self):
         fact = self.failure("forward-exit", "port-forward-start", "process-exited", 0)
