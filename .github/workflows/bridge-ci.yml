@@ -59,6 +59,11 @@ jobs:
             kars::credential_review::digest_tests::review_digest_preserves_compact_sorted_json_and_full_hex_width \
             kars::receipt_log::digest_tests::chain_hash_keeps_decimal_sequence_and_exact_pipe_framing \
             routes::artifacts::digest_tests::artifact_addresses_keep_the_existing_sixteen_byte_short_form \
+            routes::operator::audit::datapath::tests::witness_missing_is_unknown_not_not_installed_and_intent_is_separate \
+            routes::operator::audit::datapath::tests::witness_fresh_and_empty_samples_never_claim_complete_coverage \
+            routes::operator::audit::datapath::tests::witness_malformed_stale_future_and_identity_fail_closed \
+            routes::operator::audit::datapath::tests::witness_empty_configmaps_legacy_and_failed_capture_are_distinct \
+            routes::operator::audit::datapath::tests::witness_route_only_gets_two_fixed_configmaps_and_preserves_api_errors \
             routes::github::tests::connection_names_keep_the_original_raw_subject_and_eight_byte_digest \
             providers::receipt::tests::rfc8032_known_answer_and_malformed_signatures_keep_exact_verification_semantics \
             providers::credential_review::tests::legacy_v1_key_preserves_domain_null_byte_and_raw_secret_encoding \
@@ -183,6 +188,35 @@ jobs:
       - run: npm run lint && npm run typecheck && npm run build && npm test
         working-directory: bridge/teams-gateway
       - run: helm lint bridge/deploy/helm/kars-bridge
+      - name: Optional witness runtime and server-side ownership contracts
+        run: |
+          python3 -m pip install -r deploy/ebpf-witness/tests/requirements.txt
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/ebpf-witness/aggregator
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/ebpf-witness/tests -p test_chart.py
+      - name: Build the public witness image without publishing
+        run: |
+          docker build --platform linux/amd64 \
+            --build-arg PYTHON_BASE=python:3.12-alpine3.22@sha256:a190708a2dec1bd18b1decb539f8e8f5407abaa9bf39cacda583f7f8c11db322 \
+            --build-arg SOURCE_REVISION="$GITHUB_SHA" \
+            --file deploy/ebpf-witness/aggregator/Dockerfile \
+            --tag kars-witness-qualification:latest .
+          docker run --rm --read-only --network none --cap-drop ALL \
+            --security-opt no-new-privileges --entrypoint python3 \
+            kars-witness-qualification:latest -c '
+          import json, pathlib, subprocess
+          metadata = json.loads(pathlib.Path("/opt/witness/build.json").read_text())
+          assert metadata["ig_version"] == "v0.53.2"
+          assert metadata["architecture"] == "amd64"
+          assert len(metadata["source_revision"]) == 40
+          subprocess.run(["kubectl-gadget", "version", "--help"], check=True, capture_output=True)
+          print(json.dumps(metadata))
+          ' > "$RUNNER_TEMP/witness-image-build.json"
+      - name: Retain witness image build provenance (not kernel qualification)
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: witness-image-build-${{ github.sha }}
+          path: ${{ runner.temp }}/witness-image-build.json
+          if-no-files-found: error
       - uses: helm/kind-action@ef37e7f390d99f746eb8b610417061a60e82a6cc # v1.14.0
         with:
           cluster_name: bridge-addon-lifecycle
@@ -193,6 +227,11 @@ jobs:
           BRIDGE_TEST_KIND_LIFECYCLE: '1'
           BRIDGE_TEST_KUBECONFIG: ${{ runner.temp }}/bridge-addon-kubeconfig
         run: npm test -- tests/chart-lifecycle.test.ts
+      - name: Exercise guarded witness enable/off/removal without claiming kernel coverage
+        env:
+          WITNESS_TEST_KIND_LIFECYCLE: '1'
+          WITNESS_TEST_KUBECONFIG: ${{ runner.temp }}/bridge-addon-kubeconfig
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/ebpf-witness/tests -p test_kind_lifecycle.py
 
   dependencies:
     name: Dependency audit (${{ matrix.project }})

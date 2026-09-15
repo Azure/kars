@@ -1,0 +1,117 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License for Kars integration changes.
+# Derived from Inspektor Gadget v0.53.2 charts/gadget/templates/daemonset.yaml.
+# Copyright The Inspektor Gadget authors. Apache-2.0 (see THIRD_PARTY_NOTICES.md).
+{{- if .Values.enabled }}
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: gadget
+  namespace: kars-witness-gadget
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+    k8s-app: gadget
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+spec:
+  selector:
+    matchLabels: {k8s-app: gadget, app.kubernetes.io/instance: kars-datapath-witness}
+  template:
+    metadata:
+      labels:
+        {{- include "witness.labels" . | nindent 8 }}
+        k8s-app: gadget
+      annotations:
+        checksum/config: {{ .Values.gadget | toJson | sha256sum }}
+    spec:
+      serviceAccountName: gadget
+      hostPID: false
+      hostNetwork: false
+      nodeSelector: {kubernetes.io/os: linux}
+      tolerations:
+        - {operator: Exists, effect: NoSchedule}
+        - {operator: Exists, effect: NoExecute}
+      {{- with .Values.aggregator.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      initContainers:
+        - name: check-btf
+          image: {{ .Values.aggregator.image | quote }}
+          imagePullPolicy: Always
+          command: ["python3", "/opt/witness/witness.py", "--check-btf", "/host-btf/vmlinux"]
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities: {drop: ["ALL"]}
+            seccompProfile: {type: RuntimeDefault}
+          resources:
+            requests: {cpu: 10m, memory: 16Mi}
+            limits: {cpu: 100m, memory: 64Mi}
+          volumeMounts:
+            - {name: btf, mountPath: /host-btf, readOnly: true}
+      containers:
+        - name: gadget
+          image: {{ .Values.gadget.image | quote }}
+          imagePullPolicy: Always
+          command: ["/bin/gadgettracermanager", "-serve"]
+          env:
+            - name: NODE_NAME
+              valueFrom: {fieldRef: {fieldPath: spec.nodeName}}
+            - name: GADGET_POD_UID
+              valueFrom: {fieldRef: {fieldPath: metadata.uid}}
+            - {name: GADGET_IMAGE, value: ghcr.io/inspektor-gadget/inspektor-gadget}
+            - {name: HOST_ROOT, value: /host}
+          securityContext:
+            runAsUser: 0
+            readOnlyRootFilesystem: true
+            appArmorProfile: {type: Unconfined}
+            seLinuxOptions: {type: spc_t}
+            capabilities:
+              drop: ["ALL"]
+              add: [SYS_ADMIN, SYSLOG, SYS_PTRACE, SYS_RESOURCE, IPC_LOCK, NET_RAW, NET_ADMIN]
+          readinessProbe:
+            exec: {command: ["/bin/gadgettracermanager", "-liveness"]}
+            periodSeconds: 5
+            timeoutSeconds: 2
+          livenessProbe:
+            exec: {command: ["/bin/gadgettracermanager", "-liveness"]}
+            periodSeconds: 5
+            timeoutSeconds: 2
+          startupProbe:
+            exec: {command: ["/bin/gadgettracermanager", "-liveness"]}
+            failureThreshold: 24
+            periodSeconds: 5
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 1Gi}
+          volumeMounts:
+            - {name: bin, mountPath: /host/bin, readOnly: true}
+            - {name: usr, mountPath: /host/usr, readOnly: true}
+            - {name: run, mountPath: /host/run, readOnly: true}
+            - {name: var, mountPath: /host/var, readOnly: true}
+            - {name: proc, mountPath: /host/proc, readOnly: true}
+            - {name: run, mountPath: /run}
+            - {name: debugfs, mountPath: /sys/kernel/debug}
+            - {name: cgroup, mountPath: /sys/fs/cgroup, readOnly: true}
+            - {name: bpffs, mountPath: /sys/fs/bpf}
+            - {name: btf, mountPath: /sys/kernel/btf, readOnly: true}
+            - {name: oci, mountPath: /var/lib/ig}
+            - {name: config, mountPath: /etc/ig, readOnly: true}
+            - {name: wasm-cache, mountPath: /var/run/ig/wasm-cache}
+      volumes:
+        - {name: bin, hostPath: {path: /bin}}
+        - {name: usr, hostPath: {path: /usr}}
+        - {name: proc, hostPath: {path: /proc}}
+        - {name: run, hostPath: {path: /run}}
+        - {name: var, hostPath: {path: /var}}
+        - {name: cgroup, hostPath: {path: /sys/fs/cgroup}}
+        - {name: bpffs, hostPath: {path: /sys/fs/bpf}}
+        - {name: debugfs, hostPath: {path: /sys/kernel/debug}}
+        - {name: btf, hostPath: {path: /sys/kernel/btf, type: Directory}}
+        - {name: oci, emptyDir: {sizeLimit: 1Gi}}
+        - {name: config, configMap: {name: gadget, defaultMode: 256}}
+        - {name: wasm-cache, emptyDir: {sizeLimit: 256Mi}}
+{{- end }}
