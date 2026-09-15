@@ -14,6 +14,8 @@ import { requireBundledAsset } from "../lib/repo-assets.js";
 import { resolveVmSizes } from "../lib/vm-size.js";
 import { cliReleaseTag } from "../lib/version.js";
 import { prepareCoreHelmSchemas } from "../lib/core-helm-schemas.js";
+import { assertControllerMutationAllowed } from "../lib/private-root-upgrade-guard.js";
+import { preflightUpRoot } from "./up/root-preflight.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -168,6 +170,8 @@ Auto-resume:
 
       const clusterName = options.clusterName ?? "kars";
       const baseName = clusterName.replace(/-aks$/, "");
+      const rootConnected = await preflightUpRoot(execa, rg, `${baseName}-aks`, options.skipInfra === true);
+      if (rootConnected && !options.forceInfra) options.skipInfra = true;
       let acrName = ""; // resolved from Bicep output after deployment
 
       // ── Auto-resume from prior partial run ──────────────────────────
@@ -316,21 +320,6 @@ Auto-resume:
         let openAiEndpoint: string;
         let wiClientId: string;
         let kvName: string;
-
-        if (!options.skipInfra && !options.forceInfra) {
-          // Auto-detect: if AKS cluster already exists, skip Bicep (saves ~8 min)
-          try {
-            const { stdout: aksCheck } = await execa("az", [
-              "aks", "show", "-g", rg, "-n", `${baseName}-aks`,
-              "--query", "provisioningState", "-o", "tsv",
-            ], { stdio: "pipe" });
-            if (aksCheck.trim() === "Succeeded") {
-              options.skipInfra = true;
-            }
-          } catch {
-            // Cluster doesn't exist — proceed with Bicep
-          }
-        }
 
         if (!options.skipInfra) {
           stepper.step(`Provisioning Azure resources in ${options.region}...`);
@@ -598,7 +587,7 @@ Auto-resume:
 
         // ── Step 5: Get AKS credentials ──────────────────────────────
         stepper.step("Configuring kubectl...");
-        await execa("az", [
+        if (!rootConnected) await execa("az", [
           "aks", "get-credentials",
           "--name", `${baseName}-aks`,
           "--resource-group", rg,
@@ -607,6 +596,7 @@ Auto-resume:
         ], { stdio: "pipe" });
         stepper.done("kubectl configured");
         markPhaseDone("kubectl", {}, resumeTopology);
+        await assertControllerMutationAllowed(execa);
         await assertSafeMutation(execa);
 
         // ── Step 6: Get images into ACR ──────────────────────────────

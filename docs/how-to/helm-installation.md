@@ -7,6 +7,9 @@ Use the Helm chart when the Kubernetes cluster, image access, inference backend,
 and required identity configuration already exist. The chart can manage
 AgentMesh or use an existing external deployment.
 
+For the public `kars-bridge` integration branch and optional Bridge add-on, see
+the [beta Helm installation and acceptance guide](../../bridge/docs/public-beta-helm.md).
+
 Before upgrading an existing controller, run `kars namespace preflight` with the
 updated CLI and resolve all ownership conflicts. See
 [namespace ownership migration and adoption](namespace-ownership.md). The check

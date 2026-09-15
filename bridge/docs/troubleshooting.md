@@ -35,6 +35,28 @@ do not enable logging of cookies, login codes or signed principal tokens.
 
 ## Managed MCP
 
+The catalogue records an installation request, not a completed installation.
+Agent capabilities displays the current controller reason and message alongside
+the phase. After editing a server, an older generation's result is shown as
+Reconciling, not as a current Ready result. A workload reference can be recorded
+before the Deployment exists.
+
+If the message says the configured pull Secret is absent, installation is
+waiting for an operator prerequisite, not for browser startup. Check the Helm
+values `managedMcp.namespace` and `managedMcp.imagePullSecret`. That Secret must
+exist in the controller-claimed managed namespace, even when the Playwright
+image itself is public: the configured pull-Secret requirement applies to both
+managed presets. A same-named Secret in the controller namespace is insufficient.
+
+After a clean reinstall, let the controller create and UID-claim the managed
+namespace before restoring its explicitly approved, namespace-local registry
+credential through the operator's secret-management process. Do not pre-create
+or force-adopt an unclaimed namespace, copy unrelated credentials, remove the
+pull requirement to bypass the check, or mark the server Ready manually.
+The controller retries automatically; success still requires the owned rollout
+and a real MCP `initialize` / `tools/list` probe. This recovery does not require
+node-pool, GPU, CNI, or model-serving changes.
+
 ```bash
 kubectl -n kars-system get mcpserver <name> -o yaml
 kubectl -n kars-mcp get deploy,svc,networkpolicy

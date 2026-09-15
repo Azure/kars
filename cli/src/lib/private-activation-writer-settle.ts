@@ -112,7 +112,7 @@ function possibleTransition(current: ObjectValue, runtime: RuntimeReview): boole
   const expected = bodySpec(before, replicaIntent(current), revision);
   if (sameBody(current, expected, true, true)) return true;
   record(at(expected, "metadata", "annotations"))[REVISION] = at(before, "metadata", "annotations", REVISION)!;
-  return at(current, "status", "observedGeneration") !== gen(current) && sameBody(current, expected, true, true);
+  return sameBody(current, expected, true, true);
 }
 
 function transitionParts(deployment: ObjectValue) {
@@ -334,8 +334,9 @@ export async function observeWriterSettlement(
     const changedRevision = revision !== oldRevision;
     const awaitingRevision = structuredClone(restored);
     record(at(awaitingRevision, "metadata", "annotations"))[REVISION] = at(before.deployment, "metadata", "annotations", REVISION)!;
-    const restoringShape = restoredShape || (at(deployment, "status", "observedGeneration") !== gen(deployment)
-      && sameBody(deployment, awaitingRevision, true, true));
+    // Recreate can observe the generation before publishing the new rollout
+    // revision. This exact old-revision shape can wait, never satisfy completion.
+    const restoringShape = restoredShape || sameBody(deployment, awaitingRevision, true, true);
     if (projectionSame && ((changedRevision && !runtime.emptyVersion)
       || (runtime.emptyVersion && [runtime.emptyVersion, reviewed(runtime.projection).resourceVersion]
         .includes(reviewed(projection).resourceVersion)))) {

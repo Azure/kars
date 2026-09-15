@@ -8,7 +8,9 @@ Bridge manages the Kars `McpServer` catalog and exposes two distinct modes.
 ## Managed MCP
 
 Bridge creates a typed `McpServer` that selects a controller-owned preset. Kars
-deploys the workload, Service, probes, NetworkPolicy, and registry credentials.
+deploys the workload, Service, probes, and NetworkPolicy. Any configured
+registry pull credential is an operator-managed prerequisite in the claimed
+managed namespace; the controller does not copy credentials across namespaces.
 The controller does not accept an arbitrary image from the user-facing CR.
 
 ### Playwright

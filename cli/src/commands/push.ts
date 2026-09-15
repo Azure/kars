@@ -11,7 +11,8 @@ import { loadContext } from "../config.js";
 import { preparePushTarget } from "../lib/deployment-target.js";
 import { inspectMeshInstallation } from "../lib/mesh-release.js";
 import { applyPushedImages } from "./push-apply.js";
-import { dockerPushDigest, MANAGED_MCP_IMAGE_TARGET, PUSH_COMPONENTS, RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
+import { controllerEnv, dockerPushDigest, MANAGED_MCP_IMAGE_TARGET, PUSH_COMPONENTS, RUNTIME_IMAGE_TARGETS, pushImageTag } from "../lib/image-targets.js";
+import { assertControllerMutationAllowed, PrivateRootUpgradeBlocked } from "../lib/private-root-upgrade-guard.js";
 import { stageRustBinaries } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
 import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
@@ -76,12 +77,28 @@ export function pushCommand(): Command {
       }
 
       const ctx = loadContext();
-      const execa = await preparePushTarget(rawExeca, ctx, options);
+      const acrName = options.acr || ctx?.acrName;
+      const acrLoginServer = acrName ? `${acrName}.azurecr.io` : null;
+      if (!acrName || !acrLoginServer) {
+        console.error(chalk.red("\n  No ACR configured. Run 'kars up' first or pass --acr <name>.\n"));
+        process.exit(1);
+      }
+      const clusterBound = Boolean(ctx?.aksCluster && ctx?.resourceGroup);
+      const execa = await preparePushTarget(rawExeca, ctx, { ...options, apply: options.apply || clusterBound });
       const updatesMesh = !options.only || options.only === "relay" || options.only === "registry";
+      const appliesController = options.apply && (!options.only || options.only === "controller" || controllerEnv(options.only) !== undefined);
       const mesh = options.apply && updatesMesh ? await inspectMeshInstallation(execa) : undefined;
       if (mesh?.kind === "absent") throw new Error("AgentMesh is not installed; install it before pushing mesh updates");
       if (mesh?.kind === "external") {
         throw new Error("External AgentMesh will not be changed. Select an explicit core --only target (controller, router, sandbox, or runtime-*).");
+      }
+      if (options.apply) {
+        if (updatesMesh && mesh?.kind === "helm") await assertControllerMutationAllowed(execa, mesh.releaseNamespace);
+        if (appliesController) await assertControllerMutationAllowed(execa);
+      }
+      if (clusterBound || options.apply) {
+        const selected = options.only ? [options.only] : PUSH_COMPONENTS;
+        await assertControllerMutationAllowed(execa, "kars-system", selected.map(name => `${acrLoginServer}/${pushImageTag(name)}`));
       }
 
       let agtRepo: string;
@@ -109,15 +126,6 @@ export function pushCommand(): Command {
         process.exit(1);
       }
 
-      // Resolve ACR from context or flag
-      const acrName = options.acr || ctx?.acrName;
-      const acrLoginServer = acrName ? `${acrName}.azurecr.io` : null;
-
-      if (!acrName || !acrLoginServer) {
-        console.error(chalk.red("\n  No ACR configured. Run 'kars up' first or pass --acr <name>.\n"));
-        process.exit(1);
-      }
-
       console.log(blue(`\n  kars · Push Images → ${acrLoginServer}\n`));
 
       // Login to ACR
@@ -139,14 +147,14 @@ export function pushCommand(): Command {
         : [
             {
               name: "relay",
-              tag: "agentmesh-relay-agt:latest",
+              tag: pushImageTag("relay"),
               dockerfile: path.join(agtRepo, agtDockerfileRel),
               absoluteContext: agtRepo,
               buildArgs: ["--build-arg", "COMPONENT=relay", "--build-arg", `CACHE_BUST=${Date.now()}`],
             },
             {
               name: "registry",
-              tag: "agentmesh-registry-agt:latest",
+              tag: pushImageTag("registry"),
               dockerfile: path.join(agtRepo, agtDockerfileRel),
               absoluteContext: agtRepo,
               buildArgs: ["--build-arg", "COMPONENT=registry", "--build-arg", `CACHE_BUST=${Date.now()}`],
@@ -248,19 +256,19 @@ export function pushCommand(): Command {
         absoluteContext?: string;
         buildArgs?: string[];
       }> = [
-        { name: "controller", tag: "kars-controller:latest", dockerfile: controllerDf },
-        { name: "router", tag: "kars-inference-router:latest", dockerfile: routerDf,
+        { name: "controller", tag: pushImageTag("controller"), dockerfile: controllerDf },
+        { name: "router", tag: pushImageTag("router"), dockerfile: routerDf,
           buildArgs: ["--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`] },
-        { name: "sandbox-base", tag: "kars-sandbox-base:latest", dockerfile: "sandbox-images/openclaw/Dockerfile.base",
+        { name: "sandbox-base", tag: pushImageTag("sandbox-base"), dockerfile: "sandbox-images/openclaw/Dockerfile.base",
           buildArgs: ["--build-arg", `OPENCLAW_CACHE_BUST=${Date.now()}`] },
-        { name: "sandbox", tag: "openclaw-sandbox:latest", dockerfile: "sandbox-images/openclaw/Dockerfile",
+        { name: "sandbox", tag: pushImageTag("sandbox"), dockerfile: "sandbox-images/openclaw/Dockerfile",
           buildArgs: sandboxBuildArgs },
         ...meshImages,
-        { name: MANAGED_MCP_IMAGE_TARGET.name, tag: `${MANAGED_MCP_IMAGE_TARGET.repo}:latest`,
+        { name: MANAGED_MCP_IMAGE_TARGET.name, tag: pushImageTag(MANAGED_MCP_IMAGE_TARGET.name),
           dockerfile: "sandbox-images/mcp-everything/Dockerfile", context: "sandbox-images/mcp-everything" },
         // Shared with release imports, upgrade values, and push application.
         ...RUNTIME_IMAGE_TARGETS.map(runtime => ({
-          name: runtime.name, tag: `${runtime.repo}:latest`,
+          name: runtime.name, tag: pushImageTag(runtime.name),
           dockerfile: `sandbox-images/${runtime.name.slice("runtime-".length)}/Dockerfile`,
         })),
       ];
@@ -362,7 +370,14 @@ export function pushCommand(): Command {
           // Push with retry
           for (let attempt = 1; attempt <= 3; attempt++) {
             try {
+              if (options.apply) {
+                if (updatesMesh && mesh?.kind === "helm") await assertControllerMutationAllowed(execa, mesh.releaseNamespace);
+                if (appliesController) await assertControllerMutationAllowed(execa);
+              }
               if (attempt > 1) await execa("az", ["acr", "login", "--name", acrName], { stdio: "pipe" });
+              if (clusterBound || options.apply) {
+                await assertControllerMutationAllowed(execa, "kars-system", [`${acrLoginServer}/${img.tag}`]);
+              }
               const pushed = await execa("docker", ["push", `${acrLoginServer}/${img.tag}`], { stdio: "pipe" });
               if (options.apply && img.name !== "sandbox-base") {
                 const digest = dockerPushDigest(`${pushed.stdout}\n${pushed.stderr}`);
@@ -371,6 +386,7 @@ export function pushCommand(): Command {
               }
               break;
             } catch (e: any) {
+              if (e instanceof PrivateRootUpgradeBlocked) throw e;
               if (attempt === 3) throw e;
               spin.text = `Push ${img.tag} failed, retry ${attempt + 1}/3...`;
               await new Promise(r => setTimeout(r, 3000));
@@ -379,6 +395,7 @@ export function pushCommand(): Command {
           spin.succeed(`${img.tag}`);
         } catch (e: any) {
           spin.fail(`${img.tag} — ${e.message?.split("\n")[0] || "failed"}`);
+          if (e instanceof PrivateRootUpgradeBlocked) throw e;
           failures++;
         }
       }

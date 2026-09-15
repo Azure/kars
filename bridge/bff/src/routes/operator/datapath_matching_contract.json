@@ -1,0 +1,177 @@
+{
+  "_copyright": "Copyright (c) Microsoft Corporation. Licensed under the MIT License.",
+  "_contract": "The producer's declared_host compares exact strings, or *. patterns using the literal dot-prefixed suffix at any subdomain depth. It does not implement a general glob or normalize strings. declarations/compute normalize inputs before comparison. declarations permits only Learn and Strict; Open and mixed-case modes remain rejected.",
+  "matching": [
+    {
+      "name": "exact-host",
+      "host": "example.com",
+      "declared_hosts": ["example.com"],
+      "matches": true
+    },
+    {
+      "name": "exact-does-not-authorize-subdomain",
+      "host": "api.example.com",
+      "declared_hosts": ["example.com"],
+      "matches": false
+    },
+    {
+      "name": "wildcard-one-level",
+      "host": "api.example.com",
+      "declared_hosts": ["*.example.com"],
+      "matches": true
+    },
+    {
+      "name": "wildcard-multiple-levels",
+      "host": "v1.api.example.com",
+      "declared_hosts": ["*.example.com"],
+      "matches": true
+    },
+    {
+      "name": "wildcard-denies-apex",
+      "host": "example.com",
+      "declared_hosts": ["*.example.com"],
+      "matches": false
+    },
+    {
+      "name": "wildcard-dot-boundary",
+      "host": "notexample.com",
+      "declared_hosts": ["*.example.com"],
+      "matches": false
+    },
+    {
+      "name": "wildcard-anchored-suffix",
+      "host": "api.example.com.other.test",
+      "declared_hosts": ["*.example.com"],
+      "matches": false
+    },
+    {
+      "name": "nested-wildcard-denies-its-apex",
+      "host": "api.example.com",
+      "declared_hosts": ["*.api.example.com"],
+      "matches": false
+    },
+    {
+      "name": "nested-wildcard-allows-its-subdomain",
+      "host": "v1.api.example.com",
+      "declared_hosts": ["*.api.example.com"],
+      "matches": true
+    },
+    {
+      "name": "bare-star-is-not-allow-all",
+      "host": "example.com",
+      "declared_hosts": ["*"],
+      "matches": false
+    },
+    {
+      "name": "embedded-star-is-not-a-glob",
+      "host": "api.v1.example.com",
+      "declared_hosts": ["api.*.example.com"],
+      "matches": false
+    },
+    {
+      "name": "matcher-does-not-case-fold",
+      "host": "api.example.com",
+      "declared_hosts": ["API.EXAMPLE.COM"],
+      "matches": false
+    },
+    {
+      "name": "matcher-does-not-strip-trailing-dot",
+      "host": "example.com.",
+      "declared_hosts": ["example.com"],
+      "matches": false
+    },
+    {
+      "name": "matching-any-declared-entry",
+      "host": "api.example.com",
+      "declared_hosts": ["unrelated.test", "*.example.com", "api.example.com"],
+      "matches": true
+    }
+  ],
+  "reports": [
+    {
+      "name": "strict-empty-baseline-denies-observed-host",
+      "sandbox": {
+        "namespace": "kars-demo", "sandbox": "demo", "egress_mode": "Strict",
+        "declared_hosts": [], "observed_dns": ["example.com"], "observed_connects": 0,
+        "beyond_declared": ["example.com"], "unused_declared": [], "verdict": "BEYOND-DECLARED"
+      }
+    },
+    {
+      "name": "strict-exact-match",
+      "sandbox": {
+        "namespace": "kars-demo", "sandbox": "demo", "egress_mode": "Strict",
+        "declared_hosts": ["example.com"], "observed_dns": ["example.com"], "observed_connects": 0,
+        "beyond_declared": [], "unused_declared": [], "verdict": "NO-BEYOND-OBSERVED"
+      }
+    },
+    {
+      "name": "strict-exact-root-denies-subdomain",
+      "sandbox": {
+        "namespace": "kars-demo", "sandbox": "demo", "egress_mode": "Strict",
+        "declared_hosts": ["example.com"], "observed_dns": ["api.example.com"], "observed_connects": 0,
+        "beyond_declared": ["api.example.com"], "unused_declared": ["example.com"], "verdict": "BEYOND-DECLARED"
+      }
+    },
+    {
+      "name": "strict-wildcard-subdomains",
+      "sandbox": {
+        "namespace": "kars-demo", "sandbox": "demo", "egress_mode": "Strict",
+        "declared_hosts": ["*.example.com"], "observed_dns": ["api.example.com", "v1.api.example.com"], "observed_connects": 0,
+        "beyond_declared": [], "unused_declared": [], "verdict": "NO-BEYOND-OBSERVED"
+      }
+    },
+    {
+      "name": "strict-wildcard-denies-apex-and-lookalikes",
+      "sandbox": {
+        "namespace": "kars-demo", "sandbox": "demo", "egress_mode": "Strict",
+        "declared_hosts": ["*.example.com"],
+        "observed_dns": ["api.example.com", "api.example.com.other.test", "example.com", "notexample.com"],
+        "observed_connects": 0,
+        "beyond_declared": ["api.example.com.other.test", "example.com", "notexample.com"],
+        "unused_declared": [], "verdict": "BEYOND-DECLARED"
+      }
+    },
+    {
+      "name": "strict-exact-and-wildcard-union",
+      "sandbox": {
+        "namespace": "kars-demo", "sandbox": "demo", "egress_mode": "Strict",
+        "declared_hosts": ["*.example.com", "example.com", "unused.test"],
+        "observed_dns": ["api.example.com", "example.com"], "observed_connects": 0,
+        "beyond_declared": [], "unused_declared": ["unused.test"], "verdict": "NO-BEYOND-OBSERVED"
+      }
+    },
+    {
+      "name": "strict-star-does-not-enable-general-globs",
+      "sandbox": {
+        "namespace": "kars-demo", "sandbox": "demo", "egress_mode": "Strict",
+        "declared_hosts": ["*", "api.*.example.com"], "observed_dns": ["api.v1.example.com"], "observed_connects": 0,
+        "beyond_declared": ["api.v1.example.com"], "unused_declared": ["*", "api.*.example.com"], "verdict": "BEYOND-DECLARED"
+      }
+    },
+    {
+      "name": "learn-retains-complete-beyond-set-without-enforcement-verdict",
+      "sandbox": {
+        "namespace": "kars-demo", "sandbox": "demo", "egress_mode": "Learn",
+        "declared_hosts": ["*.example.com"], "observed_dns": ["api.example.com", "example.com"], "observed_connects": 0,
+        "beyond_declared": ["example.com"], "unused_declared": [], "verdict": "LEARN"
+      }
+    },
+    {
+      "name": "strict-empty-traffic-is-not-compliant",
+      "sandbox": {
+        "namespace": "kars-demo", "sandbox": "demo", "egress_mode": "Strict",
+        "declared_hosts": [], "observed_dns": [], "observed_connects": 0,
+        "beyond_declared": [], "unused_declared": [], "verdict": "NO-TRAFFIC"
+      }
+    },
+    {
+      "name": "strict-tcp-only-does-not-invent-dns-evidence",
+      "sandbox": {
+        "namespace": "kars-demo", "sandbox": "demo", "egress_mode": "Strict",
+        "declared_hosts": [], "observed_dns": [], "observed_connects": 1,
+        "beyond_declared": [], "unused_declared": [], "verdict": "NO-BEYOND-OBSERVED"
+      }
+    }
+  ],
+  "rejected_modes": ["Open", "learn", "strict", "STRICT", "Strict,Learn", ""]
+}

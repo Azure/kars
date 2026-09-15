@@ -21,6 +21,7 @@ import { submitSkillConsoleAction } from "../skill-submit-action";
 import { McpProfiles } from "../mcp-profiles";
 import { McpCatalog } from "../mcp-catalog";
 import { McpServerEditor } from "../mcp-server-editor";
+import { mcpStatus } from "../mcp-status";
 import { Icon } from "@/components/icon";
 import type { McpServer, Options, ProfileSummary, SkillSummary } from "@/lib/types";
 
@@ -162,40 +163,47 @@ export default async function CapabilitiesPage() {
           />
         ) : (
           <ul className="space-y-2">
-            {mcp.map((m) => (
-              <li
-                key={m.name}
-                className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm"
-              >
-                <div className="flex items-center justify-between gap-3">
-                  <span className="flex items-center gap-1.5">
-                    <Icon name="plug" size={13} />
-                    <span className="font-medium">{m.name}</span>
-                  </span>
-                  <div className="flex items-center gap-2">
-                    <Badge tone={m.phase === "Ready" ? "ok" : m.phase === "Degraded" ? "danger" : "warn"} dot>
-                      {m.phase ?? "Pending"}
-                    </Badge>
-                    <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] text-foreground-muted">
-                      {m.mode ?? (m.spec.managed ? "Managed" : "External")}
+            {mcp.map((m) => {
+              const readiness = mcpStatus(m);
+              return (
+                <li
+                  key={`${m.namespace}/${m.name}`}
+                  className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm"
+                >
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="flex items-center gap-1.5">
+                      <Icon name="plug" size={13} />
+                      <span className="font-medium">{m.name}</span>
                     </span>
+                    <div className="flex items-center gap-2">
+                      <Badge tone={readiness.tone} dot>
+                        {readiness.label}
+                      </Badge>
+                      <span className="rounded-full border border-border px-1.5 py-0.5 text-[10px] text-foreground-muted">
+                        {m.mode ?? (m.spec.managed ? "Managed" : "External")}
+                      </span>
+                    </div>
                   </div>
-                </div>
-                <p className="mt-1 truncate font-mono text-xs text-foreground-muted">
-                  {m.workload_ref ? `workload ${m.workload_ref}` : (m.endpoint ?? m.url ?? "endpoint pending")}
-                </p>
-                {m.discovered_tools.length > 0 && (
-                  <p className="mt-1 text-[11px] text-foreground-muted">
-                    {m.discovered_tools.length} tools verified
-                    {m.tool_schema_digest ? ` · ${m.tool_schema_digest.slice(0, 19)}…` : ""}
+                  <p className="mt-1 truncate font-mono text-xs text-foreground-muted">
+                    {m.workload_ref ? `workload reference ${m.workload_ref}` : (m.endpoint ?? m.url ?? "endpoint pending")}
                   </p>
-                )}
-                <div className="mt-2 flex items-center gap-3">
-                  <McpServerEditor initialName={m.name} initialSpec={m.spec} />
-                  <DeleteResource kind="McpServer" name={m.name} label="MCP server" />
-                </div>
-              </li>
-            ))}
+                  <p className="mt-1 text-xs text-foreground-muted">
+                    {readiness.reason && <span className="font-medium">{readiness.reason}: </span>}
+                    {readiness.detail}
+                  </p>
+                  {readiness.ready && m.discovered_tools.length > 0 && (
+                    <p className="mt-1 text-[11px] text-foreground-muted">
+                      {m.discovered_tools.length} tools verified
+                      {m.tool_schema_digest ? ` · ${m.tool_schema_digest.slice(0, 19)}…` : ""}
+                    </p>
+                  )}
+                  <div className="mt-2 flex items-center gap-3">
+                    <McpServerEditor initialName={m.name} initialSpec={m.spec} />
+                    <DeleteResource kind="McpServer" name={m.name} label="MCP server" />
+                  </div>
+                </li>
+              );
+            })}
           </ul>
         )}
         {/* Operator-curated MCP profiles — vetted bundles users pick as a set. */}

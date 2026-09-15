@@ -59,7 +59,10 @@ export interface CreateRole { name: string; system_prompt?: string; runtime?: st
 // token 404s on the Copilot exchange). The token is stored server-side; the
 // browser only ever sees the user code + the discovered models.
 export interface CopilotLoginStart { device_code: string; user_code: string; verification_uri: string; interval: number; expires_in: number }
-export interface CopilotLoginPoll { status: "pending" | "authorized"; models?: import("./types").DiscoveredModel[] }
+export type CopilotPendingReason = "authorization_pending" | "slow_down";
+export type CopilotLoginPoll =
+  | { status: "pending"; interval?: number; reason?: CopilotPendingReason }
+  | { status: "authorized"; models?: import("./types").DiscoveredModel[] };
 
 
 // ─── Local (in-cluster) inference (§ local-inference) ────────────────────────

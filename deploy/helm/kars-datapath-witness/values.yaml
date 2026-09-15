@@ -1,0 +1,24 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Off renders only the operator-intent ConfigMap. No privileged workload or capture.
+enabled: false
+
+aggregator:
+  # REQUIRED when enabled: build the public Dockerfile, publish to your registry,
+  # and supply the reachable multi-arch image by digest. No Kars image is assumed.
+  image: ""
+  imagePullSecrets: []
+  windowSeconds: 15
+  intervalSeconds: 30
+
+# Explicit read scope. Each name is a KarsSandbox in kars-system; its compiled
+# baseline is karssandbox-<name>-egress-allowlist in namespace kars-<name>.
+# Add/remove entries with the same Helm upgrade command.
+sandboxes: []
+
+# Verified upstream v0.53.2 multi-platform image index; not a Kars image.
+gadget:
+  image: ghcr.io/inspektor-gadget/inspektor-gadget@sha256:39ebe601aff064f531aa0630194d9a7bbdb5060de4f290d7ec2fd678f1dd5c10
+  dnsImage: ghcr.io/inspektor-gadget/gadget/trace_dns@sha256:751684c8bf45731ffb412e608d9fb71f9e896debe1d138d524f850cadf54a0f7
+  tcpImage: ghcr.io/inspektor-gadget/gadget/trace_tcp@sha256:b6a4f4563430effa4ddde01898e628f082f2db4b638b18922eb55e4bd4aaab89

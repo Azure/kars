@@ -1,0 +1,147 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- if .Values.enabled }}
+{{- range $name := list "gadget" "aggregator" }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $name }}
+  namespace: kars-witness-gadget
+  labels:
+    {{- include "witness.labels" $ | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" $ | nindent 4 }}
+{{- end }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-datapath-witness-gadget
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+rules:
+  # IG's per-node container and endpoint enrichment. No workload/CRD writes.
+  - apiGroups: [""]
+    resources: ["nodes", "namespaces", "pods"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: [""]
+    resources: ["nodes/proxy"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["services"]
+    verbs: ["list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kars-datapath-witness-gadget
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: kars-datapath-witness-gadget}
+subjects:
+  - {kind: ServiceAccount, name: gadget, namespace: kars-witness-gadget}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: gadget
+  namespace: kars-witness-gadget
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+rules:
+  # The upstream daemon initializes a ConfigMap informer even without headless
+  # instances. It cannot create, change, or delete them in this integration.
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: aggregator
+  namespace: kars-witness-gadget
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+rules:
+  - apiGroups: ["apps"]
+    resources: ["daemonsets"]
+    resourceNames: ["gadget"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["list"]
+  # Pod names rotate. Kubernetes cannot label-scope this verb; this is confined
+  # to the dedicated observer namespace, never all pods or sandbox namespaces.
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["create"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kars-datapath-witness
+  namespace: kars-system
+  labels:
+    {{- include "witness.labels" . | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" . | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["kars-datapath-witness"]
+    verbs: ["get", "update"]
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssandboxes"]
+    resourceNames: {{ .Values.sandboxes | toJson }}
+    verbs: ["get"]
+{{- range $name := .Values.sandboxes }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kars-datapath-witness
+  namespace: kars-{{ $name }}
+  labels:
+    {{- include "witness.labels" $ | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" $ | nindent 4 }}
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["karssandbox-{{ $name }}-egress-allowlist"]
+    verbs: ["get"]
+{{- end }}
+{{- $bindings := list (list "kars-witness-gadget" "gadget" "gadget") (list "kars-witness-gadget" "aggregator" "aggregator") (list "kars-system" "kars-datapath-witness" "aggregator") }}
+{{- range $name := .Values.sandboxes }}
+  {{- $bindings = append $bindings (list (printf "kars-%s" $name) "kars-datapath-witness" "aggregator") }}
+{{- end }}
+{{- range $binding := $bindings }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ index $binding 1 }}
+  namespace: {{ index $binding 0 }}
+  labels:
+    {{- include "witness.labels" $ | nindent 4 }}
+  annotations:
+    {{- include "witness.owner" $ | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ index $binding 1 }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ index $binding 2 }}
+    namespace: kars-witness-gadget
+{{- end }}
+{{- end }}

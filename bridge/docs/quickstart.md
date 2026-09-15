@@ -3,6 +3,10 @@ Licensed under the MIT License. -->
 
 # Private-preview quickstart
 
+For the public `Azure/kars:kars-bridge` branch on an existing cluster, use
+[Public beta installation with Helm](public-beta-helm.md). The local Kind
+preview below is not the remote beta installation procedure.
+
 This quickstart assumes access to the private Bridge images and a compatible
 Kars cluster.
 

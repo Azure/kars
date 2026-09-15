@@ -7,7 +7,7 @@ import { createSubscriptionPinnedExeca } from "./azure-subscription.js";
 export type Execute = typeof import("execa").execa;
 type ClusterContext = Pick<DeploymentContext, "subscription" | "resourceGroup" | "aksCluster">;
 
-function isAksNotFound(error: unknown): boolean {
+export function isAksNotFound(error: unknown): boolean {
   if (!error || typeof error !== "object") return false;
   const detail = error as Record<string, unknown>;
   const text = ["stderr", "stdout", "shortMessage", "message"]

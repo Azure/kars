@@ -1,0 +1,74 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- if or (ne .Release.Name "kars-datapath-witness") (ne .Release.Namespace "kars-system") -}}
+{{- fail "use release kars-datapath-witness in the existing kars-system namespace; this chart must not own a core namespace" -}}
+{{- end -}}
+{{- $root := . -}}
+{{- $ns := "kars-witness-gadget" -}}
+{{/* Guard removals as well as creations. Helm uninstall does not render templates;
+     use the documented guarded enabled=false upgrade before uninstall. */}}
+{{- $targets := list
+  (list "v1" "Namespace" "" $ns)
+  (list "v1" "ConfigMap" "kars-system" "kars-datapath-witness-settings")
+  (list "v1" "ConfigMap" "kars-system" "kars-datapath-witness")
+  (list "v1" "ConfigMap" $ns "gadget")
+  (list "v1" "ConfigMap" $ns "witness-runtime")
+  (list "v1" "ServiceAccount" $ns "gadget")
+  (list "v1" "ServiceAccount" $ns "aggregator")
+  (list "apps/v1" "DaemonSet" $ns "gadget")
+  (list "apps/v1" "Deployment" $ns "aggregator")
+  (list "rbac.authorization.k8s.io/v1" "ClusterRole" "" "kars-datapath-witness-gadget")
+  (list "rbac.authorization.k8s.io/v1" "ClusterRoleBinding" "" "kars-datapath-witness-gadget")
+  (list "rbac.authorization.k8s.io/v1" "Role" $ns "gadget")
+  (list "rbac.authorization.k8s.io/v1" "RoleBinding" $ns "gadget")
+  (list "rbac.authorization.k8s.io/v1" "Role" $ns "aggregator")
+  (list "rbac.authorization.k8s.io/v1" "RoleBinding" $ns "aggregator")
+  (list "rbac.authorization.k8s.io/v1" "Role" "kars-system" "kars-datapath-witness")
+  (list "rbac.authorization.k8s.io/v1" "RoleBinding" "kars-system" "kars-datapath-witness")
+-}}
+{{- range $name := .Values.sandboxes -}}
+  {{- $targets = append $targets (list "rbac.authorization.k8s.io/v1" "Role" (printf "kars-%s" $name) "kars-datapath-witness") -}}
+  {{- $targets = append $targets (list "rbac.authorization.k8s.io/v1" "RoleBinding" (printf "kars-%s" $name) "kars-datapath-witness") -}}
+{{- end -}}
+{{/* Also fence scopes removed from the current values, before Helm deletes them. */}}
+{{- $previous := lookup "v1" "ConfigMap" "kars-system" "kars-datapath-witness-settings" -}}
+{{- if $previous -}}
+  {{- include "witness.assertOwner" (dict "root" $root "object" $previous) -}}
+  {{- $settings := mustFromJson (get (default dict $previous.data) "settings.json") -}}
+  {{- if not (kindIs "slice" $settings.sandboxes) -}}
+    {{- fail "previous witness scope is invalid; operator review required before any removal" -}}
+  {{- end -}}
+  {{- range $name := $settings.sandboxes -}}
+    {{- if not (regexMatch "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$" $name) -}}
+      {{- fail "previous witness sandbox name is invalid; operator review required" -}}
+    {{- end -}}
+    {{- $targets = append $targets (list "rbac.authorization.k8s.io/v1" "Role" (printf "kars-%s" $name) "kars-datapath-witness") -}}
+    {{- $targets = append $targets (list "rbac.authorization.k8s.io/v1" "RoleBinding" (printf "kars-%s" $name) "kars-datapath-witness") -}}
+  {{- end -}}
+{{- end -}}
+{{- range $target := $targets -}}
+  {{- include "witness.assertOwner" (dict "root" $root "object" (lookup (index $target 0) (index $target 1) (index $target 2) (index $target 3))) -}}
+{{- end -}}
+{{- if .Values.enabled -}}
+  {{- range (lookup "apps/v1" "DaemonSet" "" "").items -}}
+    {{- $ig := eq (get (default dict .metadata.labels) "k8s-app") "gadget" -}}
+    {{- range .spec.template.spec.containers -}}
+      {{- if contains "inspektor-gadget" .image -}}{{- $ig = true -}}{{- end -}}
+    {{- end -}}
+    {{- if $ig -}}
+      {{- if or (ne .metadata.namespace $ns) (ne .metadata.name "gadget") -}}
+        {{- fail (printf "existing Inspektor Gadget DaemonSet %s/%s; refusing a second observer; legacy/shared installation requires operator review" .metadata.namespace .metadata.name) -}}
+      {{- end -}}
+      {{- include "witness.assertOwner" (dict "root" $root "object" .) -}}
+    {{- end -}}
+  {{- end -}}
+  {{- range (lookup "apps/v1" "Deployment" "" "").items -}}
+    {{- $legacy := contains "witness-aggregator" .metadata.name -}}
+    {{- range .spec.template.spec.containers -}}
+      {{- if contains "witness-aggregator" .image -}}{{- $legacy = true -}}{{- end -}}
+    {{- end -}}
+    {{- if and $legacy (or (ne .metadata.namespace $ns) (ne .metadata.name "aggregator")) -}}
+      {{- fail (printf "existing witness aggregator %s/%s; operator review required" .metadata.namespace .metadata.name) -}}
+    {{- end -}}
+  {{- end -}}
+{{- end -}}

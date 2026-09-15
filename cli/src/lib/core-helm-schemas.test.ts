@@ -2,12 +2,88 @@
 // Licensed under the MIT License.
 
 import { describe, expect, it } from "vitest";
-import { prepareCoreHelmSchemas, prepareCoreRollbackSchemas, prepareCoreTemplateSchemas } from "./core-helm-schemas.js";
+import { planCoreHelmSchemas, prepareCoreHelmSchemas, prepareCoreRollbackSchemas, prepareCoreTemplateSchemas } from "./core-helm-schemas.js";
 import { crd, admission, schemaFixture } from "./schema-stage.test-support.js";
 import type { SchemaExecute } from "./schema-documents.js";
 import { serverSchemaRenderFlags } from "./schema-helm-safety.js";
 
 describe("shared core schema entrypoints", () => {
+  const root = { apiVersion: "apps/v1", kind: "Deployment", metadata: { name: "kars-controller", namespace: "kars-system" },
+    spec: { template: { spec: { containers: [{ name: "controller", image: "reviewed:latest" }] } } } };
+  const protectedNamespace = { kind: "Namespace", metadata: { name: "kars-system", uid: "root-ns", resourceVersion: "1",
+    annotations: { "kars.azure.com/private-root-retirement": '{"version":2}' } } };
+
+  it.each(["helm", "template", "rollback"])("refuses controller-affecting %s before any schema write", async mode => {
+    const f = schemaFixture([crd(), admission(), root]);
+    f.objects.set("namespace/kars-system", protectedNamespace);
+    f.history.push({ revision: 2, status: "deployed" });
+    const operation = mode === "helm"
+      ? prepareCoreHelmSchemas(f.execute, ["upgrade", "kars", "chart", "-n", "kars-system"])
+      : mode === "template"
+        ? prepareCoreTemplateSchemas(f.execute, [crd(), root].map(object => JSON.stringify(object)).join("\n---\n"), f.owner)
+        : prepareCoreRollbackSchemas(f.execute, "kars", "kars-system");
+    await expect(operation).rejects.toThrow("KARS_PRIVATE_ROOT_UPGRADE_BLOCKED");
+    expect(f.writes).toEqual([]);
+    expect(f.requests.some(request => ["create", "apply", "patch", "delete", "rollback", "upgrade"].includes(request.args[0]!))).toBe(false);
+  });
+
+  it("allows a read-only schema plan but rechecks the root when executing that plan", async () => {
+    const f = schemaFixture([crd(), admission(), root]);
+    const apply = await planCoreHelmSchemas(f.execute, ["upgrade", "kars", "chart", "-n", "kars-system"]);
+    expect(f.writes).toEqual([]);
+    f.objects.set("namespace/kars-system", protectedNamespace);
+    await expect(apply()).rejects.toThrow("KARS_PRIVATE_ROOT_UPGRADE_BLOCKED");
+    expect(f.writes).toEqual([]);
+  });
+
+  it.each([true, false])("preserves protected-root schema verification only for checkOnly=%s", async checkOnly => {
+    const f = schemaFixture([crd(), admission(), root]);
+    f.install(crd());
+    f.objects.set("namespace/kars-system", protectedNamespace);
+    const result = prepareCoreHelmSchemas(f.execute, ["upgrade", "kars", "chart", "-n", "kars-system"], { checkOnly });
+    if (checkOnly) {
+      await expect(result).resolves.toEqual({ schemas: 1, published: true });
+      expect(f.requests.filter(request => request.file === "helm" && request.args[0] === "template")).toHaveLength(2);
+      expect(f.requests.some(request => request.args.includes("/openapi/v3"))).toBe(true);
+    } else {
+      await expect(result).rejects.toThrow("KARS_PRIVATE_ROOT_UPGRADE_BLOCKED");
+    }
+    expect(f.writes).toEqual([]);
+    expect(f.requests.some(request => ["create", "apply", "patch", "delete", "rollback", "upgrade"].includes(request.args[0]!))).toBe(false);
+  });
+
+  it("still rejects an unstaged schema during protected-root read-only verification without writing", async () => {
+    const f = schemaFixture([crd(), admission(), root]);
+    f.objects.set("namespace/kars-system", protectedNamespace);
+    await expect(prepareCoreHelmSchemas(f.execute, ["upgrade", "kars", "chart", "-n", "kars-system"], { checkOnly: true }))
+      .rejects.toThrow();
+    expect(f.writes).toEqual([]);
+    expect(f.requests.some(request => request.args[0] === "create" || request.args[0] === "apply")).toBe(false);
+  });
+
+  it("also refuses a Helm plan that would remove the protected controller", async () => {
+    const f = schemaFixture([crd(), admission()]);
+    f.objects.set("namespace/kars-system", protectedNamespace);
+    const execute: SchemaExecute = (file, args, options) => file === "helm" && args[0] === "get" && args[1] === "manifest"
+      ? Promise.resolve({ stdout: [crd(), admission(), root].map(object => JSON.stringify(object)).join("\n---\n") })
+      : f.execute(file, args, options);
+    await expect(prepareCoreHelmSchemas(execute, ["upgrade", "kars", "chart", "-n", "kars-system"]))
+      .rejects.toThrow("KARS_PRIVATE_ROOT_UPGRADE_BLOCKED");
+    expect(f.writes).toEqual([]);
+  });
+
+  it("preserves bridge-only apply and its arguments without consulting a root", async () => {
+    const bridge = { ...root, metadata: { name: "kars-bridge-bff", namespace: "bridge" } };
+    const f = schemaFixture([crd(), admission(), bridge]);
+    f.objects.set("namespace/kars-system", protectedNamespace);
+    const args = ["upgrade", "kars", "chart", "-n", "kars-system", "--reuse-values", "--set-string", "bridge.image=reviewed"];
+    await prepareCoreHelmSchemas(f.execute, args);
+    await f.execute("helm", args, { stdio: "pipe" });
+    expect(f.requests.at(-1)!.args).toEqual(args);
+    expect(f.writes).toHaveLength(1);
+    expect(f.requests.some(request => request.args[0] === "get" && request.args[1] === "namespace")).toBe(false);
+  });
+
   it("prepares a fresh Helm installation before policy installation, with matching release/context and values", async () => {
     const f = schemaFixture();
     const args = ["upgrade", "--install", "kars", "/exact/chart", "--namespace", "kars-system",

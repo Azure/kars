@@ -11,7 +11,7 @@ import { applyReviewedGrant } from "../commands/credential-grants.js";
 import { continuityFixture, privateAuthoritySnapshot } from "./private-activation-fixtures.js";
 import { canonical, readSecretMetadata, PRIVATE_PREFIX as P, type Execute } from "./private-activation.js";
 import { captureGuardRetirement, refreshGuardRetirement } from "./private-activation-guard-retirement.js";
-import { captureWriterSettlement, observeWriterSettlement } from "./private-activation-writer-settle.js";
+import { captureWriterSettlement, observeWriterSettlement, settleWriterRetirement } from "./private-activation-writer-settle.js";
 
 const RESOURCE = "karscredentialgrants.kars.azure.com";
 const C = "kars.azure.com/credential-";
@@ -310,7 +310,7 @@ describe("late runtime authority across selected writer retirement", () => {
     const { f, review, settlement } = await quiesced();
     await observeWriterSettlement(f.execute, review.spec.privateActivation, settlement);
     f.restore();
-    f.deployment.metadata.annotations[REVISION] = "1";
+    f.deployment.metadata.annotations[REVISION] = "4";
     await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement))
       .rejects.toThrow("Unreviewed template or controller pause/restore generation changed");
     const prefix = "KARS_PRIVATE_WRITER_TRANSITION ";
@@ -329,6 +329,62 @@ describe("late runtime authority across selected writer retirement", () => {
     expect(lines[0]).not.toContain(data.SLACK_BOT_TOKEN);
     expect(f.calls.every(args => args[0] === "get")).toBe(true);
     expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+  });
+
+  it.each([false, true])("awaits the exact rollout revision with current observedGeneration=%s", async observed => {
+    const { f, review, settlement } = await quiesced();
+    await observeWriterSettlement(f.execute, review.spec.privateActivation, settlement);
+    f.restore();
+    f.deployment.metadata.annotations[REVISION] = "1";
+    f.deployment.status.observedGeneration = f.deployment.metadata.generation - Number(!observed);
+    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(false);
+    expect(settlement.runtimes[0]!.restored).toBeUndefined();
+    expect(f.grant().spec.writers).toEqual([]);
+    expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+
+    f.deployment.metadata.annotations[REVISION] = "2";
+    f.deployment.metadata.resourceVersion = String(Number(f.deployment.metadata.resourceVersion) + 1);
+    f.deployment.status.observedGeneration = f.deployment.metadata.generation;
+    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement)).resolves.toBe(true);
+  });
+
+  it("keeps the original deadline and publishes no activation if the rollout revision never advances", async () => {
+    const { f, review, settlement } = await quiesced();
+    await observeWriterSettlement(f.execute, review.spec.privateActivation, settlement);
+    f.restore();
+    f.deployment.metadata.annotations[REVISION] = "1";
+    settlement.deadline = Date.now() - 1;
+    await expect(settleWriterRetirement(f.execute, review.spec.privateActivation, settlement))
+      .rejects.toThrow("no stale authority or new activation was published");
+    expect(settlement.runtimes[0]!.restored).toBeUndefined();
+    expect(f.grant().spec.writers).toEqual([]);
+    expect(f.namespace.metadata.annotations[`${P}root-retirement`]).toBeUndefined();
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
+  });
+
+  it.each(["0", "3", "invalid", "9007199254740992", undefined])(
+    "never treats an unreviewed rollout revision %s as settling", async revision => {
+      const { f, review, settlement } = await quiesced();
+      await observeWriterSettlement(f.execute, review.spec.privateActivation, settlement);
+      f.restore();
+      f.deployment.metadata.annotations[REVISION] = revision;
+      await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement))
+        .rejects.toThrow("Unreviewed template or controller pause/restore generation changed");
+      expect(settlement.runtimes[0]!.restored).toBeUndefined();
+      expect(f.calls.every(args => args[0] === "get")).toBe(true);
+    });
+
+  it("does not hide an unreviewed template behind a pending rollout revision", async () => {
+    const { f, review, settlement } = await quiesced();
+    await observeWriterSettlement(f.execute, review.spec.privateActivation, settlement);
+    f.restore();
+    f.deployment.metadata.annotations[REVISION] = "1";
+    f.deployment.spec.template.spec.containers[0].image = "unreviewed-image";
+    await expect(observeWriterSettlement(f.execute, review.spec.privateActivation, settlement))
+      .rejects.toThrow("Unreviewed template or controller pause/restore generation changed");
+    expect(settlement.runtimes[0]!.restored).toBeUndefined();
+    expect(f.calls.every(args => args[0] === "get")).toBe(true);
   });
 
   it.each([false, true])("handles an owned refill during lineage lookup without accepting template drift=%s", async unreviewed => {

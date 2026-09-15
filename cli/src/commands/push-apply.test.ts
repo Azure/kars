@@ -33,7 +33,7 @@ function getPath(object: Record<string, unknown>, path: string): string {
   return path.split(".").reduce<unknown>((current, key) => (current as Record<string, unknown>)[key], object) as string;
 }
 
-function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "external"; fail?: string; mismatch?: boolean } = {}) {
+function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "external"; fail?: string; mismatch?: boolean; privateRoot?: boolean } = {}) {
   const values: Record<string, unknown> = {
     controller: { image: { repository: "ghcr.io/azure/kars-controller", tag: "v1.0.0", pullPolicy: "IfNotPresent" } },
     inferenceRouter: { image: { repository: "ghcr.io/azure/kars-inference-router", tag: "v1.0.0" } },
@@ -133,6 +133,10 @@ function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "ex
     }
     if (bin === "kubectl" && args[0] === "annotate") materialize(args[2]);
     if (bin === "kubectl" && args[0] === "get") {
+      if (args[1] === "namespace" && options.privateRoot) return { stdout: JSON.stringify({
+        kind: "Namespace", metadata: { name: "kars-system", uid: "root-ns", resourceVersion: "1",
+          annotations: { "kars.azure.com/private-root-retirement": '{"version":1,"phase":"restoring"}' } },
+      }) };
       if (args[1] === "deployment,service") return { stdout: JSON.stringify({ items: meshResources }) };
       if (args[1] === "deployments") return { stdout: JSON.stringify({ items: sandboxes }) };
       if (args[1] === "karssandboxes") return { stdout: JSON.stringify({ items: crs }) };
@@ -147,6 +151,13 @@ function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "ex
 }
 
 describe("selected core push artifacts", () => {
+  it.each(["controller", "router", "sandbox", "runtime-openai-agents", "mcp-everything", "relay"])(
+    "refuses private-root-affecting %s apply before artifacts, schemas or any mutation", async name => {
+      const f = fixture({ privateRoot: true, mesh: name === "relay" ? "helm" : "absent" });
+      await expect(applyPushedImages(f.execute, [pushed(name)], "chart")).rejects.toThrow("KARS_PRIVATE_ROOT_UPGRADE_BLOCKED");
+      expect(f.calls().some(([bin, args]) => bin === "az" || ["upgrade", "patch", "annotate", "rollout"].includes(args[0]))).toBe(false);
+    });
+
   it("still requires SRE authority preflight before resolving or applying valid core artifacts", async () => {
     const f = fixture({ fail: "karssreregistrations.kars.azure.com" });
     await expect(applyPushedImages(f.execute, [pushed("controller")], "chart"))
