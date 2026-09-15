@@ -10,6 +10,7 @@ use serde::Serialize;
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
 
+use super::copilot_transport::{CopilotClient, CopilotEndpoint};
 use super::{require_cluster, upstream};
 
 // ─── Provider onboarding (model providers for missions + envelope gen) ───────
@@ -135,25 +136,16 @@ const COPILOT_INTEGRATION_ID: &str = "vscode-chat";
 /// the JWT so the caller can immediately query the live `/models` catalog with
 /// it (no second exchange).
 pub(crate) async fn copilot_jwt(gh_token: &str) -> Result<String, AppError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-    copilot_jwt_with_client(
-        gh_token,
-        &client,
-        "https://api.github.com/copilot_internal/v2/token",
-    )
-    .await
+    let client = CopilotClient::github().map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    copilot_jwt_with_client(gh_token, &client).await
 }
 
 pub(super) async fn copilot_jwt_with_client(
     gh_token: &str,
-    client: &reqwest::Client,
-    endpoint: &str,
+    client: &CopilotClient,
 ) -> Result<String, AppError> {
     let resp = client
-        .get(endpoint)
+        .request(CopilotEndpoint::Seat)
         .header("Authorization", format!("token {gh_token}"))
         .header("Accept", "application/json")
         .header("User-Agent", "kars-bridge")
@@ -292,20 +284,16 @@ pub(crate) fn parse_copilot_models(body: &serde_json::Value) -> Vec<DiscoveredMo
 
 /// Fetch the live Copilot model catalog for a seat, given its exchanged JWT.
 pub(crate) async fn fetch_copilot_models(jwt: &str) -> Result<Vec<DiscoveredModelDto>, AppError> {
-    let client = reqwest::Client::builder()
-        .timeout(std::time::Duration::from_secs(10))
-        .build()
-        .map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
-    fetch_copilot_models_with_client(jwt, &client, "https://api.githubcopilot.com/models").await
+    let client = CopilotClient::github().map_err(|e| AppError::Internal(anyhow::anyhow!(e)))?;
+    fetch_copilot_models_with_client(jwt, &client).await
 }
 
 pub(super) async fn fetch_copilot_models_with_client(
     jwt: &str,
-    client: &reqwest::Client,
-    endpoint: &str,
+    client: &CopilotClient,
 ) -> Result<Vec<DiscoveredModelDto>, AppError> {
     let resp = client
-        .get(endpoint)
+        .request(CopilotEndpoint::Models)
         .header("Authorization", format!("Bearer {jwt}"))
         .header("Editor-Version", COPILOT_EDITOR_VERSION)
         .header("Copilot-Integration-Id", COPILOT_INTEGRATION_ID)

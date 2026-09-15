@@ -11,6 +11,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use super::additional_providers::{INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET};
+use super::copilot_transport::{CopilotClient, CopilotEndpoint};
 use super::providers::{
     DiscoveredModelDto, copilot_jwt_with_client, fetch_copilot_models_with_client,
     invalidate_copilot_catalog_cache,
@@ -127,32 +128,24 @@ impl IntoResponse for CopilotLoginError {
 }
 
 struct OAuth {
-    client: reqwest::Client,
-    start: String,
-    poll: String,
-    seat: String,
-    models: String,
+    client: CopilotClient,
 }
 
 impl OAuth {
     fn github() -> Result<Self, CopilotLoginError> {
         Ok(Self {
-            client: reqwest::Client::builder()
-                .timeout(std::time::Duration::from_secs(10))
-                .redirect(reqwest::redirect::Policy::none())
-                .build()
-                .map_err(|_| CopilotLoginError::Upstream)?,
-            start: "https://github.com/login/device/code".into(),
-            poll: "https://github.com/login/oauth/access_token".into(),
-            seat: "https://api.github.com/copilot_internal/v2/token".into(),
-            models: "https://api.githubcopilot.com/models".into(),
+            client: CopilotClient::github().map_err(|_| CopilotLoginError::Upstream)?,
         })
     }
 
-    async fn post(&self, endpoint: &str, input: Value) -> Result<Value, CopilotLoginError> {
+    async fn post(
+        &self,
+        endpoint: CopilotEndpoint,
+        input: Value,
+    ) -> Result<Value, CopilotLoginError> {
         let response = self
             .client
-            .post(endpoint)
+            .request(endpoint)
             .header("Accept", "application/json")
             .header("User-Agent", "kars-bridge")
             .json(&input)
@@ -200,7 +193,7 @@ async fn start(cluster: &Cluster, oauth: &OAuth) -> Result<CopilotLoginStart, Co
     preflight(cluster).await?;
     let body = oauth
         .post(
-            &oauth.start,
+            CopilotEndpoint::DeviceCode,
             json!({"client_id": CLIENT_ID, "scope": "read:user"}),
         )
         .await?;
@@ -239,7 +232,7 @@ async fn poll(
     preflight(cluster).await?;
     let body = oauth
         .post(
-            &oauth.poll,
+            CopilotEndpoint::AccessToken,
             json!({
                 "client_id": CLIENT_ID, "device_code": request.device_code,
                 "grant_type": "urn:ietf:params:oauth:grant-type:device_code",
@@ -258,7 +251,7 @@ async fn poll(
         {
             return Err(CopilotLoginError::Malformed);
         }
-        let jwt = copilot_jwt_with_client(token, &oauth.client, &oauth.seat)
+        let jwt = copilot_jwt_with_client(token, &oauth.client)
             .await
             .map_err(|_| CopilotLoginError::SeatUnavailable)?;
         if !opaque(&jwt) {
@@ -271,7 +264,7 @@ async fn poll(
             .await
             .map_err(|_| CopilotLoginError::StorageUnconfirmed)?;
         invalidate_copilot_catalog_cache();
-        let models = fetch_copilot_models_with_client(&jwt, &oauth.client, &oauth.models)
+        let models = fetch_copilot_models_with_client(&jwt, &oauth.client)
             .await
             .unwrap_or_default();
         return Ok(CopilotLoginPoll::Authorized { models });
