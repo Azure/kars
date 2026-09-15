@@ -748,10 +748,14 @@ export function discoverModels(body: { kind: string; endpoint?: string; key?: st
   return requestJson("/api/operator/providers/discover", { method: "POST", body: JSON.stringify(body) });
 }
 export function copilotLoginStart(): Promise<CopilotLoginStart> {
-  return requestJson("/api/operator/providers/copilot/login/start", { method: "POST" });
+  return requestJson("/api/operator/providers/copilot/login/start", {
+    method: "POST", redirect: "manual", signal: AbortSignal.timeout(60_000),
+  });
 }
-export function copilotLoginPoll(device_code: string): Promise<CopilotLoginPoll> {
-  return requestJson("/api/operator/providers/copilot/login/poll", { method: "POST", body: JSON.stringify({ device_code }) });
+export function copilotLoginPoll(device_code: string, interval?: number): Promise<CopilotLoginPoll> {
+  return requestJson("/api/operator/providers/copilot/login/poll", {
+    method: "POST", redirect: "manual", body: JSON.stringify({ device_code, interval }), signal: AbortSignal.timeout(60_000),
+  });
 }
 
 // ─── Additional providers (§ inference-provider-wizard) ─────────────────────
