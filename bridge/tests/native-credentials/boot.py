@@ -40,6 +40,8 @@ def install_core(setup):
             "nodeSelector": {"kubernetes.io/hostname": "bridge-native-worker"},
         },
         "inferenceRouter": {"image": loaded_image("kars-native-router")},
+        # Kind has no Azure Workload Identity mutating webhook.
+        "azure": {"workloadIdentity": {"enabled": False}},
         "observationPrivacyRpc": {"enabled": True},
         "foundry": {"endpoint": "https://native.invalid"},
         "sre": {"enabled": False}, "agentMesh": {"enabled": False},
