@@ -11,6 +11,7 @@ export const copilotErrors = {
   copilot_invalid_response: "The sign-in service returned an invalid response. Polling stopped.",
   copilot_upstream: "GitHub sign-in could not be reached. Polling stopped; check connectivity before trying again.",
   copilot_expired: "The sign-in code expired. A new sign-in is required.",
+  copilot_outcome_unconfirmed: "Sign-in outcome is unconfirmed. The deadline passed while a request was still in flight; the token may have been consumed and credentials may have been stored. Inspect provider state before retrying. Do not repeat approval or start another sign-in until the outcome is checked.",
   copilot_denied: "Sign-in was cancelled on GitHub.",
   copilot_rate_limited: "GitHub rate-limited sign-in. Polling stopped; wait before trying again.",
   copilot_seat_unavailable: "Copilot eligibility could not be verified. Check the account's Copilot seat and Chat access before trying again.",
@@ -152,20 +153,24 @@ export function createCopilotLoginController(
         const expiresAt = startedAt + flow.expires_in * 1000;
         if (clock.now() >= expiresAt) { fail(copilotErrors.copilot_expired); return; }
         let interval = flow.interval;
+        let pollInFlight = false;
+        const expire = () => fail(pollInFlight
+          ? copilotErrors.copilot_outcome_unconfirmed : copilotErrors.copilot_expired);
         clock.clearTimeout(expiryTimer!);
         expiryTimer = clock.setTimeout(() => {
-          if (current()) fail(copilotErrors.copilot_expired);
+          if (current()) expire();
         }, expiresAt - clock.now());
         ui.starting(false);
         ui.flow(flow);
         ui.pending(undefined);
         const tick = async () => {
           if (!current()) return;
-          if (clock.now() >= expiresAt) { fail(copilotErrors.copilot_expired); return; }
+          if (clock.now() >= expiresAt) { expire(); return; }
           try {
+            pollInFlight = true;
             const result = parseCopilotPoll(await service.poll(flow.device_code, interval));
             if (!current()) return;
-            if (clock.now() >= expiresAt) { fail(copilotErrors.copilot_expired); return; }
+            if (clock.now() >= expiresAt) { expire(); return; }
             if (result.status === "error") { fail(result.error); return; }
             if (result.status === "authorized") {
               invalidate();
@@ -178,7 +183,12 @@ export function createCopilotLoginController(
             ui.pending(result.reason);
             schedule();
           } catch {
-            if (current()) fail(copilotErrors.transport);
+            if (current()) {
+              if (clock.now() >= expiresAt) expire();
+              else fail(copilotErrors.transport);
+            }
+          } finally {
+            pollInFlight = false;
           }
         };
         const schedule = () => {
