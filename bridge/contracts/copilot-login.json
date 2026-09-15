@@ -1,0 +1,26 @@
+{
+  "start": {
+    "device_code": "synthetic-device-not-valid-at-github",
+    "user_code": "TEST-ONLY",
+    "verification_uri": "https://github.com/login/device",
+    "interval": 5,
+    "expires_in": 40
+  },
+  "pending_legacy": { "status": "pending" },
+  "pending": { "status": "pending", "interval": 5, "reason": "authorization_pending" },
+  "slow_down_1": { "status": "pending", "interval": 10, "reason": "slow_down" },
+  "slow_down_2": { "status": "pending", "interval": 15, "reason": "slow_down" },
+  "authorized": { "status": "authorized", "models": [] },
+  "not_ready": {
+    "error": {
+      "code": "copilot_not_ready",
+      "message": "Copilot credential storage is not ready. An operator must repair the workspace credential grant and enrolled provider store before sign-in. No GitHub token was requested."
+    }
+  },
+  "storage_unconfirmed": {
+    "error": {
+      "code": "copilot_storage_unconfirmed",
+      "message": "GitHub approved sign-in, but credential storage could not be confirmed. An operator must check the provider store and grant. Do not repeat approval: the token may already have been consumed and a new sign-in may be required."
+    }
+  }
+}

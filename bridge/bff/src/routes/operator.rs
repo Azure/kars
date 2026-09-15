@@ -12,6 +12,7 @@
 
 mod additional_providers;
 mod audit;
+mod copilot_login;
 mod diagnostics;
 mod evals;
 mod local_inference;
@@ -22,6 +23,7 @@ mod skills_profiles;
 
 pub use additional_providers::*;
 pub use audit::*;
+pub use copilot_login::*;
 pub use diagnostics::*;
 pub use evals::*;
 pub use local_inference::*;
