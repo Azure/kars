@@ -27,12 +27,16 @@ fn cm(name: &str, key: &str, value: Value) -> ConfigMap {
 }
 
 fn settings(enabled: bool) -> ConfigMap {
+    settings_for(enabled, &["demo"])
+}
+
+fn settings_for(enabled: bool, sandboxes: &[&str]) -> ConfigMap {
     cm(
         "kars-datapath-witness-settings",
         "settings.json",
         json!({
             "schema_version":1,"enabled":enabled,"release_revision":2,
-            "config_digest":"a".repeat(64),"sandboxes":["demo"]
+            "config_digest":"a".repeat(64),"sandboxes":sandboxes
         }),
     )
 }
@@ -57,6 +61,160 @@ fn classify_report(value: Value) -> DatapathWitnessDto {
         Ok(Some(cm("kars-datapath-witness", "witness.json", value))),
         now(),
     )
+}
+
+fn assert_invalid_without_evidence(dto: DatapathWitnessDto) {
+    assert_eq!(dto.state, "invalid");
+    assert!(!dto.enabled);
+    assert!(dto.sandboxes.is_empty());
+}
+
+#[derive(Deserialize)]
+struct HostMatchCase {
+    name: String,
+    host: String,
+    declared_hosts: Vec<String>,
+    matches: bool,
+}
+
+#[derive(Deserialize)]
+struct ReportCase {
+    name: String,
+    sandbox: DatapathWitnessSandbox,
+}
+
+#[derive(Deserialize)]
+struct MatchingContract {
+    matching: Vec<HostMatchCase>,
+    reports: Vec<ReportCase>,
+    rejected_modes: Vec<String>,
+}
+
+fn matching_contract() -> MatchingContract {
+    serde_json::from_str(include_str!("datapath_matching_contract.json"))
+        .expect("valid shared host-matching fixture")
+}
+
+fn report_for(sandbox: &DatapathWitnessSandbox) -> Value {
+    let count = sandbox.observed_dns.len() as u64 + sandbox.observed_connects;
+    let mut value = report();
+    value["event_count"] = json!(count);
+    value["status"] = json!(if count == 0 { "empty" } else { "observed" });
+    value["nodes_with_events"] = if count == 0 {
+        json!([])
+    } else {
+        json!(["node-1"])
+    };
+    value["sandboxes"] = json!([sandbox]);
+    value
+}
+
+#[test]
+fn witness_host_matching_contract_agrees_with_actual_producer() {
+    for case in matching_contract().matching {
+        assert_eq!(
+            declared_host(&case.host, &case.declared_hosts),
+            case.matches,
+            "{}",
+            case.name
+        );
+    }
+    let Ok(output) = std::process::Command::new("python3")
+        .arg(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/routes/operator/datapath_matching_contract_test.py"
+        ))
+        .env("PYTHONDONTWRITEBYTECODE", "1")
+        .output()
+    else {
+        panic!("Python 3 must be available for the shared producer contract regression");
+    };
+    assert!(
+        output.status.success(),
+        "the actual producer must satisfy the shared matching fixture"
+    );
+}
+
+#[test]
+fn witness_exact_and_wildcard_sets_must_be_complete_in_every_supported_mode() {
+    for case in matching_contract().reports {
+        let value = report_for(&case.sandbox);
+        let dto = classify_report(value.clone());
+        let observed = !case.sandbox.observed_dns.is_empty() || case.sandbox.observed_connects > 0;
+        assert_eq!(
+            dto.state,
+            if observed { "observed" } else { "empty" },
+            "{}",
+            case.name
+        );
+        assert_eq!(dto.enabled, observed, "{}", case.name);
+        assert_eq!(dto.sandboxes.len(), 1, "{}", case.name);
+        assert_eq!(
+            dto.sandboxes[0].beyond_declared, case.sandbox.beyond_declared,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            dto.sandboxes[0].verdict, case.sandbox.verdict,
+            "{}",
+            case.name
+        );
+        for index in 0..case.sandbox.beyond_declared.len() {
+            let mut incomplete = value.clone();
+            incomplete["sandboxes"][0]["beyond_declared"]
+                .as_array_mut()
+                .unwrap()
+                .remove(index);
+            // Even retaining the correct verdict cannot excuse omitted hosts.
+            assert_invalid_without_evidence(classify_report(incomplete.clone()));
+            incomplete["sandboxes"][0]["verdict"] = json!("NO-BEYOND-OBSERVED");
+            assert_invalid_without_evidence(classify_report(incomplete));
+        }
+        if case.sandbox.beyond_declared.len() > 1 {
+            let mut reordered = value;
+            reordered["sandboxes"][0]["beyond_declared"]
+                .as_array_mut()
+                .unwrap()
+                .reverse();
+            assert_eq!(classify_report(reordered).state, "observed");
+        }
+    }
+}
+
+#[test]
+fn witness_mixed_modes_preserve_learn_semantics_and_reject_open_without_partial_evidence() {
+    let mut strict = report()["sandboxes"][0].clone();
+    strict["sandbox"] = json!("strict");
+    strict["namespace"] = json!("kars-strict");
+    let mut learn = strict.clone();
+    learn["sandbox"] = json!("learn");
+    learn["namespace"] = json!("kars-learn");
+    learn["egress_mode"] = json!("Learn");
+    learn["verdict"] = json!("LEARN");
+    let mut mixed = report();
+    mixed["sandboxes"] = json!([strict, learn]);
+    mixed["event_count"] = json!(2);
+    let classify_mixed = |value| {
+        classify(
+            Ok(Some(settings_for(true, &["strict", "learn"]))),
+            Ok(Some(cm("kars-datapath-witness", "witness.json", value))),
+            now(),
+        )
+    };
+    let dto = classify_mixed(mixed.clone());
+    assert_eq!(dto.state, "observed");
+    assert!(dto.enabled);
+    assert_eq!(dto.sandboxes.len(), 2);
+    assert_eq!(dto.sandboxes[0].verdict, "BEYOND-DECLARED");
+    assert_eq!(dto.sandboxes[1].verdict, "LEARN");
+    let mut omitted_learn = mixed.clone();
+    omitted_learn["sandboxes"][1]["beyond_declared"] = json!([]);
+    assert_invalid_without_evidence(classify_mixed(omitted_learn));
+    for mode in matching_contract().rejected_modes {
+        let mut unsupported = mixed.clone();
+        unsupported["sandboxes"][1]["egress_mode"] = json!(mode);
+        assert_invalid_without_evidence(classify_mixed(unsupported));
+    }
 }
 
 #[test]
@@ -98,6 +256,12 @@ fn witness_fresh_and_empty_samples_never_claim_complete_coverage() {
 
 #[test]
 fn witness_malformed_stale_future_and_identity_fail_closed() {
+    // Reviewer counterexample: Strict deny-all plus observed DNS cannot be a
+    // fresh negative merely because both reported verdict and beyond set lie.
+    let mut omitted = report();
+    omitted["sandboxes"][0]["beyond_declared"] = json!([]);
+    omitted["sandboxes"][0]["verdict"] = json!("NO-BEYOND-OBSERVED");
+    assert_invalid_without_evidence(classify_report(omitted));
     for (field, value) in [
         ("generated_at", json!("invalid")),
         ("generated_at", json!("2026-09-15T15:01:01Z")),
