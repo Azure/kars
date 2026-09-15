@@ -11,8 +11,14 @@ selected for migration.
 
 Private activation compares each live consumer against its reviewed owner
 template. Kubernetes' two standard, admission-injected 300-second
-`NoExecute` tolerations do not make that execution different. Explicit
-tolerations, nonstandard durations, duplicate entries and every credential,
+`NoExecute` tolerations do not make that execution different. The exact
+`node.kubernetes.io/memory-pressure` `Exists`/`NoSchedule` toleration is also
+recognized when the reviewed template requests or limits positive CPU or memory,
+including init containers or supported Pod-level resources. This shared QoS
+rule applies to non-root consumers as well as the root; it does not grant
+non-root consumers the AKS root-only admission fallback. Zero or unrelated
+resource requests, changed tolerations, duplicate entries, explicit wildcard
+policies and every credential,
 container and host-authority change still require exact review; custom
 admission mutations are not silently ignored.
 
