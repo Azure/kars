@@ -26,7 +26,7 @@ const GROUPS = [
     items: [
       { href: "/console/policies", label: "Policies", exact: false, hint: "Tools, budgets, egress" },
       { href: "/console/approvals", label: "Approvals", exact: false, hint: "Egress grants" },
-      { href: "/console/datapath", label: "Datapath witness", exact: false, hint: "eBPF egress attestation" },
+      { href: "/console/datapath", label: "Datapath witness", exact: false, hint: "Partial eBPF observations" },
       { href: "/console/evals", label: "Safety evals", exact: false, hint: "Conformance / jailbreak drift" },
       { href: "/console/audit", label: "Auditor view", exact: false, hint: "Receipts & evidence" },
       { href: "/console/sre-actions", label: "SRE Actions", exact: false, hint: "kars-sre remediation proposals" },

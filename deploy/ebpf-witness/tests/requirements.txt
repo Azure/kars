@@ -1,0 +1,4 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+# Test-only Helm manifest parser; the aggregator uses only the Python stdlib.
+PyYAML==6.0.3
