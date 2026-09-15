@@ -72,7 +72,10 @@ sign-in. Other providers and credential grant/UID/CAS checks are unchanged.
 
 The HTTP fixture override is compiled only under `cfg(test)`, accepts only a
 literal loopback IP and nonzero port, disables proxies, and still rejects
-redirects. TLS regressions exercise the production HTTPS/redirect policy with
+redirects. Its URLs use the fixed loopback hostname `localhost`; the validated
+loopback socket is pinned in reqwest's DNS configuration when the fixture
+client is built, never interpolated into request URLs from the OAuth client.
+TLS regressions exercise the production HTTPS/redirect policy with
 test-only DNS overrides and an explicitly trusted, freshly generated test
 certificate. They require the existing OpenSSL executable; private keys stay
 in memory, and no test credentials are sent to real GitHub endpoints.
@@ -98,6 +101,26 @@ gh api --method GET -H 'Accept: application/sarif+json' \
   --jq '.runs[].results[] | {ruleId, locations, codeFlows}'
 ```
 
+At head `e6908eb5`, those three alerts are fixed, but check `104563393079`
+reports [alert 833](https://github.com/Azure/kars/security/code-scanning/833)
+at the test-only HTTP URL formatting expression in `copilot_transport.rs:65`.
+Its four SARIF paths start at the `oauth` variable, traverse the client and its
+loopback-address field, and end at reqwest's URL argument. No token, device
+code or response body enters that expression: it combines a validated
+loopback socket with a fixed operation path, and is excluded from production
+by `cfg(test)`. This is a URL-dataflow false positive, not a logging/panic sink.
+The clarification separates fixture socket routing from fixed request URLs;
+it does not rename sensitive identifiers or suppress analysis.
+
+The exact evidence is SARIF analysis `1782296326` on merge commit
+`3770061a827a2bd4cd185bc830ad49ec4de3673f`. CodeQL CLI `2.27.0` used
+`codeql/rust-queries` `0.1.42` and `codeql/rust-all` `0.2.21`, both at source
+`c6baf479093fafc81d4655dc2014dc583360308e`. That version's
+`SensitiveVariableAccess` applies the shared `oauth` name heuristic; its
+reqwest model marks `Client::request`'s URL argument as a `request-url` sink.
+The same read-only SARIF command above with analysis ID `1782296326` reproduces
+all four paths. The successful analysis workflow is not alert closure.
+
 The additive poll contract is `{status:"pending", interval, reason}`, where
 `reason` is `authorization_pending` or `slow_down`; the next request carries the
 current `interval`. Older callers can omit the request interval (default five
@@ -122,10 +145,12 @@ node --test tests/*.test.mjs
 cargo test --locked routes::operator::copilot
 ```
 
-Bridge CI requires all eight original login regressions plus the seven added
-transport/login regressions to appear in `cargo test -- --list`. Rust execution,
-clippy and a fresh hosted CodeQL run are still required before publishing this
-transport repair; formatting/source checks do not substitute for those gates.
+Bridge CI requires all fifteen previously registered Copilot regressions plus
+the fixed-URL/pinned-socket fixture regression to appear in `cargo test -- --list`.
+The fifteen tests and locked Rust/clippy gates passed on `e6908eb5`; that result
+does not qualify the subsequent fixture-boundary clarification. Fresh hosted
+Rust/clippy and CodeQL results are required for the new source, with all existing
+guards preserved; formatting/source checks do not substitute for those gates.
 
 `npm run lint` is configured but currently reports a known private-preview
 React-rule backlog. It is not a green release gate yet.
