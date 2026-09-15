@@ -431,6 +431,14 @@ retained, never invented. Stable missing witnesses or authority drift still
 block enrollment. A final recheck after lineage inspection prevents reporting
 settlement from an outdated snapshot. No mutation or stale write is retried.
 
+A Kubernetes `Recreate` rollout can report the new `observedGeneration` before
+creating its new ReplicaSet and updating `deployment.kubernetes.io/revision`.
+The exact restored template with the captured old rollout revision remains
+pending within the same deadline; it cannot complete retirement even if other
+readiness fields are current. Completion still requires the exact next rollout
+revision and all identity, refill, lineage and retirement witnesses. Missing,
+malformed or unexpected revisions, and unrelated template changes, still fail.
+
 If restoration validation still refuses the observed state, the CLI emits
 `KARS_PRIVATE_WRITER_TRANSITION` with fixed booleans distinguishing generation,
 projection/revision, replica, metadata, executable-template and witness
