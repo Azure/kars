@@ -217,6 +217,15 @@ controller, ServiceAccount, MCP spec or readiness override was needed. This
 recovery does not qualify general node registry access, the other unresolved
 installation prerequisites or the complete Home-to-Team journey.
 
+In a later, separately authorized model-only operation, the GPT-OSS
+ModelDeployment was removed through AI Runway's normal provider lifecycle to
+free the H100 for other work. Its serving workloads were removed, GPU memory
+usage was zero and no compute processes remained. The existing nodes, pools,
+drivers and operators were retained. The local GPT-OSS inference path is
+therefore intentionally unavailable; subsequent beta acceptance must use an
+available, explicitly configured inference provider rather than recreate the
+removed model or claim the old local path still works.
+
 The destructive cleanup of old, explicitly disposable lab Teams and duplicate
 Helm releases was specific to that reset. It is not a customer upgrade procedure,
 and no session-local cleanup helper is a product installation prerequisite.
