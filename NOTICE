@@ -70,6 +70,21 @@ Direct dependencies — see each package's `package.json`:
 | Python 3.12 (runtime in sandbox-base) | PSF License |
 | Various pip/npm wheels installed inside sandbox-base | per-package, see vendored manifests in sandbox-images/openclaw/ |
 
+## Optional Inspektor Gadget datapath witness
+
+The optional `deploy/helm/kars-datapath-witness` add-on references Inspektor
+Gadget v0.53.2 under Apache License 2.0. Its Gadget DaemonSet is adapted from
+the upstream chart and retains the original ownership notice. Kars-specific
+integration changes are MIT; they do not relicense the upstream material.
+The unmodified upstream license is retained at
+`deploy/helm/kars-datapath-witness/LICENSE-IG`. Source, adaptation and binary
+redistribution details are recorded in that chart's `THIRD_PARTY_NOTICES.md`.
+
+The separately built aggregator downloads the official, checksum-verified
+`kubectl-gadget` client. Its Apache-2.0 license and upstream provenance must
+remain with redistributed images; other bundled components retain their
+respective licenses.
+
 ## Vendored TypeScript SDK build
 
 `vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-bdea1097.tgz`
