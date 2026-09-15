@@ -84,6 +84,16 @@ TRANSITION_FIELDS = (
     ("metadataMatches", "metadata"), ("specMatches", "spec"),
     ("templateMatches", "template"), ("replicasMatches", "replicas"),
 )
+POD_EXECUTION_PREFIX = "KARS_PRIVATE_POD_EXECUTION "
+POD_EXECUTION_FIELDS = (
+    ("rootNamespaceMatches", "root-namespace"), ("rootDeploymentMatches", "root-deployment"),
+    ("imagesMatch", "images"), ("environmentsMatch", "environment"),
+    ("commandsMatch", "commands"), ("mountsMatch", "mounts"),
+    ("containerSecurityMatches", "container-security"), ("containerResourcesMatch", "container-resources"),
+    ("otherContainerFieldsMatch", "other-container"), ("initContainersMatch", "init-containers"),
+    ("volumesMatch", "volumes"), ("tolerationsMatch", "tolerations"),
+    ("serviceAccountMatch", "service-account"), ("otherPodSpecMatch", "other-pod-spec"),
+)
 COMMAND_PREFIX = "KARS_PRIVATE_COMMAND_FAILURE "
 COMMAND_PHASES = {"Unscoped", "Review", "Pausing", "Retired", "Rotating", "Restoring", "Qualified"}
 COMMAND_OPERATIONS = {"get", "patch", "create", "auth", "other"}
@@ -158,6 +168,10 @@ def transition_checks(stderr):
     return _checks(stderr, TRANSITION_PREFIX, TRANSITION_FIELDS)
 
 
+def pod_execution_checks(stderr):
+    return _checks(stderr, POD_EXECUTION_PREFIX, POD_EXECUTION_FIELDS)
+
+
 def command_facts(stderr):
     prefixes = (COMMAND_PREFIX, "PrivateCommandFailure: " + COMMAND_PREFIX)
     payloads = [line[len(prefix):] for line in stderr.splitlines()
@@ -196,6 +210,9 @@ def operator_command(stage, *args, timeout):
         transition = transition_checks(error.stderr)
         if transition:
             details += f" (writer-transition={transition})"
+        execution = pod_execution_checks(error.stderr)
+        if execution:
+            details += f" (pod-execution={execution})"
         facts = command_facts(error.stderr)
         if facts:
             details += f" (command={facts})"
