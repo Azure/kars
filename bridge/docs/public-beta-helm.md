@@ -154,6 +154,26 @@ Do not consume provider device authorization before the credential store is read
 An authorization token already consumed before a storage failure has no guaranteed
 resume path.
 
+### Qualified controller upgrades are not yet supported
+
+In this beta, completing private enrollment seals the controller's reviewed Pod
+template into its retirement binding. A subsequent image, environment or other
+template change does not have a supported root-template migration sequence.
+Keeping the same namespace and Deployment UIDs is insufficient. Even a rollout
+restart changes a template annotation; a healthy Deployment after that restart
+does not prove private qualification continuity.
+
+Set the intended controller images, sandbox placement and isolation prerequisites
+**before initial enrollment**. If enrollment has already started or completed,
+do not change that template through Helm or `kars upgrade` and assume another
+preview/apply will requalify it. The admitted-Pod recovery repair handles legitimate
+AKS admission changes; it does not remove this separate upgrade limitation.
+Do not clear qualification metadata, replace the sealed binding, or delete grants
+as a workaround. An existing installation needing a controller-template change
+must wait for a reviewed migration path.
+
+### Verify managed tools and the user journey
+
 For managed MCPs, the controller first creates and claims its separate namespace.
 Only then provision or restore the specifically approved local registry
 credential if `managedMcp.imagePullSecret` is set. A same-named Secret elsewhere
