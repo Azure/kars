@@ -40,8 +40,17 @@ await bootstrap();
 
 ```bash
 npm ci
+npm run typecheck
 npm run build
+npm test
 ```
 
 The sandbox image (`sandbox-images/langgraph-ts/`) installs the
-already-built `dist/` output.
+already-built `dist/` output. Its builder and production dependency stages both
+use the committed lockfile with `npm ci`.
+
+Telemetry initialization targets the locked OpenTelemetry 2.x SDK APIs. The
+regressions use real SDK providers and a local HTTP collector to verify trace
+and metric exports, resource attributes, endpoint precedence and idempotent
+initialization. CI runs these checks under the existing required runtime build
+job; a best-effort initialization warning is not accepted as working telemetry.
