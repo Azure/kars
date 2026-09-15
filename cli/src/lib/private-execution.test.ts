@@ -65,25 +65,25 @@ describe("private consumer execution comparison", () => {
     expect(matchesReviewedExecution({ ...wildcard, tolerations: [...wildcard.tolerations, memoryPressure] }, wildcard, true)).toBe(false);
   });
 
-  it("reviews a non-root consumer with exact QoS admission without treating it as the root controller", async () => {
+  it.each(["team", "core"])("reviews an exact opt-in non-root consumer in %s without requiring root admission", async namespace => {
     const spec = { ...parent, serviceAccountName: "sandbox",
       containers: [{ ...parent.containers[0], resources: { requests: { cpu: "100m", memory: "128Mi" } } }] };
     const deployment = { apiVersion: "apps/v1", kind: "Deployment",
-      metadata: { name: "sandbox", namespace: "team", uid: "deployment-uid", resourceVersion: "1" },
-      spec: { template: { metadata: { labels: { app: "sandbox" } }, spec } } };
+      metadata: { name: "sandbox", namespace, uid: "deployment-uid", resourceVersion: "1" },
+      spec: { template: { metadata: { labels: { app: "sandbox", "azure.workload.identity/use": "true" } }, spec } } };
     const rs = { apiVersion: "apps/v1", kind: "ReplicaSet",
-      metadata: { name: "sandbox-rs", namespace: "team", uid: "rs-uid", resourceVersion: "1",
+      metadata: { name: "sandbox-rs", namespace, uid: "rs-uid", resourceVersion: "1",
         ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "sandbox", uid: "deployment-uid", controller: true }] },
       spec: { template: structuredClone(deployment.spec.template) } };
     const pod = { apiVersion: "v1", kind: "Pod",
-      metadata: { name: "sandbox-pod", namespace: "team", uid: "pod-uid", resourceVersion: "1",
+      metadata: { name: "sandbox-pod", namespace, uid: "pod-uid", resourceVersion: "1",
         ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "sandbox-rs", uid: "rs-uid", controller: true }] },
       spec: { ...structuredClone(spec), tolerations: [...automatic, memoryPressure] } };
     const calls: string[][] = [];
     const execute: Execute = async args => {
       calls.push([...args]);
       expect(args[0]).toBe("get");
-      expect(args).toContain("team");
+      expect(args).toContain(namespace);
       const value = args[1] === "replicasets.apps" ? rs : deployment;
       expect(args[2]).toBe(value.metadata.name);
       return JSON.stringify(value);
@@ -97,20 +97,20 @@ describe("private consumer execution comparison", () => {
       templateDigest: templateDigest(deployment), replicaIntent: 1,
     };
     await expect(reviewedOwner(execute, pod,
-      { namespace: { name: "team", uid: "team-uid", resourceVersion: "1" }, consumers: [approved] }, undefined, root)).resolves.toEqual(approved);
+      { namespace: { name: namespace, uid: `${namespace}-uid`, resourceVersion: "1" }, consumers: [approved] }, undefined, root)).resolves.toEqual(approved);
     expect(calls).toHaveLength(2);
     const failure = vi.spyOn(console, "error").mockImplementation(() => {});
     try {
       pod.spec.containers[0]!.image = "PRIVATE-UNREVIEWED-IMAGE";
       await expect(reviewedOwner(execute, pod,
-        { namespace: { name: "team", uid: "team-uid", resourceVersion: "1" }, consumers: [approved] }, undefined, root))
+        { namespace: { name: namespace, uid: `${namespace}-uid`, resourceVersion: "1" }, consumers: [approved] }, undefined, root))
         .rejects.toThrow("check: identity");
       expect(failure).toHaveBeenCalledTimes(1);
       const message = String(failure.mock.calls[0]![0]);
       expect(message.startsWith("KARS_PRIVATE_POD_EXECUTION ")).toBe(true);
       expect(message).not.toContain("PRIVATE-UNREVIEWED-IMAGE");
       const checks = JSON.parse(message.slice("KARS_PRIVATE_POD_EXECUTION ".length));
-      expect(checks).toMatchObject({ rootNamespaceMatches: false, rootDeploymentMatches: false, imagesMatch: false,
+      expect(checks).toMatchObject({ rootNamespaceMatches: namespace === "core", rootDeploymentMatches: false, imagesMatch: false,
         environmentsMatch: true, tolerationsMatch: true });
       expect(Object.keys(checks)).toHaveLength(14);
       expect(Object.values(checks).every(value => typeof value === "boolean")).toBe(true);

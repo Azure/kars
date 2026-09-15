@@ -749,7 +749,12 @@ export async function reviewedOwner(
     if (owner.apiVersion !== version) throw new Error("Private consumer owner API identity is invalid");
     const parent = await read(execute, kinds[owner.kind], owner.name, scope.namespace.name);
     if (reviewed(parent).uid !== owner.uid) throw new Error("Private consumer owner was replaced");
-    if (root && current.kind === "Pod"
+    // Only the pinned root requires WI replay when execution already matches.
+    if (root && current.kind === "Pod" && owner.kind === "ReplicaSet"
+      && list(at(parent, "metadata", "ownerReferences") ?? []).some(reference =>
+        at(reference, "controller") === true && at(reference, "apiVersion") === "apps/v1"
+        && at(reference, "kind") === "Deployment" && at(reference, "name") === root.deployment.name
+        && at(reference, "uid") === root.deployment.uid)
       && at(template(parent), "metadata", "labels", "azure.workload.identity/use") === "true") admissionRequired = true;
     if (!matchesReviewedExecution(template(current).spec, template(parent).spec, current.kind === "Pod")) {
       if (current.kind !== "Pod" || !root) {
