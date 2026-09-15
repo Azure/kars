@@ -1,8 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, expect, it } from "vitest";
-import { matchesReviewedExecution, reviewedOwner, templateDigest, type Execute } from "./private-activation.js";
+import { describe, expect, it, vi } from "vitest";
+import { matchesReviewedExecution, privateExecutionComparison, reviewedOwner, templateDigest, type Execute } from "./private-activation.js";
 
 const parent = {
   serviceAccountName: "kars-controller",
@@ -13,6 +13,19 @@ const automatic = ["node.kubernetes.io/not-ready", "node.kubernetes.io/unreachab
 const memoryPressure = { key: "node.kubernetes.io/memory-pressure", operator: "Exists", effect: "NoSchedule" };
 
 describe("private consumer execution comparison", () => {
+  it("projects only fixed booleans from the same normalized execution comparison", () => {
+    const checks = privateExecutionComparison({ ...parent, tolerations: automatic }, parent, true);
+    expect(Object.values(checks).every(value => value === true)).toBe(true);
+    const privateValue = "PRIVATE-CREDENTIAL-AND-IMAGE-DO-NOT-EMIT";
+    const changed = { ...parent, containers: [{ ...parent.containers[0],
+      image: privateValue, env: [{ name: privateValue, value: privateValue }] }],
+      unrecognizedPodField: privateValue };
+    const different = privateExecutionComparison(changed, parent, true);
+    expect(different).toEqual({ ...checks, imagesMatch: false, environmentsMatch: false, otherPodSpecMatch: false });
+    expect(matchesReviewedExecution(changed, parent, true)).toBe(false);
+    expect(JSON.stringify(different)).not.toContain(privateValue);
+  });
+
   it.each([
     { containers: [{ name: "controller", image: "controller:latest", resources: { requests: { cpu: "100m" } } }] },
     { containers: [{ name: "controller", image: "controller:latest", resources: { limits: { memory: "128Mi" } } }] },
@@ -86,6 +99,24 @@ describe("private consumer execution comparison", () => {
     await expect(reviewedOwner(execute, pod,
       { namespace: { name: "team", uid: "team-uid", resourceVersion: "1" }, consumers: [approved] }, undefined, root)).resolves.toEqual(approved);
     expect(calls).toHaveLength(2);
+    const failure = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      pod.spec.containers[0]!.image = "PRIVATE-UNREVIEWED-IMAGE";
+      await expect(reviewedOwner(execute, pod,
+        { namespace: { name: "team", uid: "team-uid", resourceVersion: "1" }, consumers: [approved] }, undefined, root))
+        .rejects.toThrow("check: identity");
+      expect(failure).toHaveBeenCalledTimes(1);
+      const message = String(failure.mock.calls[0]![0]);
+      expect(message.startsWith("KARS_PRIVATE_POD_EXECUTION ")).toBe(true);
+      expect(message).not.toContain("PRIVATE-UNREVIEWED-IMAGE");
+      const checks = JSON.parse(message.slice("KARS_PRIVATE_POD_EXECUTION ".length));
+      expect(checks).toMatchObject({ rootNamespaceMatches: false, rootDeploymentMatches: false, imagesMatch: false,
+        environmentsMatch: true, tolerationsMatch: true });
+      expect(Object.keys(checks)).toHaveLength(14);
+      expect(Object.values(checks).every(value => typeof value === "boolean")).toBe(true);
+    } finally {
+      failure.mockRestore();
+    }
   });
 
   it("accepts only the standard admission-injected bounded tolerations", () => {

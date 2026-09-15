@@ -725,7 +725,18 @@ export async function reviewedOwner(
       }
       if (admissionRequired) {
         if (!root) throw new Error("Consumer execution differs from the reviewed controller template; preserve it for explicit Pod review");
-        await verifyRootPodAdmission(execute, chain, scope, root);
+        const execution = chain[0]?.kind === "Pod" && chain[1]
+          ? privateExecutionComparison(template(chain[0]).spec, template(chain[1]).spec, true) : undefined;
+        try {
+          await verifyRootPodAdmission(execute, chain, scope, root);
+        } catch (error) {
+          if (execution) console.error(`KARS_PRIVATE_POD_EXECUTION ${JSON.stringify({
+            rootNamespaceMatches: scope.namespace.uid === root.namespace.uid && scope.namespace.name === root.namespace.name,
+            rootDeploymentMatches: id.uid === root.deployment.uid && id.name === root.deployment.name && current.kind === "Deployment",
+            ...execution,
+          })}`);
+          throw error;
+        }
       }
       return approved;
     }
@@ -761,6 +772,39 @@ export function implicitMemoryPressureToleration(spec: unknown): RecordValue | u
 }
 
 export function matchesReviewedExecution(current: unknown, parent: unknown, pod: boolean): boolean {
+  const [actual, expected] = reviewedExecutionPair(current, parent, pod);
+  return canonical(actual) === canonical(expected);
+}
+
+export function privateExecutionComparison(current: unknown, parent: unknown, pod: boolean): Record<string, boolean> {
+  const [actual, expected] = reviewedExecutionPair(current, parent, pod);
+  const groups = {
+    imagesMatch: ["image", "imagePullPolicy"],
+    environmentsMatch: ["env", "envFrom"],
+    commandsMatch: ["command", "args", "workingDir"],
+    mountsMatch: ["volumeMounts", "volumeDevices"],
+    containerSecurityMatches: ["securityContext"],
+    containerResourcesMatch: ["resources"],
+  };
+  const select = (spec: RecordValue, fields: string[], other = false) => list(spec.containers ?? []).map(value =>
+    Object.fromEntries(Object.entries(record(value)).filter(([key]) => key === "name" || (other ? !fields.includes(key) : fields.includes(key)))));
+  const known = Object.values(groups).flat();
+  const checks: Record<string, boolean> = Object.fromEntries(Object.entries(groups).map(([name, fields]) =>
+    [name, canonical(select(actual, fields)) === canonical(select(expected, fields))]));
+  checks.otherContainerFieldsMatch = canonical(select(actual, known, true)) === canonical(select(expected, known, true));
+  const sections = {
+    initContainersMatch: "initContainers", volumesMatch: "volumes",
+    tolerationsMatch: "tolerations", serviceAccountMatch: "serviceAccountName",
+  };
+  const section = (spec: RecordValue, key: string) => Object.fromEntries(Object.entries(spec).filter(([name]) => name === key));
+  for (const [name, key] of Object.entries(sections)) checks[name] = canonical(section(actual, key)) === canonical(section(expected, key));
+  const excluded = ["containers", ...Object.values(sections)];
+  const other = (spec: RecordValue) => Object.fromEntries(Object.entries(spec).filter(([key]) => !excluded.includes(key)));
+  checks.otherPodSpecMatch = canonical(other(actual)) === canonical(other(expected));
+  return checks;
+}
+
+function reviewedExecutionPair(current: unknown, parent: unknown, pod: boolean): [RecordValue, RecordValue] {
   const actual = executionSpec(current, pod);
   const expected = executionSpec(parent, false);
   if (pod) {
@@ -785,7 +829,7 @@ export function matchesReviewedExecution(current: unknown, parent: unknown, pod:
     if (tolerations.length) actual.tolerations = tolerations;
     else delete actual.tolerations;
   }
-  return canonical(actual) === canonical(expected);
+  return [actual, expected];
 }
 
 function executionSpec(value: unknown, pod: boolean): RecordValue {

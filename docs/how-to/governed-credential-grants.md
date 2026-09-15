@@ -22,6 +22,13 @@ policies and every credential,
 container and host-authority change still require exact review; custom
 admission mutations are not silently ignored.
 
+If the root admission fallback rejects a consumer, the CLI reports only fixed
+boolean execution-comparison categories and whether its namespace/Deployment
+match the root. These use the same normalized comparison as enforcement;
+no Pod values, environment names, credentials, images or hashes are emitted.
+The original refusal remains authoritative. This diagnostic does not prove
+which admission plugin ran or turn a rejected consumer into an approved one.
+
 `KarsCredentialGrant/workspace` is a **metadata-only**, namespaced operator
 delegation. It pins the workspace UID, writer ServiceAccount UIDs, permitted
 agent key names, and each enrolled integration Secret's exact name/UID/purpose.
