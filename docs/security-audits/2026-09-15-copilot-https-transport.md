@@ -78,6 +78,42 @@ was not observed; these findings are not asserted to be its proven cause.
 
 ## Delegation and verdict
 
+### Hosted outcome and test-fixture follow-up
+
+[Bridge CI 35023001697](https://github.com/Azure/kars/actions/runs/35023001697)
+at candidate `e6908eb5354cfb8c6b372d2291e57c470f28530b` subsequently passed:
+all fifteen Copilot tests actually registered and executed, with locked Clippy.
+The three original alerts report fixed on the PR merge ref. However, the
+separate CodeQL alert verdict failed a new alert 833 despite successful
+analysis jobs; that failure is retained, not waived.
+
+Rust SARIF analysis `1782296326`, merge analysis commit
+`3770061a827a2bd4cd185bc830ad49ec4de3673f`, traced the new flow from the
+heuristically sensitive variable `oauth` through a test-only `SocketAddr` into
+URL formatting. The interpolated data were a validated loopback address and
+static operation path, not credentials. The branch was already `cfg(test)`-only;
+production fixed HTTPS URLs and credential handling were not involved.
+
+Corrective source `213347e80c140f6a2b4fd19eedaa4436f700b3fc` separates fixture
+routing from request URLs: operation-specific localhost URLs are fixed, and the
+validated loopback socket is supplied only to client DNS configuration.
+Loopback/nonzero-port validation, no proxy, bounded timeout and no redirects
+remain. There is no query suppression, configuration exclusion or sensitive
+variable rename.
+
+An independent review found no significant issue in that four-file delta.
+The added network regression covers IPv4 routing, fixed paths/Host and request
+semantics; it has not yet run in the new hosted source. IPv6 routing and proxy
+isolation were not runtime-validated by that review. Existing production and
+credential-source slices remain unchanged.
+
+The parent composed the exact four files at
+`b97e1ad99b2dfc0ace9e897ed6abd87bd2eee148` and verified the CI union:
+all 57 existing guards remain, plus the new fixture test, for 58. This yields
+sixteen Copilot tests in source. Fresh Rust execution and a passing CodeQL
+alert verdict are still mandatory; source-level false-positive analysis is not
+a dismissal or successful qualification result.
+
 This uses the maintainer's explicit
 [publication-review delegation](https://github.com/Azure/kars/pull/551#issuecomment-5615522306).
 The implementation and independent review were separate AI contexts, not two
