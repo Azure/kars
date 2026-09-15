@@ -115,6 +115,17 @@ fn distinct(names: &[String]) -> bool {
         == names.len()
 }
 
+// Match the producer's declared_host contract; normalization happens upstream.
+// The shared fixture checks exact matches and dot-prefixed wildcard suffixes.
+fn declared_host(host: &str, declared: &[String]) -> bool {
+    declared.iter().any(|item| {
+        host == item
+            || item
+                .strip_prefix('*')
+                .is_some_and(|suffix| suffix.starts_with('.') && host.ends_with(suffix))
+    })
+}
+
 fn valid_sandbox(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 58
@@ -305,9 +316,14 @@ fn classify(
     }
     let mut seen = std::collections::BTreeSet::new();
     for sandbox in &doc.sandboxes {
+        let expected_beyond = sandbox
+            .observed_dns
+            .iter()
+            .filter(|host| !declared_host(host, &sandbox.declared_hosts))
+            .collect::<std::collections::BTreeSet<_>>();
         let expected_verdict = if sandbox.egress_mode.as_deref() == Some("Learn") {
             "LEARN"
-        } else if !sandbox.beyond_declared.is_empty() {
+        } else if !expected_beyond.is_empty() {
             "BEYOND-DECLARED"
         } else if sandbox.observed_dns.is_empty() && sandbox.observed_connects == 0 {
             "NO-TRAFFIC"
@@ -328,7 +344,8 @@ fn classify(
             || sandbox
                 .beyond_declared
                 .iter()
-                .any(|host| !sandbox.observed_dns.contains(host))
+                .collect::<std::collections::BTreeSet<_>>()
+                != expected_beyond
             || sandbox
                 .unused_declared
                 .iter()
