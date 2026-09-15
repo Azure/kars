@@ -99,6 +99,8 @@ jobs:
       - run: cargo test --locked
       - name: Check explicit credential review orchestration
         run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../tests/native-credentials python3 -m unittest discover -s ../tests/native-credentials -p test_credential_review.py
+      - name: Check witness producer and BFF matching agreement
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/routes/operator -p datapath_matching_contract_test.py
 
   web:
     name: Web build and lint
