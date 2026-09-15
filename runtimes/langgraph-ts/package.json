@@ -15,7 +15,7 @@
   "scripts": {
     "build": "tsc -p .",
     "typecheck": "tsc -p . --noEmit",
-    "test": "vitest run --reporter=basic",
+    "test": "vitest run",
     "lint": "tsc -p . --noEmit"
   },
   "engines": {

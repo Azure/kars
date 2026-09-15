@@ -303,6 +303,18 @@ jobs:
       - run: npm test
       - name: npm audit (Runtime OpenClaw dependencies)
         run: node ../../ci/npm-audit-bulk.mjs package-lock.json
+      - name: Install LangGraph TypeScript locked dependencies
+        working-directory: runtimes/langgraph-ts
+        run: npm ci
+      - name: Typecheck LangGraph TypeScript runtime
+        working-directory: runtimes/langgraph-ts
+        run: npm run typecheck
+      - name: Build LangGraph TypeScript runtime
+        working-directory: runtimes/langgraph-ts
+        run: npm run build
+      - name: Test LangGraph TypeScript telemetry exports
+        working-directory: runtimes/langgraph-ts
+        run: npm test
 
   mesh-plugin-build:
     name: Mesh Plugin Build & Test
