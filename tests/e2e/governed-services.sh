@@ -87,6 +87,11 @@ for container in pod["containers"]:
         assert not mounts
 PY
 
+    service_stage pod-readiness
+    category=rollout-not-ready
+    "${k[@]}" rollout status deployment/e2e-test -n kars-e2e-test \
+        --timeout=90s --request-timeout=95s >"$scratch/response.json" || return 1
+
     service_stage port-forward-start
     "${k[@]}" port-forward --address 127.0.0.1 service/e2e-test -n kars-e2e-test :8443 \
         >"$scratch/forward.log" 2>&1 &
