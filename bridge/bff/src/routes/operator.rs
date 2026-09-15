@@ -13,6 +13,7 @@
 mod additional_providers;
 mod audit;
 mod copilot_login;
+mod copilot_transport;
 mod diagnostics;
 mod evals;
 mod local_inference;

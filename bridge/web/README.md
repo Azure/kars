@@ -62,6 +62,41 @@ Unexpected JSON, HTTP failures, and transport rejections are errors, not approva
 pending. Only an explicit `authorization_pending` reason shows “Waiting for approval.”
 Both the web-to-BFF device requests and BFF-to-GitHub requests reject redirects
 instead of forwarding a credential-bearing request to another endpoint.
+Device-code creation, token polling, Copilot eligibility and the Copilot model
+catalog now share one BFF transport. Its production client enforces HTTPS-only
+requests with normal certificate/hostname verification and never follows any
+redirect, including same-origin redirects. Destinations are fixed GitHub HTTPS
+URLs selected by operation, not strings from a browser, environment variable or
+upstream response. This also protects eligibility/catalog calls outside device
+sign-in. Other providers and credential grant/UID/CAS checks are unchanged.
+
+The HTTP fixture override is compiled only under `cfg(test)`, accepts only a
+literal loopback IP and nonzero port, disables proxies, and still rejects
+redirects. TLS regressions exercise the production HTTPS/redirect policy with
+test-only DNS overrides and an explicitly trusted, freshly generated test
+certificate. They require the existing OpenSSL executable; private keys stay
+in memory, and no test credentials are sent to real GitHub endpoints.
+
+The three CodeQL alerts on [PR #566](https://github.com/Azure/kars/pull/566)
+([830](https://github.com/Azure/kars/security/code-scanning/830),
+[831](https://github.com/Azure/kars/security/code-scanning/831),
+[832](https://github.com/Azure/kars/security/code-scanning/832)) traced
+`oauth.seat`, `oauth.models`, and `oauth.start`/`oauth.poll` into reqwest's URL
+argument, not credentials into URLs. At head `8952689b`, those fields were
+fixed HTTPS URLs in production and HTTP URLs only in unit tests. Device codes
+were in JSON POST bodies, and tokens were in authorization headers. That
+reported URL dataflow was a false positive, but the separate eligibility/catalog
+client builders did have a genuine transport-policy gap: reqwest 0.12.28
+defaults to HTTP allowed and up to ten redirects. Its sensitive-header
+stripping checks host and effective port, not scheme; it is not an HTTPS
+boundary. The shared transport closes that gap without suppressing the alerts.
+The original paths can be reproduced read-only from the check's SARIF:
+
+```bash
+gh api --method GET -H 'Accept: application/sarif+json' \
+  repos/Azure/kars/code-scanning/analyses/1780407125 \
+  --jq '.runs[].results[] | {ruleId, locations, codeFlows}'
+```
 
 The additive poll contract is `{status:"pending", interval, reason}`, where
 `reason` is `authorization_pending` or `slow_down`; the next request carries the
@@ -84,8 +119,13 @@ Regression checks (shared synthetic producer/consumer fixtures in
 ```bash
 node --test tests/*.test.mjs
 # From bridge/bff:
-cargo test copilot_login
+cargo test --locked routes::operator::copilot
 ```
+
+Bridge CI requires all eight original login regressions plus the seven added
+transport/login regressions to appear in `cargo test -- --list`. Rust execution,
+clippy and a fresh hosted CodeQL run are still required before publishing this
+transport repair; formatting/source checks do not substitute for those gates.
 
 `npm run lint` is configured but currently reports a known private-preview
 React-rule backlog. It is not a green release gate yet.

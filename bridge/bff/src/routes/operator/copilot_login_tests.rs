@@ -15,6 +15,10 @@ const PRIVATE: &str = "PRIVATE_OAUTH_VALUE_NOT_RETURNED";
 const SECRET: &str = "/api/v1/namespaces/kars-system/secrets/kars-inference-providers";
 const GRANT: &str =
     "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karscredentialgrants/workspace";
+const START: &str = "/login/device/code";
+const POLL: &str = "/login/oauth/access_token";
+const SEAT: &str = "/copilot_internal/v2/token";
+const MODELS: &str = "/models";
 
 fn contract() -> Value {
     serde_json::from_str(include_str!("../../../../contracts/copilot-login.json")).unwrap()
@@ -28,6 +32,7 @@ struct Api {
     seat: Value,
     seat_status: u16,
     status: u16,
+    location: Option<String>,
     invalid_json: bool,
     revoke_on_exchange: bool,
     fail_patch: bool,
@@ -55,24 +60,27 @@ async fn handle(
     let mut api = state.lock().unwrap();
     api.calls.push((method.clone(), uri.path().into()));
     match uri.path() {
-        "/oauth/start" | "/oauth/poll" => {
+        START | POLL => {
             assert_eq!(method, Method::POST);
             let input: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(input["client_id"], CLIENT_ID);
-            if uri.path() == "/oauth/poll" {
+            if uri.path() == POLL {
                 assert_eq!(input["grant_type"], "urn:ietf:params:oauth:grant-type:device_code");
                 if api.revoke_on_exchange { api.grant["spec"]["enabled"] = false.into(); }
             }
             let status = StatusCode::from_u16(api.status).unwrap();
+            if let Some(location) = &api.location {
+                return (status, [(axum::http::header::LOCATION, location.clone())]).into_response();
+            }
             if api.invalid_json { return (status, PRIVATE).into_response(); }
-            let value = if uri.path() == "/oauth/start" { &api.start } else { &api.poll };
+            let value = if uri.path() == START { &api.start } else { &api.poll };
             (status, Json(value.clone())).into_response()
         }
-        "/oauth/seat" => (
+        SEAT => (
             StatusCode::from_u16(api.seat_status).unwrap(),
             Json(api.seat.clone()),
         ).into_response(),
-        "/oauth/models" => Json(json!({"data":[]})).into_response(),
+        MODELS => Json(json!({"data":[]})).into_response(),
         GRANT if api.missing_grant => api_failure(404),
         GRANT => Json(api.grant.clone()).into_response(),
         "/api/v1/namespaces/kars-system" => Json(json!({
@@ -122,6 +130,7 @@ async fn fixture() -> Fixture {
         seat: json!({"token":PRIVATE, "chat_enabled":true}),
         seat_status: 200,
         status: 200,
+        location: None,
         invalid_json: false,
         revoke_on_exchange: false,
         fail_patch: false,
@@ -147,16 +156,7 @@ async fn fixture() -> Fixture {
     ))
     .unwrap();
     let oauth = OAuth {
-        client: reqwest::Client::builder()
-            .no_proxy()
-            .redirect(reqwest::redirect::Policy::none())
-            .timeout(std::time::Duration::from_secs(3))
-            .build()
-            .unwrap(),
-        start: format!("http://{address}/oauth/start"),
-        poll: format!("http://{address}/oauth/poll"),
-        seat: format!("http://{address}/oauth/seat"),
-        models: format!("http://{address}/oauth/models"),
+        client: CopilotClient::loopback(address),
     };
     Fixture {
         cluster: Cluster::for_test_client(client.clone()),
@@ -250,12 +250,9 @@ async fn missing_or_unready_grant_and_replaced_store_prevent_all_oauth_requests(
         assert_eq!(body, contract()["not_ready"]);
         assert_eq!(poll_response(&f, None).await.1, contract()["not_ready"]);
         assert!(
-            !f.api
-                .lock()
-                .unwrap()
-                .calls
-                .iter()
-                .any(|(m, p)| *m != Method::GET || p.starts_with("/oauth/"))
+            !f.api.lock().unwrap().calls.iter().any(
+                |(m, p)| *m != Method::GET || [START, POLL, SEAT, MODELS].contains(&p.as_str())
+            )
         );
     }
 }
@@ -298,7 +295,7 @@ async fn invalid_and_non_success_upstream_responses_are_never_pending_or_echoed(
             .unwrap()
             .calls
             .iter()
-            .any(|(_, p)| p == "/oauth/seat" || p == "/oauth/models")
+            .any(|(_, p)| p == SEAT || p == MODELS)
     );
 }
 
@@ -356,14 +353,8 @@ async fn granted_token_is_stored_before_authorized_and_late_failures_never_claim
 
         let (status, body) = poll_response(&f, None).await;
         let api = f.api.lock().unwrap();
-        assert_eq!(
-            api.calls.iter().filter(|(_, p)| p == "/oauth/poll").count(),
-            1
-        );
-        assert_eq!(
-            api.calls.iter().filter(|(_, p)| p == "/oauth/seat").count(),
-            1
-        );
+        assert_eq!(api.calls.iter().filter(|(_, p)| p == POLL).count(), 1);
+        assert_eq!(api.calls.iter().filter(|(_, p)| p == SEAT).count(), 1);
         assert_eq!(api.secret["data"]["UNRELATED"], "cHJlc2VydmVk");
         if fault == "none" {
             assert_eq!(status, StatusCode::OK);
@@ -373,7 +364,7 @@ async fn granted_token_is_stored_before_authorized_and_late_failures_never_claim
             assert_eq!(status, StatusCode::CONFLICT);
             assert_eq!(body, contract()["storage_unconfirmed"]);
             assert!(api.secret["data"].get("COPILOT_GITHUB_TOKEN").is_none());
-            assert!(!api.calls.iter().any(|(_, p)| p == "/oauth/models"));
+            assert!(!api.calls.iter().any(|(_, p)| p == MODELS));
         }
     }
 }
@@ -448,6 +439,48 @@ async fn failed_or_malformed_seat_verification_never_stores_credentials() {
             .unwrap()
             .calls
             .iter()
-            .any(|(method, path)| *method == Method::PATCH || path == "/oauth/models")
+            .any(|(method, path)| *method == Method::PATCH || path == MODELS)
+    );
+}
+
+#[tokio::test]
+async fn device_login_redirects_never_replay_codes_or_mutate_credentials() {
+    let f = fixture().await;
+    let sink = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    for status in [301, 302, 303, 307, 308] {
+        for location in [
+            format!("http://{}/capture", sink.local_addr().unwrap()),
+            "/same-origin-capture".into(),
+        ] {
+            {
+                let mut api = f.api.lock().unwrap();
+                api.status = status;
+                api.location = Some(location);
+                api.calls.clear();
+            }
+            let (status, body) = response(start(&f.cluster, &f.oauth).await.map(Json)).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert_eq!(body["error"]["code"], "copilot_upstream");
+            let (status, body) = poll_response(&f, None).await;
+            assert_eq!(status, StatusCode::BAD_GATEWAY);
+            assert_eq!(body["error"]["code"], "copilot_upstream");
+            let api = f.api.lock().unwrap();
+            let calls: Vec<_> = api
+                .calls
+                .iter()
+                .filter(|(_, path)| !path.starts_with("/api"))
+                .map(|(method, path)| (method.clone(), path.as_str()))
+                .collect();
+            assert_eq!(calls, vec![(Method::POST, START), (Method::POST, POLL)]);
+            assert!(!api.calls.iter().any(|(method, _)| *method == Method::PATCH));
+            assert!(api.secret["data"].get("COPILOT_GITHUB_TOKEN").is_none());
+        }
+    }
+    assert!(
+        tokio::time::timeout(std::time::Duration::from_millis(100), sink.accept())
+            .await
+            .is_err()
     );
 }
