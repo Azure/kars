@@ -1,4 +1,5 @@
-{{/* Copyright (c) Microsoft Corporation. Licensed under the MIT License. */}}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
 {{- define "witness.labels" -}}
 app.kubernetes.io/name: kars-datapath-witness
 app.kubernetes.io/instance: {{ .Release.Name }}
