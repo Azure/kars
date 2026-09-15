@@ -6,7 +6,7 @@
 use axum::Json;
 use axum::extract::State;
 use kube::core::DynamicObject;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 use crate::state::AppState;
@@ -155,90 +155,9 @@ pub async fn get_audit(State(state): State<AppState>) -> AppResult<Json<AuditDto
     }))
 }
 
-// ─── datapath-completeness witness (optional eBPF) ───────────────────────────
-//
-// An independent, kernel-level attestation of what sandboxes ACTUALLY send on
-// the network, cross-checked against the controller-declared egress allowlist.
-// Produced out-of-band by the optional Inspektor Gadget witness
-// (deploy/ebpf-witness/) and published to the `kars-datapath-witness` ConfigMap
-// in kars-system. The Bridge only READS that ConfigMap — no eBPF/gadget
-// dependency here. Absent ConfigMap => witness not enabled (honest empty), never
-// an error.
-
-#[derive(Serialize, Deserialize, Default)]
-pub struct DatapathWitnessSandbox {
-    pub namespace: String,
-    pub sandbox: String,
-    #[serde(default)]
-    pub declared_hosts: Vec<String>,
-    #[serde(default)]
-    pub observed_dns: Vec<String>,
-    #[serde(default)]
-    pub observed_connects: u64,
-    #[serde(default)]
-    pub beyond_declared: Vec<String>,
-    #[serde(default)]
-    pub unused_declared: Vec<String>,
-    pub verdict: String,
-}
-
-#[derive(Serialize)]
-pub struct DatapathWitnessDto {
-    /// True once the optional eBPF witness is installed and has published a
-    /// verdict. False => not enabled (the web layer shows enable instructions).
-    pub enabled: bool,
-    pub generated_at: Option<String>,
-    pub window_seconds: Option<u32>,
-    pub sandboxes: Vec<DatapathWitnessSandbox>,
-    /// How to turn the witness on — surfaced verbatim in the not-enabled state.
-    pub install_hint: String,
-}
-
-#[derive(Deserialize)]
-struct WitnessDoc {
-    generated_at: Option<String>,
-    window_seconds: Option<u32>,
-    #[serde(default)]
-    sandboxes: Vec<DatapathWitnessSandbox>,
-}
-
-pub async fn datapath_witness(
-    State(state): State<AppState>,
-) -> AppResult<Json<DatapathWitnessDto>> {
-    let cluster = require_cluster(&state)?;
-    let hint = "Enable the optional eBPF datapath witness on the cluster: \
-                KARS_EBPF_WITNESS=1 deploy/ebpf-witness/install.sh --continuous"
-        .to_string();
-
-    let not_enabled = || DatapathWitnessDto {
-        enabled: false,
-        generated_at: None,
-        window_seconds: None,
-        sandboxes: Vec::new(),
-        install_hint: hint.clone(),
-    };
-
-    let Some(body) = cluster
-        .configmap_data("kars-datapath-witness")
-        .await
-        .and_then(|d| d.get("witness.json").cloned())
-    else {
-        return Ok(Json(not_enabled()));
-    };
-
-    match serde_json::from_str::<WitnessDoc>(&body) {
-        Ok(doc) => Ok(Json(DatapathWitnessDto {
-            enabled: true,
-            generated_at: doc.generated_at,
-            window_seconds: doc.window_seconds,
-            sandboxes: doc.sandboxes,
-            install_hint: hint,
-        })),
-        // Malformed payload is treated as not-enabled rather than a hard error —
-        // the console must never 500 on optional-feature data.
-        Err(_) => Ok(Json(not_enabled())),
-    }
-}
+#[path = "datapath.rs"]
+mod datapath;
+pub use datapath::datapath_witness;
 
 #[cfg(test)]
 mod tests {
@@ -284,45 +203,5 @@ mod tests {
 
         // No claims ⇒ "none".
         assert_eq!(receipt_verdict(&[]), "none");
-    }
-
-    #[test]
-    fn witness_doc_parses_real_aggregator_payload() {
-        // The exact shape the aggregator publishes into kars-datapath-witness.
-        let body = r#"{
-          "generated_at": "2026-07-02T13:51:32Z",
-          "window_seconds": 15,
-          "gadget": "inspektor-gadget",
-          "sandboxes": [
-            {"namespace":"kars-demo","sandbox":"demo",
-             "declared_hosts":["api.github.com"],
-             "observed_dns":["api.github.com","example.com"],
-             "observed_connects":4,
-             "beyond_declared":["example.com"],
-             "unused_declared":[],
-             "verdict":"BEYOND-DECLARED"}
-          ]
-        }"#;
-        let doc: super::WitnessDoc = serde_json::from_str(body).expect("parse");
-        assert_eq!(doc.generated_at.as_deref(), Some("2026-07-02T13:51:32Z"));
-        assert_eq!(doc.window_seconds, Some(15));
-        assert_eq!(doc.sandboxes.len(), 1);
-        let s = &doc.sandboxes[0];
-        assert_eq!(s.sandbox, "demo");
-        assert_eq!(s.verdict, "BEYOND-DECLARED");
-        assert_eq!(s.beyond_declared, vec!["example.com"]);
-        assert_eq!(s.observed_connects, 4);
-    }
-
-    #[test]
-    fn witness_sandbox_tolerates_missing_optional_arrays() {
-        // Defaults must hold so a partial payload never fails deserialization.
-        let s: super::DatapathWitnessSandbox =
-            serde_json::from_str(r#"{"namespace":"n","sandbox":"x","verdict":"LEARN"}"#)
-                .expect("parse");
-        assert_eq!(s.verdict, "LEARN");
-        assert!(s.declared_hosts.is_empty());
-        assert!(s.observed_dns.is_empty());
-        assert_eq!(s.observed_connects, 0);
     }
 }

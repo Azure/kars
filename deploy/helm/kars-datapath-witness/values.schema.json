@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft-07/schema#",
+  "$comment": "Copyright (c) Microsoft Corporation. Licensed under the MIT License.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["enabled", "aggregator", "sandboxes", "gadget"],
+  "properties": {
+    "enabled": { "type": "boolean" },
+    "aggregator": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["image", "imagePullSecrets", "windowSeconds", "intervalSeconds"],
+      "properties": {
+        "image": { "type": "string", "pattern": "^$|^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$" },
+        "imagePullSecrets": {
+          "type": "array", "uniqueItems": true,
+          "items": { "type": "object", "additionalProperties": false, "required": ["name"],
+            "properties": { "name": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$", "maxLength": 253 } } }
+        },
+        "windowSeconds": { "type": "integer", "minimum": 5, "maximum": 60 },
+        "intervalSeconds": { "type": "integer", "minimum": 5, "maximum": 60 }
+      }
+    },
+    "sandboxes": {
+      "type": "array", "uniqueItems": true, "maxItems": 50,
+      "items": { "type": "string", "pattern": "^[a-z0-9]([-a-z0-9]*[a-z0-9])?$", "maxLength": 58 }
+    },
+    "gadget": {
+      "type": "object", "additionalProperties": false,
+      "required": ["image", "dnsImage", "tcpImage"],
+      "properties": {
+        "image": { "const": "ghcr.io/inspektor-gadget/inspektor-gadget@sha256:39ebe601aff064f531aa0630194d9a7bbdb5060de4f290d7ec2fd678f1dd5c10" },
+        "dnsImage": { "const": "ghcr.io/inspektor-gadget/gadget/trace_dns@sha256:751684c8bf45731ffb412e608d9fb71f9e896debe1d138d524f850cadf54a0f7" },
+        "tcpImage": { "const": "ghcr.io/inspektor-gadget/gadget/trace_tcp@sha256:b6a4f4563430effa4ddde01898e628f082f2db4b638b18922eb55e4bd4aaab89" }
+      }
+    }
+  },
+  "if": { "properties": { "enabled": { "const": true } } },
+  "then": { "properties": {
+    "aggregator": { "properties": { "image": { "minLength": 1 } } },
+    "sandboxes": { "minItems": 1 }
+  } }
+}
