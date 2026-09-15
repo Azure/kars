@@ -106,6 +106,39 @@ new parity step. All final-head public branch requirements still apply.
 
 ## Delegation and verdict
 
+### Follow-up packaging, readiness and composition evidence
+
+The original witness source later passed
+[Bridge CI 34993669330](https://github.com/Azure/kars/actions/runs/34993669330)
+at `b360441ef38a6232bd52250bfcf90bb0fb94c66c`: locked BFF tests/Clippy,
+the producer/consumer parity step, locked web production image, pinned witness
+image construction/provenance and guarded Helm lifecycle in disposable Kind.
+This does not establish successful kernel capture or qualify a later composition.
+
+The copyright gate separately failed. Corrective
+`a2b774b6ec29f02f15556247b983d31c37433969` normalizes four first-party Helm
+headers and adds exact-path legal/upstream coverage plus root NOTICE attribution.
+The upstream license, qualified attribution notice and adapted Gadget template
+remain byte-identical; they were not relicensed or broadly exempted.
+An independent reviewer closed that six-file change, checked those bytes and
+non-header template bodies, and parsed enabled/disabled client renders.
+Equivalence rests on source comparison, not a successful paired archive render.
+
+Core Kind qualification also exposed a Pod-readiness race before the governed
+service port-forward. `4337c8487ffc1ec86ed3d632696ad308e59d8c34` adds a bounded,
+read-only Deployment rollout prerequisite before the single forward attempt.
+Two regressions failed before repair; all twelve shell-fixture tests passed
+afterward. A separate bounded review closed the two-file delta. Authentication,
+scope checks, redacted failure reporting and cleanup remain unchanged.
+
+The combined candidate preserves the 37 implementation, fixture and attribution
+files outside this extended audit and the shared CI workflow exactly at that
+corrective source. The workflow is the exact union
+of 57 existing witness/Copilot registration guards and retains the parity step.
+The parent reran 13 producer, seven chart, three parity and twelve readiness
+tests, plus all 94 combined web tests and web typechecking/focused lint.
+Final-head core/native and combined Rust/locked-web qualification remain required.
+
 Both independent AI contexts found no remaining high-confidence blocker in
 their bounded source scopes after the consistency repair. The parent assembled
 the commits and this record; it does not represent independent human review.
