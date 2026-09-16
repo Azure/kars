@@ -1,0 +1,26 @@
+Subject: [Kars compatibility] Preserve literal preformatted OAuth error descriptions
+Upstream: dexidp/dex v2.45.1, 11d2eeb52b42e1980e14cb91e69dd9e3faab2076
+Reason: Go 1.26 vet rejects two nonconstant format arguments. A constant %s
+also prevents percent text in an unsupported PKCE method from being formatted
+twice. No error type, redirect destination, or validation decision changes.
+
+--- a/server/oauth2.go
++++ b/server/oauth2.go
+@@ -474,7 +474,7 @@
+ 
+ 	if codeChallengeMethod != codeChallengeMethodS256 && codeChallengeMethod != codeChallengeMethodPlain {
+ 		description := fmt.Sprintf("Unsupported PKCE challenge method (%q).", codeChallengeMethod)
+-		return nil, newRedirectedErr(errInvalidRequest, description)
++		return nil, newRedirectedErr(errInvalidRequest, "%s", description)
+ 	}
+ 
+ 	var (
+@@ -558,7 +558,7 @@
+ 	if rt.token {
+ 		if redirectURI == redirectURIOOB {
+ 			err := fmt.Sprintf("Cannot use response type 'token' with redirect_uri '%s'.", redirectURIOOB)
+-			return nil, newRedirectedErr(errInvalidRequest, err)
++			return nil, newRedirectedErr(errInvalidRequest, "%s", err)
+ 		}
+ 	}
+ 

@@ -85,6 +85,20 @@ The separately built aggregator downloads the official, checksum-verified
 remain with redistributed images; other bundled components retain their
 respective licenses.
 
+## Optional curated Dex identity provider
+
+`bridge/idp` builds Dex v2.45.1 from upstream commit
+`11d2eeb52b42e1980e14cb91e69dd9e3faab2076` under Apache License 2.0.
+It preserves upstream attribution and explicitly discloses Kars packaging,
+dependency updates, two literal-format fixes and a test-only historical
+certificate clock adjustment. It is not an unmodified upstream Dex image.
+
+The original upstream license, source/module snapshots, reviewed patches and
+linked dependency notices accompany the built image. `bridge/idp/NOTICE`
+describes their installed locations. Generated module/checksum files and
+patch inputs retain their exact verified bytes; Kars headers must not rewrite
+them or imply ownership of upstream source. New Kars wrapper code is MIT.
+
 ## Vendored TypeScript SDK build
 
 `vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-bdea1097.tgz`

@@ -31,7 +31,7 @@ STYLES = {
     "handlebars": f"{{{{!-- {COPYRIGHT}\n{LICENSE} --}}}}",
 }
 SUFFIX_STYLES = {
-    **dict.fromkeys((".rs", ".ts", ".tsx", ".js", ".mjs", ".bicep"), "slash"),
+    **dict.fromkeys((".rs", ".go", ".ts", ".tsx", ".js", ".mjs", ".bicep"), "slash"),
     **dict.fromkeys((".sh", ".py", ".toml", ".yaml", ".yml"), "hash"),
     ".md": "html",
     ".css": "css",

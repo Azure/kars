@@ -8,7 +8,7 @@ import os
 
 
 REQUIRED_JOBS = frozenset({
-    "addon", "bff", "dependencies", "lockfiles",
+    "addon", "bff", "dependencies", "idp", "lockfiles",
     "rust-dependencies", "secrets", "security", "web",
 })
 

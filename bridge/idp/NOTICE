@@ -1,0 +1,40 @@
+Kars Dex security rebuild
+
+Dex is an OpenID Connect identity provider originally developed by CoreOS,
+maintained by the Dex project and its contributors:
+https://github.com/dexidp/dex
+
+This package uses Dex v2.45.1 application source at commit
+11d2eeb52b42e1980e14cb91e69dd9e3faab2076 under the Apache License, Version 2.0.
+The unchanged upstream LICENSE is fetched from the verified source archive
+and installed as /usr/share/doc/dex/DEX-LICENSE.
+
+This is NOT the official or unmodified upstream Dex image. Kars changes the
+Go toolchain, module dependency manifests and container packaging, and marks
+the binary version v2.45.1-kars.1. Two production calls in server/oauth2.go
+now use a constant "%s" format to preserve preformatted error descriptions
+literally and satisfy Go vet. These are the only production-source changes.
+Production certificate validation, connectors, embedded web assets and real
+CGO SQLite storage remain unchanged upstream implementations.
+
+A test-only patch validates the historical OAM SAML signature fixture at its
+signed IssueInstant, using goxmldsig's supported test clock. Other signature
+tests retain their real-clock default. The certificate and signed XML are not
+changed. Added Go regressions exercise literal OAuth errors and enforce
+certificate validity before/after the fixture certificate's lifetime.
+The reviewed patches, regression sources and pinned before/after file hashes
+are distributed in /usr/share/doc/dex/source-patches. Complete original and
+expected patched source inventories are distributed as source.upstream.sha256
+and source.sha256 in /usr/share/doc/dex.
+
+The generated dependency diff and original and patched module files are
+distributed in /usr/share/doc/dex/locks. Linked dependency license and notice
+files are distributed in /usr/share/doc/dex/third-party.
+
+The official image's gomplate and docker-entrypoint programs are intentionally
+not distributed. The supported invocation is /usr/local/bin/dex serve with an
+explicit configuration file, not upstream entrypoint template expansion.
+
+Kars packaging code: Copyright (c) Microsoft Corporation.
+Licensed under the MIT License in the Kars repository root.
+Azure Linux base contents and attribution remain unchanged.
