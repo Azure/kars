@@ -129,9 +129,11 @@ assert.throws(() => kubectl(["replace", "-f", "-"], changedScope));
 const tokenRequest = { apiVersion: "authentication.k8s.io/v1", kind: "TokenRequest",
   spec: { audiences: [audience], expirationSeconds: 600 } };
 await until(() => {
-  const review = create({ apiVersion: "authorization.k8s.io/v1", kind: "SelfSubjectAccessReview",
+  const review = JSON.parse(kubectl(["create", "--raw",
+    "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", "-f", "-", "--as", principal],
+  { apiVersion: "authorization.k8s.io/v1", kind: "SelfSubjectAccessReview",
     spec: { resourceAttributes: { namespace, verb: "create", group: "", version: "v1",
-      resource: "serviceaccounts", subresource: "token", name: "untrusted" } } }, principal, true);
+      resource: "serviceaccounts", subresource: "token", name: "untrusted" } } }, true));
   assert(!review.status?.evaluationError, "Fixture TokenRequest authorization evaluator failed");
   return review.status?.allowed === true;
 }, "fixture principal is actually authorized for TokenRequest");

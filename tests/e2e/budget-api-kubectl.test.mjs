@@ -2,7 +2,9 @@
 // Licensed under the MIT License.
 
 import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
 import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -82,6 +84,46 @@ test("successful public and private commands preserve their output without diagn
   assert.deepEqual(state.errors, []);
 });
 
+test("real kubectl sends the built-in permission review without CRD discovery or relaxed validation", { timeout: 20_000 }, async (t) => {
+  const directory = mkdtempSync(join(tmpdir(), "kars-budget-raw-review-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const path = "/apis/authorization.k8s.io/v1/selfsubjectaccessreviews";
+  const principal = "system:serviceaccount:budget-api-fixture:untrusted";
+  const review = { apiVersion: "authorization.k8s.io/v1", kind: "SelfSubjectAccessReview",
+    spec: { resourceAttributes: { namespace: "budget-api-fixture", verb: "create",
+      group: "", version: "v1", resource: "serviceaccounts", subresource: "token", name: "untrusted" } } };
+  const requests = [];
+  const server = createServer(async (req, res) => {
+    let body = "";
+    for await (const chunk of req) body += chunk;
+    requests.push({ method: req.method, path: new URL(req.url, "http://localhost").pathname,
+      actor: req.headers["impersonate-user"], body });
+    res.setHeader("Content-Type", "application/json");
+    if (req.method !== "POST" || new URL(req.url, "http://localhost").pathname !== path) {
+      res.writeHead(403);
+      res.end(JSON.stringify({ kind: "Status", status: "Failure", reason: "Forbidden", code: 403 }));
+      return;
+    }
+    res.end(JSON.stringify({ ...review, status: { allowed: true } }));
+  });
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  t.after(() => new Promise(resolve => server.close(resolve)));
+  const config = join(directory, "config.json");
+  writeFileSync(config, JSON.stringify({ apiVersion: "v1", kind: "Config",
+    clusters: [{ name: "fixture", cluster: { server: `http://127.0.0.1:${server.address().port}` } }],
+    users: [{ name: "fixture", user: {} }],
+    contexts: [{ name: context, context: { cluster: "fixture", user: "fixture" } }],
+    "current-context": context }), { mode: 0o600 });
+  const output = await new Promise((resolve, reject) => {
+    const child = execFile("kubectl", ["--kubeconfig", config, "--context", context,
+      "--request-timeout=5s", "create", "--raw", path, "-f", "-", "--as", principal],
+    { encoding: "utf8", timeout: 10_000 }, (error, stdout) => error ? reject(error) : resolve(stdout));
+    child.stdin.end(JSON.stringify(review));
+  });
+  assert.equal(JSON.parse(output).status.allowed, true);
+  assert.deepEqual(requests, [{ method: "POST", path, actor: principal, body: JSON.stringify(review) }]);
+});
+
 test("private audience denial requires the exact policy and binding without exposing error contents", (t) => {
   const marker = "do-not-publish-token-material";
   const stderr = 'The serviceaccounts "untrusted" is invalid: : Invalid value: "": '
@@ -125,6 +167,8 @@ test("the actual preflight opts only its public CRD wait into schema diagnostics
   assert.ok(source.includes("root, context, kubectl, until, namespace, controller, principal,"));
   assert.ok(source.includes('kubectl(["wait", "--for=condition=Established", `crd/${definition.metadata.name}`, "--timeout=60s"], undefined, true);'));
   assert(source.indexOf("kind: \"SelfSubjectAccessReview\"") < source.indexOf("const ordinaryToken ="));
+  assert.ok(source.includes('"/apis/authorization.k8s.io/v1/selfsubjectaccessreviews", "-f", "-", "--as", principal]'));
+  assert(!source.includes("--validate=false"));
   assert(source.indexOf("const ordinaryToken =") < source.indexOf("assert.throws(() => kubectl(tokenArgs, tokenRequest)"));
   assert.ok(source.includes("isBudgetTokenPolicyDenial,"));
 });
