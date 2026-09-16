@@ -1,24 +1,22 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# kars Bridge BFF — container image. Multi-stage: build the Rust binary against a
-# glibc base, then ship it on a slim Debian runtime. Cloud-agnostic: the image
-# runs identically on AKS, EKS, GKE, and local kind.
+# kars Bridge BFF — build with Rust, ship on the same Azure Linux 3 distroless
+# runtime as the controller and inference router. The bookworm build's glibc
+# is older than the runtime's; no build tools or Debian packages are copied.
 #
 # Build from the bff/ directory as context:
 #   docker build -f bff/Dockerfile -t <registry>/kars-bridge-bff:<tag> bff
+ARG AZURELINUX_DISTROLESS=mcr.microsoft.com/azurelinux/distroless/base:3.0
 FROM rust:1-bookworm AS build
 WORKDIR /src
 # Compile only the real sources against the reviewed lockfile.
 COPY . .
 RUN cargo build --release --locked && strip target/release/kars-bridge-bff
 
-FROM debian:bookworm-slim AS runtime
-RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && \
-    rm -rf /var/lib/apt/lists/* && \
-    useradd --uid 10001 --user-group --home-dir /home/bridge --create-home bridge
+FROM ${AZURELINUX_DISTROLESS} AS runtime
 COPY --from=build /src/target/release/kars-bridge-bff /usr/local/bin/kars-bridge-bff
-USER 10001
+USER 10001:10001
 EXPOSE 8081
 # The BFF binds BRIDGE_BFF_HOST:BRIDGE_BFF_PORT; in-cluster it must listen on all
 # interfaces. The ServiceAccount token is mounted by Kubernetes and picked up by

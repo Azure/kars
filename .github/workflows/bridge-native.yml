@@ -123,7 +123,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
           persist-credentials: false
-      - run: install -d -m 700 .native/scratch .native/evidence .native/bin
+      - run: install -d -m 700 .native/scratch .native/evidence
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -134,19 +134,16 @@ jobs:
         with:
           workspaces: |
             bridge/.native/core
-            bridge/bff
           key: native-locked-debug-no-symbols
           cache-on-failure: true
-      - name: Build core and Bridge from the same exact source on the disposable host
+      - name: Build core from the same exact source on the disposable host
         run: |
           cargo build --manifest-path .native/core/Cargo.toml --locked \
             -p kars-controller -p kars-inference-router \
             --bin kars-controller --bin kars-inference-router
-          cargo build --manifest-path bff/Cargo.toml --locked --bin kars-bridge-bff
           install -d .native/core/bin/amd64
           install .native/core/target/debug/kars-controller .native/core/bin/amd64/
           install .native/core/target/debug/kars-inference-router .native/core/bin/amd64/
-          install bff/target/debug/kars-bridge-bff .native/bin/
       - name: Set up the exact operator CLI toolchain
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
@@ -165,8 +162,8 @@ jobs:
             --tag kars-native-runtime-base:latest .native/core/tests/e2e
           docker build --file tests/native-credentials/Dockerfile.runtime \
             --tag kars-native-runtime:latest tests/native-credentials
-          docker build --file tests/native-credentials/Dockerfile.bff \
-            --tag kars-native-bff:latest .native/bin
+          docker build --file bff/Dockerfile --tag kars-native-bff:latest bff
+          python3 ../ci/bridge_image_contract.py kars-native-bff:latest --kind bff
           docker build --file tests/native-credentials/Dockerfile.probe \
             --tag kars-native-probe:latest tests/native-credentials
       - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
