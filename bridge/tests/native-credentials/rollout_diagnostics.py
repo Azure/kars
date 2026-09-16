@@ -133,7 +133,10 @@ def collect(setup, target):
         def read(path):
             value = setup.admin.get(path)
             identity(value)
-            anchors[path] = value
+            if path in anchors:
+                require(identity(value) == identity(anchors[path]), UNAVAILABLE)
+            else:
+                anchors[path] = value
             return value
 
         result["category"] = "authority-unavailable"
