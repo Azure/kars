@@ -120,6 +120,9 @@ class ContractAggregateTests(unittest.TestCase):
 
     def test_idp_job_requires_real_hosted_images_reports_runtime_and_scans(self):
         job = self.workflow_job("idp")
+        self.assertNotIn("runner.", job.split("    steps:", 1)[0])
+        self.assertIn('export IDP_EVIDENCE_DIR="$RUNNER_TEMP/bridge-idp-evidence"', job)
+        self.assertIn('printf \'IDP_EVIDENCE_DIR=%s\\n\' "$IDP_EVIDENCE_DIR" >> "$GITHUB_ENV"', job)
         for required in (
             "runs-on: ubuntu-24.04", "permissions:\n      contents: read",
             'test "$(uname -m)" = x86_64', "persist-credentials: false",
