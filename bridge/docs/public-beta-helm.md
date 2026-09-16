@@ -44,6 +44,15 @@ its label is not a rebuild. Do not overwrite normal release repositories with
 beta images or assume historical chart image defaults are publicly available.
 See [Bridge image builds and deployment](deployment.md#install).
 
+If enabling bundled Dex, separately build and qualify the
+[curated IdP runtime](../idp/README.md), then set `idp.dex.image` to its approved
+immutable registry reference. The historical upstream chart default is not
+an approved image merely because it is a default: the September 16 scan of
+upstream v2.45.1 found High/Critical issues and blocked its use. Do not deploy
+it, suppress those findings, or use the dev-role preview as authentication.
+The curated source recipe is not itself a published or runtime-qualified image.
+External OIDC remains an alternative when genuinely configured by the operator.
+
 Before changing an existing installation, inventory Helm ownership, CRD/schema
 compatibility, workload placement and external credentials. Back up sensitive
 configuration privately with restricted file permissions, outside the checkout.
