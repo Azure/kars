@@ -94,6 +94,25 @@ Actual Docker builds, final-image vulnerability scans and the updated native
 lane have not completed for this source. Existing core resources were not
 changed by this correction. Optional witness remediation remains separate.
 
+### First hosted outcome and test-only correction
+
+[Bridge CI 35089486444](https://github.com/Azure/kars/actions/runs/35089486444)
+at audit-only head `a8d4585c842e5a7e584c3c9b0c8295ece777eba1` subsequently
+built and qualified the actual BFF and web images. Both final runtimes were
+identified as Azure Linux 3, passed their image/startup contracts, and returned
+zero High/Critical image findings with Trivy 0.70.0. Web native sharp execution
+also passed. The downloaded scan artifacts' server digests and head identity
+were verified; the workflow's synthetic merge tree equals the candidate tree.
+
+The overall component workflow still failed: an older packaging test expected
+the literal `USER 10001` rather than the intended explicit `USER 10001:10001`.
+The test-only correction requires the exact UID/GID, Microsoft distroless base
+and absence of runtime shell instructions. It does not change image contents
+or relax non-root behavior. The first failed result remains failed, and the
+gateway image steps were not reached. Matching local Vitest dependencies were
+unavailable, so the corrected test still requires actual locked hosted execution.
+Native acceptance and the complete current-head component gate remain required.
+
 ## Delegation and verdict
 
 This uses the maintainer's explicit
