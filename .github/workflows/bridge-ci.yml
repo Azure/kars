@@ -230,7 +230,6 @@ jobs:
       contents: read
     env:
       PYTHONDONTWRITEBYTECODE: '1'
-      IDP_EVIDENCE_DIR: ${{ runner.temp }}/bridge-idp-evidence
     defaults:
       run:
         shell: bash
@@ -241,6 +240,8 @@ jobs:
       - name: Initialize native Dex qualification evidence
         run: |
           set -euo pipefail
+          export IDP_EVIDENCE_DIR="$RUNNER_TEMP/bridge-idp-evidence"
+          printf 'IDP_EVIDENCE_DIR=%s\n' "$IDP_EVIDENCE_DIR" >> "$GITHUB_ENV"
           mkdir -p "$IDP_EVIDENCE_DIR"
           printf 'commit=%s\nrun_id=%s\nrun_attempt=%s\n' \
             "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
