@@ -12,6 +12,14 @@ from observation_diagnostics import READ_ERRORS
 ACTORS = ("runtime", "controller", "bff")
 LIMIT = 2 * 1024 * 1024
 UNAVAILABLE = "Native template comparison unavailable"
+ANNOTATION_GROUPS = {
+    "privateEpochChanged": "kars.azure.com/private-epoch",
+    "servicesCredentialVersionChanged": "kars.azure.com/services-credential-version",
+    "credentialProjectionVersionChanged": "kars.azure.com/credential-projection-version",
+    "inferenceProvidersVersionChanged": "kars.azure.com/inference-providers-version",
+}
+RETIREMENT = "kars.azure.com/private-root-retirement"
+PHASES = ("Pausing", "Retired", "Rotating", "Restoring", "Qualified")
 HASH_SCRIPT = """
 import {readFileSync} from 'node:fs';
 import {pathToFileURL} from 'node:url';
@@ -104,6 +112,18 @@ def project(before, current, review, before_digest, current_digest):
     }
     for key in ("labels", "annotations"):
         result[key + "Changed"] = encoded(baseline["metadata"].get(key)) != encoded(actual["metadata"].get(key))
+    before_annotations = baseline["metadata"].get("annotations")
+    current_annotations = actual["metadata"].get("annotations")
+    require(all(value is None or isinstance(value, dict)
+                for value in (before_annotations, current_annotations)), UNAVAILABLE)
+    before_annotations = before_annotations or {}
+    current_annotations = current_annotations or {}
+    for label, key in ANNOTATION_GROUPS.items():
+        result[label] = encoded(before_annotations.get(key)) != encoded(current_annotations.get(key))
+    known = set(ANNOTATION_GROUPS.values())
+    result["otherAnnotationsChanged"] = encoded({
+        key: value for key, value in before_annotations.items() if key not in known
+    }) != encoded({key: value for key, value in current_annotations.items() if key not in known})
     sections = ("containers", "initContainers", "volumes", "securityContext", "serviceAccountName")
     for key in sections:
         result[key + "Changed"] = encoded(baseline["spec"].get(key)) != encoded(actual["spec"].get(key))
@@ -112,6 +132,50 @@ def project(before, current, review, before_digest, current_digest):
     }) != encoded({key: value for key, value in actual["spec"].items() if key not in sections})
     result.update(container_changes(baseline["spec"].get("containers"), actual["spec"].get("containers")))
     return result
+
+
+def late_retirement(setup, scopes, runtime, current_digest):
+    """Report a stable receipt's phase/comparison, never claim to verify authority."""
+    result = {"available": False, "category": "provenance-or-receipt-unavailable"}
+    try:
+        namespace, _, deployment_uid = identity(runtime)
+        matches = [scope for scope in scopes if scope["namespace"].get("name") == namespace]
+        require(len(matches) == 1 and isinstance(matches[0]["namespace"].get("uid"), str)
+                and matches[0]["namespace"]["uid"], UNAVAILABLE)
+        value = setup.admin.get("/api/v1/namespaces/" + namespace)
+        require(isinstance(value, dict) and isinstance(value.get("metadata"), dict), UNAVAILABLE)
+        meta = value.get("metadata", {})
+        require(meta.get("name") == namespace and meta.get("uid") == matches[0]["namespace"]["uid"]
+                and isinstance(meta.get("resourceVersion"), str) and meta["resourceVersion"], UNAVAILABLE)
+        fields = meta.get("annotations")
+        require(fields is None or isinstance(fields, dict), UNAVAILABLE)
+        raw = (fields or {}).get(RETIREMENT)
+        if raw is None:
+            result = {"available": False, "category": "absent"}
+        else:
+            require(isinstance(raw, str) and len(raw.encode()) <= 131_072, UNAVAILABLE)
+            state = json.loads(raw)
+            require(isinstance(state, dict) and type(state.get("version")) is int
+                    and state["version"] == 4 and state.get("phase") in PHASES
+                    and isinstance(state.get("deployment"), dict), UNAVAILABLE)
+            result = {
+                "available": True, "reportedPhase": state["phase"],
+                "recordedDeploymentMatches": state["deployment"].get("uid") == deployment_uid,
+                "qualifiedTemplateRecorded": state.get("qualified") is not None,
+                "authorityVerified": False,
+            }
+            if result["qualifiedTemplateRecorded"]:
+                require(isinstance(state["qualified"], dict), UNAVAILABLE)
+                expected = state["qualified"].get("template")
+                require(isinstance(expected, str) and re.fullmatch(r"[a-f0-9]{64}", expected), UNAVAILABLE)
+                result["currentMatchesRecordedTemplate"] = current_digest == expected
+        again = setup.admin.get("/api/v1/namespaces/" + namespace)
+        require(isinstance(again, dict) and isinstance(again.get("metadata"), dict), UNAVAILABLE)
+        require(again["metadata"].get("uid") == meta["uid"]
+                and again["metadata"].get("resourceVersion") == meta["resourceVersion"], UNAVAILABLE)
+        return result
+    except READ_ERRORS:
+        return {"available": False, "category": "provenance-or-receipt-unavailable"}
 
 
 def collect(setup, baselines, failure):
@@ -144,6 +208,8 @@ def collect(setup, baselines, failure):
                             for consumer in scope["consumers"]) for scope in scopes), UNAVAILABLE)
         selected = [scope for scope in scopes if scope["namespace"]["name"] in namespaces]
         comparisons = {}
+        current_runtime = None
+        runtime_digest = None
         for actor in ACTORS:
             before = baselines[actor]
             namespace, name, uid = identity(before)
@@ -159,7 +225,10 @@ def collect(setup, baselines, failure):
                     and rechecked["metadata"]["resourceVersion"] == current["metadata"]["resourceVersion"],
                     UNAVAILABLE)
             comparisons[actor] = project(before, current, matches[0], before_hash, current_hash)
+            if actor == "runtime":
+                current_runtime, runtime_digest = current, current_hash
         result.update(available=True, category="compared", actors=comparisons)
+        result["lateRetirement"] = late_retirement(setup, selected, current_runtime, runtime_digest)
     except READ_ERRORS:
         result["category"] = "provenance-or-comparison-unavailable"
     return result
