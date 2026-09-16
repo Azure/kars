@@ -124,13 +124,14 @@
 }
 {
 	"Path": "github.com/Azure/go-ntlmssp",
-	"Version": "v0.0.0-20221128193559-754e69321358",
-	"Time": "2022-11-28T19:35:59Z",
+	"Version": "v0.1.1",
+	"Time": "2026-04-23T07:51:54Z",
 	"Indirect": true,
-	"Dir": "/work/mod/github.com/!azure/go-ntlmssp@v0.0.0-20221128193559-754e69321358",
-	"GoMod": "/work/mod/cache/download/github.com/!azure/go-ntlmssp/@v/v0.0.0-20221128193559-754e69321358.mod",
-	"Sum": "h1:mFRzDkZVAjdal+s7s0MwaRv9igoPqLRdzOLzw/8Xvq8=",
-	"GoModSum": "h1:chxPXzSsl7ZWRAuOIE23GDNzjWuZquvFlgA8xmpunjU="
+	"Dir": "/work/mod/github.com/!azure/go-ntlmssp@v0.1.1",
+	"GoMod": "/work/mod/cache/download/github.com/!azure/go-ntlmssp/@v/v0.1.1.mod",
+	"GoVersion": "1.24",
+	"Sum": "h1:l+FM/EEMb0U9QZE7mKNEDw5Mu3mFiaa2GKOoTSsNDPw=",
+	"GoModSum": "h1:NYqdhxd/8aAct/s4qSYZEerdPuH1liG2/X9DiVTbhpk="
 }
 {
 	"Path": "github.com/DATA-DOG/go-sqlmock",

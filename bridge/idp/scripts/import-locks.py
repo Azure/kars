@@ -4,6 +4,7 @@
 
 """Import active Go locks and archival .snapshot baselines from a no-push build log."""
 
+import argparse
 import base64
 import gzip
 import hashlib
@@ -58,12 +59,16 @@ def decode_artifact(log):
     return result
 
 
-def main():
-    require(len(sys.argv) == 2, "usage: import-locks.py raw-acr-build.log")
-    target = ROOT / "locks/generated"
-    require(not target.exists(), "generated locks already exist; review them rather than overwriting")
-    files = decode_artifact(Path(sys.argv[1]).read_text())
-    with tempfile.TemporaryDirectory(prefix=".dex-lock-import-", dir=ROOT / "locks") as temporary:
+def import_artifact(log, target):
+    target = Path(target).resolve()
+    default = ROOT / "locks/generated"
+    checkout = next((path for path in (ROOT, *ROOT.parents) if (path / ".git").exists()), ROOT)
+    require(target == default or not target.is_relative_to(checkout),
+            "alternate lock-review output must be outside the source checkout")
+    require(not target.exists(), "lock output already exists; review it rather than overwriting")
+    require(target.parent.is_dir(), "lock-review output parent directory must already exist")
+    files = decode_artifact(Path(log).read_text())
+    with tempfile.TemporaryDirectory(prefix=".dex-lock-import-", dir=target.parent) as temporary:
         stage = Path(temporary)
         generated = stage / "locks/generated"
         generated.mkdir(parents=True)
@@ -75,6 +80,15 @@ def main():
             shutil.copyfile(ROOT / "locks" / name, stage / "locks" / name)
         check_modules(stage)
         generated.rename(target)
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("log", type=Path)
+    parser.add_argument("--output", type=Path, default=ROOT / "locks/generated",
+                        help="New review directory outside the checkout; existing qualified locks are never overwritten")
+    args = parser.parse_args()
+    import_artifact(args.log, args.output)
     print("Imported active Go locks and archival .snapshot baselines. Review dependencies.patch and all selected modules before building.")
 
 

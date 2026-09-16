@@ -23,8 +23,8 @@ cp /packaging/README.md /out/doc/PACKAGING-README.md
 cp -R /locks /out/doc/locks
 cp -R /packaging/patches /out/doc/source-patches
 cp /packaging/source.upstream.sha256 /packaging/source.sha256 /out/doc/
-go list -deps -json ./cmd/dex > /tmp/dex-packages.json
-go run /packaging/scripts/notices.go /tmp/dex-packages.json /out/doc/third-party
+go list -deps -json=ImportPath,Module ./cmd/dex > /out/doc/runtime-packages.json
+go run /packaging/scripts/notices.go /out/doc/runtime-packages.json /out/doc/third-party
 sha256sum --check --strict /packaging/source.sha256 > /dev/null
 cmp go.mod /locks/go.mod
 cmp go.sum /locks/go.sum
