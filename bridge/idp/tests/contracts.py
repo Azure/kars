@@ -11,9 +11,9 @@ BASE = (
     "4377af4aa7a810b7d59f691eae5066895a71aa3eee4cfb4eba527bbebff16479"
 )
 RPM_MANIFEST = "var/lib/rpmmanifest/container-manifest-2"
-LOCK_FILES = {
-    "go.mod", "go.sum", "api/v2/go.mod", "api/v2/go.sum",
-    "upstream/go.mod", "upstream/go.sum", "upstream/api/v2/go.mod", "upstream/api/v2/go.sum",
+ACTIVE_LOCK_FILES = {"go.mod", "go.sum", "api/v2/go.mod", "api/v2/go.sum"}
+BASELINE_SNAPSHOTS = {f"upstream/{name}.snapshot" for name in ACTIVE_LOCK_FILES}
+LOCK_FILES = ACTIVE_LOCK_FILES | BASELINE_SNAPSHOTS | {
     "modules.json", "api-modules.json", "graph.txt", "toolchain.txt",
     "inputs.lock", "requests.txt", "dependencies.patch", "SHA256SUMS",
 }
@@ -120,6 +120,37 @@ def check_rootfs(base, runtime, manifest):
                  "bin/sh", "bin/bash", "usr/bin/sh", "usr/bin/bash",
                  "usr/bin/tdnf", "usr/bin/npm", "usr/local/go/bin/go", "usr/bin/gcc"):
         require(name not in runtime, f"shipping tool/unused entrypoint: {name}")
+
+def resolve_base_file(inventory, requested):
+    require(isinstance(requested, str) and requested.startswith("/")
+            and len(requested) <= 4096 and "\0" not in requested, "invalid ELF interpreter path")
+    pending = requested.split("/")
+    resolved = []
+    links = 0
+    while pending:
+        part = pending.pop(0)
+        if part in ("", "."):
+            continue
+        if part == "..":
+            require(resolved, "base link escapes image root")
+            resolved.pop()
+            continue
+        name = "/".join([*resolved, part])
+        entry = inventory.get(name)
+        if entry is not None and entry[0] in ("symlink", "hardlink"):
+            links += 1
+            require(links <= 32, "base link resolution exceeds its bound")
+            target = entry[2]
+            require(isinstance(target, str) and target and len(target) <= 4096
+                    and "\0" not in target, "invalid base link target")
+            if entry[0] == "hardlink" or target.startswith("/"):
+                resolved = []
+            pending = target.split("/") + pending
+        else:
+            resolved.append(part)
+    name = "/".join(resolved)
+    require(inventory.get(name, (None,))[0] == "file", "ELF interpreter is not provided by pinned runtime")
+    return name
 
 
 def check_scan(report):

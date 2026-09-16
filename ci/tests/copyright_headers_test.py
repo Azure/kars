@@ -104,7 +104,7 @@ class HeaderTests(unittest.TestCase):
 
     def test_dex_integrity_data_has_exact_coverage_without_exempting_source_directories(self):
         for name in ("bridge/idp/locks/generated/go.sum",
-                     "bridge/idp/locks/generated/upstream/api/v2/go.mod",
+                     "bridge/idp/locks/generated/upstream/api/v2/go.mod.snapshot",
                      "bridge/idp/patches/0001-literal-oauth-error-descriptions.patch",
                      "bridge/idp/patches/SHA256SUMS"):
             rule = headers.classification(name, self.policy)

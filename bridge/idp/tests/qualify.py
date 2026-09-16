@@ -16,7 +16,7 @@ import tarfile
 import tempfile
 import uuid
 
-from contracts import BASE, RPM_MANIFEST, check_modules, check_rootfs, check_scan, require
+from contracts import BASE, RPM_MANIFEST, check_modules, check_rootfs, check_scan, require, resolve_base_file
 
 
 def run(*args, **kwargs):
@@ -39,8 +39,10 @@ def export(image, directory, prefix):
                     entries[name] = ("file", member.mode, hashlib.sha256(data).hexdigest())
                     if name == RPM_MANIFEST or name.startswith("usr/share/doc/dex/elf-"):
                         documents[name] = data.decode()
-                elif member.issym() or member.islnk():
-                    entries[name] = ("link", member.mode, member.linkname)
+                elif member.issym():
+                    entries[name] = ("symlink", member.mode, member.linkname)
+                elif member.islnk():
+                    entries[name] = ("hardlink", member.mode, member.linkname)
         return entries, documents
     finally:
         run("docker", "rm", container)
@@ -122,7 +124,10 @@ def main():
         match = re.search(r"Requesting program interpreter: ([^\]]+)", headers)
         require(match is not None, "CGO Dex must have a real runtime ELF interpreter")
         loader = match.group(1)
-        require(loader.lstrip("/") in base, "ELF interpreter is not provided by pinned runtime")
+        provided = resolve_base_file(base, loader)
+        (args.evidence / "interpreter-origin.json").write_text(json.dumps({
+            "requested": loader, "resolvedBaseFile": provided, "baseEntry": base[provided],
+        }, indent=2))
         linked = run("docker", "run", "--rm", "--network", "none", "--read-only",
                      "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
                      "--entrypoint", loader, image_id, "--list", "/usr/local/bin/dex")

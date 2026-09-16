@@ -19,11 +19,15 @@ COPY scripts/generate-locks.sh /packaging/scripts/generate-locks.sh
 RUN sh /packaging/scripts/generate-locks.sh
 
 FROM scratch AS lock-artifact
-COPY --from=lock-generation /out/ /
+COPY --from=lock-generation --chown=1001:1001 /out/ /
+USER 1001:1001
 
-FROM lock-generation AS lock-replay
-COPY locks/generated/ /reviewed/
-RUN cd /reviewed && sha256sum --check --strict SHA256SUMS \
+FROM source AS lock-replay
+COPY --from=lock-generation --chown=1001:1001 /out/ /out/
+COPY --chown=1001:1001 locks/generated/ /reviewed/
+USER 1001:1001
+RUN test "$(id -u)" = 1001 && test "$(id -g)" = 1001 \
+    && cd /reviewed && sha256sum --check --strict SHA256SUMS \
     && cmp SHA256SUMS /out/SHA256SUMS \
     && cd /out && sha256sum --check --strict /reviewed/SHA256SUMS \
     && printf 'KARS_DEX_LOCK_REPLAY_PASSED\n'

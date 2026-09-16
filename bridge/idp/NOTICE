@@ -27,9 +27,15 @@ are distributed in /usr/share/doc/dex/source-patches. Complete original and
 expected patched source inventories are distributed as source.upstream.sha256
 and source.sha256 in /usr/share/doc/dex.
 
-The generated dependency diff and original and patched module files are
-distributed in /usr/share/doc/dex/locks. Linked dependency license and notice
-files are distributed in /usr/share/doc/dex/third-party.
+The generated dependency diff, active patched module files, and byte-for-byte
+original module baselines are distributed in /usr/share/doc/dex/locks.
+The four archival baselines under locks/upstream use go.mod.snapshot and
+go.sum.snapshot filenames, including the api/v2 subdirectory. They are
+comparison/attribution data, never compiler inputs. This path-only distinction
+preserves every original byte and SHA-256 while the active patched go.mod and
+go.sum retain their normal filenames and full dependency/security scanning.
+Linked dependency license and notice files are distributed in
+/usr/share/doc/dex/third-party.
 
 The official image's gomplate and docker-entrypoint programs are intentionally
 not distributed. The supported invocation is /usr/local/bin/dex serve with an

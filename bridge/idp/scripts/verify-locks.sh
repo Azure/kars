@@ -9,7 +9,7 @@ cmp /packaging/locks/inputs.lock /locks/inputs.lock
 cmp /packaging/locks/requests.txt /locks/requests.txt
 test "$(cat /locks/toolchain.txt)" = "go version $GO_VERSION linux/$(go env GOARCH)"
 for file in go.mod go.sum api/v2/go.mod api/v2/go.sum; do
-    cmp "/packaging/upstream/$file" "/locks/upstream/$file"
+    cmp "/packaging/upstream/$file.snapshot" "/locks/upstream/$file.snapshot"
     cp "/locks/$file" "$file"
 done
 test "$(go list -m -f '{{.GoVersion}}')" = 1.26.0

@@ -12,6 +12,7 @@ tar -xzf /tmp/dex.tar.gz --strip-components=1 -C /src/dex
 rm /tmp/dex.tar.gz
 sh /packaging/scripts/source-inventory.sh > /packaging/source.upstream.sha256
 mkdir -p /packaging/upstream/api/v2
-cp go.mod go.sum /packaging/upstream/
-cp api/v2/go.mod api/v2/go.sum /packaging/upstream/api/v2/
+for file in go.mod go.sum api/v2/go.mod api/v2/go.sum; do
+    cp "$file" "/packaging/upstream/$file.snapshot"
+done
 sh /packaging/scripts/apply-source-patches.sh

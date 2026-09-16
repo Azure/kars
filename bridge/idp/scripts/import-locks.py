@@ -2,7 +2,7 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-"""Import public Go-generated artifacts from an ACR --no-push build log."""
+"""Import active Go locks and archival .snapshot baselines from a no-push build log."""
 
 import base64
 import gzip
@@ -75,7 +75,7 @@ def main():
             shutil.copyfile(ROOT / "locks" / name, stage / "locks" / name)
         check_modules(stage)
         generated.rename(target)
-    print("Imported Go-generated locks. Review dependencies.patch and all selected modules before building.")
+    print("Imported active Go locks and archival .snapshot baselines. Review dependencies.patch and all selected modules before building.")
 
 
 if __name__ == "__main__":

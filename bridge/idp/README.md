@@ -4,7 +4,8 @@ Licensed under the MIT License. -->
 # Kars Dex security rebuild
 
 **Status: hosted build/test stages passed; final runtime qualification pending.**
-Real Go-generated `locks/generated/` files are present and remain unchanged.
+Real Go-generated active locks under `locks/generated/` remain byte-for-byte
+unchanged; historical baselines use the path-only snapshot layout described below.
 The successful hosted attempt on September 16, 2026 compiled Dex with CGO,
 completed license collection, passed the compatibility cases, completed the
 upstream root/API race-suite commands with exit code zero, passed all nine
@@ -163,12 +164,59 @@ supported by this package. Direct Dex features are not replaced or removed.
 
 Azure Linux's **14 RPM inventory records**, base files and CA trust are
 retained rather than reconstructed. The final image installs the upstream
-Apache-2.0 license, this package's MIT license, attribution, original/patched
-module files, dependency diff, Go build metadata and ELF metadata under
+Apache-2.0 license, this package's MIT license, attribution, original module
+snapshots, active patched module files, dependency diff, Go build metadata and ELF metadata under
 `/usr/share/doc/dex/`. A build-time collector retains license/notice files
 from linked modules (including bundled notices), and fails for missing root
 licenses rather than silently shipping incomplete attribution. License review
 of the generated graph and bundled native code is still an acceptance gate.
+
+## Active locks versus archival baseline data
+
+The verified hosted artifact's four historical module baselines are now
+explicit **data snapshots**, not active Go manifests. The change is a
+deterministic path-only migration of the already-verified artifact: all four
+file contents and SHA-256 values are unchanged, and only their four paths
+change in `locks/generated/SHA256SUMS`. No Go resolution, dependency update,
+compiler/base change, exclusion, waiver or vulnerability suppression is involved.
+
+Under `bridge/idp/locks/generated/upstream/`:
+
+| Original archival path | Current data path |
+| --- | --- |
+| `go.mod` | `go.mod.snapshot` |
+| `go.sum` | `go.sum.snapshot` |
+| `api/v2/go.mod` | `api/v2/go.mod.snapshot` |
+| `api/v2/go.sum` | `api/v2/go.sum.snapshot` |
+
+The active patched `locks/generated/go.mod`, `go.sum`, `api/v2/go.mod` and
+`api/v2/go.sum` retain their normal filenames, original patched bytes and full
+dependency/security scanning. Module inventories, graph, dependency diff,
+inputs, toolchain record and all other generated artifact contents are
+unchanged. The saved historical baselines are used only for byte comparison,
+diffing and attribution; the build still copies **only active locks** into
+the Go source tree.
+
+This distinction prevents dependency discovery from mistaking archived
+upstream dependencies for new active dependencies. Actual runtime dependencies
+and their final-image vulnerability scans remain fully enforced. The runtime
+metadata copy preserves the same data suffixes under
+`/usr/share/doc/dex/locks/upstream/`.
+
+The original raw hosted-generation log remains unchanged outside the repository
+as provenance, with its original transport hash and original archive member
+names. `dependencies.patch` also keeps its logical `upstream/go.mod` and
+`upstream/api/v2/go.mod` source labels; those labels are not stored manifest
+files or compile inputs. Future generation emits the new snapshot layout
+directly. The importer and validator require that layout and reject legacy or
+mixed active-looking baseline names; do not overwrite the migrated files by
+reimporting an old-layout log or re-resolving dependencies.
+
+Representation contracts compare every generated file digest with the
+pre-migration verified artifact, require exactly four normally named active
+Go locks, and exercise archive import/rejection. With the verified-archive
+source tests enabled, each baseline snapshot is also compared byte-for-byte
+with its original file from the pinned upstream tarball.
 
 ## Hosted lock generation
 
@@ -220,8 +268,9 @@ docker buildx build --platform linux/amd64 --target lock-artifact \
 
 Artifact contents are the generated root/API `go.mod` and `go.sum`,
 `modules.json`, `api-modules.json`, `graph.txt`, `toolchain.txt`,
-`inputs.lock`, `requests.txt`, `dependencies.patch`, the four unchanged
-`upstream/` module files, and `SHA256SUMS`. Review and persist these under
+`inputs.lock`, `requests.txt`, `dependencies.patch`, the four byte-unchanged
+`upstream/` baseline data files (`go.mod.snapshot` / `go.sum.snapshot` at the
+root and under `api/v2`), and `SHA256SUMS`. Review and persist these under
 `bridge/idp/locks/generated/` before any runtime build. Generated module
 checksums are Go's, not fabricated or transcribed from vulnerability reports.
 On a second clean **native worker of the same architecture**, replay the
@@ -231,6 +280,12 @@ resolver without its cache and compare the entire reviewed artifact:
 docker build --no-cache --target lock-replay \
   --file bridge/idp/Dockerfile.locks bridge/idp
 ```
+
+The non-shipping artifact and replay stages default to `1001:1001`. Both sets
+of replay inputs are copied with that ownership, without changing lock bytes
+or applying `chmod` to upstream data. Replay asserts its actual UID/GID before
+running the read-only checksum comparisons. In `Dockerfile.locks`, root is
+retained only in the source/resolution stages that need build-directory writes.
 
 The replay target verifies both checksum inventories and requires exact
 agreement for the root/API locks, selected module graphs, source snapshots,
