@@ -12,8 +12,8 @@ class BudgetApiCommandFailure extends Error {
     super("Disposable budget API assertion command failed", { cause: undefined });
     const message = String(error.stderr ?? "");
     this.budgetTokenPolicyDenied = error.status === 1
-      && /Error from server \(Forbidden\):/.test(message)
-      && /ValidatingAdmissionPolicy ['"]kars-inference-budget-token['"] with binding ['"]kars-inference-budget-token['"] denied request:/.test(message);
+      && /(?:^|\n)The serviceaccounts ["']untrusted["'] is invalid:/.test(message)
+      && /ValidatingAdmissionPolicy ['"]kars-inference-budget-token['"] with binding ['"]kars-inference-budget-token['"] denied request: Only kubelet node identities may obtain a Pod-bound governed-inference audience token(?:$|[\s"])/.test(message);
   }
 }
 
