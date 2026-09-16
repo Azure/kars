@@ -27,9 +27,10 @@ RUN sh /packaging/scripts/verify-locks.sh \
 
 FROM dependencies AS build
 COPY scripts/build.sh /packaging/scripts/build.sh
-COPY scripts/notices.go /packaging/scripts/notices.go
+COPY scripts/notices.go scripts/notices_test.go /packaging/scripts/
 COPY NOTICE LICENSE README.md /packaging/
-RUN sh /packaging/scripts/build.sh
+RUN go test -count=1 /packaging/scripts/notices.go /packaging/scripts/notices_test.go \
+    && sh /packaging/scripts/build.sh
 
 FROM build AS compatibility-tests
 RUN go test -race -count=1 -v \

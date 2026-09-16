@@ -3,9 +3,13 @@ Licensed under the MIT License. -->
 
 # Kars Dex security rebuild
 
-**Status: hosted build/test stages passed; final runtime qualification pending.**
-Real Go-generated active locks under `locks/generated/` remain byte-for-byte
-unchanged; historical baselines use the path-only snapshot layout described below.
+**Status: NTLM security update pending hosted Go locks and full requalification.**
+The exact request now includes `github.com/Azure/go-ntlmssp@v0.1.1` for
+CVE-2026-32952. Existing previously qualified files under `locks/generated/`
+remain byte-for-byte unchanged until a new hosted artifact is verified.
+Consequently, their old request stamp does not satisfy the new request:
+normal image/qualification builds must fail closed until reviewed new locks
+are installed. No module checksums were edited by hand.
 The successful hosted attempt on September 16, 2026 compiled Dex with CGO,
 completed license collection, passed the compatibility cases, completed the
 upstream root/API race-suite commands with exit code zero, passed all nine
@@ -13,7 +17,13 @@ signing-key-continuity regression subcases under the race detector, and compiled
 the probe. Environment-dependent suite skips do not establish external
 connector runtime coverage.
 
-The required `idp` job in public Bridge CI now builds these checked-in inputs
+That earlier result applies only to the old dependency graph. Its binary
+digest `c4b5f8017cffb5e9853788a66cc1a1ce21104b9e4b4ba04901947d7510d5e4f9`
+and publication payload expectations must **not** be reused for a rebuilt
+NTLM-fixed image. Frozen operations artifacts remain unsubmitted and require
+a new approved reference after fresh qualification.
+
+The required `idp` job in public Bridge CI builds the checked-in inputs
 and executes the actual final distroless memory/SQLite/OIDC, linkage, inventory
 and scan gates. That CI execution is still required; the earlier build/test
 success is **not** final-image qualification or permission to deploy. This
@@ -54,6 +64,7 @@ the Docker build uses the pinned official builder, not an unchecked download.
 
 | Module | Upstream | Requested selection | Authoritative fix / dependency reason |
 | --- | --- | --- | --- |
+| `github.com/Azure/go-ntlmssp` | `v0.0.0-20221128193559-754e69321358` | 0.1.1 | [CVE-2026-32952 / GHSA-pjcq-xvwq-hhpj](https://github.com/advisories/GHSA-pjcq-xvwq-hhpj): malformed NTLM challenges can panic before 0.1.1 |
 | `github.com/go-jose/go-jose/v4` | 4.1.3 | 4.1.4 | [GO-2026-4945](https://vuln.go.dev/ID/GO-2026-4945.json) |
 | `github.com/russellhaering/goxmldsig` | 1.5.0 | 1.6.0 | [GO-2026-4753](https://vuln.go.dev/ID/GO-2026-4753.json) |
 | `go.opentelemetry.io/otel`, `/metric`, `/trace` | 1.39.0 | 1.44.0 | [GO-2026-5506](https://vuln.go.dev/ID/GO-2026-5506.json) fixes 1.41; [GO-2026-5158](https://vuln.go.dev/ID/GO-2026-5158.json) and gRPC require 1.44 |
@@ -85,6 +96,38 @@ builders execute preceding stages even when the selected target does not
 depend on them. Their pinned source/compiler stage is checked for consistency.
 An unexpectedly higher MVS selection fails validation and needs review, not
 a forced downgrade or a scanner waiver.
+
+### NTLM update and package-scoped OpenPGP evidence
+
+The exact NTLM release is
+[`bd8579c18d41bf5d91a5f74b1117c958f635b866`](https://github.com/Azure/go-ntlmssp/tree/bd8579c18d41bf5d91a5f74b1117c958f635b866).
+Its [module metadata](https://proxy.golang.org/github.com/!azure/go-ntlmssp/@v/v0.1.1.mod)
+requires Go 1.24 and declares no module dependencies, compatible with the
+unchanged Go 1.26.8 builder. The hosted upstream-tests stage requires the
+actual `TestNewAuthenticateMessage_ChallengeTargetInfoOffsetOverflowNoPanics`
+regression to be registered, then runs `go test -json -count=1 -race
+github.com/Azure/go-ntlmssp/...`. The actual JSON is retained as
+`/out/doc/ntlm-tests.json` in the test image and printed into the existing
+upstream build log. Standard IIS E2E cases retain their upstream
+environment-dependent skips; no IIS credentials or new provider prerequisite
+is introduced.
+
+[GO-2026-5932](https://vuln.go.dev/ID/GO-2026-5932.json) concerns
+`golang.org/x/crypto/openpgp` and its subpackages, not every package in
+`golang.org/x/crypto`. The crypto pin remains **v0.56.0**, with no module
+suppression, exclusion or waiver.
+
+Each build now retains the actual
+`go list -deps -json=ImportPath,Module ./cmd/dex` result as
+`/usr/share/doc/dex/runtime-packages.json`. It records runtime package paths
+and their selected modules without test-only or tool-only packages. The
+build-time notice collector rejects an empty/wrong-target inventory and
+fatally rejects `golang.org/x/crypto/openpgp` or any descendant import path
+before completing the image. Other crypto packages remain allowed and
+scanned. The same inventory supplies license collection; existing `LICENCE`
+handling is preserved. This is package-inclusion evidence and a future
+introduction guard, **not** a scanner filter or proof that a pending build
+has already passed.
 
 ## Disclosed source compatibility patches
 
@@ -226,6 +269,10 @@ The following task uses an operator-approved ACR's compute but **does not push
 an image**, deploy, or touch cluster state.
 The context is this public-only directory, not private repository config.
 
+For the current NTLM change, use the concrete staged-review procedure below;
+do not remove or overwrite the currently qualified generated locks merely
+to make the default importer run.
+
 From the public Kars worktree root, set `SUBSCRIPTION_ID`, `ACR_NAME` and
 `ARTIFACT_DIR` to approved operator values. Keep the artifact directory private.
 
@@ -295,6 +342,48 @@ blocker, not permission to overwrite the reviewed locks. Use a native Docker wor
 option for this independent replay; do not assume the quick-build CLI exposes
 that option. Neither replay nor generation is reachable from the normal
 `Dockerfile`.
+
+### Parent-only no-push NTLM lock-generation and review
+
+Set `SUBSCRIPTION_ID`, `ACR_NAME` and an existing `ARTIFACT_DIR` **outside the
+source checkout** to approved operator values. The task below only resolves
+the exact requested Go graph on the pinned worker image; it does not build or
+push a Dex image. Only the parent submits it.
+
+```sh
+(
+  cd bridge/idp
+  az acr build \
+    --subscription "$SUBSCRIPTION_ID" --registry "$ACR_NAME" \
+    --platform linux/amd64 --no-push --timeout 3600 \
+    --target lock-generation --file Dockerfile.locks .
+) > "$ARTIFACT_DIR/ntlm-lock-generation.log" 2>&1
+
+PYTHONDONTWRITEBYTECODE=1 python3 bridge/idp/scripts/import-locks.py \
+  "$ARTIFACT_DIR/ntlm-lock-generation.log" \
+  --output "$ARTIFACT_DIR/ntlm-reviewed-locks"
+```
+
+`--output` validates the complete archive, current request stamp and exact
+selected versions in a temporary sibling, then creates a new review
+directory. It refuses any existing output and any alternate location inside
+the source checkout. Failed/stale artifacts leave both the proposed output
+and existing qualified locks untouched.
+
+Before promotion, review the generated root/API manifests, sums, module
+inventories, graph and `dependencies.patch`. Confirm NTLM is exactly v0.1.1,
+the crypto/toolchain/base/source pins are unchanged, and original `.snapshot`
+baselines still match their pinned upstream bytes. Keep the old artifact and
+raw generation logs outside the repository as historical provenance. Only
+after that review may the parent replace `locks/generated/` with the verified
+new artifact; this source change does not perform that replacement.
+
+Then rerun source contracts, the hosted notice-guard Go tests, NTLM package
+regressions, compatibility/root/API/probe race suites, the full actual
+distroless runtime qualifier and fresh scans. Require zero HIGH/CRITICAL
+findings **and** confirmed resolution of the current NTLM advisory. Retain
+the new package inventory and establish a new binary/payload reference.
+The prior green checks and old binary hash do not qualify this update.
 
 ## Required Bridge CI qualification
 

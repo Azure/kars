@@ -22,26 +22,32 @@ type module struct {
 	Replace            *module
 }
 
-func run() error {
-	if len(os.Args) != 3 {
-		return fmt.Errorf("usage: notices packages.json output-directory")
-	}
-	f, err := os.Open(os.Args[1])
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	decoder := json.NewDecoder(f)
+func runtimeModules(input io.Reader) (map[string]module, error) {
+	decoder := json.NewDecoder(input)
 	modules := map[string]module{
 		"golang.org/toolchain@" + runtime.Version(): {Dir: runtime.GOROOT()},
 	}
+	foundDex := false
 	for {
-		var pkg struct{ Module *module }
+		var pkg struct {
+			ImportPath string
+			Module     *module
+		}
 		if err := decoder.Decode(&pkg); err != nil {
 			if err == io.EOF {
 				break
 			}
-			return err
+			return nil, err
+		}
+		if pkg.ImportPath == "" {
+			return nil, fmt.Errorf("runtime package inventory contains a missing import path")
+		}
+		if pkg.ImportPath == "golang.org/x/crypto/openpgp" ||
+			strings.HasPrefix(pkg.ImportPath, "golang.org/x/crypto/openpgp/") {
+			return nil, fmt.Errorf("forbidden compiled runtime package: %s (GO-2026-5932)", pkg.ImportPath)
+		}
+		if pkg.ImportPath == "github.com/dexidp/dex/cmd/dex" {
+			foundDex = true
 		}
 		if pkg.Module == nil || pkg.Module.Main {
 			continue
@@ -51,6 +57,25 @@ func run() error {
 			m.Dir = m.Replace.Dir
 		}
 		modules[m.Path+"@"+m.Version] = m
+	}
+	if !foundDex {
+		return nil, fmt.Errorf("runtime package inventory does not include the Dex command")
+	}
+	return modules, nil
+}
+
+func run() error {
+	if len(os.Args) != 3 {
+		return fmt.Errorf("usage: notices packages.json output-directory")
+	}
+	f, err := os.Open(os.Args[1])
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	modules, err := runtimeModules(f)
+	if err != nil {
+		return err
 	}
 	keys := make([]string, 0, len(modules))
 	for key := range modules {
