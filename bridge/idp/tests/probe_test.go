@@ -38,6 +38,55 @@ func continuityKey(kid string, key *rsa.PrivateKey) continuityJWK {
 	}
 }
 
+func TestInvalidPasswordResponse(t *testing.T) {
+	for _, tc := range []struct {
+		name     string
+		status   int
+		errorBox bool
+		redirect bool
+		wantOK   bool
+	}{
+		{name: "upstream unauthorized form", status: http.StatusUnauthorized, errorBox: true, wantOK: true},
+		{name: "successful status is not rejection", status: http.StatusOK, errorBox: true},
+		{name: "unrelated unauthorized response", status: http.StatusUnauthorized},
+		{name: "bad request is not authentication rejection", status: http.StatusBadRequest, errorBox: true},
+		{name: "callback redirect is not rejection", status: http.StatusFound, redirect: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "text/html")
+				switch {
+				case r.Method == http.MethodGet && r.URL.Path == "/dex/auth":
+					_, _ = w.Write([]byte(`<form method="post" action="/dex/login"><input name="password" type="password"></form>`))
+				case r.Method == http.MethodPost && r.URL.Path == "/dex/login":
+					if err := r.ParseForm(); err != nil {
+						t.Error(err)
+						w.WriteHeader(http.StatusBadRequest)
+						return
+					}
+					if r.Form.Get("login") != email || r.Form.Get("password") != "wrong-password" {
+						t.Error("probe did not submit the intended invalid credentials")
+					}
+					if tc.redirect {
+						w.Header().Set("Location", callback+"?code=unexpected-code")
+					}
+					w.WriteHeader(tc.status)
+					if tc.errorBox {
+						_, _ = w.Write([]byte(`<form><div id="login-error">Invalid credentials.</div></form>`))
+					}
+				default:
+					w.WriteHeader(http.StatusNotFound)
+				}
+			}))
+			defer server.Close()
+			code, err := login(server.URL+"/dex", "wrong-password", strings.Repeat("v", 43), "nonce", false)
+			if code != "" || (err == nil) != tc.wantOK {
+				t.Fatalf("invalid-password result: code present=%v, error=%v, want success=%v", code != "", err, tc.wantOK)
+			}
+		})
+	}
+}
+
 func continuityToken(t *testing.T, key *rsa.PrivateKey, issuer, kid, nonce string, expires time.Time) string {
 	t.Helper()
 	header, err := json.Marshal(map[string]string{"alg": "RS256", "kid": kid})

@@ -217,8 +217,8 @@ func login(issuer, password, verifier, nonce string, shouldSucceed bool) (string
 	defer resp.Body.Close()
 	location := resp.Header.Get("Location")
 	if !shouldSucceed {
-		if resp.StatusCode != http.StatusOK || strings.HasPrefix(location, callback) {
-			return "", fmt.Errorf("invalid password did not remain on login form")
+		if resp.StatusCode != http.StatusUnauthorized || strings.HasPrefix(location, callback) {
+			return "", fmt.Errorf("invalid password did not return its unauthorized login form (status %d)", resp.StatusCode)
 		}
 		body, err := io.ReadAll(io.LimitReader(resp.Body, 1<<20))
 		if err != nil {
