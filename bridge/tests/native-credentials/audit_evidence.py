@@ -21,15 +21,20 @@ class AuditSnapshot(list):
         self.marker = marker
 
 
+class UnsettledInventory(Failure):
+    """The active log is between its rotation rename and recreation."""
+
+
 def paths():
     names = command("docker", "exec", CONTROL_PLANE, "find", DIRECTORY,
                     "-maxdepth", "1", "-type", "f", "-name", "audit*.log",
                     timeout=30).splitlines()
-    require(1 <= len(names) <= 3 and len(set(names)) == len(names)
-            and DIRECTORY + "/audit.log" in names
+    require(len(names) <= 3 and len(set(names)) == len(names)
             and all(name.startswith(DIRECTORY + "/") and
                     NAME.fullmatch(name[len(DIRECTORY) + 1:]) for name in names),
             "Native audit file inventory is unavailable or outside its bounded scope")
+    if DIRECTORY + "/audit.log" not in names:
+        raise UnsettledInventory("Native audit rotation has not published its active file")
     return sorted(names)
 
 
@@ -63,7 +68,7 @@ def read(namespace=None):
             if before != paths():
                 continue
             return parse_events(raw, namespace)
-        except (CommandFailure, json.JSONDecodeError):
+        except (CommandFailure, json.JSONDecodeError, UnsettledInventory):
             # Rotation can retire a file between inventory and open.
             continue
     raise Failure("Native audit snapshot did not settle; no complete event proof is available")

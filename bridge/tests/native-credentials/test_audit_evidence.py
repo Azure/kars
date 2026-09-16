@@ -44,6 +44,18 @@ class AuditEvidenceTests(unittest.TestCase):
              patch.object(audit, "command", side_effect=[json.dumps(event(1)), json.dumps(event(2))]):
             self.assertEqual(audit.read("work"), [event(2)])
 
+    def test_rename_recreate_gap_retries_without_relaxing_path_validation(self):
+        old = audit.DIRECTORY + "/audit-2026-09-16T10-30-00.001.log"
+        healthy = old + "\n" + audit.DIRECTORY + "/audit.log"
+        with patch.object(audit, "command", side_effect=[
+            old, healthy, json.dumps(event(1)), healthy,
+        ]) as command:
+            self.assertEqual(audit.read("work"), [event(1)])
+        self.assertEqual(command.call_count, 4)
+        with patch.object(audit, "command", return_value=old), \
+             self.assertRaisesRegex(Failure, "did not settle"):
+            audit.read("work")
+
     def test_distinct_creates_are_retained_and_conflicting_duplicate_ids_are_refused(self):
         one, two = event(1, "create", "secrets", 201), event(2, "create", "secrets", 201)
         self.assertEqual(len(audit.parse_events(json.dumps(one) + "\n" + json.dumps(two), "work")), 2)

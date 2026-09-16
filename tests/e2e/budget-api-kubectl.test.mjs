@@ -73,9 +73,10 @@ test("successful public and private commands preserve their output without diagn
 
 test("private audience denial requires the exact policy and binding without exposing error contents", (t) => {
   const marker = "do-not-publish-token-material";
-  const stderr = "Error from server (Forbidden): serviceaccounts is forbidden: "
+  const stderr = 'The serviceaccounts "untrusted" is invalid: : Invalid value: "": '
     + "ValidatingAdmissionPolicy 'kars-inference-budget-token' with binding "
-    + `'kars-inference-budget-token' denied request: ${marker}`;
+    + "'kars-inference-budget-token' denied request: "
+    + `Only kubelet node identities may obtain a Pod-bound governed-inference audience token\n${marker}`;
   const state = fixture(t, { stderr, status: 1 });
   assert.throws(() => kubectl(["create", "--raw", "/fixture/token"], { private: marker }), (error) => {
     commandFailed(error);
@@ -89,9 +90,10 @@ test("private audience denial requires the exact policy and binding without expo
 
 for (const stderr of [
   'Error from server (Forbidden): User "untrusted" cannot create resource "serviceaccounts/token"',
-  "Error from server (Forbidden): ValidatingAdmissionPolicy 'another-policy' with binding 'kars-inference-budget-token' denied request:",
-  "Error from server (Forbidden): ValidatingAdmissionPolicy 'kars-inference-budget-token' with binding 'another-binding' denied request:",
-  "Error from server (Invalid): ValidatingAdmissionPolicy 'kars-inference-budget-token' with binding 'kars-inference-budget-token' denied request:",
+  'The serviceaccounts "untrusted" is invalid: ValidatingAdmissionPolicy \'another-policy\' with binding \'kars-inference-budget-token\' denied request: Only kubelet node identities may obtain a Pod-bound governed-inference audience token',
+  'The serviceaccounts "untrusted" is invalid: ValidatingAdmissionPolicy \'kars-inference-budget-token\' with binding \'another-binding\' denied request: Only kubelet node identities may obtain a Pod-bound governed-inference audience token',
+  'The serviceaccounts "untrusted" is invalid: ValidatingAdmissionPolicy \'kars-inference-budget-token\' with binding \'kars-inference-budget-token\' denied request: expression resulted in an evaluation error',
+  "Error from server (Forbidden): ValidatingAdmissionPolicy 'kars-inference-budget-token' with binding 'kars-inference-budget-token' denied request: Only kubelet node identities may obtain a Pod-bound governed-inference audience token",
   "Unable to connect to the server: connection refused",
 ]) {
   test(`non-policy failure never qualifies private-audience denial: ${stderr}`, (t) => {
