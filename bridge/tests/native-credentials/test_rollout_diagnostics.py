@@ -163,6 +163,35 @@ class RolloutDiagnosticsTests(unittest.TestCase):
                 self.assertFalse(value["available"])
                 call.assert_not_called()
 
+    def test_shared_replicaset_retains_its_first_snapshot_across_pods(self):
+        for changed_field in (None, "uid", "resourceVersion"):
+            with self.subTest(changed_field=changed_field):
+                fixture = RolloutFixture()
+                second = copy.deepcopy(fixture.objects[POD])
+                second["metadata"].update(name="agent-pod-2", uid="agent-pod-2-uid")
+                fixture.objects[POD + "-2"] = second
+                original = fixture.get
+                replica_reads = 0
+
+                def changing(path):
+                    nonlocal replica_reads
+                    if path == REPLICA_SET:
+                        replica_reads += 1
+                        if replica_reads == 2 and changed_field:
+                            fixture.objects[path]["metadata"][changed_field] = "changed-private-canary"
+                    return original(path)
+
+                fixture.get = changing
+                value, _ = self.capture(fixture)
+                self.assertEqual(value["available"], changed_field is None)
+                if changed_field is None:
+                    self.assertEqual(len(value["pods"]), 2)
+                    self.assertEqual(replica_reads, 3)
+                else:
+                    self.assertNotIn("pods", value)
+                    self.assertEqual(replica_reads, 2)
+                self.assertNotIn("canary", json.dumps(value))
+
     def test_errors_are_explicit_and_value_free(self):
         value, _ = self.capture(side_effect=OSError("private-canary"))
         self.assertTrue(value["available"])
