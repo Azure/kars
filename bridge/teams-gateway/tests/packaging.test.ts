@@ -26,7 +26,13 @@ describe("Private BFF image build contract", () => {
     expect(dockerfile).toContain(
       "COPY --from=build /src/target/release/kars-bridge-bff /usr/local/bin/kars-bridge-bff",
     );
-    expect(dockerfile).toMatch(/^USER 10001$/m);
+    expect(dockerfile).toMatch(/^USER 10001:10001$/m);
+    expect(dockerfile).toContain("FROM ${AZURELINUX_DISTROLESS} AS runtime");
+    expect(dockerfile).toContain(
+      "ARG AZURELINUX_DISTROLESS=mcr.microsoft.com/azurelinux/distroless/base:3.0",
+    );
+    const runtime = dockerfile.split("FROM ${AZURELINUX_DISTROLESS} AS runtime")[1];
+    expect(runtime).not.toMatch(/^RUN /m);
     expect(dockerfile).toContain('ENTRYPOINT ["/usr/local/bin/kars-bridge-bff"]');
   });
 });

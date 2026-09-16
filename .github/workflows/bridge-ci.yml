@@ -117,6 +117,32 @@ jobs:
         run: PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=../tests/native-credentials python3 -m unittest discover -s ../tests/native-credentials -p test_credential_review.py
       - name: Check witness producer and BFF matching agreement
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s src/routes/operator -p datapath_matching_contract_test.py
+      - name: Check shipping image contract regressions
+        working-directory: .
+        run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ci -p test_bridge_image_contract.py
+      - name: Build and exercise the shipping BFF image without publishing
+        run: |
+          docker build --tag kars-bridge-bff-qualification:latest .
+          python3 ../../ci/bridge_image_contract.py kars-bridge-bff-qualification:latest --kind bff
+      - name: Scan the actual BFF runtime including unfixed findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          scan-type: image
+          image-ref: kars-bridge-bff-qualification:latest
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          format: json
+          output: ${{ runner.temp }}/bridge-bff-image-scan.json
+      - name: Retain BFF runtime scan evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: bridge-bff-image-scan-${{ github.sha }}
+          path: ${{ runner.temp }}/bridge-bff-image-scan.json
+          if-no-files-found: warn
 
   web:
     name: Web build and lint
@@ -138,6 +164,8 @@ jobs:
         run: node --experimental-strip-types --test tests/*.test.mjs
       - name: Build the production web image without publishing
         run: docker build --tag kars-bridge-web-qualification:latest .
+      - name: Inspect the actual web runtime distribution, tools and CA trust
+        run: python3 ../../ci/bridge_image_contract.py kars-bridge-web-qualification:latest --kind web
       - name: Start web with an immutable root filesystem
         run: |
           container=$(docker run --detach --read-only --cap-drop ALL \
@@ -167,6 +195,25 @@ jobs:
             assert.equal(metadata.height, 2);
             assert.equal(metadata.format, "png");
           '
+      - name: Scan the actual web runtime including unfixed findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          scan-type: image
+          image-ref: kars-bridge-web-qualification:latest
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          format: json
+          output: ${{ runner.temp }}/bridge-web-image-scan.json
+      - name: Retain web runtime scan evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: bridge-web-image-scan-${{ github.sha }}
+          path: ${{ runner.temp }}/bridge-web-image-scan.json
+          if-no-files-found: warn
       - name: Remove the qualification container
         if: always()
         run: |
@@ -190,6 +237,31 @@ jobs:
         working-directory: bridge/teams-gateway
       - run: npm run lint && npm run typecheck && npm run build && npm test
         working-directory: bridge/teams-gateway
+      - name: Check Node runtime packaging contracts
+        run: node --test bridge/tests/node-runtime-image.test.mjs
+      - name: Build and inspect the shipping Teams gateway image
+        run: |
+          docker build --tag kars-bridge-gateway-qualification:latest bridge/teams-gateway
+          python3 ci/bridge_image_contract.py kars-bridge-gateway-qualification:latest --kind gateway
+      - name: Scan the actual gateway runtime including unfixed findings
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          scan-type: image
+          image-ref: kars-bridge-gateway-qualification:latest
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          exit-code: '1'
+          format: json
+          output: ${{ runner.temp }}/bridge-gateway-image-scan.json
+      - name: Retain gateway runtime scan evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: bridge-gateway-image-scan-${{ github.sha }}
+          path: ${{ runner.temp }}/bridge-gateway-image-scan.json
+          if-no-files-found: warn
       - run: helm lint bridge/deploy/helm/kars-bridge
       - name: Optional witness runtime and server-side ownership contracts
         run: |

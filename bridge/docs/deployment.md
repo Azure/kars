@@ -52,6 +52,23 @@ The optional Teams image has a separate `make image-gateway REGISTRY=<registry>`
 target. Build targets do not push images or change the cluster. Publish to your
 chosen registry separately before installation.
 
+The BFF, web and Teams gateway **shipping runtimes use Microsoft Azure Linux 3
+distroless**, matching Kars core's runtime-image policy. Rust and npm toolchains
+belong only in build stages; no shell, package manager or global npm dependency
+tree is shipped. The BFF uses the same distroless base as the controller/router.
+Node services retain Node 22 by copying the official Node executable onto that
+base; this is a Kars application image, not a claim that Microsoft publishes an
+Azure Linux distroless Node 22 image. Native library compatibility must pass in
+the final image. Third-party Dex and managed-tool images have separate provenance.
+
+Image qualification must inspect the **final application image**, verify its
+actual distribution, non-root identity and CA trust bundle, exercise its
+read-only startup (including web native `sharp` support), and scan both OS and
+language dependencies. High/Critical findings, including unfixed findings,
+block publication. A passing source/configuration scan or a separate test-only
+Dockerfile does not qualify a shipping image. Record resolved base and output
+digests; selecting distroless alone is not evidence of a clean scan.
+
 The default `namespace: kars-system` and `createNamespace: false` join the
 Kars-owned namespace without adding it to the Bridge release. Setting
 `createNamespace: true` for `kars-system` is rejected on new installs, rather
