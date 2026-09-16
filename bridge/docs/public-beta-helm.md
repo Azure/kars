@@ -94,11 +94,29 @@ schema stage and Helm; see the [core Helm guide](../../docs/how-to/helm-installa
 Choose explicit absolute file paths and the intended context:
 
 ```bash
+set -euo pipefail
 umask 077
 export KUBECONFIG=/absolute/path/to/operator.kubeconfig
 CONTEXT=my-cluster
 CORE_VALUES=/absolute/path/to/core-values.yaml
 BRIDGE_VALUES=/absolute/path/to/bridge-values.yaml
+
+# Fresh core only: refuse an existing namespace rather than adopting it.
+NAMESPACE_EXISTS=$(kubectl --context "$CONTEXT" get namespace kars-system \
+  --ignore-not-found -o name)
+test -z "$NAMESPACE_EXISTS"
+NAMESPACE_SOURCE=$(mktemp)
+NAMESPACE_OWNED=$(mktemp)
+trap 'rm -f "$NAMESPACE_SOURCE" "$NAMESPACE_OWNED"' EXIT
+helm template kars deploy/helm/kars --namespace kars-system \
+  --values "$CORE_VALUES" --show-only templates/namespace.yaml > "$NAMESPACE_SOURCE"
+kubectl label --local -f "$NAMESPACE_SOURCE" \
+  app.kubernetes.io/managed-by=Helm -o yaml |
+  kubectl annotate --local -f - meta.helm.sh/release-name=kars \
+    meta.helm.sh/release-namespace=kars-system -o yaml > "$NAMESPACE_OWNED"
+kubectl --context "$CONTEXT" create --validate=strict --dry-run=server \
+  -f "$NAMESPACE_OWNED" -o name
+kubectl --context "$CONTEXT" create --validate=strict -f "$NAMESPACE_OWNED"
 
 node cli/dist/index.js schemas prepare \
   --release kars --namespace kars-system \
@@ -107,7 +125,7 @@ node cli/dist/index.js schemas prepare \
 
 helm --kubeconfig "$KUBECONFIG" --kube-context "$CONTEXT" \
   upgrade --install kars deploy/helm/kars \
-  --namespace kars-system --create-namespace --values "$CORE_VALUES" \
+  --namespace kars-system --values "$CORE_VALUES" \
   --rollback-on-failure --wait=legacy --timeout 15m
 
 node cli/dist/index.js schemas prepare \
@@ -133,6 +151,17 @@ Use exactly the same core values, overrides and rollback mode for preparation
 and Helm. A schema/ownership refusal is not permission to force adoption, delete
 CRDs, strip finalizers, clear private qualification, or edit Helm history.
 Keep-retention protects CRDs; it does not make all configuration changes atomic.
+
+On the September 16 fresh AKS install, Helm 4's `--create-namespace` conflicted
+with the core chart's own Namespace, reporting `original object Namespace with
+the name "kars-system" not found`; rollback then reported release-not-found.
+The operator checked the failure state before retrying. The successful recovery
+used the exact rendered Namespace plus Helm ownership metadata, strict server
+dry-run and **CREATE only**, followed by the same schema preparation and Helm
+installation without `--create-namespace`. The chart was not patched and no
+existing namespace was adopted. The sequence above makes that bootstrap explicit.
+If an attempt leaves resources behind, stop and inspect ownership and Helm state;
+do not blindly repeat it, delete schemas or relabel an existing namespace.
 
 For local UI access, use a loopback-only tunnel:
 
