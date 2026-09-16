@@ -61,6 +61,17 @@ test("Secret and TokenRequest failures never expose input, stderr or an underlyi
   assert.deepEqual(state.errors, []);
 });
 
+test("synthetic authorization review can expose bounded public diagnostics without token bodies", (t) => {
+  const diagnostic = "Error from server (Forbidden): synthetic fixture permission review rejected";
+  const state = fixture(t, { stderr: diagnostic, status: 1 });
+  const review = { apiVersion: "authorization.k8s.io/v1", kind: "SelfSubjectAccessReview",
+    spec: { resourceAttributes: { namespace: "budget-api-fixture", verb: "create",
+      resource: "serviceaccounts", subresource: "token", name: "untrusted" } } };
+  assert.throws(() => kubectl(["create", "-f", "-"], review, true), commandFailed);
+  assert.deepEqual(state.errors, [diagnostic]);
+  assert(!state.request().input.includes("audiences"));
+});
+
 test("successful public and private commands preserve their output without diagnostic logging", (t) => {
   const output = '{"metadata":{"uid":"fixture-uid"}}\n';
   const state = fixture(t, { stdout: output });
