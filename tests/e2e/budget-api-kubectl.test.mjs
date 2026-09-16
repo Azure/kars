@@ -6,7 +6,7 @@ import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { context, kubectl } from "./budget-api-kubectl.mjs";
+import { context, kubectl, isBudgetTokenPolicyDenial } from "./budget-api-kubectl.mjs";
 
 function fixture(t, { stderr = "", stdout = "", status = 0 } = {}) {
   const directory = mkdtempSync(join(tmpdir(), "kars-budget-command-"));
@@ -71,10 +71,47 @@ test("successful public and private commands preserve their output without diagn
   assert.deepEqual(state.errors, []);
 });
 
+test("private audience denial requires the exact policy and binding without exposing error contents", (t) => {
+  const marker = "do-not-publish-token-material";
+  const stderr = "Error from server (Forbidden): serviceaccounts is forbidden: "
+    + "ValidatingAdmissionPolicy 'kars-inference-budget-token' with binding "
+    + `'kars-inference-budget-token' denied request: ${marker}`;
+  const state = fixture(t, { stderr, status: 1 });
+  assert.throws(() => kubectl(["create", "--raw", "/fixture/token"], { private: marker }), (error) => {
+    commandFailed(error);
+    assert.equal(isBudgetTokenPolicyDenial(error), true);
+    assert(!JSON.stringify(error).includes(marker));
+    assert(!error.stack.includes(marker));
+    return true;
+  });
+  assert.deepEqual(state.errors, []);
+});
+
+for (const stderr of [
+  'Error from server (Forbidden): User "untrusted" cannot create resource "serviceaccounts/token"',
+  "Error from server (Forbidden): ValidatingAdmissionPolicy 'another-policy' with binding 'kars-inference-budget-token' denied request:",
+  "Error from server (Forbidden): ValidatingAdmissionPolicy 'kars-inference-budget-token' with binding 'another-binding' denied request:",
+  "Error from server (Invalid): ValidatingAdmissionPolicy 'kars-inference-budget-token' with binding 'kars-inference-budget-token' denied request:",
+  "Unable to connect to the server: connection refused",
+]) {
+  test(`non-policy failure never qualifies private-audience denial: ${stderr}`, (t) => {
+    const state = fixture(t, { stderr, status: 1 });
+    assert.throws(() => kubectl(["create", "--raw", "/fixture/token"], {}), (error) => {
+      commandFailed(error);
+      assert.equal(isBudgetTokenPolicyDenial(error), false);
+      return true;
+    });
+    assert.deepEqual(state.errors, []);
+  });
+}
+
 test("the actual preflight opts only its public CRD wait into schema diagnostics", () => {
   const source = readFileSync(new URL("./inference-budget-api.mjs", import.meta.url), "utf8");
   assert.equal(context, "kind-kars-budget-api");
-  assert.ok(source.includes('import { context, kubectl } from "./budget-api-kubectl.mjs";'));
+  assert.ok(source.includes('import { context, kubectl, isBudgetTokenPolicyDenial } from "./budget-api-kubectl.mjs";'));
   assert.ok(source.includes("root, context, kubectl, until, namespace, controller, principal,"));
   assert.ok(source.includes('kubectl(["wait", "--for=condition=Established", `crd/${definition.metadata.name}`, "--timeout=60s"], undefined, true);'));
+  assert(source.indexOf("kind: \"SelfSubjectAccessReview\"") < source.indexOf("const ordinaryToken ="));
+  assert(source.indexOf("const ordinaryToken =") < source.indexOf("assert.throws(() => kubectl(tokenArgs, tokenRequest)"));
+  assert.ok(source.includes("isBudgetTokenPolicyDenial,"));
 });

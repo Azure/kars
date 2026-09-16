@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 import { runWorkloadProof } from "./budget-workload-cases.mjs";
-import { context, kubectl } from "./budget-api-kubectl.mjs";
+import { context, kubectl, isBudgetTokenPolicyDenial } from "./budget-api-kubectl.mjs";
 
 const require = createRequire(new URL("../../cli/package.json", import.meta.url));
 const { parseAllDocuments } = require("yaml");
@@ -128,8 +128,22 @@ assert.throws(() => kubectl(["replace", "-f", "-"], changedScope));
 
 const tokenRequest = { apiVersion: "authentication.k8s.io/v1", kind: "TokenRequest",
   spec: { audiences: [audience], expirationSeconds: 600 } };
-assert.throws(() => kubectl(["create", "--raw",
-  `/api/v1/namespaces/${namespace}/serviceaccounts/untrusted/token`, "-f", "-", "--as", principal], tokenRequest));
+await until(() => {
+  const review = create({ apiVersion: "authorization.k8s.io/v1", kind: "SelfSubjectAccessReview",
+    spec: { resourceAttributes: { namespace, verb: "create", group: "", version: "v1",
+      resource: "serviceaccounts", subresource: "token", name: "untrusted" } } }, principal);
+  assert(!review.status?.evaluationError, "Fixture TokenRequest authorization evaluator failed");
+  return review.status?.allowed === true;
+}, "fixture principal is actually authorized for TokenRequest");
+const tokenArgs = ["create", "--raw",
+  `/api/v1/namespaces/${namespace}/serviceaccounts/untrusted/token`, "-f", "-", "--as", principal];
+const ordinaryAudience = structuredClone(tokenRequest);
+ordinaryAudience.spec.audiences = ["kars.azure.com/budget-fixture-public"];
+const ordinaryToken = JSON.parse(kubectl(tokenArgs, ordinaryAudience));
+assert(typeof ordinaryToken.status?.token === "string" && ordinaryToken.status.token.length > 0,
+  "Same principal must be able to request an ordinary audience before testing private admission");
+assert.throws(() => kubectl(tokenArgs, tokenRequest), isBudgetTokenPolicyDenial,
+  "The private audience must be rejected by its exact admission policy, not RBAC or a transport failure");
 
 const projection = { apiVersion: "v1", kind: "ConfigMap", metadata: { name: "kars-inference-budget-ca", namespace },
   data: { "ca.crt": "public-test-only" } };
