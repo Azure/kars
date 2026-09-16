@@ -131,7 +131,7 @@ const tokenRequest = { apiVersion: "authentication.k8s.io/v1", kind: "TokenReque
 await until(() => {
   const review = create({ apiVersion: "authorization.k8s.io/v1", kind: "SelfSubjectAccessReview",
     spec: { resourceAttributes: { namespace, verb: "create", group: "", version: "v1",
-      resource: "serviceaccounts", subresource: "token", name: "untrusted" } } }, principal);
+      resource: "serviceaccounts", subresource: "token", name: "untrusted" } } }, principal, true);
   assert(!review.status?.evaluationError, "Fixture TokenRequest authorization evaluator failed");
   return review.status?.allowed === true;
 }, "fixture principal is actually authorized for TokenRequest");

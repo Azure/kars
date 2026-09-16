@@ -29,7 +29,7 @@ export function kubectl(args, input, publicSchema = false) {
     });
   } catch (error) {
     if (publicSchema) {
-      // Only public CRD/VAP creation and CRD readiness opt in, never Secret/token commands.
+      // Public schemas/readiness and synthetic authorization reviews only, never Secret/token commands.
       console.error(String(error.stderr ?? "").slice(0, 12_000));
     }
     throw new BudgetApiCommandFailure(error);
