@@ -53,6 +53,7 @@ class HeaderTests(unittest.TestCase):
     def test_all_commentable_formats(self):
         fixtures = {
             "a.rs": b"//! Crate docs\nfn main() {}\n",
+            "a.go": b"package fixture\n\nfunc Value() int { return 1 }\n",
             "a.ts": b"/// <reference lib=\"dom\" />\nexport {};\n",
             "a.tsx": b"'use client';\nexport const A = () => <p />;\n",
             "a.js": b'"use strict";\nconst x = 1;',
@@ -100,6 +101,20 @@ class HeaderTests(unittest.TestCase):
         # A cookie-looking comment after executable code is not an encoding
         # declaration; the header must still precede the executable statement.
         self.apply("a.py", b"x = 1\n# coding: utf-8\n", 0)
+
+    def test_dex_integrity_data_has_exact_coverage_without_exempting_source_directories(self):
+        for name in ("bridge/idp/locks/generated/go.sum",
+                     "bridge/idp/locks/generated/upstream/api/v2/go.mod",
+                     "bridge/idp/patches/0001-literal-oauth-error-descriptions.patch",
+                     "bridge/idp/patches/SHA256SUMS"):
+            rule = headers.classification(name, self.policy)
+            self.assertNotEqual(rule["category"], "header")
+            self.assertEqual(rule["notice"], "NOTICE")
+        for name in ("bridge/idp/scripts/new.go", "bridge/idp/patches/new.go"):
+            self.assertEqual(headers.classification(name, self.policy),
+                             {"category": "header", "style": "slash"})
+        with self.assertRaises(headers.CoverageError):
+            headers.classification("bridge/idp/locks/generated/unreviewed.lock", self.policy)
 
     def test_bom_crlf_and_no_final_newline(self):
         for body in (
@@ -440,13 +455,20 @@ class HeaderTests(unittest.TestCase):
         self.apply(nested, b"export const value = 1;\n", 0)
 
     def test_generated_coverage_requires_exact_reviewed_paths(self):
-        expected = {"tools/headlamp-plugin/dist/main.js", "tools/headlamp-plugin/dist/package.json"}
+        headlamp = {"tools/headlamp-plugin/dist/main.js", "tools/headlamp-plugin/dist/package.json"}
+        dex = {"bridge/idp/locks/generated/" + name for name in (
+            "go.mod", "go.sum", "api/v2/go.mod", "api/v2/go.sum", "modules.json",
+            "api-modules.json", "graph.txt", "toolchain.txt", "inputs.lock", "requests.txt",
+            "dependencies.patch", "SHA256SUMS",
+        )}
+        expected = headlamp | dex
         generated = {p for p, r in self.policy["files"].items() if r["category"] == "generated"}
         self.assertEqual(generated, expected)
         for name in expected:
             rule = headers.classification(name, self.policy)
             self.assertEqual(rule["notice"], "NOTICE")
-            self.assertIn("tools/headlamp-plugin/package.json", rule["reason"])
+            if name in headlamp:
+                self.assertIn("tools/headlamp-plugin/package.json", rule["reason"])
         for name in (
             "tools/headlamp-plugin/dist/authored.ts",
             "tools/headlamp-plugin/dist/authored.d.ts",

@@ -1,0 +1,18 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+*
+!Dockerfile
+!Dockerfile.locks
+!locks
+!locks/**
+!patches
+!patches/**
+!scripts
+!scripts/**
+!tests
+!tests/probe.go
+!tests/probe_test.go
+!NOTICE
+!LICENSE
+!README.md
