@@ -11,7 +11,7 @@ from pathlib import Path
 import tarfile
 import unittest
 
-from contracts import BASE, LOCK_FILES, RPM_MANIFEST, check_modules, check_rootfs, check_scan, json_stream, module_inventory
+from contracts import BASE, LOCK_FILES, RPM_MANIFEST, check_modules, check_rootfs, check_scan, json_stream, module_inventory, resolve_base_file
 
 ROOT = Path(__file__).resolve().parents[1]
 spec = importlib.util.spec_from_file_location("import_locks", ROOT / "scripts/import-locks.py")
@@ -51,13 +51,38 @@ class SourceContracts(unittest.TestCase):
         self.assertNotIn("generate-locks", runtime)
         self.assertNotIn("FROM lock-generation", runtime)
         self.assertNotIn("lock-replay", runtime)
-        self.assertIn("FROM lock-generation AS lock-replay", maintenance)
+        self.assertIn("FROM source AS lock-replay", maintenance)
         self.assertIn("cmp SHA256SUMS /out/SHA256SUMS", maintenance)
         def source(text):
             return text[text.index("FROM golang:"):text.index("\nFROM source AS ")]
 
         self.assertEqual(source(runtime), source(maintenance))
         self.assertIn("!Dockerfile.locks", (ROOT / ".dockerignore").read_text())
+
+    def test_lock_artifact_and_readonly_replay_default_to_nonroot(self):
+        maintenance = (ROOT / "Dockerfile.locks").read_text()
+        artifact = maintenance.split("FROM scratch AS lock-artifact\n", 1)[1].split("\nFROM ", 1)[0]
+        replay = maintenance.split("FROM source AS lock-replay\n", 1)[1]
+        self.assertIn("COPY --from=lock-generation --chown=1001:1001 /out/ /", artifact)
+        self.assertEqual([line for line in artifact.splitlines() if line.startswith("USER ")],
+                         ["USER 1001:1001"])
+        self.assertNotIn("RUN ", artifact)
+        self.assertIn("COPY --from=lock-generation --chown=1001:1001 /out/ /out/", replay)
+        self.assertIn("COPY --chown=1001:1001 locks/generated/ /reviewed/", replay)
+        self.assertEqual([line for line in replay.splitlines() if line.startswith("USER ")],
+                         ["USER 1001:1001"])
+        self.assertLess(replay.index("USER 1001:1001"), replay.index("RUN "))
+        self.assertIn('test "$(id -u)" = 1001 && test "$(id -g)" = 1001', replay)
+        self.assertIn("sha256sum --check --strict /reviewed/SHA256SUMS", replay)
+        self.assertNotIn("chmod", maintenance)
+        self.assertNotIn("go get", replay)
+        self.assertNotIn("go mod", replay)
+        self.assertNotIn("USER root", replay)
+        for path in (ROOT / "locks/generated").rglob("*"):
+            if path.is_file():
+                self.assertTrue(path.stat().st_mode & 0o400, f"COPY owner cannot read {path}")
+            elif path.is_dir():
+                self.assertTrue(path.stat().st_mode & 0o100, f"COPY owner cannot traverse {path}")
 
     def test_missing_locks_block_acceptance(self):
         if (ROOT / "locks/generated").is_dir():
@@ -104,6 +129,26 @@ class SourceContracts(unittest.TestCase):
         report["Results"].pop()
         with self.assertRaisesRegex(ValueError, "Dex Go binary"):
             check_scan(report)
+
+    def test_real_azure_linux_interpreter_links_resolve_only_to_base_files(self):
+        inventory = {
+            "lib64": ("symlink", 0o777, "usr/lib"),
+            "usr/lib64": ("symlink", 0o777, "lib"),
+            "usr/lib/ld-linux-x86-64.so.2": ("file", 0o755, "original-base-bytes"),
+            "usr/lib/absolute-loader": ("symlink", 0o777, "/lib64/ld-linux-x86-64.so.2"),
+            "usr/lib/hard-loader": ("hardlink", 0o755, "usr/lib/ld-linux-x86-64.so.2"),
+        }
+        for path in ("/lib64/ld-linux-x86-64.so.2", "/usr/lib64/ld-linux-x86-64.so.2",
+                     "/usr/lib/absolute-loader", "/usr/lib/hard-loader"):
+            self.assertEqual(resolve_base_file(inventory, path), "usr/lib/ld-linux-x86-64.so.2")
+        self.assertEqual(inventory["lib64"][2], "usr/lib")
+        for path in ("/usr/share/doc/dex/not-in-base", "/lib64/missing", "relative/path"):
+            with self.assertRaises(ValueError):
+                resolve_base_file(inventory, path)
+        with self.assertRaisesRegex(ValueError, "bound"):
+            resolve_base_file({"cycle": ("symlink", 0o777, "cycle")}, "/cycle")
+        with self.assertRaisesRegex(ValueError, "escapes"):
+            resolve_base_file({"escape": ("symlink", 0o777, "../../host")}, "/escape")
 
     def test_python_syntax(self):
         for file in ROOT.rglob("*.py"):

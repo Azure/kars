@@ -148,6 +148,7 @@ class AppliedPatchContracts(unittest.TestCase):
                                   'newRedirectedErr(errInvalidRequest, "%s", err)'))
         for name, data in modules.items():
             self.assertEqual((self.source / name).read_bytes(), data)
+            self.assertEqual((ROOT / "locks/generated/upstream" / (name + ".snapshot")).read_bytes(), data)
         fixture = ET.parse(self.source / "connector/saml/testdata/oam-resp.xml")
         self.assertEqual(fixture.getroot().attrib["IssueInstant"], "2016-12-12T16:54:35Z")
         self.assertEqual(self.original["./connector/saml/saml.go"], expected["./connector/saml/saml.go"])

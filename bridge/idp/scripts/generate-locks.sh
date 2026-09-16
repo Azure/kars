@@ -39,7 +39,7 @@ cp -R /packaging/upstream /out/upstream
 for file in go.mod go.sum api/v2/go.mod api/v2/go.sum; do
     set +e
     diff -u --label "upstream/$file" --label "kars/$file" \
-        "/packaging/upstream/$file" "/out/$file" >> /out/dependencies.patch
+        "/packaging/upstream/$file.snapshot" "/out/$file" >> /out/dependencies.patch
     status=$?
     set -e
     test "$status" -le 1
