@@ -146,7 +146,7 @@ class Api:
         self.server = server
 
     def request(self, method, path, body=None, expected=(200,), patch_type=None, *,
-                accept="application/json", timeout=15):
+                accept="application/json", timeout=15, audit_ids=None):
         headers = {"Accept": accept}
         if self.token:
             headers["Authorization"] = f"Bearer {self.token}"
@@ -165,12 +165,23 @@ class Api:
             if response.status not in expected:
                 raise Failure(
                     f"Kubernetes {method} {path.split('?')[0]} returned {response.status} ({status_detail(value)})")
+            if audit_ids is not None:
+                audit_id = response.getheader("Audit-Id")
+                require(isinstance(audit_id, str) and re.fullmatch(
+                    r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}", audit_id),
+                    "Actual Kubernetes response omitted a valid audit request identity")
+                audit_ids.append(audit_id)
             return response.status, value
         finally:
             connection.close()
 
     def get(self, path):
         return self.request("GET", path)[1]
+
+    def audit_marker(self, path):
+        ids = []
+        self.request("GET", path, audit_ids=ids)
+        return ids[0]
 
     def optional(self, path):
         status, body = self.request("GET", path, expected=(200, 404))
@@ -246,17 +257,9 @@ class Setup:
         return until(f"current native grant and writer in {namespace}", ready)
 
     def audit(self, namespace=None):
-        raw = command("docker", "exec", "bridge-native-control-plane",
-                      "cat", "/var/log/kars-native-audit/audit.log")
-        return [
-            event for line in raw.splitlines() if line
-            for event in [json.loads(line)]
-            if event.get("stage") == "ResponseComplete"
-            and event.get("user", {}).get("username") == f"system:serviceaccount:{BRIDGE}:{WRITER}"
-            and (namespace is None or event.get("objectRef", {}).get("namespace") == namespace)
-        ]
+        from audit_evidence import read
+        return read(namespace)
 
     def audit_barrier(self, actor, namespace):
-        actor.get(resource(namespace, "karscredentialgrants", "workspace"))
-        time.sleep(1)
-        return self.audit(namespace)
+        from audit_evidence import barrier
+        return barrier(self, actor, namespace)

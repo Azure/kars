@@ -88,6 +88,24 @@ class TemplateDiagnosticsTests(unittest.TestCase):
             with self.assertRaises(Failure):
                 diagnostics.project(value, current, review(before), "a" * 64, "b" * 64)
 
+    def test_annotation_groups_retain_only_fixed_booleans_including_unknown_changes(self):
+        before = deployment("runtime")
+        for label, key in diagnostics.ANNOTATION_GROUPS.items():
+            current = copy.deepcopy(before)
+            current["spec"]["template"]["metadata"]["annotations"] = {key: PRIVATE}
+            facts = diagnostics.project(before, current, review(before), *fixture_hashes([before, current]))
+            self.assertTrue(facts[label])
+            self.assertTrue(facts["annotationsChanged"])
+            self.assertFalse(facts["otherAnnotationsChanged"])
+            self.assertTrue(all(type(value) is bool for value in facts.values()))
+            self.assertNotIn(PRIVATE, json.dumps(facts))
+            self.assertNotIn(key, json.dumps(facts))
+        current["spec"]["template"]["metadata"]["annotations"] = {PRIVATE: PRIVATE}
+        facts = diagnostics.project(before, current, review(before), *fixture_hashes([before, current]))
+        self.assertTrue(facts["otherAnnotationsChanged"])
+        self.assertTrue(all(not facts[key] for key in diagnostics.ANNOTATION_GROUPS))
+        self.assertNotIn(PRIVATE, json.dumps(facts))
+
     def test_wrong_namespaces_owners_and_review_shapes_are_refused(self):
         before = deployment("runtime")
         for key in ("namespace", "name"):
@@ -100,12 +118,14 @@ class TemplateDiagnosticsTests(unittest.TestCase):
             with self.assertRaises(Failure):
                 diagnostics.project(before, before, invalid, "a" * 64, "b" * 64)
 
-    def collect(self, *, mutate_review=None, changed_on_recheck=False, unavailable_hashes=False, failure=FAILURE):
+    def collect(self, *, mutate_review=None, changed_on_recheck=False, unavailable_hashes=False,
+                failure=FAILURE, receipt=None, namespace_changed=False):
         baselines = {actor: deployment(actor) for actor in diagnostics.ACTORS}
         document = {"apiVersion": "kars.azure.com/v1alpha1", "kind": "KarsCredentialGrant",
                     "metadata": {"name": "workspace", "namespace": "kars-system"},
                     "spec": {"privateActivation": {"phase": "reviewed", "namespaces": [
-            {"namespace": {"name": "work"}, "consumers": [review(value) for value in baselines.values()]}
+            {"namespace": {"name": "work", "uid": "work-uid"},
+             "consumers": [review(value) for value in baselines.values()]}
         ]}}}
         if mutate_review:
             mutate_review(document)
@@ -113,6 +133,10 @@ class TemplateDiagnosticsTests(unittest.TestCase):
 
         def get(path):
             reads.append(path)
+            if path == "/api/v1/namespaces/work":
+                return {"metadata": {"name": "work", "uid": "work-uid",
+                        "resourceVersion": "2" if namespace_changed and reads.count(path) == 2 else "1",
+                        "annotations": {} if receipt is None else {diagnostics.RETIREMENT: json.dumps(receipt)}}}
             value = copy.deepcopy(baselines[path.rsplit("/", 1)[-1]])
             if changed_on_recheck and len(reads) % 2 == 0:
                 value["metadata"]["resourceVersion"] = "2"
@@ -138,13 +162,39 @@ class TemplateDiagnosticsTests(unittest.TestCase):
         self.assertTrue(result["available"])
         self.assertTrue(result["diagnosticOnly"])
         self.assertEqual(set(result["actors"]), set(diagnostics.ACTORS))
-        self.assertEqual(len(reads), 6)
+        self.assertEqual(len(reads), 8)
         self.assertTrue(all(value["currentMatchesReview"] for value in result["actors"].values()))
+        self.assertEqual(result["lateRetirement"], {"available": False, "category": "absent"})
 
     def test_writer_restoration_refusal_also_gets_value_free_template_comparisons(self):
         result, reads = self.collect(failure="Native operator apply failed: writer-runtime-transition (source=unavailable)")
         self.assertTrue(result["available"])
-        self.assertEqual(len(reads), 6)
+        self.assertEqual(len(reads), 8)
+
+    def test_stable_late_receipt_reports_phase_and_comparison_without_publishing_hashes(self):
+        expected = fixture_hashes([deployment("runtime")])[0]
+        receipt = {"version": 4, "phase": "Restoring", "deployment": {"uid": "runtime-uid"},
+                   "qualified": {"template": expected}, "private": PRIVATE}
+        result, _ = self.collect(receipt=receipt)
+        facts = result["lateRetirement"]
+        self.assertEqual(facts, {"available": True, "reportedPhase": "Restoring",
+                         "recordedDeploymentMatches": True, "qualifiedTemplateRecorded": True,
+                         "authorityVerified": False, "currentMatchesRecordedTemplate": True})
+        self.assertNotIn(expected, json.dumps(result))
+        self.assertNotIn(PRIVATE, json.dumps(result))
+        receipt["qualified"]["template"] = "f" * 64
+        result, _ = self.collect(receipt=receipt)
+        self.assertFalse(result["lateRetirement"]["currentMatchesRecordedTemplate"])
+
+    def test_unstable_or_invalid_receipt_does_not_erase_valid_deployment_comparisons(self):
+        receipt = {"version": 4, "phase": "Pausing", "deployment": {"uid": "runtime-uid"}}
+        for options in ({"receipt": receipt, "namespace_changed": True},
+                        {"receipt": {**receipt, "phase": PRIVATE}},
+                        {"receipt": {**receipt, "qualified": {"template": PRIVATE}}}):
+            result, _ = self.collect(**options)
+            self.assertTrue(result["available"])
+            self.assertFalse(result["lateRetirement"]["available"])
+            self.assertNotIn(PRIVATE, json.dumps(result))
 
     def test_changed_resource_or_failed_hashing_never_returns_partial_comparisons(self):
         for options in ({"changed_on_recheck": True}, {"unavailable_hashes": True}):

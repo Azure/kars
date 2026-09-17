@@ -1,0 +1,6 @@
+# Public, immutable shell assignments; never source an unreviewed generated file.
+DEX_COMMIT=11d2eeb52b42e1980e14cb91e69dd9e3faab2076
+DEX_ARCHIVE_SHA256=18bf92e8ccbf53e86814c2beb39b7d59f28fb07c84639e9f47a9bb5ea764e0b9
+DEX_VERSION=v2.45.1-kars.1
+GO_VERSION=go1.26.8
+SOURCE_DATE_EPOCH=0

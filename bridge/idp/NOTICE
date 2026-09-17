@@ -1,0 +1,54 @@
+Kars Dex security rebuild
+
+Dex is an OpenID Connect identity provider originally developed by CoreOS,
+maintained by the Dex project and its contributors:
+https://github.com/dexidp/dex
+
+This package uses Dex v2.45.1 application source at commit
+11d2eeb52b42e1980e14cb91e69dd9e3faab2076 under the Apache License, Version 2.0.
+The unchanged upstream LICENSE is fetched from the verified source archive
+and installed as /usr/share/doc/dex/DEX-LICENSE.
+
+This is NOT the official or unmodified upstream Dex image. Kars changes the
+Go toolchain, module dependency manifests and container packaging, and marks
+the binary version v2.45.1-kars.1. Two production calls in server/oauth2.go
+now use a constant "%s" format to preserve preformatted error descriptions
+literally and satisfy Go vet. These are the only production-source changes.
+Production certificate validation, connectors, embedded web assets and real
+CGO SQLite storage remain unchanged upstream implementations.
+
+A test-only patch validates the historical OAM SAML signature fixture at its
+signed IssueInstant, using goxmldsig's supported test clock. Other signature
+tests retain their real-clock default. The certificate and signed XML are not
+changed. Added Go regressions exercise literal OAuth errors and enforce
+certificate validity before/after the fixture certificate's lifetime.
+The reviewed patches, regression sources and pinned before/after file hashes
+are distributed in /usr/share/doc/dex/source-patches. Complete original and
+expected patched source inventories are distributed as source.upstream.sha256
+and source.sha256 in /usr/share/doc/dex.
+
+The generated dependency diff, active patched module files, and byte-for-byte
+original module baselines are distributed in /usr/share/doc/dex/locks.
+The four archival baselines under locks/upstream use go.mod.snapshot and
+go.sum.snapshot filenames, including the api/v2 subdirectory. They are
+comparison/attribution data, never compiler inputs. This path-only distinction
+preserves every original byte and SHA-256 while the active patched go.mod and
+go.sum retain their normal filenames and full dependency/security scanning.
+Linked dependency license and notice files are distributed in
+/usr/share/doc/dex/third-party.
+
+The requested dependency graph now includes github.com/Azure/go-ntlmssp
+v0.1.1 for CVE-2026-32952; the updated graph must be generated and verified
+before a new image can be accepted. No other toolchain/base/crypto pin is
+changed for this correction. The build retains the actual compiled-package
+inventory as /usr/share/doc/dex/runtime-packages.json and fails if
+golang.org/x/crypto/openpgp or a subpackage is linked (GO-2026-5932).
+This does not suppress scanning of golang.org/x/crypto or any runtime module.
+
+The official image's gomplate and docker-entrypoint programs are intentionally
+not distributed. The supported invocation is /usr/local/bin/dex serve with an
+explicit configuration file, not upstream entrypoint template expansion.
+
+Kars packaging code: Copyright (c) Microsoft Corporation.
+Licensed under the MIT License in the Kars repository root.
+Azure Linux base contents and attribution remain unchanged.

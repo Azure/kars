@@ -272,6 +272,21 @@ are never written to this evidence. Collection cannot qualify any assertion.
 TLS negatives, 9447/9448 paths, CNI peer denial, and credential rotation remain
 required unchanged.
 
+`routerRollout` separately captures an unready router's bounded container state,
+restart count, previous exit reason/code/signal, fixed startup-log markers and
+classified kubelet probe events. It checks the target namespace/Deployment and
+ReplicaSet/Pod UID chain, then rechecks all snapshot resource versions and Pod
+process state. Old observer versions are reported as comparison booleans, not
+accepted as current capability authority. This does not relax the existing
+readiness collector or the network experiment's ready-process requirement.
+Current and previous process log tails remain separate; failed log/event reads
+are explicit without discarding otherwise stable process-state evidence.
+Events must reference the exact Pod UID and `spec.containers{inference-router}`;
+their coverage is the Pod lifetime, not proof of the current process's failure.
+Unknown text, probe URLs/bodies, container IDs and raw errors are not retained.
+A logged listener-start intention is not a successful bind or reachability
+proof. The original failed result and three dependent blocked cases remain.
+
 An operator template-drift or writer-restoration refusal also records `enrollmentTemplateDrift`.
 It compares the fixture's pre-preview runtime, controller and BFF Deployment
 snapshots with the existing CLI review and current objects, using the shipped

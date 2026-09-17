@@ -5,8 +5,11 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import runpy
 import subprocess
+import tempfile
+import textwrap
 import unittest
 
 from git_fixture import GitFixture
@@ -92,12 +95,115 @@ class ContractScopeTests(GitFixture):
 
 class ContractAggregateTests(unittest.TestCase):
     components = (
-        "addon", "bff", "dependencies", "lockfiles",
+        "addon", "bff", "dependencies", "idp", "lockfiles",
         "rust-dependencies", "secrets", "security", "web",
     )
 
     def component_success(self):
         return {name: {"result": "success"} for name in self.components}
+
+    def workflow_job(self, name):
+        workflow = (CI.parent / ".github/workflows/bridge-ci.yml").read_text()
+        match = re.search(rf"(?ms)^  {re.escape(name)}:\n(.*?)(?=^  \S|\Z)", workflow)
+        self.assertIsNotNone(match, name)
+        return match.group(1)
+
+    def test_idp_is_required_by_the_exact_component_graph(self):
+        aggregate = self.workflow_job("bridge-required-gates")
+        needs = re.search(r"(?m)^    needs: \[([^\]]+)\]$", aggregate)
+        self.assertIsNotNone(needs)
+        self.assertEqual({name.strip() for name in needs.group(1).split(",")}, set(self.components))
+        self.assertIn("idp", self.components)
+        self.assertIn("    if: always()", aggregate)
+        self.assertEqual(runpy.run_path(str(CI / "bridge_component_results.py"))["REQUIRED_JOBS"],
+                         frozenset(self.components))
+
+    def test_idp_job_requires_real_hosted_images_reports_runtime_and_scans(self):
+        job = self.workflow_job("idp")
+        self.assertNotIn("runner.", job.split("    steps:", 1)[0])
+        self.assertIn('export IDP_EVIDENCE_DIR="$RUNNER_TEMP/bridge-idp-evidence"', job)
+        self.assertIn('printf \'IDP_EVIDENCE_DIR=%s\\n\' "$IDP_EVIDENCE_DIR" >> "$GITHUB_ENV"', job)
+        for required in (
+            "runs-on: ubuntu-24.04", "permissions:\n      contents: read",
+            'test "$(uname -m)" = x86_64', "persist-credentials: false",
+            "KARS_DEX_PATCH_NETWORK=1", 'check_modules("bridge/idp")',
+            "--target upstream-tests", "--target test-tools", "--target runtime",
+            "--platform linux/amd64", "--file bridge/idp/Dockerfile bridge/idp",
+            "docker create kars-bridge-idp-upstream-tests:latest",
+            'trap \'docker rm "$container"\' EXIT',
+            "$container:/out/doc/upstream-tests.json", "$container:/out/doc/api-tests.json",
+            "aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25",
+            "version: v0.70.0", "ignore-unfixed: false", "exit-code: '1'",
+            'trivy_path="$(command -v trivy)"', 'test -x "$trivy_path"',
+            "python3 bridge/idp/tests/qualify.py", '--trivy "$trivy_path"',
+            '--evidence "$IDP_EVIDENCE_DIR/runtime"',
+            "if: ${{ !cancelled() && steps.idp_runtime.outcome == 'success' }}",
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+            "if-no-files-found: error", "runtime-qualification.log", "step-outcomes.json",
+        ):
+            self.assertIn(required, job, required)
+        self.assertNotIn("continue-on-error", job)
+        self.assertNotIn("|| true", job)
+        self.assertNotIn(": write", job)
+        self.assertNotRegex(job, r"\b(docker push|docker login|az acr|kubectl)\b")
+        self.assertNotIn("secrets.", job)
+        self.assertGreaterEqual(job.count("if: always()"), 2)
+        self.assertIn("set -euo pipefail", job)
+
+    def report_summary(self, root_events, api_events):
+        block = self.workflow_job("idp").split("python3 - <<'PY'\n", 1)[1]
+        script = textwrap.dedent(block.split("\n          PY", 1)[0])
+        with tempfile.TemporaryDirectory(prefix="idp-report-contract-") as temporary:
+            evidence = Path(temporary)
+            for name, events in (("upstream-tests.json", root_events), ("api-tests.json", api_events)):
+                (evidence / name).write_text("".join(json.dumps(event) + "\n" for event in events))
+            result = subprocess.run(
+                ["python3", "-c", script], text=True, capture_output=True, timeout=10,
+                env={**os.environ, "IDP_EVIDENCE_DIR": temporary,
+                     "GITHUB_STEP_SUMMARY": str(evidence / "step-summary.md")},
+            )
+            summary_file = evidence / "upstream-summary.json"
+            summary = json.loads(summary_file.read_text()) if summary_file.exists() else None
+            return result, summary
+
+    def upstream_report_fixtures(self):
+        root = [
+            {"Action": "start", "Package": "example/root"},
+            {"Action": "pass", "Package": "example/root", "Test": "TestUnit"},
+            {"Action": "skip", "Package": "example/root", "Test": "TestUnconfiguredLDAP"},
+            {"Action": "pass", "Package": "example/root"},
+        ]
+        api = [
+            {"Action": "start", "Package": "example/api"},
+            {"Action": "output", "Package": "example/api", "Output": "[no test files]\n"},
+            {"Action": "skip", "Package": "example/api"},
+        ]
+        return root, api
+
+    def test_upstream_summary_discloses_skips_without_inventing_api_tests(self):
+        result, summary = self.report_summary(*self.upstream_report_fixtures())
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(summary["root"]["testActions"], {"pass": 1, "skip": 1})
+        self.assertEqual(summary["root"]["skipped"],
+                         [{"package": "example/root", "test": "TestUnconfiguredLDAP"}])
+        self.assertEqual(summary["api"]["testActions"], {})
+        self.assertEqual(summary["api"]["packageActions"], {"skip": 1})
+        self.assertIn("not runtime-qualified", summary["coverageLimit"])
+
+    def test_upstream_summary_rejects_failure_or_incomplete_proof(self):
+        root, api = self.upstream_report_fixtures()
+        for root_events, api_events in (
+            (root[:-1], api), (root, []),
+            (root + [{"Action": "fail", "Package": "example/root", "Test": "TestFailure"}], api),
+            (root, api + [{"Action": "build-fail", "ImportPath": "example/api"}]),
+            ([{"Action": "start", "Package": "example/root"},
+              {"Action": "skip", "Package": "example/root"}], api),
+            (root + [None], api),
+        ):
+            with self.subTest(root=root_events, api=api_events):
+                result, summary = self.report_summary(root_events, api_events)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIsNone(summary)
 
     def test_component_aggregate_rejects_missing_failed_or_skipped_jobs(self):
         check = runpy.run_path(str(CI / "bridge_component_results.py"))["require_success"]
@@ -125,10 +231,12 @@ class ContractAggregateTests(unittest.TestCase):
     def test_component_workflow_entrypoint_requires_complete_results(self):
         partial = self.component_success()
         del partial["security"]
+        without_idp = self.component_success()
+        del without_idp["idp"]
         environment = {key: value for key, value in os.environ.items()
                        if key != "COMPONENT_RESULTS"}
         for payload, expected in ((json.dumps(self.component_success()), 0),
-                                  (json.dumps(partial), 1), ("not-json", 1),
+                                  (json.dumps(partial), 1), (json.dumps(without_idp), 1), ("not-json", 1),
                                   ("null", 1), (None, 1)):
             with self.subTest(payload=payload):
                 result = subprocess.run(
