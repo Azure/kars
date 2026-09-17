@@ -2,7 +2,31 @@
 // Licensed under the MIT License.
 
 use super::Cluster;
+use anyhow::Context;
 use kube::api::Api;
+
+pub(super) fn parse_model_catalog(value: &str) -> anyhow::Result<Vec<String>> {
+    let value = value.trim();
+    if value.starts_with('[') {
+        let models: Vec<String> =
+            serde_json::from_str(value).context("Model catalog must be a JSON array of strings")?;
+        anyhow::ensure!(
+            models.iter().all(|model| !model.trim().is_empty()),
+            "Model catalog contains an empty deployment"
+        );
+        return Ok(models);
+    }
+    anyhow::ensure!(
+        !value.contains(['[', ']', '{', '}', '"']),
+        "Model catalog must be a JSON array of strings or a comma-separated list"
+    );
+    Ok(value
+        .split(',')
+        .map(str::trim)
+        .filter(|model| !model.is_empty())
+        .map(str::to_owned)
+        .collect())
+}
 
 pub(super) fn normalize_registry_host(value: &str) -> String {
     value
@@ -92,16 +116,18 @@ pub(super) fn classify_provider(
 impl Cluster {
     /// The model deployments this cluster is configured to serve, read from the
     /// controller Deployment's environment (`KARS_TASK_DEFAULT_MODEL`,
-    /// `AZURE_OPENAI_DEPLOYMENT`, and the comma-separated `FOUNDRY_DEPLOYMENTS`).
+    /// `AZURE_OPENAI_DEPLOYMENT`, and JSON/CSV catalogs in `FOUNDRY_DEPLOYMENTS`
+    /// or `KARS_MODEL_CATALOG`).
     /// This is the authoritative "what can actually run here" fact — the same
     /// values the controller stamps onto a task's InferencePolicy. Best-effort:
     /// an unreadable Deployment yields an empty list (honest, not an error), so
     /// the launch package degrades to the controller default rather than lying.
-    pub async fn controller_models(&self) -> (Option<String>, Vec<String>) {
+    /// A malformed catalog is an explicit error, not a list of corrupt routes.
+    pub async fn controller_models(&self) -> anyhow::Result<(Option<String>, Vec<String>)> {
         use k8s_openapi::api::apps::v1::Deployment;
         let deploys: Api<Deployment> = Api::namespaced(self.client.clone(), &self.core_namespace());
         let Ok(Some(d)) = deploys.get_opt("kars-controller").await else {
-            return (None, Vec::new());
+            return Ok((None, Vec::new()));
         };
         let mut default: Option<String> = None;
         let mut catalog: Vec<String> = Vec::new();
@@ -120,15 +146,14 @@ impl Cluster {
                 }
                 "FOUNDRY_DEPLOYMENTS" | "KARS_MODEL_CATALOG" => {
                     catalog.extend(
-                        val.split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty()),
+                        parse_model_catalog(&val)
+                            .with_context(|| format!("Invalid controller {}", e.name))?,
                     );
                 }
                 _ => {}
             }
         }
-        (default, catalog)
+        Ok((default, catalog))
     }
 
     /// The GitHub token wired for GitHub Copilot — checked in BOTH places

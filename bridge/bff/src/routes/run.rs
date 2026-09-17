@@ -145,6 +145,7 @@ pub async fn run_mission(
         None => cluster
             .controller_models()
             .await
+            .map_err(|error| AppError::Upstream(format!("{error:#}")))?
             .0
             .unwrap_or_else(|| "gpt-4o-mini".to_string()),
     };

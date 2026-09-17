@@ -123,6 +123,13 @@ rbac:
 # or no default-deny (they are harmless there, but off by request is supported).
 networkPolicy:
   create: true
+  # AKS pods/proxy reaches the router from kube-system konnectivity Pods.
+  # Enable through deploy/configure-orchestrator-proxy.py after the controller
+  # creates the orchestrator namespace. No changes to the core sandbox policy.
+  orchestratorProxy:
+    enabled: false
+    namespaceUid: ""
+    sandboxUid: ""
   observations:
     enabled: false
     # Explicit opt-in only: this additive policy must not accidentally become

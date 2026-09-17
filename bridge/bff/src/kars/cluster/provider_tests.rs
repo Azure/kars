@@ -6,7 +6,8 @@ use super::mission_records::{
     select_mission_evidence_records, select_mission_output_records, trace_record_identity,
 };
 use super::providers::{
-    classify_provider, image_registry_host, normalize_registry_host, public_registry,
+    classify_provider, image_registry_host, normalize_registry_host, parse_model_catalog,
+    public_registry,
 };
 use super::sandboxes::descendant_sandbox_objects;
 use k8s_openapi::api::core::v1::ConfigMap;
@@ -16,6 +17,136 @@ use std::collections::BTreeMap;
 
 fn id(r: Option<(String, String, String)>) -> Option<String> {
     r.map(|(i, _, _)| i)
+}
+
+#[test]
+fn model_catalog_decodes_actual_foundry_json_without_deployment_quotes() {
+    assert_eq!(
+        parse_model_catalog(r#"["gpt-4.1", "gpt-5.4", "gpt-5.4-mini", "text-embedding-3-small"]"#)
+            .unwrap(),
+        [
+            "gpt-4.1",
+            "gpt-5.4",
+            "gpt-5.4-mini",
+            "text-embedding-3-small"
+        ]
+    );
+}
+
+#[test]
+fn model_catalog_preserves_legacy_csv_and_json_string_values() {
+    assert_eq!(
+        parse_model_catalog(" gpt-4.1, ,openai/gpt-5.4,claude-opus-4.8, ").unwrap(),
+        ["gpt-4.1", "openai/gpt-5.4", "claude-opus-4.8"]
+    );
+    assert_eq!(
+        parse_model_catalog(r#" [ "openai\/gpt-5.4", "custom-deployment" ] "#).unwrap(),
+        ["openai/gpt-5.4", "custom-deployment"]
+    );
+    for empty in ["", " ", ", ,", "[]"] {
+        assert!(parse_model_catalog(empty).unwrap().is_empty());
+    }
+}
+
+#[test]
+fn model_catalog_rejects_malformed_json_instead_of_falling_back_to_csv() {
+    for invalid in [
+        r#"["gpt-5.4-mini""#,
+        r#"["gpt-5.4-mini",]"#,
+        r#"["gpt-5.4-mini", null]"#,
+        r#"["gpt-5.4-mini", 5]"#,
+        r#"["gpt-5.4-mini", {}]"#,
+        r#"["gpt-5.4-mini", " "]"#,
+        r#"{"models": ["gpt-5.4-mini"]}"#,
+        r#""gpt-5.4-mini""#,
+        r#"gpt-4.1,"gpt-5.4-mini""#,
+        "gpt-5.4-mini]",
+    ] {
+        assert!(parse_model_catalog(invalid).is_err(), "{invalid}");
+    }
+}
+
+fn controller_catalog_fixture(env: serde_json::Value) -> super::Cluster {
+    let service = tower::service_fn(move |request: http::Request<_>| {
+        let env = env.clone();
+        async move {
+            assert_eq!(request.method(), http::Method::GET);
+            assert_eq!(
+                request.uri().path(),
+                "/apis/apps/v1/namespaces/kars-system/deployments/kars-controller"
+            );
+            Ok::<_, std::io::Error>(
+                http::Response::builder()
+                    .header("content-type", "application/json")
+                    .body(axum::body::Body::from(
+                        json!({
+                            "apiVersion": "apps/v1", "kind": "Deployment",
+                            "metadata": {"name": "kars-controller", "namespace": "kars-system"},
+                            "spec": {
+                                "selector": {"matchLabels": {"app": "kars-controller"}},
+                                "template": {
+                                    "spec": {"containers": [{"name": "controller", "env": env}]}
+                                }
+                            }
+                        })
+                        .to_string(),
+                    ))
+                    .unwrap(),
+            )
+        }
+    });
+    super::Cluster::for_test_client(kube::Client::new(service, "kars-system"))
+}
+
+#[tokio::test]
+async fn controller_models_reads_both_catalog_formats_and_keeps_default_precedence() {
+    let cluster = controller_catalog_fixture(json!([
+        {"name": "KARS_TASK_DEFAULT_MODEL", "value": "gpt-4.1"},
+        {"name": "AZURE_OPENAI_DEPLOYMENT", "value": "second-default"},
+        {"name": "FOUNDRY_DEPLOYMENTS", "value": "[\"gpt-4.1\", \"gpt-5.4-mini\"]"},
+        {"name": "KARS_MODEL_CATALOG", "value": "custom-deployment,openai/gpt-5.4"},
+        {"name": "KARS_MODEL_CATALOG", "valueFrom": {
+            "secretKeyRef": {"name": "not-readable", "key": "models"}
+        }}
+    ]));
+    let (default, models) = cluster.controller_models().await.unwrap();
+    assert_eq!(default.as_deref(), Some("gpt-4.1"));
+    assert_eq!(
+        models,
+        [
+            "gpt-4.1",
+            "gpt-5.4-mini",
+            "custom-deployment",
+            "openai/gpt-5.4"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn controller_models_json_does_not_invent_a_missing_default() {
+    let cluster = controller_catalog_fixture(json!([
+        {"name": "FOUNDRY_DEPLOYMENTS",
+         "value": "[\"gpt-4.1\", \"gpt-5.4\", \"gpt-5.4-mini\", \"text-embedding-3-small\"]"}
+    ]));
+    let (default, models) = cluster.controller_models().await.unwrap();
+    assert_eq!(default, None);
+    assert_eq!(models[2], "gpt-5.4-mini");
+    assert_eq!(models.len(), 4);
+}
+
+#[tokio::test]
+async fn controller_models_malformed_catalog_fails_instead_of_publishing_partial_models() {
+    let cluster = controller_catalog_fixture(json!([
+        {"name": "KARS_TASK_DEFAULT_MODEL", "value": "gpt-4.1"},
+        {"name": "KARS_MODEL_CATALOG", "value": "valid-deployment"},
+        {"name": "FOUNDRY_DEPLOYMENTS", "value": "[\"gpt-5.4-mini\","}
+    ]));
+    let error = cluster.controller_models().await.unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("Invalid controller FOUNDRY_DEPLOYMENTS")
+    );
 }
 
 #[test]

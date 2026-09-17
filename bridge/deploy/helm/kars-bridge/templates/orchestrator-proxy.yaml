@@ -1,0 +1,63 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- $network := .Values.networkPolicy | default dict -}}
+{{- $proxy := $network.orchestratorProxy | default dict -}}
+{{- if $proxy.enabled -}}
+{{- $core := include "kars-bridge.coreNamespace" . -}}
+{{- $runtime := "kars-bridge-orchestrator" -}}
+{{- $namespaceUid := required "orchestratorProxy requires a reviewed namespaceUid; use configure-orchestrator-proxy.py" $proxy.namespaceUid -}}
+{{- $sandboxUid := required "orchestratorProxy requires a reviewed sandboxUid; use configure-orchestrator-proxy.py" $proxy.sandboxUid -}}
+{{- $namespace := lookup "v1" "Namespace" "" $runtime -}}
+{{- $sandbox := lookup "kars.azure.com/v1alpha1" "KarsSandbox" $core "bridge-orchestrator" -}}
+{{- if or (not $namespace) (not $sandbox) -}}
+{{- fail "orchestratorProxy requires the existing controller-created orchestrator; install Bridge first, then run configure-orchestrator-proxy.py" -}}
+{{- end -}}
+{{- $claim := $namespace.metadata.annotations | default dict -}}
+{{- $labels := $sandbox.metadata.labels | default dict -}}
+{{- if or $namespace.metadata.deletionTimestamp $sandbox.metadata.deletionTimestamp
+      (ne $namespace.metadata.uid $namespaceUid) (ne $sandbox.metadata.uid $sandboxUid)
+      (ne (index $claim "kars.azure.com/sandbox-uid") $sandboxUid)
+      (ne (index $claim "kars.azure.com/sandbox-name") "bridge-orchestrator")
+      (ne (index $claim "kars.azure.com/sandbox-namespace") $core)
+      (ne (index $labels "kars.azure.com/managed-by") "kars-bridge")
+      (ne (index $labels "kars.azure.com/orchestrator") "true") -}}
+{{- fail "orchestratorProxy target identity or namespace ownership changed; no namespace may be adopted" -}}
+{{- end -}}
+{{- $agent := lookup "apps/v1" "Deployment" "kube-system" "konnectivity-agent" -}}
+{{- if not $agent -}}
+{{- fail "orchestratorProxy requires the AKS konnectivity-agent Deployment; other proxy topologies need separate qualification" -}}
+{{- end -}}
+{{- if or $agent.metadata.deletionTimestamp $agent.spec.template.spec.hostNetwork
+      (not (deepEqual $agent.spec.selector.matchLabels (dict "app" "konnectivity-agent")))
+      $agent.spec.selector.matchExpressions
+      (ne (index $agent.spec.template.metadata.labels "app") "konnectivity-agent") -}}
+{{- fail "orchestratorProxy requires the reviewed non-hostNetwork AKS konnectivity selector" -}}
+{{- end }}
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-orchestrator-proxy
+  namespace: {{ $runtime }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+  annotations:
+    kars.azure.com/orchestrator-namespace-uid: {{ $namespaceUid | quote }}
+    kars.azure.com/orchestrator-sandbox-uid: {{ $sandboxUid | quote }}
+spec:
+  podSelector:
+    matchLabels:
+      kars.azure.com/component: sandbox
+      kars.azure.com/sandbox: bridge-orchestrator
+  policyTypes: ["Ingress"]
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: kube-system
+          podSelector:
+            matchLabels:
+              app: konnectivity-agent
+      ports:
+        - port: 8443
+          protocol: TCP
+{{- end }}
