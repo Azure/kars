@@ -161,6 +161,68 @@ and Helm. A schema/ownership refusal is not permission to force adoption, delete
 CRDs, strip finalizers, clear private qualification, or edit Helm history.
 Keep-retention protects CRDs; it does not make all configuration changes atomic.
 
+### AKS composer proxy connectivity
+
+On AKS with non-host-networked konnectivity agents, the Kubernetes `pods/proxy`
+connection reaches the sandbox from `kube-system`, not the Bridge namespace.
+Core's sandbox default-deny policy intentionally does not grant that source
+access. Healthy Bridge and orchestrator Pods alone do not establish connectivity.
+
+After the initial Bridge installation above, run the following from the same
+source checkout (requires Python 3 with PyYAML, Helm and kubectl):
+
+```bash
+python3 bridge/deploy/configure-orchestrator-proxy.py \
+  --kubeconfig "$KUBECONFIG" --context "$CONTEXT" \
+  --namespace kars-system --release kars-bridge --check
+
+python3 bridge/deploy/configure-orchestrator-proxy.py \
+  --kubeconfig "$KUBECONFIG" --context "$CONTEXT" \
+  --namespace kars-system --release kars-bridge
+```
+
+The command waits for the controller-created orchestrator namespace, verifies
+its Sandbox UID/namespace claim and the AKS proxy Deployment's selector, and
+enables `networkPolicy.orchestratorProxy` in the existing Bridge Helm release.
+It captures current private release values without printing them, checks a live
+render and server dry-run, and refuses **any** manifest change except the one
+proxy NetworkPolicy. It cannot upgrade the BFF image or an enrolled template.
+The command also reads every non-policy live release resource, rejects missing
+objects or drift in chart-declared fields, and rechecks the complete live
+UID/resourceVersion snapshots immediately before applying. Thus a recorded Helm
+manifest alone cannot authorize reverting a drifted image or recreating a missing
+BFF Deployment. Server-defaulted fields and externally managed metadata are
+preserved; original Secret `stringData` is compared to its API `data` encoding.
+Post-apply configuration readback excludes only status, resourceVersion and
+managedFields, not UIDs, generation, templates or credential data.
+
+These client-side checks are not an atomic lock against concurrent operators.
+Do not run other release/resource changes concurrently. Unexpected live changes
+or ambiguous upgrade responses fail explicitly, with no invented success,
+retry or rollback of protected state.
+`--check` completes the same preflight without applying an upgrade or probing.
+Existing/reused values keep this option off until explicitly enabled.
+
+The added rule permits **both** namespace `kube-system` **and** Pod label
+`app=konnectivity-agent`, only to `bridge-orchestrator` Sandbox Pods in
+`kars-bridge-orchestrator`, on TCP **8443**. It does not change core's
+`sandbox-policy`, expose gateway ports, grant BFF network-policy permissions,
+allow other sandboxes, or alter egress. It uses stable selectors, not Pod IPs.
+Host-networked, differently labeled or non-AKS proxy topologies fail explicitly;
+they are not silently treated as equivalent.
+
+Helm owns the additive policy and removes it on Bridge uninstall. Running the
+same command with `--disable` removes only that allowance; the namespace,
+Sandbox, controller, grants and baseline network policy are retained. Recorded
+namespace/Sandbox UIDs prevent silently adopting a replacement target on a
+later upgrade. Ordinary upgrades must retain these values and use live lookup;
+offline rendering with the allowance enabled intentionally refuses unverified
+ownership. If another chart change is needed, qualify it separately first.
+
+The final probe uses the actual `pods/proxy` router health path. It consumes no
+model tokens and does not claim signed BFF authorization, successful inference
+or team composition. Complete the authenticated functional acceptance below.
+
 On the September 16 fresh AKS install, Helm 4's `--create-namespace` conflicted
 with the core chart's own Namespace, reporting `original object Namespace with
 the name "kars-system" not found`; rollback then reported release-not-found.
@@ -183,6 +245,25 @@ Open `http://localhost:3000` and authenticate normally. An `ok` health response
 or an authentication redirect proves reachability, not a usable compose engine.
 
 ## 4. Complete functional acceptance
+
+### Copilot device-code start must work in the browser
+
+Exercise **Configuration -> Connect a provider -> GitHub Copilot -> Sign in**
+in a real authenticated browser, not only by posting to the backend. An affected
+web image can remain on `Starting...` while the backend is healthy: unbound
+browser timers were called as methods of the login controller's clock object,
+throwing `TypeError: Illegal invocation` before any sign-in request was sent.
+The corrected web source invokes both timer functions through wrappers that
+preserve browser receiver semantics. The polling interval, expiry, cancellation,
+signed-session checks and governed credential storage contract are unchanged.
+
+A hard refresh cannot repair that code in an old web image. Deploy a qualified
+corrected web image through the supported release workflow; do not modify
+browser globals as an installation workaround. A visible GitHub device code
+is the start milestone, not verified Copilot eligibility or confirmed storage.
+Only the user completes GitHub approval; token/seat/storage confirmation remains
+required afterward. This browser fix is separate from the orchestrator proxy,
+model catalog parser and protected BFF-template migration below.
 
 First complete [governed credential enrollment](../../docs/how-to/governed-credential-grants.md)
 with the matching CLI, original reviewed scope and genuine retirement evidence.
@@ -211,6 +292,21 @@ as a workaround. An existing installation needing a controller-template change
 must wait for a reviewed migration path.
 The lifecycle work is tracked in
 [Azure/kars#567](https://github.com/Azure/kars/issues/567).
+
+The original retirement proof also binds its reviewed private **consumer**
+templates. If `kars-bridge-bff` was included in that original scope, changing its
+image is not made safe by leaving the root controller unchanged. The current
+continuity code verifies the original consumer/template binding; it does not
+provide a reviewed replacement-template migration. Do not deploy a BFF fix to
+such a scope through an ordinary Helm image update, edit the proof, or assume
+a new same-scope preview accepts the changed template. The proxy-only command
+above refuses workload manifest changes and does not remove this limitation.
+
+The BFF model-catalog reader accepts the controller's JSON string-array
+`FOUNDRY_DEPLOYMENTS` and legacy CSV catalogs, including `KARS_MODEL_CATALOG`.
+Malformed arrays fail explicitly instead of producing quoted deployment names.
+That source fix requires a matching qualified BFF image; changing a correct
+controller catalog to work around an older BFF is not an upgrade strategy.
 
 The CLI now refuses controller-changing upgrade, image-publication and restart
 paths before their first mutation when private qualification or retirement

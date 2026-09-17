@@ -8,6 +8,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 const enabled = process.env.BRIDGE_TEST_KIND_LIFECYCLE === "1";
 const chart = fileURLToPath(new URL("../../deploy/helm/kars-bridge", import.meta.url));
 const legacyChart = fileURLToPath(new URL("./fixtures/legacy-namespace-chart", import.meta.url));
+const proxyCommand = fileURLToPath(new URL("../../deploy/configure-orchestrator-proxy.py", import.meta.url));
 const kubeconfig = process.env.BRIDGE_TEST_KUBECONFIG;
 
 function kubectl(args: string[], input?: unknown): string {
@@ -176,4 +177,105 @@ describe.skipIf(!enabled)("real Helm add-on lifecycle in disposable Kind", () =>
     expect(retained.metadata.labels["customer.example/namespace-policy"]).toBe("preserve");
     expect(retained.metadata.annotations["customer.example/namespace-setting"]).toBe("preserve");
   }, 120_000);
+
+  it("owns only the proxy allowance through enable, upgrade, disable and uninstall", () => {
+    const namespace = "kars-system";
+    const runtime = "kars-bridge-orchestrator";
+    const release = "bridge-proxy-lifecycle";
+    kubectl(["create", "-f", "-"], {
+      apiVersion: "apiextensions.k8s.io/v1", kind: "CustomResourceDefinition",
+      metadata: { name: "karssandboxes.kars.azure.com" },
+      spec: {
+        group: "kars.azure.com", scope: "Namespaced",
+        names: { plural: "karssandboxes", singular: "karssandbox", kind: "KarsSandbox" },
+        versions: [{
+          name: "v1alpha1", served: true, storage: true,
+          schema: { openAPIV3Schema: { type: "object" } },
+        }],
+      },
+    });
+    kubectl(["wait", "--for=condition=Established", "--timeout=30s", "crd/karssandboxes.kars.azure.com"]);
+    kubectl(["create", "-f", "-"], {
+      apiVersion: "kars.azure.com/v1alpha1", kind: "KarsSandbox",
+      metadata: { name: "bridge-orchestrator", namespace, labels: {
+        "kars.azure.com/managed-by": "kars-bridge", "kars.azure.com/orchestrator": "true",
+      } },
+    });
+    const sandboxUid = uid("karssandbox", "bridge-orchestrator", namespace);
+    kubectl(["create", "-f", "-"], {
+      apiVersion: "v1", kind: "Namespace", metadata: { name: runtime, annotations: {
+        "kars.azure.com/sandbox-name": "bridge-orchestrator",
+        "kars.azure.com/sandbox-namespace": namespace,
+        "kars.azure.com/sandbox-uid": sandboxUid,
+      } },
+    });
+    const namespaceUid = uid("namespace", runtime);
+    // API/Helm lifecycle only: zero replicas deliberately do not claim AKS dataplane proof.
+    kubectl(["create", "-f", "-"], {
+      apiVersion: "apps/v1", kind: "Deployment",
+      metadata: { name: "konnectivity-agent", namespace: "kube-system" },
+      spec: { replicas: 0, selector: { matchLabels: { app: "konnectivity-agent" } },
+        template: { metadata: { labels: { app: "konnectivity-agent" } }, spec: {
+          hostNetwork: false, containers: [{ name: "agent", image: "example.invalid/proxy:latest" }],
+        } } },
+    });
+    kubectl(["create", "-f", "-"], {
+      apiVersion: "networking.k8s.io/v1", kind: "NetworkPolicy",
+      metadata: { name: "sandbox-policy", namespace: runtime },
+      spec: { podSelector: {}, policyTypes: ["Ingress", "Egress"], ingress: [], egress: [] },
+    });
+    const baseline = kubectl(["get", "networkpolicy", "sandbox-policy", "-n", runtime, "-o", "json"]);
+    const controllerUid = uid("deployment", "kars-controller", namespace);
+    install(release, namespace, false);
+    const externalAnnotation = () => kubectl(["patch", "deployment", "kars-bridge-bff", "-n", namespace, "--type=merge",
+      "-p", JSON.stringify({ spec: { template: { metadata: {
+        annotations: { "test.kars/externally-managed-template": "preserve" },
+      } } } })]);
+    externalAnnotation();
+    const bff = () => JSON.parse(kubectl(["get", "deployment", "kars-bridge-bff", "-n", namespace, "-o", "json"]));
+    const revision = () => JSON.parse(helm(["status", release, "--namespace", namespace, "--output", "json"])).version;
+    const proxyCheck = () => {
+      if (!kubeconfig) throw new Error("Explicit disposable Kind kubeconfig required");
+      return execFileSync("python3", [proxyCommand, "--kubeconfig", kubeconfig,
+        "--context", "kind-bridge-addon-lifecycle", "--namespace", namespace, "--release", release, "--check"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 90_000 });
+    };
+    expect(JSON.parse(proxyCheck()).preflightPassed).toBe(true);
+    const reviewedRevision = revision();
+    const originalImage = bff().spec.template.spec.containers[0].image;
+    kubectl(["set", "image", "deployment/kars-bridge-bff", "bff=example.invalid/drifted:latest", "-n", namespace]);
+    expect(() => proxyCheck()).toThrow(/differs from the declared release/);
+    expect(revision()).toBe(reviewedRevision);
+    expect(bff().spec.template.spec.containers[0].image).toBe("example.invalid/drifted:latest");
+    kubectl(["set", "image", "deployment/kars-bridge-bff", `bff=${originalImage}`, "-n", namespace]);
+    kubectl(["delete", "deployment", "kars-bridge-bff", "-n", namespace, "--wait=true"]);
+    expect(() => proxyCheck()).toThrow(/resources are missing or replaced/);
+    expect(revision()).toBe(reviewedRevision);
+    expect(kubectl(["get", "deployment", "kars-bridge-bff", "-n", namespace, "--ignore-not-found", "-o", "name"])).toBe("");
+    install(release, namespace, false);
+    externalAnnotation();
+    const beforeBff = bff();
+    const enable = ["upgrade", release, chart, "--namespace", namespace, "--reuse-values",
+      "--set", "networkPolicy.orchestratorProxy.enabled=true",
+      "--set-string", `networkPolicy.orchestratorProxy.namespaceUid=${namespaceUid}`,
+      "--set-string", `networkPolicy.orchestratorProxy.sandboxUid=${sandboxUid}`];
+    helm(enable);
+    const policyName = `${release}-orchestrator-proxy`;
+    const policyUid = uid("networkpolicy", policyName, runtime);
+    helm(enable);
+    expect(uid("networkpolicy", policyName, runtime)).toBe(policyUid);
+    expect(bff().metadata.uid).toBe(beforeBff.metadata.uid);
+    expect(bff().spec).toEqual(beforeBff.spec);
+    helm(["upgrade", release, chart, "--namespace", namespace, "--reuse-values",
+      "--set", "networkPolicy.orchestratorProxy.enabled=false"]);
+    expect(kubectl(["get", "networkpolicy", policyName, "-n", runtime, "--ignore-not-found", "-o", "name"])).toBe("");
+    helm(enable);
+    expect(uid("networkpolicy", policyName, runtime)).not.toBe(policyUid);
+    helm(["uninstall", release, "--namespace", namespace, "--wait", "--timeout", "45s"]);
+    expect(kubectl(["get", "networkpolicy", policyName, "-n", runtime, "--ignore-not-found", "-o", "name"])).toBe("");
+    expect(uid("namespace", runtime)).toBe(namespaceUid);
+    expect(uid("karssandbox", "bridge-orchestrator", namespace)).toBe(sandboxUid);
+    expect(uid("deployment", "kars-controller", namespace)).toBe(controllerUid);
+    expect(kubectl(["get", "networkpolicy", "sandbox-policy", "-n", runtime, "-o", "json"])).toBe(baseline);
+  }, 240_000);
 });
