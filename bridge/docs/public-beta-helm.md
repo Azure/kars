@@ -187,6 +187,19 @@ enables `networkPolicy.orchestratorProxy` in the existing Bridge Helm release.
 It captures current private release values without printing them, checks a live
 render and server dry-run, and refuses **any** manifest change except the one
 proxy NetworkPolicy. It cannot upgrade the BFF image or an enrolled template.
+The command also reads every non-policy live release resource, rejects missing
+objects or drift in chart-declared fields, and rechecks the complete live
+UID/resourceVersion snapshots immediately before applying. Thus a recorded Helm
+manifest alone cannot authorize reverting a drifted image or recreating a missing
+BFF Deployment. Server-defaulted fields and externally managed metadata are
+preserved; original Secret `stringData` is compared to its API `data` encoding.
+Post-apply configuration readback excludes only status, resourceVersion and
+managedFields, not UIDs, generation, templates or credential data.
+
+These client-side checks are not an atomic lock against concurrent operators.
+Do not run other release/resource changes concurrently. Unexpected live changes
+or ambiguous upgrade responses fail explicitly, with no invented success,
+retry or rollback of protected state.
 `--check` completes the same preflight without applying an upgrade or probing.
 Existing/reused values keep this option off until explicitly enabled.
 

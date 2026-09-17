@@ -253,9 +253,10 @@ class ConfigurationTests(unittest.TestCase):
         self.writes = []
         self.private_path = None
         status_reads = 0
+        inventory_reads = 0
 
         def run(command, **kwargs):
-            nonlocal status_reads
+            nonlocal status_reads, inventory_reads
             self.calls.append(command)
             self.assertEqual(command[1:3], ["--kubeconfig", "/explicit/config"])
             self.assertIn("explicit-context", command)
@@ -293,7 +294,17 @@ class ConfigurationTests(unittest.TestCase):
                 else:
                     self.fail(f"unexpected Helm operation: {command}")
             elif command[0] == "kubectl":
-                if "--raw" in command:
+                if "-f" in command:
+                    inventory_reads += 1
+                    resource = copy.deepcopy(deployment)
+                    resource["metadata"].update({"uid": "bff-uid", "resourceVersion": "one"})
+                    if fault == "live-image-drift" or (fault == "post-upgrade-image-drift" and self.writes):
+                        resource["spec"]["template"]["spec"]["containers"][0]["image"] = "drifted"
+                    if fault == "changed-live-snapshot" and inventory_reads > 1:
+                        resource["metadata"]["resourceVersion"] = "two"
+                    output = json.dumps({"apiVersion": "v1", "kind": "List",
+                                         "items": [] if fault == "missing-live-workload" else [resource]})
+                elif "--raw" in command:
                     self.assertEqual(command[-1],
                                      f"/api/v1/namespaces/{CONFIG.RUNTIME}/pods/router-ready:8443/proxy/healthz")
                     if fault == "proxy-unavailable":
@@ -348,7 +359,8 @@ class ConfigurationTests(unittest.TestCase):
         self.assertFalse(self.private_path.exists())
 
     def test_invalid_or_concurrent_changes_are_rejected_before_writes(self):
-        for fault in ["workload-drift", "replaced-target", "concurrent-release", "admission-denied"]:
+        for fault in ["workload-drift", "replaced-target", "concurrent-release", "admission-denied",
+                      "live-image-drift", "missing-live-workload", "changed-live-snapshot"]:
             with self.subTest(fault=fault), self.assertRaises((ValueError, RuntimeError)) as raised:
                 self.configure(fault)
             self.assertEqual(self.writes, [])
@@ -362,6 +374,26 @@ class ConfigurationTests(unittest.TestCase):
         self.assertEqual(len(self.writes), 1)
         self.assertNotIn("never-print-this", str(raised.exception))
         self.assertFalse(self.private_path.exists())
+
+    def test_post_upgrade_drift_fails_without_rolling_back_or_claiming_qualification(self):
+        with self.assertRaisesRegex(RuntimeError, "Non-policy live resources changed"):
+            self.configure("post-upgrade-image-drift")
+        self.assertEqual(len(self.writes), 1)
+
+    def test_live_comparison_preserves_server_defaults_and_secret_stringdata_semantics(self):
+        declared = {"apiVersion": "v1", "kind": "Secret", "metadata": {
+            "name": "oidc", "namespace": "kars-system"},
+            "type": "Opaque", "stringData": {"client-secret": "fixture-only"}}
+        current = copy.deepcopy(declared)
+        current.pop("stringData")
+        current["metadata"].update({"uid": "secret-uid", "resourceVersion": "one",
+                                    "annotations": {"external": "preserve"}})
+        current["data"] = {"client-secret": "Zml4dHVyZS1vbmx5"}
+        live = {CONFIG.live_key(current): current}
+        CONFIG.require_live_compatible(yaml.safe_dump(declared), live, "kars-bridge")
+        current["data"]["client-secret"] = "Y2hhbmdlZA=="
+        with self.assertRaises(ValueError):
+            CONFIG.require_live_compatible(yaml.safe_dump(declared), live, "kars-bridge")
 
     def test_health_failure_after_install_is_not_functional_success(self):
         with self.assertRaises(subprocess.TimeoutExpired):

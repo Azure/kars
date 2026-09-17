@@ -8,6 +8,7 @@ import { beforeAll, describe, expect, it } from "vitest";
 const enabled = process.env.BRIDGE_TEST_KIND_LIFECYCLE === "1";
 const chart = fileURLToPath(new URL("../../deploy/helm/kars-bridge", import.meta.url));
 const legacyChart = fileURLToPath(new URL("./fixtures/legacy-namespace-chart", import.meta.url));
+const proxyCommand = fileURLToPath(new URL("../../deploy/configure-orchestrator-proxy.py", import.meta.url));
 const kubeconfig = process.env.BRIDGE_TEST_KUBECONFIG;
 
 function kubectl(args: string[], input?: unknown): string {
@@ -226,11 +227,33 @@ describe.skipIf(!enabled)("real Helm add-on lifecycle in disposable Kind", () =>
     const baseline = kubectl(["get", "networkpolicy", "sandbox-policy", "-n", runtime, "-o", "json"]);
     const controllerUid = uid("deployment", "kars-controller", namespace);
     install(release, namespace, false);
-    kubectl(["patch", "deployment", "kars-bridge-bff", "-n", namespace, "--type=merge",
+    const externalAnnotation = () => kubectl(["patch", "deployment", "kars-bridge-bff", "-n", namespace, "--type=merge",
       "-p", JSON.stringify({ spec: { template: { metadata: {
         annotations: { "test.kars/externally-managed-template": "preserve" },
       } } } })]);
+    externalAnnotation();
     const bff = () => JSON.parse(kubectl(["get", "deployment", "kars-bridge-bff", "-n", namespace, "-o", "json"]));
+    const revision = () => JSON.parse(helm(["status", release, "--namespace", namespace, "--output", "json"])).version;
+    const proxyCheck = () => {
+      if (!kubeconfig) throw new Error("Explicit disposable Kind kubeconfig required");
+      return execFileSync("python3", [proxyCommand, "--kubeconfig", kubeconfig,
+        "--context", "kind-bridge-addon-lifecycle", "--namespace", namespace, "--release", release, "--check"],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: 90_000 });
+    };
+    expect(JSON.parse(proxyCheck()).preflightPassed).toBe(true);
+    const reviewedRevision = revision();
+    const originalImage = bff().spec.template.spec.containers[0].image;
+    kubectl(["set", "image", "deployment/kars-bridge-bff", "bff=example.invalid/drifted:latest", "-n", namespace]);
+    expect(() => proxyCheck()).toThrow(/differs from the declared release/);
+    expect(revision()).toBe(reviewedRevision);
+    expect(bff().spec.template.spec.containers[0].image).toBe("example.invalid/drifted:latest");
+    kubectl(["set", "image", "deployment/kars-bridge-bff", `bff=${originalImage}`, "-n", namespace]);
+    kubectl(["delete", "deployment", "kars-bridge-bff", "-n", namespace, "--wait=true"]);
+    expect(() => proxyCheck()).toThrow(/resources are missing or replaced/);
+    expect(revision()).toBe(reviewedRevision);
+    expect(kubectl(["get", "deployment", "kars-bridge-bff", "-n", namespace, "--ignore-not-found", "-o", "name"])).toBe("");
+    install(release, namespace, false);
+    externalAnnotation();
     const beforeBff = bff();
     const enable = ["upgrade", release, chart, "--namespace", namespace, "--reuse-values",
       "--set", "networkPolicy.orchestratorProxy.enabled=true",
@@ -254,5 +277,5 @@ describe.skipIf(!enabled)("real Helm add-on lifecycle in disposable Kind", () =>
     expect(uid("karssandbox", "bridge-orchestrator", namespace)).toBe(sandboxUid);
     expect(uid("deployment", "kars-controller", namespace)).toBe(controllerUid);
     expect(kubectl(["get", "networkpolicy", "sandbox-policy", "-n", runtime, "-o", "json"])).toBe(baseline);
-  }, 180_000);
+  }, 240_000);
 });

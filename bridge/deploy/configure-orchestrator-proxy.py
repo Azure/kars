@@ -3,6 +3,8 @@
 """Configure only Bridge's Helm-owned AKS composer ingress, never its workloads."""
 
 import argparse
+import base64
+import copy
 import json
 from pathlib import Path
 import subprocess
@@ -39,6 +41,57 @@ def require_policy_only(before, after, release):
             "Refusing non-network changes: this command cannot upgrade images, templates, "
             "RBAC, credentials or namespaces. Use the matching installed chart or a "
             "separately qualified upgrade; private-consumer template migration is not bypassed."
+        )
+
+
+def live_key(obj):
+    metadata = obj["metadata"]
+    return (obj["apiVersion"], obj["kind"], metadata.get("namespace", ""), metadata["name"])
+
+
+def matches_declared(expected, live):
+    if expected is None or expected == {} or expected == []:
+        return live is None or expected == live
+    if isinstance(expected, dict):
+        return isinstance(live, dict) and all(
+            matches_declared(value, live.get(key)) for key, value in expected.items()
+        )
+    if isinstance(expected, list):
+        return isinstance(live, list) and len(expected) == len(live) and all(
+            matches_declared(left, right) for left, right in zip(expected, live)
+        )
+    return type(expected) is type(live) and expected == live
+
+
+def require_live_compatible(before, live, release):
+    expected = documents(before)
+    expected.pop(("networking.k8s.io/v1", "NetworkPolicy", RUNTIME, release + "-orchestrator-proxy"), None)
+    if expected.keys() != live.keys():
+        raise ValueError("Non-policy release resources are missing or replaced; refusing reconciliation")
+    for key, original in expected.items():
+        declared = copy.deepcopy(original)
+        if declared["kind"] == "Secret":
+            for name, value in declared.pop("stringData", {}).items():
+                declared.setdefault("data", {})[name] = base64.b64encode(value.encode()).decode()
+        current = live[key]
+        metadata = current.get("metadata", {})
+        if (not metadata.get("uid") or not metadata.get("resourceVersion")
+                or metadata.get("deletionTimestamp") or not matches_declared(declared, current)):
+            raise ValueError(f"Live {key[1]}/{key[3]} differs from the declared release; no upgrade attempted")
+
+
+def require_live_unchanged(before, after):
+    def configuration(objects):
+        result = copy.deepcopy(objects)
+        for obj in result.values():
+            obj.pop("status", None)
+            for field in ["resourceVersion", "managedFields"]:
+                obj["metadata"].pop(field, None)
+        return result
+    if configuration(before) != configuration(after):
+        raise RuntimeError(
+            "Non-policy live resources changed during the operation; qualification is not established. "
+            "Preserve the current state for operator review; no automatic rollback was attempted."
         )
 
 
@@ -91,6 +144,20 @@ class Configuration:
             raise ValueError("Bridge release must be deployed; recover its existing operation first")
         return status["version"]
 
+    def inventory(self, path):
+        value = json.loads(self.command(
+            [*self.kubectl, "get", "-f", str(path), "--ignore-not-found", "-o", "json"],
+            "Read live non-policy resource inventory",
+        ))
+        objects = value.get("items", []) if value.get("kind") == "List" else [value]
+        result = {}
+        for obj in objects:
+            key = live_key(obj)
+            if key in result:
+                raise ValueError("Duplicate live resource identity")
+            result[key] = obj
+        return result
+
     def configure(self):
         revision = self.revision()
         before = self.helm_read("manifest")
@@ -113,6 +180,17 @@ class Configuration:
                 proxy[field] = uid
 
         with tempfile.TemporaryDirectory(prefix="kars-bridge-proxy-") as directory:
+            identity_path = Path(directory) / "resource-identities.json"
+            identities = documents(before)
+            identities.pop(("networking.k8s.io/v1", "NetworkPolicy", RUNTIME,
+                            self.args.release + "-orchestrator-proxy"), None)
+            identity_path.write_text(json.dumps({"apiVersion": "v1", "kind": "List", "items": [
+                {"apiVersion": key[0], "kind": key[1], "metadata": {
+                    "name": key[3], **({"namespace": key[2]} if key[2] else {}),
+                }} for key in identities
+            ]}))
+            live_before = self.inventory(identity_path)
+            require_live_compatible(before, live_before, self.args.release)
             path = Path(directory) / "private-values.json"
             with path.open("x") as stream:
                 path.chmod(0o600)
@@ -130,12 +208,16 @@ class Configuration:
             self.command([*upgrade, "--dry-run=server"], "Server-side Helm preflight")
             if self.revision() != revision or self.helm_read("manifest") != before:
                 raise ValueError("Helm release changed after review; no upgrade attempted")
+            live_current = self.inventory(identity_path)
+            if live_before != live_current:
+                raise ValueError("Live release resources changed after preflight; no upgrade attempted")
             if self.args.check:
                 return {
                     "helmRevision": revision, "proxyAllowance": "not changed", "preflightPassed": True,
                     "functionalAcceptance": "not performed; no policy or workload changed",
                 }
             self.command(upgrade, "Apply proxy-only Helm upgrade", timeout=self.args.timeout + 30)
+            require_live_unchanged(live_before, self.inventory(identity_path))
 
         actual = self.helm_read("manifest")
         require_policy_only(before, actual, self.args.release)
