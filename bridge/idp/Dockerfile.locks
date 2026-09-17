@@ -1,0 +1,33 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# Separate from the image recipe: even legacy builders must never resolve
+# dependency versions as an incidental step in a normal runtime image build.
+FROM golang:1.26.8-bookworm@sha256:9fdc884aacc3bec89b20ffc69f4bb369c78210e3e4f600387b5128b12c199f81 AS source
+ENV GOTOOLCHAIN=local GOWORK=off GOPROXY=https://proxy.golang.org \
+    GOSUMDB=sum.golang.org GOMODCACHE=/work/mod GOCACHE=/work/cache \
+    GOFLAGS=-mod=readonly CGO_ENABLED=1
+WORKDIR /src/dex
+COPY locks/inputs.lock /packaging/locks/inputs.lock
+COPY scripts/fetch-source.sh scripts/source-inventory.sh scripts/apply-source-patches.sh /packaging/scripts/
+COPY patches/ /packaging/patches/
+RUN sh /packaging/scripts/fetch-source.sh
+
+FROM source AS lock-generation
+COPY locks/requests.txt /packaging/locks/requests.txt
+COPY scripts/generate-locks.sh /packaging/scripts/generate-locks.sh
+RUN sh /packaging/scripts/generate-locks.sh
+
+FROM scratch AS lock-artifact
+COPY --from=lock-generation --chown=1001:1001 /out/ /
+USER 1001:1001
+
+FROM source AS lock-replay
+COPY --from=lock-generation --chown=1001:1001 /out/ /out/
+COPY --chown=1001:1001 locks/generated/ /reviewed/
+USER 1001:1001
+RUN test "$(id -u)" = 1001 && test "$(id -g)" = 1001 \
+    && cd /reviewed && sha256sum --check --strict SHA256SUMS \
+    && cmp SHA256SUMS /out/SHA256SUMS \
+    && cd /out && sha256sum --check --strict /reviewed/SHA256SUMS \
+    && printf 'KARS_DEX_LOCK_REPLAY_PASSED\n'

@@ -64,8 +64,8 @@ def paused_team(setup, namespace, name):
 
 
 def changes_since(setup, actor, namespace, before):
-    ids = {event["auditID"] for event in before}
-    return [event for event in setup.audit_barrier(actor, namespace) if event["auditID"] not in ids]
+    from audit_evidence import changes
+    return changes(before, setup.audit_barrier(actor, namespace))
 
 
 class CredentialCases:
@@ -122,7 +122,8 @@ class CredentialCases:
         posts = [event for event in events if event["verb"] == "create"
                  and event.get("objectRef", {}).get("resource") == "secrets"
                  and event.get("responseStatus", {}).get("code") == 201]
-        require(len(posts) == 1, "Bootstrap did not use one exclusive native source CREATE")
+        require(len(posts) == 1,
+                f"Bootstrap requires exactly one native source CREATE; observed {len(posts)} in the complete audit interval")
         created_at = posts[0]["requestReceivedTimestamp"]
         gets = [event for event in events if event["verb"] == "get"
                 and event.get("objectRef", {}).get("resource") == "secrets"

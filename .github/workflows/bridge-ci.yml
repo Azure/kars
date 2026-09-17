@@ -20,7 +20,7 @@ concurrency:
 jobs:
   bridge-required-gates:
     name: Bridge component acceptance
-    needs: [addon, bff, dependencies, lockfiles, rust-dependencies, secrets, security, web]
+    needs: [addon, bff, dependencies, idp, lockfiles, rust-dependencies, secrets, security, web]
     if: always()
     runs-on: ubuntu-22.04
     env:
@@ -221,6 +221,180 @@ jobs:
             docker logs "$WEB_CONTAINER_ID"
             docker rm --force "$WEB_CONTAINER_ID"
           fi
+
+  idp:
+    name: Dex IdP runtime qualification
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    permissions:
+      contents: read
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Initialize native Dex qualification evidence
+        run: |
+          set -euo pipefail
+          export IDP_EVIDENCE_DIR="$RUNNER_TEMP/bridge-idp-evidence"
+          printf 'IDP_EVIDENCE_DIR=%s\n' "$IDP_EVIDENCE_DIR" >> "$GITHUB_ENV"
+          mkdir -p "$IDP_EVIDENCE_DIR"
+          printf 'commit=%s\nrun_id=%s\nrun_attempt=%s\n' \
+            "$GITHUB_SHA" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" \
+            > "$IDP_EVIDENCE_DIR/provenance.txt"
+          test "$(uname -m)" = x86_64
+          docker info --format '{{.OSType}}/{{.Architecture}}' \
+            | tee "$IDP_EVIDENCE_DIR/docker-platform.txt"
+          df -h "$RUNNER_TEMP" | tee "$IDP_EVIDENCE_DIR/disk-before.txt"
+      - name: Check Dex source contracts and actual reviewed module locks
+        id: idp_source
+        run: |
+          set -euo pipefail
+          KARS_DEX_PATCH_NETWORK=1 python3 -m unittest discover \
+            -s bridge/idp/tests -p 'test_*.py' \
+            2>&1 | tee "$IDP_EVIDENCE_DIR/source-contracts.log"
+          PYTHONPATH=bridge/idp/tests python3 -c \
+            'from contracts import check_modules; check_modules("bridge/idp"); print("Reviewed Go module locks verified")' \
+            2>&1 | tee "$IDP_EVIDENCE_DIR/module-locks.log"
+          PYTHONPATH=ci/tests python3 -m unittest bridge_contracts_test.ContractAggregateTests \
+            2>&1 | tee "$IDP_EVIDENCE_DIR/component-aggregate-contracts.log"
+          git diff --exit-code -- bridge/idp/locks
+      - name: Build and run upstream Dex root and API race suites
+        id: idp_upstream
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 --progress=plain \
+            --target upstream-tests --tag kars-bridge-idp-upstream-tests:latest \
+            --file bridge/idp/Dockerfile bridge/idp \
+            2>&1 | tee "$IDP_EVIDENCE_DIR/upstream-build.log"
+      - name: Collect actual upstream JSON reports and disclose skips
+        id: idp_reports
+        run: |
+          set -euo pipefail
+          container=$(docker create kars-bridge-idp-upstream-tests:latest)
+          trap 'docker rm "$container"' EXIT
+          docker cp "$container:/out/doc/upstream-tests.json" "$IDP_EVIDENCE_DIR/upstream-tests.json"
+          docker cp "$container:/out/doc/api-tests.json" "$IDP_EVIDENCE_DIR/api-tests.json"
+          docker image inspect kars-bridge-idp-upstream-tests:latest \
+            > "$IDP_EVIDENCE_DIR/upstream-image.json"
+          python3 - <<'PY'
+          import collections
+          import json
+          import os
+          from pathlib import Path
+
+          evidence = Path(os.environ["IDP_EVIDENCE_DIR"])
+          summary = {}
+          for label, filename in (("root", "upstream-tests.json"), ("api", "api-tests.json")):
+              tests = collections.Counter()
+              packages = collections.Counter()
+              started, finished = set(), set()
+              skips = []
+              for number, line in enumerate((evidence / filename).read_text().splitlines(), 1):
+                  event = json.loads(line)
+                  if not isinstance(event, dict) or not isinstance(event.get("Action"), str):
+                      raise SystemExit(f"Invalid Go event in {filename}:{number}")
+                  action = event["Action"]
+                  if action in ("fail", "build-fail"):
+                      raise SystemExit(f"Upstream failure recorded in {filename}:{number}")
+                  package = event.get("Package")
+                  if package and not event.get("Test"):
+                      if action == "start":
+                          started.add(package)
+                      elif action in ("pass", "skip"):
+                          finished.add(package)
+                          packages[action] += 1
+                  if event.get("Test") and action in ("pass", "skip"):
+                      tests[action] += 1
+                  if action == "skip":
+                      skips.append({"package": package, "test": event.get("Test")})
+              if not started or started != finished:
+                  raise SystemExit(f"Incomplete package results in {filename}")
+              if label == "root" and not tests["pass"]:
+                  raise SystemExit("The root report contains no passing upstream tests")
+              summary[label] = {
+                  "testActions": dict(tests), "packageActions": dict(packages), "skipped": skips,
+              }
+          summary["coverageLimit"] = (
+              "Skipped service integrations and unconfigured LDAP/cloud connectors are not "
+              "runtime-qualified. Memory, SQLite and static OIDC require the separate runtime harness."
+          )
+          (evidence / "upstream-summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+          with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as output:
+              output.write("### Dex upstream reports (not final runtime qualification)\n")
+              for label in ("root", "api"):
+                  counts = summary[label]
+                  output.write(f"- {label}: test actions {counts['testActions']}; "
+                               f"package actions {counts['packageActions']}. See retained JSON for every skip.\n")
+              output.write(summary["coverageLimit"] + "\n")
+          PY
+      - name: Build Dex tools and run signing-key continuity race regressions
+        id: idp_tools
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 --progress=plain \
+            --target test-tools --tag kars-bridge-idp-tools:latest \
+            --file bridge/idp/Dockerfile bridge/idp \
+            2>&1 | tee "$IDP_EVIDENCE_DIR/probe-build.log"
+          docker image inspect kars-bridge-idp-tools:latest > "$IDP_EVIDENCE_DIR/tools-image.json"
+      - name: Build the actual Azure Linux distroless Dex runtime without publishing
+        id: idp_runtime
+        run: |
+          set -euo pipefail
+          docker build --platform linux/amd64 --progress=plain \
+            --target runtime --tag kars-bridge-idp-qualification:latest \
+            --file bridge/idp/Dockerfile bridge/idp \
+            2>&1 | tee "$IDP_EVIDENCE_DIR/runtime-build.log"
+      - name: Install pinned Trivy and scan the actual Dex runtime
+        id: idp_scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: v0.70.0
+          cache: 'false'
+          scan-type: image
+          image-ref: kars-bridge-idp-qualification:latest
+          scanners: vuln
+          severity: HIGH,CRITICAL
+          ignore-unfixed: false
+          list-all-pkgs: 'true'
+          exit-code: '1'
+          format: json
+          output: ${{ runner.temp }}/bridge-idp-evidence/initial-image-scan.json
+      - name: Require real memory SQLite OIDC linkage inventory and fresh-cache scans
+        id: idp_qualification
+        if: ${{ !cancelled() && steps.idp_runtime.outcome == 'success' }}
+        run: |
+          set -euo pipefail
+          {
+            trivy_path="$(command -v trivy)"
+            test -x "$trivy_path"
+            printf '%s\n' "$trivy_path" > "$IDP_EVIDENCE_DIR/trivy-cli-path.txt"
+            "$trivy_path" --version | tee "$IDP_EVIDENCE_DIR/trivy-cli-version.txt"
+            grep -Eq '^Version: 0[.]70[.]0([[:space:]]|$)' "$IDP_EVIDENCE_DIR/trivy-cli-version.txt"
+            python3 bridge/idp/tests/qualify.py \
+              --image kars-bridge-idp-qualification:latest \
+              --tools-image kars-bridge-idp-tools:latest \
+              --trivy "$trivy_path" --evidence "$IDP_EVIDENCE_DIR/runtime"
+          } 2>&1 | tee "$IDP_EVIDENCE_DIR/runtime-qualification.log"
+      - name: Record Dex step outcomes without overriding failures
+        if: always()
+        env:
+          IDP_STEP_RESULTS: ${{ toJSON(steps) }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$IDP_EVIDENCE_DIR"
+          printf '%s\n' "$IDP_STEP_RESULTS" > "$IDP_EVIDENCE_DIR/step-outcomes.json"
+      - name: Retain actual Dex qualification evidence including failures
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
+        with:
+          name: bridge-idp-qualification-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/bridge-idp-evidence/
+          if-no-files-found: error
 
   addon:
     name: Add-on install and uninstall

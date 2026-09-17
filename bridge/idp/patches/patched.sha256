@@ -1,0 +1,4 @@
+c8b250efd8e8d41f88fb21968847e4d82f6eb3738f9815de662b6a7854cddeeb  ./server/oauth2.go
+de88d7c7361b41e306001280ef2b5f6e01827eff572a0404a047194e660bde31  ./connector/saml/saml_test.go
+e310d58df8845a7fd8e839a5428880358789bff128b561558dfddd61b7a2853d  ./server/kars_compat_test.go
+63da3c3b7a5739568f4e8601daaadd2b5e85e3b4776414d6ed0046c7fb876eff  ./connector/saml/kars_compat_test.go

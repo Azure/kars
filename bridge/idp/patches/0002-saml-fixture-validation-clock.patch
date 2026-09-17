@@ -1,0 +1,39 @@
+Subject: [Kars test-only compatibility] Validate the historical OAM signature at fixture time
+Upstream: dexidp/dex v2.45.1, 11d2eeb52b42e1980e14cb91e69dd9e3faab2076
+Fixture: connector/saml/testdata/oam-resp.xml IssueInstant 2016-12-12T16:54:35Z
+Certificate: oam-ca.pem valid 2016-06-30T04:54:16Z through 2026-06-28T04:54:16Z
+Reason: This XML namespace/signature test is not a wall-clock expiry test.
+Only this historical fixture selects goxmldsig's supported fake test clock.
+All other runVerify callers retain the real clock. Production validation,
+the signed XML, and the certificate remain unchanged.
+
+--- a/connector/saml/saml_test.go
++++ b/connector/saml/saml_test.go
+@@ -544,11 +544,16 @@
+ func runVerify(t *testing.T, ca string, resp string, shouldSucceed bool) {
++	runVerifyWithClock(t, ca, resp, shouldSucceed, nil)
++}
++
++func runVerifyWithClock(t *testing.T, ca string, resp string, shouldSucceed bool, clock *dsig.Clock) {
+ 	cert, err := loadCert(ca)
+ 	if err != nil {
+ 		t.Fatal(err)
+ 	}
+ 	s := certStore{[]*x509.Certificate{cert}}
+ 
+ 	validator := dsig.NewDefaultValidationContext(s)
++	validator.Clock = clock
+ 
+ 	data, err := os.ReadFile(resp)
+ 	if err != nil {
+@@ -573,7 +578,9 @@
+ func TestVerifyUnsignedMessageAndSignedAssertionWithRootXmlNs(t *testing.T) {
+-	runVerify(t, "testdata/oam-ca.pem", "testdata/oam-resp.xml", true)
++	// Match the signed fixture's IssueInstant, not the wall clock.
++	clock := dsig.NewFakeClockAt(time.Date(2016, time.December, 12, 16, 54, 35, 0, time.UTC))
++	runVerifyWithClock(t, "testdata/oam-ca.pem", "testdata/oam-resp.xml", true, clock)
+ }
+ 
+ func TestVerifySignedMessageAndUnsignedAssertion(t *testing.T) {
+ 	runVerify(t, "testdata/idp-cert.pem", "testdata/idp-resp-signed-message.xml", true)
+ }
