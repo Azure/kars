@@ -161,6 +161,55 @@ and Helm. A schema/ownership refusal is not permission to force adoption, delete
 CRDs, strip finalizers, clear private qualification, or edit Helm history.
 Keep-retention protects CRDs; it does not make all configuration changes atomic.
 
+### AKS composer proxy connectivity
+
+On AKS with non-host-networked konnectivity agents, the Kubernetes `pods/proxy`
+connection reaches the sandbox from `kube-system`, not the Bridge namespace.
+Core's sandbox default-deny policy intentionally does not grant that source
+access. Healthy Bridge and orchestrator Pods alone do not establish connectivity.
+
+After the initial Bridge installation above, run the following from the same
+source checkout (requires Python 3 with PyYAML, Helm and kubectl):
+
+```bash
+python3 bridge/deploy/configure-orchestrator-proxy.py \
+  --kubeconfig "$KUBECONFIG" --context "$CONTEXT" \
+  --namespace kars-system --release kars-bridge --check
+
+python3 bridge/deploy/configure-orchestrator-proxy.py \
+  --kubeconfig "$KUBECONFIG" --context "$CONTEXT" \
+  --namespace kars-system --release kars-bridge
+```
+
+The command waits for the controller-created orchestrator namespace, verifies
+its Sandbox UID/namespace claim and the AKS proxy Deployment's selector, and
+enables `networkPolicy.orchestratorProxy` in the existing Bridge Helm release.
+It captures current private release values without printing them, checks a live
+render and server dry-run, and refuses **any** manifest change except the one
+proxy NetworkPolicy. It cannot upgrade the BFF image or an enrolled template.
+`--check` completes the same preflight without applying an upgrade or probing.
+Existing/reused values keep this option off until explicitly enabled.
+
+The added rule permits **both** namespace `kube-system` **and** Pod label
+`app=konnectivity-agent`, only to `bridge-orchestrator` Sandbox Pods in
+`kars-bridge-orchestrator`, on TCP **8443**. It does not change core's
+`sandbox-policy`, expose gateway ports, grant BFF network-policy permissions,
+allow other sandboxes, or alter egress. It uses stable selectors, not Pod IPs.
+Host-networked, differently labeled or non-AKS proxy topologies fail explicitly;
+they are not silently treated as equivalent.
+
+Helm owns the additive policy and removes it on Bridge uninstall. Running the
+same command with `--disable` removes only that allowance; the namespace,
+Sandbox, controller, grants and baseline network policy are retained. Recorded
+namespace/Sandbox UIDs prevent silently adopting a replacement target on a
+later upgrade. Ordinary upgrades must retain these values and use live lookup;
+offline rendering with the allowance enabled intentionally refuses unverified
+ownership. If another chart change is needed, qualify it separately first.
+
+The final probe uses the actual `pods/proxy` router health path. It consumes no
+model tokens and does not claim signed BFF authorization, successful inference
+or team composition. Complete the authenticated functional acceptance below.
+
 On the September 16 fresh AKS install, Helm 4's `--create-namespace` conflicted
 with the core chart's own Namespace, reporting `original object Namespace with
 the name "kars-system" not found`; rollback then reported release-not-found.
@@ -211,6 +260,21 @@ as a workaround. An existing installation needing a controller-template change
 must wait for a reviewed migration path.
 The lifecycle work is tracked in
 [Azure/kars#567](https://github.com/Azure/kars/issues/567).
+
+The original retirement proof also binds its reviewed private **consumer**
+templates. If `kars-bridge-bff` was included in that original scope, changing its
+image is not made safe by leaving the root controller unchanged. The current
+continuity code verifies the original consumer/template binding; it does not
+provide a reviewed replacement-template migration. Do not deploy a BFF fix to
+such a scope through an ordinary Helm image update, edit the proof, or assume
+a new same-scope preview accepts the changed template. The proxy-only command
+above refuses workload manifest changes and does not remove this limitation.
+
+The BFF model-catalog reader accepts the controller's JSON string-array
+`FOUNDRY_DEPLOYMENTS` and legacy CSV catalogs, including `KARS_MODEL_CATALOG`.
+Malformed arrays fail explicitly instead of producing quoted deployment names.
+That source fix requires a matching qualified BFF image; changing a correct
+controller catalog to work around an older BFF is not an upgrade strategy.
 
 The CLI now refuses controller-changing upgrade, image-publication and restart
 paths before their first mutation when private qualification or retirement

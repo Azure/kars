@@ -440,6 +440,7 @@ jobs:
       - name: Optional witness runtime and server-side ownership contracts
         run: |
           python3 -m pip install -r deploy/ebpf-witness/tests/requirements.txt
+          PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bridge/tests -p composer_proxy_test.py
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/ebpf-witness/aggregator
           PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s deploy/ebpf-witness/tests -p test_chart.py
       - name: Build the public witness image without publishing

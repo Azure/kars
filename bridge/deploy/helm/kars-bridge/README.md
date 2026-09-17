@@ -60,6 +60,13 @@ Microsoft Teams is optional: the gateway defaults to zero replicas and the
 BFF's Teams Secret references are optional. Missing tenant credentials do not
 block a Kars-backed web-only deployment.
 
+For AKS `pods/proxy` through non-host-networked konnectivity agents, complete
+the [composer connectivity step](../../../docs/public-beta-helm.md#aks-composer-proxy-connectivity)
+after Bridge bootstrap. It installs a Helm-owned, UID-reviewed ingress rule for
+the orchestrator router only; no core NetworkPolicy or workload is changed.
+The rule is off for old/default values and removed with Bridge. A router health
+probe is not functional composition acceptance.
+
 ### Bridge alone, on an EXISTING kars cluster (the common case)
 
 ```bash

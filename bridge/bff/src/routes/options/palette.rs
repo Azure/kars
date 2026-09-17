@@ -58,7 +58,10 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
     // Models: the controller-configured default + catalog, deduped against any
     // distinct models already pinned on existing InferencePolicies (real,
     // in-use facts). Order: default first, then catalog, then discovered.
-    let (default_model, catalog) = cluster.controller_models().await;
+    let (default_model, catalog) = cluster
+        .controller_models()
+        .await
+        .map_err(|error| AppError::Upstream(format!("{error:#}")))?;
     // The cluster's inherited inference provider — the authoritative tag for any
     // catalog model that doesn't carry its own vendor prefix. Fetched up front
     // so every offered model is stamped with the provider the router actually
