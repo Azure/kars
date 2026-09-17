@@ -230,6 +230,43 @@ function moduleFrom(path, dependencies, globals = {}) {
   return exports;
 }
 
+test("default clock keeps browser timer receivers valid through start, poll and cancellation", async () => {
+  const time = clock();
+  const view = ui();
+  let starts = 0, polls = 0;
+  const browser = moduleFrom("../src/lib/copilot-login.ts", {}, {
+    Date: { now: time.now },
+    setTimeout: function (callback, milliseconds) {
+      assert.equal(this, undefined, "Window.setTimeout must not receive the clock object");
+      return time.setTimeout(callback, milliseconds);
+    },
+    clearTimeout: function (timer) {
+      assert.equal(this, undefined, "Window.clearTimeout must not receive the clock object");
+      time.clearTimeout(timer);
+    },
+  });
+  // Deliberately omit the injected clock: production uses the browser defaults.
+  const control = browser.createCopilotLoginController({
+    start: async () => { starts++; return { ok: true, data: contract.start }; },
+    poll: async () => { polls++; return contract.pending; },
+  }, view.callbacks);
+  await control.begin();
+  assert.equal(starts, 1);
+  assert.equal(view.state.starting, false);
+  assert.equal(view.state.flow.user_code, contract.start.user_code);
+  await time.advance(5000);
+  assert.equal(polls, 1);
+  control.cancel();
+  assert.equal(view.state.flow, null);
+  assert.deepEqual(time.deadlines(), []);
+  await control.begin();
+  assert.equal(starts, 2);
+  control.dispose();
+  await time.advance(900_000);
+  assert.equal(polls, 1);
+  assert.deepEqual(time.deadlines(), []);
+});
+
 async function server(t, handler) {
   const calls = [];
   const http = createServer(async (req, res) => {

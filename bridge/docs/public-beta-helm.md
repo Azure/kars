@@ -246,6 +246,25 @@ or an authentication redirect proves reachability, not a usable compose engine.
 
 ## 4. Complete functional acceptance
 
+### Copilot device-code start must work in the browser
+
+Exercise **Configuration -> Connect a provider -> GitHub Copilot -> Sign in**
+in a real authenticated browser, not only by posting to the backend. An affected
+web image can remain on `Starting...` while the backend is healthy: unbound
+browser timers were called as methods of the login controller's clock object,
+throwing `TypeError: Illegal invocation` before any sign-in request was sent.
+The corrected web source invokes both timer functions through wrappers that
+preserve browser receiver semantics. The polling interval, expiry, cancellation,
+signed-session checks and governed credential storage contract are unchanged.
+
+A hard refresh cannot repair that code in an old web image. Deploy a qualified
+corrected web image through the supported release workflow; do not modify
+browser globals as an installation workaround. A visible GitHub device code
+is the start milestone, not verified Copilot eligibility or confirmed storage.
+Only the user completes GitHub approval; token/seat/storage confirmation remains
+required afterward. This browser fix is separate from the orchestrator proxy,
+model catalog parser and protected BFF-template migration below.
+
 First complete [governed credential enrollment](../../docs/how-to/governed-credential-grants.md)
 with the matching CLI, original reviewed scope and genuine retirement evidence.
 If recovery is in progress, do not change the sealed controller template to
