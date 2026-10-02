@@ -32,6 +32,23 @@ without a governed Task binding keep their existing daily/monthly tracker,
 credentials, runtime environment, and inference behavior. Aggregate limits are
 never copied into a per-sandbox daily allowance.
 
+## Bridge preflight
+
+Package validation accepts `budget_tokens`, `budget_usd_micros`, and explicit
+`budget_scope: "GovernedInference"`. Stored-task validation retains all three
+fields from the persisted envelope. A positive cap without scope fails preflight;
+Bridge does not add scope implicitly or convert an existing UID into first-time
+governed enrollment.
+
+Explicit scope reports a warning, not an enforcement pass: Bridge preflight does
+not verify broker readiness, provider contracts, available reservation capacity,
+or the bound account. Admission, controller materialization and router dispatch
+remain authoritative and may reject execution. Missing limits also warn; autonomy
+tiers and cluster defaults are not proof of a hard aggregate spending limit.
+The Home creation form currently supplies tokens without scope, so its finite
+budgets cannot pass this check. This is a launch blocker, not a reason to remove
+the requested cap.
+
 ## Root lifetime and immutable identity
 
 A standalone task tree has one account for its **root Task UID**. A Team and all
