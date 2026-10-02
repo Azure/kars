@@ -171,3 +171,5 @@ impl Cluster {
 
 #[cfg(test)]
 mod provider_tests;
+#[cfg(test)]
+mod mission_record_tests;

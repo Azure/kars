@@ -235,6 +235,16 @@ request/response size limits and an overall request deadline.
   separate from the current run. Terminal publication may be retried without
   contacting the runtime, including after a transport identity change.
 
+Bridge's current output, artifact and download readers validate the Task owner,
+UID and requested/completed nonce after reading the projection. Unbound legacy
+records remain historical, not current delivery. Historical deduplication includes
+Task identity as well as the nonce. Team harvesting applies the same binding
+checks before accounting or writing shared memory, and keys memory entries by
+Task UID plus run nonce so distinct revisions do not overwrite one another.
+Retirement retains resourceVersion concurrency checks. These reads are not
+multi-resource transactions, and unavailable reads still need distinct UI states;
+this change does not repair live router telemetry or deploy the dispatcher.
+
 Nonterminal and uncertain claims are never automatically retried. A send timeout
 cannot cancel an already-started transport send, and a crashed dispatcher's claim
 may remain pending. The `ownerSession` field is not a leadership lease or process

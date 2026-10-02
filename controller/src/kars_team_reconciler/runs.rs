@@ -38,6 +38,54 @@ pub(super) fn cadence_name(team: &KarsTeam) -> Result<String, ReconcileError> {
     Ok(format!("{prefix}-run-{}", &sha256_hex(&key)[..32]))
 }
 
+fn current_output(cm: &ConfigMap, task: &KarsTask) -> bool {
+    let (Some(name), Some(namespace), Some(uid)) = (
+        task.metadata.name.as_deref(),
+        task.metadata.namespace.as_deref(),
+        task.metadata.uid.as_deref().filter(|uid| !uid.is_empty()),
+    ) else {
+        return false;
+    };
+    let Some(nonce) = task
+        .annotations()
+        .get(ANNOT_RUN_REQUESTED)
+        .filter(|nonce| !nonce.is_empty())
+    else {
+        return false;
+    };
+    let Some(data) = cm.data.as_ref() else {
+        return false;
+    };
+    task.metadata.deletion_timestamp.is_none()
+        && cm.metadata.deletion_timestamp.is_none()
+        && cm.metadata.name.as_deref() == Some(format!("kars-mission-output-{name}").as_str())
+        && cm.metadata.namespace.as_deref() == Some(namespace)
+        && task.annotations().get("kars.azure.com/run-completed") == Some(nonce)
+        && cm
+            .annotations()
+            .get("kars.azure.com/mission-task-uid")
+            .map(String::as_str)
+            == Some(uid)
+        && cm.annotations().get("kars.azure.com/mission-run-nonce") == Some(nonce)
+        && cm
+            .annotations()
+            .get("kars.azure.com/mission-principal-name")
+            .map(String::as_str)
+            == Some(name)
+        && cm.metadata.owner_references.as_ref().is_some_and(|owners| {
+            owners.iter().any(|owner| {
+                owner.api_version == "kars.azure.com/v1alpha1"
+                    && owner.kind == "KarsTask"
+                    && owner.name == name
+                    && owner.uid == uid
+                    && owner.controller == Some(true)
+            })
+        })
+        && data.get("taskName").map(String::as_str) == Some(name)
+        && data.get("taskUid").map(String::as_str) == Some(uid)
+        && data.get("assignmentNonce") == Some(nonce)
+}
+
 pub(super) async fn harvest_and_retire_runs(
     client: &Client,
     tasks_api: &Api<KarsTask>,
@@ -45,7 +93,8 @@ pub(super) async fn harvest_and_retire_runs(
 ) -> Result<RunStats, ReconcileError> {
     let mut stats = RunStats::default();
     let list = tasks_api.list(&ListParams::default()).await?;
-    let cms = Api::<ConfigMap>::namespaced(client.clone(), super::namespace(team)?);
+    let namespace = super::namespace(team)?;
+    let cms = Api::<ConfigMap>::namespaced(client.clone(), namespace);
     for task in list.items.iter().filter(|task| {
         tasks::owned(&task.metadata, team)
             && task
@@ -59,25 +108,45 @@ pub(super) async fn harvest_and_retire_runs(
             .execution
             .as_ref()
             .is_some_and(|execution| execution.launch);
-        let terminal = matches!(
-            (task.annotations().get(ANNOT_RUN_REQUESTED), task.annotations().get("kars.azure.com/run-completed")),
-            (Some(requested), Some(completed)) if requested == completed
-        );
         let Some(cm) = cms.get_opt(&format!("kars-mission-output-{run}")).await? else {
             if launched {
                 stats.active += 1;
             }
             continue;
         };
-        // In-progress output can still change: do not record an incomplete first
-        // result under an idempotent commons key and lose the final result.
-        if !terminal {
+        // Projections are written before the Task completion marker. Refresh the
+        // Task after reading output, and never harvest a replaced or revised run.
+        let current = tasks_api.get_opt(&run).await?;
+        let Some(task) = current.as_ref().filter(|current| {
+            current.metadata.uid == task.metadata.uid
+                && current.metadata.name == task.metadata.name
+                && current.metadata.namespace.as_deref() == Some(namespace)
+                && tasks::owned(&current.metadata, team)
+                && current
+                    .annotations()
+                    .get(ANNOT_TEAM_ROLE)
+                    .is_some_and(|role| role == "taskforce")
+                && current_output(&cm, current)
+        }) else {
             if launched {
                 stats.active += 1;
             }
             continue;
-        }
+        };
+        let launched = task
+            .spec
+            .execution
+            .as_ref()
+            .is_some_and(|execution| execution.launch);
         let data = cm.data.unwrap_or_default();
+        if data
+            .get("finishedAt")
+            .is_some_and(|finished| super::parse_rfc3339(finished).is_none())
+        {
+            return Err(ReconcileError::Invalid(format!(
+                "run '{run}' has malformed finishedAt"
+            )));
+        }
         let tokens = parse_count(data.get("totalTokens"), "totalTokens", &run)?;
         let artifacts = parse_count(data.get("artifactCount"), "artifactCount", &run)?;
         stats.tokens_total = stats.tokens_total.saturating_add(tokens);
@@ -92,21 +161,17 @@ pub(super) async fn harvest_and_retire_runs(
                 .lines()
                 .next()
                 .unwrap_or(&team.spec.charter);
-            // UID provenance prevents name reuse from aliasing an older run.
-            let id = task
-                .metadata
-                .uid
-                .as_deref()
-                .filter(|uid| !uid.is_empty())
-                .ok_or_else(|| ReconcileError::Invalid(format!("run '{run}' has no UID")))?;
-            crate::team_commons::record_entry(client, team, id, title, &run, &run, output).await?;
+            // Distinct revisions of one Task must not share an idempotency key.
+            let id = format!(
+                "run-{}",
+                sha256_hex(&serde_json::to_vec(&(
+                    task.metadata.uid.as_deref(),
+                    task.annotations().get(ANNOT_RUN_REQUESTED),
+                ))?)
+            );
+            crate::team_commons::record_entry(client, team, &id, title, &run, &run, output).await?;
             stats.succeeded += 1;
             if let Some(finished) = data.get("finishedAt") {
-                if super::parse_rfc3339(finished).is_none() {
-                    return Err(ReconcileError::Invalid(format!(
-                        "run '{run}' has malformed finishedAt"
-                    )));
-                }
                 if stats
                     .last_success_at
                     .as_ref()
