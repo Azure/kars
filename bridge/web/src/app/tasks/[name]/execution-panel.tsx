@@ -8,7 +8,7 @@
 // sandbox; the panel reflects the real execution phase, including the honest
 // "needs a real Foundry endpoint" caveat on a local cluster.
 
-import { useEffect, useState, useTransition } from "react";
+import { useEffect, useRef, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { StatusBadge } from "@/components/status-badge";
 import { missionStatus } from "@/components/mission-status";
@@ -53,7 +53,7 @@ function statusView(task: TaskDetail): { label: string; tone: Tone } {
     case "failed":
       return { label: "Run failed", tone: "danger" };
     default:
-      return { label: task.launched ? "Starting" : "Ready to launch", tone: "muted" };
+      return { label: task.launched ? "Starting" : "Draft", tone: "muted" };
   }
 }
 
@@ -61,7 +61,17 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-  const [validation, setValidation] = useState<ValidationResult | null>(null);
+  const [attempt, setAttempt] = useState(0);
+  const [preflight, setPreflight] = useState<{
+    key: string; attempt: number; result: ValidationResult;
+  } | null>(null);
+  const validationEpoch = useRef(0);
+  const validationKey = JSON.stringify([
+    task.namespace, task.name, task.created_at, task.observed_generation,
+    task.phase, task.envelope_digest, task.envelope, task.composition,
+  ]);
+  const validation = preflight?.key === validationKey && preflight.attempt === attempt
+    ? preflight.result : null;
   const [launchAccepted, setLaunchAccepted] = useState<boolean | null>(null);
   const [rerunBaseline, setRerunBaseline] = useState<string | null | undefined>(undefined);
   const awaitingAssignment = Boolean(
@@ -84,6 +94,25 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
     result: rerunAccepted ? null : task.result,
   };
   const ready = task.phase === "Ready";
+  const checking = !launched && validation === null;
+
+  useEffect(() => {
+    const epoch = ++validationEpoch.current;
+    if (launched) return;
+    let active = true;
+    void validateTask(task.name).catch((): ValidationResult => ({
+      ok: false,
+      checks: [{
+        id: "validate_error", label: "Validation could not run", status: "fail",
+        detail: "Could not reach launch validation. Recheck before launching.",
+      }],
+    })).then((result) => {
+      if (active && validationEpoch.current === epoch) {
+        setPreflight({ key: validationKey, attempt, result });
+      }
+    });
+    return () => { active = false; validationEpoch.current = epoch + 1; };
+  }, [task.name, validationKey, attempt, launched]);
 
   useEffect(() => {
     if (launchAccepted === null || launchAccepted === task.launched) return;
@@ -98,24 +127,34 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
   }, [rerunAccepted, router]);
 
   function toggle(launch: boolean) {
+    if (launch && (!ready || checking || !validation?.ok)) return;
     setError(null);
+    const epoch = validationEpoch.current;
     startTransition(async () => {
-      // Launching a draft runs the §20 pre-flight gate first — the same checks
-      // the new-mission flow runs — so a draft can't be launched past a failing
-      // package. Stopping needs no validation.
-      if (launch) {
-        const v = await validateTask(task.name);
-        setValidation(v);
-        if (!v.ok) return;
-      } else {
-        setValidation(null);
-      }
-      const res = await setLaunch(task.name, launch);
-      if (res.error) {
-        setError(res.error);
-      } else {
-        setLaunchAccepted(launch);
-        window.setTimeout(() => router.refresh(), 0);
+      try {
+        // Recheck at the action boundary; stop never depends on preflight.
+        if (launch) {
+          const result = await validateTask(task.name);
+          if (validationEpoch.current !== epoch) return;
+          setPreflight({ key: validationKey, attempt, result });
+          if (!result.ok) return;
+        } else {
+          setPreflight(null);
+        }
+        const res = await setLaunch(task.name, launch);
+        if (res.error) {
+          setError(res.error);
+        } else {
+          setLaunchAccepted(launch);
+          window.setTimeout(() => router.refresh(), 0);
+        }
+      } catch {
+        if (launch) setPreflight({ key: validationKey, attempt, result: {
+          ok: false,
+          checks: [{ id: "validate_error", label: "Launch check interrupted", status: "fail",
+            detail: "Recheck launch validation before retrying." }],
+        } });
+        setError("The launch control could not be reached. Recheck the mission status before retrying.");
       }
     });
   }
@@ -202,7 +241,17 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
         </p>
       )}
 
-      {validation && (
+      {!launched && (
+        <p role="status" className="mt-3 text-xs text-foreground-muted">
+          {checking ? "Checking this saved package… Launch is disabled until validation completes."
+            : !validation?.ok ? "Launch blocked — resolve the failing checks below."
+            : validation.checks.some((check) => check.status === "warn")
+              ? "Pre-flight completed with warnings — review them before requesting launch."
+              : "Pre-flight checks passed. Launch rechecks the package; runtime admission still applies."}
+        </p>
+      )}
+
+      {validation && !launched && (
         <div className="mt-3 rounded-lg border border-border bg-surface-muted/40 px-3 py-2.5">
           <p className="text-xs font-medium text-foreground-muted">Pre-flight check</p>
           <ul className="mt-1.5 space-y-1">
@@ -229,8 +278,8 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
           </ul>
           {!validation.ok && (
             <p className="mt-2 text-xs font-medium text-danger">
-              This mission can&apos;t launch until the failing checks are resolved (fix the connected
-              services / tool policy in the Operator Console).
+              This mission can&apos;t launch until the failing checks are resolved. Follow each check&apos;s
+              instructions; budget enrollment may require a new draft rather than editing this one.
             </p>
           )}
         </div>
@@ -241,22 +290,30 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
           <>
             <button
               type="button"
-              disabled={!ready || pending}
+              disabled={!ready || pending || checking || !validation?.ok}
               onClick={() => toggle(true)}
               className="rounded-lg bg-signal px-4 py-2 text-sm font-medium text-signal-fg hover:opacity-90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
             >
-              {pending ? "Launching…" : "Launch"}
+              {pending ? "Validating / launching…" : "Launch"}
+            </button>
+            <button
+              type="button"
+              disabled={pending || checking}
+              onClick={() => { setError(null); setAttempt((value) => value + 1); }}
+              className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-surface-muted disabled:opacity-50"
+            >
+              Recheck launch
             </button>
             {!ready && (
               <span className="text-xs text-foreground-muted">
                 {task.phase === "Pending"
-                  ? "The controller is admitting this package. Launch enables automatically when it is ready."
+                  ? "The controller is admitting this package. Both admission and pre-flight checks must pass before Launch enables."
                   : "This package is not launchable; review its status and validation details."}
               </span>
             )}
-            {ready && (
+            {ready && validation?.ok && (
               <span className="text-xs text-foreground-muted">
-                Materializes the governed sandbox and starts the mission automatically.
+                Requests a governed sandbox and starts the mission if runtime admission succeeds.
               </span>
             )}
           </>
