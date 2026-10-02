@@ -6,6 +6,7 @@ use super::{
     credential_contract::{CredentialBindings, Identity, Selection, Target},
     credential_transport::{failure, object_api, safe},
     credentials::input_name,
+    task::TaskExecution,
 };
 use kube::{
     ResourceExt,
@@ -224,8 +225,12 @@ impl Cluster {
             .get(&target.name)
             .await
             .map_err(|e| safe("Read captured target before activation", e))?;
-        if object.uid().as_deref() != Some(target.uid.as_str()) {
-            return Err(failure("Created target was replaced before activation"));
+        if object.uid().as_deref() != Some(target.uid.as_str())
+            || object.metadata.deletion_timestamp.is_some()
+        {
+            return Err(failure(
+                "Created target was replaced or deleted before activation",
+            ));
         }
         if object.data["spec"]["blueprint"]["githubBinding"].is_object()
             && !object.data["spec"]["blueprint"]["credentialBindings"].is_object()
@@ -243,15 +248,42 @@ impl Cluster {
                 .get(&target.name)
                 .await
                 .map_err(|error| safe("Refresh captured keyless consumer", error))?;
-            if object.uid().as_deref() != Some(target.uid.as_str()) {
-                return Err(failure("Keyless consumer was replaced before activation"));
+            if object.uid().as_deref() != Some(target.uid.as_str())
+                || object.metadata.deletion_timestamp.is_some()
+            {
+                return Err(failure(
+                    "Keyless consumer was replaced or deleted before activation",
+                ));
             }
         }
+        // Draft tasks may omit execution entirely; the typed default is inactive.
+        // Rewriting an unchanged gate needlessly races controller status updates.
         let spec = match target.kind.as_str() {
+            "KarsTask"
+                if serde_json::from_value::<Option<TaskExecution>>(
+                    object.data["spec"]["execution"].clone(),
+                )
+                .is_ok_and(|execution| {
+                    execution.is_some_and(|execution| execution.launch) == active
+                }) =>
+            {
+                return Ok(());
+            }
             "KarsTask" => json!({"execution":{"launch":active}}),
+            "KarsTeam" if object.data["spec"]["paused"] == !active => return Ok(()),
             "KarsTeam" => json!({"paused":!active}),
             _ => return Ok(()),
         };
+        if object
+            .metadata
+            .resource_version
+            .as_deref()
+            .is_none_or(str::is_empty)
+        {
+            return Err(failure(
+                "Created target resourceVersion is missing before activation",
+            ));
+        }
         api.patch(&target.name, &PatchParams::default(), &Patch::Merge(json!({
             "metadata":{"uid":target.uid,"resourceVersion":object.metadata.resource_version},"spec":spec,
         }))).await.map_err(|e| safe("Activate captured credential target", e))?;
