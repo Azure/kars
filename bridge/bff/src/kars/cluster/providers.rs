@@ -89,10 +89,24 @@ pub(super) fn classify_provider(
     Some((pick.0.to_string(), pick.1.to_string(), pick.2.to_string()))
 }
 
+pub(super) fn parse_model_catalog(value: &str) -> Vec<String> {
+    let value = value.trim();
+    let entries = if value.starts_with('[') {
+        serde_json::from_str::<Vec<String>>(value).unwrap_or_default()
+    } else {
+        value.split(',').map(str::to_string).collect()
+    };
+    entries
+        .into_iter()
+        .map(|model| model.trim().to_string())
+        .filter(|model| !model.is_empty())
+        .collect()
+}
+
 impl Cluster {
     /// The model deployments this cluster is configured to serve, read from the
     /// controller Deployment's environment (`KARS_TASK_DEFAULT_MODEL`,
-    /// `AZURE_OPENAI_DEPLOYMENT`, and the comma-separated `FOUNDRY_DEPLOYMENTS`).
+    /// `AZURE_OPENAI_DEPLOYMENT`, JSON-array `FOUNDRY_DEPLOYMENTS`, or legacy CSV).
     /// This is the authoritative "what can actually run here" fact — the same
     /// values the controller stamps onto a task's InferencePolicy. Best-effort:
     /// an unreadable Deployment yields an empty list (honest, not an error), so
@@ -119,11 +133,7 @@ impl Cluster {
                     default = Some(val);
                 }
                 "FOUNDRY_DEPLOYMENTS" | "KARS_MODEL_CATALOG" => {
-                    catalog.extend(
-                        val.split(',')
-                            .map(|s| s.trim().to_string())
-                            .filter(|s| !s.is_empty()),
-                    );
+                    catalog.extend(parse_model_catalog(&val));
                 }
                 _ => {}
             }

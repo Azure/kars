@@ -360,8 +360,8 @@ impl Cluster {
         Ok(None)
     }
 
-    /// Read every key of a Secret as UTF-8 strings (base64-decoded). Empty map
-    /// when the secret doesn't exist. Used for the multi-provider inference
+    /// Read every key of an enrolled Secret as UTF-8 strings (base64-decoded).
+    /// Missing or broken enrollment is an error. Used for the multi-provider inference
     /// Secret, whose keys ARE the literal env var names the router reads
     /// (`KARS_PROVIDER_<TAG>_ENDPOINT`, `COPILOT_GITHUB_TOKEN`, ...) — listing
     /// requires reading the whole key set, not one key at a time.
@@ -372,6 +372,18 @@ impl Cluster {
     ) -> Result<std::collections::BTreeMap<String, String>, kube::Error> {
         let (_, s) = self.integration_store(namespace, secret).await?;
         Ok(Self::decode_secret_data(&s))
+    }
+
+    /// Optional provider discovery never reads credentials without enrollment.
+    /// Broken existing authority remains an error, not an empty catalogue.
+    pub async fn additional_provider_keys(
+        &self,
+    ) -> Result<std::collections::BTreeMap<String, String>, kube::Error> {
+        Ok(self
+            .optional_integration_store(&self.core_namespace(), "kars-inference-providers")
+            .await?
+            .map(|(_, secret)| Self::decode_secret_data(&secret))
+            .unwrap_or_default())
     }
 
     /// Read-modify-write a Secret's full key set under real optimistic

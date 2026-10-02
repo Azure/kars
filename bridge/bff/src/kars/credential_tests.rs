@@ -13,6 +13,9 @@ use axum::{
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+#[path = "credential_discovery_tests.rs"]
+mod discovery;
+
 #[path = "credential_binding_tests.rs"]
 mod binding_repairs;
 #[path = "credential_handler_tests.rs"]
