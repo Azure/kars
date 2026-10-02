@@ -1,0 +1,54 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- $enrollment := .Values.workspaceEnrollment | default dict -}}
+{{- if and (hasKey $enrollment "enabled") (not (kindIs "bool" $enrollment.enabled)) -}}
+{{- fail "workspaceEnrollment.enabled must be a boolean" -}}
+{{- end -}}
+{{- if $enrollment.enabled -}}
+{{- $namespace := $enrollment.namespace | default (include "kars-bridge.coreNamespace" .) -}}
+{{- $workspace := lookup "v1" "Namespace" "" $namespace -}}
+{{- if or (not $workspace) (not $workspace.metadata.uid) $workspace.metadata.deletionTimestamp -}}
+{{- fail "workspaceEnrollment requires a live existing workspace namespace; install Core first and use a cluster-connected Helm command" -}}
+{{- end -}}
+{{- $grant := lookup "kars.azure.com/v1alpha1" "KarsCredentialGrant" $namespace "workspace" -}}
+{{- if $grant -}}
+{{- $annotations := $grant.metadata.annotations | default dict -}}
+{{- $labels := $grant.metadata.labels | default dict -}}
+{{- if or $grant.metadata.deletionTimestamp
+    (ne (index $annotations "meta.helm.sh/release-name") .Release.Name)
+    (ne (index $annotations "meta.helm.sh/release-namespace") .Release.Namespace)
+    (ne (index $labels "app.kubernetes.io/managed-by") "Helm") -}}
+{{- fail "workspaceEnrollment refuses to adopt an existing or terminating grant; keep enrollment disabled for operator-managed workspaces" -}}
+{{- end -}}
+{{- $spec := $grant.spec | default dict -}}
+{{- if or (ne ($spec.workspaceUid | default "") $workspace.metadata.uid) (not (hasKey $spec "enabled")) (not $spec.enabled) -}}
+{{- fail "workspaceEnrollment refuses a replaced workspace or disabled grant" -}}
+{{- end -}}
+{{- range $key, $value := $spec -}}
+{{- if not (has $key (list "workspaceUid" "enabled")) -}}
+{{- if or (not (has $key (list "writers" "agentKeys" "integrationStores" "legacyImports" "observationTargets" "githubConnections"))) (not (kindIs "slice" $value)) (gt (len $value) 0) -}}
+{{- fail "workspaceEnrollment refuses to overwrite expanded grant authority; disable enrollment before reviewed operator changes" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsCredentialGrant
+metadata:
+  name: workspace
+  namespace: {{ $namespace | quote }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+  annotations:
+    # Disabling enrollment or uninstalling Bridge must not revoke a workspace.
+    helm.sh/resource-policy: keep
+spec:
+  workspaceUid: {{ $workspace.metadata.uid | quote }}
+  enabled: true
+  writers: []
+  agentKeys: []
+  integrationStores: []
+  legacyImports: []
+  observationTargets: []
+  githubConnections: []
+{{- end }}
