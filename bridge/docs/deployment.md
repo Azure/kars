@@ -52,6 +52,11 @@ The optional Teams image has a separate `make image-gateway REGISTRY=<registry>`
 target. Build targets do not push images or change the cluster. Publish to your
 chosen registry separately before installation.
 
+The BFF Docker build defaults to one Cargo compilation job to limit peak memory
+on local development machines. On a larger builder, override it with
+`docker build --build-arg CARGO_BUILD_JOBS=4 -t <registry>/kars-bridge-bff:latest bff`.
+This changes build concurrency, not the locked dependencies or release profile.
+
 The BFF, web and Teams gateway **shipping runtimes use Microsoft Azure Linux 3
 distroless**, matching Kars core's runtime-image policy. Rust and npm toolchains
 belong only in build stages; no shell, package manager or global npm dependency
