@@ -45,9 +45,14 @@ not verify broker readiness, provider contracts, available reservation capacity,
 or the bound account. Admission, controller materialization and router dispatch
 remain authoritative and may reject execution. Missing limits also warn; autonomy
 tiers and cluster defaults are not proof of a hard aggregate spending limit.
-The Home creation form currently supplies tokens without scope, so its finite
-budgets cannot pass this check. This is a launch blocker, not a reason to remove
-the requested cap.
+Home reviews finite token caps as explicit `GovernedInference` enrollment for a
+new mission. The same scope and limit travel through package validation and
+creation. Invalid, fractional, unsafe, zero or negative supplied limits are
+rejected rather than silently discarded; a positive limit without reviewed scope
+is rejected too. The creation action also preserves a reviewed currency limit,
+when supplied, rather than replacing it with null. Blank limits remain explicitly
+unbounded, not an enforcement claim. Existing draft UIDs are not migrated: create
+a newly reviewed mission to enroll for the first time.
 
 ## Root lifetime and immutable identity
 

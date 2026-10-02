@@ -318,6 +318,7 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
       const res = await validateMissionAction(blueprint, {
         tier,
         budget_tokens: budgetTokens.trim() === "" ? null : Number(budgetTokens),
+        budget_scope: budgetTokens.trim() === "" ? undefined : "GovernedInference",
       });
       if (!res || !Array.isArray(res.checks)) {
         throw new Error("The pre-flight service returned an unexpected response (no checks).");

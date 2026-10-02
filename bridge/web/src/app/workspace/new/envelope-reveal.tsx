@@ -87,7 +87,7 @@ export function EnvelopeReveal({
     { icon: "globe", label: "Network egress", value: blueprint.egress?.length ? blueprint.egress.map((e) => e.host + (e.port ? `:${e.port}` : "")).join(", ") : "model path only", why: blueprint.egress?.length ? "Exact host:port destinations allowed at the network boundary; everything else is denied." : "Default-deny — only the model path is reachable." },
     { icon: "shield", label: "Isolation", value: blueprint.isolation ?? "standard", why: "Sandbox hardening level." },
     { icon: "database", label: "Shared memory", value: blueprint.memory ?? "none", why: blueprint.memory ? "Knowledge commons the mission reads + writes." : undefined },
-    { icon: "coin", label: "Budget", value: budgetTokens ? `${Number(budgetTokens).toLocaleString()} tokens` : "no cap", why: "Hard ceiling on spend." },
+    { icon: "coin", label: "Budget", value: budgetTokens?.trim() ? `${Number(budgetTokens).toLocaleString()} tokens · GovernedInference` : "no aggregate cap", why: budgetTokens?.trim() ? "Requested mission-tree lifetime cap; broker and model-contract readiness are checked at launch. Not a ceiling on tools or infrastructure costs." : "No aggregate inference limit requested; no spending protection is implied." },
   ];
 
   return (
