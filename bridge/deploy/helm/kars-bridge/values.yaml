@@ -54,6 +54,13 @@ bff:
   resources:
     requests: { cpu: "50m", memory: "64Mi" }
     limits: { cpu: "500m", memory: "256Mi" }
+  routeQualification:
+    # required: retained route evidence gates launch (default).
+    # validation: admit unqualified routes with a preflight warning; resource
+    # qualification and all execution/security controls remain mandatory.
+    mode: required
+    # Genuine retained records as a JSON array; use --set-file for a file.
+    recordsJson: ""
   # Extra env merged into the BFF container (e.g. BRIDGE_OPERATOR, BRIDGE_ROLES,
   # BRIDGE_ENGINEERING_POLLER_SECONDS; default 60, minimum 15).
   extraEnv: []

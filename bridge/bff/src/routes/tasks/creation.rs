@@ -35,7 +35,7 @@ fn validate_mission_fallback_route(
             model.provider, model.deployment
         )));
     }
-    match crate::routes::options::route_qualification(
+    match crate::routes::options::route_admitted(
         runtime,
         &model.provider,
         &model.deployment,
@@ -257,7 +257,7 @@ pub async fn create_task(
             .budget
             .as_ref()
             .and_then(|budget| budget.tokens);
-        match crate::routes::options::route_qualification(
+        match crate::routes::options::route_admitted(
             runtime,
             &model.provider,
             &model.deployment,
