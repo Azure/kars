@@ -19,6 +19,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
+use crate::kars::task::{BudgetScope, TaskBudget};
 use crate::routes::ownership::require_owned_task;
 use crate::state::AppState;
 
@@ -37,14 +38,28 @@ pub struct ValidateRequest {
     /// gate actually covers the envelope the UI shows, not just the blueprint.
     #[serde(default)]
     pub tier: Option<i32>,
-    /// The token budget cap, when set. Validated for sanity (positive, not
-    /// absurdly small) so a mis-typed cap is caught before launch.
+    /// Aggregate inference limits and their explicit accounting scope. Presence
+    /// alone does not establish that the durable broker can enforce them.
     #[serde(default)]
     pub budget_tokens: Option<i64>,
+    #[serde(default)]
+    pub budget_usd_micros: Option<i64>,
+    #[serde(default)]
+    pub budget_scope: Option<BudgetScope>,
     /// Structural launch surface. Team composition requires retained Team E2E
     /// evidence in addition to generic mission execution evidence.
     #[serde(default)]
     pub workload: Option<String>,
+}
+
+impl ValidateRequest {
+    fn budget(&self) -> TaskBudget {
+        TaskBudget {
+            scope: self.budget_scope,
+            tokens: self.budget_tokens,
+            usd_micros: self.budget_usd_micros,
+        }
+    }
 }
 
 #[derive(Debug, Serialize, Clone, Copy, PartialEq)]
@@ -82,6 +97,7 @@ pub async fn validate_package(
     Json(req): Json<ValidateRequest>,
 ) -> AppResult<Json<ValidateResponse>> {
     let cluster = require_cluster(&state)?;
+    let budget = req.budget();
     let bp = req.blueprint.unwrap_or_default();
     Ok(Json(
         run_checks(
@@ -89,7 +105,7 @@ pub async fn validate_package(
             &ns,
             &bp,
             req.tier,
-            req.budget_tokens,
+            Some(&budget),
             req.workload.as_deref(),
         )
         .await,
@@ -114,9 +130,16 @@ pub async fn validate_task(
         .map(blueprint_to_dto)
         .unwrap_or_default();
     let tier = Some(task.spec.envelope.tier);
-    let budget_tokens = task.spec.envelope.budget.as_ref().and_then(|b| b.tokens);
     Ok(Json(
-        run_checks(cluster, &ns, &bp, tier, budget_tokens, None).await,
+        run_checks(
+            cluster,
+            &ns,
+            &bp,
+            tier,
+            task.spec.envelope.budget.as_ref(),
+            None,
+        )
+        .await,
     ))
 }
 
@@ -166,12 +189,13 @@ async fn run_checks(
     namespace: &str,
     bp: &crate::routes::tasks::BlueprintDto,
     tier: Option<i32>,
-    budget_tokens: Option<i64>,
+    budget: Option<&TaskBudget>,
     workload: Option<&str>,
 ) -> ValidateResponse {
     let mut checks: Vec<Check> = Vec::new();
+    let budget_tokens = budget.and_then(|b| b.tokens);
 
-    envelope::check_envelope(cluster, bp, tier, budget_tokens, &mut checks).await;
+    envelope::check_envelope(cluster, bp, tier, budget, &mut checks).await;
 
     resources::check_resources(cluster, namespace, bp, &mut checks).await;
 
