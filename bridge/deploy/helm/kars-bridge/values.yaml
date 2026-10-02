@@ -25,6 +25,15 @@ createNamespace: false
 core:
   namespace: kars-system
 
+# Explicit operator enrollment for credential-free missions/teams. Requires a
+# live Core namespace and Core CRDs; creates no writers, stores, or private
+# activation authority. Existing reviewed grants should leave this disabled.
+# The Helm caller needs grant manage permission; the BFF gains no permissions.
+workspaceEnrollment:
+  enabled: false
+  # Empty selects core.namespace, not the Bridge workload namespace.
+  namespace: ""
+
 # imagePullSecrets: list of {name: <secret>} references to pre-created
 # `kubernetes.io/dockerconfigjson` Secrets in `namespace`, for pulling the
 # private BFF/web images. Empty ⇒ public images / node-identity pull.
