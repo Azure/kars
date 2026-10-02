@@ -16,7 +16,10 @@ mod connections;
 mod engineering_sources;
 mod local_inference;
 mod mission_records;
+#[cfg(test)]
+mod mission_run_tests;
 mod mission_runs;
+pub use mission_runs::MissionRunError;
 mod orchestrator;
 mod providers;
 mod resources;
@@ -37,14 +40,13 @@ pub struct Cluster {
 
 /// Outcome of awaiting a mesh-driven run (`Cluster::await_mesh_run`).
 pub enum MeshRunOutcome {
-    /// The controller stamped `run-completed` and the deliverable is written.
+    /// A committed deliverable matches the awaited Task UID and run nonce.
     Completed(std::collections::BTreeMap<String, String>),
-    /// The mesh peer acknowledged (`run-ack`) and is actively delivering, but
-    /// hasn't finished within the wait — the caller must NOT single-turn (that
-    /// would race the controller's deliverable write); the result lands async.
+    /// Completion could not be verified, or the awaited run was superseded.
+    /// This does not establish that an agent is currently executing.
     InProgress,
-    /// No `run-ack` appeared — the mesh peer never picked this up (no lease
-    /// holder / relay down), so a single-turn fallback is safe.
+    /// No matching ACK or completion was observed within the wait. Despite the
+    /// historical name, this is not proof of non-delivery and is never retry authority.
     NeverProcessed,
 }
 
@@ -170,6 +172,6 @@ impl Cluster {
 }
 
 #[cfg(test)]
-mod provider_tests;
-#[cfg(test)]
 mod mission_record_tests;
+#[cfg(test)]
+mod provider_tests;

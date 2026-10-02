@@ -216,12 +216,8 @@ pub async fn list_artifacts(
             })
             .unwrap_or_default();
 
-        let assignment_identity = data
-            .get("assignmentNonce")
-            .cloned()
-            .unwrap_or_else(|| evidence_key.clone());
         let task_review = cluster.read_review(&task).await.unwrap_or_default();
-        let review = if task_review.get("assignmentNonce") == Some(&assignment_identity) {
+        let review = if crate::routes::review::review_matches_output(&data, &task_review) {
             task_review
         } else {
             Default::default()

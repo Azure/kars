@@ -245,6 +245,26 @@ Retirement retains resourceVersion concurrency checks. These reads are not
 multi-resource transactions, and unavailable reads still need distinct UI states;
 this change does not repair live router telemetry or deploy the dispatcher.
 
+Bridge requests a run using the authorized launched Task's UID/resourceVersion
+preconditions. A pending nonce is reused; conflicting or ambiguous writes surface
+an error and never trigger a direct model call or a second execution path. Waiting
+is bounded across API reads and sleeps, and completion must match the requested
+Task UID and nonce. Missing ACKs do not prove non-delivery. Pending HTTP responses
+have no output, model, token usage or completion timestamp; `ok: true` there means
+request accepted, not mission completed.
+
+Feedback requires the exact currently completed run and a valid bound review
+journal. It creates a distinct revision nonce and stores the objective with that
+nonce and its SHA-256 digest in one Task CAS. Reviews use ConfigMap CREATE or
+resourceVersion-guarded replacement: concurrent reviews cannot adopt or overwrite
+a newer journal. Reading review state is side-effect-free, and only the requested
+revision's completion clears derived pending state. Artifact/efficiency approval
+attribution requires both nonempty Task UID and run nonce, including historical
+records. Task revision and review journal writes are **not a transaction**: if the
+revision commits but the journal fails, the request errors while preserving the
+pending revision; replay cannot dispatch it again or undo it. Unbound legacy
+journals must not be silently adopted. Retired Tasks require normal relaunch.
+
 Nonterminal and uncertain claims are never automatically retried. A send timeout
 cannot cancel an already-started transport send, and a crashed dispatcher's claim
 may remain pending. The `ownerSession` field is not a leadership lease or process
