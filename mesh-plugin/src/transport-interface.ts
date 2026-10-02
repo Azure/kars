@@ -13,9 +13,9 @@
  * / waitForMessage / pingPeer / resolveAmid.
  */
 
-import type { InboxDiagnostics, InboxMessage } from "./local-inbox.js";
+import type { InboxDiagnostics, InboxMessage, MessageSecurity } from "./local-inbox.js";
 
-export type { InboxDiagnostics, InboxMessage };
+export type { InboxDiagnostics, InboxMessage, MessageSecurity };
 
 export interface IMeshIdentity {
   /** Stable agent ID (DID or AMID base58). */
@@ -62,7 +62,7 @@ export interface IMeshTransport {
 
   // ── Messaging ────────────────────────────────────────────────
   send(toAmid: string, payload: unknown): Promise<string | undefined>;
-  onMessage(handler: (fromAmid: string, payload: unknown) => void): void;
+  onMessage(handler: (fromAmid: string, payload: unknown, security: MessageSecurity) => void): void;
   onKnock(
     handler: (fromAmid: string, intent: unknown) => Promise<{ accept: boolean }>,
   ): void;
@@ -90,7 +90,7 @@ export interface IMeshTransport {
   drainInbox(): InboxMessage[];
   consumeInbox(predicate: (msg: InboxMessage) => boolean): InboxMessage[];
   waitForMessage<T>(
-    predicate: (content: unknown, from: string) => T | null,
+    predicate: (content: unknown, from: string, security: MessageSecurity) => T | null,
     timeoutMs?: number,
     opts?: { consume?: boolean },
   ): Promise<T>;
@@ -101,7 +101,7 @@ export interface IMeshTransport {
   sendWithAck<T>(
     toAmid: string,
     payload: unknown,
-    ackPredicate: (content: unknown, from: string) => T | null,
+    ackPredicate: (content: unknown, from: string, security: MessageSecurity) => T | null,
     opts?: { timeoutMs?: number; retries?: number; retryDelayMs?: number },
   ): Promise<T>;
   pingPeer(

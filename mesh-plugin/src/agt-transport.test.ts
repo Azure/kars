@@ -18,7 +18,7 @@ interface FakeClient {
   removePlaintextPeer: Mock;
   isPlaintextPeer: Mock;
   establishSessionWithPeer: Mock;
-  __msgHandler?: (from: string, payload: unknown, isPlaintext: boolean) => void;
+  __msgHandler?: (from: string, payload: unknown, isPlaintext?: boolean) => void;
   __knockHandler?: (from: string, intent: unknown) => Promise<boolean>;
 }
 
@@ -116,6 +116,91 @@ describe("AgtTransport", () => {
     expect(fakeClient.send).toHaveBeenCalledWith("did:agentmesh:peer", {
       hello: "world",
     });
+  });
+
+  it("establishes the encrypted session before sending", async () => {
+    const t = new AgtTransport({ relayUrl: "ws://r", registryUrl: "http://reg", identity });
+    let establish!: () => void;
+    fakeClient.establishSessionWithPeer.mockReturnValueOnce(new Promise<void>(resolve => { establish = resolve; }));
+    await t.connect();
+    const sending = t.send("peer", { message: "private" });
+    expect(fakeClient.establishSessionWithPeer).toHaveBeenCalledWith("peer");
+    await Promise.resolve();
+    expect(fakeClient.send).not.toHaveBeenCalled();
+    establish();
+    await sending;
+    expect(fakeClient.send).toHaveBeenCalledWith("peer", { message: "private" });
+    await t.disconnect();
+  });
+
+  it("does not send or enable plaintext when session establishment fails", async () => {
+    const t = new AgtTransport({ relayUrl: "ws://r", registryUrl: "http://reg", identity });
+    const failure = new Error("Missing peer prekeys");
+    fakeClient.establishSessionWithPeer.mockRejectedValueOnce(failure);
+    await t.connect();
+    await expect(t.send("peer", { message: "private" })).rejects.toBe(failure);
+    expect(fakeClient.send).not.toHaveBeenCalled();
+    expect(fakeClient.addPlaintextPeer).not.toHaveBeenCalled();
+    expect(t.getPlaintextPeers()).toEqual([]);
+    await t.disconnect();
+  });
+
+  it("retains explicitly configured plaintext compatibility sends", async () => {
+    const t = new AgtTransport({
+      relayUrl: "ws://r", registryUrl: "http://reg", identity, plaintextPeers: ["legacy"],
+    });
+    await t.connect();
+    await t.send("legacy", { message: "compatibility" });
+    expect(fakeClient.establishSessionWithPeer).not.toHaveBeenCalled();
+    expect(fakeClient.send).toHaveBeenCalledWith("legacy", { message: "compatibility" });
+    await t.disconnect();
+  });
+
+  it.each([
+    [false, "encrypted"], [true, "plaintext"], [undefined, "unknown"],
+    [null, "unknown"], [0, "unknown"], ["false", "unknown"],
+  ] as const)("propagates SDK evidence %s as %s, never payload claims", async (flag, security) => {
+    const t = new AgtTransport({ relayUrl: "ws://r", registryUrl: "http://reg", identity });
+    const handler = vi.fn();
+    const payload = { security: "encrypted", plaintext: false };
+    t.onMessage(handler);
+    await t.connect();
+    fakeClient.__msgHandler?.("peer", payload, flag as boolean | undefined);
+    expect(handler).toHaveBeenCalledWith("peer", payload, security);
+    expect(t.getInbox()[0]).toMatchObject({ from: "peer", content: payload, security });
+    await expect(t.waitForMessage((_content, _from, evidence) => evidence)).resolves.toBe(security);
+    const active = t.waitForMessage((_content, _from, evidence) => evidence);
+    fakeClient.__msgHandler?.("peer", payload, flag as boolean | undefined);
+    await expect(active).resolves.toBe(security);
+    expect(t.getInbox()).toEqual([]);
+    await t.disconnect();
+  });
+
+  it("does not treat later plaintext as encrypted after an encrypted message", async () => {
+    const t = new AgtTransport({ relayUrl: "ws://r", registryUrl: "http://reg", identity });
+    await t.connect();
+    fakeClient.__msgHandler?.("peer", { first: true }, false);
+    fakeClient.__msgHandler?.("peer", { second: true }, true);
+    fakeClient.__msgHandler?.("peer", { third: true });
+    expect(t.drainInbox().map(message => message.security)).toEqual([
+      "encrypted", "plaintext", "unknown",
+    ]);
+    await t.disconnect();
+  });
+
+  it("passes security evidence to ACK predicates without upgrading plaintext", async () => {
+    const t = new AgtTransport({ relayUrl: "ws://r", registryUrl: "http://reg", identity });
+    await t.connect();
+    fakeClient.send.mockImplementationOnce(async () => {
+      fakeClient.__msgHandler?.("peer", { id: "run-1", ack: true }, true);
+      fakeClient.__msgHandler?.("peer", { id: "run-1", ack: true });
+      fakeClient.__msgHandler?.("peer", { id: "run-1", ack: true }, false);
+    });
+    await expect(t.sendWithAck("peer", { id: "run-1" }, (content, from, security) =>
+      from === "peer" && security === "encrypted" ? content : null, { retries: 0 },
+    )).resolves.toEqual({ id: "run-1", ack: true });
+    expect(t.getInbox().map(message => message.security)).toEqual(["plaintext", "unknown"]);
+    await t.disconnect();
   });
 
   it("throws if send is called before connect", async () => {

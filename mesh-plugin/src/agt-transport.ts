@@ -5,7 +5,7 @@
  * AGT-backed mesh transport — implements IMeshTransport using the
  * upstream Microsoft Agent Governance SDK.
  *
- * Package: @microsoft/agent-governance-sdk (^3.5.0)
+ * Package: @microsoft/agent-governance-sdk (pinned in package.json)
  * Module:  @microsoft/agent-governance-sdk/dist/encryption (or default export)
  *
  * Sole mesh transport implementation. Wire compatibility: speaks
@@ -21,6 +21,7 @@ import type {
   FileTransferAck,
   InboxMessage,
   InboxDiagnostics,
+  MessageSecurity,
 } from "./transport-interface.js";
 import { LocalInbox } from "./local-inbox.js";
 import { ed25519 } from "@noble/curves/ed25519.js";
@@ -33,11 +34,7 @@ const MAX_FILE_SIZE = 30 * 1024 * 1024;
 // now (upstream port of vendored SDK patch #12). We reach it via
 // MeshClient.getRegistry() — see lookup() below.
 
-// ── Lazy SDK loading (optional dependency) ───────────────────────
-//
-// The upstream SDK is an *optional* npm dependency: vendored deployments
-// don't need it installed. Loading is deferred to connect() so that
-// `new AgtTransport(...)` is cheap and side-effect-free.
+// Defer loading the pinned SDK until connect() so construction has no side effects.
 
 interface AgtSdkModule {
   X3DHKeyManager: new (
@@ -102,7 +99,7 @@ interface AgtMeshClient {
   reconnect(): Promise<void>;
   send(peerId: string, payload: unknown): Promise<void>;
   onMessage(
-    handler: (from: string, payload: unknown, isPlaintext: boolean) => void,
+    handler: (from: string, payload: unknown, isPlaintext?: boolean) => void,
   ): void;
   onKnock(handler: (from: string, intent: unknown) => Promise<boolean>): void;
   sendHeartbeat(): void;
@@ -133,14 +130,8 @@ interface AgtMeshClient {
   onE2EVerified?: (
     handler: (peerAmid: string, isFirstPeer: boolean) => void,
   ) => void;
-  /**
-   * (legacy/optional) Some SDK forks expose this name. The real upstream
-   * method is establishSession(toAmid, options). We no longer call either
-   * here — AgentMeshClient.send() auto-bootstraps the X3DH handshake on
-   * first contact. Kept on the type only to document the historical API
-   * surface; consumers should NOT depend on it.
-   */
-  establishSessionWithPeer?: (peerId: string) => Promise<unknown>;
+  /** The pinned SDK requires session establishment before encrypted send. */
+  establishSessionWithPeer(peerId: string): Promise<unknown>;
 }
 
 let agtSdkPromise: Promise<AgtSdkModule> | null = null;
@@ -148,9 +139,7 @@ async function loadAgtSdk(): Promise<AgtSdkModule> {
   if (agtSdkPromise) return agtSdkPromise;
   agtSdkPromise = (async () => {
     try {
-      // Use a computed specifier so TypeScript doesn't try to resolve the
-      // optional dependency at compile time (it may not be installed in the
-      // vendored deployment path).
+      // Keep SDK loading deferred in bundled runtimes as well as Node.
       const pkg = "@microsoft/agent-governance-sdk";
       const mod = (await import(/* @vite-ignore */ pkg)) as Record<
         string,
@@ -172,7 +161,7 @@ async function loadAgtSdk(): Promise<AgtSdkModule> {
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(
         `@microsoft/agent-governance-sdk is required for AGT mesh transport. ` +
-          `Install: npm i @microsoft/agent-governance-sdk@^3.5.0. ` +
+          `Restore the pinned dependency with npm ci in mesh-plugin. ` +
           `Underlying error: ${msg}`,
       );
     }
@@ -208,7 +197,7 @@ export class AgtTransport implements IMeshTransport {
   private readonly options: AgtTransportOptions;
   private client: AgtMeshClient | null = null;
   private readonly messageHandlers: Array<
-    (from: string, payload: unknown) => void
+    (from: string, payload: unknown, security: MessageSecurity) => void
   > = [];
   private readonly knockHandlers: Array<
     (from: string, intent: unknown) => Promise<{ accept: boolean }>
@@ -314,20 +303,23 @@ export class AgtTransport implements IMeshTransport {
     });
 
     // Bridge SDK callbacks → our handler arrays + LocalInbox.
-    this.client.onMessage((from, payload, _isPlaintext) => {
+    this.client.onMessage((from, payload, isPlaintext) => {
+      const security: MessageSecurity = isPlaintext === false
+        ? "encrypted"
+        : isPlaintext === true ? "plaintext" : "unknown";
       // First fan out to subscribed handlers (Phase 2 callers); then deliver
       // to the inbox so polling code (mesh_inbox tool, waitForMessage) sees
       // every message exactly once via either the waiter set or the FIFO.
       for (const handler of this.messageHandlers) {
         try {
-          handler(from, payload);
+          handler(from, payload, security);
         } catch (e) {
           // Handler errors must not poison the SDK callback chain.
           // eslint-disable-next-line no-console
           console.error("[agt-transport] message handler threw:", e);
         }
       }
-      this.inbox.deliver(from, payload);
+      this.inbox.deliver(from, payload, security);
     });
 
     this.client.onKnock(async (from, intent) => {
@@ -423,7 +415,7 @@ export class AgtTransport implements IMeshTransport {
     // on the hot path.
     if (!this._plaintextPeers.has(toAmid)) {
       try {
-        await this.client.establishSessionWithPeer!(toAmid);
+        await this.client.establishSessionWithPeer(toAmid);
       } catch (e: unknown) {
         // Surface the real error verbatim — the caller's retry loop matches
         // on /prekey/i, so a generic "prekey bootstrap failed" wrapper hides
@@ -446,7 +438,7 @@ export class AgtTransport implements IMeshTransport {
     return undefined;
   }
 
-  onMessage(handler: (fromAmid: string, payload: unknown) => void): void {
+  onMessage(handler: (fromAmid: string, payload: unknown, security: MessageSecurity) => void): void {
     this.messageHandlers.push(handler);
   }
 
@@ -553,7 +545,7 @@ export class AgtTransport implements IMeshTransport {
   }
 
   waitForMessage<T>(
-    predicate: (content: unknown, from: string) => T | null,
+    predicate: (content: unknown, from: string, security: MessageSecurity) => T | null,
     timeoutMs?: number,
     opts?: { consume?: boolean },
   ): Promise<T> {
@@ -573,7 +565,7 @@ export class AgtTransport implements IMeshTransport {
   async sendWithAck<T>(
     toAmid: string,
     payload: unknown,
-    ackPredicate: (content: unknown, from: string) => T | null,
+    ackPredicate: (content: unknown, from: string, security: MessageSecurity) => T | null,
     opts: { timeoutMs?: number; retries?: number; retryDelayMs?: number } = {},
   ): Promise<T> {
     const timeoutMs = opts.timeoutMs ?? 5000;

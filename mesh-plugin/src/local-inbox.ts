@@ -19,7 +19,11 @@
 
 import * as crypto from "node:crypto";
 
+/** Per-message transport evidence, never a claim supplied by the payload. */
+export type MessageSecurity = "encrypted" | "plaintext" | "unknown";
+
 export interface InboxMessage {
+  security: MessageSecurity;
   id: string;
   from: string;
   content: unknown;
@@ -39,7 +43,7 @@ export interface InboxDiagnostics {
 }
 
 interface Waiter {
-  predicate: (content: unknown, from: string) => unknown;
+  predicate: (content: unknown, from: string, security: MessageSecurity) => unknown;
   resolve: (v: unknown) => void;
   consume: boolean;
 }
@@ -71,24 +75,25 @@ export class LocalInbox {
    * Returns true iff a waiter consumed the message (caller may then skip
    * any side-effect storage).
    */
-  deliver(from: string, content: unknown): boolean {
-    if (this.deliverToWaiters(from, content)) return true;
+  deliver(from: string, content: unknown, security: MessageSecurity = "unknown"): boolean {
+    if (this.deliverToWaiters(from, content, security)) return true;
     const ts = new Date().toISOString();
     this.push({
       id: `mesh-${Date.now().toString(36)}-${crypto.randomUUID().slice(0, 8)}`,
       from,
       content,
+      security,
       timestamp: ts,
     });
     return false;
   }
 
-  private deliverToWaiters(from: string, content: unknown): boolean {
+  private deliverToWaiters(from: string, content: unknown, security: MessageSecurity): boolean {
     if (this.waiters.size === 0) return false;
     for (const waiter of [...this.waiters]) {
       let result: unknown;
       try {
-        result = waiter.predicate(content, from);
+        result = waiter.predicate(content, from, security);
       } catch (err) {
         this.waiters.delete(waiter);
         waiter.resolve(err);
@@ -174,14 +179,14 @@ export class LocalInbox {
   }
 
   async waitForMessage<T>(
-    predicate: (content: unknown, from: string) => T | null,
+    predicate: (content: unknown, from: string, security: MessageSecurity) => T | null,
     timeoutMs = 15_000,
     opts: { consume?: boolean } = {},
   ): Promise<T> {
     const consume = opts.consume !== false;
     for (let i = 0; i < this.inbox.length; i++) {
       const msg = this.inbox[i];
-      const result = predicate(msg.content, msg.from);
+      const result = predicate(msg.content, msg.from, msg.security);
       if (result !== null && result !== undefined) {
         if (consume) {
           this.inbox.splice(i, 1);
@@ -192,7 +197,7 @@ export class LocalInbox {
     }
     return new Promise<T>((resolve, reject) => {
       const waiter: Waiter = {
-        predicate: predicate as (content: unknown, from: string) => unknown,
+        predicate,
         consume,
         resolve: (v: unknown) => {
           clearTimeout(timer);
