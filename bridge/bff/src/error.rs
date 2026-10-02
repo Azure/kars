@@ -49,6 +49,21 @@ pub enum AppError {
     Internal(#[from] anyhow::Error),
 }
 
+impl From<crate::kars::cluster::MissionRunError> for AppError {
+    fn from(error: crate::kars::cluster::MissionRunError) -> Self {
+        use crate::kars::cluster::MissionRunError;
+        match error {
+            MissionRunError::Conflict(message) => Self::Conflict(message.into()),
+            MissionRunError::Cluster(kube::Error::Api(response)) if response.code == 409 => {
+                Self::Conflict(
+                    "the mission changed; reload before requesting a run or revision".into(),
+                )
+            }
+            MissionRunError::Cluster(error) => Self::Upstream(error.to_string()),
+        }
+    }
+}
+
 impl AppError {
     fn status(&self) -> StatusCode {
         match self {
