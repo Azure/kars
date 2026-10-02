@@ -119,14 +119,7 @@ async fn orchestrator_via_router(
         return Ok(content);
     }
 
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "max_tokens": max_tokens,
-    });
+    let body = chat_completion_body(model, system, user, max_tokens);
     let text = cluster.router_chat(ns, pod, &body).await?;
     let parsed: serde_json::Value = serde_json::from_str(&text)
         .map_err(|e| anyhow::anyhow!("router returned non-JSON: {e}"))?;
@@ -140,6 +133,28 @@ async fn orchestrator_via_router(
         .to_string())
 }
 
+fn chat_completion_body(
+    model: &str,
+    system: &str,
+    user: &str,
+    max_tokens: u32,
+) -> serde_json::Value {
+    // The router may select a reasoning deployment regardless of the requested
+    // alias. The current Chat Completions limit bounds reasoning + visible output.
+    serde_json::json!({
+        "model": model,
+        "messages": [
+            {"role": "system", "content": system},
+            {"role": "user", "content": user},
+        ],
+        "max_completion_tokens": max_tokens,
+    })
+}
+
+#[cfg(test)]
+#[path = "client_tests.rs"]
+mod tests;
+
 /// Call the orchestrator LLM (OpenAI-compatible chat/completions) and return
 /// the assistant's text content.
 async fn call_llm(
@@ -151,14 +166,7 @@ async fn call_llm(
     max_tokens: u32,
 ) -> anyhow::Result<String> {
     let url = format!("{}/chat/completions", endpoint.trim_end_matches('/'));
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [
-            {"role": "system", "content": system},
-            {"role": "user", "content": user},
-        ],
-        "max_tokens": max_tokens,
-    });
+    let body = chat_completion_body(model, system, user, max_tokens);
     let client = reqwest::Client::builder()
         .timeout(std::time::Duration::from_secs(45))
         .build()?;
