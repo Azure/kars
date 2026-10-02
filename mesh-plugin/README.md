@@ -201,10 +201,47 @@ Execution uses the real runtime tool loop through the local inference router:
   assignments with the same nonce are rejected. Execution is serialized.
 
 Replay protection is **in memory for one runtime boot**, capped at 128 accepted
-assignment records without eviction. It is not durable recovery. A dispatcher
-must persist claims, fence restarts and publish correlated output/usage before
-marking a run complete. Those integrations are still missing; receiver tests do
-not qualify useful mission delivery, persistent teams or either beta gate.
+assignment records without eviction. It is not durable recovery. The dispatcher
+library below adds persistent send exclusion; neither library is currently wired
+into a deployed execution path. Receiver tests do not qualify useful mission
+delivery, persistent teams or either beta gate.
+
+### Durable dispatch and result storage
+
+`mission-dispatcher.ts` uses the official encrypted transport and
+`mission-store.ts` persists attempts through `kubernetes-json.ts`, an in-cluster
+HTTPS client with certificate verification, rotating service-account credentials,
+request/response size limits and an overall request deadline.
+
+- A readiness probe checks the exact encrypted sender, runtime boot and target.
+  A Kubernetes ConfigMap CREATE claims `(Task UID, run nonce)` **before** the sole
+  assignment-send attempt. Competing dispatchers and restarts cannot resend that
+  claim. This is at-most-one send attempt, **not exactly-once execution**.
+- Currentness checks require a launched, observed Running Task, matching objective,
+  Task-owned runtime binding and Sandbox, and the exact Ready Pod UID. Revision
+  objectives must match their nonce and SHA-256 digest. These checks depend on
+  controller-owned bindings and appropriate write authority; owner references
+  alone are not an authorization boundary.
+- Authenticated replies append to a bounded, resourceVersion-CAS event journal.
+  Acceptance precedes ACK; terminal evidence is persisted before publication.
+  Lost write responses preserve the durable state rather than authorizing resend.
+- Actual output and `response.md` are archived in immutable per-run ConfigMaps,
+  with Task UID/run/assignment/agent attribution and measured usage. Unknown usage
+  is omitted, never manufactured as zero. Failed runs do not produce an artifact.
+  Task UID and run nonce annotations also identify artifact ConfigMaps.
+- Task-name projections and completion use optimistic concurrency. They are not
+  a transaction across resources: consumers must validate Task UID and requested
+  nonce before treating output or artifacts as current. Historical evidence is
+  separate from the current run. Terminal publication may be retried without
+  contacting the runtime, including after a transport identity change.
+
+Nonterminal and uncertain claims are never automatically retried. A send timeout
+cannot cancel an already-started transport send, and a crashed dispatcher's claim
+may remain pending. The `ownerSession` field is not a leadership lease or process
+fence. Controller binding/Secret producers, helper lifecycle and single-prekey-
+writer enforcement, Helm/RBAC wiring, orphan handling, correlated Bridge readers
+and live end-to-end execution remain integration work. These source-level tests
+are not evidence of a delivered mission.
 
 ## Files created
 
