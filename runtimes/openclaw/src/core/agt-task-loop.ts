@@ -21,6 +21,8 @@ import { meshSendWithIdentity, type MeshIdentity } from "./mesh-transport.js";
 import { validateMeshPayload } from "./mesh-payload-guard.js";
 import { routerUrl } from "./router-client.js";
 import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js";
+import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
+import { authorizeTaskAction } from "./task-policy.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyMeshClient = any;
@@ -61,6 +63,26 @@ export interface TaskLoopDeps {
    * absent, blocking tools fall back to a single immediate read.
    */
   waitForInbox?: (timeoutMs: number) => Promise<boolean>;
+  onEvidence?: (evidence: TaskExecutionEvidence) => void;
+}
+
+export async function executeTaskWithEvidence(
+  taskContent: unknown,
+  deps: TaskLoopDeps,
+  log: Logger,
+): Promise<TaskExecutionEvidence & { output: string }> {
+  const ledger = new TaskCompletionLedger(taskModel());
+  try {
+    const output = await processTaskWithTools(taskContent, deps, log, ledger);
+    return { ...ledger.snapshot(), output };
+  } catch (error) {
+    if (error instanceof TaskExecutionError) throw error;
+    throw new TaskExecutionError(error instanceof Error ? error.message : "Task execution failed", ledger.snapshot());
+  }
+}
+
+function taskModel(): string {
+  return process.env.OPENCLAW_MODEL || process.env.KARS_MODEL || process.env.MODEL || "gpt-4.1";
 }
 
 export async function processTaskWithTools(
@@ -68,10 +90,11 @@ export async function processTaskWithTools(
   taskContent: any,
   deps: TaskLoopDeps,
   log: Logger,
+  ledger?: TaskCompletionLedger,
 ): Promise<string> {
   const http = await import("node:http");
   const { execSync } = await import("node:child_process");
-  const model = process.env.OPENCLAW_MODEL || process.env.MODEL || "gpt-4.1";
+  const model = taskModel();
 
   const tools = getTaskTools();
   const strictCount = tools.filter((t: any) => t?.function?.strict === true).length;
@@ -135,6 +158,10 @@ export async function processTaskWithTools(
       } catch { /* ignore */ }
     }
     if (deps.isInterruptRequested()) {
+      if (ledger) {
+        deps.setInterrupt(false, "");
+        ledger.fail(`Task interrupted for handoff at round ${round}`);
+      }
       log.info(`🛑 Handoff interrupt: saving progress at round ${round}/${25}`);
       try {
         const fs = await import("node:fs");
@@ -155,8 +182,9 @@ export async function processTaskWithTools(
       return `Task interrupted for handoff at round ${round}. Progress saved to .task-in-progress.json — will resume after handoff.`;
     }
 
-    const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: 2048 });
+    const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: ledger ? 8192 : 2048 });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ledger?.beginRequest();
     const response = await new Promise<any>((resolve, reject) => {
       const req = http.request(routerUrl("/v1/chat/completions"), {
         method: "POST",
@@ -179,7 +207,8 @@ export async function processTaskWithTools(
             }
           } catch { reject(new Error(`LLM parse error: ${body.slice(0, 200)}`)); }
         });
-        res.on("error", () => {});
+        res.on("error", reject);
+        res.on("aborted", () => reject(new Error("LLM response aborted")));
       });
       req.on("error", (e) => reject(e));
       req.on("timeout", () => { req.destroy(); reject(new Error("LLM timeout")); });
@@ -187,10 +216,26 @@ export async function processTaskWithTools(
       req.end();
     });
 
+    ledger?.record(response);
+    if (ledger) deps.onEvidence?.(ledger.snapshot());
     const choice = response?.choices?.[0];
-    if (!choice) throw new Error("No LLM response");
+    if (!choice?.message) throw new Error("No LLM response");
+    if (ledger && choice.finish_reason !== "stop" && choice.finish_reason !== "tool_calls") {
+      ledger.fail(`Incomplete model response (${String(choice.finish_reason)})`);
+    }
 
     const msg = choice.message;
+    if (ledger) {
+      const calls = msg.tool_calls;
+      const hasCalls = Array.isArray(calls) && calls.length > 0;
+      if ((calls != null && !Array.isArray(calls)) || (choice.finish_reason === "tool_calls") !== hasCalls) {
+        ledger.fail("Invalid tool-call finish reason or shape");
+      }
+      if (hasCalls && (new Set(calls.map((tc: any) => tc?.id)).size !== calls.length
+        || calls.some((tc: any) => !tc || typeof tc.id !== "string" || !tc.id
+          || tc.type !== "function" || typeof tc.function?.name !== "string" || !tc.function.name
+          || typeof tc.function.arguments !== "string"))) ledger.fail("Invalid tool-call envelope");
+    }
 
     // If the model wants to call tools, execute them and continue
     if (msg.tool_calls && msg.tool_calls.length > 0) {
@@ -214,6 +259,11 @@ export async function processTaskWithTools(
             continue;
           }
           const fnName = tc.function.name;
+          if (ledger && (!tools.some((tool) => tool.function.name === fnName)
+            || !await authorizeTaskAction(`tool:${fnName}`, { tool: fnName, tool_call_id: tc.id, arguments: args }))) {
+            messages.push({ role: "tool", tool_call_id: tc.id, content: "Blocked by policy: unknown tool, denied, or evaluation unavailable" });
+            continue;
+          }
 
           if (fnName === "file_write") {
             const filePath = String(args.path || "");
@@ -1437,30 +1487,9 @@ export async function processTaskWithTools(
           } else {
             const cmd = String(args.command || args.cmd || "echo 'no command'");
             log.info(`AGT sub-agent exec: ${sanitizeLog(cmd, 200)}`);
-            let policyAllowed = true;
-            let policyReason = "";
-            try {
-              const policyHttp = await import("node:http");
-              const policyBody = JSON.stringify({ action: `shell:${cmd}`, context: { tool: "exec_command" } });
-              const policyResult = await new Promise<{ allowed: boolean; reason?: string }>((resolve) => {
-                const req = policyHttp.request(routerUrl("/agt/evaluate"), {
-                  method: "POST", timeout: 2000,
-                  headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(policyBody) },
-                }, (res) => {
-                  let data = "";
-                  res.on("data", (c: Buffer) => { data += c.toString(); });
-                  res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve({ allowed: true }); } });
-                });
-                req.on("error", () => resolve({ allowed: true }));
-                req.on("timeout", () => { req.destroy(); resolve({ allowed: true }); });
-                req.write(policyBody);
-                req.end();
-              });
-              policyAllowed = policyResult.allowed !== false;
-              policyReason = policyResult.reason || "";
-            } catch { /* router unavailable — allow */ }
+            const policyAllowed = await authorizeTaskAction(`shell:${cmd}`, { tool: "exec_command" });
             if (!policyAllowed) {
-              result = `Blocked by policy: ${policyReason || "denied"}`;
+              result = "Blocked by policy: denied or evaluation unavailable";
             } else {
               result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
             }
@@ -1474,8 +1503,9 @@ export async function processTaskWithTools(
       continue;
     }
 
-    return msg.content || "";
+    return ledger ? ledger.finish(choice) : msg.content || "";
   }
 
+  if (ledger) ledger.fail("Sub-agent reached maximum tool-calling rounds (25) without a final response");
   return "Sub-agent reached maximum tool-calling rounds (25) without a final response.";
 }
