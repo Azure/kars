@@ -89,6 +89,12 @@ inferenceRouter:
     openai:
       endpoint: ""       # Azure OpenAI endpoint for dev mode (set via kars onboard)
       deploymentName: "gpt-4.1"   # Default model for dev mode
+      # Initial no-Entra inference, also used with foundry.endpoint. Leave empty
+      # for AKS workload/Agent ID authentication. Never commit real keys.
+      credentials:
+        apiKey: ""            # Helm-managed Secret; prefer --set-file from a private file
+        existingSecret: ""    # Alternative: operator-provisioned Secret in the Core namespace
+        key: "api-key"
     contentSafety:
       enabled: true
     promptShields:
