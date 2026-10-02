@@ -7,7 +7,7 @@ set -eu
 (cd /locks && sha256sum --check --strict SHA256SUMS)
 cmp /packaging/locks/inputs.lock /locks/inputs.lock
 cmp /packaging/locks/requests.txt /locks/requests.txt
-test "$(cat /locks/toolchain.txt)" = "go version $GO_VERSION linux/$(go env GOARCH)"
+sh /packaging/scripts/verify-toolchain.sh "$GO_VERSION" "$(cat /locks/toolchain.txt)" "$(go version)"
 for file in go.mod go.sum api/v2/go.mod api/v2/go.sum; do
     cmp "/packaging/upstream/$file.snapshot" "/locks/upstream/$file.snapshot"
     cp "/locks/$file" "$file"
