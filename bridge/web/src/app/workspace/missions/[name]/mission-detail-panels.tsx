@@ -145,8 +145,8 @@ export function NextStep({
   const map: Record<string, { tone: string; title: string; body: string; cta?: { href: string; label: string } }> = {
     drafting: {
       tone: "border-signal/30 bg-signal/[0.05]",
-      title: "Ready to launch",
-      body: "Review the composed plan below — model, tools, network, autonomy, budget — then launch it in the Execution panel when you're happy.",
+      title: "Draft — review launch checks",
+      body: "Review the model, tools, network, autonomy and budget below. The Execution panel checks this saved package before enabling Launch; a Ready controller phase alone does not establish launch readiness.",
     },
     deploying: {
       tone: "border-signal/30 bg-signal/[0.05]",
