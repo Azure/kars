@@ -10,9 +10,9 @@
 // /etc/hosts or running a second port-forward for Dex.
 //
 // By setting Dex's issuer to `http://localhost:3000/dex` and proxying /dex/*
-// from this pod to the in-cluster Dex Service, BOTH the browser (authorize +
-// login form) AND the server-side token/JWKS/discovery calls flow through the
-// one localhost:3000 origin. One port-forward, zero hosts-file hacks.
+// from this pod to the in-cluster Dex Service, the browser's authorize/login
+// requests use one port-forward. Server-side token/JWKS/discovery calls use
+// BRIDGE_OIDC_BACKCHANNEL_ISSUER directly; the public issuer is still verified.
 //
 // redirect:"manual" so Dex's 3xx (connector select → login → approval → back to
 // /auth/callback) pass straight to the browser. set-cookie is forwarded per

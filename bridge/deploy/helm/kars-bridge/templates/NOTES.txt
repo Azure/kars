@@ -2,9 +2,9 @@
 Licensed under the MIT License. */}}kars Bridge {{ .Chart.AppVersion }} installed in namespace {{ include "kars-bridge.namespace" . }} (release {{ .Release.Name }}).
 
 This is an ADDITIVE layer on top of kars. It expects the kars CRDs + controller to
-already be present in the cluster. Install a compatible full Kars runtime from
-its separate checkout first; see docs/compatibility.md. The public foundation
-PRs alone are not the full Bridge runtime. Images remain private preview.
+already be present in the cluster. Install Core from deploy/helm/kars in the
+same Azure/kars checkout, followed by this Bridge release. See
+bridge/docs/public-beta-helm.md for the Helm-only preview and remaining gates.
 
 Verify the required API group before enabling user traffic:
     kubectl api-resources --api-group=kars.azure.com
@@ -26,11 +26,18 @@ Reach the console + workspace:
     # No ingress configured — port-forward the web Service:
     kubectl -n {{ include "kars-bridge.namespace" . }} port-forward svc/kars-bridge-web {{ .Values.web.port }}:{{ .Values.web.port }}
     # then open http://localhost:{{ .Values.web.port }}/workspace
+{{- if .Values.idp.enabled }}
+    # Bundled Dex public issuer: {{ .Values.idp.issuer }}
+    # Match that public origin exactly; adjust the local (left-hand) port above
+    # when the issuer uses a different port. HTTPS issuers require ingress/TLS.
+{{- end }}
 {{- end }}
 
 The BFF runs as ServiceAccount "{{ include "kars-bridge.serviceAccountName" . }}" under a
 least-privilege ClusterRole. Persona checks in the BFF govern individual users;
 the ClusterRole is the aggregate Kubernetes permission ceiling.
 
-AKS and local kind are live-qualified. EKS/GKE require environment-specific
-identity, registry, ingress, CNI, inference, and compatibility validation.
+Installation and readiness are not end-to-end beta qualification. Validate real
+inference, useful agent delivery, persistent teams and feedback on your target.
+AKS additionally requires Entra Agent ID validation. All targets require compatible
+identity, registry, ingress, CNI and inference configuration.

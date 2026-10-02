@@ -49,12 +49,12 @@ spec:
               value: {{ include "kars-bridge.coreNamespace" . | quote }}
             {{- if .Values.idp.enabled }}
             # ── In-cluster IdP (Dex) SSO wiring ──────────────────────────────
-            # Issuer is the browser-facing {web origin}/dex, reached via the web
-            # pod's same-origin /dex proxy (DEX_UPSTREAM_URL) both server-side
-            # (discovery/token/JWKS) and browser-side (authorize/login). One
-            # port-forward, no /etc/hosts. See templates/idp.yaml.
+            # Keep the public issuer for browser redirects and token validation;
+            # server-side calls use Dex directly, independently of port-forwarding.
             - name: BRIDGE_OIDC_ISSUER
               value: {{ .Values.idp.issuer | quote }}
+            - name: BRIDGE_OIDC_BACKCHANNEL_ISSUER
+              value: {{ printf "%s/dex" (trimSuffix "/" (default (printf "http://dex.%s.svc.cluster.local:5556" (include "kars-bridge.namespace" .)) .Values.idp.dexUpstreamUrl)) | quote }}
             - name: BRIDGE_OIDC_CLIENT_ID
               value: {{ .Values.idp.clientId | quote }}
             - name: BRIDGE_OIDC_REDIRECT_URI

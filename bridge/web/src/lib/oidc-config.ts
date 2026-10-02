@@ -13,8 +13,10 @@
 import type { Role } from "./config";
 
 export interface OidcConfig {
-  /** IdP issuer URL. Discovery doc is fetched from `${issuer}/.well-known/openid-configuration`. */
+  /** Public IdP issuer, used for browser redirects and ID-token verification. */
   issuer: string;
+  /** Optional internal issuer base for server-side discovery, token and JWKS requests. */
+  backchannelIssuer?: string | null;
   clientId: string;
   clientSecret: string;
   /** Where the IdP redirects back to. Defaults to `{request origin}/auth/callback`. */
@@ -63,6 +65,7 @@ export function oidcConfig(): OidcConfig | null {
 
   return {
     issuer: issuer.replace(/\/$/, ""),
+    backchannelIssuer: process.env.BRIDGE_OIDC_BACKCHANNEL_ISSUER?.trim().replace(/\/$/, "") || null,
     clientId,
     clientSecret,
     redirectUri: process.env.BRIDGE_OIDC_REDIRECT_URI?.trim() || null,

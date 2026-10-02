@@ -25,7 +25,8 @@ Required integration configuration:
 | Variable | Purpose |
 |---|---|
 | `BRIDGE_BFF_URL` | Server-side BFF origin |
-| `BRIDGE_OIDC_ISSUER` | OIDC issuer |
+| `BRIDGE_OIDC_ISSUER` | Public OIDC issuer (also used to verify ID tokens) |
+| `BRIDGE_OIDC_BACKCHANNEL_ISSUER` | Optional internal issuer base for discovery, token exchange and JWKS; automatically wired for bundled Dex by Helm |
 | `BRIDGE_OIDC_CLIENT_ID` | OIDC client |
 | `BRIDGE_OIDC_CLIENT_SECRET` | OIDC client secret |
 | `BRIDGE_SESSION_SECRET` | Signs Bridge sessions |
