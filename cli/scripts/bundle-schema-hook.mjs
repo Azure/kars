@@ -14,6 +14,14 @@ const output = resolve(root, "deploy/helm/kars/files");
 const args = process.argv.slice(2);
 if (args.length > 1 || (args.length === 1 && args[0] !== "--check")) throw new Error("Only --check is supported");
 const check = args[0] === "--check";
+const require = createRequire(import.meta.url);
+const yamlPackage = require.resolve("yaml/package.json");
+const installedYaml = JSON.parse(await readFile(yamlPackage, "utf8")).version;
+const lockedYaml = JSON.parse(await readFile(resolve(cli, "package-lock.json"), "utf8"))
+  .packages?.["node_modules/yaml"]?.version;
+if (!lockedYaml || installedYaml !== lockedYaml) {
+  throw new Error(`Schema helper requires lockfile yaml ${lockedYaml ?? "(missing)"}; found ${installedYaml}. Restore locked CLI dependencies before bundling.`);
+}
 const stage = await mkdtemp(resolve(cli, ".schema-hook-build-"));
 try {
   await build({
@@ -25,7 +33,8 @@ try {
   });
   const files = await readdir(stage);
   if (files.length !== 1 || files[0] !== "schema-hook.mjs") throw new Error("Schema helper must be a single executable bundle");
-  const code = await readFile(resolve(stage, files[0]), "utf8");
+  const code = "// Copyright (c) Microsoft Corporation.\n// Licensed under the MIT License.\n"
+    + await readFile(resolve(stage, files[0]), "utf8");
   if (Buffer.byteLength(code) > 900_000) throw new Error("Schema helper exceeds its ConfigMap bound");
   const parsed = ts.createSourceFile("schema-hook.mjs", code, ts.ScriptTarget.Latest, true, ts.ScriptKind.JS);
   const visit = node => {
@@ -41,8 +50,6 @@ try {
     ts.forEachChild(node, visit);
   };
   visit(parsed);
-  const require = createRequire(import.meta.url);
-  const yamlPackage = require.resolve("yaml/package.json");
   const notice = await readFile(resolve(dirname(yamlPackage), "LICENSE"), "utf8");
   for (const [name, content] of [["schema-hook.mjs", code], ["schema-hook.NOTICE", `Bundled dependency: yaml\n\n${notice}`]]) {
     if (check) {
