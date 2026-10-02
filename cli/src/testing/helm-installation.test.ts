@@ -16,19 +16,25 @@ const temporaryDirectories: string[] = [];
 interface Container {
   name?: string;
   image?: string;
-  env?: Array<{ name: string; value?: string }>;
+  env?: Array<{
+    name: string;
+    value?: string;
+    valueFrom?: { secretKeyRef: { name: string; key: string; optional: boolean } };
+  }>;
   command?: string[];
 }
 
 interface Manifest {
   kind: string;
-  metadata?: { name?: string; labels?: Record<string, string> };
+  type?: string;
+  data?: Record<string, string>;
+  metadata?: { name?: string; namespace?: string; labels?: Record<string, string> };
   spec?: {
     replicas?: number;
     strategy?: { type?: string };
     selector?: Record<string, unknown>;
     template?: {
-      metadata?: { labels?: Record<string, string> };
+      metadata?: { labels?: Record<string, string>; annotations?: Record<string, string> };
       spec?: { containers?: Container[]; initContainers?: Container[] };
     };
   };
@@ -76,6 +82,69 @@ afterEach(() => {
   for (const directory of temporaryDirectories.splice(0)) {
     rmSync(directory, { recursive: true, force: true });
   }
+});
+
+describe("Helm initial inference credentials", () => {
+  const prefix = "inferenceRouter.azure.openai.credentials";
+  const endpoint = "--set=foundry.endpoint=https://inference.example.test";
+  const controller = (manifests: Manifest[]) => resource(manifests, "Deployment", "kars-controller");
+  const keyEnv = (manifests: Manifest[]) => controller(manifests).spec?.template?.spec
+    ?.containers?.[0]?.env?.find((entry) => entry.name === "AZURE_OPENAI_API_KEY");
+
+  it.each([{ args: [] }, { args: [`--set=${prefix}=null`] }])("leaves identity authentication unchanged by default: $args", ({ args }) => {
+    const manifests = render(chart, args);
+    expect(keyEnv(manifests)).toBeUndefined();
+    expect(manifests.some((item) => item.metadata?.name === "kars-inference-bootstrap")).toBe(false);
+  });
+
+  it("accepts saved values predating credential configuration", () => {
+    const copied = reusedValuesChart();
+    const path = join(copied, "values.yaml");
+    const values = parse(readFileSync(path, "utf8"));
+    delete values.inferenceRouter.azure.openai.credentials;
+    writeFileSync(path, stringify(values));
+    expect(keyEnv(render(copied))).toBeUndefined();
+  }, 45_000);
+
+  it("creates an Opaque Secret and a required reference without a literal controller key", () => {
+    const manifests = render(chart, [endpoint, `--set-string=${prefix}.apiKey=fixture-not-a-credential`]);
+    const secret = resource(manifests, "Secret", "kars-inference-bootstrap");
+    expect(secret.metadata?.namespace).toBe("kars-system");
+    expect(secret.type).toBe("Opaque");
+    expect(secret.data).toEqual({ "api-key": Buffer.from("fixture-not-a-credential").toString("base64") });
+    expect(keyEnv(manifests)).toEqual({
+      name: "AZURE_OPENAI_API_KEY",
+      valueFrom: { secretKeyRef: { name: "kars-inference-bootstrap", key: "api-key", optional: false } },
+    });
+    expect(JSON.stringify(controller(manifests))).not.toContain("fixture-not-a-credential");
+    const changed = render(chart, [endpoint, `--set-string=${prefix}.apiKey=rotated-fixture`]);
+    expect(controller(manifests).spec?.template?.metadata?.annotations?.["checksum/inference-credentials"])
+      .not.toBe(controller(changed).spec?.template?.metadata?.annotations?.["checksum/inference-credentials"]);
+  });
+
+  it("references an operator-managed Secret without creating or adopting it", () => {
+    const manifests = render(chart, [endpoint, `--set=${prefix}.existingSecret=operator-key,${prefix}.key=API_KEY`]);
+    expect(manifests.some((item) => item.kind === "Secret" &&
+      ["operator-key", "kars-inference-bootstrap"].includes(item.metadata?.name ?? ""))).toBe(false);
+    expect(keyEnv(manifests)?.valueFrom?.secretKeyRef)
+      .toEqual({ name: "operator-key", key: "API_KEY", optional: false });
+  });
+
+  it.each([
+    [`${prefix}.apiKey=fixture,${prefix}.existingSecret=operator-key`, /choose apiKey or existingSecret/],
+    [`${prefix}.apiKey=   `, /apiKey must not be blank/],
+    [`${prefix}.existingSecret=bad..name`, /existingSecret must be a Secret name/],
+    [`${prefix}.existingSecret=kars-inference-bootstrap`, /cannot use the Helm-managed bootstrap Secret name/],
+    [`${prefix}.existingSecret=operator-key,${prefix}.key=bad\/key`, /key must be a Secret data key/],
+    [`${prefix}.apiKey=fixture,controller.extraEnv[0].name=AZURE_OPENAI_API_KEY,controller.extraEnv[0].value=duplicate`, /cannot also be set/],
+  ])("rejects conflicting or invalid inputs: %s", (setting, message) => {
+    expect(() => render(chart, [endpoint, `--set-string=${setting}`])).toThrow(message);
+  });
+
+  it("requires an inference endpoint for API-key authentication", () => {
+    expect(() => render(chart, [`--set-string=${prefix}.apiKey=fixture`]))
+      .toThrow(/API-key inference requires/);
+  });
 });
 
 describe("existing Helm installation compatibility", () => {

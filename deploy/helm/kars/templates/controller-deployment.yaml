@@ -1,6 +1,8 @@
 {{/* Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. */}}{{- $localInference := .Values.localInference | default dict }}
 {{- $privacyRpc := .Values.observationPrivacyRpc | default dict }}
+{{- include "kars.inferenceCredentials.validate" . }}
+{{- $inferenceCredentials := .Values.inferenceRouter.azure.openai.credentials | default dict }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,6 +19,10 @@ spec:
       app.kubernetes.io/component: controller
   template:
     metadata:
+      {{- if $inferenceCredentials.apiKey }}
+      annotations:
+        checksum/inference-credentials: {{ $inferenceCredentials.apiKey | sha256sum | quote }}
+      {{- end }}
       labels:
         app.kubernetes.io/name: kars
         app.kubernetes.io/component: controller
@@ -126,6 +132,14 @@ spec:
               value: {{ .Values.runtimes.pydanticAi.image | default "" | quote }}
             - name: HERMES_RUNTIME_IMAGE
               value: {{ .Values.runtimes.hermes.image | default "" | quote }}
+            {{- if or $inferenceCredentials.apiKey $inferenceCredentials.existingSecret }}
+            - name: AZURE_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $inferenceCredentials.existingSecret | default "kars-inference-bootstrap" | quote }}
+                  key: {{ $inferenceCredentials.key | default "api-key" | quote }}
+                  optional: false
+            {{- end }}
             - name: AZURE_OPENAI_ENDPOINT
               value: {{ .Values.inferenceRouter.azure.openai.endpoint | quote }}
             - name: FOUNDRY_ENDPOINT

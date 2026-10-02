@@ -5,8 +5,11 @@ Licensed under the MIT License. -->
 
 This chart installs the Kars CRDs, controller, RBAC, admission controls,
 policies, and optional operational components into an existing Kubernetes
-cluster. It does not provision the cluster, registry, inference backend, cloud
-identity, or inference credentials. The generic profile also deploys the
+cluster. It does not provision the cluster, registry, inference backend, or cloud
+identity. For no-Entra development, it can store an operator-supplied initial API
+key using the [Helm inference bootstrap](../../../docs/how-to/helm-inference-bootstrap.md).
+Read that guide's release-history and router workload-specification exposure
+boundaries before supplying credentials. The generic profile also deploys the
 Microsoft AGT AgentMesh relay and registry from the public Kars release images.
 
 ## Support status
