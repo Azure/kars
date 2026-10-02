@@ -459,7 +459,7 @@ fn validate_qualified_model_route(
             "model route `{route}` must use provider::deployment"
         )));
     };
-    match crate::routes::options::route_qualification(
+    match crate::routes::options::route_admitted(
         runtime,
         provider,
         deployment,

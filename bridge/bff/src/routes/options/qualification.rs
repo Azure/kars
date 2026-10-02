@@ -95,14 +95,54 @@ fn qualification_records(raw: &str) -> Result<Vec<QualifiedRoute>, String> {
         .map_err(|error| format!("BRIDGE_QUALIFICATION_RECORDS_JSON is invalid: {error}"))
 }
 
-fn qualification_records_from_env() -> Result<Vec<QualifiedRoute>, String> {
-    let raw = std::env::var("BRIDGE_QUALIFICATION_RECORDS_JSON")
-        .map_err(|_| "BRIDGE_QUALIFICATION_RECORDS_JSON is not configured".to_string())?;
-    let mut records = qualification_records(&raw)?;
-    if let Ok(additional) = std::env::var("BRIDGE_ADDITIONAL_QUALIFICATION_RECORDS_JSON")
-        && !additional.trim().is_empty()
-    {
-        records.extend(qualification_records(&additional).map_err(|error| {
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(super) enum RouteQualificationMode {
+    Required,
+    Validation,
+}
+
+impl RouteQualificationMode {
+    pub(super) fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None | Some("required") => Ok(Self::Required),
+            Some("validation") => Ok(Self::Validation),
+            _ => Err("BRIDGE_ROUTE_QUALIFICATION_MODE must be required or validation".into()),
+        }
+    }
+
+    fn from_env() -> Result<Self, String> {
+        match std::env::var("BRIDGE_ROUTE_QUALIFICATION_MODE") {
+            Ok(value) => Self::parse(Some(&value)),
+            Err(std::env::VarError::NotPresent) => Self::parse(None),
+            Err(_) => Err("BRIDGE_ROUTE_QUALIFICATION_MODE is not valid Unicode".into()),
+        }
+    }
+
+    pub(super) fn admit(self, evidence: Result<bool, String>) -> Result<bool, String> {
+        let qualified = evidence?;
+        Ok(qualified || self == Self::Validation)
+    }
+}
+
+pub(crate) fn route_validation_note() -> Result<Option<&'static str>, String> {
+    Ok((RouteQualificationMode::from_env()? == RouteQualificationMode::Validation).then_some(
+        "Unqualified validation mode: prior runtime/model route evidence is advisory. This is not E2E qualification. Resource-specific evidence, authorization, admission, budgets, tool policy, and approval requirements still apply.",
+    ))
+}
+
+pub(super) fn configured_records(
+    mode: RouteQualificationMode,
+    primary: Option<&str>,
+    additional: Option<&str>,
+) -> Result<Vec<QualifiedRoute>, String> {
+    let raw = match primary {
+        Some(raw) => raw,
+        None if mode == RouteQualificationMode::Validation => "[]",
+        None => return Err("BRIDGE_QUALIFICATION_RECORDS_JSON is not configured".into()),
+    };
+    let mut records = qualification_records(raw)?;
+    if let Some(additional) = additional.filter(|value| !value.trim().is_empty()) {
+        records.extend(qualification_records(additional).map_err(|error| {
             error.replace(
                 "BRIDGE_QUALIFICATION_RECORDS_JSON",
                 "BRIDGE_ADDITIONAL_QUALIFICATION_RECORDS_JSON",
@@ -110,6 +150,21 @@ fn qualification_records_from_env() -> Result<Vec<QualifiedRoute>, String> {
         })?);
     }
     Ok(records)
+}
+
+fn qualification_records_from_env() -> Result<Vec<QualifiedRoute>, String> {
+    fn optional_env(name: &str) -> Result<Option<String>, String> {
+        match std::env::var(name) {
+            Ok(value) => Ok(Some(value)),
+            Err(std::env::VarError::NotPresent) => Ok(None),
+            Err(_) => Err(format!("{name} is not valid Unicode")),
+        }
+    }
+    configured_records(
+        RouteQualificationMode::from_env()?,
+        optional_env("BRIDGE_QUALIFICATION_RECORDS_JSON")?.as_deref(),
+        optional_env("BRIDGE_ADDITIONAL_QUALIFICATION_RECORDS_JSON")?.as_deref(),
+    )
 }
 
 fn qualification_records_raw_from_env() -> Result<String, String> {
@@ -371,10 +426,15 @@ pub(crate) fn resource_qualification_summary(options: &Options) -> Result<String
 
 pub(crate) fn qualification_constraints_summary() -> Result<String, String> {
     let routes = qualification_records_from_env()?;
+    let policy = route_validation_note()?.unwrap_or(
+        "Required mode: the complete capability contract must fit ONE retained route record. Records cannot be combined.",
+    );
     if routes.is_empty() {
-        return Ok("  (no qualified execution routes are retained)".into());
+        return Ok(format!(
+            "  {policy}\n  (no qualified execution routes are retained)"
+        ));
     }
-    Ok(routes
+    let records = routes
         .into_iter()
         .map(|route| {
             format!(
@@ -414,7 +474,8 @@ pub(crate) fn qualification_constraints_summary() -> Result<String, String> {
             )
         })
         .collect::<Vec<_>>()
-        .join("\n"))
+        .join("\n");
+    Ok(format!("  {policy}\n{records}"))
 }
 
 pub(crate) fn route_minimum_tokens(
@@ -462,6 +523,24 @@ pub(crate) fn route_qualification(
         max_parallel,
         total_tokens,
     )
+}
+
+pub(crate) fn route_admitted(
+    runtime: &str,
+    provider: &str,
+    deployment: &str,
+    required_capabilities: &std::collections::BTreeSet<String>,
+    max_parallel: i32,
+    total_tokens: Option<i64>,
+) -> Result<bool, String> {
+    RouteQualificationMode::from_env()?.admit(route_qualification(
+        runtime,
+        provider,
+        deployment,
+        required_capabilities,
+        max_parallel,
+        total_tokens,
+    ))
 }
 
 pub(crate) fn route_qualification_gap(

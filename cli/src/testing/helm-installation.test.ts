@@ -84,6 +84,58 @@ afterEach(() => {
   }
 });
 
+describe("Bridge route qualification policy", () => {
+  const bridgeChart = join(root, "bridge/deploy/helm/kars-bridge");
+  const prefix = "bff.routeQualification";
+  const env = (args: string[] = []) => resource(render(bridgeChart, args), "Deployment", "kars-bridge-bff")
+    .spec?.template?.spec?.containers?.[0]?.env ?? [];
+
+  it("defaults to required evidence without creating synthetic records", () => {
+    expect(env().find((entry) => entry.name === "BRIDGE_ROUTE_QUALIFICATION_MODE")?.value).toBe("required");
+    expect(env().some((entry) => entry.name === "BRIDGE_QUALIFICATION_RECORDS_JSON")).toBe(false);
+  });
+
+  it("renders explicit unqualified validation mode", () => {
+    expect(env([`--set=${prefix}.mode=validation`]).filter((entry) => entry.name === "BRIDGE_ROUTE_QUALIFICATION_MODE"))
+      .toEqual([{ name: "BRIDGE_ROUTE_QUALIFICATION_MODE", value: "validation" }]);
+  });
+
+  it.each(["", "disabled", "Validation", "validation "])("rejects invalid mode %j", (mode) => {
+    expect(() => env([`--set-string=${prefix}.mode=${mode}`])).toThrow(/mode must be required or validation/);
+  });
+
+  it.each(["not-json", "null", "{}"])("rejects invalid records %j", (records) => {
+    const directory = mkdtempSync(join(tmpdir(), "kars-route-records-"));
+    temporaryDirectories.push(directory);
+    const file = join(directory, "records.json");
+    writeFileSync(file, records);
+    expect(() => env([`--set-file=${prefix}.recordsJson=${file}`])).toThrow();
+  });
+
+  it("loads record files and rejects duplicate primary sources", () => {
+    const directory = mkdtempSync(join(tmpdir(), "kars-route-records-"));
+    temporaryDirectories.push(directory);
+    const file = join(directory, "records.json");
+    writeFileSync(file, "[]");
+    expect(env([`--set-file=${prefix}.recordsJson=${file}`])
+      .find((entry) => entry.name === "BRIDGE_QUALIFICATION_RECORDS_JSON")?.value).toBe("[]");
+    expect(() => env([`--set-file=${prefix}.recordsJson=${file}`,
+      "--set=bff.extraEnv[0].name=BRIDGE_QUALIFICATION_RECORDS_JSON",
+      "--set-string=bff.extraEnv[0].value=[]"])).toThrow(/conflicts/);
+  });
+
+  it("preserves existing primary records in extraEnv", () => {
+    expect(env(["--set=bff.extraEnv[0].name=BRIDGE_QUALIFICATION_RECORDS_JSON",
+      "--set-string=bff.extraEnv[0].value=[]"]).filter((entry) => entry.name === "BRIDGE_QUALIFICATION_RECORDS_JSON"))
+      .toEqual([{ name: "BRIDGE_QUALIFICATION_RECORDS_JSON", value: "[]" }]);
+  });
+
+  it("rejects mode shadowing through extraEnv", () => {
+    expect(() => env(["--set=bff.extraEnv[0].name=BRIDGE_ROUTE_QUALIFICATION_MODE",
+      "--set=bff.extraEnv[0].value=validation"])).toThrow(/not extraEnv/);
+  });
+});
+
 describe("Helm initial inference credentials", () => {
   const prefix = "inferenceRouter.azure.openai.credentials";
   const endpoint = "--set=foundry.endpoint=https://inference.example.test";

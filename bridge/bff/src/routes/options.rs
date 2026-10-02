@@ -24,14 +24,16 @@ pub(crate) use projections::{mcp_server_option, memory_option, skill_option};
 pub(crate) use qualification::{
     channel_adapter_qualified_for_route, mcp_server_qualified_for_route,
     memory_binding_qualified_for_route, qualification_constraints_summary,
-    resource_qualification_summary, route_label, route_minimum_tokens, route_qualification,
-    route_qualification_gap, skill_version_qualified_for_route,
+    resource_qualification_summary, route_admitted, route_label, route_minimum_tokens,
+    route_qualification, route_qualification_gap, route_validation_note,
+    skill_version_qualified_for_route,
 };
 
 #[cfg(test)]
 use qualification::{
-    channel_resource_selection, mcp_resource_selection, resource_is_qualified_in,
-    resource_qualification_routes_in, route_is_qualified_in, route_qualification_gap_in,
+    RouteQualificationMode, channel_resource_selection, configured_records, mcp_resource_selection,
+    resource_is_qualified_in, resource_qualification_routes_in, route_is_qualified_in,
+    route_qualification_gap_in,
 };
 
 fn name_of(o: &DynamicObject) -> String {

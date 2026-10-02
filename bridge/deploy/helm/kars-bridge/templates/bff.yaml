@@ -1,6 +1,29 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+{{ $qualification := .Values.bff.routeQualification | default dict -}}
+{{- $mode := "required" -}}
+{{- if hasKey $qualification "mode" -}}
+{{- $mode = get $qualification "mode" -}}
+{{- end -}}
+{{- if not (has $mode (list "required" "validation")) -}}
+{{- fail "bff.routeQualification.mode must be required or validation" -}}
+{{- end -}}
+{{- $records := get $qualification "recordsJson" | default "" -}}
+{{- if $records -}}
+{{- $parsed := mustFromJson $records -}}
+{{- if not (kindIs "slice" $parsed) -}}
+{{- fail "bff.routeQualification.recordsJson must be a JSON array" -}}
+{{- end -}}
+{{- end -}}
+{{- range .Values.bff.extraEnv -}}
+{{- if eq .name "BRIDGE_ROUTE_QUALIFICATION_MODE" -}}
+{{- fail "configure BRIDGE_ROUTE_QUALIFICATION_MODE through bff.routeQualification.mode, not extraEnv" -}}
+{{- end -}}
+{{- if and $records (eq .name "BRIDGE_QUALIFICATION_RECORDS_JSON") -}}
+{{- fail "bff.routeQualification.recordsJson conflicts with BRIDGE_QUALIFICATION_RECORDS_JSON in extraEnv" -}}
+{{- end -}}
+{{- end -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -48,6 +71,12 @@ spec:
               value: {{ include "kars-bridge.namespace" . | quote }}
             - name: BRIDGE_LOG_JSON
               value: "true"
+            - name: BRIDGE_ROUTE_QUALIFICATION_MODE
+              value: {{ $mode | quote }}
+            {{- if $records }}
+            - name: BRIDGE_QUALIFICATION_RECORDS_JSON
+              value: {{ $records | quote }}
+            {{- end }}
             {{- if or .Values.idp.enabled .Values.auth.principalSecretName }}
             # Same HS256 key the web uses to verify bridge-session cookies. The
             # web forwards the signed session; the BFF independently verifies it

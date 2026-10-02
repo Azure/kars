@@ -243,7 +243,7 @@ AVAILABLE MODELS (pick exactly one by its deployment string):
 EFFICIENCY FRONTIER (learned from completed runs on THIS cluster — the honest signal is human ACCEPTANCE, not emitted tokens):
 {efficiency}
 
-QUALIFIED EXECUTION RECORDS (the complete proposed package MUST fit one record; records do not compose):
+ROUTE QUALIFICATION POLICY AND RECORDS (follow the configured policy; never claim missing evidence):
 {qualification_constraints}
 
 RESOURCE QUALIFICATION RECORDS (selected MCP servers, memory bindings, and skills MUST match one current-digest record on the chosen route; generic route records do not count):
@@ -262,7 +262,7 @@ TOOL POLICIES (optional; pick one name or null):
 
 MCP SERVERS (optional; pick zero or more names; if you pick any, you MUST also set a tool_policy):
 {mcp}
-Foundry-native web search, file search, memory, and code execution are Kars plugin tools and do not require MCP. If the customer explicitly requests an installed MCP server, select it and declare `mcp`; the complete capability combination must match one atomic qualification record.
+Foundry-native web search, file search, memory, and code execution are Kars plugin tools and do not require MCP. If the customer explicitly requests an installed MCP server, select it and declare `mcp`; the complete capability combination must meet the configured route policy, and the selected server still needs current resource-specific evidence.
 
 APPROVED SKILLS (optional; pick zero or more names):
 {skills}
@@ -284,7 +284,7 @@ INSTRUCTIONS: write a concise, specific system prompt (2–5 sentences) framing 
 
 EXECUTION PLAN: when the objective benefits from decomposition, propose a workload-neutral typed execution plan. Choose arbitrary role names from the objective — never use a fixed role template. Each role has dependency-aware phases. Each phase declares only the generic capabilities it needs: filesystem-read, filesystem-write, shell, network, web-search, mcp, memory. `min_tool_calls` is the minimum successful evidence-producing calls required; set it to at least 1 whenever the phase outcome depends on tools or external evidence. `max_tool_calls` is the explicit upper bound. Set `fresh_context=true` when a phase should consume only prior handbacks instead of the full earlier transcript. Use null for a small single-agent objective.
 
-LAUNCHABILITY: every required capability, the runtime/model route, and max_parallel MUST fit one qualified execution record above. Never merge capabilities from separate records. If you select an MCP server, memory binding, or approved skill, state in the rationale which current-digest resource qualification record makes it launchable. Generic route records do not prove a specific server, backend, or skill version. If the requested output format requires an unqualified capability, propose a supported alternative (for example a Markdown report with inline Mermaid diagrams instead of generated binary images) and explain that choice in the rationale. When you emit Mermaid flowcharts, quote every label that contains parser-sensitive punctuation such as :, (), [], {{}}, or /.
+LAUNCHABILITY: follow the configured route qualification policy above for the complete capability/runtime/model/max_parallel contract. Required mode demands ONE record; never merge records. Explicit validation mode permits unqualified routes, not claims of qualification. If you select an MCP server, memory binding, or approved skill, state in the rationale which current-digest resource qualification record makes it launchable; this is mandatory in both modes. Generic route records do not prove a specific server, backend, or skill version. If the requested output format cannot meet the configured policy, propose a supported alternative (for example a Markdown report with inline diagrams instead of generated binary images) and explain that choice. When you emit Mermaid flowcharts, quote every label that contains parser-sensitive punctuation such as :, (), [], {{}}, or /.
 
 RESEARCH EVIDENCE: for current-events, incident, or authoritative-source research, declare `web-search` on the source-discovery phase and `network` on the exact-URL fetch phase (or declare both on one combined phase). The first fetch-capable phase must discover exact source URLs with an available search tool (`foundry_web_search` or `web_search`) before fetching pages. Never invent article paths. A timeout, non-success response, blocked page, or search snippet is not evidence for a factual claim. Later phases and synthesis may cite only URLs and facts retained from successful source-discovery/fetch tool results; if authoritative evidence is unavailable, report the gap instead of reconstructing unsupported details.
 
@@ -516,7 +516,7 @@ MODELS (pick per role as "provider::deployment", or "" for the team default):
 
 CONNECTED SERVICES / MCP (select only services the charter genuinely needs):
 {mcp_servers}
-Foundry-native web search, file search, memory, and code execution are Kars plugin tools and do not require MCP. If the customer explicitly requests an installed MCP server, select it and declare `mcp`; the complete capability combination must match one atomic qualification record.
+Foundry-native web search, file search, memory, and code execution are Kars plugin tools and do not require MCP. If the customer explicitly requests an installed MCP server, select it and declare `mcp`; the complete capability combination must meet the configured route policy, and the selected server still needs current resource-specific evidence.
 
 SHARED MEMORY STORES (optional; default to a qualified Foundry-backed store when one is already configured and useful for continuity):
 {memories}
@@ -527,7 +527,7 @@ APPROVED SKILLS (assign only when a role genuinely benefits from the recipe belo
 EFFICIENCY FRONTIER (learned from completed runs; honest signal is human ACCEPTANCE):
 {efficiency}
 
-QUALIFIED EXECUTION RECORDS (the full team plan MUST fit one route record; records do not compose):
+ROUTE QUALIFICATION POLICY AND RECORDS (follow the configured policy; never claim missing evidence):
 {qualification_constraints}
 
 RESOURCE QUALIFICATION RECORDS (selected MCP servers, memory bindings, and skills MUST match one current-digest record on the chosen route; generic route records do not count):

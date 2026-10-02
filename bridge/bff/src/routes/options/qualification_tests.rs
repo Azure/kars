@@ -11,6 +11,71 @@ use super::{
 use std::collections::BTreeSet;
 
 #[test]
+fn route_validation_mode_is_explicit_and_defaults_to_required() {
+    use super::RouteQualificationMode as Mode;
+    assert_eq!(Mode::parse(None).unwrap(), Mode::Required);
+    assert_eq!(Mode::parse(Some("required")).unwrap(), Mode::Required);
+    assert_eq!(Mode::parse(Some("validation")).unwrap(), Mode::Validation);
+    for value in ["", " ", "Validation", "validation ", "disabled", "allow"] {
+        assert!(Mode::parse(Some(value)).is_err(), "accepted {value:?}");
+    }
+    assert!(!Mode::Required.admit(Ok(false)).unwrap());
+    assert!(Mode::Validation.admit(Ok(false)).unwrap());
+    for mode in [Mode::Required, Mode::Validation] {
+        assert!(mode.admit(Ok(true)).unwrap());
+        assert_eq!(
+            mode.admit(Err("bad configuration".into())).unwrap_err(),
+            "bad configuration"
+        );
+    }
+}
+
+#[test]
+fn validation_record_loading_never_invents_route_or_resource_evidence() {
+    use super::{RouteQualificationMode as Mode, configured_records};
+    assert!(configured_records(Mode::Required, None, None).is_err());
+    let records = configured_records(Mode::Validation, None, None).unwrap();
+    assert!(records.is_empty());
+    let raw = serde_json::to_string(&records).unwrap();
+    let capabilities = ["single-agent", "telemetry"]
+        .map(String::from)
+        .into_iter()
+        .collect();
+    assert!(
+        !route_is_qualified_in(
+            &raw,
+            "OpenClaw",
+            "foundry",
+            "gpt-4.1",
+            &capabilities,
+            1,
+            None
+        )
+        .unwrap()
+    );
+    let resource = channel_resource_selection("slack");
+    assert!(!resource_is_qualified_in(&raw, "OpenClaw", "foundry", "gpt-4.1", &resource).unwrap());
+    for mode in [Mode::Required, Mode::Validation] {
+        assert!(
+            configured_records(mode, Some("[]"), Some(" "))
+                .unwrap()
+                .is_empty()
+        );
+        for invalid in ["", "not-json", "{}", "null", "[{\"runtime\":\"OpenClaw\"}]"] {
+            assert!(configured_records(mode, Some(invalid), None).is_err());
+            let error = configured_records(mode, Some("[]"), Some(invalid));
+            if !invalid.is_empty() {
+                assert!(
+                    error
+                        .unwrap_err()
+                        .contains("BRIDGE_ADDITIONAL_QUALIFICATION_RECORDS_JSON")
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn qualification_requires_route_capabilities_constraints_and_evidence() {
     let routes = r#"[
           {

@@ -37,7 +37,8 @@ pub struct ComposeDelegation {
 pub struct ComposeProposal {
     pub tier: i32,
     pub model: Option<ComposeModel>,
-    /// Ordered routes that independently qualify the complete Mission package.
+    /// Ordered routes independently admitted for the complete Mission package.
+    /// Validation-mode admission is not retained qualification evidence.
     pub model_fallbacks: Vec<ComposeModel>,
     /// Plain-language basis for the model choice, so the reviewer sees WHY this
     /// model was proposed — the learned efficiency frontier, the orchestrator's
