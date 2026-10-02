@@ -571,8 +571,13 @@ export function FailureDiagnostic({
   );
 }
 
-export function CompositionPanel({ composition, launched }: { composition: Composition; launched: boolean }) {
+export function CompositionPanel({ composition, launched, envelopeToolPolicy }: {
+  composition: Composition;
+  launched: boolean;
+  envelopeToolPolicy: string | null;
+}) {
   const c = composition;
+  const toolPolicy = c.tool_policy?.trim() || (!launched && envelopeToolPolicy?.trim()) || null;
   return (
     <section className="rounded-xl border border-border bg-surface p-6">
       <h2 className="text-sm font-semibold">How this mission runs</h2>
@@ -584,7 +589,7 @@ export function CompositionPanel({ composition, launched }: { composition: Compo
       <dl className="mt-4 grid gap-x-8 gap-y-4 sm:grid-cols-2">
         <Fact label="Model" value={c.model} />
         <Fact label="Harness" value={c.runtime} />
-        <Fact label="Tool policy" value={c.tool_policy ?? "None — model only"} />
+        <Fact label="Tool policy" value={toolPolicy ?? (launched ? "Runtime policy not reported" : "Policy not reported")} />
         <Fact label="Isolation" value={c.isolation} />
         <Fact
           label="Connected services"
@@ -592,6 +597,13 @@ export function CompositionPanel({ composition, launched }: { composition: Compo
         />
         <Fact label="Shared memory" value={c.memory ?? "None"} />
       </dl>
+      <p className="mt-3 text-xs text-foreground-muted">
+        {toolPolicy === "kars-default"
+          ? "kars-default permits governed tools, including shell and Foundry tools. Instructions to avoid tools do not disable them."
+          : toolPolicy
+          ? "The policy name alone does not establish which tools are permitted; review its rules."
+          : "Missing policy information is not evidence that tools are disabled."}
+      </p>
       <div className="mt-4 border-t border-border pt-4">
         <p className="text-xs font-medium text-foreground-muted">Network egress</p>
         {c.egress.length === 0 ? (

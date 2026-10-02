@@ -450,7 +450,7 @@ export default async function MissionDetail({
             node: (
               <div className="space-y-5">
                 {task.launched && <DeployTimeline task={displayTask} />}
-                {task.composition && <CompositionPanel composition={task.composition} launched={task.launched} />}
+                {task.composition && <CompositionPanel composition={task.composition} launched={task.launched} envelopeToolPolicy={task.envelope.tool_policy} />}
                 {task.composition && (
                   <ReadinessPanel
                     composition={task.composition}

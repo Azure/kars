@@ -358,7 +358,7 @@ export function renderReview({
           onChange={(e) => setToolPolicy(e.target.value)}
           className="mt-1.5 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
         >
-          <option value="">None — model only (no governed tools)</option>
+          <option value="">Default — kars-default (governed tools permitted)</option>
           {options.tool_policies.map((t) => (
             <option key={t.name} value={t.name}>
               {t.name}
@@ -366,6 +366,11 @@ export function renderReview({
             </option>
           ))}
         </select>
+        <p className="mt-1.5 text-xs text-foreground-muted">
+          Leaving this at Default selects kars-default, which permits governed tools, including
+          shell and Foundry tools. It does not disable tools. Instructions to avoid tools are
+          not a no-tools policy; review the selected policy before launch.
+        </p>
 
         <div className="mt-4">
           <label className="text-xs font-medium text-foreground-muted">Connected services (MCP)</label>

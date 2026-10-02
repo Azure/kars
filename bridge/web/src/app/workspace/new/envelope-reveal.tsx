@@ -82,7 +82,7 @@ export function EnvelopeReveal({
           ? `${delegation.roles.map((role) => role.name).join(", ")} · up to ${delegation.max_parallel} in parallel.`
           : "Best for small, tightly coupled work where delegation would add overhead.",
     },
-    { icon: "wrench", label: "Tool policy", value: blueprint.tool_policy ?? "none — model only", why: blueprint.tool_policy ? "Bounds every tool the agent may call." : "No tools — pure reasoning." },
+    { icon: "wrench", label: "Tool policy", value: blueprint.tool_policy?.trim() || "kars-default (default)", why: blueprint.tool_policy?.trim() ? "Review this policy's permitted actions before launch." : "Default permits governed tools, including shell and Foundry tools. No-tools instructions do not disable tools." },
     { icon: "plug", label: "Connected services", value: blueprint.mcp_servers?.length ? blueprint.mcp_servers.map(humanizeMcp).join(", ") : "none", why: blueprint.mcp_servers?.length ? "MCP servers the agent may reach, bounded by the tool policy." : undefined },
     { icon: "globe", label: "Network egress", value: blueprint.egress?.length ? blueprint.egress.map((e) => e.host + (e.port ? `:${e.port}` : "")).join(", ") : "model path only", why: blueprint.egress?.length ? "Exact host:port destinations allowed at the network boundary; everything else is denied." : "Default-deny — only the model path is reachable." },
     { icon: "shield", label: "Isolation", value: blueprint.isolation ?? "standard", why: "Sandbox hardening level." },

@@ -75,6 +75,14 @@ Everything is not a production integration. See [MCP servers](mcp-servers.md).
 
 ## 6. Run the first mission
 
+Review the tool policy before launching. Leaving the Home policy selector at
+**Default** selects `kars-default`; it does not disable tools. The bundled default
+permits governed tools including shell and Foundry tools. Instructions such as
+“use general knowledge only” are not an enforced no-tools policy. Select an
+operator-reviewed restrictive policy when needed, retaining the permissions
+required for AgentMesh task delivery. A missing policy in runtime telemetry is
+shown as not reported, not as proof that tools are disabled.
+
 Create a mission that:
 
 1. uses `everything.echo` and `everything.get-sum`;
