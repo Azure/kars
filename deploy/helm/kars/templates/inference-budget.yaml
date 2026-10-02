@@ -3,6 +3,7 @@ Licensed under the MIT License. */}}{{- /*
 Governed inference only. No prices, model limits, free providers, or TLS
 identities are guessed. Old/reused values without this block render no broker.
 */ -}}
+{{- include "kars.inferenceBudget.tls.validate" . -}}
 {{- $budget := .Values.inferenceBudget | default dict -}}
 {{- if and (hasKey $budget "enabled") (not (kindIs "bool" $budget.enabled)) (not (kindIs "invalid" $budget.enabled)) -}}
 {{- fail "inferenceBudget.enabled must be a boolean" -}}
@@ -17,6 +18,25 @@ identities are guessed. Old/reused values without this block render no broker.
 {{- fail "inferenceBudget.routerImageDigest must be a qualified sha256 manifest digest" -}}
 {{- end -}}
 {{- if contains "PRIVATE KEY" $ca -}}{{- fail "inferenceBudget.caBundle must contain public certificates only" -}}{{- end -}}
+{{- $identity := $budget.tls | default dict -}}
+{{- if $identity.certificate }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: {{ $tls | quote }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    kars.azure.com/inference-budget-tls: v1
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: inference-budget
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+type: kubernetes.io/tls
+data:
+  tls.crt: {{ $identity.certificate | b64enc | quote }}
+  tls.key: {{ $identity.privateKey | b64enc | quote }}
+---
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:

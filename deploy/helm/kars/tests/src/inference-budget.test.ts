@@ -12,7 +12,7 @@ const { parse, parseAllDocuments } = require("yaml");
 const chart = fileURLToPath(new URL("../../", import.meta.url));
 let counter = 0;
 
-function render(inferenceBudget?: unknown) {
+function render(inferenceBudget?: unknown, existingSecret?: unknown) {
   const fixture = join(chart, "tests", `.budget-fixture-${process.pid}-${++counter}`);
   mkdirSync(fixture);
   try {
@@ -22,6 +22,14 @@ function render(inferenceBudget?: unknown) {
     const values = parse(readFileSync(join(chart, "values.yaml"), "utf8"));
     delete values.inferenceBudget;
     if (inferenceBudget !== undefined) values.inferenceBudget = inferenceBudget;
+    if (existingSecret !== undefined) {
+      const helper = join(fixture, "templates/_inference-budget-tls.tpl");
+      const source = readFileSync(helper, "utf8");
+      const lookup = 'lookup "v1" "Secret" .Release.Namespace $name';
+      expect(source.split(lookup)).toHaveLength(2);
+      writeFileSync(helper, source.replace(lookup, "(.Values.testExistingBudgetSecret | default dict)"));
+      values.testExistingBudgetSecret = existingSecret;
+    }
     values.controller.replicas = 3;
     values.controller.extraEnv = [{ name: "CUSTOMER_SETTING", value: "preserved" }];
     writeFileSync(join(fixture, "values.yaml"), JSON.stringify(values));
@@ -140,6 +148,95 @@ describe("governed inference budget Helm contract", () => {
       expect(() => render(incomplete)).toThrow(/inferenceBudget/);
     },
   );
+
+  const suppliedTls = {
+    certificate: "-----BEGIN CERTIFICATE-----\npublic-test-fixture\n-----END CERTIFICATE-----",
+    privateKey: "-----BEGIN PRIVATE KEY-----\nprivate-test-fixture\n-----END PRIVATE KEY-----",
+  };
+
+  it("installs supplied TLS only as a release-managed private Secret", () => {
+    const documents = render({ ...configured, tls: suppliedTls });
+    const secrets = documents.filter((doc: { kind: string }) => doc.kind === "Secret");
+    expect(secrets).toHaveLength(1);
+    const secret = secrets[0];
+    expect(secret.metadata.name).toBe(configured.tlsSecretName);
+    expect(secret.metadata.namespace).toBe("customer-system");
+    expect(secret.metadata.labels["app.kubernetes.io/managed-by"]).toBe("Helm");
+    expect(secret.metadata.annotations["kars.azure.com/inference-budget-tls"]).toBe("v1");
+    expect(secret.type).toBe("kubernetes.io/tls");
+    expect(Buffer.from(secret.data["tls.crt"], "base64").toString()).toBe(suppliedTls.certificate);
+    expect(Buffer.from(secret.data["tls.key"], "base64").toString()).toBe(suppliedTls.privateKey);
+    const publicDocuments = JSON.stringify(documents.filter((doc: { kind: string }) => doc.kind !== "Secret"));
+    expect(publicDocuments).not.toContain("private-test-fixture");
+    expect(publicDocuments).not.toContain(secret.data["tls.key"]);
+  });
+
+  it("accepts only live, same-release, explicitly owned budget TLS Secrets", () => {
+    const owned = {
+      type: "kubernetes.io/tls",
+      metadata: {
+        annotations: {
+          "meta.helm.sh/release-name": "retained-release",
+          "meta.helm.sh/release-namespace": "customer-system",
+          "kars.azure.com/inference-budget-tls": "v1",
+        },
+        labels: { "app.kubernetes.io/managed-by": "Helm" },
+      },
+    };
+    const budget = { ...configured, tls: suppliedTls };
+    expect(() => render(budget, owned)).not.toThrow();
+    const invalid = [
+      { ...owned, type: "Opaque" },
+      { ...owned, metadata: { ...owned.metadata, deletionTimestamp: "2026-01-01T00:00:00Z" } },
+      { ...owned, metadata: { ...owned.metadata, annotations: {} } },
+      { ...owned, metadata: { ...owned.metadata, labels: {} } },
+      ...Object.keys(owned.metadata.annotations).map((key) => ({
+        ...owned,
+        metadata: { ...owned.metadata, annotations: { ...owned.metadata.annotations, [key]: "foreign" } },
+      })),
+    ];
+    for (const secret of invalid) {
+      expect(() => render(budget, secret)).toThrow(/cannot adopt or replace/);
+    }
+  });
+
+  it("rolls the controller for managed certificate or key changes only", () => {
+    const checksum = (budget: unknown) => render(budget).find(
+      (doc: { kind: string; metadata: { name: string } }) =>
+        doc.kind === "Deployment" && doc.metadata.name === "kars-controller",
+    ).spec.template.metadata.annotations?.["checksum/inference-budget-tls"];
+    expect(checksum(configured)).toBeUndefined();
+    const initial = checksum({ ...configured, tls: suppliedTls });
+    expect(initial).toMatch(/^[a-f0-9]{64}$/);
+    expect(checksum({ ...configured, tls: suppliedTls })).toBe(initial);
+    for (const field of ["certificate", "privateKey"] as const) {
+      expect(checksum({ ...configured, tls: { ...suppliedTls, [field]: `${suppliedTls[field]}\n` } }))
+        .not.toBe(initial);
+    }
+  });
+
+  it.each([
+    { certificate: suppliedTls.certificate },
+    { privateKey: suppliedTls.privateKey },
+    { ...suppliedTls, certificate: " " },
+    { ...suppliedTls, privateKey: " " },
+    { ...suppliedTls, certificate: suppliedTls.privateKey },
+    { ...suppliedTls, privateKey: "-----BEGIN ENCRYPTED PRIVATE KEY-----" },
+  ])("rejects incomplete or invalid supplied TLS %s", (tls) => {
+    expect(() => render({ ...configured, tls })).toThrow(/inferenceBudget.tls/);
+  });
+
+  it("does not silently discard a supplied identity when disabled", () => {
+    expect(() => render({ ...configured, enabled: false, tls: suppliedTls }))
+      .toThrow(/inferenceBudget.tls requires inferenceBudget.enabled/);
+    const documents = render({ ...configured, enabled: false, tls: {} });
+    expect(documents.some((doc: { kind: string }) => doc.kind === "Secret")).toBe(false);
+  });
+
+  it("rejects an invalid managed Secret name", () => {
+    expect(() => render({ ...configured, tlsSecretName: "wrong/name", tls: suppliedTls }))
+      .toThrow(/inferenceBudget.tlsSecretName must be a Secret name/);
+  });
 
   it("never places private TLS keys in a public CA ConfigMap", () => {
     expect(() => render({ ...configured, caBundle: "-----BEGIN PRIVATE KEY-----" }))

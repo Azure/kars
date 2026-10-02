@@ -198,11 +198,34 @@ Enable the optional Helm `inferenceBudget` section only after supplying:
   ignores the new budget environment must not be mistaken for enforcement.
 
 The TLS Secret has type `kubernetes.io/tls`, `tls.crt`/`tls.key`, and annotation
-`kars.azure.com/inference-budget-tls: v1`. It is operator-provided, not generated
-with a development certificate or mounted into agents. The CA ConfigMap contains
-public certificates only. Certificate issuance and accurate, maintained provider
-bounds/tariffs are operator responsibilities, not external database requirements.
-TLS/certificate rotation must preserve trustworthy CA overlap during rollout.
+`kars.azure.com/inference-budget-tls: v1`. Choose either installation mode:
+
+- **Existing Secret:** set `tlsSecretName` and leave `tls.certificate` and
+  `tls.privateKey` empty. The chart does not create, adopt or rotate that Secret.
+- **Core Helm-managed Secret:** set `tlsSecretName`, and supply both
+  `tls.certificate` and `tls.privateKey` using protected values or `--set-file`.
+  Core installs the supplied PEM identity; no extra product release, raw manifest,
+  certificate generator or automatic development trust is required. A conflicting
+  live Secret not already owned as budget TLS by this release is rejected.
+  **The private key is stored in Helm release history.** Do not use this mode
+  if your secret-management policy prohibits that storage; never commit these
+  values or expose rendered manifests/logs. Helm deletes its managed Secret when
+  the supplied identity is removed, the feature is disabled (with identity fields
+  cleared), or the release is uninstalled. Finite inference then fails closed.
+
+Partial supplied identities and public certificates containing private keys are
+rejected. PEM framing is checked at render time; the broker validates certificate
+and key parsing/pairing, and routers validate server trust and hostname. Operators
+must supply an unexpired certificate for the service DNS name and its trusted CA.
+The key is never mounted into agents. The CA ConfigMap is public certificates only.
+
+Managed certificate/key changes update the controller Pod checksum and trigger a
+rollout. With an externally managed Secret, explicitly roll the controller after
+rotation. Both modes require trustworthy CA overlap and updating/recreating finite
+router Pods through their supported lifecycle so they trust the new issuer before
+removing the old CA. Certificate issuance and accurate, maintained provider
+bounds/tariffs remain operator responsibilities. A locally issued Kind development
+certificate is validation-only and does not qualify production/AKS trust.
 
 Finite accounts fail closed for missing/expired/unknown bounds, missing prices
 when any ancestor needs a currency cap, or unavailable admission/privacy proof.

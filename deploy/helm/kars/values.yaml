@@ -36,9 +36,15 @@ inferenceBudget:
   catalogVersion: ""
   contracts: []
   nonInferenceEgressHosts: []
-  # Explicit operator-owned TLS identity. No key or pricing is generated here.
+  # Reference an existing operator TLS Secret, or supply both PEM fields below
+  # to install it in this Core release. No certificates or keys are generated.
   tlsSecretName: ""
   caBundle: ""
+  tls:
+    certificate: ""
+    # Supplied keys are stored in Helm release history; use existing-Secret mode
+    # when your secret-management policy prohibits that storage.
+    privateKey: ""
 
 # Controller configuration
 # Required for explicitly enrolled private observations. Does not expose a

@@ -2,7 +2,9 @@
 Licensed under the MIT License. */}}{{- $localInference := .Values.localInference | default dict }}
 {{- $privacyRpc := .Values.observationPrivacyRpc | default dict }}
 {{- include "kars.inferenceCredentials.validate" . }}
+{{- include "kars.inferenceBudget.tls.validate" . }}
 {{- $inferenceCredentials := .Values.inferenceRouter.azure.openai.credentials | default dict }}
+{{- $budgetTls := (.Values.inferenceBudget | default dict).tls | default dict }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -19,9 +21,14 @@ spec:
       app.kubernetes.io/component: controller
   template:
     metadata:
-      {{- if $inferenceCredentials.apiKey }}
+      {{- if or $inferenceCredentials.apiKey $budgetTls.certificate }}
       annotations:
+        {{- if $inferenceCredentials.apiKey }}
         checksum/inference-credentials: {{ $inferenceCredentials.apiKey | sha256sum | quote }}
+        {{- end }}
+        {{- if $budgetTls.certificate }}
+        checksum/inference-budget-tls: {{ dict "certificate" $budgetTls.certificate "privateKey" $budgetTls.privateKey | toJson | sha256sum | quote }}
+        {{- end }}
       {{- end }}
       labels:
         app.kubernetes.io/name: kars
