@@ -148,6 +148,21 @@ The plugin automatically receives status updates and the final result via the me
 
 3. **Security**: All relay messages are opaque base64 payloads. The pairing token is never stored (only its SHA-256 hash). Your Ed25519 identity provides authentication. The sandbox runs with full kars security (seccomp, NetworkPolicy, read-only rootfs, Content Safety).
 
+## Received-message encryption evidence
+
+`IMeshTransport.onMessage` handlers and `waitForMessage` / `sendWithAck`
+predicates receive a third argument: `"encrypted"`, `"plaintext"`, or `"unknown"`.
+Inbox records carry the same `security` field. Only the SDK's explicit successful
+encrypted receive path yields `"encrypted"`; missing metadata is `"unknown"`.
+Payload fields and a previous encrypted message from the same peer cannot upgrade
+that evidence. Existing two-argument callbacks remain supported.
+
+Consumers requiring encrypted delivery must check each message's evidence,
+including acknowledgements. Explicit plaintext compatibility peers remain
+plaintext. Encrypted sends establish an SDK session first and propagate handshake
+failure without falling back to plaintext. This evidence describes transport,
+not permission to execute an instruction or proof that work was completed.
+
 ## Files created
 
 | Path | Purpose |
