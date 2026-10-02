@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Core Helm schema bootstrap
 
 The opt-in `schemaHook` publishes Core's CRDs from the exact pending Helm release
@@ -46,8 +49,12 @@ helm package deploy/helm/kars
 ```
 
 The CLI build generates `deploy/helm/kars/files/schema-hook.mjs` and its dependency
-NOTICE before bundling deployment assets. `check:schema-hook` refuses stale or
-missing generated output without rewriting it. The chart mounts the exact bundle
+NOTICE before bundling deployment assets. Generate it with the committed CLI
+lockfile: the bundler refuses an installed `yaml` version that differs from that
+lockfile, including mismatched shared development dependencies. Restore dependencies
+in a separate temporary build directory rather than modifying another checkout's
+shared `node_modules`. `check:schema-hook` refuses stale or missing generated output
+without rewriting it. The chart mounts the exact bundle
 bytes from an immutable ConfigMap; the helper image supplies only Node and the
 Helm/kubectl clients. Preserve `schema-hook.NOTICE` when distributing the chart.
 

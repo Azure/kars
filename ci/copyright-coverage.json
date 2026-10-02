@@ -43,6 +43,11 @@
     }
   },
   "files": {
+    "deploy/helm/kars/files/schema-hook.NOTICE": {
+      "category": "legal",
+      "reason": "Generated yaml dependency attribution and upstream license from cli/scripts/bundle-schema-hook.mjs; preserve its original ownership rather than adding a Microsoft source header.",
+      "notice": "NOTICE"
+    },
     "tools/headlamp-plugin/dist/main.js": {
       "category": "generated",
       "reason": "Reviewed Headlamp bundle produced by headlamp-plugin build in tools/headlamp-plugin/package.json; preserve bundled source/dependency notices and artifact bytes.",
