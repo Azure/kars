@@ -23,7 +23,7 @@ export interface IntakeState {
 /** Validate the composed package against the live cluster (the §20 gate). */
 export async function validateMissionAction(
   blueprint: unknown,
-  envelope?: { tier?: number; budget_tokens?: number | null },
+  envelope?: Parameters<typeof import("@/lib/bff").validatePackage>[2],
 ): Promise<import("@/lib/types").ValidationResult> {
   const { validatePackage } = await import("@/lib/bff");
   return validatePackage(defaultNamespace(), blueprint, envelope);
@@ -92,12 +92,25 @@ export async function createMissionAction(
   const objective = String(formData.get("objective") ?? "").trim();
   const displayName = String(formData.get("display_name") ?? "").trim();
   const tier = Number(formData.get("tier")) || 3;
-  const tokens = ((): number | null => {
-    const v = formData.get("budget_tokens");
-    if (v == null || v === "") return null;
-    const n = Number(v);
-    return Number.isFinite(n) ? Math.trunc(n) : null;
-  })();
+  const limits: Record<"tokens" | "usd_micros", number | null> = { tokens: null, usd_micros: null };
+  for (const field of ["tokens", "usd_micros"] as const) {
+    const raw = formData.get(`budget_${field}`);
+    if (raw == null || (typeof raw === "string" && raw.trim() === "")) continue;
+    const value = typeof raw === "string" ? Number(raw) : NaN;
+    if (!Number.isSafeInteger(value) || value <= 0) {
+      return { error: "Budget limits must be positive safe whole numbers, or blank. An invalid cap cannot be discarded." };
+    }
+    limits[field] = value;
+  }
+  const hasBudget = limits.tokens !== null || limits.usd_micros !== null;
+  const scope = formData.get("budget_scope");
+  if ((hasBudget && scope !== "GovernedInference") ||
+      (scope != null && scope !== "" && scope !== "GovernedInference")) {
+    return { error: "Review this new mission with explicit GovernedInference budget scope before creating it." };
+  }
+  if (!hasBudget && scope === "GovernedInference") {
+    return { error: "GovernedInference enrollment requires a positive reviewed limit." };
+  }
   const launch = formData.get("launch") === "on";
   // The authority ceiling for delegated sub-roles defaults to one tier below
   // the mission (a mission never grants a child more than it holds).
@@ -152,7 +165,7 @@ export async function createMissionAction(
       tier,
       authority_ceiling: authorityCeiling,
       delegation_depth: delegationDepth,
-      budget: tokens == null ? null : { tokens, usd_micros: null },
+      budget: hasBudget ? { scope: "GovernedInference", ...limits } : null,
       tool_policy: null,
       egress_allowlist: null,
     },

@@ -349,7 +349,13 @@ export function getOptions(): Promise<Options> {
 export function validatePackage(
   namespace: string,
   blueprint: unknown,
-  envelope?: { tier?: number; budget_tokens?: number | null; workload?: "mission" | "team" },
+  envelope?: {
+    tier?: number;
+    budget_tokens?: number | null;
+    budget_usd_micros?: number | null;
+    budget_scope?: import("./types").Budget["scope"];
+    workload?: "mission" | "team";
+  },
 ): Promise<import("./types").ValidationResult> {
   return requestJson(
     `/api/namespaces/${encodeURIComponent(namespace)}/validate`,
@@ -357,6 +363,8 @@ export function validatePackage(
       blueprint,
       tier: envelope?.tier,
       budget_tokens: envelope?.budget_tokens ?? undefined,
+      budget_usd_micros: envelope?.budget_usd_micros ?? undefined,
+      budget_scope: envelope?.budget_scope,
       workload: envelope?.workload,
     }) },
   );
