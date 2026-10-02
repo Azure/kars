@@ -56,6 +56,15 @@ controller reads credentials at startup.
 Do not set both `apiKey` and `existingSecret`, or duplicate
 `AZURE_OPENAI_API_KEY` through `controller.extraEnv`.
 
+## Home composition model compatibility
+
+Home composition uses the current Chat Completions `max_completion_tokens` limit
+for both the governed router path and an explicit operator endpoint. The limit
+covers reasoning and visible output, including when an InferencePolicy selects a
+reasoning deployment behind a model alias. Native Anthropic Messages requests
+retain `max_tokens`. Router selection excludes terminating Pods during rollout;
+readiness alone does not make a deleting Pod a usable inference target.
+
 ## Security and qualification boundaries
 
 - `--set-file` avoids command-line disclosure, **not** Helm release-history
