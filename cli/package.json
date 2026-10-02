@@ -15,7 +15,9 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "tsc && chmod +x dist/index.js && cp -r profiles dist/profiles && node scripts/bundle-deploy-assets.mjs",
+    "build": "tsc && chmod +x dist/index.js && cp -r profiles dist/profiles && npm run build:schema-hook && node scripts/bundle-deploy-assets.mjs",
+    "build:schema-hook": "node scripts/bundle-schema-hook.mjs",
+    "check:schema-hook": "node scripts/bundle-schema-hook.mjs --check",
     "dev": "tsx watch src/index.ts",
     "lint": "oxlint .",
     "format": "oxfmt .",

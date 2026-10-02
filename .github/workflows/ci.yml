@@ -265,12 +265,17 @@ jobs:
       - name: Require standalone core checkout
         working-directory: .
         run: test ! -e bridge
+      - uses: azure/setup-helm@9bc31f4ebc9c6b171d7bfbaa5d006ae7abdb4310 # v5.0.1
+        with:
+          version: v4.1.3
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
       - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
+      - name: Check committed schema bootstrap bundle
+        run: npm run check:schema-hook
       - run: npm run build
       - run: npm test
       # S17.A: SCA gate — fail on `high` or `critical` advisories in
