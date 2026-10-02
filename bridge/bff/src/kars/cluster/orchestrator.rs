@@ -245,7 +245,7 @@ impl Cluster {
             .await
             .map_err(|error| error.to_string())?
             .as_ref()
-            .is_some_and(&policy_ready)
+            .is_some_and(policy_ready)
         {
             return Ok(());
         }
@@ -298,7 +298,7 @@ impl Cluster {
                 .await
                 .map_err(|error| error.to_string())?
                 .as_ref()
-                .is_some_and(&policy_ready);
+                .is_some_and(policy_ready);
             if ready {
                 return Ok(());
             }
