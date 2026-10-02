@@ -22,7 +22,8 @@
 //!    not the derived `agentIdentityBlueprint` type we need).
 //! 3. Blueprint service principal: required for the blueprint to be
 //!    visible in the Entra portal and for agent identities to derive
-//!    from it. Created via `az ad sp create --id <blueprint-app-id>`.
+//!    from it. Created through Graph's typed BlueprintPrincipal endpoint;
+//!    existing principals must match both the blueprint appId and type.
 //! 4. Controller managed identity: an ARM `userAssignedIdentities`
 //!    resource in the customer's subscription. The MI's principalId
 //!    becomes the subject of the blueprint's federated identity
@@ -313,35 +314,68 @@ async function createBlueprint(
   return created;
 }
 
+const BLUEPRINT_PRINCIPAL_TYPE = "microsoft.graph.agentIdentityBlueprintPrincipal";
+const BLUEPRINT_PRINCIPAL_PATH = "/beta/servicePrincipals/microsoft.graph.agentIdentityBlueprintPrincipal";
+
 interface SpGraphResponse {
   id: string;
   appId: string;
-  displayName: string;
+  "@odata.type"?: string;
+}
+
+function validateBlueprintSp(value: unknown, appId: string, expectedId?: string): SpGraphResponse {
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Graph returned an invalid BlueprintPrincipal response");
+  }
+  const sp = value as Record<string, unknown>;
+  if (
+    typeof sp.id !== "string" || !sp.id.trim() || sp.id !== sp.id.trim() ||
+    typeof sp.appId !== "string" || sp.appId.toLowerCase() !== appId.toLowerCase() ||
+    (expectedId !== undefined && sp.id.toLowerCase() !== expectedId.toLowerCase())
+  ) {
+    throw new Error("Graph BlueprintPrincipal identity does not match the requested blueprint");
+  }
+  const type = sp["@odata.type"];
+  if (type !== undefined && (typeof type !== "string" || type.replace(/^#/, "") !== BLUEPRINT_PRINCIPAL_TYPE)) {
+    throw new Error("Graph service principal is not an agentIdentityBlueprintPrincipal");
+  }
+  return { id: sp.id, appId: sp.appId, "@odata.type": type === undefined ? undefined : BLUEPRINT_PRINCIPAL_TYPE };
 }
 
 async function ensureBlueprintSp(appId: string): Promise<SpGraphResponse> {
-  // Look up first.
-  interface ListResp {
-    value: SpGraphResponse[];
+  if (typeof appId !== "string" || !appId.trim() || appId !== appId.trim()) {
+    throw new Error("Cannot ensure BlueprintPrincipal without a valid blueprint appId");
   }
-  const filter = encodeURIComponent(`appId eq '${appId}'`);
-  const existing = await azGraphRest<ListResp>(
+  const filter = encodeURIComponent(`appId eq '${appId.replaceAll("'", "''")}'`);
+  const response = await azGraphRest<unknown>(
     "GET",
-    `/beta/servicePrincipals?$filter=${filter}&$top=1`,
+    `/beta/servicePrincipals?$filter=${filter}&$top=2`,
   );
-  if (existing && existing.value && existing.value.length > 0) {
-    return existing.value[0];
+  if (!response || typeof response !== "object" || Array.isArray(response)) {
+    throw new Error("Graph returned an invalid BlueprintPrincipal lookup");
   }
-  // Create.
-  const created = await azGraphRest<SpGraphResponse>(
+  const existing = response as Record<string, unknown>;
+  if (!Array.isArray(existing.value)) {
+    throw new Error("Graph returned an invalid BlueprintPrincipal lookup");
+  }
+  if (existing.value.length > 1 || existing["@odata.nextLink"] !== undefined) {
+    throw new Error("Graph BlueprintPrincipal lookup is ambiguous or incomplete; refusing to provision");
+  }
+  if (existing.value.length === 1) {
+    const sp = validateBlueprintSp(existing.value[0], appId);
+    if (sp["@odata.type"] === BLUEPRINT_PRINCIPAL_TYPE) return sp;
+    // Minimal OData metadata can omit the type. Require a successful typed
+    // read of this exact object rather than treating an ordinary SP as trusted.
+    return validateBlueprintSp(await azGraphRest<unknown>(
+      "GET",
+      `/beta/servicePrincipals/${encodeURIComponent(sp.id)}/microsoft.graph.agentIdentityBlueprintPrincipal`,
+    ), appId, sp.id);
+  }
+  return validateBlueprintSp(await azGraphRest<unknown>(
     "POST",
-    "/beta/servicePrincipals",
+    BLUEPRINT_PRINCIPAL_PATH,
     { appId },
-  );
-  if (!created || !created.id) {
-    throw new Error("Graph POST /servicePrincipals returned an empty response");
-  }
-  return created;
+  ), appId);
 }
 
 interface ManagedIdentityResponse {

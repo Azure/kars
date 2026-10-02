@@ -76,8 +76,17 @@ What happens for Entra Agent ID, transparently:
 1. **Preflight.** Confirms you hold `Agent ID Developer` (or stronger).
 2. **Blueprint.** If the tenant already has a `kars-blueprint`
    application, kars reuses it. Otherwise it creates one via Microsoft
-   Graph and registers its service principal so it appears in the
-   Entra Agents portal.
+   Graph and ensures its typed `agentIdentityBlueprintPrincipal` through
+   the [Graph BlueprintPrincipal API](https://learn.microsoft.com/en-us/graph/api/agentidentityblueprintprincipal-post?view=graph-rest-beta).
+   The CLI checks the principal's object ID, matching blueprint appId,
+   and derived type before provisioning credentials or writing
+   `KarsAuthConfig`. Both documented type annotations (with or without the
+   leading `#`) are accepted. An existing principal with omitted type metadata
+   requires a successful [typed read](https://learn.microsoft.com/en-us/graph/api/agentidentityblueprintprincipal-get?view=graph-rest-beta)
+   of that same object. Ordinary service
+   principals, mismatched IDs, ambiguous or incomplete lookups, and malformed
+   responses stop setup rather than being adopted or replaced. This type
+   check does not grant permissions or establish a usable Graph credential.
 3. **Controller MI.** A user-assigned managed identity in your
    subscription, scoped to this cluster, gets created.
 4. **Federation.** The controller MI is added as a federated identity
@@ -349,9 +358,10 @@ workaround is:
    ```
 
    ```http
-   # 2. Create the SP for the new app (required for RBAC + portal listing)
-   POST https://graph.microsoft.com/v1.0/servicePrincipals
+   # 2. Create the typed BlueprintPrincipal for the new blueprint
+   POST https://graph.microsoft.com/v1.0/servicePrincipals/microsoft.graph.agentIdentityBlueprintPrincipal
    Content-Type: application/json
+   OData-Version: 4.0
 
    { "appId": "<NEW_APP_ID_FROM_STEP_1>" }
    ```
