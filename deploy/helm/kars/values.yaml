@@ -5,6 +5,21 @@
 # NOTE: For production, replace "latest" tags with specific image digests
 #       (e.g., sha256:abc123...) and set pullPolicy to IfNotPresent.
 
+# First-install schema publication inside the Core Helm invocation. Opt-in until
+# the image and real Helm/admission/CNI lifecycle are qualified. Use --create-namespace.
+# No upgrade/replacement/rollback, automatic failure-uninstall or CLI staging.
+# Hooks retain Job, credentials and network isolation even on success. Retire their
+# exact resources only after verified helper termination; Helm uninstall does not.
+schemaHook:
+  enabled: false
+  architecture: amd64
+  image:
+    repository: ""
+    tag: "latest"
+    digest: ""
+  # Exact API service/backend IPv4 /32s and TCP ports for this cluster/CNI.
+  apiDestinations: []
+
 localInference:
   # Opt in to namespace-wide model egress, or prefer precise pod targets below.
   namespaces: []

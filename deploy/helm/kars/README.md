@@ -59,6 +59,17 @@ agentMesh:
   enabled: false
 ```
 
+## Helm-only first-install preview
+
+The opt-in `schemaHook` moves first-install CRD publication into Core's own Helm
+invocation, without `kars schemas prepare` or a third product release. See the
+[schema bootstrap guide](../../../cli/schema-hook/README.md) for the exact
+Helm/Kubernetes versions, image build and digest, API-only networking, installation
+command and retained-helper lifecycle. It remains disabled by default until the
+image and native installation are qualified. It does not yet qualify Bridge,
+Kind/AKS journeys or Helm-only upgrades. Existing CLI preparation below remains
+available for existing installations, not as the accepted beta install path.
+
 ## Validate
 
 ```bash

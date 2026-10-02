@@ -1,12 +1,9 @@
 {{/* Copyright (c) Microsoft Corporation.
-Licensed under the MIT License. */}}# Default-deny NetworkPolicy for the operator namespace.
+Licensed under the MIT License. */}}# Namespace-wide deny and separate operator allowances.
 #
-# Pinned by the CNCF K8s AI conformance suite (criterion C8). The
-# kars controller reaches the K8s API server via the
-# in-cluster service (egress on TCP/443 to kube-apiserver) and
-# scrapes /metrics over TCP/9091 from a co-located Prometheus or
-# `kubectl port-forward`. Everything else is denied unless an
-# operator opts in via an additional NetworkPolicy.
+# The default-deny policy isolates every Pod. The additive operator allow policy
+# preserves existing API, mesh, router, IMDS and metrics access, but excludes the
+# schema helper: its dedicated API-only policy must be its only chart allowance.
 #
 # This is the *operator* namespace policy, distinct from the
 # per-sandbox default-deny that the controller renders inline in
@@ -25,6 +22,21 @@ metadata:
     app.kubernetes.io/part-of: kars
 spec:
   podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress: []
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kars-system-operator-allow
+  namespace: {{ .Release.Namespace | default "kars-system" }}
+spec:
+  podSelector:
+    matchExpressions:
+      - key: app.kubernetes.io/component
+        operator: NotIn
+        values: [schema-hook]
   policyTypes:
     - Ingress
     - Egress
