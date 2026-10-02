@@ -6,19 +6,20 @@ Licensed under the MIT License. -->
 Date: 2026-10-02
 Scope: the principal validation and opt-in schema bootstrap in
 [Azure/kars#573](https://github.com/Azure/kars/pull/573), including the helper,
-chart, network policies, packaging, image recipe, tests and documentation.
-Gated paths: `cli/src/commands/mesh/agent_id_setup.ts`,
+chart, network policies, packaging, image recipe, tests and documentation,
+plus the Bridge dependency and BFF lint repairs described below.
+Original gated paths: `cli/src/commands/mesh/agent_id_setup.ts`,
 `deploy/helm/kars/files/schema-hook.mjs`,
 `deploy/helm/kars/files/schema-hook.NOTICE`.
 
 Source base: `3a6c81564cf2a8a5a201b0cbe63e000738d70133` (`kars-bridge`).
-Source head for requested review: `b3e4d531c123fd943fbe04e5969c84108fc38230`
+Source head for requested review: `301dea274cbf6f89ce9dbef2f1316f2672ec4e22`
 (principal commit `7e5a6255bb8a60eae92dd576df6df68be6130cee`, bootstrap commit
-`8a1ef14708550af9f09e65403be03b4bebfa101d`, and bundle reproducibility/license
-repair `b3e4d531`). This is the exact executable source range described here;
-the subsequent commit adding this record is documentation-only. Later executable
-changes require renewed review. Unpublished Helm/runtime identity integration is
-excluded.
+`8a1ef14708550af9f09e65403be03b4bebfa101d`, bundle reproducibility/license
+repair `b3e4d531`, and Bridge dependency/BFF lint repair `301dea27`). This is the
+exact executable source range described here; the subsequent commit updating
+this record is documentation-only. Later executable changes require renewed
+review. Unpublished Helm/runtime identity integration is excluded.
 
 **Review status:** prepared by GitHub Copilot for human review. Neither an author
 security sign-off nor an independent human review has been obtained. This is not
@@ -155,8 +156,60 @@ Commands are from `cli/` unless stated otherwise:
 Only after these checks passed were the generated program and NOTICE copied back.
 The disposable source, dependency installation and package were removed. The
 shared development installation remains unchanged; its `check:schema-hook` now
-correctly refuses YAML 2.9.0. Verification on CI's Node 22 platform remains pending;
-local generation/tests used Node 24.9.0 with the configured Node 22 output target.
+correctly refuses YAML 2.9.0. Local generation/tests used Node 24.9.0 with the
+configured Node 22 output target. On published head `c3086df1`, the
+[public CLI Build & Test job](https://github.com/Azure/kars/actions/runs/36996841261/job/110805477244)
+passed on Node 22, including locked installation, typecheck, lint, the committed
+bundle freshness check, build, tests and CLI dependency audit.
+
+### Focused Bridge CI repair
+
+Commit `301dea27` changes only the web manifest/lockfile, gateway lockfile and
+two BFF Clippy expressions:
+
+- Next.js, its platform packages and ESLint configuration: 16.3.6.
+- DOMPurify: 3.4.16; brace-expansion: 1.1.21 and 5.0.12.
+- Axios: 1.20.0; ip-address: 10.7.2, within existing gateway parent ranges.
+  The Teams SDK and gateway manifest are unchanged.
+- Both BFF policy-readiness checks pass the same closure without a needless
+  borrow. Their generation, provider, deployment and Ready predicates are
+  unchanged; no authorization check is removed.
+
+npm generated both lockfiles. Existing versions retain their previous registry
+URLs and integrity metadata; the published baseline already uses both npmjs and
+Microsoft public-mirror URLs. This is not a registry migration. No security gate,
+severity threshold or CI command was weakened.
+
+Checks below passed on Node 24.9.0. Install/build/test checks ran in a disposable
+export of committed source with only the three changed dependency files overlaid,
+excluding unfinished identity work and shared dependencies. Both lockfiles stayed
+byte-identical throughout installation and checks; the disposable tree was removed.
+
+- From the repository root,
+  `npm --prefix bridge/web audit --package-lock-only --ignore-scripts --audit-level=high`
+  and
+  `npm --prefix bridge/teams-gateway audit --package-lock-only --ignore-scripts --audit-level=high`
+  — each passed with zero vulnerabilities through the configured npm mirror.
+- In each component,
+  `npm ci --ignore-scripts --no-audit --no-fund --fetch-retries=1 --fetch-timeout=30000`
+  — passed. Lifecycle scripts were disabled.
+- In `bridge/web`, `npm run lint` — passed with zero errors and eight existing
+  warnings in unchanged application files; `./node_modules/.bin/tsc --noEmit`
+  — passed; `node --experimental-strip-types --test tests/*.test.mjs`
+  — passed, 94 tests across nine files, including proxy routing and attribution.
+- In `bridge/teams-gateway`, `npm run lint` — passed without warnings;
+  `npm run build` — passed;
+  `npm test -- tests/gateway.test.ts tests/kubernetes.test.ts` — passed, 31 tests.
+  The bounded fake API server and Helm rendering are not native installation proof.
+- `git diff --cached --check` — passed before the four-file commit.
+
+The exact `ci/npm-audit-bulk.mjs` public-npm gate could not obtain advisory data
+locally: its bounded requests failed with `ENOTCONN`, including a retry using
+Node's supported environment-proxy flag. This is a transport failure, not a
+passing bulk audit. Direct registry regeneration also failed and did not replace
+source. Existing public CI must validate the new source's exact bulk audits,
+Linux/Node 22 build and image checks, and BFF Clippy. No local Rust compilation,
+image build, native cluster execution or full gateway suite was run for this repair.
 
 ### Earlier evidence and remaining qualification
 
@@ -184,10 +237,11 @@ The initial PR CI head `8a1ef147` also failed:
 - BFF Clippy: `needless_borrows_for_generic_args` at
   `bridge/bff/src/kars/cluster/orchestrator.rs:248` and `:301`.
 
-Those dependency inputs and BFF source are not modified by this source range.
-The reports remain unresolved, not dismissed or assessed for application-specific
-exploitability here. Consult the live PR for follow-up CI results; local repair
-validation does not establish that the PR is green.
+The focused repair now updates those dependency inputs and the two BFF expressions.
+Configured-registry audits are clean, but the new public bulk-audit, BFF and image
+results remain pending. The reports are not dismissed or assessed for
+application-specific exploitability here. Consult the live PR for follow-up CI
+results; local repair validation does not establish that the PR is green.
 
 ## Verdict
 
