@@ -3,13 +3,20 @@ Licensed under the MIT License. -->
 
 # Kars Dex security rebuild
 
-**Status: NTLM security update pending hosted Go locks and full requalification.**
-The exact request now includes `github.com/Azure/go-ntlmssp@v0.1.1` for
-CVE-2026-32952. Existing previously qualified files under `locks/generated/`
-remain byte-for-byte unchanged until a new hosted artifact is verified.
-Consequently, their old request stamp does not satisfy the new request:
-normal image/qualification builds must fail closed until reviewed new locks
-are installed. No module checksums were edited by hand.
+**Status: NTLM security update is in the checked-in locks; final-image
+qualification remains required.** Both `locks/requests.txt` and
+`locks/generated/` select `github.com/Azure/go-ntlmssp@v0.1.1` for
+CVE-2026-32952. Normal image builds verify the lock checksums and exact requests;
+they never resolve replacement versions implicitly. No module checksums were
+edited by hand.
+
+The lock artifact records the resolver's compiler and architecture. Native
+Linux AMD64 and ARM64 builds may consume the same locked module graph, but both
+the recorded resolver and actual compiler must use the pinned Go version.
+The build preserves resolver provenance in `locks/toolchain.txt` and records
+the actual compiler and target in `build-info.txt`. Fresh ARM64 lock generation
+matched the checked-in AMD64 artifact except for that toolchain record and its
+checksum; this does not substitute for final-image runtime qualification.
 The successful hosted attempt on September 16, 2026 compiled Dex with CGO,
 completed license collection, passed the compatibility cases, completed the
 upstream root/API race-suite commands with exit code zero, passed all nine

@@ -14,11 +14,10 @@ COPY patches/ /packaging/patches/
 RUN sh /packaging/scripts/fetch-source.sh
 
 FROM source AS dependencies
-# Deliberately absent until a hosted Go resolver's output has been reviewed.
-# A runtime build MUST fail rather than resolve new versions implicitly.
+# A runtime build MUST use the reviewed locks, never resolve new versions.
 COPY locks/generated/ /locks/
 COPY locks/requests.txt /packaging/locks/requests.txt
-COPY scripts/verify-locks.sh /packaging/scripts/verify-locks.sh
+COPY scripts/verify-locks.sh scripts/verify-toolchain.sh /packaging/scripts/
 RUN sh /packaging/scripts/verify-locks.sh \
     && go mod download && go mod verify \
     && cmp go.mod /locks/go.mod && cmp go.sum /locks/go.sum \

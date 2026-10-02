@@ -38,6 +38,27 @@ Use repository-level `make dev` to run the BFF and web application together.
 npm run build
 ```
 
+## Container build
+
+From the repository root:
+
+```bash
+docker build -f bridge/web/Dockerfile -t kars-bridge-web:latest bridge/web
+```
+
+If your network requires an npm mirror or authenticated registry, supply its
+configuration as an optional BuildKit secret:
+
+```bash
+docker build --secret id=npmrc,src="$HOME/.npmrc" \
+  -f bridge/web/Dockerfile -t kars-bridge-web:latest bridge/web
+```
+
+The secret is mounted only for dependency installation; it is not copied into
+an image layer. Without it, npm uses its default configuration. Lockfile versions
+and integrity checks are unchanged. Do not pass registry credentials as build
+arguments or copy them into the build context.
+
 ## Copilot device sign-in
 
 The provider wizard checks the workspace credential grant and enrolled provider
