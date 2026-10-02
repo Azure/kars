@@ -71,7 +71,10 @@ Do not set both `apiKey` and `existingSecret`, or duplicate
   for per-agent Entra authentication.
 - Initial operator-owned Helm configuration does not enroll a Bridge credential
   store, create a `KarsCredentialGrant`, or authorize provider changes through
-  Bridge. Governed operator enrollment remains a separate requirement.
+  Bridge. Home can discover and use the controller's configured model catalogue
+  without enrolling additional providers. An absent optional provider enrollment
+  contributes no extra models; broken existing authority still fails closed.
+  Governed operator enrollment remains required for provider changes.
 - Successful installation or controller rollout does not prove inference. Verify
   sandbox readiness and a real model response through its router, followed by
   useful agent delivery and linked evidence.

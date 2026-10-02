@@ -152,10 +152,7 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
     // InferencePolicy's model picker offer "gpt-4.1 via Foundry" alongside
     // "opus-4.8 via GitHub Copilot" with no change to that editor — it
     // already keys options by `provider::deployment`.
-    let provider_keys = cluster
-        .read_secret_all("kars-system", "kars-inference-providers")
-        .await
-        .map_err(upstream)?;
+    let provider_keys = cluster.additional_provider_keys().await.map_err(upstream)?;
     let mut declared_models: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for (key, value) in &provider_keys {

@@ -153,15 +153,23 @@ impl Cluster {
     pub async fn ensure_orchestrator_sandbox(&self) -> Result<(), kube::Error> {
         const NAME: &str = "bridge-orchestrator";
         const NS: &str = "kars-system";
+        let (default, catalog) = self.controller_models().await;
+        let provider = self.controller_provider().await.map(|(id, _, _)| id);
+        let model = default
+            .filter(|model| !model.trim().is_empty())
+            .or_else(|| catalog.into_iter().next());
+        let mut spec = serde_json::json!({"appliesTo": {"sandboxName": NAME}});
+        if let (Some(provider), Some(deployment)) = (provider, model) {
+            spec["modelPreference"] = serde_json::json!({
+                "primary": {"provider": provider, "deployment": deployment}
+            });
+        }
         let inference = serde_json::json!({
             "apiVersion": "kars.azure.com/v1alpha1",
             "kind": "InferencePolicy",
             "metadata": { "name": format!("{NAME}-inference"), "namespace": NS,
                 "labels": { "kars.azure.com/managed-by": "kars-bridge" } },
-            "spec": {
-                "appliesTo": { "sandboxName": NAME },
-                "modelPreference": { "primary": { "provider": "github-copilot", "deployment": "claude-opus-4.8" } },
-            },
+            "spec": spec,
         });
         self.apply_kind(NS, "InferencePolicy", inference, true)
             .await?;
