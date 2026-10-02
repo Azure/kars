@@ -13,6 +13,9 @@ use wiremock::{Mock, MockServer, Request, Respond, ResponseTemplate};
 #[path = "budget_interleaving_tests.rs"]
 mod budget_interleavings;
 
+#[path = "harvest_tests.rs"]
+mod harvest;
+
 const TASKS_PATH: &str = "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karstasks";
 const CMS_PATH: &str = "/api/v1/namespaces/tenant-a/configmaps";
 const TEAM_STATUS_PATH: &str =
@@ -26,6 +29,8 @@ struct Store {
     version: i64,
     fail_status_once: bool,
     fail_commons_write: bool,
+    task_on_output_read: Option<Value>,
+    task_on_retirement: Option<Value>,
 }
 
 #[derive(Clone)]
@@ -115,6 +120,13 @@ impl Respond for KubeServer {
             return failure(404);
         };
         if method == "GET" {
+            if !is_task && name.starts_with("kars-mission-output-") {
+                if let Some(task) = store.task_on_output_read.take() {
+                    store
+                        .tasks
+                        .insert(task["metadata"]["name"].as_str().unwrap().into(), task);
+                }
+            }
             return match if is_task {
                 store.tasks.get(name)
             } else {
@@ -154,6 +166,13 @@ impl Respond for KubeServer {
             return response(201, body);
         }
         if method == "PUT" {
+            if is_task {
+                if let Some(task) = store.task_on_retirement.take() {
+                    store
+                        .tasks
+                        .insert(task["metadata"]["name"].as_str().unwrap().into(), task);
+                }
+            }
             if !is_task && store.fail_commons_write {
                 return failure(409);
             }
@@ -304,11 +323,10 @@ async fn commons_must_commit_before_retirement_and_write_conflicts_retry() {
         let mut state = store.lock().unwrap();
         state.tasks.get_mut(&name).unwrap()["metadata"]["annotations"]["kars.azure.com/run-completed"] =
             json!(name);
-        state.cms.insert(format!("kars-mission-output-{name}"), json!({
-            "apiVersion": "v1", "kind": "ConfigMap",
-            "metadata": { "name": format!("kars-mission-output-{name}"), "namespace": "tenant-a" },
-            "data": { "status": "ok", "totalTokens": "25", "artifactCount": "0", "output": "Useful run result.", "finishedAt": Utc::now().to_rfc3339() },
-        }));
+        let output = harvest::output(&state.tasks[&name]);
+        state
+            .cms
+            .insert(format!("kars-mission-output-{name}"), output);
         state.fail_commons_write = true;
     }
     assert!(

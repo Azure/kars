@@ -52,7 +52,7 @@ const PRIOR_KNOWLEDGE_ENTRIES: usize = 5;
 /// One provenance-tracked record in a team's knowledge commons.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CommonsEntry {
-    /// Stable id — the source run task name, so a run contributes at most once.
+    /// Stable id — new harvests bind Task UID and run nonce, including revisions.
     pub id: String,
     /// Human-readable title (derived from the run objective).
     pub title: String,
