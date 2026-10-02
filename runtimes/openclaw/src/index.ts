@@ -366,7 +366,10 @@ import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MES
 import { TASK_TOOLS } from "./core/agt-task-tools.js";
 import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
-import { processTaskWithTools as _processTaskWithTools } from "./core/agt-task-loop.js";
+import { processTaskWithTools as _processTaskWithTools, executeTaskWithEvidence, type TaskLoopDeps } from "./core/agt-task-loop.js";
+import { MissionReceiver, missionTargetFromEnvironment } from "./core/mission-receiver.js";
+import { isMissionMessage } from "@kars/mesh/dist/mission-protocol.js";
+import { authorizeTaskAction } from "./core/task-policy.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
 import { registerHttpFetchTool } from "./core/agt-tools/http-fetch.js";
 import { registerGitHubActionsTool } from "./core/agt-tools/github-actions.js";
@@ -388,7 +391,11 @@ async function processTaskWithTools(
   taskContent: any,
   log: { info: (m: string) => void; warn: (m: string) => void },
 ): Promise<string> {
-  return _processTaskWithTools(taskContent, {
+  return _processTaskWithTools(taskContent, taskLoopDeps(), log);
+}
+
+function taskLoopDeps(): TaskLoopDeps {
+  return {
     meshClient: () => agtMeshClient,
     meshIdentity: () => agtIdentity,
     isInterruptRequested: () => handoffInterruptRequested,
@@ -405,7 +412,7 @@ async function processTaskWithTools(
       }
     },
     waitForInbox,
-  }, log);
+  };
 }
 
 // ── meshSend: auto-chunking send wrapper ─────────────────────────────────────
@@ -793,9 +800,26 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       }
     });
 
+    const missionTarget = missionTargetFromEnvironment(agtIdentity.did);
+    const missionReceiver = missionTarget ? new MissionReceiver({
+      target: missionTarget,
+      authorize: (assignment) => authorizeTaskAction("task:execute", {
+        task_uid: assignment.taskUid, run_nonce: assignment.runNonce,
+        dispatcher_did: assignment.dispatcherDid, assignment_id: assignment.assignmentId,
+      }),
+      execute: (content, onEvidence) => executeTaskWithEvidence(content, { ...taskLoopDeps(), onEvidence }, log),
+      send: (to, reply) => agtMeshClient!.send(to, reply),
+      warn: (message) => log.warn(message),
+    }) : null;
+
     // Set up message handler — stores received messages in the AGT inbox buffer
     // AND auto-replies to task_request messages via AGT relay (E2E encrypted reply)
-    agtMeshClient.onMessage(async (fromAmid: string, message: any) => {
+    agtMeshClient.onMessage(async (fromAmid: string, message: any, security: "encrypted" | "plaintext" | "unknown" = "unknown") => {
+      if (isMissionMessage(message)) {
+        try { await missionReceiver?.handle(fromAmid, message, security); }
+        catch { log.warn("Rejected invalid mission protocol message"); }
+        return;
+      }
       // Resolve sender name — check local cache first, then look up via registry
       let fromName = amidToName.get(fromAmid) || "";
       if (!fromName && message?.from_agent) {
@@ -822,6 +846,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       if (transportResult !== undefined) {
         // Reassembled message — replace the original message and continue to app layer
         message = transportResult;
+        if (isMissionMessage(message)) {
+          log.warn("Rejected chunked mission protocol message: no aggregate encryption evidence");
+          return;
+        }
         log.info(`Mesh transfer reassembled from '${fromName}' — processing as ${message.type || "message"}`);
       }
 

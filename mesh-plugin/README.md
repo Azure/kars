@@ -163,6 +163,49 @@ plaintext. Encrypted sends establish an SDK session first and propagate handshak
 failure without falling back to plaintext. This evidence describes transport,
 not permission to execute an instruction or proof that work was completed.
 
+## Gated mission receiver (not yet a complete dispatch path)
+
+`dist/mission-protocol.js` defines the version-1 `mission:` protocol used by the
+OpenClaw runtime receiver. Messages are limited to 192 KiB and bind the Task UID,
+Sandbox UID, Pod UID, run nonce, agent DID and dispatcher DID. An encrypted probe
+returns the current runtime boot ID; assignments additionally bind that boot ID
+and an assignment ID. The receiver requires per-message encrypted evidence and
+the pinned dispatcher, not names or payload assertions of trust.
+
+The receiver is disabled unless `KARS_MISSION_DISPATCH_ENABLED=true`. Enabling it
+requires `KARS_MISSION_TASK_NAME`, `KARS_MISSION_TASK_UID`,
+`KARS_MISSION_SANDBOX_UID`, `KARS_MISSION_POD_UID`,
+`KARS_MISSION_DISPATCHER_DID` and a 64-hex `KARS_IDENTITY_SEED`. These are intended
+for controller-owned bindings and a random Secret-backed seed. Environment
+validation checks format only: it cannot prove Secret provenance or randomness.
+Do not derive execution authority from a public application ID. The current
+chart/controller do not yet provide these bindings or a mission dispatcher.
+
+Reserved messages never fall through to legacy task handlers, even when the
+receiver is disabled. Reassembled legacy chunks are rejected because they lack
+aggregate encryption evidence. The existing process-wide SDK singleton remains
+the only runtime client and prekey writer.
+
+Execution uses the real runtime tool loop through the local inference router:
+
+- Assignment and tool authorization fail closed on policy errors; only HTTP 200
+  with boolean `allowed: true` authorizes the action. Shell commands require a
+  separate policy decision, including in the legacy loop.
+- Strict requests use `max_completion_tokens: 8192` (legacy requests keep 2048)
+  and stop after at most 25 rounds. Unknown tools cannot fall back to shell.
+- Success requires nonempty final output, `finish_reason: stop` and positive,
+  validated provider usage. Missing/invalid usage or an unresolved later request
+  makes whole-run usage unknown; earlier totals are not reported as complete.
+- Accepted, running, succeeded, failed and rejected replies are distinct. Exact
+  duplicate assignments replay cached replies without executing twice; changed
+  assignments with the same nonce are rejected. Execution is serialized.
+
+Replay protection is **in memory for one runtime boot**, capped at 128 accepted
+assignment records without eviction. It is not durable recovery. A dispatcher
+must persist claims, fence restarts and publish correlated output/usage before
+marking a run complete. Those integrations are still missing; receiver tests do
+not qualify useful mission delivery, persistent teams or either beta gate.
+
 ## Files created
 
 | Path | Purpose |
