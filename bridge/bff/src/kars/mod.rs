@@ -12,6 +12,7 @@ mod credential_targets;
 mod credential_tests;
 mod credential_transport;
 pub mod credentials;
+pub(crate) mod execution_plans;
 mod github_grants;
 pub(crate) use github_grants::github_connection_name;
 pub mod operator_credentials;

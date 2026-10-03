@@ -58,6 +58,74 @@ fn inherited_fallbacks_reach_principal_member_and_run_authority_without_weakenin
     assert!(member.blueprint.unwrap().model_fallbacks.is_empty());
 }
 
+#[test]
+fn execution_plan_inheritance_and_overrides_preserve_paused_authority() {
+    let plan = crate::task_execution_plan::test_plan();
+    let mut team = team();
+    team.spec.envelope.budget = None;
+    team.spec.paused = true;
+    team.spec.blueprint = Some(TaskBlueprint {
+        execution_plan: Some(plan.clone()),
+        ..Default::default()
+    });
+    let mut role = TeamRole {
+        name: "writer".into(),
+        ..Default::default()
+    };
+    team.spec.roster = vec![role.clone()];
+    assert!(
+        team.validation_errors().is_empty(),
+        "{:?}",
+        team.validation_errors()
+    );
+    for spec in [
+        specs::principal_spec(&team),
+        specs::member_spec(&team, &role),
+        specs::run_spec(&team, "").unwrap(),
+    ] {
+        assert_eq!(spec.blueprint.unwrap().execution_plan, Some(plan.clone()));
+    }
+    role.blueprint = Some(TaskBlueprint::default());
+    team.spec.roster = vec![role.clone()];
+    assert!(
+        specs::member_spec(&team, &role)
+            .blueprint
+            .unwrap()
+            .execution_plan
+            .is_none()
+    );
+    team.spec.paused = false;
+    assert!(
+        team.validation_errors()
+            .iter()
+            .any(|error| error.contains("TypedPlanExecutionUnavailable"))
+    );
+    team.spec.blueprint = None;
+    assert!(team.validation_errors().is_empty());
+    team.spec.roster[0]
+        .blueprint
+        .as_mut()
+        .unwrap()
+        .execution_plan = Some(plan);
+    assert!(
+        team.validation_errors()
+            .iter()
+            .any(|error| error.contains("roster role 'writer': TypedPlanExecutionUnavailable"))
+    );
+    team.spec.paused = true;
+    assert!(team.validation_errors().is_empty());
+    team.annotations_mut().insert(
+        "kars.azure.com/mission-decomposition".into(),
+        "execution-plan/v1".into(),
+    );
+    assert!(
+        team.validation_errors()
+            .iter()
+            .any(|error| error.contains("ReviewedExecutionPlanMissing")),
+        "a role plan cannot replace a pruned root plan"
+    );
+}
+
 pub(super) fn team() -> KarsTeam {
     let mut team = KarsTeam::new(
         "eng",
