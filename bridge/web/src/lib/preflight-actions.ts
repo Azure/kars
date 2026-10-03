@@ -15,6 +15,8 @@ export async function validatePackageAction(
   envelope?: {
     tier?: number;
     budget_tokens?: number | null;
+    budget_scope?: "GovernedInference" | null;
+    budget_usd_micros?: number | null;
     workload?: "mission" | "team";
   },
 ): Promise<ValidationResult> {

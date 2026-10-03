@@ -479,6 +479,11 @@ pub async fn get_team(
         tier: team.spec.envelope.tier,
         authority_ceiling: team.spec.envelope.authority_ceiling,
         delegation_depth: team.spec.envelope.delegation_depth,
+        budget: team.spec.envelope.budget.as_ref().map(|budget| crate::routes::tasks::BudgetDto {
+            scope: budget.scope,
+            tokens: budget.tokens,
+            usd_micros: budget.usd_micros,
+        }),
         paused: team.spec.paused,
         every_minutes: team.spec.cadence.as_ref().and_then(|c| c.every_minutes),
         lifecycle_mode: effective_lifecycle_mode(&team),

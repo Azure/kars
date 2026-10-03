@@ -353,7 +353,7 @@ export function validatePackage(
     tier?: number;
     budget_tokens?: number | null;
     budget_usd_micros?: number | null;
-    budget_scope?: import("./types").Budget["scope"];
+    budget_scope?: import("./types").Budget["scope"] | null;
     workload?: "mission" | "team";
   },
 ): Promise<import("./types").ValidationResult> {
@@ -738,7 +738,7 @@ export function verifyFoundry(): Promise<FoundryVerifyResult> {
 export function listAgents(): Promise<import("./types").AgentLifecycle[]> {
   return requestJson("/api/agents");
 }
-export function createTeam(namespace: string, body: { name: string; display_name?: string; charter: string; tier?: number; authority_ceiling?: number; delegation_depth?: number; reporting_to?: string; knowledge_commons?: string; memory?: string; tool_policy?: string; runtime?: string; model?: string; model_fallbacks?: string[]; mcp_servers?: string[]; egress?: { host: string; port?: number }[]; egress_mode?: "learning" | "strict"; cadence_minutes?: number; lifecycle_mode?: import("./types").TeamLifecycleMode; warm_idle_seconds?: number; launch?: boolean; roles?: CreateRole[]; execution_plan?: import("./types").ExecutionPlan; git_write_repos?: string[]; created_by?: string }): Promise<{ created: boolean; name: string }> {
+export function createTeam(namespace: string, body: { name: string; display_name?: string; charter: string; budget?: import("./types").Budget; tier?: number; authority_ceiling?: number; delegation_depth?: number; reporting_to?: string; knowledge_commons?: string; memory?: string; tool_policy?: string; runtime?: string; model?: string; model_fallbacks?: string[]; mcp_servers?: string[]; egress?: { host: string; port?: number }[]; egress_mode?: "learning" | "strict"; cadence_minutes?: number; lifecycle_mode?: import("./types").TeamLifecycleMode; warm_idle_seconds?: number; launch?: boolean; roles?: CreateRole[]; execution_plan?: import("./types").ExecutionPlan; git_write_repos?: string[]; created_by?: string }): Promise<{ created: boolean; name: string }> {
   return requestJson(`/api/namespaces/${encodeURIComponent(namespace)}/teams`, { method: "POST", body: JSON.stringify(body) });
 }
 export function updateTeam(namespace: string, name: string, body: { charter?: string; paused?: boolean; cadence_minutes?: number; reporting_to?: string; lifecycle_mode?: import("./types").TeamLifecycleMode; warm_idle_seconds?: number; runtime?: string; model?: string; model_fallbacks?: string[]; memory?: string; mcp_servers?: string[]; execution_plan?: import("./types").ExecutionPlan }): Promise<{ updated: boolean }> {

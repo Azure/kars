@@ -29,6 +29,32 @@ Intent
   -> approved team memory + next milestone
 ```
 
+## Reviewed Team lifetime budget
+
+New Teams created in Bridge require an explicitly reviewed positive whole-number
+**token limit** with `GovernedInference` scope. There is no preselected cap.
+The same Team-UID lifetime account bounds the principal, members and every run,
+including later intake; starting another run does not replenish the allowance.
+Changing the cap invalidates the composer's previous pre-flight result.
+Pre-flight and model-route qualification check the proposed envelope, not whether
+its eventual live budget account, broker or provider reservation is ready.
+
+The API retains compatibility with omitted/null budgets for legacy callers; this
+is not governed budget enrollment. When a budget is supplied, it must have
+explicit `GovernedInference` scope and at least one positive safe whole-number
+limit (tokens and/or micro-USD). Empty, zero, negative, fractional and unsafe
+limits are rejected, not silently removed. Principal, specialist and fallback
+route qualification uses the reviewed token limit. Route edits use the stored
+limit and cannot increase it. Team detail shows the configured limit and scope,
+not a guessed remaining balance. A changed lifetime limit requires a separately
+reviewed new Team, not editing or removing an existing Team's cap. Team update
+requests that explicitly include `budget`, even `null`, are rejected; unrelated
+route or lifecycle edits keep the stored lifetime limit.
+
+Creation remains paused by default. Opt-in launch with milestones creates the
+Team paused, installs its queue and engineering settings, then requests resume.
+This budget contract alone is not proof of useful Team delivery or beta readiness.
+
 ## What each Workspace concept means
 
 | Workspace concept | What it is | What it is not |

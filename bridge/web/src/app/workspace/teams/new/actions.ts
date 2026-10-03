@@ -13,6 +13,7 @@ import {
   type CreateRole,
 } from "@/lib/bff";
 import { defaultNamespace } from "@/lib/config";
+import { parseTeamBudget } from "@/lib/team-budget";
 import type { ComposeTeamResponse, EngineeringSignal, ExecutionPlan, TeamLifecycleMode } from "@/lib/types";
 
 export interface NewTeamState { error: string | null }
@@ -46,6 +47,8 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
   // (audit f41). An explicit Name still wins.
   let name = slugify(String(form.get("name") ?? ""));
   if (!name) name = slugify(displayName || charter);
+  const parsedBudget = parseTeamBudget(form.get("budget_tokens"), form.get("budget_scope"));
+  if (parsedBudget.error !== null) return { error: parsedBudget.error };
   const tier = Number(form.get("tier") ?? 3);
   const cadence = Number(form.get("cadence") ?? 0);
   const lifecycleMode = String(form.get("lifecycle_mode") ?? "resourceOptimized") as TeamLifecycleMode;
@@ -140,6 +143,7 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
   try {
     await createTeam(defaultNamespace(), {
       name, charter, tier,
+      budget: parsedBudget.budget,
       display_name: displayName || undefined,
       cadence_minutes: cadence || undefined,
       lifecycle_mode: lifecycleMode,

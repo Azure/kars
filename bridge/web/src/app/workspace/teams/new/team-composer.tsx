@@ -25,6 +25,7 @@ import { OrchestrationCube } from "@/components/orchestration-cube";
 import { LoopDesigner } from "@/components/loop-designer";
 import { Icon, type IconName } from "@/components/icon";
 import { MEMBER_ARCHETYPES } from "@/lib/member-archetypes";
+import { parseTeamBudget } from "@/lib/team-budget";
 import { renderGovernancePanel, renderOrgPanel } from "./team-composer-panels";
 import type { Role } from "./team-composer-panel-types";
 
@@ -68,6 +69,9 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
   const [displayName, setDisplayName] = useState(profile?.display_name ?? "");
   const [charter, setCharter] = useState(profile?.charter_template ?? initialCharter ?? "");
   const [tier, setTier] = useState(profile?.tier ?? 3);
+  const [budgetTokens, setBudgetTokens] = useState("");
+  const budgetScope = "GovernedInference";
+  const parsedBudget = parseTeamBudget(budgetTokens, budgetScope);
   const [addNote, setAddNote] = useState<string | null>(null);
   useEffect(() => { if (!addNote) return; const t = setTimeout(() => setAddNote(null), 2500); return () => clearTimeout(t); }, [addNote]);
   const [cadence, setCadence] = useState(0);
@@ -133,8 +137,8 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
     };
   }, [runtime, toolPolicy, roles, mcp, memory, model, modelFallbacks, egressText, egressMode, executionPlan]);
   const teamFingerprint = useMemo(
-    () => JSON.stringify({ blueprint: teamBlueprint, tier }),
-    [teamBlueprint, tier],
+    () => JSON.stringify({ blueprint: teamBlueprint, tier, budgetTokens, budgetScope }),
+    [teamBlueprint, tier, budgetTokens, budgetScope],
   );
   const currentValidation = validatedFingerprint === teamFingerprint ? validation : null;
   const selectedMemoryOption = useMemo(
@@ -667,10 +671,40 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
         </div>
       </div>
 
+      <fieldset className="rounded-xl border border-border p-4">
+        <legend className="px-1 text-xs font-medium text-foreground-muted">Shared lifetime inference budget</legend>
+        <input type="hidden" name="budget_scope" value={budgetScope} />
+        <label htmlFor="team-budget-tokens" className="text-sm font-medium">Total token limit</label>
+        <input
+          id="team-budget-tokens"
+          name="budget_tokens"
+          type="number"
+          min={1}
+          max={Number.MAX_SAFE_INTEGER}
+          step={1}
+          required
+          value={budgetTokens}
+          onChange={(event) => setBudgetTokens(event.target.value)}
+          aria-describedby="team-budget-help team-budget-error"
+          aria-invalid={parsedBudget.error !== null}
+          className="mt-2 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
+        />
+        <p id="team-budget-help" className="mt-2 text-xs text-foreground-muted">
+          GovernedInference: one finite limit for this Team’s lifetime, shared by its principal,
+          members and all runs. Later intake does not replenish it. This is not a per-run allowance
+          or a dollar spending limit. Edit cannot raise it; a different limit requires a separately
+          reviewed new Team. Pre-flight checks do not prove the live budget account is ready.
+        </p>
+        <p id="team-budget-error" className="mt-2 text-xs text-danger">{parsedBudget.error}</p>
+      </fieldset>
+
       <PreflightCheck
         key={teamFingerprint}
         blueprint={teamBlueprint}
         tier={tier}
+        budgetTokens={parsedBudget.budget?.tokens}
+        budgetScope={budgetScope}
+        disabled={parsedBudget.error !== null}
         workload="team"
         onResult={(result) => {
           setValidation(result);
@@ -752,7 +786,7 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
       <RepoAccess onSelectionChange={setSelectedRepos} />
 
       <div className="flex flex-wrap items-center gap-3">
-        <button type="submit" disabled={pending || !name.trim() || executionPlan === null || executionPlanError !== null || (engineeringEnabled && (selectedRepos.length === 0 || engineeringSignals.size === 0)) || (currentValidation !== null && !currentValidation.ok) || (launch && currentValidation?.ok !== true)} className="rounded-lg bg-signal px-5 py-2.5 text-sm font-semibold text-signal-fg disabled:opacity-50">{pending ? "Creating…" : "Create team"}</button>
+        <button type="submit" disabled={pending || parsedBudget.error !== null || !name.trim() || executionPlan === null || executionPlanError !== null || (engineeringEnabled && (selectedRepos.length === 0 || engineeringSignals.size === 0)) || (currentValidation !== null && !currentValidation.ok) || (launch && currentValidation?.ok !== true)} className="rounded-lg bg-signal px-5 py-2.5 text-sm font-semibold text-signal-fg disabled:opacity-50">{pending ? "Creating…" : "Create team"}</button>
         <label className="inline-flex items-center gap-2 text-xs text-foreground-muted">
           <input type="checkbox" name="launch" checked={launch} onChange={(event) => setLaunch(event.target.checked)} className="h-3.5 w-3.5 rounded border-border" />
           Launch immediately (otherwise created paused for your approval)

@@ -94,6 +94,7 @@ pub struct TeamDetailDto {
     pub tier: i32,
     pub authority_ceiling: i32,
     pub delegation_depth: i32,
+    pub budget: Option<crate::routes::tasks::BudgetDto>,
     pub paused: bool,
     pub every_minutes: Option<u32>,
     pub lifecycle_mode: String,
@@ -213,6 +214,9 @@ pub struct CreateTeamRequest {
     pub tier: Option<i32>,
     pub authority_ceiling: Option<i32>,
     pub delegation_depth: Option<i32>,
+    /// Immutable Team-UID lifetime limit shared by the principal, members and runs.
+    #[serde(default)]
+    pub budget: Option<crate::routes::tasks::BudgetDto>,
     pub reporting_to: Option<String>,
     pub knowledge_commons: Option<String>,
     #[serde(default)]
@@ -301,6 +305,7 @@ pub struct CreateRole {
 }
 struct TeamModelRoutes<'a> {
     namespace: &'a str,
+    total_tokens: Option<i64>,
     runtime: Option<&'a str>,
     model: Option<&'a str>,
     model_fallbacks: &'a [String],
@@ -312,6 +317,12 @@ struct TeamModelRoutes<'a> {
 
 #[derive(Debug, Deserialize)]
 pub struct UpdateTeamRequest {
+    #[serde(
+        default,
+        rename = "budget",
+        deserialize_with = "validation::reject_budget_update"
+    )]
+    pub _immutable_budget: (),
     pub charter: Option<String>,
     pub paused: Option<bool>,
     pub cadence_minutes: Option<u32>,

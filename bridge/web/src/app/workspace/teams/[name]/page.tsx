@@ -254,18 +254,31 @@ export default async function TeamDetailPage({
         paused={team.paused}
       />
 
-      {/* Budget stop — a standing team whose daily/monthly cap is exhausted mints
-          no new runs until the cap is raised. Surface it as an actionable state,
-          not a silent stall the operator has to infer from "no recent runs". */}
+      <section className="rounded-xl border border-border px-4 py-3" aria-label="Configured Team lifetime budget">
+        <h2 className="text-sm font-medium">Configured lifetime inference limit</h2>
+        {team.budget ? (
+          <>
+            <p className="mt-1 text-sm">
+              Scope: {team.budget.scope ?? "unscoped (not governed enrollment)"} · Tokens: {team.budget.tokens ?? "not configured"}
+              {" · Micro-USD: "}{team.budget.usd_micros ?? "not configured"}
+            </p>
+            <p className="mt-1 text-xs text-foreground-muted">
+              Shared by this Team’s principal, members and all runs; later intake does not reset it.
+              These configured limits are not a remaining balance or proof of live account readiness.
+            </p>
+          </>
+        ) : <p className="mt-1 text-xs text-foreground-muted">No explicit lifetime inference limit is configured. Tier limits are not aggregate spending protection.</p>}
+      </section>
       {!team.paused && /budget/i.test(team.detail ?? "") && /(exhaust|exceeded|cap)/i.test(team.detail ?? "") && (
         <div className="rounded-xl border border-warning/50 bg-warning/[0.07] px-4 py-3">
           <div className="flex items-start gap-2">
             <span aria-hidden className="text-warning">⏸</span>
             <div className="min-w-0">
-              <p className="text-sm font-medium">Team paused on budget — no new runs until the cap is raised.</p>
+              <p className="text-sm font-medium">Budget admission is blocking new work.</p>
               <p className="mt-0.5 text-xs text-foreground-muted">
-                {team.detail} Raise the team&apos;s token budget in Edit, inspect spend in the ledger below, or
-                pause the team if this is expected.
+                {team.detail} Inspect the budget diagnostic and ledger, or pause the team.
+                Edit cannot increase its lifetime cap. A different lifetime limit requires a
+                separately reviewed new Team; existing funded work and evidence remain with this Team.
               </p>
             </div>
           </div>

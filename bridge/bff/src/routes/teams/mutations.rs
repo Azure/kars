@@ -17,7 +17,8 @@ use crate::routes::tasks::require_cluster;
 use super::validation::{
     apply_team_git_write, build_roster, normalize_autonomous_runtime, normalize_lifecycle_mode,
     normalize_mcp_servers, normalize_model_fallback_routes, reject_reserved_role_names,
-    validate_mcp_servers, validate_team_model_routes, validate_warm_idle_seconds,
+    validate_mcp_servers, validate_team_budget, validate_team_model_routes,
+    validate_warm_idle_seconds,
 };
 use super::{
     CreateRole, CreateTeamRequest, TeamModelRoutes, UpdateTeamRequest, require_owned_team,
@@ -42,6 +43,7 @@ pub async fn create_team(
             "name and a real charter are required".into(),
         ));
     }
+    let budget = validate_team_budget(b.budget.as_ref())?;
     reject_reserved_role_names(&b.name, &b.roles)?;
     let execution_plan = b
         .execution_plan
@@ -87,6 +89,7 @@ pub async fn create_team(
         &options,
         TeamModelRoutes {
             namespace: &ns,
+            total_tokens: budget.as_ref().and_then(|budget| budget.tokens),
             runtime: b.runtime.as_deref(),
             model: b.model.as_deref(),
             model_fallbacks: &b.model_fallbacks,
@@ -121,6 +124,9 @@ pub async fn create_team(
     let mut spec = serde_json::json!({
         "charter": b.charter, "paused": paused, "envelope": { "tier": tier, "authorityCeiling": ceiling, "delegationDepth": b.delegation_depth.unwrap_or(1) },
     });
+    if let Some(budget) = budget {
+        spec["envelope"]["budget"] = serde_json::json!(budget);
+    }
     if let Some(mode) = normalize_lifecycle_mode(b.lifecycle_mode.as_deref())? {
         spec["lifecycleMode"] = serde_json::json!(mode);
     }
@@ -478,6 +484,12 @@ pub async fn update_team(
             &options,
             TeamModelRoutes {
                 namespace: &ns,
+                total_tokens: team
+                    .spec
+                    .envelope
+                    .budget
+                    .as_ref()
+                    .and_then(|budget| budget.tokens),
                 runtime: b.runtime.as_deref().or(existing_runtime),
                 model: b.model.as_deref().or(existing_model.as_deref()),
                 model_fallbacks: b

@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import type { ExecutionPlan } from "./missions";
+import type { Budget, ExecutionPlan } from "./missions";
 import type { PullRequestRef } from "./workspace";
 
 
@@ -67,6 +67,7 @@ export interface TeamDetail {
   tier: number;
   authority_ceiling: number;
   delegation_depth: number;
+  budget: Budget | null;
   paused: boolean;
   every_minutes: number | null;
   lifecycle_mode: TeamLifecycleMode;
