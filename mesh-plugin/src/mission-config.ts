@@ -27,7 +27,8 @@ export function missionProcessConfig(env: NodeJS.ProcessEnv): MissionProcessConf
     let parsed: URL;
     try { parsed = new URL(env[key] ?? ""); } catch { throw invalid(); }
     if (!protocols.includes(parsed.protocol) || !parsed.hostname || parsed.username || parsed.password || parsed.search || parsed.hash) throw invalid();
-    return parsed.toString();
+    // The official SDK appends /ws to relay base URLs; URL adds a root slash.
+    return parsed.toString().replace(/\/+$/, "");
   };
   // Development transport is explicit. Entra cannot silently fall back to anonymous registration.
   if (env.KARS_MISSION_AUTH_MODE !== "development") throw new Error("Mission dispatcher requires explicit development authentication; Entra is not supported yet");
