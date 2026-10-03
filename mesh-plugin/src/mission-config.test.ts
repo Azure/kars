@@ -15,6 +15,17 @@ describe("mission process configuration", () => {
     expect(result.service.timeoutMs).toBe(300_000); expect(result.service.pollMs).toBe(2_000);
     expect(result.port).toBe(8080); expect(result.shutdownMs).toBe(30_000);
   });
+  it.each([
+    ["ws://relay:8765", "ws://relay:8765"],
+    ["ws://relay:8765/", "ws://relay:8765"],
+    ["wss://relay.example/", "wss://relay.example"],
+    ["ws://relay:8765/agt/relay/", "ws://relay:8765/agt/relay"],
+    ["ws://relay:8765/ws", "ws://relay:8765/ws"],
+  ])("keeps %s compatible with the SDK relay path", (input, expected) => {
+    const config = missionProcessConfig({ ...env, AGENTMESH_RELAY_URL: input });
+    expect(config.service.relayUrl).toBe(expected);
+    expect(config.service.registryUrl).toBe("http://registry:8080");
+  });
   it.each(Object.keys(env))("rejects missing %s", key => {
     const input: NodeJS.ProcessEnv = { ...env }; delete input[key];
     expect(() => missionProcessConfig(input)).toThrow();

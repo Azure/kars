@@ -403,9 +403,11 @@ missionDispatcher:
 ```
 
 Registry and relay URLs default to the Core-managed official AgentMesh services;
-`registryUrl` and `relayUrl` can select an existing official deployment. Identity
-roots are never user-provided values. This configuration and the passing source
-tests alone do not prove live execution or connected Bridge activity.
+`registryUrl` and `relayUrl` can select an existing official deployment. Trailing
+slashes are normalized before passing base URLs to the SDK, preventing a doubled
+slash when it appends `/ws` to a relay origin. Identity roots are never user-provided
+values. This configuration and the passing source tests alone do not prove live
+execution or connected Bridge activity.
 
 ## Files created
 
