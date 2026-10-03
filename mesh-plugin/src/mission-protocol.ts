@@ -3,6 +3,25 @@
 
 export const MISSION_PROTOCOL_VERSION = 1;
 export const MAX_MISSION_MESSAGE_BYTES = 192 * 1024;
+export const MAX_MISSION_ARTIFACT_BYTES = 128 * 1024;
+export const MAX_MISSION_ARTIFACTS = 16;
+export type MissionArtifacts = Record<string, string>;
+
+export function validMissionArtifacts(value: unknown): value is MissionArtifacts {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  try {
+    const prototype = Object.getPrototypeOf(value);
+    if (prototype !== Object.prototype && prototype !== null) return false;
+    const keys = Reflect.ownKeys(value);
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    return keys.length <= MAX_MISSION_ARTIFACTS && keys.every(name => {
+      if (typeof name !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(name)
+        || ["response.md", "__proto__", "constructor", "prototype"].includes(name)) return false;
+      const descriptor = descriptors[name];
+      return descriptor.enumerable && "value" in descriptor && typeof descriptor.value === "string" && !!descriptor.value.trim();
+    }) && Buffer.byteLength(JSON.stringify(value), "utf8") <= MAX_MISSION_ARTIFACT_BYTES;
+  } catch { return false; }
+}
 
 export interface MissionTarget {
   taskName: string;
@@ -23,6 +42,7 @@ export interface MissionAssignment extends MissionTarget {
   version: 1;
   bootId: string;
   assignmentId: string;
+  artifactFormat?: "text-v1";
   content: string;
 }
 export interface MissionReply extends MissionTarget {
@@ -33,6 +53,8 @@ export interface MissionReply extends MissionTarget {
   assignmentId?: string;
   status: "ready" | "accepted" | "running" | "succeeded" | "failed" | "rejected";
   output?: string;
+  artifacts?: MissionArtifacts;
+  artifactFormat?: "text-v1";
   error?: string;
   evidence?: {
     model: string;
@@ -53,6 +75,8 @@ export function parseMissionMessage(value: unknown): MissionMessage | null {
   try { size = Buffer.byteLength(JSON.stringify(value)); } catch { return null; }
   if (size > MAX_MISSION_MESSAGE_BYTES) return null;
   const v = value as Record<string, unknown>;
+  if (v.artifactFormat !== undefined && (v.artifactFormat !== "text-v1" || !["mission:assign", "mission:reply"].includes(String(v.type)))) return null;
+  if (v.artifacts !== undefined && (v.type !== "mission:reply" || v.status !== "succeeded" || v.artifactFormat !== "text-v1" || !validMissionArtifacts(v.artifacts))) return null;
   if (v.version !== 1 || ![v.taskName, v.taskUid, v.sandboxUid, v.podUid, v.runNonce].every(id)
     || !did(v.agentDid) || !did(v.dispatcherDid)) return null;
   if (v.type === "mission:probe") return id(v.challenge) ? value as MissionProbe : null;

@@ -3,6 +3,7 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
+import { mkdtemp, readFile, rm, access } from "node:fs/promises";
 import { executeTaskWithEvidence, processTaskWithTools, type TaskLoopDeps } from "./agt-task-loop.js";
 import { TaskCompletionLedger, TaskExecutionError } from "./task-completion.js";
 
@@ -14,14 +15,22 @@ const final = (content: unknown = "A useful briefing", finish_reason = "stop", m
 });
 let server: Server | undefined;
 let requests: Record<string, any>[];
+let policyRequests: Record<string, any>[];
+const tempDirectories: string[] = [];
+async function workspace() {
+  const directory = await mkdtemp("/tmp/kars-mission-artifacts-");
+  tempDirectories.push(directory);
+  return directory;
+}
 async function router(responses: unknown[], policyStatus = 200, policyBody: unknown = { allowed: false }) {
-  requests = [];
+  requests = []; policyRequests = [];
   let index = 0;
   server = createServer((req, res) => {
     let body = "";
     req.on("data", (data) => { body += data; });
     req.on("end", () => {
       if (req.url === "/agt/evaluate") {
+        policyRequests.push(JSON.parse(body));
         res.writeHead(policyStatus, { "content-type": "application/json" });
         res.end(typeof policyBody === "string" ? policyBody : JSON.stringify(policyBody));
       } else {
@@ -47,10 +56,131 @@ afterEach(async () => {
   vi.unstubAllEnvs();
   if (server) await new Promise<void>((resolve, reject) => server!.close((error) => error ? reject(error) : resolve()));
   server = undefined;
+  await Promise.all(tempDirectories.splice(0).map(path => rm(path, { recursive: true, force: true })));
 });
 
 const tool = (name = "mesh_inbox", args = {}) => ({
   choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "call-1", type: "function", function: { name, arguments: JSON.stringify(args) } }] } }], usage,
+});
+
+describe("explicit mission attachments", () => {
+  it("delivers exact written text after policy authorization with a strict negotiated schema", async () => {
+    const directory = await workspace();
+    const args = { path: `${directory}/briefing.md`, content: "# Briefing\r\nCafé — 日本語 🌍\n", artifact_name: "briefing.md" };
+    await router([tool("file_write", args), final("Attached briefing")], 200, { allowed: true });
+    vi.stubEnv("KARS_STRICT_TOOLS", "1");
+    const result = await executeTaskWithEvidence("Write a briefing", deps, log, true);
+    expect(result.artifacts).toEqual({ "briefing.md": args.content });
+    expect(await readFile(args.path, "utf8")).toBe(args.content);
+    expect(policyRequests).toContainEqual({ action: "tool:file_write", context: { tool: "file_write", tool_call_id: "call-1", arguments: args } });
+    const schema = requests[0].tools.find((entry: any) => entry.function.name === "file_write").function;
+    expect(schema.strict).toBe(true);
+    expect(schema.parameters.properties.artifact_name).toMatchObject({ type: ["string", "null"] });
+    expect(schema.parameters.required).toContain("artifact_name");
+    expect(requests[1].messages.at(-1).content).toContain("attached as briefing.md");
+  });
+  it.each([null, undefined])("keeps scratch writes local when artifact name is %j", async artifact_name => {
+    const directory = await workspace();
+    const args = { path: `${directory}/scratch.md`, content: "private scratch", artifact_name };
+    await router([tool("file_write", args), final()], 200, { allowed: true });
+    expect(await executeTaskWithEvidence("Write", deps, log, true)).not.toHaveProperty("artifacts");
+    expect(await readFile(args.path, "utf8")).toBe(args.content);
+    expect(requests[1].messages.at(-1).content).toContain("local only");
+  });
+  it("does not write or attach denied content", async () => {
+    const path = `${await workspace()}/denied.md`;
+    await router([tool("file_write", { path, content: "denied", artifact_name: "denied.md" }), final()]);
+    expect(await executeTaskWithEvidence("Write", deps, log, true)).not.toHaveProperty("artifacts");
+    await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it.each(["response.md", "../secret.md", "__proto__"])("does not write invalid attachment %s", async artifact_name => {
+    const path = `${await workspace()}/invalid.md`;
+    await router([tool("file_write", { path, content: "draft", artifact_name }), final()], 200, { allowed: true });
+    expect(await executeTaskWithEvidence("Write", deps, log, true)).not.toHaveProperty("artifacts");
+    await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(requests[1].messages.at(-1).content).toContain("file_write error:");
+  });
+  it.each(["  \n", "🌍".repeat(33 * 1024)])("rejects invalid attachment content before writing (%#)", async content => {
+    const path = `${await workspace()}/invalid.md`;
+    await router([tool("file_write", { path, content, artifact_name: "invalid.md" }), final()], 200, { allowed: true });
+    expect(await executeTaskWithEvidence("Write", deps, log, true)).not.toHaveProperty("artifacts");
+    await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(requests[1].messages.at(-1).content).toContain("file_write error:");
+  });
+  it("rejects the seventeenth attachment before writing while retaining the first sixteen", async () => {
+    const directory = await workspace();
+    await router([...Array.from({ length: 17 }, (_, i) => tool("file_write", {
+      path: `${directory}/${i}.md`, content: `document ${i}`, artifact_name: `${i}.md`,
+    })), final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write", deps, log, true);
+    expect(result.artifacts).toEqual(Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`${i}.md`, `document ${i}`])));
+    expect(await readFile(`${directory}/15.md`, "utf8")).toBe("document 15");
+    await expect(access(`${directory}/16.md`)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(requests[17].messages.at(-1).content).toContain("file_write error:");
+  });
+  it("keeps the last successful explicitly attached write, not failed or scratch writes", async () => {
+    const directory = await workspace();
+    const path = `${directory}/briefing.md`;
+    await router([
+      tool("file_write", { path, content: "first", artifact_name: "briefing.md" }),
+      tool("file_write", { path, content: "second 🌍", artifact_name: "briefing.md" }),
+      tool("file_write", { path: directory, content: "failed overwrite", artifact_name: "briefing.md" }),
+      tool("file_write", { path, content: "private scratch", artifact_name: null }), final(),
+    ], 200, { allowed: true });
+    expect((await executeTaskWithEvidence("Write", deps, log, true)).artifacts).toEqual({ "briefing.md": "second 🌍" });
+    expect(await readFile(path, "utf8")).toBe("private scratch");
+    expect(requests[3].messages.at(-1).content).toContain("file_write error:");
+  });
+  it("isolates artifacts between executions and excludes them from failed evidence", async () => {
+    const path = `${await workspace()}/briefing.md`;
+    await router([tool("file_write", { path, content: "staged text", artifact_name: "briefing.md" }), final("Truncated", "length"), final()], 200, { allowed: true });
+    const error = await executeTaskWithEvidence("Write", deps, log, true).catch(error => error);
+    expect(error).toBeInstanceOf(TaskExecutionError);
+    expect(error.evidence).toEqual({ model: "gpt-5.4-mini", rounds: 2, usage: { promptTokens: 14, completionTokens: 8, totalTokens: 22 } });
+    expect(error).not.toHaveProperty("artifacts");
+    expect(await executeTaskWithEvidence("New revision", deps, log, true)).not.toHaveProperty("artifacts");
+  });
+  it("does not advertise or accept attachments without negotiation", async () => {
+    const path = `${await workspace()}/briefing.md`;
+    await router([tool("file_write", { path, content: "draft", artifact_name: "briefing.md" }), final()], 200, { allowed: true });
+    expect(await executeTaskWithEvidence("Write", deps, log)).not.toHaveProperty("artifacts");
+    expect(requests[0].tools.find((entry: any) => entry.function.name === "file_write").function.parameters.properties).not.toHaveProperty("artifact_name");
+    await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+  it("preserves the legacy write result and schema", async () => {
+    const path = `${await workspace()}/legacy.md`;
+    await router([tool("file_write", { path, content: "legacy" }), final()]);
+    expect(await processTaskWithTools("Write", deps, log)).toBe("A useful briefing");
+    expect(requests[0].tools.find((entry: any) => entry.function.name === "file_write").function.parameters.properties).not.toHaveProperty("artifact_name");
+    expect(requests[1].messages.at(-1).content).toBe(`OK: wrote 6 bytes to ${path}`);
+    expect(policyRequests).toEqual([]);
+  });
+  it("offers inline or corrected-JSON delivery after malformed mission arguments, not peer transfer", async () => {
+    const malformed = tool("file_write"); malformed.choices[0].message.tool_calls[0].function.arguments = "{";
+    await router([malformed, final()]);
+    await executeTaskWithEvidence("Write", deps, log, true);
+    expect(requests[1].messages.at(-1).content).toContain("return the complete deliverable in the final response");
+    expect(requests[1].messages.at(-1).content).not.toContain("mesh_transfer_file");
+    expect(policyRequests).toEqual([]);
+  });
+  it("projects only cloned accounting evidence into execution errors", () => {
+    const result = { model: "model", rounds: 1, output: "private draft", artifacts: { "a.md": "private" }, usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3, private: "data" } };
+    const error = new TaskExecutionError("failed", result);
+    result.usage.totalTokens = 9;
+    expect(error.evidence).toEqual({ model: "model", rounds: 1, usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 } });
+    expect(new TaskExecutionError("failed", { ...result, usage: null }).evidence.usage).toBeNull();
+  });
+  it("stages isolated snapshots without committing invalid maps", () => {
+    const ledger = new TaskCompletionLedger("model", true);
+    const staged = ledger.prepareArtifact("a.md", "first");
+    expect(ledger.artifactSnapshot()).toEqual({});
+    ledger.commitArtifacts(staged); staged["a.md"] = "mutated";
+    const snapshot = ledger.artifactSnapshot(); snapshot.artifacts!["a.md"] = "mutated again";
+    expect(ledger.artifactSnapshot()).toEqual({ artifacts: { "a.md": "first" } });
+    expect(() => ledger.commitArtifacts({ "response.md": "invalid" })).toThrow();
+    expect(() => new TaskCompletionLedger("model").commitArtifacts({ "a.md": "text" })).toThrow();
+    expect(ledger.artifactSnapshot()).toEqual({ artifacts: { "a.md": "first" } });
+  });
 });
 
 describe("measured task execution through the local router", () => {

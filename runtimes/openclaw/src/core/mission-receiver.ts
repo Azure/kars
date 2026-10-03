@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { createHash, randomUUID } from "node:crypto";
-import { isMissionMessage, parseMissionMessage, sameMissionTarget, type MissionAssignment, type MissionReply, type MissionTarget } from "@kars/mesh/dist/mission-protocol.js";
+import { isMissionMessage, parseMissionMessage, sameMissionTarget, validMissionArtifacts, type MissionAssignment, type MissionReply, type MissionTarget } from "@kars/mesh/dist/mission-protocol.js";
 import type { MessageSecurity } from "@kars/mesh/dist/transport-interface.js";
 import { missionIdentity } from "@kars/mesh/dist/mission-identity.js";
 import { TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
@@ -10,7 +10,7 @@ import { TaskExecutionError, type TaskExecutionEvidence } from "./task-completio
 export interface MissionReceiverOptions {
   target: Omit<MissionTarget, "runNonce">;
   authorize: (assignment: MissionAssignment) => Promise<boolean>;
-  execute: (content: string, progress: (evidence: TaskExecutionEvidence) => void) => Promise<TaskExecutionEvidence & { output: string }>;
+  execute: (content: string, progress: (evidence: TaskExecutionEvidence) => void, artifactsEnabled: boolean) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
   send: (to: string, reply: MissionReply) => Promise<unknown>;
   warn: (message: string) => void;
   bootId?: string;
@@ -95,8 +95,14 @@ export class MissionReceiver {
         execution.reply = this.reply(execution.assignment, "running", { evidence });
         const progress = execution.reply;
         progressSends = progressSends.then(() => this.send(progress));
+      }, execution.assignment.artifactFormat === "text-v1");
+      if (result.artifacts !== undefined && (execution.assignment.artifactFormat !== "text-v1" || !validMissionArtifacts(result.artifacts))) {
+        throw new TaskExecutionError("Invalid or unnegotiated mission artifacts", result);
+      }
+      const reply = this.reply(execution.assignment, "succeeded", {
+        output: result.output, ...(result.artifacts ? { artifacts: { ...result.artifacts } } : {}),
+        evidence: { model: result.model, rounds: result.rounds, usage: result.usage },
       });
-      const reply = this.reply(execution.assignment, "succeeded", { output: result.output, evidence: { model: result.model, rounds: result.rounds, usage: result.usage } });
       if (!parseMissionMessage(reply)) throw new TaskExecutionError("Final deliverable exceeds the mission envelope or lacks valid evidence", result);
       execution.reply = reply;
     } catch (error) {

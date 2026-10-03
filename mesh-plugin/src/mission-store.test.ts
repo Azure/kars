@@ -361,6 +361,58 @@ describe("Kubernetes mission attempt store", () => {
     expect(h.api.resources.get(projectionPath)!.data).toEqual(output.data);
     expect(h.api.calls.at(-1)).toMatchObject({ method: "PATCH", path: taskPath, body: { metadata: { uid: c.taskUid, annotations: { [`${p}run-completed`]: c.runNonce } } } });
   });
+  it("publishes exact attached bytes and recovers terminal publication without losing files", async () => {
+    const h = fixture(); const attempt = initial(); attempt.assignment.artifactFormat = "text-v1";
+    const created = await h.store.create(attempt);
+    const done = next(attempt, "succeeded"); const artifacts = { "briefing.md": "# Briefing\r\nCafé — 日本語 🌍\n", "checklist.txt": "Review before approval\n" };
+    done.reply!.artifacts = artifacts;
+    await h.store.replace(created!, done);
+    const recovered = (await new KubernetesMissionStore(h.api).get(c))!.attempt;
+    expect(recovered.reply!.artifacts).toEqual(artifacts);
+    expect(await h.store.publish(recovered)).toBe(true);
+    for (const path of [artifactPath, `${mapsPath}/kars-mission-artifacts-${c.taskName}`]) {
+      expect(h.api.resources.get(path)!.data).toEqual({ "response.md": done.reply!.output, ...artifacts });
+    }
+    expect(h.api.resources.get(outputPath)!.data!.artifactCount).toBe("3");
+    expect(h.api.calls.at(-1)?.method).toBe("PATCH");
+    expect(await h.store.publish(recovered)).toBe(true);
+    h.api.resources.get(artifactPath)!.data!["briefing.md"] = "different";
+    await expect(h.store.publish(recovered)).rejects.toThrow("collision");
+  });
+  it("replaces current artifacts for a new revision without copying old attachments", async () => {
+    const h = fixture(); const attempt = initial(); attempt.assignment.artifactFormat = "text-v1";
+    const created = await h.store.create(attempt); const done = next(attempt, "succeeded"); done.reply!.artifacts = { "old.md": "old revision" };
+    await h.store.replace(created!, done); expect(await h.store.publish(done)).toBe(true);
+    const candidate = { ...c, runNonce: "rev-2", content: "A revised briefing" };
+    h.api.resources.get(taskPath)!.metadata.annotations![`${p}run-requested`] = candidate.runNonce;
+    const second = initial(candidate); second.assignment.artifactFormat = "text-v1";
+    const secondCreated = await h.store.create(second); const secondDone = next(second, "succeeded"); secondDone.reply!.artifacts = { "new.md": "new revision" };
+    await h.store.replace(secondCreated!, secondDone);
+    expect(await h.store.publish(secondDone)).toBe(false);
+    expect(h.api.resources.get(`${mapsPath}/kars-mission-artifacts-${c.taskName}`)!.data).toEqual({ "response.md": done.reply!.output, "old.md": "old revision" });
+    Object.assign(h.api.resources.get(taskPath)!.metadata.annotations!, {
+      [`${p}run-objective-nonce`]: candidate.runNonce,
+      [`${p}run-objective-b64`]: Buffer.from(candidate.content).toString("base64"),
+      [`${p}run-objective-digest`]: missionContentDigest(candidate.content),
+    });
+    expect(await h.store.publish(secondDone)).toBe(true);
+    expect(h.api.resources.get(`${mapsPath}/kars-mission-artifacts-${c.taskName}`)!.data).toEqual({ "response.md": secondDone.reply!.output, "new.md": "new revision" });
+    expect(h.api.resources.get(artifactPath)!.data).toEqual({ "response.md": done.reply!.output, "old.md": "old revision" });
+    expect(h.api.resources.get(projectionPath)!.data!.assignmentNonce).toBe("rev-2");
+  });
+  it("rejects a reply capability not offered by its durable assignment", async () => {
+    const h = fixture(); const created = await h.store.create(initial()); const done = next(initial(), "succeeded");
+    done.reply!.artifactFormat = "text-v1"; done.reply!.artifacts = { "a.md": "unnegotiated" };
+    await expect(h.store.replace(created!, done)).rejects.toThrow();
+    await expect(h.store.publish(done)).rejects.toThrow();
+    expect(h.api.resources.has(outputPath)).toBe(false);
+  });
+  it("accepts a text-only old-runtime reply to a capable assignment", async () => {
+    const h = fixture(); const attempt = initial(); attempt.assignment.artifactFormat = "text-v1";
+    const created = await h.store.create(attempt); const done = next(attempt, "succeeded"); delete done.reply!.artifactFormat;
+    await h.store.replace(created!, done); expect(await h.store.publish(done)).toBe(true);
+    expect(h.api.resources.get(artifactPath)!.data).toEqual({ "response.md": done.reply!.output });
+  });
   it("requires persisted matching terminal evidence before publishing", async () => {
     const h = fixture(); await expect(h.store.publish(next(initial(), "succeeded"))).rejects.toThrow("persisted");
     const done = await terminal(h.store); done.reply!.output = "Modified output";

@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import { validMissionArtifacts, type MissionArtifacts } from "@kars/mesh/dist/mission-protocol.js";
+
 export interface TaskUsage {
   promptTokens: number;
   completionTokens: number;
@@ -14,9 +16,16 @@ export interface TaskExecutionEvidence {
 }
 
 export class TaskExecutionError extends Error {
-  constructor(message: string, readonly evidence: TaskExecutionEvidence) {
+  readonly evidence: TaskExecutionEvidence;
+  constructor(message: string, evidence: TaskExecutionEvidence) {
     super(message);
     this.name = "TaskExecutionError";
+    this.evidence = {
+      model: evidence.model, rounds: evidence.rounds,
+      usage: evidence.usage ? {
+        promptTokens: evidence.usage.promptTokens, completionTokens: evidence.usage.completionTokens, totalTokens: evidence.usage.totalTokens,
+      } : null,
+    };
   }
 }
 
@@ -26,7 +35,26 @@ export class TaskCompletionLedger {
   private awaitingResponse = false;
   private usage: TaskUsage | null = { promptTokens: 0, completionTokens: 0, totalTokens: 0 };
 
-  constructor(private readonly model: string) {}
+  private artifacts: MissionArtifacts = {};
+
+  constructor(private readonly model: string, readonly artifactsEnabled = false) {}
+
+  prepareArtifact(name: unknown, content: unknown): MissionArtifacts {
+    if (!this.artifactsEnabled) throw new Error("Dispatcher does not support named artifacts; return the full content inline");
+    if (typeof name !== "string" || typeof content !== "string") throw new Error("Artifact name and content must be strings");
+    const next = { ...this.artifacts, [name]: content };
+    if (!validMissionArtifacts(next)) throw new Error("Artifact requires a safe, nonreserved filename, nonempty UTF-8 text, at most 16 files and 128 KiB serialized total");
+    return next;
+  }
+
+  commitArtifacts(artifacts: MissionArtifacts): void {
+    if (!this.artifactsEnabled || !validMissionArtifacts(artifacts)) throw new Error("Invalid or unnegotiated mission artifacts");
+    this.artifacts = { ...artifacts };
+  }
+
+  artifactSnapshot(): { artifacts?: MissionArtifacts } {
+    return Object.keys(this.artifacts).length ? { artifacts: { ...this.artifacts } } : {};
+  }
 
   beginRequest(): void {
     this.awaitingResponse = true;
