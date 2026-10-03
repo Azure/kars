@@ -24,6 +24,7 @@ import type {
   MessageSecurity,
 } from "./transport-interface.js";
 import { LocalInbox } from "./local-inbox.js";
+import { AgtSocketOwner } from "./agt-socket.js";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import * as crypto from "node:crypto";
 
@@ -90,6 +91,7 @@ interface AgtMeshClientOptions {
   registrationMetadata?: Record<string, string>;
   oneTimePrekeyCount?: number;
   autoRegister?: boolean;
+  autoReconnect?: boolean;
 }
 
 interface AgtMeshClient {
@@ -205,6 +207,14 @@ export class AgtTransport implements IMeshTransport {
   private readonly _plaintextPeers: Set<string>;
   private _connected = false;
   private readonly inbox: LocalInbox;
+  private readonly sockets: AgtSocketOwner;
+  private lifecycle: Promise<void> = Promise.resolve();
+  private wantConnected = false;
+  private epoch = 0;
+  private fatal: Error | null = null;
+  private registered = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
 
   // Phase 2 diagnostic hooks — fan out from AGT MeshClient callbacks
   // (registered in connect() once the client exists).
@@ -232,6 +242,7 @@ export class AgtTransport implements IMeshTransport {
     this.options = options;
     this._plaintextPeers = new Set(options.plaintextPeers ?? []);
     this.inbox = new LocalInbox({ buildHash: "agt" });
+    this.sockets = new AgtSocketOwner(options.wsFactory);
   }
 
   get isConnected(): boolean {
@@ -263,11 +274,93 @@ export class AgtTransport implements IMeshTransport {
     );
   }
 
-  async connect(opts?: {
+  connect(opts?: { capabilities?: string[]; displayName?: string }): Promise<void> {
+    this.wantConnected = true;
+    this.clearReconnect();
+    return this.serialize(() => this.connectOnce(opts));
+  }
+
+  private serialize(operation: () => Promise<void>): Promise<void> {
+    const result = this.lifecycle.then(operation);
+    this.lifecycle = result.catch(() => {});
+    return result;
+  }
+
+  private clearReconnect(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private scheduleReconnect(): void {
+    if (!this.wantConnected || this.fatal || this.reconnectTimer) return;
+    const delay = Math.min(60_000, 1_000 * 2 ** Math.min(this.reconnectAttempt++, 6));
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.wantConnected) return;
+      void this.serialize(() => this.connectOnce()).catch(() => this.scheduleReconnect());
+    }, delay);
+    this.reconnectTimer.unref();
+  }
+
+  private async retireConnection(): Promise<void> {
+    this._connected = false;
+    this.epoch++;
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+    let failure: unknown;
+    try { await this.client?.disconnect(); } catch (error) { failure = error; }
+    try { await this.sockets.retire(); } catch (error) { failure ??= error; }
+    this.clearReconnect();
+    if (failure) {
+      this.fatal = new Error("AGT transport cleanup failed; a new connection is forbidden", { cause: failure });
+      throw this.fatal;
+    }
+  }
+
+  private async connectOnce(opts?: { capabilities?: string[]; displayName?: string }): Promise<void> {
+    if (this.fatal) throw this.fatal;
+    if (!this.wantConnected || this.isConnected) return;
+    await this.retireConnection();
+    await this.initializeClient(opts);
+    if (!this.wantConnected) return;
+    const client = this.client!;
+    const opens = this.sockets.openCount;
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        client.connect(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            expired = true;
+            reject(new Error("AGT connection/registration deadline exceeded"));
+          }, 30_000);
+        }),
+      ]);
+      this.registered = true;
+      if (!client.isConnected) throw new Error("AGT relay closed during registration");
+      if (!this.wantConnected) return;
+      this._connected = true;
+      this.reconnectAttempt = 0;
+      this.clearReconnect();
+      this.startHeartbeat();
+    } catch (error) {
+      // Registration writes cannot be cancelled or safely repeated after an ambiguous failure.
+      if (expired || (!this.registered && this.sockets.openCount !== opens)) {
+        this.fatal = new Error("AGT registration outcome is uncertain; reconnect is forbidden", { cause: error });
+      }
+      await this.retireConnection();
+      throw this.fatal ?? error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async initializeClient(opts?: {
     capabilities?: string[];
     displayName?: string;
   }): Promise<void> {
-    if (this.isConnected) return;
+    if (this.client) return;
     const sdk = await loadAgtSdk();
 
     // X3DH key manager — MeshClient.registerSelf() will call
@@ -294,12 +387,13 @@ export class AgtTransport implements IMeshTransport {
       keyManager,
       agentDid: this.options.identity.agentId,
       displayName,
-      wsFactory: this.options.wsFactory,
+      wsFactory: this.sockets.create,
       plaintextPeers: [...this._plaintextPeers],
       knockTimeout: this.options.knockTimeout,
       capabilities,
       oneTimePrekeyCount: this.options.oneTimePreKeyCount ?? 20,
       autoRegister: true,
+      autoReconnect: false,
     });
 
     // Bridge SDK callbacks → our handler arrays + LocalInbox.
@@ -352,14 +446,19 @@ export class AgtTransport implements IMeshTransport {
       }
     });
     this.client.onDisconnect?.((reason, code) => {
+      this._connected = false;
+      this.epoch++;
+      if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+      this.scheduleReconnect();
       for (const h of this._disconnectHandlers) {
         try { h(reason, code); } catch { /* swallow */ }
       }
     });
 
-    await this.client.connect();
-    this._connected = true;
+  }
 
+  private startHeartbeat(): void {
     // Start auto-heartbeat ticker (see field comment for rationale).
     if (this.heartbeatTimer === null) {
       this.heartbeatTimer = setInterval(() => {
@@ -387,24 +486,18 @@ export class AgtTransport implements IMeshTransport {
     }
   }
 
-  async disconnect(): Promise<void> {
-    if (this.heartbeatTimer !== null) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
-    if (this.client) {
-      try {
-        await this.client.disconnect();
-      } catch {
-        // best-effort — connection may already be down
-      }
-    }
+  disconnect(): Promise<void> {
+    this.wantConnected = false;
     this._connected = false;
-    this.client = null;
+    this.epoch++;
+    this.clearReconnect();
+    return this.serialize(() => this.retireConnection());
   }
 
   async send(toAmid: string, payload: unknown): Promise<string | undefined> {
-    if (!this.client) throw new Error("AgtTransport not connected");
+    const client = this.client;
+    const epoch = this.epoch;
+    if (!client || !this.isConnected) throw new Error("AgtTransport not connected");
     // @microsoft/agent-governance-sdk MeshClient.send() throws
     // "No encrypted session with <peer>. Call establishSession() first."
     // when no SecureChannel exists for the peer — it does NOT auto-bootstrap
@@ -415,7 +508,7 @@ export class AgtTransport implements IMeshTransport {
     // on the hot path.
     if (!this._plaintextPeers.has(toAmid)) {
       try {
-        await this.client.establishSessionWithPeer(toAmid);
+        await client.establishSessionWithPeer(toAmid);
       } catch (e: unknown) {
         // Surface the real error verbatim — the caller's retry loop matches
         // on /prekey/i, so a generic "prekey bootstrap failed" wrapper hides
@@ -434,7 +527,8 @@ export class AgtTransport implements IMeshTransport {
         throw e instanceof Error ? e : new Error(String(e));
       }
     }
-    await this.client.send(toAmid, payload);
+    if (this.epoch !== epoch || !this.isConnected) throw new Error("AGT connection changed during session establishment");
+    await client.send(toAmid, payload);
     return undefined;
   }
 

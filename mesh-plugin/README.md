@@ -175,16 +175,39 @@ the pinned dispatcher, not names or payload assertions of trust.
 The receiver is disabled unless `KARS_MISSION_DISPATCH_ENABLED=true`. Enabling it
 requires `KARS_MISSION_TASK_NAME`, `KARS_MISSION_TASK_UID`,
 `KARS_MISSION_SANDBOX_UID`, `KARS_MISSION_POD_UID`,
-`KARS_MISSION_DISPATCHER_DID` and a 64-hex `KARS_IDENTITY_SEED`. These are intended
-for controller-owned bindings and a random Secret-backed seed. Environment
-validation checks format only: it cannot prove Secret provenance or randomness.
-Do not derive execution authority from a public application ID. The current
-chart/controller do not yet provide these bindings or a mission dispatcher.
+`KARS_MISSION_DISPATCHER_DID` and a 64-hex `KARS_MISSION_IDENTITY_ROOT`.
+The enabled runtime derives its signing identity from this root, the `runtime`
+role, Sandbox UID and Pod UID using HMAC-SHA256 over the JSON array
+`["kars-mission-identity-v1", role, ownerUid, podUid]`. Receiver validation checks
+that the supplied DID matches this derivation as well as the complete binding.
+It cannot prove root entropy, Secret provenance or controller ownership.
+`KARS_IDENTITY_SEED` and public application IDs cannot substitute for this root.
+The current chart/controller do not yet provide these bindings or a mission
+dispatcher; the enabled path remains source-only.
 
 Reserved messages never fall through to legacy task handlers, even when the
 receiver is disabled. Reassembled legacy chunks are rejected because they lack
-aggregate encryption evidence. The existing process-wide SDK singleton remains
-the only runtime client and prekey writer.
+aggregate encryption evidence. The existing process-wide SDK singleton remains.
+Before deriving a mission identity or creating its SDK client, runtime bootstrap
+also acquires an exclusive loopback listener on `127.0.0.1:19791`. Its acquisition
+promise and successful listener are retained for the process lifetime, including
+after validation or SDK failure. A second initialization fails closed and
+requires a process restart. This is a cooperative same-Pod prekey-writer guard,
+not an authorization boundary against malicious processes or cross-Pod fencing.
+The disabled mission path keeps legacy identity behavior unchanged.
+
+Transport reconnects serialize connection retirement and reuse one SDK client
+and key manager. SDK automatic reconnect is disabled in favor of the wrapper's
+bounded-backoff retry. A replacement socket cannot open before the old actual
+socket closes; ambiguous registration, timeout or failed cleanup quarantines the
+transport instead of creating another writer. Sends reject if their connection
+changes during session establishment. Heartbeat reconnect status comes from the
+actual connection, not a cached success flag. Already-running upstream SDK
+asynchronous handlers are not fully generation-fenced by this wrapper.
+
+The opt-in real-relay test uses fresh identities for six encrypted messages over
+two reconnect cycles, checking exact payloads, unchanged DIDs and actual socket
+closure. It proves neither Entra authentication nor useful mission delivery.
 
 Execution uses the real runtime tool loop through the local inference router:
 

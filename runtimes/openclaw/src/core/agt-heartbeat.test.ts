@@ -2,7 +2,72 @@
 // Licensed under the MIT License.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { startTaskProgressHeartbeat } from "./agt-heartbeat.js";
+import { agtReconnect, startTaskProgressHeartbeat } from "./agt-heartbeat.js";
+
+describe("agtReconnect", () => {
+  function setup(connected = false) {
+    const client = {
+      isConnected: connected,
+      connect: vi.fn(async () => { client.isConnected = true; }),
+      disconnect: vi.fn(async () => {}),
+    };
+    const setConnected = vi.fn();
+    const log = { info: vi.fn(), warn: vi.fn() };
+    return { client, setConnected, log };
+  }
+
+  it("does nothing without a client", async () => {
+    const s = setup();
+    await agtReconnect(null, "sandbox", s.setConnected, s.log);
+    expect(s.setConnected).not.toHaveBeenCalled();
+    expect(s.log.info).not.toHaveBeenCalled();
+  });
+
+  it("refreshes cached state without reconnecting an actually connected client", async () => {
+    const s = setup(true);
+    await agtReconnect(s.client, "sandbox", s.setConnected, s.log);
+    expect(s.setConnected).toHaveBeenCalledExactlyOnceWith(true);
+    expect(s.client.connect).not.toHaveBeenCalled();
+    expect(s.client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("awaits serialized connect and never disconnects the client itself", async () => {
+    const s = setup();
+    let finish!: () => void;
+    s.client.connect.mockImplementationOnce(() => new Promise<void>(resolve => {
+      finish = () => { s.client.isConnected = true; resolve(); };
+    }));
+    const pending = agtReconnect(s.client, "sandbox", s.setConnected, s.log);
+    expect(s.setConnected).toHaveBeenCalledExactlyOnceWith(false);
+    expect(s.client.connect).toHaveBeenCalledExactlyOnceWith({
+      displayName: "sandbox", capabilities: ["kars-agent", "task-execution", "sandbox"],
+    });
+    expect(s.log.info).not.toHaveBeenCalled();
+    finish();
+    await pending;
+    expect(s.setConnected).toHaveBeenLastCalledWith(true);
+    expect(s.log.info).toHaveBeenCalledExactlyOnceWith("AGT mesh reconnected successfully");
+    expect(s.client.disconnect).not.toHaveBeenCalled();
+  });
+
+  it("reports failed reconnects without claiming success", async () => {
+    const s = setup();
+    s.client.connect.mockRejectedValueOnce(new Error("quarantined"));
+    await agtReconnect(s.client, "sandbox", s.setConnected, s.log);
+    expect(s.setConnected.mock.calls.every(([value]) => value === false)).toBe(true);
+    expect(s.log.warn).toHaveBeenCalledExactlyOnceWith("AGT mesh reconnect failed: quarantined");
+    expect(s.log.info).not.toHaveBeenCalled();
+  });
+
+  it("does not report a resolved but cancelled connection as reconnected", async () => {
+    const s = setup();
+    s.client.connect.mockResolvedValueOnce(undefined);
+    await agtReconnect(s.client, "sandbox", s.setConnected, s.log);
+    expect(s.setConnected.mock.calls.every(([value]) => value === false)).toBe(true);
+    expect(s.log.warn).toHaveBeenCalledOnce();
+    expect(s.log.info).not.toHaveBeenCalled();
+  });
+});
 
 describe("startTaskProgressHeartbeat", () => {
   // Vitest 4's ReturnType<typeof vi.fn> is no longer assignable to the

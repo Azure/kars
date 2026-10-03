@@ -22,9 +22,8 @@ interface MeshIdentity {
   signTimestamp: () => Promise<[string, string]>;
 }
 interface MeshClient {
-  disconnect: () => Promise<void>;
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  connect: (opts: { displayName: string; capabilities: string[] }) => Promise<any>;
+  readonly isConnected: boolean;
+  connect: (opts: { displayName: string; capabilities: string[] }) => Promise<unknown>;
 }
 interface InboxEntry {
   from_amid: string;
@@ -97,30 +96,27 @@ export async function recordMeshSession(
   }
 }
 
-/**
- * Re-establish a dropped mesh client connection. The SDK sets
- * `client.connected = true` even on transport failure, so we explicitly
- * disconnect first to reset stale state. Caller must update its
- * `connected` flag via `setConnected` on success.
- */
+/** Reconnect through the transport's serialized socket retirement/registration lifecycle. */
 export async function agtReconnect(
   meshClient: MeshClient | null,
-  isConnected: boolean,
   sandboxName: string,
   setConnected: (v: boolean) => void,
   log: MeshLogger,
 ): Promise<void> {
-  if (!meshClient || isConnected) return;
+  if (!meshClient) return;
+  setConnected(meshClient.isConnected);
+  if (meshClient.isConnected) return;
   try {
-    try { await meshClient.disconnect(); } catch { /* ignore */ }
     await meshClient.connect({
       displayName: sandboxName,
       capabilities: ["kars-agent", "task-execution", sandboxName],
     });
+    if (!meshClient.isConnected) throw new Error("Connection was cancelled or closed before reconnect completed");
     setConnected(true);
     log.info("AGT mesh reconnected successfully");
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
   } catch (e: any) {
+    setConnected(false);
     log.warn(`AGT mesh reconnect failed: ${e.message}`);
   }
 }

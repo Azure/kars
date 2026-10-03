@@ -294,6 +294,20 @@ function buildFacade(data: IdentityData): MeshIdentity {
   };
 }
 
+/** Derive a signing identity without reading environment variables or persisting keys. */
+export function identityFromSigningSeed(seed: Uint8Array): MeshIdentity {
+  if (!(seed instanceof Uint8Array) || seed.byteLength !== 32) {
+    throw new Error("Signing identity requires exactly 32 seed bytes");
+  }
+  const keys = rawEd25519Keys(Buffer.from(seed));
+  return {
+    amid: deriveAmid(keys.pub),
+    did: deriveCanonicalDid(keys.pub),
+    signingPublicKey: keys.pub,
+    signingPrivateKey: keys.priv,
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Generate / Load / Save
 // ---------------------------------------------------------------------------

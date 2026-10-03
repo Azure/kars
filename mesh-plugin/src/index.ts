@@ -1833,7 +1833,10 @@ export const activate = register;
 // Re-export for consumers
 export { decodeToken } from "./pairing.js";
 export { createMeshTransport } from "./transport-factory.js";
+export { missionIdentity, missionIdentitySeed, acquireMissionWriter } from "./mission-identity.js";
+export type { MissionIdentityRole } from "./mission-identity.js";
 export {
+  identityFromSigningSeed,
   generateIdentity,
   loadIdentity,
   loadOrCreateIdentity,

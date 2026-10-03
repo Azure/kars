@@ -49,8 +49,10 @@ describe.skipIf(!LIVE)("AGT live mesh round-trip", () => {
   const bobKp = newKeypair();
 
   const frames: Array<Record<string, unknown>> = [];
+  const sockets: WebSocket[] = [];
   const wsFactory = (url: string) => {
     const socket = new WebSocket(url);
+    sockets.push(socket);
     const send = socket.send.bind(socket);
     socket.send = ((data: WebSocket.RawData, ...args: unknown[]) => {
       const frame = JSON.parse(data.toString()) as Record<string, unknown>;
@@ -91,18 +93,20 @@ describe.skipIf(!LIVE)("AGT live mesh round-trip", () => {
   }, 30_000);
 
   afterAll(async () => {
-    await Promise.all([alice?.disconnect(), bob?.disconnect()]);
-    for (const { did, signTimestamp } of [aliceKp, bobKp]) {
+    const disconnects = await Promise.allSettled([alice?.disconnect(), bob?.disconnect()]);
+    const deletions = await Promise.allSettled([aliceKp, bobKp].map(async ({ did, signTimestamp }) => {
       const timestamp = new Date().toISOString();
       const response = await fetch(`${REGISTRY}/v1/agents/${encodeURIComponent(did)}`, {
         method: "DELETE", signal: AbortSignal.timeout(5000),
         headers: { authorization: `Ed25519-Timestamp ${did} ${timestamp} ${signTimestamp(timestamp)}` },
       });
       expect([200, 204, 404]).toContain(response.status);
-    }
+    }));
+    const errors = [...disconnects, ...deletions].flatMap(result => result.status === "rejected" ? [result.reason] : []);
+    if (errors.length) throw new AggregateError(errors, "Live mesh cleanup failed");
   }, 15_000);
 
-  it("delivers encrypted A→B, B→A, and A→B messages across ratchet turns", async () => {
+  it("preserves encrypted bidirectional ratchets across repeated reconnects", async () => {
     expect(alice.isConnected).toBe(true);
     expect(bob.isConnected).toBe(true);
     expect(alice.getPlaintextPeers()).toEqual([]);
@@ -113,7 +117,16 @@ describe.skipIf(!LIVE)("AGT live mesh round-trip", () => {
       { sender: bob, receiver: alice, from: bobKp.did, to: aliceKp.did },
       { sender: alice, receiver: bob, from: aliceKp.did, to: bobKp.did },
     ];
-    for (const [turn, { sender, receiver, from, to }] of exchanges.entries()) {
+    for (const [turn, { sender, receiver, from, to }] of [...exchanges, ...exchanges].entries()) {
+      if (turn === 2 || turn === 4) {
+        const oldSockets = [...sockets];
+        await Promise.all([alice.disconnect(), bob.disconnect()]);
+        expect(oldSockets.every(socket => socket.readyState === WebSocket.CLOSED)).toBe(true);
+        await Promise.all([alice.connect(), alice.connect(), bob.connect(), bob.connect()]);
+        expect(sockets).toHaveLength(oldSockets.length + 2);
+        expect(alice.currentDid).toBe(aliceKp.did);
+        expect(bob.currentDid).toBe(bobKp.did);
+      }
       const payload = { id: crypto.randomUUID(), text: "Private roundtrip — café ✓", turn };
       await sender.send(to, payload);
       const received = await receiver.waitForMessage((content, peer, security) =>
@@ -130,6 +143,6 @@ describe.skipIf(!LIVE)("AGT live mesh round-trip", () => {
       expect(Buffer.from(wire.ciphertext as string, "base64").equals(Buffer.from(JSON.stringify(payload))))
         .toBe(false);
     }
-    expect(frames).toHaveLength(3);
+    expect(frames).toHaveLength(6);
   }, 45_000);
 });

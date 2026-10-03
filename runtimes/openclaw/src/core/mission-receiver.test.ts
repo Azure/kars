@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MissionReceiver, missionTargetFromEnvironment } from "./mission-receiver.js";
 import { parseMissionMessage, type MissionAssignment, type MissionReply } from "@kars/mesh/dist/mission-protocol.js";
 import { TaskExecutionError } from "./task-completion.js";
+import { missionIdentity } from "@kars/mesh/dist/mission-identity.js";
 
 const target = { taskName: "mission", taskUid: "task-uid", sandboxUid: "sandbox-uid", podUid: "pod-uid", agentDid: `did:mesh:${"a".repeat(32)}`, dispatcherDid: `did:mesh:${"b".repeat(32)}` };
 const assignment: MissionAssignment = { ...target, type: "mission:assign", version: 1, runNonce: "run-1", assignmentId: "assignment-1", bootId: "boot-1", content: "Produce a useful briefing" };
@@ -104,14 +105,26 @@ describe("encrypted mission receiver", () => {
 });
 
 describe("mission wire and environment validation", () => {
-  it("requires a complete binding and independently secret seed", () => {
+  const environment = {
+    KARS_MISSION_DISPATCH_ENABLED: "true", KARS_MISSION_IDENTITY_ROOT: "c".repeat(64), KARS_MISSION_TASK_NAME: target.taskName,
+    KARS_MISSION_TASK_UID: target.taskUid, KARS_MISSION_SANDBOX_UID: target.sandboxUid, KARS_MISSION_POD_UID: target.podUid,
+    KARS_MISSION_DISPATCHER_DID: target.dispatcherDid,
+  };
+  const derivedDid = missionIdentity(environment.KARS_MISSION_IDENTITY_ROOT, "runtime", target.sandboxUid, target.podUid).did;
+  it("requires a complete binding and independently secret root", () => {
     expect(missionTargetFromEnvironment(target.agentDid, {})).toBeNull();
     expect(() => missionTargetFromEnvironment(target.agentDid, { KARS_MISSION_DISPATCH_ENABLED: "true" })).toThrow("Secret-backed");
-    expect(missionTargetFromEnvironment(target.agentDid, {
-      KARS_MISSION_DISPATCH_ENABLED: "true", KARS_IDENTITY_SEED: "c".repeat(64), KARS_MISSION_TASK_NAME: target.taskName,
-      KARS_MISSION_TASK_UID: target.taskUid, KARS_MISSION_SANDBOX_UID: target.sandboxUid, KARS_MISSION_POD_UID: target.podUid,
-      KARS_MISSION_DISPATCHER_DID: target.dispatcherDid,
-    })).toEqual(target);
+    expect(missionTargetFromEnvironment(derivedDid, environment)).toEqual({ ...target, agentDid: derivedDid });
+  });
+  it.each(["KARS_MISSION_SANDBOX_UID", "KARS_MISSION_POD_UID", "KARS_MISSION_IDENTITY_ROOT"])("rejects a DID from a different %s", field => {
+    const value = field === "KARS_MISSION_IDENTITY_ROOT" ? "d".repeat(64) : "different-uid";
+    expect(() => missionTargetFromEnvironment(derivedDid, { ...environment, [field]: value })).toThrow("does not match");
+  });
+  it("does not accept a legacy signing seed or public Entra app ID as the mission root", () => {
+    const { KARS_MISSION_IDENTITY_ROOT: _root, ...binding } = environment;
+    expect(() => missionTargetFromEnvironment(derivedDid, {
+      ...binding, KARS_IDENTITY_SEED: "c".repeat(64), PINNED_AGENT_IDENTITY_APP_ID: "public-app-id",
+    })).toThrow("Secret-backed");
   });
   it("rejects invalid or absent success evidence", () => {
     const reply = { ...assignment, type: "mission:reply", status: "succeeded", output: "answer", evidence };

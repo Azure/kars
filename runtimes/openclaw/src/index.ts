@@ -350,7 +350,7 @@ async function recordMeshSession(
 
 // Attempt to reconnect the AGT mesh client after a disconnect.
 async function agtReconnect(log: { info: (m: string) => void; warn: (m: string) => void }) {
-  return _agtReconnect(agtMeshClient, agtConnected, agtSandboxName, (v) => { agtConnected = v; }, log);
+  return _agtReconnect(agtMeshClient, agtSandboxName, (v) => { agtConnected = v; }, log);
 }
 
 // Write unread inbox messages to a file the LLM can see in its context.
@@ -368,6 +368,7 @@ import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect,
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
 import { processTaskWithTools as _processTaskWithTools, executeTaskWithEvidence, type TaskLoopDeps } from "./core/agt-task-loop.js";
 import { MissionReceiver, missionTargetFromEnvironment } from "./core/mission-receiver.js";
+import { initializeMissionIdentity } from "./core/mission-bootstrap.js";
 import { isMissionMessage } from "@kars/mesh/dist/mission-protocol.js";
 import { authorizeTaskAction } from "./core/task-policy.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
@@ -512,10 +513,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // dependency for keygen / verify).
     const meshMod: any = await import("@kars/mesh");
 
-    // Generate Ed25519 + X25519 identity. `generateIdentity` writes the
-    // encrypted envelope under ~/.kars/identity.json and returns a
-    // facade with raw key buffers + amid/did.
-    const meshIdentity = await meshMod.generateIdentity();
+    // Mission identities are Pod-bound and never persisted to the legacy identity file.
+    // Acquire process-external prekey writer custody before deriving keys or creating the SDK.
+    const meshIdentity = await initializeMissionIdentity() ?? await meshMod.generateIdentity();
     agtIdentity = {
       amid: meshIdentity.amid,
       did: meshIdentity.did,
