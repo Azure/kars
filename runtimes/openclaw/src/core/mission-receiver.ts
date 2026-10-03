@@ -4,6 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isMissionMessage, parseMissionMessage, sameMissionTarget, type MissionAssignment, type MissionReply, type MissionTarget } from "@kars/mesh/dist/mission-protocol.js";
 import type { MessageSecurity } from "@kars/mesh/dist/transport-interface.js";
+import { missionIdentity } from "@kars/mesh/dist/mission-identity.js";
 import { TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
 
 export interface MissionReceiverOptions {
@@ -21,9 +22,12 @@ export function missionTargetFromEnvironment(agentDid: string, env = process.env
     sandboxUid: env.KARS_MISSION_SANDBOX_UID!, podUid: env.KARS_MISSION_POD_UID!,
     dispatcherDid: env.KARS_MISSION_DISPATCHER_DID!, agentDid,
   };
-  if (!/^[a-fA-F0-9]{64}$/.test(env.KARS_IDENTITY_SEED ?? "") || !parseMissionMessage({
+  if (!/^[a-fA-F0-9]{64}$/.test(env.KARS_MISSION_IDENTITY_ROOT ?? "") || !parseMissionMessage({
     ...target, type: "mission:probe", version: 1, challenge: "validation", runNonce: "validation",
-  })) throw new Error("Mission dispatch requires a complete controller-owned binding and Secret-backed identity seed");
+  })) throw new Error("Mission dispatch requires a complete controller-owned binding and Secret-backed identity root");
+  if (missionIdentity(env.KARS_MISSION_IDENTITY_ROOT!, "runtime", target.sandboxUid, target.podUid).did !== agentDid) {
+    throw new Error("Mission identity does not match its controller-owned Sandbox and Pod binding");
+  }
   return target;
 }
 
