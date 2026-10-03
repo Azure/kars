@@ -5,6 +5,8 @@ use super::*;
 use serde_json::Value;
 use std::{collections::BTreeMap, sync::Mutex};
 use wiremock::{Mock, MockServer, ResponseTemplate};
+#[path = "tests/mission_defer.rs"]
+mod mission_defer;
 #[path = "tests/suspension.rs"]
 mod suspension;
 
@@ -40,6 +42,7 @@ struct State {
     objects: BTreeMap<String, Value>,
     calls: Vec<(String, String, Value)>,
     pods: Vec<Value>,
+    create_deployment_on_post: bool,
 }
 
 fn merge(value: &mut Value, patch: &Value) {
@@ -183,6 +186,19 @@ async fn fixture() -> (
                 "apiVersion":"v1","kind":"Status","status":"Failure","code":403,"reason":"Forbidden"}));}
             let key=if r.method=="POST" {format!("{path}/{}",body["metadata"]["name"].as_str().unwrap())}
                 else {path.strip_suffix("/status").unwrap_or(path).into()};
+            if r.method=="POST" && key==DEPLOYMENT {
+                if s.create_deployment_on_post {
+                    let mut competing=body.clone();
+                    competing["metadata"]["uid"]=json!("competing-deployment-uid");
+                    competing["metadata"]["resourceVersion"]=json!("50");
+                    s.objects.insert(key.clone(),competing);
+                }
+                if s.objects.contains_key(&key) {
+                    return ResponseTemplate::new(409).set_body_json(json!({
+                        "apiVersion":"v1","kind":"Status","status":"Failure",
+                        "reason":"AlreadyExists","message":"deployment exists","code":409}));
+                }
+            }
             let mut value=s.objects.get(&key).cloned().unwrap_or_else(||json!({"apiVersion":"kars.azure.com/v1alpha1",
                 "kind":if key.contains("inferencepolicies"){"InferencePolicy"}else{"KarsReceipt"},
                 "metadata":{"uid":"created","resourceVersion":"0","generation":1}}));

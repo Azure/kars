@@ -304,10 +304,46 @@ journals must not be silently adopted. Retired Tasks require normal relaunch.
 Nonterminal and uncertain claims are never automatically retried. A send timeout
 cannot cancel an already-started transport send, and a crashed dispatcher's claim
 may remain pending. The `ownerSession` field is not a leadership lease or process
-fence. Controller binding/Secret producers, helper lifecycle and single-prekey-
-writer enforcement, Helm/RBAC wiring, orphan handling, correlated Bridge readers
-and live end-to-end execution remain integration work. These source-level tests
-are not evidence of a delivered mission.
+fence. The controller now implements the default-off binding/Secret producer
+below. The executable helper lifecycle, Helm/RBAC wiring, orphan handling,
+correlated Bridge activity readers and live end-to-end execution remain
+integration work. These source-level tests are not evidence of a delivered mission.
+
+### Controller identity and binding producer
+
+`controller/src/mission_delivery` is enabled only by
+`KARS_MISSION_DISPATCH_ENABLED=true`. It requires `POD_NAMESPACE`,
+`KARS_MISSION_DISPATCHER_DEPLOYMENT` and `KARS_MISSION_DISPATCHER_RELEASE` to
+identify the administrator-configured Core helper: one Recreate replica with a
+required reference to `kars-mission-dispatcher-identity`. Release metadata is
+checked, but labels are not an authorization boundary: Core Deployment and
+Namespace writers must be restricted to trusted administrators/controllers.
+
+The controller creates separate immutable random identity roots for the helper
+and each eligible Task runtime. Secret custody is checked through metadata before
+reading its body. Each root is pinned by Secret UID on its owning Deployment or
+Sandbox using UID/resourceVersion preconditions. An interrupted CREATE/pin is
+never automatically adopted or rotated; recovery requires the exact retained
+Secret UID in `kars.azure.com/mission-root-recovery-uid` on the owning Namespace.
+That administrative recovery marker is not removed automatically. Secret root
+values are never projected as literals or included in diagnostics.
+
+Only an authorized, launched, Ready OpenClaw Task receives the required runtime
+Secret reference, downward Pod UID and expected dispatcher DID. The controller
+publishes `binding.json` after validating the actual applied projection and the
+settled Deployment/ReplicaSet/Pod chain, with reverse UID/resourceVersion reads.
+Bindings are Task-owned ConfigMaps written with CREATE or guarded replacement;
+conflicts are not permission to adopt a competing resource. This producer and the
+consumer's separate currentness checks are not a cross-resource transaction.
+
+Transient helper convergence preserves an existing runtime's accepted spec and
+its original UID/resourceVersion through the deployment write fence. Concurrent
+updates, replacements or disappearance fail rather than adopting a newer object.
+A runtime that does not exist waits without creating a paused placeholder. First
+creation uses CREATE, never forced apply over a competing create. Suspension,
+Task authorization, credential-rebind and private-activation checks still apply.
+The feature is not wired into the installed Core release yet; source tests do not
+qualify Kubernetes defaulting, useful delivery, Entra identity or either beta gate.
 
 ## Files created
 

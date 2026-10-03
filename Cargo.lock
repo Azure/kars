@@ -2497,6 +2497,7 @@ dependencies = [
  "futures",
  "futures-util",
  "hex",
+ "hmac 0.12.1",
  "jsonwebtoken",
  "k8s-openapi",
  "kars-eval-corpus",

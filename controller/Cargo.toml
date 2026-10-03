@@ -79,6 +79,7 @@ rustls = { version = "0.23.45", default-features = false, features = ["aws_lc_rs
 rcgen.workspace = true
 time.workspace = true
 regex = "1.12.3"
+hmac.workspace = true
 
 [dev-dependencies]
 # S16 — perf baseline criterion benches. See `controller/benches/`.
