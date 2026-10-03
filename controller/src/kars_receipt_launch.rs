@@ -162,6 +162,7 @@ mod tests {
                     isolation: Some("enhanced".into()),
                     memory: Some("review-memory".into()),
                     model_fallbacks: Vec::new(),
+                    execution_plan: None,
                     credential_bindings: None,
                     github_binding: None,
                 }),

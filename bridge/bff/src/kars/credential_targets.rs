@@ -219,8 +219,22 @@ impl Cluster {
         target: &Target,
         active: bool,
     ) -> Result<(), kube::Error> {
-        self.attach_created_credentials(target).await?;
         let api = object_api(self, &target.namespace, &target.kind);
+        if active {
+            let captured = api
+                .get(&target.name)
+                .await
+                .map_err(|error| safe("Check reviewed plan before credential attachment", error))?;
+            if captured.uid().as_deref() != Some(target.uid.as_str())
+                || captured.metadata.deletion_timestamp.is_some()
+            {
+                return Err(failure(
+                    "Created target was replaced or deleted before credential attachment",
+                ));
+            }
+            super::execution_plans::validate(&captured, true).map_err(|error| failure(&error))?;
+        }
+        self.attach_created_credentials(target).await?;
         let mut object = api
             .get(&target.name)
             .await
@@ -255,6 +269,9 @@ impl Cluster {
                     "Keyless consumer was replaced or deleted before activation",
                 ));
             }
+        }
+        if active {
+            super::execution_plans::validate(&object, true).map_err(|error| failure(&error))?;
         }
         // Draft tasks may omit execution entirely; the typed default is inactive.
         // Rewriting an unchanged gate needlessly races controller status updates.

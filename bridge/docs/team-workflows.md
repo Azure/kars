@@ -29,6 +29,30 @@ Intent
   -> approved team memory + next milestone
 ```
 
+## Current execution boundary
+
+A reviewed `kars.execution-plan/v1` is retained in Task and Team blueprints,
+including role overrides, replication, authority digests and signed launch
+packages. Bridge compares the API's captured plan with the reviewed plan before
+continuing creation or plan updates. An older CRD that prunes the plan must fail
+this check; saving a name or objective is not equivalent to saving the plan.
+
+**Typed-plan execution is not implemented yet.** The existing encrypted mission
+executor delivers an objective to one runtime; it does not enforce the reviewed
+role DAG, phases, capability sets, tool-call bounds, per-role budgets or synthesis.
+A valid plan can be saved inactive for review, but launch, resume and manual run
+requests reject it with `TypedPlanExecutionUnavailable`. A decomposition marker
+without its plan, or an unsupported marker, rejects with
+`ReviewedExecutionPlanMissing`. A missing plan is not a legacy fallback when a
+marker declares one. Stopping a Task or purely pausing a Team remains allowed.
+Unmarked legacy planless execution remains supported.
+
+The roster alone is not proof that specialists performed work. The published
+manual-run admission path is distinct from engineering intake and milestone
+execution: automatic queue claiming, dependency advancement and revision-bound
+checkpoint continuation still need their consumers. The journey below is the
+intended product contract, not a claim that those integrations are complete.
+
 ## Reviewed Team lifetime budget
 
 New Teams created in Bridge require an explicitly reviewed positive whole-number
@@ -51,8 +75,10 @@ reviewed new Team, not editing or removing an existing Team's cap. Team update
 requests that explicitly include `budget`, even `null`, are rejected; unrelated
 route or lifecycle edits keep the stored lifetime limit.
 
-Creation remains paused by default. Opt-in launch with milestones creates the
-Team paused, installs its queue and engineering settings, then requests resume.
+Creation remains paused by default. The UI's opt-in launch sequence creates the
+Team paused, installs its queue and engineering settings, then requests resume;
+that sequence does not bypass the typed-plan activation guard above. Until a
+plan-aware executor is available, retain the Team as a reviewed paused draft.
 This budget contract alone is not proof of useful Team delivery or beta readiness.
 
 ## What each Workspace concept means
@@ -222,9 +248,11 @@ Each milestone contains:
 - acceptance criteria;
 - optional review gate.
 
-Only a milestone whose dependencies are `done` may run. A milestone in
-`active` or `awaiting_review` blocks later assignments. This is why a team can
-have many queued milestones but only one current execution cell.
+The intended dependency contract allows only a milestone whose dependencies are
+`done` to run; `active` or `awaiting_review` work must block dependent assignments.
+The graph records that contract, but its automatic execution and review
+continuation are not yet connected to the durable manual-run consumer. Do not
+interpret queued milestones or a successful queue write as agent activity.
 
 ## 3. Launch and watch a run
 

@@ -33,7 +33,7 @@
 //! core never depends on Bridge.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
-use kube::CustomResource;
+use kube::{CustomResource, ResourceExt};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
@@ -307,6 +307,29 @@ impl KarsTeam {
             // Do not feed invalid arithmetic bounds (including i32::MIN depth)
             // into a validator whose parent envelope must already be valid.
             return errs;
+        }
+        if let Err(error) = crate::task_execution_plan::validate_activation(
+            self.spec
+                .blueprint
+                .as_ref()
+                .and_then(|blueprint| blueprint.execution_plan.as_ref()),
+            self.annotations()
+                .get("kars.azure.com/mission-decomposition")
+                .map(String::as_str),
+            !self.spec.paused,
+        ) {
+            errs.push(error);
+        }
+        for role in &self.spec.roster {
+            if let Err(error) = crate::task_execution_plan::validate_activation(
+                role.blueprint
+                    .as_ref()
+                    .and_then(|blueprint| blueprint.execution_plan.as_ref()),
+                None,
+                !self.spec.paused,
+            ) {
+                errs.push(format!("roster role '{}': {error}", role.name));
+            }
         }
         let principal = specs::principal_spec(self);
         errs.extend(specs::policy_errors(&principal));

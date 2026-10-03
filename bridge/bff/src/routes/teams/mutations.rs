@@ -51,6 +51,12 @@ pub async fn create_team(
         .ok_or_else(|| AppError::BadRequest("a typed execution_plan is required".into()))?;
     crate::routes::compose::validate_execution_plan(execution_plan)
         .map_err(AppError::BadRequest)?;
+    crate::kars::task::execution_plan::validate_activation(
+        Some(&execution_plan.clone().into_crd()),
+        Some("execution-plan/v1"),
+        b.launch.unwrap_or(false),
+    )
+    .map_err(AppError::BadRequest)?;
     let roster_names = b
         .roles
         .iter()
@@ -282,12 +288,16 @@ pub async fn create_team(
     body["metadata"]["annotations"]["kars.azure.com/owner-sub"] = serde_json::json!(principal.sub);
     body["metadata"]["annotations"]["kars.azure.com/owner-name"] =
         serde_json::json!(principal.name);
+    body["metadata"]["annotations"]["kars.azure.com/mission-decomposition"] =
+        serde_json::json!("execution-plan/v1");
     let active = !body["spec"]["paused"].as_bool().unwrap_or(false);
+    crate::kars::execution_plans::validate(&body, active).map_err(AppError::BadRequest)?;
     body["spec"]["paused"] = serde_json::json!(true);
     let captured = cluster
-        .create_kind(&ns, "KarsTeam", body)
+        .create_kind(&ns, "KarsTeam", body.clone())
         .await
         .map_err(|e| AppError::Upstream(e.to_string()))?;
+    crate::kars::execution_plans::ensure_preserved(&body, &captured).map_err(AppError::Upstream)?;
     cluster
         .finish_created_credentials(
             &crate::kars::credentials::Target {
@@ -669,14 +679,31 @@ pub async fn update_team(
     if let Some(ttl) = b.run_retention_ttl_seconds {
         spec.insert("runRetentionTtlSeconds".into(), serde_json::json!(ttl));
     }
+    let pause_only = spec.len() == 1 && spec.get("paused") == Some(&serde_json::json!(true));
+    let patch = crate::kars::execution_plans::prepare_team_patch(&team, spec.into())
+        .map_err(AppError::BadRequest)?;
+    let mut expected =
+        serde_json::to_value(&team).map_err(|error| AppError::Upstream(error.to_string()))?;
+    json_patch::merge(&mut expected, &patch);
     let api: Api<KarsTeam> = cluster.teams(&ns);
-    api.patch(
-        &name,
-        &kube::api::PatchParams::default(),
-        &kube::api::Patch::Merge(serde_json::json!({"spec": spec})),
-    )
-    .await
-    .map_err(|e| AppError::Upstream(e.to_string()))?;
+    let captured = api
+        .patch(
+            &name,
+            &kube::api::PatchParams::default(),
+            &kube::api::Patch::Merge(patch),
+        )
+        .await
+        .map_err(|error| match error {
+            kube::Error::Api(response) if matches!(response.code, 409 | 422) => AppError::Conflict(
+                "Team changed while its reviewed package was being updated; refresh and retry"
+                    .into(),
+            ),
+            error => AppError::Upstream(error.to_string()),
+        })?;
+    if !pause_only {
+        crate::kars::execution_plans::ensure_preserved(&expected, &captured)
+            .map_err(AppError::Upstream)?;
+    }
     if execution_plan_changed {
         cluster
             .merge_patch_kind(

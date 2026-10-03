@@ -263,6 +263,7 @@ async fn materialized_resources_match_the_authorization_blueprint() {
         }],
         credential_bindings: None,
         github_binding: None,
+        execution_plan: None,
     });
     Mock::given(method("GET"))
         .and(path(OBJECT_PATH))

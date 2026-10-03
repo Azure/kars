@@ -478,6 +478,71 @@ async fn blocked_admission_preserves_pending_request_without_staging() {
     }
 }
 
+fn execution_plan_changes() -> Vec<Value> {
+    let plan = crate::task_execution_plan::test_plan();
+    vec![
+        json!({"spec":{"blueprint":{"executionPlan":plan}}}),
+        json!({"spec":{"roster":[{"name":"writer","blueprint":{"executionPlan":plan}}]}}),
+        json!({"metadata":{"annotations":{"kars.azure.com/mission-decomposition":"execution-plan/v1"}}}),
+        json!({"metadata":{"annotations":{"kars.azure.com/mission-decomposition":"execution-plan/v2"}}}),
+    ]
+}
+
+#[tokio::test]
+async fn execution_plan_guard_blocks_team_reconciliation_before_staging() {
+    for change in execution_plan_changes() {
+        let mut value = serde_json::to_value(requested_team()).unwrap();
+        merge(&mut value, change);
+        let team: KarsTeam = serde_json::from_value(value).unwrap();
+        let (_server, client, store) = setup(&team).await;
+        assert!(matches!(
+            cycle(&client, &store).await,
+            Err(ReconcileError::Invalid(_))
+        ));
+        let state = store.lock().unwrap();
+        assert!(state.tasks.is_empty());
+        assert!(state.activation_reservations.is_empty());
+        assert_eq!(state.team["metadata"]["annotations"][REQUEST], request(1));
+        assert_eq!(state.team["status"]["phase"], "Degraded");
+        assert!(state.team["status"]["runAdmission"].is_null());
+    }
+}
+
+#[tokio::test]
+async fn execution_plan_guard_blocks_reserved_run_activation_and_recovery() {
+    for change in execution_plan_changes() {
+        let (_server, client, store) = setup(&requested_team()).await;
+        let prepared = stage(&client, &store).await;
+        reserve(&client, &store, &prepared).await;
+        {
+            let mut state = store.lock().unwrap();
+            merge(&mut state.team, change);
+            state.team["metadata"]["resourceVersion"] = json!("300");
+        }
+        assert!(finish(&client, &latest(&store), &prepared).await.is_err());
+        assert!(!launched(&store, &prepared));
+        assert!(matches!(
+            cycle(&client, &store).await,
+            Err(ReconcileError::Invalid(_))
+        ));
+        let state = store.lock().unwrap();
+        assert!(state.activation_reservations.is_empty());
+        assert!(
+            state
+                .tasks
+                .values()
+                .all(|task| task["spec"]["execution"]["launch"] != true)
+        );
+        assert_eq!(state.team["metadata"]["annotations"][REQUEST], request(1));
+        assert_eq!(state.team["status"]["generatedTaskCount"], 1);
+        assert_eq!(
+            state.team["status"]["runAdmission"],
+            serde_json::to_value(&prepared.record).unwrap()
+        );
+        assert_eq!(state.team["status"]["phase"], "Degraded");
+    }
+}
+
 #[tokio::test]
 async fn activation_rechecks_authority_and_namespace_wide_owned_capacity() {
     for mutation in ["authority", "paused", "capacity"] {

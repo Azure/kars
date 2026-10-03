@@ -187,6 +187,11 @@ pub struct TaskBlueprint {
     #[schemars(schema_with = "crate::task_models::fallback_schema")]
     pub model_fallbacks: Vec<TaskModel>,
 
+    /// Reviewed plan retained in task authority; activation requires an enforcing executor.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "crate::task_execution_plan::schema")]
+    pub execution_plan: Option<crate::task_execution_plan::ExecutionPlan>,
+
     /// Explicit governed credential sources and key grants; included in task authority.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(schema_with = "crate::credential_grant::schema::bindings")]
@@ -546,6 +551,15 @@ pub fn task_runtime(spec: &KarsTaskSpec) -> Result<crate::crd::RuntimeKind, Stri
 /// Check that the effective launch contract does not exceed the declared
 /// envelope or promise a ceiling this foundation cannot enforce.
 pub fn validate_execution_contract(spec: &KarsTaskSpec) -> Result<(), String> {
+    crate::task_execution_plan::validate_activation(
+        spec.blueprint
+            .as_ref()
+            .and_then(|blueprint| blueprint.execution_plan.as_ref()),
+        None,
+        spec.execution
+            .as_ref()
+            .is_some_and(|execution| execution.launch),
+    )?;
     task_runtime(spec)?;
     if let Some(blueprint) = &spec.blueprint
         && let Some(binding) = &blueprint.github_binding

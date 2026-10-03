@@ -81,6 +81,7 @@ pub(crate) async fn request_team_run(
 ) -> AppResult<serde_json::Value> {
     let api: Api<KarsTeam> = cluster.teams(ns);
     let team = require_owned_team(cluster, ns, name, principal).await?;
+    crate::kars::execution_plans::validate(&team, true).map_err(AppError::BadRequest)?;
     let patch = run_request_patch(&team)?;
     if team.spec.paused {
         return Err(AppError::BadRequest(

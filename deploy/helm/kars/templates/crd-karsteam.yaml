@@ -128,6 +128,171 @@ spec:
                     type: object
                   credentialBindings:
                     {{- include "kars.credentialBindingsSchema" . | nindent 20 }}
+                  executionPlan:
+                    description: Reviewed plan retained in task authority; activation requires an enforcing executor.
+                    properties:
+                      deliverables:
+                        default: []
+                        items:
+                          properties:
+                            mediaType:
+                              maxLength: 128
+                              minLength: 1
+                              type: string
+                            name:
+                              maxLength: 128
+                              minLength: 1
+                              pattern: ^[a-zA-Z0-9][a-zA-Z0-9._-]*$
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        maxItems: 16
+                        type: array
+                      maxParallel:
+                        format: int32
+                        maximum: 8.0
+                        minimum: 1.0
+                        type: integer
+                      roles:
+                        items:
+                          properties:
+                            budgetTokens:
+                              format: int64
+                              minimum: 1.0
+                              type: integer
+                            dependsOn:
+                              default: []
+                              items:
+                                maxLength: 48
+                                minLength: 1
+                                pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                                type: string
+                              maxItems: 7
+                              type: array
+                            name:
+                              maxLength: 48
+                              minLength: 1
+                              pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                              type: string
+                            objective:
+                              maxLength: 1200
+                              minLength: 20
+                              type: string
+                            phases:
+                              items:
+                                properties:
+                                  capabilities:
+                                    default: []
+                                    items:
+                                      enum:
+                                      - filesystem-read
+                                      - filesystem-write
+                                      - shell
+                                      - network
+                                      - web-search
+                                      - mcp
+                                      - memory
+                                      type: string
+                                    maxItems: 7
+                                    type: array
+                                  freshContext:
+                                    default: false
+                                    type: boolean
+                                  maxToolCalls:
+                                    format: int32
+                                    maximum: 32.0
+                                    minimum: 0.0
+                                    type: integer
+                                  minToolCalls:
+                                    default: 0
+                                    format: int32
+                                    maximum: 32.0
+                                    minimum: 0.0
+                                    type: integer
+                                  name:
+                                    maxLength: 48
+                                    minLength: 1
+                                    pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                                    type: string
+                                  objective:
+                                    maxLength: 1200
+                                    minLength: 20
+                                    type: string
+                                  requiredToolCalls:
+                                    items:
+                                      properties:
+                                        arguments:
+                                          additionalProperties:
+                                            maxLength: 4096
+                                            type: string
+                                          default: {}
+                                          maxProperties: 8
+                                          type: object
+                                        name:
+                                          enum:
+                                          - github_actions_job_logs
+                                          type: string
+                                      required:
+                                      - name
+                                      type: object
+                                    maxItems: 8
+                                    type: array
+                                required:
+                                - maxToolCalls
+                                - name
+                                - objective
+                                type: object
+                              maxItems: 8
+                              minItems: 1
+                              type: array
+                          required:
+                          - name
+                          - objective
+                          - phases
+                          type: object
+                        maxItems: 8
+                        minItems: 1
+                        type: array
+                      schema:
+                        enum:
+                        - kars.execution-plan/v1
+                        type: string
+                      synthesis:
+                        properties:
+                          capabilities:
+                            default: []
+                            items:
+                              enum:
+                              - filesystem-read
+                              - filesystem-write
+                              - shell
+                              - network
+                              - web-search
+                              - mcp
+                              - memory
+                              type: string
+                            maxItems: 7
+                            type: array
+                          maxToolCalls:
+                            format: int32
+                            maximum: 32.0
+                            minimum: 0.0
+                            type: integer
+                          objective:
+                            maxLength: 1200
+                            minLength: 20
+                            type: string
+                        required:
+                        - maxToolCalls
+                        - objective
+                        type: object
+                    required:
+                    - maxParallel
+                    - roles
+                    - schema
+                    - synthesis
+                    type: object
                   githubBinding:
                     {{- include "kars.githubBindingSchema" . | nindent 20 }}
                   modelFallbacks:
@@ -422,6 +587,171 @@ spec:
                           type: object
                         credentialBindings:
                           {{- include "kars.credentialBindingsSchema" . | nindent 26 }}
+                        executionPlan:
+                          description: Reviewed plan retained in task authority; activation requires an enforcing executor.
+                          properties:
+                            deliverables:
+                              default: []
+                              items:
+                                properties:
+                                  mediaType:
+                                    maxLength: 128
+                                    minLength: 1
+                                    type: string
+                                  name:
+                                    maxLength: 128
+                                    minLength: 1
+                                    pattern: ^[a-zA-Z0-9][a-zA-Z0-9._-]*$
+                                    type: string
+                                required:
+                                - name
+                                type: object
+                              maxItems: 16
+                              type: array
+                            maxParallel:
+                              format: int32
+                              maximum: 8.0
+                              minimum: 1.0
+                              type: integer
+                            roles:
+                              items:
+                                properties:
+                                  budgetTokens:
+                                    format: int64
+                                    minimum: 1.0
+                                    type: integer
+                                  dependsOn:
+                                    default: []
+                                    items:
+                                      maxLength: 48
+                                      minLength: 1
+                                      pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                                      type: string
+                                    maxItems: 7
+                                    type: array
+                                  name:
+                                    maxLength: 48
+                                    minLength: 1
+                                    pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                                    type: string
+                                  objective:
+                                    maxLength: 1200
+                                    minLength: 20
+                                    type: string
+                                  phases:
+                                    items:
+                                      properties:
+                                        capabilities:
+                                          default: []
+                                          items:
+                                            enum:
+                                            - filesystem-read
+                                            - filesystem-write
+                                            - shell
+                                            - network
+                                            - web-search
+                                            - mcp
+                                            - memory
+                                            type: string
+                                          maxItems: 7
+                                          type: array
+                                        freshContext:
+                                          default: false
+                                          type: boolean
+                                        maxToolCalls:
+                                          format: int32
+                                          maximum: 32.0
+                                          minimum: 0.0
+                                          type: integer
+                                        minToolCalls:
+                                          default: 0
+                                          format: int32
+                                          maximum: 32.0
+                                          minimum: 0.0
+                                          type: integer
+                                        name:
+                                          maxLength: 48
+                                          minLength: 1
+                                          pattern: ^[a-z0-9]([a-z0-9-]*[a-z0-9])?$
+                                          type: string
+                                        objective:
+                                          maxLength: 1200
+                                          minLength: 20
+                                          type: string
+                                        requiredToolCalls:
+                                          items:
+                                            properties:
+                                              arguments:
+                                                additionalProperties:
+                                                  maxLength: 4096
+                                                  type: string
+                                                default: {}
+                                                maxProperties: 8
+                                                type: object
+                                              name:
+                                                enum:
+                                                - github_actions_job_logs
+                                                type: string
+                                            required:
+                                            - name
+                                            type: object
+                                          maxItems: 8
+                                          type: array
+                                      required:
+                                      - maxToolCalls
+                                      - name
+                                      - objective
+                                      type: object
+                                    maxItems: 8
+                                    minItems: 1
+                                    type: array
+                                required:
+                                - name
+                                - objective
+                                - phases
+                                type: object
+                              maxItems: 8
+                              minItems: 1
+                              type: array
+                            schema:
+                              enum:
+                              - kars.execution-plan/v1
+                              type: string
+                            synthesis:
+                              properties:
+                                capabilities:
+                                  default: []
+                                  items:
+                                    enum:
+                                    - filesystem-read
+                                    - filesystem-write
+                                    - shell
+                                    - network
+                                    - web-search
+                                    - mcp
+                                    - memory
+                                    type: string
+                                  maxItems: 7
+                                  type: array
+                                maxToolCalls:
+                                  format: int32
+                                  maximum: 32.0
+                                  minimum: 0.0
+                                  type: integer
+                                objective:
+                                  maxLength: 1200
+                                  minLength: 20
+                                  type: string
+                              required:
+                              - maxToolCalls
+                              - objective
+                              type: object
+                          required:
+                          - maxParallel
+                          - roles
+                          - schema
+                          - synthesis
+                          type: object
                         githubBinding:
                           {{- include "kars.githubBindingSchema" . | nindent 26 }}
                         modelFallbacks:
