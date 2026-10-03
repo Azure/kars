@@ -427,7 +427,7 @@ export function AgentGraph({
                 <span className="mt-2 block border-t border-border/70 pt-2 text-[10px] text-foreground-muted">
                   <span className="font-medium text-foreground">{layout.agent.actions.length} records</span>
                   {" · "}
-                  {ellipsis(latest?.human ?? "Awaiting first action", 34)}
+                  {ellipsis(latest?.human ?? "No retained action", 34)}
                 </span>
               </button>
             );
@@ -593,10 +593,8 @@ export function AgentGraph({
               }}
             >
               {running
-                ? "The principal is live. Action leaves will unfold here."
-                : events.length > 0
-                  ? "This execution completed without retained tool actions."
-                  : "Launch the execution to populate its action graph."}
+                ? "Waiting for revision-bound tool records."
+                : "No tool actions are retained here. This does not mean no work occurred."}
             </div>
           )}
         </div>

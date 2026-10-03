@@ -70,7 +70,12 @@ not evidence of who produced an earlier result. Whole-run usage comes from a
 validated terminal record; cumulative progress snapshots are never added together.
 Missing usage or activity is unavailable, not zero. Revision-pinned activity
 streams close when the revision changes and only signal completion from a
-matching terminal result, never merely because an artifact exists.
+matching terminal result, never merely because an artifact exists. If detailed
+trace records are unavailable, Activity says so instead of showing a zero-work
+graph or asking you to launch an already completed run. Available assignment and
+approval records remain visible, without claiming a complete timeline. Produced
+and review-history timestamps use explicitly labelled UTC for consistent display
+across server rendering and browser timezones.
 
 Approval requires an eligible useful successful result in the current revision.
 Invalid terminal evidence cannot authorize a review mutation. Task-level receipts

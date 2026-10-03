@@ -12,6 +12,7 @@
 import Markdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import { Children, isValidElement } from "react";
+import { formatEvidenceTime } from "@/lib/format";
 import type { Components } from "react-markdown";
 import { Icon, type IconName } from "@/components/icon";
 import { MermaidDiagram } from "@/components/mermaid-diagram";
@@ -373,7 +374,7 @@ export function DeliverableView({
             <div className="flex items-center gap-1">
               <dt>produced</dt>
               <dd className="font-medium text-foreground">
-                {new Date(finishedAt).toLocaleString()}
+                {formatEvidenceTime(finishedAt)}
               </dd>
             </div>
           )}

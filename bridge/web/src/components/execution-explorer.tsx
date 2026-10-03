@@ -76,6 +76,33 @@ export function ExecutionExplorer({
     setTab("tools");
   };
 
+  if (events.length === 0) {
+    return (
+      <div className="space-y-4">
+        <ActivityStream
+          running={running}
+          activity={activity}
+          events={events}
+          telemetry={telemetry}
+          ns={ns}
+          name={name}
+          runNonce={runNonce}
+          principalAgentName={name}
+          title="Rounds and tool records"
+          detail="Available revision-bound round and tool records. Missing records do not establish that no work occurred."
+        />
+        {(assignmentEvents.length > 0 || approvals.length > 0) && (
+          <ExecutionLifetime
+            running={running}
+            activity={events}
+            assignmentEvents={assignmentEvents}
+            approvals={approvals}
+          />
+        )}
+      </div>
+    );
+  }
+
   return (
     <div className="space-y-4">
       <AgentGraph
