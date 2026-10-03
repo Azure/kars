@@ -295,6 +295,7 @@ export default async function TeamDetailPage({
                         approvals={latestRunApprovals}
                         ns={ns}
                         name={latestRun}
+                        runNonce={latestRunTask.current_run_nonce}
                         agentLabel={team.display_name ?? team.name}
                         agentPhase={
                           awaitingAssignment

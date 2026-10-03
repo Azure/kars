@@ -13,12 +13,13 @@ mod diagnostics;
 mod egress;
 mod evidence;
 mod fleet;
-mod history;
 mod lifecycle;
 mod mapping;
 mod models;
 mod presentation;
 mod queries;
+mod revision;
+pub(crate) mod run_evidence;
 
 #[cfg(test)]
 mod tests;
@@ -45,8 +46,10 @@ pub use models::{
     TaskDetailDto, TaskSummaryDto, TeamCollaborationEventDto, TeamRolePlanDto,
 };
 pub use presentation::PullRequestRef;
+#[cfg(test)]
+use presentation::classify_blocked;
 pub(crate) use presentation::{
-    classify_blocked, clean_display_name, clean_objective, deliverable_excerpt, deliverable_text,
+    clean_display_name, clean_objective, deliverable_excerpt, deliverable_text,
     extract_pull_requests, is_failure_shaped_output, is_no_change_output, is_real_deliverable,
 };
 pub use queries::{get_task, list_tasks};

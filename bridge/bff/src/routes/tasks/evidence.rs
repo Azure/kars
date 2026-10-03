@@ -2,8 +2,7 @@
 // Licensed under the MIT License.
 
 use super::{
-    MissionArtifactDto, MissionResultDto, TaskAssignmentEventDto, TeamCollaborationEventDto,
-    TeamRolePlanDto,
+    MissionArtifactDto, TaskAssignmentEventDto, TeamCollaborationEventDto, TeamRolePlanDto,
 };
 
 pub(super) const ARTIFACT_PREVIEW_MAX_BYTES: usize = 8 * 1024;
@@ -255,23 +254,6 @@ pub(super) fn select_task_checkpoint(
                 Some("pending" | "in_progress")
             )
     })
-}
-
-pub(super) fn merge_trace_total_tokens(
-    result: &mut Option<MissionResultDto>,
-    trace_total_tokens: i64,
-) {
-    if trace_total_tokens <= 0 {
-        return;
-    }
-    if let Some(result) = result {
-        result.total_tokens = Some(
-            result
-                .total_tokens
-                .unwrap_or_default()
-                .max(trace_total_tokens),
-        );
-    }
 }
 
 pub(super) fn subagent_trace_from_artifacts(

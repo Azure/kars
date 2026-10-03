@@ -19,6 +19,7 @@ export function LiveActivityView({
   telemetry,
   ns,
   name,
+  runNonce,
   agentLabel,
   subAgents = [],
   showGraph = true,
@@ -33,6 +34,7 @@ export function LiveActivityView({
   telemetry: MissionTelemetry | null;
   ns?: string;
   name?: string;
+  runNonce?: string | null;
   agentLabel?: string;
   subAgents?: SubAgent[];
   showGraph?: boolean;
@@ -43,7 +45,7 @@ export function LiveActivityView({
   activityDetail?: string;
 }) {
   // One stream, shared by the graph and the feed.
-  const events = useLiveTrace(ns, name, running, activity);
+  const events = useLiveTrace(ns, name, running, activity, runNonce);
   return (
     <div className="space-y-4">
       {showGraph && (
@@ -53,6 +55,7 @@ export function LiveActivityView({
           events={events}
           ns={ns}
           name={name}
+          runNonce={runNonce}
           agentLabel={agentLabel}
           subAgents={subAgents}
           identity={identity}
@@ -67,6 +70,7 @@ export function LiveActivityView({
         telemetry={telemetry}
         ns={ns}
         name={name}
+        runNonce={runNonce}
         title={activityTitle}
         detail={activityDetail}
       />

@@ -23,6 +23,9 @@ use tower::ServiceExt;
 
 const TASK: &str = "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karstasks/briefing";
 const MAPS: &str = "/api/v1/namespaces/kars-system/configmaps";
+#[path = "mission_revision_read_tests.rs"]
+mod revision_reads;
+
 const REQUESTED: &str = "kars.azure.com/run-requested";
 const COMPLETED: &str = "kars.azure.com/run-completed";
 
@@ -60,6 +63,10 @@ struct Store {
     deny_review_write: bool,
     rotate_on_output: Option<Value>,
     slow_task_get: bool,
+    trace: Option<Value>,
+    rotate_on_trace: Option<Value>,
+    rotate_on_second_list: Option<Value>,
+    task_lists: usize,
 }
 
 fn status(code: StatusCode) -> Response {
@@ -80,7 +87,11 @@ async fn handle(State(shared): State<Arc<Mutex<Store>>>, request: Request) -> Re
     store.requests.push((method.clone(), path.clone()));
     if path == TASK {
         if method == Method::GET {
-            return Json(store.task.clone()).into_response();
+            return if store.task.is_null() {
+                status(StatusCode::NOT_FOUND)
+            } else {
+                Json(store.task.clone()).into_response()
+            };
         }
         if method == Method::PATCH {
             if body["metadata"]["uid"] != store.task["metadata"]["uid"]
@@ -105,6 +116,38 @@ async fn handle(State(shared): State<Arc<Mutex<Store>>>, request: Request) -> Re
             }
             return Json(store.task.clone()).into_response();
         }
+    }
+    if path == TASK.trim_end_matches("/briefing") && method == Method::GET {
+        store.task_lists += 1;
+        if store.task_lists == 2
+            && let Some(next) = store.rotate_on_second_list.take()
+        {
+            store.task = next;
+        }
+        let items = if store.task.is_null() {
+            vec![]
+        } else {
+            vec![store.task.clone()]
+        };
+        return Json(json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsTaskList","metadata":{},"items":items})).into_response();
+    }
+    if path == MAPS && method == Method::GET {
+        let mut listed = store.output.clone();
+        listed["metadata"]["labels"]["kars.azure.com/mission-output"] = json!("briefing");
+        return Json(
+            json!({"apiVersion":"v1","kind":"ConfigMapList","metadata":{},"items":[listed]}),
+        )
+        .into_response();
+    }
+    if path == format!("{MAPS}/kars-mission-trace-briefing") && method == Method::GET {
+        if let Some(next) = store.rotate_on_trace.take() {
+            store.task = next;
+        }
+        return store
+            .trace
+            .clone()
+            .map(|value| Json(value).into_response())
+            .unwrap_or_else(|| status(StatusCode::NOT_FOUND));
     }
     if path == format!("{MAPS}/kars-mission-output-briefing") && method == Method::GET {
         if let Some(next) = store.rotate_on_output.take() {
@@ -157,6 +200,87 @@ async fn handle(State(shared): State<Arc<Mutex<Store>>>, request: Request) -> Re
     status(StatusCode::NOT_FOUND)
 }
 
+#[tokio::test]
+async fn review_rejects_non_deliverables_without_any_write() {
+    for (status, text, evidence) in [
+        (Some("failed"), "Partial report", None),
+        (Some("rejected"), "Denied", None),
+        (Some("error"), "Failed", None),
+        (None, "Useful report", None),
+        (Some("ok"), "  ", None),
+        (Some("ok"), "Useful report", Some("{}")),
+    ] {
+        let fixture = Fixture::new().await;
+        let before = review();
+        {
+            let mut store = fixture.store.lock().unwrap();
+            store.review = Some(before.clone());
+            let data = store.output["data"].as_object_mut().unwrap();
+            data.remove("status");
+            if let Some(status) = status {
+                data.insert("status".into(), json!(status));
+            }
+            data.insert("output".into(), json!(text));
+            if let Some(evidence) = evidence {
+                data.insert("evidence.json".into(), json!(evidence));
+            }
+        }
+        let (code, _) = fixture
+            .route(
+                Method::POST,
+                "review",
+                json!({"decision":"approve","assignment_nonce":"run-1"}),
+            )
+            .await;
+        assert_eq!(code, StatusCode::CONFLICT, "{status:?}/{text}/{evidence:?}");
+        let store = fixture.store.lock().unwrap();
+        assert_eq!(store.patches, 0);
+        assert_eq!(store.review.as_ref(), Some(&before));
+        assert!(
+            store
+                .requests
+                .iter()
+                .all(|(method, _)| method == Method::GET)
+        );
+    }
+}
+
+#[tokio::test]
+async fn review_allows_feedback_on_failed_and_empty_results() {
+    for (status, text) in [("failed", "Partial report"), ("ok", "")] {
+        let fixture = Fixture::new().await;
+        {
+            let mut store = fixture.store.lock().unwrap();
+            store.output["data"]["status"] = json!(status);
+            store.output["data"]["output"] = json!(text);
+        }
+        let (code, _) = fixture.route(Method::POST, "review", json!({"decision":"request_changes","comment":"Produce the complete briefing","assignment_nonce":"run-1"})).await;
+        assert_eq!(code, StatusCode::OK);
+        let store = fixture.store.lock().unwrap();
+        assert_eq!(store.patches, 1);
+        assert_ne!(
+            store.task["metadata"]["annotations"][REQUESTED],
+            json!("run-1")
+        );
+    }
+}
+
+#[tokio::test]
+async fn review_accepts_explicit_legacy_success() {
+    let fixture = Fixture::new().await;
+    let (code, _) = fixture
+        .route(
+            Method::POST,
+            "review",
+            json!({"decision":"approve","assignment_nonce":"run-1"}),
+        )
+        .await;
+    assert_eq!(code, StatusCode::OK);
+    let store = fixture.store.lock().unwrap();
+    assert_eq!(store.patches, 0);
+    assert_eq!(store.review.as_ref().unwrap()["data"]["status"], "approved");
+}
+
 struct Fixture {
     store: Arc<Mutex<Store>>,
     client: kube::Client,
@@ -180,6 +304,10 @@ impl Fixture {
             deny_review_write: false,
             rotate_on_output: None,
             slow_task_get: false,
+            trace: None,
+            rotate_on_trace: None,
+            rotate_on_second_list: None,
+            task_lists: 0,
         }));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let client = kube::Client::try_from(kube::Config::new(
@@ -203,6 +331,43 @@ impl Fixture {
     }
     fn task(&self) -> KarsTask {
         serde_json::from_value(self.store.lock().unwrap().task.clone()).unwrap()
+    }
+    async fn read_route(&self, uri: &str) -> (StatusCode, String) {
+        let app = Router::new()
+            .route(
+                "/api/namespaces/{ns}/tasks",
+                get(crate::routes::tasks::list_tasks),
+            )
+            .route(
+                "/api/namespaces/{ns}/tasks/{name}",
+                get(crate::routes::tasks::get_task),
+            )
+            .route(
+                "/api/namespaces/{ns}/tasks/{name}/stream",
+                get(crate::routes::telemetry::stream_mission),
+            )
+            .layer(Extension(Principal {
+                sub: "owner".into(),
+                name: "Owner".into(),
+                roles: vec![],
+            }))
+            .with_state(AppState::for_test_client(
+                self.client.clone(),
+                "kars-system",
+            ));
+        let response = app
+            .oneshot(Request::builder().uri(uri).body(Body::empty()).unwrap())
+            .await
+            .unwrap();
+        let code = response.status();
+        let bytes = tokio::time::timeout(
+            Duration::from_secs(5),
+            to_bytes(response.into_body(), 1024 * 1024),
+        )
+        .await
+        .expect("read must terminate without polling an unrelated revision")
+        .unwrap();
+        (code, String::from_utf8(bytes.to_vec()).unwrap())
     }
     async fn route(&self, method: Method, suffix: &str, body: Value) -> (StatusCode, Value) {
         let app = Router::new()

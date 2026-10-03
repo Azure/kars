@@ -278,8 +278,7 @@ impl Cluster {
         Ok(())
     }
 
-    async fn current_mission_configmap(&self, task: &str, output: bool) -> Option<ConfigMap> {
-        let kind = if output { "output" } else { "artifacts" };
+    async fn current_mission_configmap(&self, task: &str, kind: &str) -> Option<ConfigMap> {
         let name = format!("kars-mission-{kind}-{task}");
         let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");
         let cm = cms.get_opt(&name).await.ok().flatten()?;
@@ -292,7 +291,7 @@ impl Cluster {
         (cm.metadata.name.as_deref() == Some(name.as_str())
             && current.metadata.name.as_deref() == Some(task)
             && current.metadata.namespace.as_deref() == Some("kars-system")
-            && current_mission_record(&cm, &current, output))
+            && current_mission_record(&cm, &current, kind == "output"))
         .then_some(cm)
     }
 
@@ -301,7 +300,7 @@ impl Cluster {
         &self,
         task: &str,
     ) -> Option<std::collections::BTreeMap<String, String>> {
-        self.current_mission_configmap(task, true).await?.data
+        self.current_mission_configmap(task, "output").await?.data
     }
 
     /// Read text artifacts committed for the current Task UID and requested run.
@@ -312,7 +311,9 @@ impl Cluster {
         &self,
         task: &str,
     ) -> Option<std::collections::BTreeMap<String, String>> {
-        self.current_mission_configmap(task, false).await?.data
+        self.current_mission_configmap(task, "artifacts")
+            .await?
+            .data
     }
 
     /// Read a single artifact file's raw bytes for download — text artifacts
@@ -325,7 +326,7 @@ impl Cluster {
         task: &str,
         key: &str,
     ) -> Option<(Vec<u8>, bool)> {
-        let cm = self.current_mission_configmap(task, false).await?;
+        let cm = self.current_mission_configmap(task, "artifacts").await?;
         if let Some(text) = cm.data.as_ref().and_then(|d| d.get(key)) {
             return Some((text.clone().into_bytes(), false));
         }
@@ -335,6 +336,15 @@ impl Cluster {
             return Some((bytes.0.clone(), true));
         }
         None
+    }
+
+    /// Read a terminal mission trace only when bound to the current Task UID/run.
+    pub async fn read_current_mission_trace(&self, task: &str) -> Option<String> {
+        self.current_mission_configmap(task, "trace")
+            .await?
+            .data?
+            .get("trace.json")
+            .cloned()
     }
 
     /// Read a mission's persisted execution trace — the clean per-tool audit

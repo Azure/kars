@@ -36,7 +36,7 @@ fn record(kind: &str) -> Value {
 #[test]
 fn current_records_require_matching_committed_identity() {
     let current: KarsTask = serde_json::from_value(task()).unwrap();
-    for kind in ["output", "artifacts"] {
+    for kind in ["output", "artifacts", "trace"] {
         assert!(current_mission_record(
             &serde_json::from_value(record(kind)).unwrap(),
             &current,
@@ -229,7 +229,11 @@ async fn current_readers_and_downloads_hide_stale_or_unverifiable_results() {
     artifacts["binaryData"] = json!({"image.bin":"AAH/"});
     let state = Arc::new(Mutex::new(Store {
         task: task(),
-        maps: vec![record("output"), artifacts],
+        maps: vec![record("output"), artifacts, {
+            let mut trace = record("trace");
+            trace["data"] = json!({"trace.json":"[]"});
+            trace
+        }],
         ..Default::default()
     }));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -272,6 +276,13 @@ async fn current_readers_and_downloads_hide_stale_or_unverifiable_results() {
             .read_mission_artifact_bytes("briefing", "missing")
             .await
             .is_none()
+    );
+    assert_eq!(
+        cluster
+            .read_current_mission_trace("briefing")
+            .await
+            .as_deref(),
+        Some("[]")
     );
     assert_eq!(cluster.list_mission_outputs().await.len(), 1);
     {
@@ -325,6 +336,13 @@ async fn current_readers_and_downloads_hide_stale_or_unverifiable_results() {
         assert!(
             cluster
                 .read_mission_artifact_bytes("briefing", "image.bin")
+                .await
+                .is_none(),
+            "{mode}"
+        );
+        assert!(
+            cluster
+                .read_current_mission_trace("briefing")
                 .await
                 .is_none(),
             "{mode}"
