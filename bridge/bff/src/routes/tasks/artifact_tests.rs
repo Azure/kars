@@ -18,11 +18,17 @@ fn fixture(
     retained: bool,
 ) -> (AppState, Arc<Mutex<Vec<String>>>) {
     let key = artifact_key(name);
+    let metadata = json!({"name":"kars-mission-artifacts-task","namespace":"kars-system",
+        "annotations":{"kars.azure.com/mission-task-uid":"task-uid",
+            "kars.azure.com/mission-run-nonce":"run-1",
+            "kars.azure.com/mission-principal-name":"task"},
+        "ownerReferences":[{"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsTask",
+            "name":"task","uid":"task-uid","controller":true}]});
     let artifact = if binary {
-        json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"kars-mission-artifacts-task"},
+        json!({"apiVersion":"v1","kind":"ConfigMap","metadata":metadata,
             "binaryData":{key:k8s_openapi::ByteString(bytes.to_vec())}})
     } else {
-        json!({"apiVersion":"v1","kind":"ConfigMap","metadata":{"name":"kars-mission-artifacts-task"},
+        json!({"apiVersion":"v1","kind":"ConfigMap","metadata":metadata,
             "data":{key:std::str::from_utf8(bytes).unwrap()}})
     };
     let calls = Arc::new(Mutex::new(Vec::new()));
@@ -35,17 +41,23 @@ fn fixture(
             let path = request.uri().path();
             requests.lock().unwrap().push(path.to_string());
             let (status, body) = match path {
-                "/apis/kars.azure.com/v1alpha1/namespaces/work/karstasks/task" if retained => (
-                    404,
-                    json!({
-                        "apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404,"message":"not found"
-                    }),
-                ),
-                "/apis/kars.azure.com/v1alpha1/namespaces/work/karstasks/task" => (
+                "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karstasks/task"
+                    if retained =>
+                {
+                    (
+                        404,
+                        json!({
+                            "apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404,"message":"not found"
+                        }),
+                    )
+                }
+                "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karstasks/task" => (
                     200,
                     json!({
                         "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsTask",
-                        "metadata":{"name":"task","namespace":"work","annotations":{"kars.azure.com/owner-sub":"owner"}},
+                        "metadata":{"name":"task","namespace":"kars-system","uid":"task-uid",
+                            "annotations":{"kars.azure.com/owner-sub":"owner",
+                                "kars.azure.com/run-requested":"run-1","kars.azure.com/run-completed":"run-1"}},
                         "spec":{"objective":"test","envelope":{"tier":1,"authorityCeiling":1}}
                     }),
                 ),
@@ -71,7 +83,7 @@ fn fixture(
         }
     });
     (
-        AppState::for_test_client(kube::Client::new(service, "work"), "work"),
+        AppState::for_test_client(kube::Client::new(service, "kars-system"), "kars-system"),
         calls,
     )
 }
@@ -86,7 +98,9 @@ async fn fetch(state: AppState, file: &str, owner: &str, method: Method) -> Resp
         .oneshot(
             Request::builder()
                 .method(method)
-                .uri(format!("/api/namespaces/work/tasks/task/artifact/{file}"))
+                .uri(format!(
+                    "/api/namespaces/kars-system/tasks/task/artifact/{file}"
+                ))
                 .body(Body::empty())
                 .unwrap(),
         )
@@ -95,7 +109,7 @@ async fn fetch(state: AppState, file: &str, owner: &str, method: Method) -> Resp
 }
 
 #[tokio::test]
-async fn active_and_unknown_artifacts_download_unchanged_from_live_or_retained_tasks() {
+async fn active_and_unknown_artifacts_require_a_current_task_and_download_unchanged() {
     let payload = b"<script>fetch('/api/operator/retention-policy')</script>";
     for (name, mime) in [
         ("report.html", "text/html; charset=utf-8"),
@@ -112,6 +126,10 @@ async fn active_and_unknown_artifacts_download_unchanged_from_live_or_retained_t
             for retained in [false, true] {
                 let (state, _) = fixture(name, payload, binary, retained);
                 let response = fetch(state, name, "owner", Method::GET).await;
+                if retained {
+                    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+                    continue;
+                }
                 assert_eq!(response.status(), StatusCode::OK);
                 assert_eq!(response.headers()["content-type"], mime);
                 assert_eq!(

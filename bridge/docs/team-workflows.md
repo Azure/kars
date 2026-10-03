@@ -45,6 +45,15 @@ Intent
 | Memory | Approved retained knowledge injected into later runs. | A replay of every raw conversation. |
 | Engineering intake | Repository signal discovery and backlog creation. | The activity timeline or the agents doing the work. |
 
+### Current artifacts versus retained evidence
+
+The mission artifact download endpoint serves only the current committed run of
+a live Task in `kars-system`. Its Task UID, requested/completed run nonce and
+artifact ownership must match. A missing, recreated or superseded Task does not
+make an old file current: the endpoint returns not found rather than serving
+unbound bytes. Retained historical evidence is a separate capability; this
+endpoint does not establish artifact access after Task deletion.
+
 ### Engineering intake identity and existing PRs
 
 Dependabot remediation work uses a versioned identity containing the repository,
