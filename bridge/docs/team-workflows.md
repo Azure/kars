@@ -47,6 +47,17 @@ without its plan, or an unsupported marker, rejects with
 marker declares one. Stopping a Task or purely pausing a Team remains allowed.
 Unmarked legacy planless execution remains supported.
 
+The OpenClaw measured loop has a tested **local single-phase filesystem guard**:
+only explicitly granted `filesystem-read`/`filesystem-write` tools are exposed,
+actual calls are checked again, and router policy authorization is still required.
+`maxToolCalls` limits attempted calls (including denied, malformed and failed
+calls); an overflowing batch fails before any tool runs. `minToolCalls` counts
+only successful authorized filesystem operations. Failure preserves accounting
+but exports no artifacts. Unsupported capabilities and required tool contracts
+are rejected before inference. This local guard is not yet supplied by encrypted
+assignments and does not implement role scheduling, fresh-context handoffs or
+per-role/synthesis budgets. It must not be used to unlock typed-plan activation.
+
 The roster alone is not proof that specialists performed work. The published
 manual-run admission path is distinct from engineering intake and milestone
 execution: automatic queue claiming, dependency advancement and revision-bound
