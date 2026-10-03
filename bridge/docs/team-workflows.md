@@ -50,9 +50,33 @@ Intent
 The mission artifact download endpoint serves only the current committed run of
 a live Task in `kars-system`. Its Task UID, requested/completed run nonce and
 artifact ownership must match. A missing, recreated or superseded Task does not
-make an old file current: the endpoint returns not found rather than serving
-unbound bytes. Retained historical evidence is a separate capability; this
-endpoint does not establish artifact access after Task deletion.
+make an old file current. Downloads require an explicit `run_nonce` query
+parameter; omitted revisions return 400, superseded or incomplete revisions 409,
+and missing or inaccessible records 404. Ownership and revision are rechecked
+after reading evidence and before serving bytes. Retained historical evidence is
+a separate capability; this endpoint does not establish artifact access after
+Task deletion.
+
+### Revision-bound mission evidence
+
+Mission detail and list results join the live Task UID with its exact requested
+and completed revision, not a name-only retained output. A changed or deleted
+Task during a detail read withholds that response. Feedback requests a distinct
+revision; it does not prove the next execution has started.
+
+For durable agent results, the recorded producer includes agent DID, assignment,
+Task UID, sandbox/pod/boot identity, and timestamps. Current registry identity is
+not evidence of who produced an earlier result. Whole-run usage comes from a
+validated terminal record; cumulative progress snapshots are never added together.
+Missing usage or activity is unavailable, not zero. Revision-pinned activity
+streams close when the revision changes and only signal completion from a
+matching terminal result, never merely because an artifact exists.
+
+Approval requires an eligible useful successful result in the current revision.
+Invalid terminal evidence cannot authorize a review mutation. Task-level receipts
+without revision binding are explicitly labelled as such. Budget/failure messages
+are reported observations, not independent accounting, proof of a root cause,
+or a promise of reset or automatic recovery.
 
 ### Explicit text attachments on mission success
 

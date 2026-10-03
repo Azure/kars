@@ -3,11 +3,8 @@
 
 use super::{NO_CHANGE_SENTINEL, RunBlockedDto, looks_scaffolded};
 
-/// Classify a transport-`ok` run whose body is really a STOP condition (not a
-/// deliverable). Today this recognises the daily token-budget block the router
-/// enforces from the sandbox InferencePolicy — its message reads
-/// "Daily token budget exceeded (23131/20000 tokens)". Returns `None` for a
-/// genuine deliverable (or an already-`error` run, handled separately).
+/// Recognise a reported budget stop, not independently verified accounting or
+/// a reset schedule. Already-`error` results are handled separately.
 pub(crate) fn classify_blocked(status: Option<&str>, output: &str) -> Option<RunBlockedDto> {
     if status == Some("error") {
         return None;
@@ -19,7 +16,7 @@ pub(crate) fn classify_blocked(status: Option<&str>, output: &str) -> Option<Run
         let (spent, limit) = parse_budget_pair(output);
         return Some(RunBlockedDto {
             reason: "budget".into(),
-            detail: "The run reached its daily token budget and stopped before finishing.".into(),
+            detail: "The recorded message reports a token-budget stop. Any counts below are from that message, not independently verified accounting.".into(),
             spent,
             limit,
         });

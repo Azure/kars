@@ -26,8 +26,7 @@ import { JourneyRail, missionBeat } from "@/components/journey-rail";
 import { ReceiptPanel } from "@/components/receipt-panel";
 import { CompliancePackView } from "@/components/compliance-pack";
 import { ReceiptVerifyButton } from "@/components/receipt-verify";
-import { ProvenanceOverlay } from "@/components/provenance-overlay";
-import { AuditReportDownload } from "@/components/audit-report";
+import { missionRunState } from "@/lib/mission-run-evidence";
 import { ReliabilityRunner } from "./reliability-runner";
 import { BudgetRecovery } from "./budget-recovery";
 import { PromoteMission } from "./promote-mission";
@@ -44,7 +43,7 @@ import { egressScope } from "@/lib/format";
 import { Icon } from "@/components/icon";
 import { HaltButton } from "./halt-button";
 import { TIER_LABELS, type MissionArtifact } from "@/lib/types";
-import { MissionServerTabs, EnvelopeFact, ObjectiveBlock, NextStep, AgentIdentityCard, ArtifactsPanel, ResultPanel, FailureDiagnostic, CompositionPanel } from "./mission-detail-panels";
+import { MissionServerTabs, EnvelopeFact, ObjectiveBlock, NextStep, AgentIdentityCard, RecordedRunPanel, ArtifactsPanel, ResultPanel, FailureDiagnostic, CompositionPanel } from "./mission-detail-panels";
 
 
 export const dynamic = "force-dynamic";
@@ -119,51 +118,15 @@ export default async function MissionDetail({
   ]);
   const currentRunNonce = task.current_run_nonce;
   const approvals = allApprovals.filter(
-    (approval) =>
-      approval.run_nonce == null
-      || currentRunNonce == null
-      || approval.run_nonce === currentRunNonce,
+    (approval) => Boolean(currentRunNonce) && approval.run_nonce === currentRunNonce,
   );
 
   const needsYou = approvals.some((a) => a.actionable);
-  const awaitingAssignment = Boolean(
-    task.current_run_nonce
-    && task.assignment?.task_id !== task.current_run_nonce,
-  );
-  const assignmentInFlight =
-    awaitingAssignment
-    || (
-      task.assignment?.completed_at == null
-      && (task.assignment?.state === "Assigned" || task.assignment?.state === "Running")
-    );
-  const resultMatchesCurrentRun =
-    task.result == null
-    || task.current_run_nonce == null
-    || task.result.assignment_nonce == null
-    || task.result.assignment_nonce === task.current_run_nonce;
-  const currentResult = assignmentInFlight || !resultMatchesCurrentRun ? null : task.result;
-  const currentReceipt = assignmentInFlight ? null : receipt;
-  const displayTask = assignmentInFlight ? { ...task, result: null } : task;
-  // A run result with status "error" is a FAILURE, not a deliverable — it must
-  // never read as "Delivered"/"Running", and it must not present a receipt as
-  // attesting real work (audit f8/f9/f13).
+  const { currentResult, realDelivery, failed } = missionRunState(task);
+  const displayTask = { ...task, result: currentResult };
   const blocked = currentResult?.blocked ?? null;
-  const assignmentFailed =
-    !awaitingAssignment
-    && task.assignment?.completed_at != null
-    && task.assignment.state === "Failed";
-  const failed =
-    assignmentFailed || (currentResult?.status === "error" && blocked == null);
-  // A run whose output is a capability/limit STOP is not a deliverable — surface
-  // it as an actionable state, never the answer.
-  // For a failed run, pull the real cluster troubleshooting evidence (pod +
-  // container status + the agent's own log tail + an evidence-derived cause).
+  const producer = currentResult?.run_evidence;
   const troubleshoot = failed ? await getTroubleshoot(ns, name).catch(() => null) : null;
-  const realDelivery =
-    !assignmentFailed
-    && currentResult != null
-    && currentResult.status !== "error"
-    && blocked == null;
   const status = missionStatus(task.phase, task.execution_phase, {
     delivered: realDelivery,
     needsYou,
@@ -359,8 +322,8 @@ export default async function MissionDetail({
           <div>
             <p className="text-sm font-medium">Mission halted</p>
             <p className="mt-0.5 text-xs text-foreground-muted">
-              {task.halted}. The agent was torn down and removed from the mesh; the deliverable,
-              trace, and receipt are retained. This halt is recorded as a governed decision.
+              {task.halted}. A halt is recorded. This does not by itself verify runtime teardown,
+              mesh removal, or retention of the deliverable, trace, and receipt.
             </p>
           </div>
         </div>
@@ -371,8 +334,8 @@ export default async function MissionDetail({
           <div>
             <p className="text-sm font-medium">Harness capability-corrected</p>
             <p className="mt-0.5 text-xs text-foreground-muted">
-              {task.harness_corrected}. Recorded as a governed decision so the mission runs on a
-              harness that can actually execute it — never silently idling.
+              {task.harness_corrected}. This records a configuration decision, not proof that
+              the selected runtime executed or delivered this revision.
             </p>
           </div>
         </div>
@@ -392,16 +355,16 @@ export default async function MissionDetail({
             <span aria-hidden className="text-warning">⏸</span>
             <div className="min-w-0">
               <p className="text-sm font-medium">
-                Run stopped — daily token budget reached
+                Recorded token-budget stop
                 {blocked.spent != null && blocked.limit != null
-                  ? ` (${blocked.spent.toLocaleString()} / ${blocked.limit.toLocaleString()} tokens)`
+                  ? ` (message reports ${blocked.spent.toLocaleString()} / ${blocked.limit.toLocaleString()} tokens)`
                   : ""}
                 .
               </p>
               <p className="mt-0.5 text-xs text-foreground-muted">
-                This isn&apos;t the mission&apos;s answer — the agent hit its budget mid-run. Increase the
-                governed budget below to continue in the existing sandbox, narrow the objective, or wait
-                for the daily reset.
+                This is a reported stop, not a deliverable. Verify the governed budget account before
+                requesting a change. Approval of a higher limit does not by itself prove execution
+                resumed; no reset schedule is established by this message.
               </p>
               <BudgetRecovery
                 namespace={ns}
@@ -430,9 +393,9 @@ export default async function MissionDetail({
             <div className="min-w-0">
               <p className="text-sm font-medium">This run produced no new deliverable.</p>
               <p className="mt-0.5 text-xs text-foreground-muted">
-                The agent completed but reported nothing material to add for this objective. If you
-                expected output, sharpen the objective or widen its tools/network reach in the launch
-                package, then run again.
+                No eligible new deliverable is available for this revision. Inspect the recorded
+                result before requesting changes; missing output alone does not justify wider tools
+                or network access.
               </p>
             </div>
           </div>
@@ -482,10 +445,11 @@ export default async function MissionDetail({
             id: "activity",
             label: "Activity",
             live: running,
-            badge: task.activity?.filter((event) => event.kind === "tool").length ?? null,
+            badge: task.activity?.length ? task.activity.filter((event) => event.kind === "tool").length : null,
             node: (
               <div className="space-y-4">
                 {task.launched && currentResult == null && <DeployTimeline task={displayTask} />}
+                {currentResult && <RecordedRunPanel result={currentResult} />}
                 <ExecutionExplorer
                   running={running}
                   activity={task.activity}
@@ -494,14 +458,14 @@ export default async function MissionDetail({
                   approvals={approvals}
                   ns={ns}
                   name={name}
-                  agentLabel={task.display_name ?? name}
-                  agentPhase={task.assignment?.state ?? task.execution_phase ?? task.phase}
-                  agentRuntime={task.composition?.runtime}
-                  agentModel={task.composition?.model}
-                  subAgents={task.sub_agents}
-                  identity={task.agent_identity ?? null}
+                  runNonce={currentRunNonce}
+                  agentLabel={producer?.agent_name ?? task.display_name ?? name}
+                  agentPhase={currentResult?.status ?? task.assignment?.state ?? task.execution_phase ?? task.phase}
+                  agentRuntime={currentResult ? null : task.composition?.runtime}
+                  agentModel={currentResult ? currentResult.model : task.composition?.model}
+                  subAgents={currentResult ? [] : task.sub_agents}
+                  identity={currentResult ? null : task.agent_identity ?? null}
                   envelopeDigest={task.envelope_digest ?? null}
-                  receipt={currentReceipt}
                 />
                 <MissionBlockers
                   ns={ns}
@@ -523,26 +487,30 @@ export default async function MissionDetail({
           },
           {
             id: "deliverable",
-            label: blocked ? "Run stopped" : currentResult?.status === "error" ? "Run failed" : "Deliverable",
+            label: blocked ? "Run stopped" : failed ? "Run outcome" : "Deliverable",
             live: false,
-            badge: currentResult != null && currentResult.status !== "error" && blocked == null ? "Ready" : null,
+            badge: realDelivery ? "Ready" : null,
             node: currentResult ? (
               <div className="space-y-5">
-                {currentResult.status === "error" ? (
-                  <FailureDiagnostic task={displayTask} troubleshoot={troubleshoot} />
+                <RecordedRunPanel result={currentResult} />
+                {failed ? (
+                  <>
+                    <FailureDiagnostic task={displayTask} troubleshoot={troubleshoot} />
+                    <ResultPanel result={currentResult} />
+                  </>
                 ) : blocked ? (
                   <section className="rounded-xl border border-warning/50 bg-warning/[0.06] p-6">
                     <p className="text-sm font-medium">
-                      {blocked.reason === "budget" ? "Run stopped — daily token budget reached" : "Run stopped"}
+                      {blocked.reason === "budget" ? "Recorded token-budget stop" : "Recorded stop"}
                       {blocked.spent != null && blocked.limit != null
                         ? ` (${blocked.spent.toLocaleString()} / ${blocked.limit.toLocaleString()} tokens)`
                         : ""}
                     </p>
                     <p className="mt-1 text-sm text-foreground-muted">{blocked.detail}</p>
                     <p className="mt-3 text-xs text-foreground-muted">
-                      This is a stop condition, not the mission&apos;s answer — so there&apos;s no deliverable
-                      to review. Raise the budget in the launch package (enforced by the sandbox&apos;s
-                      inference policy), narrow the objective, or resume after the daily reset, then run again.
+                      This is a reported stop, not a deliverable. Check the recorded evidence and
+                      governed budget before requesting another revision. A budget change does not
+                      by itself prove recovery.
                     </p>
                     <details className="mt-3">
                       <summary className="cursor-pointer text-xs text-foreground-muted hover:text-foreground">
@@ -556,7 +524,7 @@ export default async function MissionDetail({
                 ) : (
                   <ResultPanel result={currentResult} />
                 )}
-                {currentResult.status !== "error" && blocked == null && currentResult.output && <ReviewPanel task={name} assignmentNonce={currentResult.assignment_nonce ?? task.current_run_nonce ?? name} kind={reviewKind(task.artifacts)} initial={review} sandboxLive={task.launched && task.execution_phase === "Running"} />}
+                {currentRunNonce && <ReviewPanel key={currentRunNonce} task={name} assignmentNonce={currentRunNonce} eligible={realDelivery} kind={reviewKind(task.artifacts)} initial={review} sandboxLive={task.launched && task.execution_phase === "Running"} />}
               </div>
             ) : null,
           },
@@ -565,7 +533,7 @@ export default async function MissionDetail({
             label: "Artifacts",
             badge: ((task.artifacts?.length ?? 0) + (task.pull_requests?.length ?? 0)) || null,
             node: (task.artifacts && task.artifacts.length > 0) || (task.pull_requests && task.pull_requests.length > 0) ? (
-              <ArtifactsPanel ns={ns} task={name} artifacts={task.artifacts} pullRequests={task.pull_requests ?? []} activity={task.activity} egress={task.composition?.egress ?? []} tokens={currentResult?.total_tokens ?? null} />
+              <ArtifactsPanel ns={ns} task={name} runNonce={task.current_run_nonce} artifacts={task.artifacts} pullRequests={task.pull_requests ?? []} activity={task.activity} egress={task.composition?.egress ?? []} tokens={currentResult?.total_tokens ?? null} />
             ) : realDelivery ? (
               <HonestState
                 variant="empty"
@@ -580,31 +548,24 @@ export default async function MissionDetail({
             label: "Receipt",
             node: (
               <div className="space-y-3">
+                <section className="rounded-xl border border-border bg-surface p-6">
+                  <h2 className="text-sm font-semibold">Task-level governance records</h2>
+                  <p className="mt-1 text-xs text-foreground-muted">
+                    These records are associated with the task. Their binding to this specific run
+                    revision is not verified here. A signature check does not by itself establish
+                    which revision, artifact, or agent it covers.
+                  </p>
+                </section>
                 {scorecard && <MissionScorecard scorecard={scorecard} />}
-                {currentReceipt && realDelivery ? (
+                {receipt ? (
                   <>
-                    <div className="flex items-center justify-end gap-2">
-                      <AuditReportDownload task={name} receipt={currentReceipt} activity={task.activity} egress={task.composition?.egress ?? []} />
-                      <ProvenanceOverlay receipt={currentReceipt} deliverableDid={null} activity={task.activity} egress={task.composition?.egress ?? []} />
-                    </div>
                     <ReceiptVerifyButton ns={ns} task={name} />
-                    <ReceiptPanel receipt={currentReceipt} />
-                    {compliance && <CompliancePackView pack={compliance} />}
+                    <ReceiptPanel receipt={receipt} />
                   </>
                 ) : (
-                  <section className="rounded-xl border border-dashed border-border bg-surface-muted/40 p-6 text-center">
-                    <p className="text-sm font-medium">No Governance Receipt yet</p>
-                    <p className="mt-1 text-xs text-foreground-muted">
-                      {status === "failed"
-                        ? "This run did not complete successfully — there's no delivered work to attest, so no receipt is presented."
-                        : status === "blocked"
-                          ? "Blocked missions don't produce a receipt — there's no validated work to attest."
-                          : status === "done"
-                            ? "Finalising the signed receipt for this mission's delivered work — refresh in a moment. If it remains unavailable, check receipt signing in the Operator Console."
-                            : "A signed, verifiable receipt is issued once this mission delivers work — it attests the captured deliverable, token cost, and the policies enforced."}
-                    </p>
-                  </section>
+                  <HonestState variant="empty" compact title="Receipt unavailable" detail="No task-level receipt was returned. This does not establish whether a receipt will be issued." />
                 )}
+                {compliance && <CompliancePackView pack={compliance} />}
               </div>
             ),
           },

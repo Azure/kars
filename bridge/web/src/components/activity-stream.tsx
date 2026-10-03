@@ -1,18 +1,12 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// kars Bridge Workspace — live activity stream.
-//
-// The plan's Mission Map right-rail: the real tool-call / round trace and token
-// burn the agent emitted as it worked. Events are REAL — the controller
-// persists the agent's live execution trace; this surface renders it verbatim,
-// and while a mission is running it tails the SSE telemetry stream so events
-// tick in flight. When a mission has not run there is no trace, and we say so
-// plainly rather than faking ticks.
+// Captured, revision-bound activity. Missing trace is not evidence of no work.
 
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useMemo, useState } from "react";
+import { useLiveTrace } from "./use-live-trace";
 import { HonestState } from "@/components/honest-state";
 import { LivePulse } from "@/components/live-refresh";
 import type { ActivityEvent, MissionTelemetry } from "@/lib/types";
@@ -29,6 +23,7 @@ export function ActivityStream({
   telemetry,
   ns,
   name,
+  runNonce,
   events: externalEvents,
   title = "Activity",
   detail = "The real tool calls, model rounds, and token burn the agent emitted as it worked.",
@@ -40,6 +35,7 @@ export function ActivityStream({
   telemetry: MissionTelemetry | null;
   ns?: string;
   name?: string;
+  runNonce?: string | null;
   /** When a parent supplies the merged live events (one shared stream), use
    *  them and do NOT open a second EventSource. */
   events?: ActivityEvent[];
@@ -48,29 +44,16 @@ export function ActivityStream({
   focusQuery?: string;
   principalAgentName?: string;
 }) {
-  const [live, setLive] = useState<ActivityEvent[]>([]);
   const [query, setQuery] = useState(focusQuery ?? "");
-  // Tail the SSE telemetry stream while running so the trace ticks in flight.
-  useEffect(() => {
-    if (externalEvents || !running || !ns || !name) return;
-    const es = new EventSource(`/api/namespaces/${ns}/tasks/${name}/stream`);
-    es.onmessage = (m) => {
-      try {
-        setLive((prev) => [...prev, JSON.parse(m.data)]);
-      } catch {
-        /* ignore malformed frame */
-      }
-    };
-    es.addEventListener("done", () => es.close());
-    return () => es.close();
-  }, [running, ns, name, externalEvents]);
-
-  const merged = externalEvents ?? (activity.length >= live.length ? activity : live);
+  const sharedEvents = useLiveTrace(ns, name, running && externalEvents == null, activity, runNonce);
+  const merged = externalEvents ?? sharedEvents;
   const hasActivity = merged && merged.length > 0;
   const toolEvents = hasActivity ? merged.filter((e) => e.kind === "tool").length : 0;
   const roundEvents = hasActivity ? merged.filter((e) => e.kind === "round").length : 0;
-  const rounds = telemetry?.rounds ?? roundEvents;
-  const toolCalls = telemetry?.tool_calls ?? toolEvents;
+  const recordedTotals = [
+    telemetry?.rounds != null ? `${telemetry.rounds} model rounds` : null,
+    telemetry?.tool_calls != null ? `${telemetry.tool_calls} tool calls` : null,
+  ].filter(Boolean).join(" · ");
   const visible = useMemo(() => {
     const rawQuery = query.trim();
     const needle = rawQuery.toLowerCase();
@@ -220,14 +203,17 @@ export function ActivityStream({
               />
             </label>
             <span className="shrink-0 rounded-full bg-surface-muted px-2.5 py-1 text-xs font-medium">
-              {query.trim() ? `${visible.length}/${merged.length} events` : `${rounds} round${rounds === 1 ? "" : "s"} · ${toolCalls} tool call${toolCalls === 1 ? "" : "s"}`}
+              {query.trim() ? `${visible.length}/${merged.length} events` : `${roundEvents} round records · ${toolEvents} tool records`}
             </span>
           </div>
         ) : running ? (
-          <LivePulse label="Working" />
+          <LivePulse label="Waiting for revision evidence" />
         ) : null}
       </div>
 
+      {recordedTotals && (
+        <p className="mt-3 text-xs text-foreground-muted">Recorded run totals: {recordedTotals}. Trace records below may be incomplete.</p>
+      )}
       <div className="mt-4">
         {hasActivity ? (
           visible.length > 0 ? (
@@ -240,19 +226,12 @@ export function ActivityStream({
               detail="Try a tool name, agent name, host, argument, result, success, or failed."
             />
           )
-        ) : running ? (
-          <HonestState
-            variant="needs_run"
-            compact
-            title="No activity captured yet"
-            detail="This mission's sandbox is running but hasn't executed a task yet. Run the mission to drive the agent loop; its real tool-call trace and token burn appear here as it works."
-          />
         ) : (
           <HonestState
-            variant="needs_run"
+            variant="empty"
             compact
-            title="No activity yet"
-            detail="This mission hasn't run. Launch it, then run it — the agent's real per-tool trace and token cost are captured and shown here."
+            title="Detailed trace unavailable"
+            detail="No revision-bound round or tool records are available here. This does not mean the agent did no work; recorded run totals and delivered artifacts are separate evidence."
           />
         )}
       </div>
@@ -325,7 +304,7 @@ function SpanTree({ events }: { events: ActivityEvent[] }) {
             <span className="inline-block h-1.5 w-1.5 shrink-0 rounded-full bg-border" aria-hidden />
             <span className="font-medium">Model round {displayOrdinal.get(key) ?? 1}</span>
             {first && <span className="font-mono text-[10px] text-foreground-muted">· {agentKey(first)}</span>}
-            <span className="text-foreground-muted">· in flight</span>
+            <span className="text-foreground-muted">· round record unavailable</span>
           </div>
           <RoundTools tools={tools} display={displayOrdinal.get(key) ?? 1} />
         </li>

@@ -6,6 +6,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "@/components/icon";
+import { useLiveTrace } from "./use-live-trace";
 import type {
   ActivityEvent,
   AgentIdentity,
@@ -38,6 +39,7 @@ export function AgentGraph({
   activity,
   ns,
   name,
+  runNonce,
   agentLabel = "Agent",
   agentPhase = null,
   agentRuntime = null,
@@ -53,6 +55,7 @@ export function AgentGraph({
   activity: ActivityEvent[];
   ns?: string;
   name?: string;
+  runNonce?: string | null;
   agentLabel?: string;
   agentPhase?: string | null;
   agentRuntime?: string | null;
@@ -64,7 +67,7 @@ export function AgentGraph({
   receipt?: Receipt | null;
   onInspect?: (query: string) => void;
 }) {
-  const [live, setLive] = useState<ActivityEvent[]>([]);
+  const sharedEvents = useLiveTrace(ns, name, running && externalEvents == null, activity, runNonce);
   const [query, setQuery] = useState("");
   const [selectedKey, setSelectedKey] = useState("agent:principal");
   const [selectedAgentId, setSelectedAgentId] = useState("principal");
@@ -96,21 +99,7 @@ export function AgentGraph({
     };
   }, [enlarged]);
 
-  useEffect(() => {
-    if (externalEvents || !running || !ns || !name) return;
-    const stream = new EventSource(`/api/namespaces/${ns}/tasks/${name}/stream`);
-    stream.onmessage = (message) => {
-      try {
-        setLive((previous) => [...previous, JSON.parse(message.data)]);
-      } catch {
-        // Ignore malformed telemetry frames.
-      }
-    };
-    stream.addEventListener("done", () => stream.close());
-    return () => stream.close();
-  }, [externalEvents, name, ns, running]);
-
-  const events = externalEvents ?? (activity.length >= live.length ? activity : live);
+  const events = externalEvents ?? sharedEvents;
   const hasRecentActivity = (agent: AgentExecution): boolean => {
     if (!running || clientNow === null || !agent.lastActivity) return false;
     const timestamp = new Date(agent.lastActivity).getTime();

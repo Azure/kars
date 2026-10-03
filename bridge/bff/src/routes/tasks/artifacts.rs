@@ -1,11 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use axum::extract::{Extension, Path, State};
+use axum::extract::{Extension, Path, Query, State};
+use serde::Deserialize;
 
+use super::revision::ReadRevision;
 use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
-use crate::routes::ownership::require_owned_task_or_output;
+use crate::routes::ownership::require_owned_task;
 use crate::state::AppState;
 
 use super::evidence::{ARTIFACT_PREVIEW_TOTAL_BYTES, artifact_preview};
@@ -52,7 +54,12 @@ fn artifact_content_type(name: &str) -> &'static str {
     }
 }
 
-/// `GET /api/namespaces/:ns/tasks/:name/artifact/:file` — Bridge-native artifact fetch.
+#[derive(Deserialize)]
+pub struct ArtifactQuery {
+    run_nonce: String,
+}
+
+/// `GET /api/namespaces/:ns/tasks/:name/artifact/:file?run_nonce=...` — revision-pinned artifact fetch.
 /// Streams one artifact file's bytes (text from `data`, binary from
 /// `binaryData`) so operators download deliverables in-product, never via
 /// `kubectl`. Agent-produced active content is always a download, never an
@@ -61,15 +68,22 @@ pub async fn download_artifact(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     Path((ns, name, file)): Path<(String, String, String)>,
+    Query(query): Query<ArtifactQuery>,
 ) -> AppResult<axum::response::Response> {
     use axum::http::header;
     let cluster = require_cluster(&state)?;
-    require_owned_task_or_output(cluster, &ns, &name, &principal).await?;
+    if ns != "kars-system" {
+        return Err(AppError::NotFound);
+    }
+    let task = require_owned_task(cluster, &ns, &name, &principal).await?;
+    let revision = ReadRevision::capture(&task, &ns, &name, &principal)?;
+    revision.require_download_nonce(&query.run_nonce)?;
     let key = artifact_key(&file);
     let (bytes, _) = cluster
         .read_mission_artifact_bytes(&name, &key)
         .await
         .ok_or(AppError::NotFound)?;
+    revision.recheck(cluster, &principal).await?;
     let ctype = artifact_content_type(&file);
     let disposition = if matches!(
         ctype,

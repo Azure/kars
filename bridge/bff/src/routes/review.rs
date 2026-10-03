@@ -207,6 +207,12 @@ pub async fn post_review(
         ));
     }
 
+    if decision == "approve" && !super::tasks::run_evidence::mission_result(&output).reviewable {
+        return Err(AppError::Conflict(
+            "only a successful, nonempty deliverable with valid evidence can be approved; request changes instead".into(),
+        ));
+    }
+
     // Read prior review state, distinguishing a genuine cluster-read error from
     // "no review yet". Silently defaulting on error would erase the entire
     // review history on the next write (a transient blip = permanent data loss).
