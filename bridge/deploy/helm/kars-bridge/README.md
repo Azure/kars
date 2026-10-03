@@ -77,6 +77,40 @@ helm install kars-bridge deploy/helm/kars-bridge -n kars-system   # additive
 ```
 (or `make helm-install` — see the Makefile.)
 
+### Credential-free workspace enrollment
+
+Creating missions and teams requires a current, UID-bound
+`KarsCredentialGrant/workspace`, even when no private credentials are selected.
+For a new credential-free workspace, add this explicit option to the **second
+Helm command** above:
+
+```bash
+helm install kars-bridge deploy/helm/kars-bridge -n kars-system \
+  -f <your-bridge-values.yaml> --set workspaceEnrollment.enabled=true
+```
+
+This creates only metadata: no writers, agent keys, integration stores, GitHub
+connections, or private activation authority. The installing operator needs the
+Core `manage` permission on that grant (in addition to Helm installation rights).
+No operator role is bound by this option; BFF RBAC is unchanged. Core must already
+be installed. Helm looks up the actual namespace UID; offline `helm template`
+cannot fabricate it. Use a cluster-connected install/upgrade or
+`helm template --dry-run=server` for enrollment validation.
+
+The workspace defaults to `core.namespace`, independently of Bridge's workload
+namespace. Set `workspaceEnrollment.namespace` only for another existing
+workspace. Wait for the controller's `Ready` condition at the grant's current
+generation before creating work. `PrivateConsumptionReady` remains false; this
+does not qualify private credentials or an agent execution route.
+
+Leave enrollment disabled for existing operator-managed grants. The template
+refuses adoption, namespace replacement, disabled/terminating grants, or any
+expanded authority. Disable enrollment through Helm **before** separately
+reviewed private enrollment. The grant is retained on disable/uninstall
+(`helm.sh/resource-policy: keep`); uninstall is not credential revocation.
+Explicit retirement must follow the
+[governed-grant lifecycle](../../../../docs/how-to/governed-credential-grants.md).
+
 ## Cloud-specific values
 
 | Cloud | Image registry | Ingress class | Notes |

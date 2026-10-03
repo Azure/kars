@@ -35,7 +35,7 @@ fn validate_mission_fallback_route(
             model.provider, model.deployment
         )));
     }
-    match crate::routes::options::route_qualification(
+    match crate::routes::options::route_admitted(
         runtime,
         &model.provider,
         &model.deployment,
@@ -257,7 +257,7 @@ pub async fn create_task(
             .budget
             .as_ref()
             .and_then(|budget| budget.tokens);
-        match crate::routes::options::route_qualification(
+        match crate::routes::options::route_admitted(
             runtime,
             &model.provider,
             &model.deployment,
@@ -560,6 +560,7 @@ pub async fn create_task(
         .execution
         .as_ref()
         .is_some_and(|execution| execution.launch);
+    crate::kars::execution_plans::validate(&task, launch).map_err(AppError::BadRequest)?;
     if let Some(execution) = task.spec.execution.as_mut() {
         execution.launch = false;
     }
@@ -567,6 +568,7 @@ pub async fn create_task(
         .create(&PostParams::default(), &task)
         .await
         .map_err(map_kube_err)?;
+    crate::kars::execution_plans::ensure_preserved(&task, &created).map_err(AppError::Upstream)?;
     cluster
         .finish_created_credentials(
             &crate::kars::credentials::Target {

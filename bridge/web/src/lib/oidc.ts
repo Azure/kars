@@ -26,10 +26,33 @@ interface DiscoveryDoc {
 const discoveryCache = new Map<string, DiscoveryDoc>();
 const jwksCache = new Map<string, ReturnType<typeof createRemoteJWKSet>>();
 
-async function discover(issuer: string): Promise<DiscoveryDoc> {
-  const cached = discoveryCache.get(issuer);
+function backchannelUrl(cfg: OidcConfig, endpoint: string): string {
+  if (!cfg.backchannelIssuer) return endpoint;
+  const issuer = new URL(cfg.issuer);
+  const target = new URL(endpoint);
+  const internal = new URL(cfg.backchannelIssuer);
+  const prefix = issuer.pathname.replace(/\/$/, "");
+  if (
+    !["http:", "https:"].includes(internal.protocol) ||
+    internal.username || internal.password || internal.search || internal.hash ||
+    target.origin !== issuer.origin || target.username || target.password ||
+    !target.pathname.startsWith(`${prefix}/`)
+  ) {
+    throw new Error("OIDC backchannel endpoint must be beneath the configured issuer");
+  }
+  internal.pathname = internal.pathname.replace(/\/$/, "") + target.pathname.slice(prefix.length);
+  internal.search = target.search;
+  return internal.toString();
+}
+
+async function discover(cfg: OidcConfig): Promise<DiscoveryDoc> {
+  const { issuer } = cfg;
+  const cacheKey = JSON.stringify([issuer, cfg.backchannelIssuer ?? null]);
+  const cached = discoveryCache.get(cacheKey);
   if (cached) return cached;
-  const res = await fetch(`${issuer}/.well-known/openid-configuration`);
+  const res = await fetch(backchannelUrl(cfg, `${issuer}/.well-known/openid-configuration`), {
+    redirect: "error",
+  });
   if (!res.ok) {
     throw new Error(`OIDC discovery failed for ${issuer}: HTTP ${res.status}`);
   }
@@ -37,7 +60,10 @@ async function discover(issuer: string): Promise<DiscoveryDoc> {
   if (!doc.authorization_endpoint || !doc.token_endpoint || !doc.jwks_uri) {
     throw new Error(`OIDC discovery document from ${issuer} is missing required fields`);
   }
-  discoveryCache.set(issuer, doc);
+  if (doc.issuer !== issuer) {
+    throw new Error("OIDC discovery issuer does not match the configured issuer");
+  }
+  discoveryCache.set(cacheKey, doc);
   return doc;
 }
 
@@ -78,7 +104,7 @@ export async function buildAuthorizationRequest(
   cfg: OidcConfig,
   redirectUri: string,
 ): Promise<AuthRequest> {
-  const doc = await discover(cfg.issuer);
+  const doc = await discover(cfg);
   const state = randomToken(16);
   const nonce = randomToken(16);
   const codeVerifier = randomToken(32);
@@ -116,7 +142,7 @@ export async function exchangeCodeForIdentity(
   codeVerifier: string,
   expectedNonce: string,
 ): Promise<OidcIdentity> {
-  const doc = await discover(cfg.issuer);
+  const doc = await discover(cfg);
 
   const body = new URLSearchParams({
     grant_type: "authorization_code",
@@ -126,8 +152,9 @@ export async function exchangeCodeForIdentity(
     client_secret: cfg.clientSecret,
     code_verifier: codeVerifier,
   });
-  const res = await fetch(doc.token_endpoint, {
+  const res = await fetch(backchannelUrl(cfg, doc.token_endpoint), {
     method: "POST",
+    redirect: "error",
     headers: { "content-type": "application/x-www-form-urlencoded" },
     body,
   });
@@ -139,8 +166,8 @@ export async function exchangeCodeForIdentity(
     throw new Error("OIDC token response carried no id_token");
   }
 
-  const { payload } = await jwtVerify(tokens.id_token, jwks(doc.jwks_uri), {
-    issuer: doc.issuer,
+  const { payload } = await jwtVerify(tokens.id_token, jwks(backchannelUrl(cfg, doc.jwks_uri)), {
+    issuer: cfg.issuer,
     audience: cfg.clientId,
   });
 
@@ -175,7 +202,7 @@ export function rolesFromClaims(cfg: OidcConfig, claims: JWTPayload): import("./
 
 /** End-session (RP-initiated logout) URL, when the IdP advertises one. */
 export async function endSessionUrl(cfg: OidcConfig, postLogoutRedirectUri: string): Promise<string | null> {
-  const doc = await discover(cfg.issuer);
+  const doc = await discover(cfg);
   if (!doc.end_session_endpoint) return null;
   const params = new URLSearchParams({
     client_id: cfg.clientId,

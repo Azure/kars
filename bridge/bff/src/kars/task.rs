@@ -92,69 +92,12 @@ pub struct TaskBlueprint {
     pub execution_plan: Option<ExecutionPlan>,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecutionPlan {
-    pub schema: String,
-    pub roles: Vec<ExecutionRole>,
-    pub max_parallel: i32,
-    pub synthesis: ExecutionSynthesis,
-    #[serde(default)]
-    pub deliverables: Vec<ExecutionDeliverable>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecutionRole {
-    pub name: String,
-    pub objective: String,
-    #[serde(default)]
-    pub depends_on: Vec<String>,
-    pub phases: Vec<ExecutionPhase>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub budget_tokens: Option<i64>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecutionPhase {
-    pub name: String,
-    pub objective: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub required_tool_calls: Vec<ExecutionRequiredToolCall>,
-    #[serde(default)]
-    pub min_tool_calls: i32,
-    pub max_tool_calls: i32,
-    #[serde(default)]
-    pub fresh_context: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecutionRequiredToolCall {
-    pub name: String,
-    #[serde(default)]
-    pub arguments: std::collections::BTreeMap<String, String>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecutionSynthesis {
-    pub objective: String,
-    #[serde(default)]
-    pub capabilities: Vec<String>,
-    pub max_tool_calls: i32,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
-#[serde(rename_all = "camelCase")]
-pub struct ExecutionDeliverable {
-    pub name: String,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub media_type: Option<String>,
-}
+#[path = "../../../../shared/execution_plan.rs"]
+pub mod execution_plan;
+pub use execution_plan::{
+    ExecutionDeliverable, ExecutionPhase, ExecutionPlan, ExecutionRequiredToolCall, ExecutionRole,
+    ExecutionSynthesis,
+};
 
 #[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]

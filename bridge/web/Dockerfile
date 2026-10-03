@@ -10,7 +10,7 @@
 FROM node:22-bookworm-slim AS deps
 WORKDIR /app
 COPY package.json package-lock.json* ./
-RUN npm ci
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc npm ci
 
 FROM node:22-bookworm-slim AS build
 WORKDIR /app

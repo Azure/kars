@@ -1,6 +1,11 @@
 {{/* Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. */}}{{- $localInference := .Values.localInference | default dict }}
 {{- $privacyRpc := .Values.observationPrivacyRpc | default dict }}
+{{- include "kars.inferenceCredentials.validate" . }}
+{{- include "kars.inferenceBudget.tls.validate" . }}
+{{- include "kars.missionDispatcher.validate" . }}
+{{- $inferenceCredentials := .Values.inferenceRouter.azure.openai.credentials | default dict }}
+{{- $budgetTls := (.Values.inferenceBudget | default dict).tls | default dict }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -17,6 +22,15 @@ spec:
       app.kubernetes.io/component: controller
   template:
     metadata:
+      {{- if or $inferenceCredentials.apiKey $budgetTls.certificate }}
+      annotations:
+        {{- if $inferenceCredentials.apiKey }}
+        checksum/inference-credentials: {{ $inferenceCredentials.apiKey | sha256sum | quote }}
+        {{- end }}
+        {{- if $budgetTls.certificate }}
+        checksum/inference-budget-tls: {{ dict "certificate" $budgetTls.certificate "privateKey" $budgetTls.privateKey | toJson | sha256sum | quote }}
+        {{- end }}
+      {{- end }}
       labels:
         app.kubernetes.io/name: kars
         app.kubernetes.io/component: controller
@@ -50,6 +64,14 @@ spec:
               value: {{ required "inferenceBudget.routerImageDigest is required" .Values.inferenceBudget.routerImageDigest | quote }}
             - name: KARS_INFERENCE_BUDGET_ADDR
               value: "0.0.0.0:9447"
+            {{- end }}
+            {{- if (.Values.missionDispatcher | default dict).enabled }}
+            - name: KARS_MISSION_DISPATCH_ENABLED
+              value: "true"
+            - name: KARS_MISSION_DISPATCHER_DEPLOYMENT
+              value: kars-mission-dispatcher
+            - name: KARS_MISSION_DISPATCHER_RELEASE
+              value: {{ .Release.Name | quote }}
             {{- end }}
             # Downward API — used by leader-election + S12.d
             # SignerPolicy watcher to scope to the controller's own
@@ -126,6 +148,14 @@ spec:
               value: {{ .Values.runtimes.pydanticAi.image | default "" | quote }}
             - name: HERMES_RUNTIME_IMAGE
               value: {{ .Values.runtimes.hermes.image | default "" | quote }}
+            {{- if or $inferenceCredentials.apiKey $inferenceCredentials.existingSecret }}
+            - name: AZURE_OPENAI_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $inferenceCredentials.existingSecret | default "kars-inference-bootstrap" | quote }}
+                  key: {{ $inferenceCredentials.key | default "api-key" | quote }}
+                  optional: false
+            {{- end }}
             - name: AZURE_OPENAI_ENDPOINT
               value: {{ .Values.inferenceRouter.azure.openai.endpoint | quote }}
             - name: FOUNDRY_ENDPOINT

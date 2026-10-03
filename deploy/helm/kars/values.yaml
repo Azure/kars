@@ -5,6 +5,33 @@
 # NOTE: For production, replace "latest" tags with specific image digests
 #       (e.g., sha256:abc123...) and set pullPolicy to IfNotPresent.
 
+# First-install schema publication inside the Core Helm invocation. Opt-in until
+# the image and real Helm/admission/CNI lifecycle are qualified. Use --create-namespace.
+# No upgrade/replacement/rollback, automatic failure-uninstall or CLI staging.
+# Hooks retain Job, credentials and network isolation even on success. Retire their
+# exact resources only after verified helper termination; Helm uninstall does not.
+schemaHook:
+  enabled: false
+  architecture: amd64
+  image:
+    repository: ""
+    tag: "latest"
+    digest: ""
+  # Exact API service/backend IPv4 /32s and TCP ports for this cluster/CNI.
+  apiDestinations: []
+
+# Durable encrypted dispatch is opt-in while live delivery is being qualified.
+# Development mode is explicit; this helper does not yet support Entra authentication.
+# Identity roots are generated/pinned by the controller, never supplied through values.
+missionDispatcher:
+  enabled: false
+  authMode: ""
+  image:
+    repository: karsacr.azurecr.io/kars-mission-dispatcher
+    digest: ""
+  relayUrl: ""
+  registryUrl: ""
+
 localInference:
   # Opt in to namespace-wide model egress, or prefer precise pod targets below.
   namespaces: []
@@ -21,9 +48,15 @@ inferenceBudget:
   catalogVersion: ""
   contracts: []
   nonInferenceEgressHosts: []
-  # Explicit operator-owned TLS identity. No key or pricing is generated here.
+  # Reference an existing operator TLS Secret, or supply both PEM fields below
+  # to install it in this Core release. No certificates or keys are generated.
   tlsSecretName: ""
   caBundle: ""
+  tls:
+    certificate: ""
+    # Supplied keys are stored in Helm release history; use existing-Secret mode
+    # when your secret-management policy prohibits that storage.
+    privateKey: ""
 
 # Controller configuration
 # Required for explicitly enrolled private observations. Does not expose a
@@ -74,6 +107,12 @@ inferenceRouter:
     openai:
       endpoint: ""       # Azure OpenAI endpoint for dev mode (set via kars onboard)
       deploymentName: "gpt-4.1"   # Default model for dev mode
+      # Initial no-Entra inference, also used with foundry.endpoint. Leave empty
+      # for AKS workload/Agent ID authentication. Never commit real keys.
+      credentials:
+        apiKey: ""            # Helm-managed Secret; prefer --set-file from a private file
+        existingSecret: ""    # Alternative: operator-provisioned Secret in the Core namespace
+        key: "api-key"
     contentSafety:
       enabled: true
     promptShields:

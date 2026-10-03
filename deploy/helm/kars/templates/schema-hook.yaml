@@ -1,0 +1,260 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- $settings := .Values.schemaHook | default dict -}}
+{{- if ($settings.enabled | default false) -}}
+{{- if ((.Values.entraSidecar | default dict).enabled | default false) -}}
+{{- fail "schemaHook requires entraSidecar.enabled=false; activate identity in a separate reviewed Core upgrade with schemaHook disabled" -}}
+{{- end -}}
+{{- $architecture := "amd64" -}}
+{{- if hasKey $settings "architecture" -}}{{- $architecture = $settings.architecture -}}{{- end -}}
+{{- if or (not (kindIs "string" $architecture)) (not (has $architecture (list "amd64" "arm64"))) -}}
+{{- fail "schemaHook.architecture requires a qualified amd64 or arm64 helper image" -}}
+{{- end -}}
+{{- if or .Release.IsUpgrade (not .Release.IsInstall) (ne (int .Release.Revision) 1) -}}
+{{- fail "schemaHook supports only an original revision-one install; upgrade, replacement and rollback are not qualified" -}}
+{{- end -}}
+{{- if not (regexMatch "^v4\\.1\\.3(\\+[0-9A-Za-z.-]+)?$" .Capabilities.HelmVersion.Version) -}}
+{{- fail "schemaHook requires the source-inspected Helm 4.1.3 outer installer" -}}
+{{- end -}}
+{{- if or (not (semverCompare ">=1.35.0-0 <1.36.0-0" .Capabilities.KubeVersion.Version)) ((.Values.policyPrototype | default dict).enabled | default false) -}}
+{{- fail "schemaHook requires Kubernetes 1.35 and cannot run with policyPrototype" -}}
+{{- end -}}
+{{- $image := $settings.image | default dict -}}
+{{- $repository := required "schemaHook.image.repository is required" $image.repository -}}
+{{- $digest := required "schemaHook.image.digest is required" $image.digest -}}
+{{- if or (not (regexMatch "^([a-z0-9]([a-z0-9.-]*[a-z0-9])?(:[0-9]{1,5})?/)?[a-z0-9]+([._-][a-z0-9]+)*(/[a-z0-9]+([._-][a-z0-9]+)*)*$" $repository)) (not (regexMatch "^sha256:[a-f0-9]{64}$" $digest)) (and $image.tag (ne $image.tag "latest")) -}}
+{{- fail "schemaHook requires an exact image repository, latest tag and sha256 digest" -}}
+{{- end -}}
+{{- $destinations := $settings.apiDestinations | default list -}}
+{{- if or (not (kindIs "slice" $destinations)) (lt (len $destinations) 1) (gt (len $destinations) 8) -}}
+{{- fail "schemaHook.apiDestinations requires one to eight reviewed API IPv4 /32 and TCP port pairs" -}}
+{{- end -}}
+{{- range $destination := $destinations -}}
+{{- if or (not (kindIs "map" $destination)) (ne (len $destination) 2) -}}
+{{- fail "schemaHook API destinations contain exactly cidr and port" -}}
+{{- end -}}
+{{- if or (not (kindIs "string" $destination.cidr)) (not (regexMatch "^((25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])\\.){3}(25[0-5]|2[0-4][0-9]|1[0-9][0-9]|[1-9]?[0-9])/32$" $destination.cidr)) (not (regexMatch "^[1-9][0-9]*$" (toString $destination.port))) (gt (int $destination.port) 65535) -}}
+{{- fail "schemaHook API destinations require exact IPv4 /32 addresses and TCP ports 1..65535" -}}
+{{- end -}}
+{{- end -}}
+{{- /* Every render uses new helper names: a failed install's scaffolding is never deleted or reused. */ -}}
+{{- if not (hasKey .Release "karsSchemaHookId") -}}
+{{- $_ := set .Release "karsSchemaHookId" (randAlphaNum 16 | lower) -}}
+{{- end -}}
+{{- $identity := printf "%s-schema-%s" (.Release.Name | trunc 32 | trimSuffix "-") .Release.karsSchemaHookId -}}
+{{- /* A failed Helm watch does not prove Pod termination. Retain policy and credentials
+      with the Job until an operator verifies termination and retires this exact helper. */ -}}
+{{- $annotations := dict "helm.sh/hook" "pre-install" "helm.sh/hook-weight" "-100" "helm.sh/hook-delete-policy" "before-hook-creation" -}}
+{{- $crds := list "karssandboxes" "karspairings" "karsapprovals" "mcpservers" "karssreregistrations" "toolpolicies" "trustgraphs" "karsbudgetaccounts" "karscredentialgrants" "karstasks" "inferencepolicies" "karsauthconfigs" "egressapprovals" "karsevals" "a2aagents" "karsskills" "karsreceipts" "karsmemories" "karsteams" "karsprofiles" "karssreactions" -}}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: {{ $identity }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+automountServiceAccountToken: false
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ $identity }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+rules:
+  # Kubernetes RBAC cannot restrict CREATE by resourceName. The pinned helper
+  # accepts only CRDs in the exact stored pending Helm manifest, without force.
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    verbs: ["create"]
+  - apiGroups: ["apiextensions.k8s.io"]
+    resources: ["customresourcedefinitions"]
+    resourceNames:
+      {{- range $crds }}
+      - {{ printf "%s.kars.azure.com" . | quote }}
+      {{- end }}
+    verbs: ["get", "patch"]
+  - apiGroups: ["admissionregistration.k8s.io"]
+    resources: ["validatingadmissionpolicies"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    resourceNames: [{{ .Release.Namespace | quote }}]
+    verbs: ["get"]
+  - nonResourceURLs: ["/version", "/api", "/api/*", "/apis", "/apis/*", "/openapi/v3", "/openapi/v3/*"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ $identity }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ $identity }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $identity }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: {{ $identity }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+rules:
+  # Helm history LIST cannot be resourceName-scoped; use a dedicated Core namespace.
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments"]
+    resourceNames: ["kars-controller"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: {{ $identity }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: {{ $identity }}
+subjects:
+  - kind: ServiceAccount
+    name: {{ $identity }}
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ $identity }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+immutable: true
+# The generated bundle contains literal control characters; preserve its bytes outside YAML scalars.
+binaryData:
+  schema-hook.mjs: {{ required "schemaHook requires the generated schema-hook.mjs bundle" (.Files.Get "files/schema-hook.mjs") | b64enc | quote }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ $identity }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+spec:
+  podSelector:
+    matchLabels:
+      kars.azure.com/schema-hook: {{ $identity }}
+  policyTypes: [Ingress, Egress]
+  ingress: []
+  egress:
+    {{- range $destinations }}
+    - to:
+        - ipBlock:
+            cidr: {{ .cidr | quote }}
+      ports:
+        - protocol: TCP
+          port: {{ int .port }}
+    {{- end }}
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: {{ $identity }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    helm.sh/hook: pre-install
+    helm.sh/hook-weight: "-90"
+    # Retain terminal output; neither successful nor failed Job evidence is auto-deleted.
+    helm.sh/hook-delete-policy: before-hook-creation
+spec:
+  backoffLimit: 0
+  activeDeadlineSeconds: 180
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kars
+        app.kubernetes.io/component: schema-hook
+        kars.azure.com/schema-hook: {{ $identity }}
+    spec:
+      serviceAccountName: {{ $identity }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      restartPolicy: Never
+      terminationGracePeriodSeconds: 10
+      nodeSelector:
+        kubernetes.io/os: linux
+        kubernetes.io/arch: {{ $architecture }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: schemas
+          image: {{ printf "%s:latest@%s" $repository $digest | quote }}
+          imagePullPolicy: IfNotPresent
+          command: ["/usr/local/bin/node", "/opt/kars-schema/schema-hook.mjs"]
+          args: ["--release", {{ .Release.Name | quote }}, "--namespace", {{ .Release.Namespace | quote }}, "--revision", "1", "--operation", "install", "--installer-helm-version", {{ .Capabilities.HelmVersion.Version | quote }}, "--timeout-ms", "120000"]
+          env:
+            - name: NODE_OPTIONS
+              value: "--max-old-space-size=160"
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            requests:
+              cpu: 100m
+              memory: 192Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          volumeMounts:
+            - name: program
+              mountPath: /opt/kars-schema
+              readOnly: true
+            - name: temporary
+              mountPath: /tmp
+            - name: api-identity
+              mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+              readOnly: true
+      volumes:
+        - name: program
+          configMap:
+            name: {{ $identity }}
+            defaultMode: 292
+        - name: temporary
+          emptyDir:
+            sizeLimit: 128Mi
+        - name: api-identity
+          projected:
+            defaultMode: 292
+            sources:
+              - serviceAccountToken:
+                  path: token
+                  expirationSeconds: 600
+              - configMap:
+                  name: kube-root-ca.crt
+                  items:
+                    - key: ca.crt
+                      path: ca.crt
+              - downwardAPI:
+                  items:
+                    - path: namespace
+                      fieldRef:
+                        fieldPath: metadata.namespace
+{{- end }}

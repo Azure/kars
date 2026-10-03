@@ -14,6 +14,95 @@ use kube::api::DynamicObject;
 use serde_json::json;
 use std::collections::BTreeMap;
 
+#[test]
+fn controller_model_catalog_accepts_json_and_legacy_csv_without_inventing_models() {
+    use super::providers::parse_model_catalog;
+    for raw in [
+        r#"["gpt-4.1", " gpt-5.4-mini ", ""]"#,
+        "gpt-4.1, gpt-5.4-mini,",
+    ] {
+        assert_eq!(parse_model_catalog(raw), vec!["gpt-4.1", "gpt-5.4-mini"]);
+    }
+    for raw in ["", "[]", "[broken", r#"["valid", 42]"#] {
+        assert!(parse_model_catalog(raw).is_empty(), "{raw}");
+    }
+}
+
+#[tokio::test]
+async fn orchestrator_bootstrap_uses_the_controller_route_instead_of_a_fixed_provider() {
+    use axum::{Json, Router, body::Bytes, extract::State, http::Method};
+    use std::sync::{Arc, Mutex};
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    type Fixture = Arc<(serde_json::Value, Mutex<Vec<serde_json::Value>>)>;
+    async fn handle(
+        State(state): State<Fixture>,
+        method: Method,
+        body: Bytes,
+    ) -> Json<serde_json::Value> {
+        if method == Method::PATCH {
+            let document: serde_json::Value = serde_json::from_slice(&body).unwrap();
+            state.1.lock().unwrap().push(document.clone());
+            Json(document)
+        } else {
+            assert_eq!(method, Method::GET);
+            Json(state.0.clone())
+        }
+    }
+
+    for (default, catalog, expected) in [
+        (
+            Some("gpt-5.4-mini"),
+            r#"["gpt-4.1", "gpt-5.4-mini"]"#,
+            Some("gpt-5.4-mini"),
+        ),
+        (None, r#"["gpt-4.1", "gpt-5.4-mini"]"#, Some("gpt-4.1")),
+        (None, "", None),
+    ] {
+        let mut env = vec![
+            json!({"name":"FOUNDRY_ENDPOINT","value":"https://example.cognitiveservices.azure.com/"}),
+            json!({"name":"FOUNDRY_DEPLOYMENTS","value":catalog}),
+        ];
+        if let Some(default) = default {
+            env.push(json!({"name":"KARS_TASK_DEFAULT_MODEL","value":default}));
+        }
+        let state: Fixture = Arc::new((
+            json!({
+                "apiVersion":"apps/v1","kind":"Deployment",
+                "metadata":{"name":"kars-controller"},
+                "spec":{"selector":{"matchLabels":{"app":"controller"}},
+                    "template":{"spec":{"containers":[{"name":"controller","env":env}]}}}
+            }),
+            Mutex::new(Vec::new()),
+        ));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = kube::Config::new(
+            format!("http://{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+        );
+        let app = Router::new().fallback(handle).with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cluster = super::Cluster {
+            client: kube::Client::try_from(config).unwrap(),
+        };
+        cluster.ensure_orchestrator_sandbox().await.unwrap();
+        let writes = state.1.lock().unwrap();
+        assert_eq!(writes.len(), 2);
+        assert_eq!(writes[0]["kind"], "InferencePolicy");
+        if let Some(expected) = expected {
+            assert_eq!(
+                writes[0]["spec"]["modelPreference"]["primary"],
+                json!({"provider":"azure-foundry","deployment":expected})
+            );
+        } else {
+            assert!(writes[0]["spec"].get("modelPreference").is_none());
+        }
+        assert_eq!(writes[1]["kind"], "KarsSandbox");
+        server.abort();
+    }
+}
+
 fn id(r: Option<(String, String, String)>) -> Option<String> {
     r.map(|(i, _, _)| i)
 }

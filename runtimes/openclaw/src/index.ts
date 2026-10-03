@@ -350,7 +350,7 @@ async function recordMeshSession(
 
 // Attempt to reconnect the AGT mesh client after a disconnect.
 async function agtReconnect(log: { info: (m: string) => void; warn: (m: string) => void }) {
-  return _agtReconnect(agtMeshClient, agtConnected, agtSandboxName, (v) => { agtConnected = v; }, log);
+  return _agtReconnect(agtMeshClient, agtSandboxName, (v) => { agtConnected = v; }, log);
 }
 
 // Write unread inbox messages to a file the LLM can see in its context.
@@ -366,7 +366,12 @@ import { meshSendWithIdentity, meshHandleTransportMessage, pendingTransfers, MES
 import { TASK_TOOLS } from "./core/agt-task-tools.js";
 import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
-import { processTaskWithTools as _processTaskWithTools } from "./core/agt-task-loop.js";
+import { processTaskWithTools as _processTaskWithTools, executeTaskWithEvidence, type TaskLoopDeps } from "./core/agt-task-loop.js";
+import { MissionReceiver, missionTargetFromEnvironment } from "./core/mission-receiver.js";
+import { initializeMissionIdentity } from "./core/mission-bootstrap.js";
+import { missionKnockHandler } from "./core/mission-admission.js";
+import { isMissionMessage } from "@kars/mesh/dist/mission-protocol.js";
+import { authorizeTaskAction } from "./core/task-policy.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
 import { registerHttpFetchTool } from "./core/agt-tools/http-fetch.js";
 import { registerGitHubActionsTool } from "./core/agt-tools/github-actions.js";
@@ -388,7 +393,11 @@ async function processTaskWithTools(
   taskContent: any,
   log: { info: (m: string) => void; warn: (m: string) => void },
 ): Promise<string> {
-  return _processTaskWithTools(taskContent, {
+  return _processTaskWithTools(taskContent, taskLoopDeps(), log);
+}
+
+function taskLoopDeps(): TaskLoopDeps {
+  return {
     meshClient: () => agtMeshClient,
     meshIdentity: () => agtIdentity,
     isInterruptRequested: () => handoffInterruptRequested,
@@ -405,7 +414,7 @@ async function processTaskWithTools(
       }
     },
     waitForInbox,
-  }, log);
+  };
 }
 
 // ── meshSend: auto-chunking send wrapper ─────────────────────────────────────
@@ -505,10 +514,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // dependency for keygen / verify).
     const meshMod: any = await import("@kars/mesh");
 
-    // Generate Ed25519 + X25519 identity. `generateIdentity` writes the
-    // encrypted envelope under ~/.kars/identity.json and returns a
-    // facade with raw key buffers + amid/did.
-    const meshIdentity = await meshMod.generateIdentity();
+    // Mission identities are Pod-bound and never persisted to the legacy identity file.
+    // Acquire process-external prekey writer custody before deriving keys or creating the SDK.
+    const meshIdentity = await initializeMissionIdentity() ?? await meshMod.generateIdentity();
     agtIdentity = {
       amid: meshIdentity.amid,
       did: meshIdentity.did,
@@ -611,13 +619,14 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Messages can arrive immediately after connect() returns, so handlers
     // must be in place first.
 
+    const missionTarget = missionTargetFromEnvironment(agtIdentity.did);
     // KNOCK handler — policy-gated session establishment with trust scoring.
     const AGT_TRUST_THRESHOLD = parseInt(process.env.AGT_TRUST_THRESHOLD || "0", 10); // 0 = accept all (dev)
     if (AGT_TRUST_THRESHOLD > 0) {
       agtMeshClient.enableKnockEnforcement();
       log.info(`AGT KNOCK enforcement enabled (threshold: ${AGT_TRUST_THRESHOLD})`);
     }
-    agtMeshClient.onKnock(async (fromAmid: string, request: any) => {
+    agtMeshClient.onKnock(missionKnockHandler(missionTarget, async (fromAmid: string, request: any) => {
       const intent = request?.intent?.capability || '*';
       // Use full AMID as identifier when name resolution fails — a truncated
       // prefix (slice(0,12) = "did:agentmes") collapses every unresolved
@@ -698,7 +707,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       log.info(`AGT KNOCK accepted: bootstrapped trust for ${fromName} / ${fromAmid.slice(0, 12)}... (score=500)`);
 
       return { accept: true };
-    });
+    }));
 
     // Handle E2E decryption failures, KNOCK rejections, and transport errors.
     //
@@ -793,9 +802,25 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       }
     });
 
+    const missionReceiver = missionTarget ? new MissionReceiver({
+      target: missionTarget,
+      authorize: (assignment) => authorizeTaskAction("task:execute", {
+        task_uid: assignment.taskUid, run_nonce: assignment.runNonce,
+        dispatcher_did: assignment.dispatcherDid, assignment_id: assignment.assignmentId,
+      }),
+      execute: (content, onEvidence, artifactsEnabled) => executeTaskWithEvidence(content, { ...taskLoopDeps(), onEvidence }, log, artifactsEnabled),
+      send: (to, reply) => agtMeshClient!.send(to, reply),
+      warn: (message) => log.warn(message),
+    }) : null;
+
     // Set up message handler — stores received messages in the AGT inbox buffer
     // AND auto-replies to task_request messages via AGT relay (E2E encrypted reply)
-    agtMeshClient.onMessage(async (fromAmid: string, message: any) => {
+    agtMeshClient.onMessage(async (fromAmid: string, message: any, security: "encrypted" | "plaintext" | "unknown" = "unknown") => {
+      if (isMissionMessage(message)) {
+        try { await missionReceiver?.handle(fromAmid, message, security); }
+        catch { log.warn("Rejected invalid mission protocol message"); }
+        return;
+      }
       // Resolve sender name — check local cache first, then look up via registry
       let fromName = amidToName.get(fromAmid) || "";
       if (!fromName && message?.from_agent) {
@@ -822,6 +847,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       if (transportResult !== undefined) {
         // Reassembled message — replace the original message and continue to app layer
         message = transportResult;
+        if (isMissionMessage(message)) {
+          log.warn("Rejected chunked mission protocol message: no aggregate encryption evidence");
+          return;
+        }
         log.info(`Mesh transfer reassembled from '${fromName}' — processing as ${message.type || "message"}`);
       }
 

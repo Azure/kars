@@ -4,8 +4,8 @@
 "use client";
 
 // kars Bridge Workspace — the artifact review loop (§16). A reviewer accepts a
-// deliverable or requests changes; request-changes re-drives the producing task
-// on the delta and a new revision lands. Typed by artifact kind, with the full
+// deliverable or requests a distinct revision; submission does not prove that
+// the requested execution has started or completed. Typed by artifact kind, with the full
 // review lineage and a link into the run's provenance (the execution trace).
 
 import { useState, useTransition } from "react";
@@ -13,6 +13,7 @@ import { useRouter } from "next/navigation";
 import { submitReview } from "./review-actions";
 import { setLaunch } from "@/app/tasks/[name]/launch-actions";
 import type { ReviewState } from "@/lib/types";
+import { formatEvidenceTime } from "@/lib/format";
 
 const KIND_LABEL: Record<string, string> = {
   code: "Code — review as a change",
@@ -23,7 +24,7 @@ const KIND_LABEL: Record<string, string> = {
 
 function statusChip(status: string, pending: boolean) {
   if (pending)
-    return { label: "Revising…", cls: "bg-sky-500/10 text-sky-600 border-sky-500/30" };
+    return { label: "Revision requested", cls: "bg-sky-500/10 text-sky-600 border-sky-500/30" };
   switch (status) {
     case "approved":
       return { label: "Approved", cls: "bg-emerald-500/10 text-emerald-600 border-emerald-500/30" };
@@ -39,12 +40,14 @@ export function ReviewPanel({
   assignmentNonce,
   kind,
   initial,
+  eligible = false,
   sandboxLive = false,
 }: {
   task: string;
   assignmentNonce: string;
   kind: string;
   initial: ReviewState | null;
+  eligible?: boolean;
   /** True when the producing agent's sandbox is still Running — so approving can
    *  offer to terminate it (cleanup-on-good). False once it's already torn down. */
   sandboxLive?: boolean;
@@ -66,6 +69,10 @@ export function ReviewPanel({
 
   function act(decision: "approve" | "request_changes") {
     setError(null);
+    if (decision === "approve" && (!eligible || !assignmentNonce || redrivePending)) {
+      setError("Approval requires a validated successful deliverable for this revision.");
+      return;
+    }
     if (decision === "request_changes" && comment.trim().length === 0) {
       setError("Describe what needs to change so the agent can revise.");
       return;
@@ -106,7 +113,7 @@ export function ReviewPanel({
           <h2 className="text-sm font-semibold">Review</h2>
           <p className="mt-0.5 text-xs text-foreground-muted">
             {KIND_LABEL[kind] ?? KIND_LABEL.output} · accept the deliverable or request changes —
-            requesting changes re-runs the agent on your feedback.
+            requesting changes creates a distinct revision request for your feedback.
           </p>
         </div>
         <span className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium ${chip.cls}`}>
@@ -118,12 +125,13 @@ export function ReviewPanel({
       {redrivePending ? (
         <p className="mt-4 rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-3 text-sm text-foreground-muted">
           <span className="font-medium text-sky-700">Changes requested — received.</span>{" "}
-          The agent is producing a new revision from your feedback. It will land here when ready
-          (watch it in the Activity tab).
+          A distinct revision has been requested from your feedback. A request alone does not
+          prove the agent has started; check the revision status and recorded activity.
         </p>
       ) : (
         <div className="mt-4 space-y-3">
-          {status === "approved" && !requesting ? (
+          {!eligible && <p className="text-xs text-foreground-muted">Approval unavailable: this revision has no validated successful deliverable. You can still request changes.</p>}
+          {status === "approved" && eligible && !requesting ? (
             <div className="space-y-3">
               <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-700">
                 ✓ You approved this deliverable{revision > 0 ? ` (rev ${revision})` : ""}.{" "}
@@ -136,16 +144,13 @@ export function ReviewPanel({
                 </button>
                 .
               </p>
-              {/* Cleanup-on-good: once approved, offer to terminate the agent and
-                  free its sandbox. The deliverable + signed receipt are kept — this
-                  only tears down the running agent. Shown only while the sandbox is
-                  still up, and dismissable if the operator wants to keep iterating. */}
+              {/* Stopping the sandbox is a separate, explicit action. */}
               {sandboxLive && !keepRunning && (
                 <div className="rounded-lg border border-border bg-surface-muted/40 px-4 py-3">
                   <p className="text-sm font-medium">Happy with this? You can free the agent now.</p>
                   <p className="mt-0.5 text-xs text-foreground-muted">
-                    Terminating tears down the agent&rsquo;s sandbox and frees its resources. Your
-                    deliverable and its signed receipt are kept — nothing is lost.
+                    Terminating tears down the agent&rsquo;s sandbox and frees its resources.
+                    Download the files you need first; this action does not guarantee retention after task deletion.
                   </p>
                   <div className="mt-3 flex flex-wrap gap-2">
                     <button
@@ -178,7 +183,7 @@ export function ReviewPanel({
             <div className="flex flex-wrap gap-2">
               <button
                 type="button"
-                disabled={pending}
+                disabled={pending || !eligible || !assignmentNonce}
                 onClick={() => act("approve")}
                 className="rounded-lg bg-emerald-600 px-4 py-2 text-sm font-semibold text-white transition hover:opacity-90 disabled:opacity-50"
               >
@@ -209,7 +214,7 @@ export function ReviewPanel({
                   onClick={() => act("request_changes")}
                   className="rounded-lg bg-signal px-4 py-2 text-sm font-semibold text-signal-fg transition hover:opacity-90 disabled:opacity-50"
                 >
-                  {pending ? "Sending…" : "Send & re-run"}
+                  {pending ? "Sending…" : "Request revision"}
                 </button>
                 <button
                   type="button"
@@ -244,7 +249,7 @@ export function ReviewPanel({
                   {h.decision === "approve" ? "Approved" : "Requested changes"}
                 </span>{" "}
                 <span className="text-foreground-muted">
-                  · rev {h.revision} · {new Date(h.decided_at).toLocaleString()} · {h.reviewer}
+                  · rev {h.revision} · {formatEvidenceTime(h.decided_at)} · {h.reviewer}
                   {h.attested === false && (
                     <span
                       className="ml-1 rounded bg-surface-muted px-1 py-0.5 text-[10px] text-foreground-muted"

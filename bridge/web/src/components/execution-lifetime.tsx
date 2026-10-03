@@ -115,25 +115,25 @@ export function ExecutionLifetime({
     <section className="rounded-2xl border border-border bg-surface p-5">
       <div className="flex flex-wrap items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold">Complete execution lifetime</h2>
+          <h2 className="text-sm font-semibold">Recorded execution timeline</h2>
           <p className="mt-0.5 max-w-2xl text-xs text-foreground-muted">
-            Every retained assignment, model round, tool call, approval, handback, and failure in timestamp order.
+            Available assignment, model round, tool call and approval records in timestamp order. Missing records do not establish that no work occurred.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <label className="relative">
-            <span className="sr-only">Search execution lifetime</span>
+            <span className="sr-only">Search recorded timeline</span>
             <Icon name="search" size={13} className="pointer-events-none absolute left-2.5 top-1/2 -translate-y-1/2 text-foreground-muted" />
             <input
               value={query}
               onChange={(event) => setQuery(event.target.value)}
-              placeholder="Search the complete lifetime"
+              placeholder="Search recorded events"
               className="w-64 rounded-lg border border-border bg-surface-muted/40 py-1.5 pl-8 pr-3 text-xs outline-none focus:border-signal"
             />
           </label>
           {running ? <LivePulse label="Recording live" /> : (
             <span className="rounded-full border border-border bg-surface-muted px-2.5 py-1 text-xs font-medium text-foreground-muted">
-              {visible.length}/{events.length} events
+              {events.length > 0 ? `${visible.length}/${events.length} recorded events` : "No records available"}
             </span>
           )}
         </div>
@@ -169,7 +169,9 @@ export function ExecutionLifetime({
       </ol>
       {visible.length === 0 && (
         <p className="mt-4 rounded-lg border border-dashed border-border p-4 text-center text-xs text-foreground-muted">
-          No retained event matches this search.
+          {events.length === 0
+            ? "No timeline records are available here. This does not mean the agent did no work."
+            : "No retained event matches this search."}
         </p>
       )}
     </section>

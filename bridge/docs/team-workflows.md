@@ -29,6 +29,69 @@ Intent
   -> approved team memory + next milestone
 ```
 
+## Current execution boundary
+
+A reviewed `kars.execution-plan/v1` is retained in Task and Team blueprints,
+including role overrides, replication, authority digests and signed launch
+packages. Bridge compares the API's captured plan with the reviewed plan before
+continuing creation or plan updates. An older CRD that prunes the plan must fail
+this check; saving a name or objective is not equivalent to saving the plan.
+
+**Typed-plan execution is not implemented yet.** The existing encrypted mission
+executor delivers an objective to one runtime; it does not enforce the reviewed
+role DAG, phases, capability sets, tool-call bounds, per-role budgets or synthesis.
+A valid plan can be saved inactive for review, but launch, resume and manual run
+requests reject it with `TypedPlanExecutionUnavailable`. A decomposition marker
+without its plan, or an unsupported marker, rejects with
+`ReviewedExecutionPlanMissing`. A missing plan is not a legacy fallback when a
+marker declares one. Stopping a Task or purely pausing a Team remains allowed.
+Unmarked legacy planless execution remains supported.
+
+The OpenClaw measured loop has a tested **local single-phase filesystem guard**:
+only explicitly granted `filesystem-read`/`filesystem-write` tools are exposed,
+actual calls are checked again, and router policy authorization is still required.
+`maxToolCalls` limits attempted calls (including denied, malformed and failed
+calls); an overflowing batch fails before any tool runs. `minToolCalls` counts
+only successful authorized filesystem operations. Failure preserves accounting
+but exports no artifacts. Unsupported capabilities and required tool contracts
+are rejected before inference. This local guard is not yet supplied by encrypted
+assignments and does not implement role scheduling, fresh-context handoffs or
+per-role/synthesis budgets. It must not be used to unlock typed-plan activation.
+
+The roster alone is not proof that specialists performed work. The published
+manual-run admission path is distinct from engineering intake and milestone
+execution: automatic queue claiming, dependency advancement and revision-bound
+checkpoint continuation still need their consumers. The journey below is the
+intended product contract, not a claim that those integrations are complete.
+
+## Reviewed Team lifetime budget
+
+New Teams created in Bridge require an explicitly reviewed positive whole-number
+**token limit** with `GovernedInference` scope. There is no preselected cap.
+The same Team-UID lifetime account bounds the principal, members and every run,
+including later intake; starting another run does not replenish the allowance.
+Changing the cap invalidates the composer's previous pre-flight result.
+Pre-flight and model-route qualification check the proposed envelope, not whether
+its eventual live budget account, broker or provider reservation is ready.
+
+The API retains compatibility with omitted/null budgets for legacy callers; this
+is not governed budget enrollment. When a budget is supplied, it must have
+explicit `GovernedInference` scope and at least one positive safe whole-number
+limit (tokens and/or micro-USD). Empty, zero, negative, fractional and unsafe
+limits are rejected, not silently removed. Principal, specialist and fallback
+route qualification uses the reviewed token limit. Route edits use the stored
+limit and cannot increase it. Team detail shows the configured limit and scope,
+not a guessed remaining balance. A changed lifetime limit requires a separately
+reviewed new Team, not editing or removing an existing Team's cap. Team update
+requests that explicitly include `budget`, even `null`, are rejected; unrelated
+route or lifecycle edits keep the stored lifetime limit.
+
+Creation remains paused by default. The UI's opt-in launch sequence creates the
+Team paused, installs its queue and engineering settings, then requests resume;
+that sequence does not bypass the typed-plan activation guard above. Until a
+plan-aware executor is available, retain the Team as a reviewed paused draft.
+This budget contract alone is not proof of useful Team delivery or beta readiness.
+
 ## What each Workspace concept means
 
 | Workspace concept | What it is | What it is not |
@@ -44,6 +107,68 @@ Intent
 | Approval | A typed human decision that changes workflow state. | Free-form feedback with no controller effect. |
 | Memory | Approved retained knowledge injected into later runs. | A replay of every raw conversation. |
 | Engineering intake | Repository signal discovery and backlog creation. | The activity timeline or the agents doing the work. |
+
+### Current artifacts versus retained evidence
+
+The mission artifact download endpoint serves only the current committed run of
+a live Task in `kars-system`. Its Task UID, requested/completed run nonce and
+artifact ownership must match. A missing, recreated or superseded Task does not
+make an old file current. Downloads require an explicit `run_nonce` query
+parameter; omitted revisions return 400, superseded or incomplete revisions 409,
+and missing or inaccessible records 404. Ownership and revision are rechecked
+after reading evidence and before serving bytes. Retained historical evidence is
+a separate capability; this endpoint does not establish artifact access after
+Task deletion.
+
+### Revision-bound mission evidence
+
+Mission detail and list results join the live Task UID with its exact requested
+and completed revision, not a name-only retained output. A changed or deleted
+Task during a detail read withholds that response. Feedback requests a distinct
+revision; it does not prove the next execution has started.
+
+For durable agent results, the recorded producer includes agent DID, assignment,
+Task UID, sandbox/pod/boot identity, and timestamps. Current registry identity is
+not evidence of who produced an earlier result. Whole-run usage comes from a
+validated terminal record; cumulative progress snapshots are never added together.
+Missing usage or activity is unavailable, not zero. Revision-pinned activity
+streams close when the revision changes and only signal completion from a
+matching terminal result, never merely because an artifact exists. If detailed
+trace records are unavailable, Activity says so instead of showing a zero-work
+graph or asking you to launch an already completed run. Available assignment and
+approval records remain visible, without claiming a complete timeline. Produced
+and review-history timestamps use explicitly labelled UTC for consistent display
+across server rendering and browser timezones.
+
+Approval requires an eligible useful successful result in the current revision.
+Invalid terminal evidence cannot authorize a review mutation. Task-level receipts
+without revision binding are explicitly labelled as such. Budget/failure messages
+are reported observations, not independent accounting, proof of a root cause,
+or a promise of reset or automatic recovery.
+
+### Explicit text attachments on mission success
+
+The bounded mission dispatcher advertises `artifactFormat: "text-v1"`. With a
+compatible OpenClaw runtime, an authorized `file_write` can supply `artifact_name`
+to attach the exact UTF-8 content it successfully wrote. The final answer remains
+`response.md`; a path or an “artifact ready” message is not the document itself.
+When attachment support is absent, the agent must return the complete answer
+inline instead.
+
+Attachments use flat filenames (letters/digits first, then letters, digits,
+periods, underscores or hyphens; at most 128 characters). `response.md`,
+`__proto__`, `constructor` and `prototype` are reserved. There may be at most
+16 additional files, totaling 128 KiB of serialized JSON including UTF-8 text,
+escaping and filenames. The entire encrypted mission payload remains bounded by
+192 KiB, including final answer and evidence; exceeding it fails the mission.
+
+A null or omitted `artifact_name` is local-only scratch. Nothing scans the
+filesystem, reads older files, or implicitly exports output from another tool.
+The last successful explicitly attached write to a name wins; later local-only
+or failed writes do not replace it. Staged attachments are execution-local and
+publish only with a successful terminal result, never on failure or in a later
+revision. Named files share the current-run ownership and download fences above.
+Transport success and valid files still require review for useful content.
 
 ### Engineering intake identity and existing PRs
 
@@ -134,14 +259,51 @@ Each milestone contains:
 - acceptance criteria;
 - optional review gate.
 
-Only a milestone whose dependencies are `done` may run. A milestone in
-`active` or `awaiting_review` blocks later assignments. This is why a team can
-have many queued milestones but only one current execution cell.
+The intended dependency contract allows only a milestone whose dependencies are
+`done` to run; `active` or `awaiting_review` work must block dependent assignments.
+The graph records that contract, but its automatic execution and review
+continuation are not yet connected to the durable manual-run consumer. Do not
+interpret queued milestones or a successful queue write as agent activity.
 
 ## 3. Launch and watch a run
 
-**Run now** creates a one-shot request. The BFF rejects a second request while
-one is pending or active, and the button changes to **Run in progress**.
+**Run now** records a one-shot request, not proof that an agent started or
+produced a deliverable. The BFF checks the current owner and Team UID, rejects
+paused Teams, pending requests and exact-owned active task forces, and writes
+with UID/resourceVersion preconditions. Active-run checks cover the entire
+namespace; labels alone neither establish ownership nor hide a running Task.
+Concurrent Team changes return a conflict instead of overwriting newer intent.
+
+The manual admission protocol separates durable stages:
+
+1. Stage an exact-owned, **unlaunched** Task under a stable request identity.
+2. Persist its Task UID, authority/spec digests and admission sequence in
+   `status.runAdmission`, counting the reservation once.
+3. Recheck current authority, finite shared budget and capacity; activate that
+   exact Task with UID/resourceVersion preconditions.
+4. Acknowledge only the matching request. A retry after a lost acknowledgement
+   reuses the reservation rather than creating or relaunching work.
+
+The latest admission remains after acknowledgement. Requests use canonical
+`manual-<sequence>-<sha256>` identities; a later request advances the sequence
+and creates a distinct Task under the same Team budget root, without resetting
+settled spend. Missing, replaced or altered reserved Tasks fail closed rather
+than being recreated. Credential drift still pauses the runtime promptly; only
+its final credential-spec rewrite waits for a pending acknowledgement so the
+original admission spec can be verified before rebinding.
+
+Legacy timestamp-only `run-now` annotations are not silently converted or
+executed. They remain rejected/pending. An operator must inspect the Team and
+retained Task evidence before clearing an obsolete request with current UID/RV
+preconditions and submitting a new reviewed request. Do not clear the retained
+admission watermark, replay an old sequence, or treat a retry as permission to
+reset the budget.
+
+These are bounded cross-object checks, not a distributed transaction or lease.
+A request, reservation, acknowledgement, Ready pod or generated-task count is
+not delivery evidence. Manual admission also does not establish engineering
+backlog assignment or checkpoint/revision continuation; those paths require
+their own connected evidence and acceptance tests.
 
 The run page has four views:
 

@@ -99,10 +99,22 @@ pub struct TeamCadence {
     pub every_minutes: Option<u32>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "camelCase")]
+pub struct TeamRunAdmission {
+    pub request: String,
+    pub task_name: String,
+    pub task_uid: String,
+    pub authority_digest: String,
+    pub task_spec_digest: String,
+}
+
 /// `KarsTeam.status` — the controller is the sole writer.
 #[derive(Debug, Clone, Default, Serialize, Deserialize, JsonSchema)]
 #[serde(rename_all = "camelCase")]
 pub struct KarsTeamStatus {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub run_admission: Option<TeamRunAdmission>,
     /// `Forming` | `Active` | `Hibernating` | `Degraded` | `Retired`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub phase: Option<String>,

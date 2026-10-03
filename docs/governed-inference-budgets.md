@@ -32,6 +32,28 @@ without a governed Task binding keep their existing daily/monthly tracker,
 credentials, runtime environment, and inference behavior. Aggregate limits are
 never copied into a per-sandbox daily allowance.
 
+## Bridge preflight
+
+Package validation accepts `budget_tokens`, `budget_usd_micros`, and explicit
+`budget_scope: "GovernedInference"`. Stored-task validation retains all three
+fields from the persisted envelope. A positive cap without scope fails preflight;
+Bridge does not add scope implicitly or convert an existing UID into first-time
+governed enrollment.
+
+Explicit scope reports a warning, not an enforcement pass: Bridge preflight does
+not verify broker readiness, provider contracts, available reservation capacity,
+or the bound account. Admission, controller materialization and router dispatch
+remain authoritative and may reject execution. Missing limits also warn; autonomy
+tiers and cluster defaults are not proof of a hard aggregate spending limit.
+Home reviews finite token caps as explicit `GovernedInference` enrollment for a
+new mission. The same scope and limit travel through package validation and
+creation. Invalid, fractional, unsafe, zero or negative supplied limits are
+rejected rather than silently discarded; a positive limit without reviewed scope
+is rejected too. The creation action also preserves a reviewed currency limit,
+when supplied, rather than replacing it with null. Blank limits remain explicitly
+unbounded, not an enforcement claim. Existing draft UIDs are not migrated: create
+a newly reviewed mission to enroll for the first time.
+
 ## Root lifetime and immutable identity
 
 A standalone task tree has one account for its **root Task UID**. A Team and all
@@ -176,11 +198,34 @@ Enable the optional Helm `inferenceBudget` section only after supplying:
   ignores the new budget environment must not be mistaken for enforcement.
 
 The TLS Secret has type `kubernetes.io/tls`, `tls.crt`/`tls.key`, and annotation
-`kars.azure.com/inference-budget-tls: v1`. It is operator-provided, not generated
-with a development certificate or mounted into agents. The CA ConfigMap contains
-public certificates only. Certificate issuance and accurate, maintained provider
-bounds/tariffs are operator responsibilities, not external database requirements.
-TLS/certificate rotation must preserve trustworthy CA overlap during rollout.
+`kars.azure.com/inference-budget-tls: v1`. Choose either installation mode:
+
+- **Existing Secret:** set `tlsSecretName` and leave `tls.certificate` and
+  `tls.privateKey` empty. The chart does not create, adopt or rotate that Secret.
+- **Core Helm-managed Secret:** set `tlsSecretName`, and supply both
+  `tls.certificate` and `tls.privateKey` using protected values or `--set-file`.
+  Core installs the supplied PEM identity; no extra product release, raw manifest,
+  certificate generator or automatic development trust is required. A conflicting
+  live Secret not already owned as budget TLS by this release is rejected.
+  **The private key is stored in Helm release history.** Do not use this mode
+  if your secret-management policy prohibits that storage; never commit these
+  values or expose rendered manifests/logs. Helm deletes its managed Secret when
+  the supplied identity is removed, the feature is disabled (with identity fields
+  cleared), or the release is uninstalled. Finite inference then fails closed.
+
+Partial supplied identities and public certificates containing private keys are
+rejected. PEM framing is checked at render time; the broker validates certificate
+and key parsing/pairing, and routers validate server trust and hostname. Operators
+must supply an unexpired certificate for the service DNS name and its trusted CA.
+The key is never mounted into agents. The CA ConfigMap is public certificates only.
+
+Managed certificate/key changes update the controller Pod checksum and trigger a
+rollout. With an externally managed Secret, explicitly roll the controller after
+rotation. Both modes require trustworthy CA overlap and updating/recreating finite
+router Pods through their supported lifecycle so they trust the new issuer before
+removing the old CA. Certificate issuance and accurate, maintained provider
+bounds/tariffs remain operator responsibilities. A locally issued Kind development
+certificate is validation-only and does not qualify production/AKS trust.
 
 Finite accounts fail closed for missing/expired/unknown bounds, missing prices
 when any ancestor needs a currency cap, or unavailable admission/privacy proof.

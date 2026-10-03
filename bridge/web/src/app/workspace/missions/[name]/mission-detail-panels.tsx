@@ -4,6 +4,7 @@
 // Mission detail server presentation; page fetching and routing stay in ./page.
 
 import Link from "next/link";
+import { missionFailureAdvice, revisionArtifactUrl } from "@/lib/mission-run-evidence";
 import { DeliverableView, DeliverableBody } from "@/components/deliverable-view";
 import { ProvenanceStory } from "@/components/provenance-story";
 import type { ReactNode } from "react";
@@ -145,34 +146,34 @@ export function NextStep({
   const map: Record<string, { tone: string; title: string; body: string; cta?: { href: string; label: string } }> = {
     drafting: {
       tone: "border-signal/30 bg-signal/[0.05]",
-      title: "Ready to launch",
-      body: "Review the composed plan below — model, tools, network, autonomy, budget — then launch it in the Execution panel when you're happy.",
+      title: "Draft — review launch checks",
+      body: "Review the model, tools, network, autonomy and budget below. The Execution panel checks this saved package before enabling Launch; a Ready controller phase alone does not establish launch readiness.",
     },
     deploying: {
       tone: "border-signal/30 bg-signal/[0.05]",
       title: "Deploying — the agent is coming online",
-      body: "Each provisioning step below is a real, verified event. This page updates itself live; no need to refresh.",
+      body: "Provisioning status is shown below. A ready sandbox is not proof that the assignment has started.",
     },
     running: {
       tone: "border-signal/30 bg-signal/[0.05]",
       title: "Running",
-      body: "Watch the agent work in the Activity tab. If it needs a decision it will ask you here and in your Inbox.",
+      body: "Check revision status in Activity. Detailed activity appears only when a revision-bound trace is available; a running sandbox alone does not prove progress.",
     },
     needs_you: {
       tone: "border-warning/40 bg-warning/10",
       title: "This mission needs your decision",
-      body: "It paused for your approval before a priced, external, or irreversible step.",
+      body: "An actionable approval request is associated with this revision. Inspect its scope before deciding.",
       cta: { href: "/workspace/inbox", label: "Open the inbox →" },
     },
     done: {
       tone: "border-ok/40 bg-ok/10",
       title: "Delivered",
-      body: "The deliverable is ready. Review it and accept or request changes in the Deliverable tab; the signed receipt is in the Receipt tab.",
+      body: "Review the output, its recorded producer, and attached files. Accept or request a distinct revision in Deliverable. Receipt availability and revision binding are shown separately.",
     },
     failed: {
       tone: "border-danger/40 bg-danger/10",
       title: "This run didn't complete",
-      body: "Open the Run failed tab below for a full diagnosis — the likely cause, how far it got, the runtime's exact reason, and one-click ways to re-compose or re-run.",
+      body: "Open Run outcome to inspect the recorded output and available diagnostics. Missing evidence is not proof of the cause or how far execution got.",
     },
   };
   const m = map[status] ?? map.drafting;
@@ -191,14 +192,61 @@ export function NextStep({
   );
 }
 
+export function RecordedRunPanel({ result }: { result: MissionResult }) {
+  const record = result.run_evidence;
+  const fmt = (value: number | null | undefined) => value == null ? "Unavailable" : value.toLocaleString("en-US");
+  const facts: [string, string][] = [
+    ["Revision", result.assignment_nonce ?? "Unavailable"],
+    ["Agent", record?.agent_name ?? "Producer unavailable"],
+    ["Agent DID", record?.agent_did ?? "Unavailable"],
+    ["Assignment", record?.assignment_id ?? "Unavailable"],
+    ["Task UID", record?.task_uid ?? "Unavailable"],
+    ["Outcome", record?.status ?? result.status ?? "Unavailable"],
+    ["Model", result.model ?? "Unavailable"],
+    ["Started", record?.started_at ?? "Unavailable"],
+    ["Finished", record?.finished_at ?? result.finished_at ?? "Unavailable"],
+    ["Model rounds", fmt(record?.rounds)],
+    ["Prompt tokens", fmt(result.usage_known === true ? result.prompt_tokens : null)],
+    ["Completion tokens", fmt(result.usage_known === true ? result.completion_tokens : null)],
+    ["Total tokens", fmt(result.usage_known === true ? result.total_tokens : null)],
+  ];
+  return (
+    <section className="rounded-xl border border-border bg-surface p-6">
+      <h2 className="text-sm font-semibold">Recorded run</h2>
+      <p className="mt-1 text-xs text-foreground-muted">
+        {record
+          ? "Producer and whole-run usage from the validated terminal record for this revision, not the current mesh registry. Detailed tool activity is separate and may be unavailable."
+          : "No validated producer record is available for this revision. Current registry membership does not establish who produced this output."}
+      </p>
+      <dl className="mt-4 grid gap-x-6 gap-y-3 sm:grid-cols-2">
+        {facts.map(([label, value]) => (
+          <div key={label} className="min-w-0">
+            <dt className="text-xs text-foreground-muted">{label}</dt>
+            <dd className="mt-0.5 break-all text-sm">{value}</dd>
+          </div>
+        ))}
+      </dl>
+      {record && (
+        <details className="mt-4 text-xs">
+          <summary className="cursor-pointer font-medium">Recorded runtime identity</summary>
+          <dl className="mt-2 space-y-2">
+            {[["Sandbox UID", record.sandbox_uid], ["Pod UID", record.pod_uid], ["Runtime boot ID", record.runtime_boot_id], ["Dispatcher DID", record.dispatcher_did]].map(([label, value]) => (
+              <div key={label}><dt className="text-foreground-muted">{label}</dt><dd className="break-all font-mono">{value}</dd></div>
+            ))}
+          </dl>
+        </details>
+      )}
+    </section>
+  );
+}
+
 export function AgentIdentityCard({ identity }: { identity: AgentIdentity }) {
   return (
     <section className="rounded-xl border border-border bg-surface p-6">
-      <h2 className="text-sm font-semibold">Agent mesh identity</h2>
+      <h2 className="text-sm font-semibold">Current mesh registry identity</h2>
       <p className="mt-0.5 text-xs text-foreground-muted">
-        The running agent&apos;s real, harness-neutral identity on the encrypted agent mesh —
-        discovered live from the registry. This is how work is delivered and verified across any
-        runtime.
+        Discovered from the current registry. This may differ from the recorded producer of an
+        earlier revision and is not delivery evidence.
       </p>
       <dl className="mt-3 space-y-2 text-sm">
         <div className="flex flex-wrap items-baseline gap-x-2">
@@ -228,7 +276,7 @@ export function AgentIdentityCard({ identity }: { identity: AgentIdentity }) {
   );
 }
 
-export function ArtifactsPanel({ ns, task, artifacts, pullRequests, activity, egress, tokens }: { ns: string; task: string; artifacts: MissionArtifact[]; pullRequests: import("@/lib/types").PullRequestRef[]; activity: import("@/lib/types").ActivityEvent[]; egress: string[]; tokens: number | null }) {
+export function ArtifactsPanel({ ns, task, runNonce, artifacts, pullRequests, activity, egress, tokens }: { ns: string; task: string; runNonce: string | null; artifacts: MissionArtifact[]; pullRequests: import("@/lib/types").PullRequestRef[]; activity: import("@/lib/types").ActivityEvent[]; egress: string[]; tokens: number | null }) {
   const fmtSize = (n: number | null) =>
     n == null ? "" : n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
   return (
@@ -237,19 +285,19 @@ export function ArtifactsPanel({ ns, task, artifacts, pullRequests, activity, eg
         <div>
           <h2 className="text-sm font-semibold">Artifacts</h2>
           <p className="mt-0.5 text-xs text-foreground-muted">
-            The complete set of files the agent produced through its native loop over the mesh —
-            captured by the controller into a durable, cluster-native record.
+            Files explicitly captured for this revision. This is a bounded handoff, not an
+            inventory of every file in the agent sandbox.
           </p>
         </div>
         <span className="shrink-0 rounded-full bg-surface-muted px-2.5 py-1 text-xs font-medium">
           {artifacts.length} file{artifacts.length === 1 ? "" : "s"}
         </span>
       </div>
-      {/* Pull requests are a first-class delivery type — a PR the agent opened is
-          an artifact, shown here as a chip (not only in the deliverable prose). */}
+      {!runNonce && artifacts.length > 0 && <p className="mt-3 text-xs text-foreground-muted">Downloads unavailable: no current revision is recorded.</p>}
+      {/* Output references do not establish PR authorship. */}
       {pullRequests.length > 0 && (
         <div className="mt-4 rounded-lg border border-signal/20 bg-signal/[0.03] p-4">
-          <h3 className="text-xs font-semibold">Pull requests opened</h3>
+          <h3 className="text-xs font-semibold">Pull requests referenced in output</h3>
           <ul className="mt-2 flex flex-wrap gap-2">
             {pullRequests.map((pr) => (
               <li key={pr.url}>
@@ -270,10 +318,11 @@ export function ArtifactsPanel({ ns, task, artifacts, pullRequests, activity, eg
           </ul>
         </div>
       )}
-      {/* How this was made — the plain-language provenance story over the real trace. */}
       <div className="mt-4 rounded-lg border border-border bg-background/40 p-4">
-        <h3 className="text-xs font-semibold">How this was made</h3>
-        <div className="mt-2"><ProvenanceStory activity={activity} egress={egress} tokens={tokens} /></div>
+        <h3 className="text-xs font-semibold">Available activity evidence</h3>
+        {activity.length > 0
+          ? <div className="mt-2"><ProvenanceStory activity={activity} egress={egress} tokens={tokens} /></div>
+          : <p className="mt-2 text-xs text-foreground-muted">Detailed revision-bound trace unavailable. See Recorded run for terminal producer and usage evidence.</p>}
       </div>
       <ul className="mt-4 divide-y divide-border rounded-lg border border-border">
         {artifacts.map((a, i) => (
@@ -286,7 +335,8 @@ export function ArtifactsPanel({ ns, task, artifacts, pullRequests, activity, eg
                 </span>
                 <span className="flex shrink-0 items-center gap-3 text-xs text-foreground-muted">
                   <a
-                    href={`/api/namespaces/${encodeURIComponent(ns)}/tasks/${encodeURIComponent(task)}/artifact/${encodeURIComponent(a.name)}`}
+                    href={revisionArtifactUrl(ns, task, a.name, runNonce)}
+                    aria-disabled={!runNonce}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="text-signal hover:underline"
@@ -294,7 +344,8 @@ export function ArtifactsPanel({ ns, task, artifacts, pullRequests, activity, eg
                     {a.content_truncated ? "Open full" : "Open"}
                   </a>
                   <a
-                    href={`/api/namespaces/${encodeURIComponent(ns)}/tasks/${encodeURIComponent(task)}/artifact/${encodeURIComponent(a.name)}`}
+                    href={revisionArtifactUrl(ns, task, a.name, runNonce)}
+                    aria-disabled={!runNonce}
                     download={a.name}
                     className="inline-flex items-center gap-1 font-medium text-signal hover:underline"
                   >
@@ -318,7 +369,8 @@ export function ArtifactsPanel({ ns, task, artifacts, pullRequests, activity, eg
                     </pre>
                   ) : null}
                   <a
-                    href={`/api/namespaces/${encodeURIComponent(ns)}/tasks/${encodeURIComponent(task)}/artifact/${encodeURIComponent(a.name)}`}
+                    href={revisionArtifactUrl(ns, task, a.name, runNonce)}
+                    aria-disabled={!runNonce}
                     target="_blank"
                     rel="noopener noreferrer"
                     className="inline-flex text-xs font-medium text-signal hover:underline"
@@ -326,7 +378,8 @@ export function ArtifactsPanel({ ns, task, artifacts, pullRequests, activity, eg
                     Open full artifact ↗
                   </a>
                   <a
-                    href={`/api/namespaces/${encodeURIComponent(ns)}/tasks/${encodeURIComponent(task)}/artifact/${encodeURIComponent(a.name)}`}
+                    href={revisionArtifactUrl(ns, task, a.name, runNonce)}
+                    aria-disabled={!runNonce}
                     download={a.name}
                     className="inline-flex items-center gap-1 text-xs font-medium text-signal hover:underline"
                   >
@@ -348,7 +401,8 @@ export function ArtifactsPanel({ ns, task, artifacts, pullRequests, activity, eg
                 <p className="border-t border-border bg-surface-muted/30 px-4 py-3 text-xs text-foreground-muted">
                   Binary artifact — use{" "}
                   <a
-                    href={`/api/namespaces/${encodeURIComponent(ns)}/tasks/${encodeURIComponent(task)}/artifact/${encodeURIComponent(a.name)}`}
+                    href={revisionArtifactUrl(ns, task, a.name, runNonce)}
+                    aria-disabled={!runNonce}
                     download={a.name}
                     className="text-signal hover:underline"
                   >
@@ -372,9 +426,8 @@ export function ResultPanel({ result }: { result: MissionResult }) {
         <div className="flex items-start gap-2 rounded-lg border border-amber-500/30 bg-amber-500/[0.06] px-3 py-2 text-xs text-foreground-muted">
           <span aria-hidden className="mt-0.5 text-amber-600">ℹ</span>
           <span>
-            <span className="font-medium text-foreground">Single-turn completion.</span> The full
-            agent loop (tools + sub-agents) was unavailable on this run, so this is one model turn —
-            the Activity tab will show no tool calls. Re-run to try the full loop again.
+            <span className="font-medium text-foreground">Source marked single-turn.</span> This
+            legacy classification alone does not establish tool use, delegated work, or producer identity.
           </span>
         </div>
       )}
@@ -388,55 +441,7 @@ export function ResultPanel({ result }: { result: MissionResult }) {
   );
 }
 
-/** Analyse a run failure reason into a plain-language cause + a specific remedy,
- *  and (when relevant) flag that the harness itself is the problem. */
-function analyzeFailure(reason: string, harness: string | null): { cause: string; remedy: string; harnessIssue: boolean } {
-  const r = (reason || "").toLowerCase();
-  const chatGateway = !!harness && /hermes|gateway|channel/.test(harness.toLowerCase());
-  if (r.includes("did not come online") || r.includes("not yet discoverable") || r.includes("mesh registry") || r.includes("not discoverable")) {
-    return {
-      cause: chatGateway
-        ? `The agent never registered on the encrypted mesh. The “${harness}” harness is a chat-gateway — it waits for inbound channel messages and does not execute a one-shot mission on its own, so it never came online to do autonomous work.`
-        : "The agent sandbox didn't register on the encrypted mesh within the startup window. This is usually a slow container image pull or node pressure delaying the pod — occasionally a crashed agent container.",
-      remedy: chatGateway
-        ? "Re-compose this mission on the OpenClaw harness (built for autonomous missions), or drive this one through its channel."
-        : "Re-run it — a fresh sandbox often comes up cleanly. If it repeats, an operator can inspect the sandbox for image-pull or crash errors.",
-      harnessIssue: chatGateway,
-    };
-  }
-  if (r.includes("no progress heartbeat") || r.includes("timed out") || r.includes("timeout")) {
-    return {
-      cause: "The agent started but stopped making progress, so the controller timed the run out after a period with no heartbeat.",
-      remedy: "Re-run it. If it stalls repeatedly, narrow the objective or raise the token/time budget in the envelope.",
-      harnessIssue: false,
-    };
-  }
-  if (r.includes("content safety") || r.includes("jailbreak") || r.includes("blocked by")) {
-    return {
-      cause: "A content-safety policy blocked the run before it could deliver.",
-      remedy: "Adjust the objective to avoid the flagged content, or ask an operator about the content-safety floor.",
-      harnessIssue: false,
-    };
-  }
-  if (r.includes("budget") || r.includes("token cap") || r.includes("out of tokens")) {
-    return {
-      cause: "The run hit its token budget before producing a deliverable.",
-      remedy: "Re-run with a higher token budget in the envelope.",
-      harnessIssue: false,
-    };
-  }
-  return {
-    cause: "The run ended with an error before producing a deliverable.",
-    remedy: "Re-run it, or re-compose with a different harness or model.",
-    harnessIssue: false,
-  };
-}
-
-/** Real, actionable troubleshooting for a failed run: what happened, how far the
- *  provisioning got (which stage it stopped at), and what to do next. When live
- *  cluster evidence is available (pod/container status + the agent's own log
- *  tail), it uses the evidence-derived diagnosis and SHOWS the proof; otherwise
- *  it falls back to analysing the recorded reason. */
+/** Current diagnostics are separate from the recorded revision's result. */
 export function FailureDiagnostic({
   task,
   troubleshoot,
@@ -445,26 +450,13 @@ export function FailureDiagnostic({
   troubleshoot: import("@/lib/types").Troubleshoot | null;
 }) {
   const reason = task.result?.output ?? task.execution_detail ?? "The run ended with an error.";
-  const harness = task.composition?.runtime ?? null;
-  // Prefer the live, evidence-derived diagnosis from the cluster; fall back to
-  // the local reason analysis when the troubleshoot endpoint is unavailable.
-  const local = analyzeFailure(reason, harness);
-  const cause = troubleshoot?.cause ?? local.cause;
-  const remedy = troubleshoot?.remedy ?? local.remedy;
-  const harnessIssue = troubleshoot?.harness_issue ?? local.harnessIssue;
-  const meshAcknowledged = task.assignment_events.some(
-    (event) => event.event_type === "acknowledged" || event.state === "Running",
-  );
-
-  // How far provisioning got — the same stages the deploy timeline tracks. The
-  // first un-reached stage is where it stopped.
+  const { cause, remedy } = missionFailureAdvice(reason);
   const stages: { label: string; reached: boolean }[] = [
-    { label: "Launch approved", reached: task.launched },
-    { label: "Sandbox provisioned", reached: !!task.sandbox },
-    { label: "Agent online on the mesh", reached: meshAcknowledged || !!task.agent_identity?.last_seen },
-    { label: "First activity (model round / tool call)", reached: (task.activity?.length ?? 0) > 0 },
+    { label: "Task launch recorded", reached: task.launched },
+    { label: "Current sandbox reference", reached: !!task.sandbox },
+    { label: "Current registry last-seen value", reached: !!task.agent_identity?.last_seen },
+    { label: "Revision-bound activity available", reached: (task.activity?.length ?? 0) > 0 },
   ];
-  const stoppedAt = stages.findIndex((s) => !s.reached);
 
   return (
     <section className="space-y-4 rounded-xl border border-amber-500/40 bg-amber-500/5 p-6">
@@ -473,27 +465,23 @@ export function FailureDiagnostic({
           <Icon name="target" size={18} />
         </span>
         <div>
-          <h2 className="text-sm font-semibold">Run did not complete</h2>
+          <h2 className="text-sm font-semibold">Revision not ready for approval</h2>
           <p className="mt-0.5 text-xs text-foreground-muted">
-            {troubleshoot
-              ? "Diagnosed from the sandbox's live pod status and the agent's own logs."
-              : "Here's what happened and how to fix it."}
+            A stop message alone does not establish the root cause.
           </p>
         </div>
       </div>
 
-      {/* Likely cause + remedy. */}
       <div className="rounded-lg border border-amber-500/30 bg-surface p-4">
-        <p className="text-xs font-semibold uppercase tracking-wide text-foreground-muted">Likely cause</p>
+        <p className="text-xs font-semibold uppercase tracking-wide text-foreground-muted">Recorded result</p>
         <p className="mt-1 text-sm">{cause}</p>
         <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-foreground-muted">What to do</p>
         <p className="mt-1 text-sm">{remedy}</p>
       </div>
 
-      {/* The real smoking-gun evidence pulled from the agent's logs. */}
       {troubleshoot && troubleshoot.evidence.length > 0 && (
         <div className="rounded-lg border border-danger/30 bg-surface p-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-foreground-muted">Evidence — from the agent&apos;s own logs</p>
+          <p className="text-xs font-semibold uppercase tracking-wide text-foreground-muted">Current sandbox diagnostics — revision binding unverified</p>
           <ul className="mt-2 space-y-1">
             {troubleshoot.evidence.map((e, i) => (
               <li key={i} className="rounded bg-danger/5 px-2 py-1 font-mono text-[11px] leading-relaxed text-danger">{e}</li>
@@ -522,38 +510,28 @@ export function FailureDiagnostic({
         </div>
       )}
 
-      {/* How far it got. */}
       <div className="rounded-lg border border-border bg-surface p-4">
-        <p className="text-xs font-semibold uppercase tracking-wide text-foreground-muted">How far it got</p>
-        <ol className="mt-2 space-y-1.5">
-          {stages.map((s, i) => {
-            const isStop = i === stoppedAt;
-            return (
-              <li key={s.label} className="flex items-center gap-2 text-sm">
-                <span aria-hidden className={s.reached ? "text-ok" : isStop ? "text-danger" : "text-foreground-muted"}>
-                  {s.reached ? "✓" : isStop ? "✗" : "•"}
-                </span>
-                <span className={s.reached ? "" : isStop ? "font-medium text-danger" : "text-foreground-muted"}>
-                  {s.label}
-                  {isStop && <span className="ml-1.5 text-xs font-normal text-danger">— stopped here</span>}
-                </span>
-              </li>
-            );
-          })}
-        </ol>
+        <p className="text-xs font-semibold uppercase tracking-wide text-foreground-muted">Available observations</p>
+        <p className="mt-1 text-xs text-foreground-muted">Current resources are not historical execution proof. Missing evidence does not identify a stopping point.</p>
+        <ul className="mt-2 space-y-1.5">
+          {stages.map((s) => (
+            <li key={s.label} className="flex items-center gap-2 text-sm">
+              <span className="text-foreground-muted">{s.label}: {s.reached ? "present" : "unavailable"}</span>
+            </li>
+          ))}
+        </ul>
       </div>
 
-      {/* The raw agent log tail — the exact evidence, for the record. */}
       <details className="rounded-lg border border-border bg-surface">
-        <summary className="cursor-pointer px-4 py-2.5 text-xs font-semibold">
-          {troubleshoot && troubleshoot.agent_log_tail.length > 0 ? "Agent log tail (live)" : "Runtime's exact reason"}
-        </summary>
-        {troubleshoot && troubleshoot.agent_log_tail.length > 0 ? (
-          <pre className="max-h-72 overflow-auto border-t border-border px-4 py-3 font-mono text-[10px] leading-relaxed text-foreground-muted">{troubleshoot.agent_log_tail.join("\n")}</pre>
-        ) : (
-          <p className="border-t border-border px-4 py-3 font-mono text-xs leading-relaxed text-foreground-muted">{reason}</p>
-        )}
+        <summary className="cursor-pointer px-4 py-2.5 text-xs font-semibold">Recorded result or execution message</summary>
+        <p className="border-t border-border px-4 py-3 font-mono text-xs leading-relaxed text-foreground-muted">{reason}</p>
       </details>
+      {troubleshoot && troubleshoot.agent_log_tail.length > 0 && (
+        <details className="rounded-lg border border-border bg-surface">
+          <summary className="cursor-pointer px-4 py-2.5 text-xs font-semibold">Current agent log tail — revision binding unverified</summary>
+          <pre className="max-h-72 overflow-auto border-t border-border px-4 py-3 font-mono text-[10px] leading-relaxed text-foreground-muted">{troubleshoot.agent_log_tail.join("\n")}</pre>
+        </details>
+      )}
 
       {/* Actions. */}
       <div className="flex flex-wrap gap-2">
@@ -561,18 +539,23 @@ export function FailureDiagnostic({
           href={`/workspace/new?intent=${encodeURIComponent(task.objective)}`}
           className="rounded-lg bg-signal px-4 py-2 text-xs font-semibold text-signal-fg hover:opacity-90"
         >
-          {harnessIssue ? "Re-compose on OpenClaw →" : "Re-compose from this intent →"}
+          Re-compose from this intent →
         </Link>
       </div>
       {task.result?.finished_at && (
-        <p className="text-xs text-foreground-muted">Failed {new Date(task.result.finished_at).toLocaleString()}</p>
+        <p className="text-xs text-foreground-muted">Recorded finish {new Date(task.result.finished_at).toLocaleString()}</p>
       )}
     </section>
   );
 }
 
-export function CompositionPanel({ composition, launched }: { composition: Composition; launched: boolean }) {
+export function CompositionPanel({ composition, launched, envelopeToolPolicy }: {
+  composition: Composition;
+  launched: boolean;
+  envelopeToolPolicy: string | null;
+}) {
   const c = composition;
+  const toolPolicy = c.tool_policy?.trim() || (!launched && envelopeToolPolicy?.trim()) || null;
   return (
     <section className="rounded-xl border border-border bg-surface p-6">
       <h2 className="text-sm font-semibold">How this mission runs</h2>
@@ -584,7 +567,7 @@ export function CompositionPanel({ composition, launched }: { composition: Compo
       <dl className="mt-4 grid gap-x-8 gap-y-4 sm:grid-cols-2">
         <Fact label="Model" value={c.model} />
         <Fact label="Harness" value={c.runtime} />
-        <Fact label="Tool policy" value={c.tool_policy ?? "None — model only"} />
+        <Fact label="Tool policy" value={toolPolicy ?? (launched ? "Runtime policy not reported" : "Policy not reported")} />
         <Fact label="Isolation" value={c.isolation} />
         <Fact
           label="Connected services"
@@ -592,6 +575,13 @@ export function CompositionPanel({ composition, launched }: { composition: Compo
         />
         <Fact label="Shared memory" value={c.memory ?? "None"} />
       </dl>
+      <p className="mt-3 text-xs text-foreground-muted">
+        {toolPolicy === "kars-default"
+          ? "kars-default permits governed tools, including shell and Foundry tools. Instructions to avoid tools do not disable them."
+          : toolPolicy
+          ? "The policy name alone does not establish which tools are permitted; review its rules."
+          : "Missing policy information is not evidence that tools are disabled."}
+      </p>
       <div className="mt-4 border-t border-border pt-4">
         <p className="text-xs font-medium text-foreground-muted">Network egress</p>
         {c.egress.length === 0 ? (

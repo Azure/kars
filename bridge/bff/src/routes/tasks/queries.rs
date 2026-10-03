@@ -12,18 +12,14 @@ use crate::kars::task::KarsTask;
 use crate::state::AppState;
 
 use super::artifacts::build_artifact_set;
-use super::evidence::{
-    merge_trace_total_tokens, select_task_checkpoint, subagent_trace_from_artifacts,
-};
-use super::history::synth_detail_from_output;
+use super::evidence::{select_task_checkpoint, subagent_trace_from_artifacts};
 use super::mapping::{
     composition_from_materialized, is_task_owner, to_detail, to_sub_agent, to_summary,
 };
 use super::presentation::deliverable_pull_requests;
-use super::{
-    MissionResultDto, MissionTelemetryDto, TaskDetailDto, TaskSummaryDto, classify_blocked,
-    deliverable_text, map_kube_err, require_cluster,
-};
+use super::revision::{ReadRevision, output_matches_task};
+use super::run_evidence::{mission_result, run_telemetry, scope_activity};
+use super::{TaskDetailDto, TaskSummaryDto, map_kube_err, require_cluster};
 
 /// `GET /api/namespaces/:ns/tasks` — list tasks in a namespace.
 pub async fn list_tasks(
@@ -36,115 +32,39 @@ pub async fn list_tasks(
         .map(|Extension(principal)| principal)
         .ok_or_else(|| AppError::Forbidden("signed-in principal required".into()))?;
     let api: Api<KarsTask> = cluster.tasks(&ns);
+    let outputs = if ns == "kars-system" {
+        cluster.list_mission_outputs().await
+    } else {
+        Vec::new()
+    };
+    // Re-read ownership and revision after evidence; never project onto an older list snapshot.
     let list = api
         .list(&ListParams::default())
         .await
         .map_err(map_kube_err)?;
-    // Cross-reference delivered + failed missions in ONE pass over the persisted
-    // outputs, so the list can show "Delivered" / "Run failed" instead of
-    // misreading an idle delivered run — or a hung errored run — as "drafting".
-    let outputs = cluster.list_mission_outputs().await;
-    let mut terminal = std::collections::HashMap::<String, &'static str>::new();
-    for record in &outputs {
-        match record.data.get("status").map(String::as_str) {
-            Some("ok")
-                if record
-                    .data
-                    .get("output")
-                    .is_some_and(|output| !output.trim().is_empty()) =>
-            {
-                terminal
-                    .entry(record.task_name.clone())
-                    .or_insert("delivered");
-            }
-            Some("error") => {
-                terminal.entry(record.task_name.clone()).or_insert("failed");
-            }
-            _ => {}
-        }
-    }
-    let delivered: std::collections::HashSet<String> = terminal
-        .iter()
-        .filter(|(_, status)| **status == "delivered")
-        .map(|(task, _)| task.clone())
-        .collect();
-    let failed: std::collections::HashSet<String> = terminal
-        .iter()
-        .filter(|(_, status)| **status == "failed")
-        .map(|(task, _)| task.clone())
-        .collect();
-    let mut summaries: Vec<TaskSummaryDto> = list
+    let summaries = list
         .items
         .iter()
-        .filter(|task| is_task_owner(task, &principal))
-        .map(|t| {
-            let mut s = to_summary(t);
-            s.delivered = delivered.contains(&s.name);
-            s.failed = failed.contains(&s.name);
-            s
+        .filter(|task| {
+            is_task_owner(task, &principal)
+                && task.namespace().as_deref() == Some(ns.as_str())
+                && task.metadata.deletion_timestamp.is_none()
+        })
+        .map(|task| {
+            let mut summary = to_summary(task);
+            if let Some(record) = outputs
+                .iter()
+                .find(|record| output_matches_task(task, &record.data))
+            {
+                let result = mission_result(&record.data);
+                summary.delivered = result.reviewable;
+                summary.failed = !result.reviewable;
+            }
+            summary
         })
         .collect();
-
-    // Persist history: a mission whose KarsTask CR has been garbage-collected
-    // (retired-run GC) still has its delivered/errored output ConfigMap. Without
-    // this, completed missions silently vanish from the list mid-session and
-    // their direct URLs 404 ("data loss", audit BUG-8). Re-add any output-only
-    // mission that isn't already represented by a live CR. Team-run machinery
-    // (`<team>-run-<epoch>`) is excluded — those belong to the Team view, which
-    // is exactly what the live-CR path already hides.
-    let live_names: std::collections::HashSet<String> =
-        summaries.iter().map(|s| s.name.clone()).collect();
-    for record in &outputs {
-        let task = &record.task_name;
-        let d = &record.data;
-        if d.get("ownerSub").map(String::as_str) != Some(principal.sub.as_str()) {
-            continue;
-        }
-        if live_names.contains(task) || regex_lite_is_team_run(task) {
-            continue;
-        }
-        let is_ok = delivered.contains(task);
-        let is_err = failed.contains(task);
-        // Only surface a genuinely terminal output (delivered or errored); skip
-        // stray/empty outputs so we don't invent phantom missions.
-        if !is_ok && !is_err {
-            continue;
-        }
-        summaries.push(TaskSummaryDto {
-            name: task.clone(),
-            namespace: ns.clone(),
-            objective: d.get("objective").cloned().unwrap_or_default(),
-            display_name: d
-                .get("displayName")
-                .cloned()
-                .filter(|s| !s.trim().is_empty()),
-            created_at: d.get("startedAt").cloned(),
-            tier: d.get("tier").and_then(|v| v.parse().ok()).unwrap_or(0),
-            phase: if is_err {
-                "Failed".into()
-            } else {
-                "Delivered".into()
-            },
-            envelope_digest: None,
-            team: d.get("team").cloned(),
-            delivered: is_ok,
-            failed: is_err,
-            launched: true,
-            execution_phase: Some("Idle".into()),
-        });
-    }
+    // Retained output without a live Task is not current, authorized evidence.
     Ok(Json(summaries))
-}
-
-/// True when `name` looks like a standing-team run task (`<team>-run-<epoch>`),
-/// which the Missions surface intentionally hides (they belong to the Team
-/// view). A tiny hand-rolled check to avoid a regex dependency.
-pub(super) fn regex_lite_is_team_run(name: &str) -> bool {
-    if let Some(idx) = name.rfind("-run-") {
-        let suffix = &name[idx + "-run-".len()..];
-        return !suffix.is_empty() && suffix.chars().all(|c| c.is_ascii_digit());
-    }
-    false
 }
 
 /// `GET /api/namespaces/:ns/tasks/:name` — fetch one task, with its delegated
@@ -156,17 +76,12 @@ pub async fn get_task(
 ) -> AppResult<Json<TaskDetailDto>> {
     let cluster = require_cluster(&state)?;
     let api: Api<KarsTask> = cluster.tasks(&ns);
-    let task = match api.get_opt(&name).await.map_err(map_kube_err)? {
-        Some(t) => t,
-        // The KarsTask CR was garbage-collected (retired-run GC) but the
-        // mission's terminal output persists. Synthesize a read-only detail from
-        // it so a delivered/failed mission's page — and the list link that now
-        // shows it — doesn't 404 mid-session. Genuine unknowns still 404.
-        None => return synth_detail_from_output(cluster, &ns, &name, &principal).await,
-    };
-    if !is_task_owner(&task, &principal) {
-        return Err(AppError::NotFound);
-    }
+    let task = api
+        .get_opt(&name)
+        .await
+        .map_err(map_kube_err)?
+        .ok_or(AppError::NotFound)?;
+    let revision = ReadRevision::capture(&task, &ns, &name, &principal)?;
     // Resolve direct children by scanning the namespace for parentRef == name.
     // Exclude RUN INSTANCES (cadence/taskforce runs named `*-run-<epoch>` or
     // annotated team-role=taskforce): those are run history, not org-chart roles.
@@ -239,48 +154,40 @@ pub async fn get_task(
     };
 
     // The mission's captured run result (persisted deliverable + real tokens).
-    let output_data = cluster.read_mission_output(&name).await;
-    let mut result = output_data.as_ref().and_then(|d| {
-        let output = deliverable_text(d.get("output")?);
-        let blocked = classify_blocked(d.get("status").map(String::as_str), &output);
-        Some(MissionResultDto {
-            output,
-            status: d.get("status").cloned(),
-            model: d.get("model").cloned(),
-            total_tokens: d.get("totalTokens").and_then(|v| v.parse().ok()),
-            prompt_tokens: d.get("promptTokens").and_then(|v| v.parse().ok()),
-            completion_tokens: d.get("completionTokens").and_then(|v| v.parse().ok()),
-            finished_at: d.get("finishedAt").cloned(),
-            assignment_nonce: d.get("assignmentNonce").cloned(),
-            source: d.get("source").cloned(),
-            blocked,
-            artifact_persistence: d.get("artifactPersistence").cloned(),
-            artifact_count: d.get("artifactCount").and_then(|v| v.parse().ok()),
-            declared_artifact_count: d.get("declaredArtifactCount").and_then(|v| v.parse().ok()),
-        })
-    });
+    let output_data = if ns == "kars-system" {
+        cluster
+            .read_mission_output(&name)
+            .await
+            .filter(|output| output_matches_task(&task, output))
+    } else {
+        None
+    };
+    let result = output_data.as_ref().map(mission_result);
 
     // The mission's full artifact set: the manifest (name + size, incl. binary)
     // comes from the output ConfigMap; text contents come from the companion
     // artifacts ConfigMap. Merge them so the set is complete and honest.
-    let artifacts = build_artifact_set(cluster, &name, output_data.as_ref()).await;
-    let successful_result = result.as_ref().is_some_and(|result| {
-        result.status.as_deref() != Some("error") && result.blocked.is_none()
-    });
-    let checkpoint = select_task_checkpoint(
-        cluster.read_mission_progress(&name).await,
-        &artifacts,
-        successful_result,
-    );
+    let artifacts = if output_data.is_some() {
+        build_artifact_set(cluster, &name, output_data.as_ref()).await
+    } else {
+        Vec::new()
+    };
+    let successful_result = result.as_ref().is_some_and(|result| result.reviewable);
+    // Name-only progress checkpoints cannot establish revision custody.
+    let checkpoint = select_task_checkpoint(None, &artifacts, successful_result);
 
     // The mission's live execution activity — the real per-round + per-tool
     // trace the agent emitted, persisted by the controller as the clean audit
     // record. Parsed from the trace ConfigMap; empty when no trace exists.
-    let mut activity: Vec<serde_json::Value> = cluster
-        .read_mission_trace(&name)
-        .await
-        .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(&raw).ok())
-        .unwrap_or_default();
+    let mut activity: Vec<serde_json::Value> = if output_data.is_some() {
+        cluster
+            .read_current_mission_trace(&name)
+            .await
+            .and_then(|raw| serde_json::from_str(&raw).ok())
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
     activity.extend(subagent_trace_from_artifacts(&artifacts));
     activity.sort_by(|left, right| {
         left.get("ts")
@@ -294,102 +201,15 @@ pub async fn get_task(
             )
     });
 
-    // LIVE fallback. The persisted trace ConfigMap is written only once, at
-    // delivery — so a still-running mission would otherwise show an EMPTY
-    // activity trace (blank deploy timeline, agent graph, and map, and a
-    // "Waiting for the first model round" that lies while the agent is already
-    // on round 3). When no persisted trace exists yet and the mission is
-    // launched, pull the SAME live router telemetry the Activity SSE streams —
-    // the principal sandbox plus every sub-agent it spawned — so the WHOLE
-    // detail page is genuinely live on each poll, not just the SSE tab.
-    if activity.is_empty()
-        && let Some(principal) = &sandbox_name
-    {
-        let mut live: Vec<serde_json::Value> = Vec::new();
-        for mut ev in cluster.sandbox_live_trace(principal).await {
-            if let Some(obj) = ev.as_object_mut() {
-                obj.insert("agent".into(), serde_json::json!(name));
-                obj.insert("agentInstance".into(), serde_json::json!(principal));
-                obj.insert("agentRole".into(), serde_json::json!("principal"));
-            }
-            live.push(ev);
-        }
-        let mut descendants = cluster
-            .sub_agent_sandbox_names(&ns, principal)
-            .await
-            .into_iter();
-        loop {
-            let sub_batch = descendants.by_ref().take(8).collect::<Vec<_>>();
-            if sub_batch.is_empty() {
-                break;
-            }
-            let mut polling = tokio::task::JoinSet::new();
-            for sub in sub_batch {
-                let cluster = cluster.clone();
-                polling.spawn(async move {
-                    let events = cluster.sandbox_live_trace(&sub).await;
-                    (sub, events)
-                });
-            }
-            while let Some(result) = polling.join_next().await {
-                let Ok((sub, events)) = result else {
-                    continue;
-                };
-                for mut ev in events {
-                    if let Some(obj) = ev.as_object_mut() {
-                        obj.insert("agent".into(), serde_json::json!(sub.clone()));
-                        obj.insert("agentInstance".into(), serde_json::json!(sub.clone()));
-                        obj.insert("agentRole".into(), serde_json::json!("subagent"));
-                    }
-                    live.push(ev);
-                }
-            }
-        }
-        activity = live;
-    }
+    // Name-only router traces cannot establish Task UID, revision, or runtime
+    // custody. Missing bound activity means unavailable detail, not zero work.
 
-    // Loop-shape telemetry (rounds, tool calls). Token totals live on `result`.
-    // Derive rollups from the persisted per-round/per-tool trace when the run's
-    // output ConfigMap didn't include them — some harnesses persist the trace
-    // but not the totals, which left a DELIVERED mission's map reading
-    // "Not run yet" / "No activity". The trace is the honest source either way.
-    let trace_round_events = activity
-        .iter()
-        .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some("round"))
-        .count() as i64;
-    let trace_tool_events = activity
-        .iter()
-        .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some("tool"))
-        .count() as i64;
-    let trace_total_tokens: i64 = activity
-        .iter()
-        .filter(|e| e.get("kind").and_then(|k| k.as_str()) == Some("round"))
-        .filter_map(|e| e.get("total_tokens").and_then(serde_json::Value::as_i64))
-        .sum();
-
-    // Backfill the token total on the result from the trace when the output CM
-    // didn't carry it (so token burn shows on a delivered run with a trace).
-    merge_trace_total_tokens(&mut result, trace_total_tokens);
-
-    let telemetry = {
-        let mut rounds = output_data
-            .as_ref()
-            .and_then(|d| d.get("rounds").and_then(|v| v.parse::<i64>().ok()));
-        let mut tool_calls = output_data
-            .as_ref()
-            .and_then(|d| d.get("toolCalls").and_then(|v| v.parse::<i64>().ok()));
-        if trace_round_events > 0 {
-            rounds = Some(rounds.unwrap_or_default().max(trace_round_events));
-        }
-        if trace_tool_events > 0 {
-            tool_calls = Some(tool_calls.unwrap_or_default().max(trace_tool_events));
-        }
-        if rounds.is_some() || tool_calls.is_some() {
-            Some(MissionTelemetryDto { rounds, tool_calls })
-        } else {
-            None
-        }
-    };
+    let current_nonce = task
+        .annotations()
+        .get("kars.azure.com/run-requested")
+        .map(String::as_str);
+    activity = scope_activity(activity, current_nonce);
+    let telemetry = run_telemetry(result.as_ref());
 
     // The running agent's real mesh identity, discovered from the AGT registry
     // (harness-neutral). Only meaningful once a sandbox is running.
@@ -398,13 +218,13 @@ pub async fn get_task(
         None => None,
     };
 
-    // Pull requests the mission opened, extracted from its raw output — a PR is a
-    // first-class delivery type, surfaced on the Artifacts tab (not just prose).
+    // Referenced PR URLs are not proof that this mission authored the PR.
     let pull_requests = output_data
         .as_ref()
         .map(deliverable_pull_requests)
         .unwrap_or_default();
 
+    let task = revision.recheck(cluster, &principal).await?;
     Ok(Json(to_detail(
         &task,
         children,

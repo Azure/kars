@@ -25,7 +25,7 @@ use super::execution::execution_plan_error_from_raw;
 use super::prompts::build_team_system_prompt;
 use super::routing::select_orchestrator_route;
 use super::team_proposal::parse_and_validate_team;
-use super::team_qualification::{normalize_team_proposal_route, qualified_team_fallbacks};
+use super::team_qualification::{admitted_team_fallbacks, normalize_team_proposal_route};
 
 // A team proposal can contain eight milestone contracts plus four role contracts.
 // Keep enough output room for the model's complete JSON rather than accepting a
@@ -67,7 +67,8 @@ pub struct ComposeTeamProposal {
     pub instructions: String,
     /// Principal/default model as `provider::deployment`.
     pub model: String,
-    /// Ordered routes that independently qualify the complete Team contract.
+    /// Ordered routes independently admitted for the complete Team contract.
+    /// Validation-mode admission is not retained qualification evidence.
     pub model_fallbacks: Vec<String>,
     /// Evidence-backed reason for the principal model choice.
     pub model_basis: Option<String>,
@@ -249,10 +250,10 @@ pub async fn compose_team(
     if let Err(error) = normalize_team_proposal_route(&mut proposal, &options) {
         let repair_user = format!(
             "{user}\n\nYour previous response was not launchable: {error}\n\
-             Recompose it so the principal route, every role route, and every selected MCP \
-             server, memory binding, and approved skill fit retained qualification evidence at \
-             the CURRENT digest. Generic route records do not prove a specific resource.\n\n\
-             QUALIFIED EXECUTION RECORDS:\n{qualification_constraints}\n\n\
+             Recompose it so the principal and every role meet the configured route qualification \
+             policy below. Every selected MCP server, memory binding, and approved skill still needs \
+             retained evidence at the CURRENT digest. Generic route records do not prove a specific resource.\n\n\
+             ROUTE QUALIFICATION POLICY AND RECORDS:\n{qualification_constraints}\n\n\
              RESOURCE QUALIFICATION RECORDS:\n{resource_qualification_constraints}\n\n\
              Return ONLY the complete JSON object."
         );
@@ -281,7 +282,16 @@ pub async fn compose_team(
             source: Some(source),
         }));
     }
-    proposal.model_fallbacks = qualified_team_fallbacks(&proposal, &options);
+    proposal.model_fallbacks = admitted_team_fallbacks(&proposal, &options);
+    if let Some(note) =
+        crate::routes::options::route_validation_note().map_err(AppError::Upstream)?
+    {
+        rationale = Some(
+            format!("{} {note}", rationale.unwrap_or_default())
+                .trim()
+                .to_string(),
+        );
+    }
     Ok(Json(ComposeTeamResponse {
         available: true,
         reason: None,

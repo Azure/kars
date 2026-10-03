@@ -104,7 +104,7 @@ fn apply_mission_budget_floor(proposal: &mut ComposeProposal) -> Result<Option<i
 
 fn mission_proposal_qualification(proposal: &ComposeProposal) -> Result<(), String> {
     let (_, model, required, max_parallel) = mission_proposal_blueprint(proposal)?;
-    let qualified = crate::routes::options::route_qualification(
+    let admitted = crate::routes::options::route_admitted(
         &proposal.runtime,
         &model.provider,
         &model.deployment,
@@ -112,7 +112,7 @@ fn mission_proposal_qualification(proposal: &ComposeProposal) -> Result<(), Stri
         max_parallel,
         proposal.budget_tokens,
     )?;
-    if qualified {
+    if admitted {
         return Ok(());
     }
     let missing = crate::routes::options::route_qualification_gap(
@@ -331,15 +331,15 @@ pub async fn compose(
     if let Err(error) = mission_proposal_launchability(&proposal, &options) {
         let repair_user = format!(
             "{user}\n\nYour previous proposal was not launchable: {error}\n\
-             Recompose it so the complete runtime/model/capability/max_parallel requirement fits \
-             ONE qualified execution record below. Qualification records do not compose. If a \
+             Recompose it so the complete runtime/model/capability/max_parallel requirement meets \
+             the configured route qualification policy below. Never claim missing evidence. If a \
              selected MCP server, memory binding, or approved skill is used, it MUST have a \
              retained resource-scoped qualification record at the CURRENT digest on the chosen \
              route — generic route records do not count. If a requested binary or file-writing \
              deliverable needs an unqualified capability, choose a launchable text/JSON \
              alternative and represent diagrams inline with quoted Mermaid flowchart labels \
              whenever they contain parser-sensitive punctuation.\n\n\
-             QUALIFIED EXECUTION RECORDS:\n{qualification_constraints}\n\n\
+             ROUTE QUALIFICATION POLICY AND RECORDS:\n{qualification_constraints}\n\n\
              RESOURCE QUALIFICATION RECORDS:\n{resource_qualification_constraints}\n\n\
              Return ONLY the complete JSON object."
         );
@@ -370,7 +370,16 @@ pub async fn compose(
         }));
     }
 
-    proposal.model_fallbacks = qualified_mission_fallbacks(&proposal, &options);
+    proposal.model_fallbacks = admitted_mission_fallbacks(&proposal, &options);
+    if let Some(note) =
+        crate::routes::options::route_validation_note().map_err(AppError::Upstream)?
+    {
+        rationale = Some(
+            format!("{} {note}", rationale.unwrap_or_default())
+                .trim()
+                .to_string(),
+        );
+    }
     Ok(Json(ComposeResponse {
         available: true,
         reason: None,
@@ -380,7 +389,7 @@ pub async fn compose(
     }))
 }
 
-fn qualified_mission_fallbacks(
+fn admitted_mission_fallbacks(
     proposal: &ComposeProposal,
     options: &crate::routes::options::Options,
 ) -> Vec<ComposeModel> {

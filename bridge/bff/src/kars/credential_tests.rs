@@ -13,6 +13,9 @@ use axum::{
 use serde_json::{Value, json};
 use std::sync::{Arc, Mutex};
 
+#[path = "credential_discovery_tests.rs"]
+mod discovery;
+
 #[path = "credential_binding_tests.rs"]
 mod binding_repairs;
 #[path = "credential_handler_tests.rs"]
@@ -50,6 +53,8 @@ struct TestApi {
     bind_source_owner: bool,
     publish_ownership_receipt: bool,
     ownership_from_override: Option<String>,
+    gate_patch_conflict: bool,
+    target_read_mutation: Option<(String, usize, Value)>,
 }
 
 async fn handle(
@@ -64,6 +69,27 @@ async fn handle(
     state
         .calls
         .push((method.to_string(), uri.path().into(), body.clone()));
+    if method == Method::GET
+        && let Some((path, read_number, _)) = &state.target_read_mutation
+        && path == uri.path()
+        && state
+            .calls
+            .iter()
+            .filter(|(method, called, _)| method == "GET" && called == path)
+            .count()
+            == *read_number
+    {
+        let (path, _, patch) = state.target_read_mutation.take().unwrap();
+        let target = state.objects.get_mut(&path).unwrap();
+        json_patch::merge(target, &patch);
+        let version = target["metadata"]["resourceVersion"]
+            .as_str()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+            + 1;
+        target["metadata"]["resourceVersion"] = version.to_string().into();
+    }
     if let Some(response) = handler_conflicts::before_request(&mut state, &method, uri.path()) {
         return response;
     }
@@ -203,6 +229,12 @@ async fn handle(
         return (axum::http::StatusCode::CREATED, axum::Json(value)).into_response();
     }
     if method == Method::PATCH && state.objects.contains_key(uri.path()) {
+        if state.gate_patch_conflict {
+            state.gate_patch_conflict = false;
+            let object = state.objects.get_mut(uri.path()).unwrap();
+            object["metadata"]["resourceVersion"] = "3".into();
+            object["status"]["phase"] = "Ready".into();
+        }
         let mut value = state.objects[uri.path()].clone();
         let old_spec = value.get("spec").cloned();
         if body.is_array() {
@@ -281,6 +313,8 @@ async fn fixture() -> (Cluster, Arc<Mutex<TestApi>>, tokio::task::JoinHandle<()>
         bind_source_owner: false,
         publish_ownership_receipt: false,
         ownership_from_override: None,
+        gate_patch_conflict: false,
+        target_read_mutation: None,
         secret: json!({
         "apiVersion":"v1","kind":"Secret","type":"Opaque","metadata":{"name":"test-teams","namespace":"work","uid":"secret","resourceVersion":"2"},
         "data":{"client-id":"b2xk","bff-internal-secret":"cHJlc2VydmVk"}}),
@@ -296,6 +330,387 @@ async fn fixture() -> (Cluster, Arc<Mutex<TestApi>>, tokio::task::JoinHandle<()>
         kube::Client::try_from(kube::Config::new(format!("http://{addr}").parse().unwrap()))
             .unwrap();
     (Cluster::for_test_client(client), state, task)
+}
+
+fn created_target(kind: &str, active: bool) -> (Target, String, Value) {
+    let resource = if kind == "KarsTask" {
+        "karstasks"
+    } else {
+        "karsteams"
+    };
+    let target = Target {
+        kind: kind.into(),
+        namespace: "work".into(),
+        name: "draft".into(),
+        uid: "draft-uid".into(),
+    };
+    let path = format!("/apis/kars.azure.com/v1alpha1/namespaces/work/{resource}/draft");
+    let spec = if kind == "KarsTask" {
+        json!({"execution":{"launch":active},"blueprint":{}})
+    } else {
+        json!({"paused":!active,"blueprint":{}})
+    };
+    let object = json!({"apiVersion":"kars.azure.com/v1alpha1","kind":kind,
+        "metadata":{"name":"draft","namespace":"work","uid":"draft-uid","resourceVersion":"2"},
+        "spec":spec,"status":{"phase":"Ready"}});
+    (target, path, object)
+}
+
+fn reviewed_plan_changes(kind: &str) -> Vec<Value> {
+    let plan = super::task::execution_plan::tests::plan();
+    let mut changes = vec![
+        json!({"spec":{"blueprint":{"executionPlan":plan}}}),
+        json!({"metadata":{"annotations":{"kars.azure.com/mission-decomposition":"execution-plan/v1"}}}),
+    ];
+    if kind == "KarsTeam" {
+        changes.push(
+            json!({"spec":{"roster":[{"name":"writer","blueprint":{"executionPlan":plan}}]}}),
+        );
+    }
+    changes
+}
+
+#[tokio::test]
+async fn credential_finish_rejects_unsupported_or_pruned_plans_before_credentials() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for change in reviewed_plan_changes(kind) {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, mut object) = created_target(kind, false);
+            json_patch::merge(&mut object, &change);
+            state
+                .lock()
+                .unwrap()
+                .objects
+                .insert(path.clone(), object.clone());
+            let error = cluster
+                .finish_created_credentials(&target, true)
+                .await
+                .unwrap_err()
+                .to_string();
+            assert!(
+                error.contains("TypedPlanExecutionUnavailable")
+                    || error.contains("ReviewedExecutionPlanMissing"),
+                "{error}"
+            );
+            {
+                let s = state.lock().unwrap();
+                assert_eq!(s.objects[&path], object);
+                assert_eq!(s.calls.len(), 1);
+                assert_eq!((&s.calls[0].0, &s.calls[0].1), (&"GET".to_string(), &path));
+            }
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_rechecks_plan_and_identity_after_credential_validation() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        let mut changes = reviewed_plan_changes(kind);
+        changes.extend([
+            json!({"metadata":{"uid":"replacement"}}),
+            json!({"metadata":{"deletionTimestamp":"2026-10-03T00:00:00Z"}}),
+        ]);
+        for change in changes {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, object) = created_target(kind, false);
+            {
+                let mut s = state.lock().unwrap();
+                s.objects.insert(path.clone(), object);
+                s.target_read_mutation = Some((path.clone(), 2, change));
+            }
+            assert!(
+                cluster
+                    .finish_created_credentials(&target, true)
+                    .await
+                    .is_err()
+            );
+            {
+                let s = state.lock().unwrap();
+                assert!(s.target_read_mutation.is_none());
+                assert!(s.calls.iter().all(|(method, _, _)| method == "GET"));
+                assert!(
+                    s.calls
+                        .iter()
+                        .any(|(_, path, _)| path.ends_with("/karscredentialgrants/workspace"))
+                );
+                if kind == "KarsTask" {
+                    assert_eq!(s.objects[&path]["spec"]["execution"]["launch"], false);
+                } else {
+                    assert_eq!(s.objects[&path]["spec"]["paused"], true);
+                }
+            }
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_can_stop_unsupported_or_pruned_plan_targets() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for change in reviewed_plan_changes(kind) {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, mut object) = created_target(kind, true);
+            json_patch::merge(&mut object, &change);
+            state.lock().unwrap().objects.insert(path.clone(), object);
+            cluster
+                .finish_created_credentials(&target, false)
+                .await
+                .unwrap();
+            {
+                let s = state.lock().unwrap();
+                let writes: Vec<_> = s
+                    .calls
+                    .iter()
+                    .filter(|(method, _, _)| method != "GET")
+                    .collect();
+                assert_eq!(writes.len(), 1);
+                assert_eq!(writes[0].0, "PATCH");
+                assert_eq!(
+                    writes[0].2["metadata"],
+                    json!({"uid":"draft-uid","resourceVersion":"2"})
+                );
+                if kind == "KarsTask" {
+                    assert_eq!(s.objects[&path]["spec"]["execution"]["launch"], false);
+                } else {
+                    assert_eq!(s.objects[&path]["spec"]["paused"], true);
+                }
+            }
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_unchanged_gate_validates_grant_and_target_without_writing() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for active in [false, true] {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, object) = created_target(kind, active);
+            state
+                .lock()
+                .unwrap()
+                .objects
+                .insert(path.clone(), object.clone());
+            cluster
+                .finish_created_credentials(&target, active)
+                .await
+                .unwrap();
+            {
+                let s = state.lock().unwrap();
+                assert_eq!(s.objects[&path], object);
+                assert!(s.calls.iter().all(|(method, _, _)| method == "GET"));
+                assert!(
+                    s.calls
+                        .iter()
+                        .any(|(_, path, _)| path.ends_with("/karscredentialgrants/workspace"))
+                );
+                assert!(s.calls.iter().any(|(_, p, _)| p == &path));
+            }
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_changed_gate_retains_exact_uid_resource_version_preconditions() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for active in [false, true] {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, object) = created_target(kind, !active);
+            state.lock().unwrap().objects.insert(path.clone(), object);
+            cluster
+                .finish_created_credentials(&target, active)
+                .await
+                .unwrap();
+            {
+                let s = state.lock().unwrap();
+                let writes: Vec<_> = s
+                    .calls
+                    .iter()
+                    .filter(|(method, _, _)| method != "GET")
+                    .collect();
+                assert_eq!(writes.len(), 1);
+                assert_eq!((&writes[0].0, &writes[0].1), (&"PATCH".to_string(), &path));
+                assert_eq!(
+                    writes[0].2["metadata"],
+                    json!({"uid":"draft-uid","resourceVersion":"2"})
+                );
+                if kind == "KarsTask" {
+                    assert_eq!(s.objects[&path]["spec"]["execution"]["launch"], active);
+                } else {
+                    assert_eq!(s.objects[&path]["spec"]["paused"], !active);
+                }
+            }
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_noop_rejects_replacement_deletion_and_unavailable_grant() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for fault in ["replacement", "deletion", "grant"] {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, mut object) = created_target(kind, false);
+            match fault {
+                "replacement" => object["metadata"]["uid"] = "replacement".into(),
+                "deletion" => {
+                    object["metadata"]["deletionTimestamp"] = "2026-10-02T17:00:00Z".into()
+                }
+                _ => state.lock().unwrap().forbidden = true,
+            }
+            state.lock().unwrap().objects.insert(path, object);
+            assert!(
+                cluster
+                    .finish_created_credentials(&target, false)
+                    .await
+                    .is_err()
+            );
+            assert!(
+                state
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .all(|(method, _, _)| method == "GET")
+            );
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_task_without_execution_uses_inactive_default() {
+    for execution in [
+        None,
+        Some(Value::Null),
+        Some(json!({})),
+        Some(json!({"runtime":"OpenClaw"})),
+    ] {
+        for active in [false, true] {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, mut object) = created_target("KarsTask", false);
+            object["spec"].as_object_mut().unwrap().remove("execution");
+            if let Some(execution) = &execution {
+                object["spec"]["execution"] = execution.clone();
+            }
+            state
+                .lock()
+                .unwrap()
+                .objects
+                .insert(path.clone(), object.clone());
+            cluster
+                .finish_created_credentials(&target, active)
+                .await
+                .unwrap();
+            {
+                let s = state.lock().unwrap();
+                assert_eq!(
+                    s.calls
+                        .iter()
+                        .filter(|(method, _, _)| method == "PATCH")
+                        .count(),
+                    usize::from(active)
+                );
+                if active {
+                    assert_eq!(s.objects[&path]["spec"]["execution"]["launch"], true);
+                } else {
+                    assert_eq!(s.objects[&path], object);
+                }
+            }
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_real_transition_conflict_is_not_retried_or_adopted() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        let (cluster, state, server) = fixture().await;
+        let (target, path, object) = created_target(kind, false);
+        {
+            let mut s = state.lock().unwrap();
+            s.objects.insert(path.clone(), object.clone());
+            s.gate_patch_conflict = true;
+        }
+        let error = cluster
+            .finish_created_credentials(&target, true)
+            .await
+            .unwrap_err();
+        assert!(matches!(error, kube::Error::Api(ref response) if response.code == 409));
+        {
+            let s = state.lock().unwrap();
+            assert_eq!(s.objects[&path]["spec"], object["spec"]);
+            assert_eq!(
+                s.calls
+                    .iter()
+                    .filter(|(method, _, _)| method == "PATCH")
+                    .count(),
+                1
+            );
+        }
+        server.abort();
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_missing_or_malformed_gate_is_not_treated_as_satisfied() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for malformed in [Value::Null, json!("false"), json!(0)] {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, mut object) = created_target(kind, false);
+            if kind == "KarsTask" {
+                object["spec"]["execution"]["launch"] = malformed;
+            } else {
+                object["spec"]["paused"] = malformed;
+            }
+            state.lock().unwrap().objects.insert(path, object);
+            cluster
+                .finish_created_credentials(&target, false)
+                .await
+                .unwrap();
+            assert_eq!(
+                state
+                    .lock()
+                    .unwrap()
+                    .calls
+                    .iter()
+                    .filter(|(method, _, _)| method == "PATCH")
+                    .count(),
+                1
+            );
+            server.abort();
+        }
+    }
+}
+
+#[tokio::test]
+async fn credential_finish_mutation_rejects_missing_resource_version() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        let (cluster, state, server) = fixture().await;
+        let (target, path, mut object) = created_target(kind, false);
+        object["metadata"]
+            .as_object_mut()
+            .unwrap()
+            .remove("resourceVersion");
+        state.lock().unwrap().objects.insert(path, object);
+        assert!(
+            cluster
+                .finish_created_credentials(&target, true)
+                .await
+                .is_err()
+        );
+        assert!(
+            state
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .all(|(method, _, _)| method == "GET")
+        );
+        server.abort();
+    }
 }
 
 #[tokio::test]

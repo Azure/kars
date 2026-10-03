@@ -95,7 +95,7 @@ fn team_proposal_qualification(
     };
     let (required, max_parallel) =
         crate::routes::validate::qualification_requirements(&principal_blueprint, Some("team"));
-    if !crate::routes::options::route_qualification(
+    if !crate::routes::options::route_admitted(
         principal_runtime,
         &principal_route.0,
         &principal_route.1,
@@ -192,7 +192,7 @@ fn team_proposal_qualification(
             role.runtime.trim()
         };
         let role_required = team_role_qualification_requirements(plan, &role.name);
-        if !crate::routes::options::route_qualification(
+        if !crate::routes::options::route_admitted(
             runtime,
             provider,
             deployment,
@@ -328,7 +328,7 @@ pub(super) fn normalize_team_proposal_route(
         }
         if team_proposal_qualification(proposal, options).is_ok() {
             proposal.model_basis = Some(format!(
-                "Bridge selected {route} because the complete team plan and its reviewed resources match one retained qualification record; the orchestrator's proposed route did not."
+                "Bridge selected {route} because the complete team plan meets the configured route admission policy and all selected resources have current qualification evidence; the orchestrator's proposed route did not."
             ));
             proposal.expected_tokens_per_outcome = None;
             proposal.efficiency_sample_runs = 0;
@@ -343,7 +343,7 @@ pub(super) fn normalize_team_proposal_route(
     Err(initial_error)
 }
 
-pub(super) fn qualified_team_fallbacks(
+pub(super) fn admitted_team_fallbacks(
     proposal: &ComposeTeamProposal,
     options: &crate::routes::options::Options,
 ) -> Vec<String> {

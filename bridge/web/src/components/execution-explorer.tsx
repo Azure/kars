@@ -40,6 +40,7 @@ export function ExecutionExplorer({
   approvals,
   ns,
   name,
+  runNonce,
   agentLabel,
   agentPhase = null,
   agentRuntime = null,
@@ -56,6 +57,7 @@ export function ExecutionExplorer({
   approvals: Approval[];
   ns: string;
   name: string;
+  runNonce?: string | null;
   agentLabel: string;
   agentPhase?: string | null;
   agentRuntime?: string | null;
@@ -65,7 +67,7 @@ export function ExecutionExplorer({
   envelopeDigest?: string | null;
   receipt?: Receipt | null;
 }) {
-  const events = useLiveTrace(ns, name, running, activity);
+  const events = useLiveTrace(ns, name, running, activity, runNonce);
   const [tab, setTab] = useState<"lifetime" | "tools">("lifetime");
   const [focus, setFocus] = useState("");
 
@@ -73,6 +75,33 @@ export function ExecutionExplorer({
     setFocus(query);
     setTab("tools");
   };
+
+  if (events.length === 0) {
+    return (
+      <div className="space-y-4">
+        <ActivityStream
+          running={running}
+          activity={activity}
+          events={events}
+          telemetry={telemetry}
+          ns={ns}
+          name={name}
+          runNonce={runNonce}
+          principalAgentName={name}
+          title="Rounds and tool records"
+          detail="Available revision-bound round and tool records. Missing records do not establish that no work occurred."
+        />
+        {(assignmentEvents.length > 0 || approvals.length > 0) && (
+          <ExecutionLifetime
+            running={running}
+            activity={events}
+            assignmentEvents={assignmentEvents}
+            approvals={approvals}
+          />
+        )}
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-4">
@@ -82,6 +111,7 @@ export function ExecutionExplorer({
         events={events}
         ns={ns}
         name={name}
+        runNonce={runNonce}
         agentLabel={agentLabel}
         agentPhase={agentPhase}
         agentRuntime={agentRuntime}
@@ -97,7 +127,7 @@ export function ExecutionExplorer({
           <div>
             <h2 className="text-sm font-semibold">Drill-down</h2>
             <p className="text-[11px] text-foreground-muted">
-              Select an agent to focus its exact round and tool records, or inspect the complete chronological lifetime.
+              Select an agent to focus available round and tool records, or inspect the recorded timeline.
             </p>
           </div>
           <div className="flex items-center gap-1 rounded-lg border border-border bg-surface-muted/40 p-1">
@@ -109,7 +139,7 @@ export function ExecutionExplorer({
               }}
               className={`rounded-md px-3 py-1.5 text-xs font-medium ${tab === "lifetime" ? "bg-surface text-foreground shadow-sm" : "text-foreground-muted"}`}
             >
-              Complete lifetime
+              Recorded timeline
             </button>
             <button
               type="button"
@@ -148,10 +178,11 @@ export function ExecutionExplorer({
               telemetry={telemetry}
               ns={ns}
               name={name}
+              runNonce={runNonce}
               focusQuery={focus}
               principalAgentName={name}
               title="Rounds and tool records"
-              detail="Every retained model round and tool invocation, including arguments, result preview, duration, agent, and success state."
+              detail="Available revision-bound round and tool records. Missing records do not establish that no work occurred."
             />
           )}
         </div>
