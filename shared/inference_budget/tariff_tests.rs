@@ -34,6 +34,48 @@ fn request() -> Vec<u8> {
 }
 
 #[test]
+fn chat_tool_followup_accepts_request_fields_not_provider_response_metadata() {
+    let mut body = json!({
+        "model": "model-revision-1",
+        "messages": [
+            {"role": "user", "content": "Write a briefing"},
+            {"role": "assistant", "content": null, "refusal": null, "tool_calls": [
+                {"id": "call-1", "type": "function", "function": {"name": "mesh_inbox", "arguments": "{}"}}
+            ]},
+            {"role": "tool", "tool_call_id": "call-1", "content": "No messages"}
+        ]
+    });
+    for content in [Value::Null, json!("Checking the inbox")] {
+        body["messages"][1]["content"] = content;
+        let (wire, quote) = contract()
+            .normalize(&serde_json::to_vec(&body).unwrap(), 100, true)
+            .unwrap();
+        let normalized: Value = serde_json::from_slice(&wire).unwrap();
+        assert_eq!(normalized["messages"], body["messages"]);
+        assert_eq!(normalized["max_completion_tokens"], 20);
+        assert_eq!(quote.maximum.tokens, 30);
+    }
+    for field in ["annotations", "provider_metadata"] {
+        let mut response_reused = body.clone();
+        response_reused["messages"][1][field] = json!([]);
+        assert!(
+            contract()
+                .normalize(&serde_json::to_vec(&response_reused).unwrap(), 100, true)
+                .is_err()
+        );
+    }
+    body["messages"][1]
+        .as_object_mut()
+        .unwrap()
+        .remove("content");
+    assert!(
+        contract()
+            .normalize(&serde_json::to_vec(&body).unwrap(), 100, true)
+            .is_err()
+    );
+}
+
+#[test]
 fn output_field_wire_names_and_schema_remain_operator_compatible() {
     let variants = [
         (OutputField::Tokens, "MaxTokens"),

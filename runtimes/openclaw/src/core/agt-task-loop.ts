@@ -231,6 +231,11 @@ export async function processTaskWithTools(
       if ((calls != null && !Array.isArray(calls)) || (choice.finish_reason === "tool_calls") !== hasCalls) {
         ledger.fail("Invalid tool-call finish reason or shape");
       }
+      if (hasCalls && (msg.role !== "assistant"
+        || (msg.content != null && typeof msg.content !== "string")
+        || (msg.refusal != null && typeof msg.refusal !== "string"))) {
+        ledger.fail("Invalid assistant tool message");
+      }
       if (hasCalls && (new Set(calls.map((tc: any) => tc?.id)).size !== calls.length
         || calls.some((tc: any) => !tc || typeof tc.id !== "string" || !tc.id
           || tc.type !== "function" || typeof tc.function?.name !== "string" || !tc.function.name
@@ -239,7 +244,15 @@ export async function processTaskWithTools(
 
     // If the model wants to call tools, execute them and continue
     if (msg.tool_calls && msg.tool_calls.length > 0) {
-      messages.push(msg);
+      // Provider responses may carry metadata that is not valid on the governed request wire.
+      messages.push(ledger ? {
+        role: "assistant", content: msg.content ?? null,
+        ...(msg.refusal !== undefined ? { refusal: msg.refusal } : {}),
+        tool_calls: msg.tool_calls.map((tc: any) => ({
+          id: tc.id, type: "function",
+          function: { name: tc.function.name, arguments: tc.function.arguments },
+        })),
+      } : msg);
       for (const tc of msg.tool_calls) {
         let result: string = "";
         try {

@@ -216,6 +216,11 @@ Execution uses the real runtime tool loop through the local inference router:
   separate policy decision, including in the legacy loop.
 - Strict requests use `max_completion_tokens: 8192` (legacy requests keep 2048)
   and stop after at most 25 rounds. Unknown tools cannot fall back to shell.
+- Strict tool follow-ups serialize assistant text/null, refusal and validated
+  function calls as request fields, not raw provider messages. Response-only
+  metadata is not replayed; omitted tool-message content becomes explicit null.
+  Unsupported assistant roles/content fail before tool execution. The router's
+  fail-closed wire allowlist and finite output bound remain unchanged.
 - Success requires nonempty final output, `finish_reason: stop` and positive,
   validated provider usage. Missing/invalid usage or an unresolved later request
   makes whole-run usage unknown; earlier totals are not reported as complete.
