@@ -241,10 +241,23 @@ request/response size limits and an overall request deadline.
   assignment-send attempt. Competing dispatchers and restarts cannot resend that
   claim. This is at-most-one send attempt, **not exactly-once execution**.
 - Currentness checks require a launched, observed Running Task, matching objective,
-  Task-owned runtime binding and Sandbox, and the exact Ready Pod UID. Revision
-  objectives must match their nonce and SHA-256 digest. These checks depend on
-  controller-owned bindings and appropriate write authority; owner references
-  alone are not an authorization boundary.
+  and uniquely Task-controller-owned binding and Sandbox. `binding.json` also
+  requires `namespaceUid`, `deploymentUid`, `deploymentGeneration`,
+  `replicaSetName` and `replicaSetUid`; legacy Pod-only bindings fail closed.
+  The claimed Namespace must match the Sandbox UID backlink. Deployment custody
+  follows controller managed-fields or exact credential-consumer UID evidence,
+  never labels alone or an invalid cross-namespace owner reference. The settled
+  single-replica Deployment, current revision/template ReplicaSet, and Running,
+  Ready Pod must form the exact Deployment → ReplicaSet → Pod controller chain.
+  Suspension, credential-rebind holds, rollout changes and replacements reject
+  dispatch. Revision objectives must match their nonce and SHA-256 digest.
+- Before allowing dispatch, a bounded second read requires unchanged UID and
+  resourceVersion for all seven resources, ending with the binding and Task.
+  This detects changes during collection; it is not a cross-resource transaction
+  or an execution lease, and cannot prevent changes after the check. These checks
+  depend on controller-owned bindings and appropriate write authority; owner
+  references alone are not an authorization boundary. Historical durable claims
+  remain recoverable without treating a replacement Pod as permission to resend.
 - Authenticated replies append to a bounded, resourceVersion-CAS event journal.
   Acceptance precedes ACK; terminal evidence is persisted before publication.
   Lost write responses preserve the durable state rather than authorizing resend.
