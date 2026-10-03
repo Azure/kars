@@ -4,8 +4,8 @@
 "use client";
 
 // kars Bridge Workspace — the artifact review loop (§16). A reviewer accepts a
-// deliverable or requests changes; request-changes re-drives the producing task
-// on the delta and a new revision lands. Typed by artifact kind, with the full
+// deliverable or requests a distinct revision; submission does not prove that
+// the requested execution has started or completed. Typed by artifact kind, with the full
 // review lineage and a link into the run's provenance (the execution trace).
 
 import { useState, useTransition } from "react";
@@ -13,6 +13,7 @@ import { useRouter } from "next/navigation";
 import { submitReview } from "./review-actions";
 import { setLaunch } from "@/app/tasks/[name]/launch-actions";
 import type { ReviewState } from "@/lib/types";
+import { formatEvidenceTime } from "@/lib/format";
 
 const KIND_LABEL: Record<string, string> = {
   code: "Code — review as a change",
@@ -213,7 +214,7 @@ export function ReviewPanel({
                   onClick={() => act("request_changes")}
                   className="rounded-lg bg-signal px-4 py-2 text-sm font-semibold text-signal-fg transition hover:opacity-90 disabled:opacity-50"
                 >
-                  {pending ? "Sending…" : "Send & re-run"}
+                  {pending ? "Sending…" : "Request revision"}
                 </button>
                 <button
                   type="button"
@@ -248,7 +249,7 @@ export function ReviewPanel({
                   {h.decision === "approve" ? "Approved" : "Requested changes"}
                 </span>{" "}
                 <span className="text-foreground-muted">
-                  · rev {h.revision} · {new Date(h.decided_at).toLocaleString()} · {h.reviewer}
+                  · rev {h.revision} · {formatEvidenceTime(h.decided_at)} · {h.reviewer}
                   {h.attested === false && (
                     <span
                       className="ml-1 rounded bg-surface-muted px-1 py-0.5 text-[10px] text-foreground-muted"
