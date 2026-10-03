@@ -7,6 +7,7 @@ import { KubernetesMissionStore, missionObjective } from "./mission-store.js";
 import { MissionDispatcher, missionAttemptName, missionContentDigest, type MissionAttempt, type MissionCandidate } from "./mission-dispatcher.js";
 import type { MissionReply } from "./mission-protocol.js";
 import type { IMeshTransport } from "./transport-interface.js";
+import type { MissionMetadata, MissionWorkloadResources } from "./mission-workload.js";
 
 const c: MissionCandidate = { namespace: "kars-system", taskName: "briefing", taskUid: "task-uid", sandboxUid: "sandbox-uid", podUid: "pod-uid",
   runNonce: "run-1", agentDid: `did:mesh:${"a".repeat(32)}`, dispatcherDid: `did:mesh:${"b".repeat(32)}`, agentName: "Briefing writer", content: "Write an approval checklist." };
@@ -18,10 +19,9 @@ const evidence = { model: "gpt-5.4-mini", rounds: 1, usage: { promptTokens: 20, 
 const stamp = "2026-10-02T20:00:00.000Z";
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 interface Resource {
-  metadata: { name: string; namespace?: string; uid?: string; resourceVersion?: string; generation?: number; deletionTimestamp?: string;
-    ownerReferences?: typeof owner[]; annotations?: Record<string, string>; labels?: Record<string, string> };
-  spec?: { objective: string; execution: { launch: boolean } };
-  status?: { observedGeneration?: number; executionPhase?: string; sandboxRef?: { name: string }; phase?: string; conditions?: Array<{ type: string; status: string }> };
+  metadata: MissionMetadata;
+  spec?: NonNullable<MissionWorkloadResources["deployment"]["spec"]> & { objective?: string; execution?: { launch: boolean }; suspended?: boolean };
+  status?: NonNullable<MissionWorkloadResources["deployment"]["status"]> & { executionPhase?: string; sandboxRef?: { name: string }; phase?: string; conditions?: Array<{ type: string; status: string }> };
   data?: Record<string, string>; immutable?: boolean;
 }
 
@@ -57,13 +57,34 @@ function fixture() {
     spec: { objective: c.content, execution: { launch: true } }, status: { observedGeneration: 1, executionPhase: "Running", sandboxRef: { name: "briefing" } } };
   api.put(taskPath, task);
   const bindingPath = `${mapsPath}/kars-mission-binding-${c.taskName}`;
-  api.put(bindingPath, { metadata: { name: `kars-mission-binding-${c.taskName}`, namespace: c.namespace, ownerReferences: [owner] },
-    data: { "binding.json": JSON.stringify({ ...c, sandboxName: "briefing", podName: "briefing-abc" }) } });
+  api.put(bindingPath, { metadata: { name: `kars-mission-binding-${c.taskName}`, namespace: c.namespace, uid: "binding-uid", ownerReferences: [owner] },
+    data: { "binding.json": JSON.stringify({ ...c, sandboxName: "briefing", podName: "briefing-abc", namespaceUid: "namespace-uid",
+      deploymentUid: "deployment-uid", deploymentGeneration: 1, replicaSetName: "briefing-rs", replicaSetUid: "replicaset-uid" }) } });
   const sandboxPath = `/apis/kars.azure.com/v1alpha1/namespaces/${c.namespace}/karssandboxes/briefing`;
-  api.put(sandboxPath, { metadata: { name: "briefing", namespace: c.namespace, uid: c.sandboxUid, ownerReferences: [owner] } });
+  api.put(sandboxPath, { metadata: { name: "briefing", namespace: c.namespace, uid: c.sandboxUid, ownerReferences: [owner], annotations: { [`${p}namespace-uid`]: "namespace-uid" } } });
+  const namespacePath = "/api/v1/namespaces/kars-briefing";
+  api.put(namespacePath, { metadata: { name: "kars-briefing", uid: "namespace-uid", annotations: {
+    [`${p}namespace-claim-version`]: "v1", [`${p}sandbox-namespace`]: c.namespace, [`${p}sandbox-name`]: "briefing", [`${p}sandbox-uid`]: c.sandboxUid,
+  } }, status: { phase: "Active" } });
+  const deploymentPath = "/apis/apps/v1/namespaces/kars-briefing/deployments/briefing";
+  const template = { metadata: { labels: { [`${p}sandbox`]: "briefing" } }, spec: { containers: [{ name: "openclaw", image: "sandbox:latest" }] } };
+  const replicas = { observedGeneration: 1, replicas: 1, readyReplicas: 1, availableReplicas: 1 };
+  api.put(deploymentPath, { metadata: { name: "briefing", namespace: "kars-briefing", uid: "deployment-uid", generation: 1,
+    labels: { [`${p}sandbox`]: "briefing", [`${p}component`]: "sandbox", [`${p}parent-namespace`]: c.namespace },
+    annotations: { "deployment.kubernetes.io/revision": "1" },
+    managedFields: [{ manager: "kars-controller/karssandbox", operation: "Apply", fieldsV1: { "f:spec": {} } }],
+  }, spec: { replicas: 1, template }, status: { ...replicas, updatedReplicas: 1 } });
+  const replicaSetPath = "/apis/apps/v1/namespaces/kars-briefing/replicasets/briefing-rs";
+  api.put(replicaSetPath, { metadata: { name: "briefing-rs", namespace: "kars-briefing", uid: "replicaset-uid", generation: 1,
+    ownerReferences: [{ apiVersion: "apps/v1", kind: "Deployment", name: "briefing", uid: "deployment-uid", controller: true }],
+    annotations: { "deployment.kubernetes.io/revision": "1" }, labels: { "pod-template-hash": "abc" },
+  }, spec: { replicas: 1, template: { ...template, metadata: { labels: { ...template.metadata.labels, "pod-template-hash": "abc" } } } }, status: replicas });
   const podPath = "/api/v1/namespaces/kars-briefing/pods/briefing-abc";
-  api.put(podPath, { metadata: { name: "briefing-abc", namespace: "kars-briefing", uid: c.podUid }, status: { phase: "Running", conditions: [{ type: "Ready", status: "True" }] } });
-  return { api, store: new KubernetesMissionStore(api), task, bindingPath, sandboxPath, podPath };
+  api.put(podPath, { metadata: { name: "briefing-abc", namespace: "kars-briefing", uid: c.podUid, labels: { "pod-template-hash": "abc" },
+    ownerReferences: [{ apiVersion: "apps/v1", kind: "ReplicaSet", name: "briefing-rs", uid: "replicaset-uid", controller: true }],
+  }, status: { phase: "Running", conditions: [{ type: "Ready", status: "True" }] } });
+  const paths = { task: taskPath, binding: bindingPath, sandbox: sandboxPath, namespace: namespacePath, deployment: deploymentPath, replicaSet: replicaSetPath, pod: podPath };
+  return { api, store: new KubernetesMissionStore(api), task, bindingPath, sandboxPath, namespacePath, deploymentPath, replicaSetPath, podPath, paths };
 }
 function initial(candidate = c): MissionAttempt {
   return { version: 1, candidate, assignment: { ...candidate, type: "mission:assign", version: 1, bootId: "boot-1", assignmentId: "assignment-1" },
@@ -122,6 +143,108 @@ describe("Kubernetes mission attempt store", () => {
     h.api.resources.get(taskPath)!.status!.observedGeneration = 1;
     h.api.resources.get(h.podPath)!.status!.conditions = [{ type: "Ready", status: "False" }];
     expect(await h.store.isCurrent(c)).toBe(false);
+  });
+  it.each(["task", "binding", "sandbox", "namespace", "deployment", "replicaSet", "pod"] as const)("requires every %s identity/revision and detects races during the collection", async kind => {
+    for (const field of ["uid", "resourceVersion"] as const) {
+      const h = fixture(); delete h.api.resources.get(h.paths[kind])!.metadata[field];
+      expect(await h.store.isCurrent(c)).toBe(false);
+    }
+    for (const replacement of [false, true]) {
+      const h = fixture(); let reads = 0;
+      h.api.before = (method, path) => {
+        if (method === "GET" && path === h.paths[kind] && ++reads === 2) {
+          const current = clone(h.api.resources.get(path)!);
+          if (replacement) current.metadata.uid = "replacement";
+          h.api.put(path, current);
+        }
+      };
+      expect(await h.store.isCurrent(c)).toBe(false);
+      expect(reads).toBe(2);
+      expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+    }
+  });
+  it.each(["namespace", "deployment", "replicaSet"] as const)("rejects missing, deleting, or replaced %s workloads", async kind => {
+    const h = fixture(); const path = h.paths[kind]; const saved = clone(h.api.resources.get(path)!);
+    h.api.resources.delete(path); expect(await h.store.isCurrent(c)).toBe(false);
+    h.api.put(path, { ...saved, metadata: { ...saved.metadata, deletionTimestamp: stamp } }); expect(await h.store.isCurrent(c)).toBe(false);
+    h.api.put(path, { ...saved, metadata: { ...saved.metadata, uid: "replacement" } }); expect(await h.store.isCurrent(c)).toBe(false);
+  });
+  it.each(["binding", "sandbox", "replicaSet", "pod"] as const)("requires exactly one correct controller owner for %s", async kind => {
+    const h = fixture(); const meta = h.api.resources.get(h.paths[kind])!.metadata; const correct = clone(meta.ownerReferences![0]);
+    for (const refs of [[], [{ ...correct, uid: "other" }], [{ ...correct, name: "other" }], [{ ...correct, kind: "Other" }],
+      [{ ...correct, apiVersion: "other/v1" }], [{ ...correct, controller: false }], [correct, correct]]) {
+      meta.ownerReferences = refs; expect(await h.store.isCurrent(c)).toBe(false);
+    }
+    meta.ownerReferences = [correct, { ...correct, kind: "Observer", controller: false }];
+    expect(await h.store.isCurrent(c)).toBe(true);
+  });
+  it.each([
+    ["namespace", `${p}namespace-claim-version`], ["namespace", `${p}sandbox-namespace`],
+    ["namespace", `${p}sandbox-name`], ["namespace", `${p}sandbox-uid`], ["sandbox", `${p}namespace-uid`],
+  ] as const)("requires exact %s claim annotation %s", async (kind, annotation) => {
+    const h = fixture(); const meta = h.api.resources.get(h.paths[kind])!.metadata;
+    delete meta.annotations![annotation]; expect(await h.store.isCurrent(c)).toBe(false);
+    meta.annotations![annotation] = "other"; expect(await h.store.isCurrent(c)).toBe(false);
+  });
+  it("rejects namespace adoption, suspended sandboxes and credential-rebind holds", async () => {
+    for (const mutate of [
+      (h: ReturnType<typeof fixture>) => { h.api.resources.get(h.namespacePath)!.metadata.annotations![`${p}namespace-prestage`] = "bind-next-sandbox"; },
+      (h: ReturnType<typeof fixture>) => { h.api.resources.get(h.namespacePath)!.metadata.ownerReferences = [owner]; },
+      (h: ReturnType<typeof fixture>) => { h.api.resources.get(h.namespacePath)!.status!.phase = "Terminating"; },
+      (h: ReturnType<typeof fixture>) => { h.api.resources.get(h.sandboxPath)!.spec = { suspended: true }; },
+      (h: ReturnType<typeof fixture>) => { h.api.resources.get(h.sandboxPath)!.metadata.annotations![`${p}credential-rebind-task-uid`] = c.taskUid; },
+    ]) { const h = fixture(); mutate(h); expect(await h.store.isCurrent(c)).toBe(false); }
+  });
+  it("requires Deployment custody, not labels or a cross-namespace Sandbox owner", async () => {
+    const h = fixture(); const meta = h.api.resources.get(h.deploymentPath)!.metadata;
+    delete meta.managedFields; expect(await h.store.isCurrent(c)).toBe(false);
+    meta.managedFields = [{ manager: "other", operation: "Apply", fieldsV1: { "f:spec": {} } }]; expect(await h.store.isCurrent(c)).toBe(false);
+    meta.managedFields[0].manager = "kars-controller/karssandbox"; meta.managedFields[0].operation = "Update"; expect(await h.store.isCurrent(c)).toBe(false);
+    meta.annotations![`${p}credential-sandbox-uid`] = c.sandboxUid;
+    meta.annotations![`${p}credential-namespace-uid`] = "namespace-uid"; expect(await h.store.isCurrent(c)).toBe(true);
+    meta.ownerReferences = [owner]; expect(await h.store.isCurrent(c)).toBe(false);
+    delete meta.ownerReferences; meta.annotations![`${p}credential-namespace-uid`] = "old"; expect(await h.store.isCurrent(c)).toBe(false);
+  });
+  it.each(["task", "deployment", "replicaSet"] as const)("requires positive, observed %s generations", async kind => {
+    for (const generation of [undefined, 0, -1, 1.5, Number.MAX_SAFE_INTEGER + 1, 2]) {
+      const h = fixture(); const r = h.api.resources.get(h.paths[kind])!;
+      r.metadata.generation = generation;
+      if (generation !== 2) r.status!.observedGeneration = generation;
+      expect(await h.store.isCurrent(c)).toBe(false);
+    }
+  });
+  it.each(["deployment", "replicaSet"] as const)("waits for the complete single-replica %s rollout", async kind => {
+    for (const field of ["replicas", "readyReplicas", "availableReplicas"] as const) {
+      for (const count of [undefined, 0, 2]) {
+        const h = fixture(); h.api.resources.get(h.paths[kind])!.status![field] = count;
+        expect(await h.store.isCurrent(c)).toBe(false);
+      }
+    }
+    const h = fixture(); const r = h.api.resources.get(h.paths[kind])!;
+    r.status!.terminatingReplicas = 1; expect(await h.store.isCurrent(c)).toBe(false);
+    delete r.status!.terminatingReplicas; r.spec!.replicas = 0; expect(await h.store.isCurrent(c)).toBe(false);
+  });
+  it("rejects paused or partially updated Deployments and mismatched templates/revisions/hashes", async () => {
+    for (const mutate of [
+      (h: ReturnType<typeof fixture>) => { h.api.resources.get(h.deploymentPath)!.spec!.paused = true; },
+      (h: ReturnType<typeof fixture>) => { h.api.resources.get(h.deploymentPath)!.status!.updatedReplicas = 0; },
+      (h: ReturnType<typeof fixture>) => { h.api.resources.get(h.replicaSetPath)!.metadata.annotations!["deployment.kubernetes.io/revision"] = "2"; },
+      (h: ReturnType<typeof fixture>) => { h.api.resources.get(h.podPath)!.metadata.labels!["pod-template-hash"] = "old"; },
+      (h: ReturnType<typeof fixture>) => { h.api.resources.get(h.replicaSetPath)!.spec!.template!.spec!.containers![0].image = "other:latest"; },
+      (h: ReturnType<typeof fixture>) => { delete h.api.resources.get(h.deploymentPath)!.spec!.template; },
+    ]) { const h = fixture(); mutate(h); expect(await h.store.isCurrent(c)).toBe(false); }
+  });
+  it.each([{ namespaceUid: "" }, { deploymentUid: null }, { replicaSetUid: "" }, { replicaSetName: "../bad" },
+    { deploymentGeneration: 0 }, { deploymentGeneration: "1" }, { deploymentGeneration: 1.5 }])("rejects malformed workload binding fields %j before workload reads", async mutation => {
+    const h = fixture(); const cm = h.api.resources.get(h.bindingPath)!;
+    cm.data!["binding.json"] = JSON.stringify({ ...JSON.parse(cm.data!["binding.json"]), ...mutation });
+    expect(await h.store.isCurrent(c)).toBe(false); expect(h.api.calls).toHaveLength(2);
+  });
+  it("does not dispatch or claim when the bound Pod has no current ReplicaSet owner", async () => {
+    const h = fixture(); delete h.api.resources.get(h.podPath)!.metadata.ownerReferences;
+    const mesh = { currentDid: c.dispatcherDid, isConnected: true, isPlaintextPeer: () => false } as unknown as IMeshTransport;
+    expect(await new MissionDispatcher(mesh, h.store, "process", 1000).dispatch(c)).toBe("stale");
+    expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
   });
   it("decodes only an exact nonce-bound, digest-checked UTF-8 revision objective", () => {
     const { task } = fixture(); const text = "Revise café guidance ✓";

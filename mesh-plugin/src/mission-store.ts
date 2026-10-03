@@ -5,30 +5,26 @@ import { isDeepStrictEqual } from "node:util";
 import { KubernetesError, type KubernetesJson } from "./kubernetes-json.js";
 import { missionAttemptName, missionContentDigest, type MissionAttempt, type MissionAttemptStore, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
 import { parseMissionMessage, sameMissionTarget } from "./mission-protocol.js";
-
-interface Metadata {
-  name: string; namespace?: string; uid?: string; resourceVersion?: string; generation?: number;
-  deletionTimestamp?: string; annotations?: Record<string, string>; labels?: Record<string, string>;
-  ownerReferences?: Array<{ apiVersion: string; kind: string; name: string; uid: string; controller?: boolean }>;
-}
+import { currentMissionWorkload, singleControllerOwner, type MissionMetadata as Metadata, type MissionWorkloadBinding, type MissionWorkloadResources } from "./mission-workload.js";
 interface ConfigMap { apiVersion: "v1"; kind: "ConfigMap"; metadata: Metadata; data: Record<string, string>; immutable?: boolean }
 interface Task {
   apiVersion: string; kind: string; metadata: Metadata;
   spec: { objective: string; execution?: { launch?: boolean } };
   status?: { observedGeneration?: number; executionPhase?: string; sandboxRef?: { name: string } };
 }
-interface Binding {
-  taskName: string; taskUid: string; sandboxName: string; sandboxUid: string; podName: string; podUid: string;
-  agentDid: string; dispatcherDid: string;
+interface Binding extends MissionWorkloadBinding {
+  taskName: string; taskUid: string; agentDid: string; dispatcherDid: string;
 }
 function parseBinding(value: unknown): Binding | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
   const b = value as Record<string, unknown>;
-  if (![b.taskName, b.taskUid, b.sandboxName, b.sandboxUid, b.podName, b.podUid, b.agentDid, b.dispatcherDid]
-    .every(v => typeof v === "string" && v.length > 0)) return null;
+  if (![b.taskName, b.taskUid, b.sandboxName, b.sandboxUid, b.podName, b.podUid, b.agentDid, b.dispatcherDid,
+    b.namespaceUid, b.deploymentUid, b.replicaSetName, b.replicaSetUid]
+    .every(v => typeof v === "string" && v.length > 0)
+    || !Number.isSafeInteger(b.deploymentGeneration) || (b.deploymentGeneration as number) < 1) return null;
   const name = /^[a-z0-9](?:[a-z0-9.-]*[a-z0-9])?$/;
-  if (!name.test(b.sandboxName as string) || !name.test(b.podName as string)
-    || (b.podName as string).length > 253 || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(`kars-${b.sandboxName}`)
+  if (![b.sandboxName, b.podName, b.replicaSetName].every(v => name.test(v as string) && (v as string).length <= 253)
+    || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(`kars-${b.sandboxName}`)
     || `kars-${b.sandboxName}`.length > 63) return null;
   return value as Binding;
 }
@@ -46,8 +42,7 @@ const isMissing = (e: unknown): boolean => e instanceof KubernetesError && e.sta
 const isConflict = (e: unknown): boolean => e instanceof KubernetesError && e.status === 409;
 const owner = (candidate: MissionCandidate) => ({ apiVersion: "kars.azure.com/v1alpha1", kind: "KarsTask", name: candidate.taskName, uid: candidate.taskUid, controller: true });
 const owned = (metadata: Metadata, candidate: MissionCandidate): boolean =>
-  !metadata.deletionTimestamp && metadata.ownerReferences?.some(o => o.apiVersion === "kars.azure.com/v1alpha1"
-    && o.kind === "KarsTask" && o.name === candidate.taskName && o.uid === candidate.taskUid && o.controller === true) === true;
+  !metadata.deletionTimestamp && singleControllerOwner(metadata, "kars.azure.com/v1alpha1", "KarsTask", candidate.taskName, candidate.taskUid);
 
 export function missionObjective(task: Task, nonce: string): string | null {
   const annotations = task.metadata.annotations ?? {};
@@ -82,26 +77,47 @@ export class KubernetesMissionStore implements MissionAttemptStore {
 
   async isCurrent(candidate: MissionCandidate): Promise<boolean> {
     const task = await this.task(candidate);
-    if (!this.current(task, candidate) || task.status?.observedGeneration !== task.metadata.generation
-      || task.status?.executionPhase !== "Running") return false;
+    if (!this.current(task, candidate) || !task.metadata.resourceVersion
+      || !Number.isSafeInteger(task.metadata.generation) || task.metadata.generation! < 1
+      || task.status?.observedGeneration !== task.metadata.generation || task.status?.executionPhase !== "Running") return false;
     try {
       const cm = await this.api.request<ConfigMap>("GET", mapPath(candidate.namespace, `kars-mission-binding-${candidate.taskName}`));
-      if (!owned(cm.metadata, candidate) || cm.metadata.namespace !== candidate.namespace
+      if (!owned(cm.metadata, candidate) || !cm.metadata.uid || !cm.metadata.resourceVersion
+        || cm.metadata.namespace !== candidate.namespace
         || cm.metadata.name !== `kars-mission-binding-${candidate.taskName}` || !cm.data?.["binding.json"]) return false;
       const binding = parseBinding(JSON.parse(cm.data["binding.json"]));
       if (!binding || binding.taskName !== candidate.taskName || binding.taskUid !== candidate.taskUid
         || binding.sandboxUid !== candidate.sandboxUid || binding.podUid !== candidate.podUid
         || binding.agentDid !== candidate.agentDid || binding.dispatcherDid !== candidate.dispatcherDid
         || binding.sandboxName !== task.status.sandboxRef?.name) return false;
-      const sandbox = await this.api.request<{ metadata: Metadata }>("GET",
-        `/apis/kars.azure.com/v1alpha1/namespaces/${segment(candidate.namespace)}/karssandboxes/${segment(binding.sandboxName)}`);
-      if (!owned(sandbox.metadata, candidate) || sandbox.metadata.uid !== candidate.sandboxUid
-        || sandbox.metadata.name !== binding.sandboxName || sandbox.metadata.namespace !== candidate.namespace) return false;
-      const pod = await this.api.request<{ metadata: Metadata; status?: { phase?: string; conditions?: Array<{ type: string; status: string }> } }>("GET",
-        `/api/v1/namespaces/${segment(`kars-${binding.sandboxName}`)}/pods/${segment(binding.podName)}`);
-      return !pod.metadata.deletionTimestamp && pod.metadata.uid === candidate.podUid
-        && pod.metadata.name === binding.podName && pod.metadata.namespace === `kars-${binding.sandboxName}` && pod.status?.phase === "Running"
-        && pod.status.conditions?.some(c => c.type === "Ready" && c.status === "True") === true;
+      const runtimeNamespace = segment(`kars-${binding.sandboxName}`);
+      const paths = {
+        sandbox: `/apis/kars.azure.com/v1alpha1/namespaces/${segment(candidate.namespace)}/karssandboxes/${segment(binding.sandboxName)}`,
+        namespace: `/api/v1/namespaces/${runtimeNamespace}`,
+        deployment: `/apis/apps/v1/namespaces/${runtimeNamespace}/deployments/${segment(binding.sandboxName)}`,
+        replicaSet: `/apis/apps/v1/namespaces/${runtimeNamespace}/replicasets/${segment(binding.replicaSetName)}`,
+        pod: `/api/v1/namespaces/${runtimeNamespace}/pods/${segment(binding.podName)}`,
+      };
+      const sandbox = await this.api.request<MissionWorkloadResources["sandbox"]>("GET", paths.sandbox);
+      if (!owned(sandbox.metadata, candidate)) return false;
+      const namespace = await this.api.request<MissionWorkloadResources["namespace"]>("GET", paths.namespace);
+      const deployment = await this.api.request<MissionWorkloadResources["deployment"]>("GET", paths.deployment);
+      const replicaSet = await this.api.request<MissionWorkloadResources["replicaSet"]>("GET", paths.replicaSet);
+      const pod = await this.api.request<MissionWorkloadResources["pod"]>("GET", paths.pod);
+      if (!currentMissionWorkload(binding, candidate.namespace, { sandbox, namespace, deployment, replicaSet, pod })) return false;
+      // A bounded second collection catches changes during traversal, not changes after this check.
+      // This is deliberately not a multi-resource transaction or an execution lease.
+      const snapshots: Array<[string, { metadata: Metadata }]> = [
+        [paths.pod, pod], [paths.replicaSet, replicaSet], [paths.deployment, deployment],
+        [paths.namespace, namespace], [paths.sandbox, sandbox],
+        [mapPath(candidate.namespace, cm.metadata.name), cm], [taskPath(candidate), task],
+      ];
+      for (const [path, prior] of snapshots) {
+        const fresh = await this.api.request<{ metadata: Metadata }>("GET", path);
+        if (fresh.metadata.deletionTimestamp || fresh.metadata.uid !== prior.metadata.uid
+          || fresh.metadata.resourceVersion !== prior.metadata.resourceVersion) return false;
+      }
+      return true;
     } catch (e) { if (isMissing(e) || e instanceof SyntaxError) return false; throw e; }
   }
 
