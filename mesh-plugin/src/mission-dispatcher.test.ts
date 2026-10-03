@@ -81,6 +81,36 @@ describe("durable encrypted mission dispatcher", () => {
     expect(actual.contentDigest).toBe(missionContentDigest(candidate.content));
   });
 
+  it("advertises bounded artifacts and preserves them across terminal publication recovery", async () => {
+    const h = harness();
+    const artifacts = { "briefing.md": "# Briefing\r\nCafé — 日本語 🌍\n" };
+    h.alterReply(reply => reply.status === "succeeded" ? { ...reply, artifacts } : reply);
+    vi.mocked(h.store.publish).mockRejectedValueOnce(new Error("Kubernetes unavailable"));
+    await expect(h.dispatcher().dispatch(candidate)).rejects.toThrow("Kubernetes unavailable");
+    expect(h.state()!.attempt.assignment.artifactFormat).toBe("text-v1");
+    expect(h.state()!.attempt.reply?.artifacts).toEqual(artifacts);
+    expect(await h.dispatcher().dispatch(candidate)).toBe("already-claimed");
+    expect(h.store.publish).toHaveBeenLastCalledWith(expect.objectContaining({ reply: expect.objectContaining({ artifacts }) }));
+    expect(h.mesh.send).toHaveBeenCalledTimes(1);
+  });
+  it("accepts an old runtime's text-only reply without a capability flag", async () => {
+    const h = harness();
+    h.alterReply(reply => { const copy = { ...reply }; delete copy.artifactFormat; return copy; });
+    expect(await h.dispatcher().dispatch(candidate)).toBe("succeeded");
+    expect(h.state()!.attempt.reply?.artifactFormat).toBeUndefined();
+  });
+  it.each([
+    { artifactFormat: "text-v2" },
+    { artifactFormat: undefined, artifacts: { "a.md": "text" } },
+    { artifacts: { "response.md": "overwrite" } },
+  ])("does not publish malformed attachment replies %j", fields => {
+    const h = harness(); h.setStatuses(["succeeded"]);
+    h.alterReply(reply => ({ ...reply, ...fields }) as MissionReply);
+    return h.dispatcher().dispatch(candidate).then(result => {
+      expect(result).toBe("uncertain");
+      expect(h.store.publish).not.toHaveBeenCalled();
+    });
+  });
   it("allows only the winning atomic claim to send under concurrent dispatch", async () => {
     const h = harness();
     const results = await Promise.all([h.dispatcher().dispatch(candidate), h.dispatcher().dispatch(candidate)]);

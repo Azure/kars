@@ -192,7 +192,8 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       || (attempt.phase === "uncertain" && (!attempt.error || (attempt.reply && !["accepted", "running"].includes(attempt.reply.status))))
       || (attempt.reply && (parseMissionMessage(attempt.reply)?.type !== "mission:reply"
         || !sameMissionTarget(attempt.assignment, attempt.reply) || attempt.reply.bootId !== attempt.assignment.bootId
-        || attempt.reply.assignmentId !== attempt.assignment.assignmentId))
+        || attempt.reply.assignmentId !== attempt.assignment.assignmentId
+        || (attempt.reply.artifactFormat !== undefined && attempt.reply.artifactFormat !== attempt.assignment.artifactFormat)))
       || (["accepted", "running", "succeeded", "failed", "rejected"].includes(attempt.phase) && attempt.reply?.status !== attempt.phase)) {
       throw new Error("Malformed durable mission attempt");
     }
@@ -294,7 +295,8 @@ export class KubernetesMissionStore implements MissionAttemptStore {
     const { candidate, reply, assignment } = attempt;
     if (!reply || !["succeeded", "failed", "rejected"].includes(attempt.phase) || reply.status !== attempt.phase
       || parseMissionMessage(reply)?.type !== "mission:reply" || !sameMissionTarget(assignment, reply)
-      || assignment.assignmentId !== reply.assignmentId || assignment.bootId !== reply.bootId) throw new Error("Mission has no valid terminal reply");
+      || assignment.assignmentId !== reply.assignmentId || assignment.bootId !== reply.bootId
+      || (reply.artifactFormat !== undefined && reply.artifactFormat !== assignment.artifactFormat)) throw new Error("Mission has no valid terminal reply");
     const durable = await this.get(candidate);
     if (!durable || !isDeepStrictEqual(durable.attempt, attempt)) throw new Error("Terminal reply must be persisted before publication");
     const key = missionAttemptName(candidate).replace("kars-mission-attempt-", "");
@@ -306,6 +308,7 @@ export class KubernetesMissionStore implements MissionAttemptStore {
         [`${prefix}mission-run-nonce`]: candidate.runNonce },
     });
     const success = reply.status === "succeeded";
+    const artifacts: Record<string, string> = success ? { "response.md": reply.output!, ...reply.artifacts } : {};
     const data: Record<string, string> = {
       taskName: candidate.taskName, taskUid: candidate.taskUid, assignmentNonce: candidate.runNonce,
       assignmentId: assignment.assignmentId, agentName: candidate.agentName, agentDid: candidate.agentDid,
@@ -315,9 +318,8 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       model: reply.evidence?.model ?? "",
       ...(reply.evidence?.usage ? { totalTokens: String(reply.evidence.usage.totalTokens) } : {}),
       usageKnown: String(reply.evidence?.usage !== null && reply.evidence?.usage !== undefined),
-      artifactCount: success ? "1" : "0", "evidence.json": JSON.stringify(reply),
+      artifactCount: String(Object.keys(artifacts).length), "evidence.json": JSON.stringify(reply),
     };
-    const artifacts: Record<string, string> = success ? { "response.md": reply.output! } : {};
     await this.immutable({ apiVersion: "v1", kind: "ConfigMap", metadata: metadata(`kars-mission-output-${key}`, "canonical", "mission-output"), data });
     await this.immutable({ apiVersion: "v1", kind: "ConfigMap", metadata: metadata(`kars-mission-artifacts-${key}`, "canonical", "mission-artifacts"), data: artifacts });
     const task = await this.task(candidate);

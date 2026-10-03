@@ -78,7 +78,7 @@ export class MissionDispatcher {
         && reply.status === "ready" && reply.challenge === probe.challenge && sameMissionTarget(target, reply) ? reply : null;
     }, { retries: 0, timeoutMs: Math.min(this.timeoutMs, 15_000) });
     const assignment: MissionAssignment = {
-      ...target, type: "mission:assign", version: 1, bootId: ready.bootId, assignmentId: randomUUID(), content,
+      ...target, type: "mission:assign", version: 1, bootId: ready.bootId, assignmentId: randomUUID(), artifactFormat: "text-v1", content,
     };
     if (!parseMissionMessage(assignment)) throw new Error("Mission assignment exceeds protocol bounds");
     if (!await this.store.isCurrent(candidate)) return "stale";
@@ -108,7 +108,8 @@ export class MissionDispatcher {
           const message = parseMissionMessage(payload);
           return security === "encrypted" && from === agentDid && message?.type === "mission:reply"
             && message.status !== "ready" && sameMissionTarget(assignment, message)
-            && message.bootId === assignment.bootId && message.assignmentId === assignment.assignmentId ? message : null;
+            && message.bootId === assignment.bootId && message.assignmentId === assignment.assignmentId
+            && (message.artifactFormat === undefined || message.artifactFormat === assignment.artifactFormat) ? message : null;
         }, Math.max(1, deadline - Date.now()), { consume: true });
         const previous = stored.attempt;
         // A succeeded/failed reply is authoritative even when the earlier acceptance frame was lost.

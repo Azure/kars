@@ -23,6 +23,7 @@ import { routerUrl } from "./router-client.js";
 import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js";
 import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
 import { authorizeTaskAction } from "./task-policy.js";
+import type { MissionArtifacts } from "@kars/mesh/dist/mission-protocol.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyMeshClient = any;
@@ -70,11 +71,12 @@ export async function executeTaskWithEvidence(
   taskContent: unknown,
   deps: TaskLoopDeps,
   log: Logger,
-): Promise<TaskExecutionEvidence & { output: string }> {
-  const ledger = new TaskCompletionLedger(taskModel());
+  artifactsEnabled = false,
+): Promise<TaskExecutionEvidence & { output: string; artifacts?: MissionArtifacts }> {
+  const ledger = new TaskCompletionLedger(taskModel(), artifactsEnabled);
   try {
     const output = await processTaskWithTools(taskContent, deps, log, ledger);
-    return { ...ledger.snapshot(), output };
+    return { ...ledger.snapshot(), ...ledger.artifactSnapshot(), output };
   } catch (error) {
     if (error instanceof TaskExecutionError) throw error;
     throw new TaskExecutionError(error instanceof Error ? error.message : "Task execution failed", ledger.snapshot());
@@ -96,7 +98,17 @@ export async function processTaskWithTools(
   const { execSync } = await import("node:child_process");
   const model = taskModel();
 
-  const tools = getTaskTools();
+  const tools = getTaskTools().map(tool => !ledger?.artifactsEnabled || tool.function.name !== "file_write" ? tool : {
+    ...tool, function: {
+      ...tool.function,
+      description: "Write UTF-8 text locally. To deliver this exact content through Bridge on mission success, set artifact_name to a safe filename (not response.md). Use null for private scratch files. At most 16 named artifacts and 128 KiB serialized total; do not export secrets or unrelated data.",
+      parameters: {
+        ...tool.function.parameters,
+        properties: { ...tool.function.parameters.properties, artifact_name: { type: ["string", "null"], description: "Explicit Bridge attachment filename, or null for local-only scratch" } },
+        required: [...tool.function.parameters.required, "artifact_name"],
+      },
+    },
+  });
   const strictCount = tools.filter((t: any) => t?.function?.strict === true).length;
   log.info(`AGT task-loop: ${tools.length} tools loaded (strict=${strictCount}, KARS_STRICT_TOOLS=${process.env.KARS_STRICT_TOOLS || "<unset>"}, model=${process.env.OPENCLAW_MODEL || process.env.KARS_MODEL || "<unset>"})`);
   const provider = process.env.KARS_PROVIDER;
@@ -135,7 +147,11 @@ export async function processTaskWithTools(
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: process.env.OFFLOAD_REQUEST_ID ? offloadPrompt : subAgentPrompt,
+      content: ledger
+        ? `You are a Kars mission agent. Complete the user's reviewed task within its constraints and the authorized tools. Do not invent observations, citations, work performed, or results. Tool access does not authorize external actions outside the task. Return the actual useful deliverable, never only a promise, status, or sandbox path. Your final answer is sent securely to Bridge as response.md for review, not to a sibling agent. Do not send messages or transfer files to peers unless the task explicitly requires it. ${ledger.artifactsEnabled
+          ? "For a named text deliverable, call file_write with the complete content and artifact_name set to its download filename; check that the tool confirms it was attached. Only explicitly attached successful writes are returned to Bridge. Local-only writes, existing files and tool-generated files are NOT harvested. Keep the final answer concise when attachments contain the deliverable, and name those attachments. If attaching fails, fix it or include the complete deliverable inline."
+          : "This dispatcher supports inline delivery only: include the full requested content in your final answer. Local files are NOT delivered."}`
+        : process.env.OFFLOAD_REQUEST_ID ? offloadPrompt : subAgentPrompt,
     },
     {
       role: "user",
@@ -263,7 +279,9 @@ export async function processTaskWithTools(
           } catch (parseErr) {
             const argLen = (tc.function.arguments || "").length;
             const fn = tc.function.name;
-            const hint = (fn === "file_write" || fn === "mesh_send" || fn === "foundry_code_execute")
+            const hint = ledger
+              ? " — use valid JSON with shorter, properly escaped arguments, or return the complete deliverable in the final response. Do not replace the deliverable with a sandbox path or send it to peers."
+              : (fn === "file_write" || fn === "mesh_send" || fn === "foundry_code_execute")
               ? ` — the ${fn} arguments JSON is malformed because a large string field (${argLen} bytes) was not properly escaped by the model. DO NOT retry the same call. INSTEAD, shrink the arguments by moving the large content out of the tool-call envelope: (1) call foundry_code_execute with a SHORT snippet that builds the data structure programmatically (e.g. fetch results from a prior tool call, or json.loads a small string) and json.dump's it to /mnt/data/<name>.json; the wrapper auto-downloads to /sandbox/.openclaw/workspace/. (2) then call mesh_transfer_file(to_agent='<sibling>', file_path='/sandbox/.openclaw/workspace/<name>.json') — both arguments are tiny so the call cannot corrupt. Never put multi-KB stringified-JSON inside any tool-call argument field.`
               : "";
             result = `${fn} error: invalid tool-call arguments JSON (${argLen} bytes, parse failed: ${(parseErr as Error).message})${hint}`;
@@ -285,13 +303,15 @@ export async function processTaskWithTools(
               result = `file_write error: path must be under /sandbox/ or /tmp/ (got: ${filePath})`;
             } else {
               try {
+                const staged = ledger && args.artifact_name != null ? ledger.prepareArtifact(args.artifact_name, args.content) : undefined;
                 const fs = await import("node:fs");
                 const path = await import("node:path");
                 fs.mkdirSync(path.dirname(filePath), { recursive: true });
                 fs.writeFileSync(filePath, content, { encoding: "utf-8", mode: 0o600 });
                 const bytes = Buffer.byteLength(content, "utf-8");
                 log.info(`AGT sub-agent file_write: ${filePath} (${bytes} bytes)`);
-                result = `OK: wrote ${bytes} bytes to ${filePath}`;
+                if (staged) ledger!.commitArtifacts(staged);
+                result = `OK: wrote ${bytes} bytes to ${filePath}${staged ? `; attached as ${args.artifact_name} for Bridge on mission success` : ledger ? "; local only" : ""}`;
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
               } catch (err: any) {
                 result = `file_write error: ${err.message}`;

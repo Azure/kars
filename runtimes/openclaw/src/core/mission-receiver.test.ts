@@ -56,6 +56,54 @@ describe("encrypted mission receiver", () => {
     expect(s.execute).toHaveBeenCalledTimes(1);
     expect(s.replies).toHaveLength(3);
   });
+  it("negotiates attachments, preserves bytes and replays without execution or mutation", async () => {
+    const artifacts = { "briefing.md": "# Briefing\r\nCafé — 日本語 🌍\n" };
+    const execute = vi.fn(async () => ({ ...evidence, output: "Briefing attached", artifacts }));
+    const s = setup({ execute });
+    const negotiated = { ...assignment, artifactFormat: "text-v1" as const };
+    await s.receiver.handle(target.dispatcherDid, negotiated, "encrypted");
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
+    expect(execute).toHaveBeenCalledWith(assignment.content, expect.any(Function), true);
+    const terminal = structuredClone(s.replies.at(-1)!);
+    expect(terminal.artifacts).toEqual(artifacts);
+    artifacts["briefing.md"] = "changed executor state";
+    await s.receiver.handle(target.dispatcherDid, negotiated, "encrypted");
+    expect(s.replies.at(-1)).toEqual(terminal);
+    const count = s.replies.length;
+    await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    expect(s.replies).toHaveLength(count);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+  it("keeps old assignments on the inline executor path", async () => {
+    const s = setup();
+    await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
+    expect(s.execute).toHaveBeenCalledWith(assignment.content, expect.any(Function), false);
+    expect(s.replies.at(-1)).not.toHaveProperty("artifacts");
+    expect(s.replies.at(-1)).not.toHaveProperty("artifactFormat");
+  });
+  it.each([new Date(), { "response.md": "overwrite" }, { "a.md": "x".repeat(128 * 1024) }, { "a.md": " " }])("fails invalid raw attachments without leaking content in failure evidence %#", async artifacts => {
+    const s = setup({ execute: async () => ({ ...evidence, output: "Private draft", artifacts: artifacts as unknown as Record<string, string> }) });
+    await s.receiver.handle(target.dispatcherDid, { ...assignment, artifactFormat: "text-v1" }, "encrypted");
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("failed"));
+    const failed = s.replies.at(-1)!;
+    expect(failed).not.toHaveProperty("artifacts");
+    expect(failed).not.toHaveProperty("output");
+    expect(failed.evidence).toEqual(evidence);
+    expect(parseMissionMessage(failed)).not.toBeNull();
+  });
+  it("rejects executor attachments when the assignment did not negotiate them", async () => {
+    const s = setup({ execute: async () => ({ ...evidence, output: "Draft", artifacts: { "a.md": "text" } }) });
+    await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("failed"));
+    expect(s.replies.at(-1)?.evidence).toEqual(evidence);
+  });
+  it("consumes unsupported attachment formats without executing", async () => {
+    const s = setup();
+    expect(await s.receiver.handle(target.dispatcherDid, { ...assignment, artifactFormat: "text-v2" }, "encrypted")).toBe(true);
+    expect(s.execute).not.toHaveBeenCalled();
+    expect(s.replies).toEqual([]);
+  });
   it("serializes assignments before asynchronous authorization", async () => {
     let allow!: (value: boolean) => void;
     const s = setup({ authorize: () => new Promise(resolve => { allow = resolve; }) });
@@ -85,6 +133,8 @@ describe("encrypted mission receiver", () => {
     await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
     await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("failed"));
     expect(s.replies.some(r => r.status === "succeeded")).toBe(false);
+    expect(s.replies.at(-1)?.evidence).toEqual(evidence);
+    expect(parseMissionMessage(s.replies.at(-1))).not.toBeNull();
   });
   it("retains the terminal response when sending fails", async () => {
     let available = false;

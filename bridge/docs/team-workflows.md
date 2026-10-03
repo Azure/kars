@@ -54,6 +54,30 @@ make an old file current: the endpoint returns not found rather than serving
 unbound bytes. Retained historical evidence is a separate capability; this
 endpoint does not establish artifact access after Task deletion.
 
+### Explicit text attachments on mission success
+
+The bounded mission dispatcher advertises `artifactFormat: "text-v1"`. With a
+compatible OpenClaw runtime, an authorized `file_write` can supply `artifact_name`
+to attach the exact UTF-8 content it successfully wrote. The final answer remains
+`response.md`; a path or an “artifact ready” message is not the document itself.
+When attachment support is absent, the agent must return the complete answer
+inline instead.
+
+Attachments use flat filenames (letters/digits first, then letters, digits,
+periods, underscores or hyphens; at most 128 characters). `response.md`,
+`__proto__`, `constructor` and `prototype` are reserved. There may be at most
+16 additional files, totaling 128 KiB of serialized JSON including UTF-8 text,
+escaping and filenames. The entire encrypted mission payload remains bounded by
+192 KiB, including final answer and evidence; exceeding it fails the mission.
+
+A null or omitted `artifact_name` is local-only scratch. Nothing scans the
+filesystem, reads older files, or implicitly exports output from another tool.
+The last successful explicitly attached write to a name wins; later local-only
+or failed writes do not replace it. Staged attachments are execution-local and
+publish only with a successful terminal result, never on failure or in a later
+revision. Named files share the current-run ownership and download fences above.
+Transport success and valid files still require review for useful content.
+
 ### Engineering intake identity and existing PRs
 
 Dependabot remediation work uses a versioned identity containing the repository,
