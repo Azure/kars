@@ -3,6 +3,7 @@ Licensed under the MIT License. */}}{{- $localInference := .Values.localInferenc
 {{- $privacyRpc := .Values.observationPrivacyRpc | default dict }}
 {{- include "kars.inferenceCredentials.validate" . }}
 {{- include "kars.inferenceBudget.tls.validate" . }}
+{{- include "kars.missionDispatcher.validate" . }}
 {{- $inferenceCredentials := .Values.inferenceRouter.azure.openai.credentials | default dict }}
 {{- $budgetTls := (.Values.inferenceBudget | default dict).tls | default dict }}
 apiVersion: apps/v1
@@ -63,6 +64,14 @@ spec:
               value: {{ required "inferenceBudget.routerImageDigest is required" .Values.inferenceBudget.routerImageDigest | quote }}
             - name: KARS_INFERENCE_BUDGET_ADDR
               value: "0.0.0.0:9447"
+            {{- end }}
+            {{- if (.Values.missionDispatcher | default dict).enabled }}
+            - name: KARS_MISSION_DISPATCH_ENABLED
+              value: "true"
+            - name: KARS_MISSION_DISPATCHER_DEPLOYMENT
+              value: kars-mission-dispatcher
+            - name: KARS_MISSION_DISPATCHER_RELEASE
+              value: {{ .Release.Name | quote }}
             {{- end }}
             # Downward API — used by leader-election + S12.d
             # SignerPolicy watcher to scope to the controller's own

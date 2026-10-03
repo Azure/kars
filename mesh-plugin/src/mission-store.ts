@@ -35,13 +35,13 @@ const segment = (s: string): string => {
   if (!/^[a-z0-9][a-z0-9.-]{0,252}$/.test(s) || s === "." || s === "..") throw new Error("Invalid Kubernetes resource name");
   return encodeURIComponent(s);
 };
-const taskPath = (c: MissionCandidate): string => `/apis/kars.azure.com/v1alpha1/namespaces/${segment(c.namespace)}/karstasks/${segment(c.taskName)}`;
+const taskPath = (c: Pick<MissionCandidate, "namespace" | "taskName">): string => `/apis/kars.azure.com/v1alpha1/namespaces/${segment(c.namespace)}/karstasks/${segment(c.taskName)}`;
 const mapsPath = (namespace: string): string => `/api/v1/namespaces/${segment(namespace)}/configmaps`;
 const mapPath = (namespace: string, name: string): string => `${mapsPath(namespace)}/${segment(name)}`;
 const isMissing = (e: unknown): boolean => e instanceof KubernetesError && e.status === 404;
 const isConflict = (e: unknown): boolean => e instanceof KubernetesError && e.status === 409;
 const owner = (candidate: MissionCandidate) => ({ apiVersion: "kars.azure.com/v1alpha1", kind: "KarsTask", name: candidate.taskName, uid: candidate.taskUid, controller: true });
-const owned = (metadata: Metadata, candidate: MissionCandidate): boolean =>
+const owned = (metadata: Metadata, candidate: Pick<MissionCandidate, "taskName" | "taskUid">): boolean =>
   !metadata.deletionTimestamp && singleControllerOwner(metadata, "kars.azure.com/v1alpha1", "KarsTask", candidate.taskName, candidate.taskUid);
 
 export function missionObjective(task: Task, nonce: string): string | null {
@@ -61,9 +61,58 @@ export function missionObjective(task: Task, nonce: string): string | null {
 
 /** ConfigMap create/CAS supplies durable exclusion, including across dispatcher restarts. */
 export class KubernetesMissionStore implements MissionAttemptStore {
-  constructor(private readonly api: KubernetesJson) {}
+  constructor(private readonly api: KubernetesJson, private readonly dispatchCurrent: () => Promise<boolean> = async () => true) {}
 
-  private async task(candidate: MissionCandidate): Promise<Task | null> {
+  async *pendingTasks(): AsyncGenerator<{ namespace: string; taskName: string }> {
+    let continuation = "";
+    const seen = new Set<string>();
+    do {
+      const page = await this.api.request<{ items: Task[]; metadata?: { continue?: string } }>("GET",
+        `/apis/kars.azure.com/v1alpha1/karstasks?limit=10${continuation ? `&continue=${encodeURIComponent(continuation)}` : ""}`);
+      if (!Array.isArray(page.items)) throw new Error("Invalid Task listing");
+      for (const task of page.items) {
+        const m = task.metadata;
+        if (m?.namespace && m.name && m.uid && !m.deletionTimestamp && m.annotations?.[requested]
+          && m.annotations[requested] !== m.annotations[completed]) {
+          segment(m.namespace); segment(m.name);
+          yield { namespace: m.namespace, taskName: m.name };
+        }
+      }
+      continuation = page.metadata?.continue ?? "";
+      if (typeof continuation !== "string" || (continuation && seen.has(continuation)) || seen.size >= 10_000) {
+        throw new Error("Invalid or excessive Task pagination");
+      }
+      if (continuation) seen.add(continuation);
+    } while (continuation);
+  }
+
+  async candidate(reference: Pick<MissionCandidate, "namespace" | "taskName">, dispatcherDid: string): Promise<MissionCandidate | null> {
+    const task = await this.task(reference);
+    const m = task?.metadata;
+    const runNonce = m?.annotations?.[requested];
+    if (!task || !m?.uid || !m.resourceVersion || m.deletionTimestamp || m.name !== reference.taskName
+      || m.namespace !== reference.namespace || !runNonce || m.annotations?.[completed] === runNonce) return null;
+    const key = { ...reference, taskUid: m.uid, runNonce };
+    try {
+      // Recover the original persisted target even after a Pod or dispatcher replacement.
+      const cm = await this.api.request<ConfigMap>("GET", mapPath(reference.namespace, missionAttemptName(key)));
+      return this.unpack(cm, key).attempt.candidate;
+    } catch (e) { if (!isMissing(e)) throw e; }
+    const content = missionObjective(task, runNonce);
+    if (!content || task.spec.execution?.launch !== true) return null;
+    try {
+      const cm = await this.api.request<ConfigMap>("GET", mapPath(reference.namespace, `kars-mission-binding-${reference.taskName}`));
+      const binding = parseBinding(JSON.parse(cm.data?.["binding.json"] ?? "null"));
+      if (!binding || binding.taskName !== reference.taskName || binding.taskUid !== m.uid || binding.dispatcherDid !== dispatcherDid) return null;
+      const candidate: MissionCandidate = { ...key, sandboxUid: binding.sandboxUid, podUid: binding.podUid,
+        agentDid: binding.agentDid, dispatcherDid, agentName: binding.sandboxName, content };
+      if (!parseMissionMessage({ ...candidate, type: "mission:probe", version: 1, challenge: "candidate-validation" })
+        || !await this.isCurrent(candidate)) return null;
+      return candidate;
+    } catch (e) { if (isMissing(e) || e instanceof SyntaxError) return null; throw e; }
+  }
+
+  private async task(candidate: Pick<MissionCandidate, "namespace" | "taskName">): Promise<Task | null> {
     try { return await this.api.request<Task>("GET", taskPath(candidate)); }
     catch (e) { if (isMissing(e)) return null; throw e; }
   }
@@ -117,11 +166,11 @@ export class KubernetesMissionStore implements MissionAttemptStore {
         if (fresh.metadata.deletionTimestamp || fresh.metadata.uid !== prior.metadata.uid
           || fresh.metadata.resourceVersion !== prior.metadata.resourceVersion) return false;
       }
-      return true;
+      return await this.dispatchCurrent();
     } catch (e) { if (isMissing(e) || e instanceof SyntaxError) return false; throw e; }
   }
 
-  private unpack(cm: ConfigMap, candidate: MissionCandidate): StoredMissionAttempt {
+  private unpack(cm: ConfigMap, candidate: Pick<MissionCandidate, "namespace" | "taskName" | "taskUid" | "runNonce">): StoredMissionAttempt {
     if (!owned(cm.metadata, candidate) || !cm.metadata.resourceVersion || cm.metadata.namespace !== candidate.namespace
       || cm.metadata.name !== missionAttemptName(candidate)) throw new Error("Mission attempt ownership or revision mismatch");
     if (!cm.data?.["attempt.json"] || Buffer.byteLength(cm.data["attempt.json"]) > 900 * 1024) throw new Error("Mission attempt exceeds storage bounds");

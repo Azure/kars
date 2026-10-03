@@ -104,6 +104,56 @@ const outputPath = `${mapsPath}/kars-mission-output-${key}`;
 const artifactPath = `${mapsPath}/kars-mission-artifacts-${key}`;
 const projectionPath = `${mapsPath}/kars-mission-output-${c.taskName}`;
 
+describe("mission candidate discovery", () => {
+  it("rereads the Task and validates its live binding before returning a candidate", async () => {
+    const h = fixture();
+    expect(await h.store.candidate(c, c.dispatcherDid)).toEqual({ ...c, agentName: "briefing" });
+    h.api.resources.get(taskPath)!.metadata.annotations![`${p}run-completed`] = c.runNonce;
+    expect(await h.store.candidate(c, c.dispatcherDid)).toBeNull();
+  });
+  it.each(["dispatching", "succeeded", "uncertain"] as const)("recovers a %s claim before looking for a replacement binding", async phase => {
+    const h = fixture();
+    const created = (await h.store.create(initial()))!;
+    if (phase === "succeeded") await h.store.replace(created, next(created.attempt, "succeeded"));
+    if (phase === "uncertain") await h.store.replace(created, { ...created.attempt, phase, error: "Send outcome unknown" });
+    h.api.resources.delete(h.bindingPath);
+    h.api.calls.length = 0;
+    expect(await h.store.candidate(c, c.agentDid)).toEqual(c);
+    expect(h.api.calls.map(call => call.path)).toEqual([taskPath, `${mapsPath}/${missionAttemptName(c)}`]);
+  });
+  it("does not turn a malformed durable claim into a new dispatch", async () => {
+    const h = fixture(); await h.store.create(initial());
+    h.api.resources.get(`${mapsPath}/${missionAttemptName(c)}`)!.data!["attempt.json"] = "{}";
+    await expect(h.store.candidate(c, c.dispatcherDid)).rejects.toThrow("Malformed");
+  });
+  it("does not recover an old Task UID's claim", async () => {
+    const h = fixture(); await h.store.create(initial());
+    h.api.resources.get(taskPath)!.metadata.uid = "replacement";
+    expect(await h.store.candidate(c, c.dispatcherDid)).toBeNull();
+  });
+  it("requires current dispatcher custody for new candidates", async () => {
+    const h = fixture(); const store = new KubernetesMissionStore(h.api, async () => false);
+    expect(await store.isCurrent(c)).toBe(false);
+    expect(await store.candidate(c, c.dispatcherDid)).toBeNull();
+  });
+  it("discovers only pending Tasks across encoded continuation pages", async () => {
+    const paths: string[] = [];
+    const task = (name: string, annotations: Record<string, string> = { [`${p}run-requested`]: "run" }) => ({ metadata: { name, namespace: c.namespace, uid: name, annotations } });
+    const api: KubernetesJson = { async request<T>(_method: string, path: string): Promise<T> {
+      paths.push(path);
+      return (paths.length === 1 ? { items: [task("pending"), task("idle", {}), task("done", { [`${p}run-requested`]: "run", [`${p}run-completed`]: "run" })], metadata: { continue: "page+/=" } }
+        : { items: [task("next"), { ...task("deleting"), metadata: { ...task("deleting").metadata, deletionTimestamp: stamp } }] }) as T;
+    } };
+    const found = []; for await (const ref of new KubernetesMissionStore(api).pendingTasks()) found.push(ref);
+    expect(found).toEqual([{ namespace: c.namespace, taskName: "pending" }, { namespace: c.namespace, taskName: "next" }]);
+    expect(paths).toEqual(["/apis/kars.azure.com/v1alpha1/karstasks?limit=10", "/apis/kars.azure.com/v1alpha1/karstasks?limit=10&continue=page%2B%2F%3D"]);
+  });
+  it.each([{ items: null }, { items: [], metadata: { continue: 7 } }, { items: [], metadata: { continue: "repeat" } }])("rejects malformed or repeated pagination %j", async page => {
+    const api: KubernetesJson = { async request<T>(): Promise<T> { return page as T; } };
+    await expect((async () => { for await (const _ref of new KubernetesMissionStore(api).pendingTasks()) { /* drain */ } })()).rejects.toThrow();
+  });
+});
+
 describe("Kubernetes mission attempt store", () => {
   it("requires a current owned Task, Sandbox, binding and exact Ready Pod", async () => {
     const h = fixture(); expect(await h.store.isCurrent(c)).toBe(true);
