@@ -49,6 +49,7 @@ mod inference_budget_dispatch;
 mod inference_policy;
 mod inference_policy_compile;
 mod inference_policy_reconciler;
+mod mission_delivery;
 mod kars_approval;
 mod kars_approval_reconciler;
 mod kars_eval;

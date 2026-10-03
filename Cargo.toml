@@ -88,6 +88,7 @@ chrono = { version = "0.4", features = ["serde"] }
 ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.9"
 sha2 = "0.10"
+hmac = "0.12"
 bs58 = "0.5"
 base64 = "0.22"
 hex = "0.4"
