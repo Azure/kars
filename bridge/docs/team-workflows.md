@@ -228,8 +228,43 @@ have many queued milestones but only one current execution cell.
 
 ## 3. Launch and watch a run
 
-**Run now** creates a one-shot request. The BFF rejects a second request while
-one is pending or active, and the button changes to **Run in progress**.
+**Run now** records a one-shot request, not proof that an agent started or
+produced a deliverable. The BFF checks the current owner and Team UID, rejects
+paused Teams, pending requests and exact-owned active task forces, and writes
+with UID/resourceVersion preconditions. Active-run checks cover the entire
+namespace; labels alone neither establish ownership nor hide a running Task.
+Concurrent Team changes return a conflict instead of overwriting newer intent.
+
+The manual admission protocol separates durable stages:
+
+1. Stage an exact-owned, **unlaunched** Task under a stable request identity.
+2. Persist its Task UID, authority/spec digests and admission sequence in
+   `status.runAdmission`, counting the reservation once.
+3. Recheck current authority, finite shared budget and capacity; activate that
+   exact Task with UID/resourceVersion preconditions.
+4. Acknowledge only the matching request. A retry after a lost acknowledgement
+   reuses the reservation rather than creating or relaunching work.
+
+The latest admission remains after acknowledgement. Requests use canonical
+`manual-<sequence>-<sha256>` identities; a later request advances the sequence
+and creates a distinct Task under the same Team budget root, without resetting
+settled spend. Missing, replaced or altered reserved Tasks fail closed rather
+than being recreated. Credential drift still pauses the runtime promptly; only
+its final credential-spec rewrite waits for a pending acknowledgement so the
+original admission spec can be verified before rebinding.
+
+Legacy timestamp-only `run-now` annotations are not silently converted or
+executed. They remain rejected/pending. An operator must inspect the Team and
+retained Task evidence before clearing an obsolete request with current UID/RV
+preconditions and submitting a new reviewed request. Do not clear the retained
+admission watermark, replay an old sequence, or treat a retry as permission to
+reset the budget.
+
+These are bounded cross-object checks, not a distributed transaction or lease.
+A request, reservation, acknowledgement, Ready pod or generated-task count is
+not delivery evidence. Manual admission also does not establish engineering
+backlog assignment or checkpoint/revision continuation; those paths require
+their own connected evidence and acceptance tests.
 
 The run page has four views:
 
