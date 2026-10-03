@@ -296,6 +296,171 @@ fn enroll(store: &Arc<Mutex<Store>>, apis: &BudgetApis) {
     *apis.account.lock().unwrap() = Some(account);
 }
 
+fn settle_run(apis: &BudgetApis, run: &KarsTask) {
+    let identity = ExecutionIdentity {
+        task_uid: run.uid().unwrap(),
+        authorization_digest: run.envelope_digest(),
+        sandbox: ResourceIdentity {
+            namespace: "tenant-a".into(),
+            name: run.name_any(),
+            uid: format!("sandbox-{}", run.uid().unwrap()),
+        },
+        runtime_namespace_uid: "runtime-uid".into(),
+        pod_name: "pod".into(),
+        pod_uid: format!("pod-{}", run.uid().unwrap()),
+    };
+    let (_, quote) = contract()
+        .normalize(
+            br#"{"model":"reviewed-model","messages":[{"role":"user","content":"fixture"}]}"#,
+            100,
+            true,
+        )
+        .unwrap();
+    let request = ReserveRequest {
+        account_uid: "account-uid".into(),
+        identity: identity.clone(),
+        sequence: 1,
+        wire_digest: format!("sha256:{}", "a".repeat(64)),
+        quote,
+    };
+    let command = AttemptCommand {
+        account_uid: request.account_uid.clone(),
+        key: AttemptKey {
+            pod_uid: identity.pod_uid.clone(),
+            sequence: 1,
+        },
+        identity,
+        wire_digest: request.wire_digest.clone(),
+    };
+    let mut account = apis.account.lock().unwrap();
+    let ledger = account
+        .as_mut()
+        .unwrap()
+        .status
+        .as_mut()
+        .unwrap()
+        .ledger
+        .as_mut()
+        .unwrap();
+    *ledger = ledger
+        .register_session(request.identity.clone())
+        .unwrap()
+        .next;
+    *ledger = ledger.reserve(&request, 100).unwrap().next;
+    *ledger = ledger.begin_dispatch(&command, 101).unwrap().next;
+    *ledger = ledger
+        .settle(&Settlement {
+            attempt: command,
+            usage: Some(Usage {
+                input_tokens: 3,
+                output_tokens: 5,
+                cached_input_tokens: 0,
+                cache_creation_input_tokens: 0,
+                reasoning_output_tokens: 0,
+            }),
+        })
+        .unwrap()
+        .next;
+}
+
+#[tokio::test]
+async fn later_manual_run_retains_finite_team_root_and_settled_spend() {
+    let _lock = ENV_LOCK.lock().await;
+    let _environment = BudgetEnvironment::enabled();
+    let mut team = team();
+    let budget = team.spec.envelope.budget.as_mut().unwrap();
+    budget.scope = Some(BudgetScope::GovernedInference);
+    budget.tokens = Some(60);
+    team.spec.blueprint = Some(TaskBlueprint {
+        model: Some(TaskModel {
+            provider: "azure-openai".into(),
+            deployment: "reviewed-model".into(),
+        }),
+        ..Default::default()
+    });
+    let request = |sequence| format!("manual-{sequence}-{}", "a".repeat(64));
+    team.annotations_mut()
+        .insert(requests::REQUEST.into(), request(1));
+    let (server, client, store) = setup(&team).await;
+    let apis = budget_apis(&server).await;
+    cycle(&client, &store).await;
+    assert_eq!(
+        store.lock().unwrap().tasks.len(),
+        1,
+        "unenrolled root cannot admit a run"
+    );
+    assert!(latest(&store).status.unwrap().run_admission.is_none());
+    enroll(&store, &apis);
+    let initial_account = apis.account.lock().unwrap().clone().unwrap();
+    let principal_name = specs::principal_name(&team);
+    let principal_uid = ids(&store)[&principal_name].clone();
+    let mut runs = Vec::new();
+    for sequence in 1..=2 {
+        cycle(&client, &store).await;
+        let record = latest(&store).status.unwrap().run_admission.unwrap();
+        assert_eq!(record.request, request(sequence));
+        assert_eq!(
+            latest(&store).status.unwrap().generated_task_count,
+            sequence
+        );
+        assert!(!latest(&store).annotations().contains_key(requests::REQUEST));
+        enroll(&store, &apis);
+        let run: KarsTask =
+            serde_json::from_value(store.lock().unwrap().tasks[&record.task_name].clone()).unwrap();
+        assert_eq!(run.uid().as_deref(), Some(record.task_uid.as_str()));
+        assert_eq!(run.spec.parent_ref.as_ref().unwrap().name, principal_name);
+        assert!(run.spec.execution.as_ref().unwrap().launch);
+        assert_eq!(run.spec.envelope.budget.as_ref().unwrap().tokens, Some(60));
+        let binding = run
+            .status
+            .as_ref()
+            .unwrap()
+            .inference_budget
+            .as_ref()
+            .unwrap();
+        assert_eq!(binding.account.uid, initial_account.uid().unwrap());
+        assert_eq!(binding.root, initial_account.spec.root);
+        assert_eq!(binding.root.resource.uid, team.uid().unwrap());
+        assert_eq!(
+            binding.parent_task_uid.as_deref(),
+            Some(principal_uid.as_str())
+        );
+        assert_eq!(binding.root_task_uid, principal_uid);
+        settle_run(&apis, &run);
+        {
+            let account = apis.account.lock().unwrap();
+            let account = account.as_ref().unwrap();
+            assert_eq!(account.uid(), initial_account.uid());
+            assert_eq!(
+                serde_json::to_value(&account.spec).unwrap(),
+                serde_json::to_value(&initial_account.spec).unwrap()
+            );
+            let ledger = account.status.as_ref().unwrap().ledger.as_ref().unwrap();
+            assert_eq!(ledger.meters.settled.tokens, sequence as u64 * 8);
+            assert_eq!(ledger.meters.reserved.tokens, 0);
+            assert_eq!(ledger.meters.uncertain.tokens, 0);
+            assert_eq!(ledger.nodes.len(), sequence as usize + 1);
+        }
+        runs.push(record);
+        if sequence == 1 {
+            let mut state = store.lock().unwrap();
+            state.tasks.get_mut(&run.name_any()).unwrap()["spec"]["execution"]["launch"] =
+                json!(false);
+            state.team["metadata"]["annotations"][requests::REQUEST] = json!(request(2));
+            state.team["metadata"]["resourceVersion"] = json!("200");
+        }
+    }
+    assert_ne!(runs[0].task_name, runs[1].task_name);
+    assert_ne!(runs[0].task_uid, runs[1].task_uid);
+    assert_eq!(ids(&store)[&principal_name], principal_uid);
+    let state = store.lock().unwrap();
+    assert_eq!(state.activation_reservations.len(), 2);
+    assert_eq!(
+        state.tasks[&runs[0].task_name]["spec"]["execution"]["launch"],
+        false
+    );
+}
+
 #[tokio::test]
 async fn governed_team_admission_interleavings_preserve_uids_funding_and_launch_intent() {
     let _lock = ENV_LOCK.lock().await;

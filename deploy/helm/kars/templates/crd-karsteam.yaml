@@ -676,6 +676,27 @@ spec:
                 description: When the team last published a digest to the steering inbox (RFC3339).
                 nullable: true
                 type: string
+              runAdmission:
+                description: Latest manual request reservation; retained after acknowledgement to prevent replay.
+                nullable: true
+                type: object
+                required:
+                - authorityDigest
+                - request
+                - taskName
+                - taskSpecDigest
+                - taskUid
+                properties:
+                  request:
+                    type: string
+                  taskName:
+                    type: string
+                  taskUid:
+                    type: string
+                  authorityDigest:
+                    type: string
+                  taskSpecDigest:
+                    type: string
               lastGeneratedTask:
                 description: The most recent task-force task the charter loop minted.
                 nullable: true

@@ -132,6 +132,11 @@ pub(crate) async fn reconcile(
         {
             continue;
         }
+        // Keep the paused Task's reserved spec intact until lost-ACK recovery finishes.
+        // The next reconciliation can rebind it without relaxing admission's spec fence.
+        if requests::awaiting_ack(&latest, &task) {
+            continue;
+        }
         api.patch(
             &task.name_any(),
             &PatchParams::default(),

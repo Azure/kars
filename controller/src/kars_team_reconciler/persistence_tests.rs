@@ -16,6 +16,10 @@ mod budget_interleavings;
 #[path = "harvest_tests.rs"]
 mod harvest;
 
+#[path = "request_tests.rs"]
+mod requests_tests;
+
+const TEAM_PATH: &str = "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karsteams/eng";
 const TASKS_PATH: &str = "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karstasks";
 const CMS_PATH: &str = "/api/v1/namespaces/tenant-a/configmaps";
 const TEAM_STATUS_PATH: &str =
@@ -28,9 +32,15 @@ struct Store {
     team: Value,
     version: i64,
     fail_status_once: bool,
+    fail_after_status_once: bool,
+    fail_after_activation_once: bool,
+    fail_after_ack_once: bool,
     fail_commons_write: bool,
     task_on_output_read: Option<Value>,
     task_on_retirement: Option<Value>,
+    team_on_activation: Option<Value>,
+    team_on_ack: Option<Value>,
+    activation_reservations: Vec<Value>,
 }
 
 #[derive(Clone)]
@@ -81,18 +91,31 @@ impl Respond for KubeServer {
         let mut store = self.0.lock().unwrap();
         let path = request.url.path();
         let method = request.method.as_str();
-        if path == TEAM_STATUS_PATH && method == "PATCH" {
-            if store.fail_status_once {
-                store.fail_status_once = false;
+        if path == TEAM_PATH && method == "GET" {
+            return response(200, store.team.clone());
+        }
+        if (path == TEAM_STATUS_PATH || path == TEAM_PATH) && method == "PATCH" {
+            let status = path == TEAM_STATUS_PATH;
+            if status && std::mem::take(&mut store.fail_status_once) {
                 return failure(500);
             }
+            if !status && let Some(team) = store.team_on_ack.take() {
+                store.team = team;
+            }
             let patch: Value = serde_json::from_slice(&request.body).unwrap();
-            if patch["metadata"]["resourceVersion"] != store.team["metadata"]["resourceVersion"] {
+            if patch["metadata"]["resourceVersion"] != store.team["metadata"]["resourceVersion"]
+                || patch["metadata"]["uid"] != store.team["metadata"]["uid"]
+            {
                 return failure(409);
             }
             merge(&mut store.team, patch);
             store.version += 1;
             store.team["metadata"]["resourceVersion"] = json!(store.version.to_string());
+            if (status && std::mem::take(&mut store.fail_after_status_once))
+                || (!status && std::mem::take(&mut store.fail_after_ack_once))
+            {
+                return failure(500);
+            }
             return response(200, store.team.clone());
         }
         if path == TASKS_PATH && method == "GET" {
@@ -165,6 +188,26 @@ impl Respond for KubeServer {
             }
             return response(201, body);
         }
+        if method == "PATCH" && is_task {
+            let Some(mut task) = store.tasks.get(name).cloned() else {
+                return failure(404);
+            };
+            if body["metadata"]["resourceVersion"] != task["metadata"]["resourceVersion"]
+                || body["metadata"]["uid"] != task["metadata"]["uid"]
+            {
+                return failure(409);
+            }
+            let spec = task["spec"].clone();
+            merge(&mut task, body);
+            if task["spec"] != spec {
+                task["metadata"]["generation"] =
+                    json!(task["metadata"]["generation"].as_i64().unwrap() + 1);
+            }
+            store.version += 1;
+            task["metadata"]["resourceVersion"] = json!(store.version.to_string());
+            store.tasks.insert(name.into(), task.clone());
+            return response(200, task);
+        }
         if method == "PUT" {
             if is_task {
                 if let Some(task) = store.task_on_retirement.take() {
@@ -189,12 +232,26 @@ impl Respond for KubeServer {
             {
                 return failure(409);
             }
+            let activation = is_task
+                && body["metadata"]["annotations"]["kars.azure.com/team-request-state"]
+                    == "admitted"
+                && body["spec"]["execution"]["launch"] == true;
             store.version += 1;
             body["metadata"]["resourceVersion"] = json!(store.version.to_string());
             if is_task {
                 store.tasks.insert(name.into(), body.clone());
             } else {
                 store.cms.insert(name.into(), body.clone());
+            }
+            if activation {
+                let reservation = store.team["status"]["runAdmission"].clone();
+                store.activation_reservations.push(reservation);
+                if let Some(team) = store.team_on_activation.take() {
+                    store.team = team;
+                }
+                if std::mem::take(&mut store.fail_after_activation_once) {
+                    return failure(500);
+                }
             }
             return response(200, body);
         }
