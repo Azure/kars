@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { validMissionArtifacts, type MissionArtifacts } from "@kars/mesh/dist/mission-protocol.js";
+import type { TaskPhaseEvidence } from "./task-phase.js";
 
 export interface TaskUsage {
   promptTokens: number;
@@ -17,9 +18,11 @@ export interface TaskExecutionEvidence {
 
 export class TaskExecutionError extends Error {
   readonly evidence: TaskExecutionEvidence;
-  constructor(message: string, evidence: TaskExecutionEvidence) {
+  readonly phase?: TaskPhaseEvidence;
+  constructor(message: string, evidence: TaskExecutionEvidence, phase?: TaskPhaseEvidence) {
     super(message);
     this.name = "TaskExecutionError";
+    if (phase) this.phase = { ...phase };
     this.evidence = {
       model: evidence.model, rounds: evidence.rounds,
       usage: evidence.usage ? {

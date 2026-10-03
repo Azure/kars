@@ -3,7 +3,8 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
-import { mkdtemp, readFile, rm, access } from "node:fs/promises";
+import { join } from "node:path";
+import { mkdtemp, readFile, rm, access, writeFile } from "node:fs/promises";
 import { executeTaskWithEvidence, processTaskWithTools, type TaskLoopDeps } from "./agt-task-loop.js";
 import { TaskCompletionLedger, TaskExecutionError } from "./task-completion.js";
 
@@ -61,6 +62,202 @@ afterEach(async () => {
 
 const tool = (name = "mesh_inbox", args = {}) => ({
   choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "call-1", type: "function", function: { name, arguments: JSON.stringify(args) } }] } }], usage,
+});
+
+const reviewedPhase = (overrides: Record<string, unknown> = {}) => ({
+  name: "write-briefing", objective: "Write the reviewed internal briefing document.",
+  capabilities: ["filesystem-write"], minToolCalls: 1, maxToolCalls: 2,
+  requiredToolCalls: [], freshContext: true, ...overrides,
+});
+const batch = (...responses: ReturnType<typeof tool>[]) => ({
+  usage,
+  choices: [{ finish_reason: "tool_calls", message: { role: "assistant", tool_calls: responses.map((response, index) => ({
+    ...response.choices[0].message.tool_calls[0], id: `call-${index}`,
+  })) } }],
+});
+
+describe("reviewed filesystem phase execution", () => {
+  it.each([
+    null, [], {},
+    reviewedPhase({ unexpected: true }),
+    reviewedPhase({ name: "Bad Name" }),
+    reviewedPhase({ objective: "too short" }),
+    reviewedPhase({ objective: "é".repeat(601) }),
+    reviewedPhase({ capabilities: null }),
+    reviewedPhase({ capabilities: ["filesystem-write", "filesystem-write"] }),
+    ...["shell", "network", "web-search", "memory", "mcp"].map(capability => reviewedPhase({ capabilities: [capability] })),
+    reviewedPhase({ requiredToolCalls: [{ name: "github_actions_job_logs", arguments: {} }] }),
+    reviewedPhase({ requiredToolCalls: null }),
+    reviewedPhase({ minToolCalls: null }),
+    reviewedPhase({ minToolCalls: -1 }),
+    reviewedPhase({ minToolCalls: 3, maxToolCalls: 2 }),
+    reviewedPhase({ maxToolCalls: 33 }),
+    reviewedPhase({ maxToolCalls: 1.5 }),
+    reviewedPhase({ maxToolCalls: "2" }),
+    reviewedPhase({ freshContext: null }),
+    reviewedPhase({ capabilities: [] }),
+  ])("rejects invalid or unsupported phase before inference (%#)", async contract => {
+    await router([final()]);
+    await expect(executeTaskWithEvidence("task", deps, log, false, contract)).rejects.toMatchObject({ evidence: { rounds: 0, usage: null } });
+    expect(requests).toEqual([]);
+    expect(policyRequests).toEqual([]);
+  });
+
+  it("enforces a tool-free phase", async () => {
+    await router([final()]);
+    const result = await executeTaskWithEvidence("task", deps, log, false, reviewedPhase({ capabilities: [], minToolCalls: 0, maxToolCalls: 0 }));
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 0, successfulToolCalls: 0 });
+    expect(requests[0].tools).toEqual([]);
+    expect(result.usage).toEqual({ promptTokens: 7, completionTokens: 4, totalTokens: 11 });
+  });
+
+  it("counts real authorized writes, retains exact artifacts, and copies the reviewed contract", async () => {
+    const path = join(await workspace(), "briefing.md");
+    const contract = reviewedPhase({ maxToolCalls: 1 });
+    await router([tool("file_write", { path, content: "Useful briefing\r\n✓", artifact_name: "briefing.md" }), final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("task", { ...deps, onEvidence: async () => {
+      contract.capabilities.length = 0;
+      contract.maxToolCalls = 32;
+      contract.minToolCalls = 0;
+    } }, log, true, contract);
+    expect(result.phase).toEqual({ name: "write-briefing", attemptedToolCalls: 1, successfulToolCalls: 1, minToolCalls: 1, maxToolCalls: 1 });
+    expect(result.artifacts).toEqual({ "briefing.md": "Useful briefing\r\n✓" });
+    expect(await readFile(path, "utf8")).toBe("Useful briefing\r\n✓");
+    expect(result.usage?.totalTokens).toBe(22);
+    expect(requests[0].tools.map((t: any) => t.function.name)).toEqual(["file_write"]);
+    expect(policyRequests).toHaveLength(1);
+  });
+
+  it("counts an actual read without requiring write permission", async () => {
+    const path = join(await workspace(), "source.txt");
+    await writeFile(path, "Evidence actually read");
+    await router([tool("file_read", { path, max_bytes: 8 }), final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("task", deps, log, false, reviewedPhase({ capabilities: ["filesystem-read"] }));
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 1, successfulToolCalls: 1 });
+    expect(requests[0].tools.map((t: any) => t.function.name)).toEqual(["file_read"]);
+    expect(JSON.parse(requests[1].messages.at(-1).content)).toMatchObject({ content: "Evidence", returned_bytes: 8, truncated: true });
+  });
+
+  it.each(["file_write", "http_fetch", "exec_command", "memory", "mesh_send", "foundry_code_execute"])("denies ungranted %s before policy or effects", async name => {
+    const path = join(await workspace(), "forbidden.txt");
+    await router([tool(name, { path, content: "Must not write", cmd: `touch ${path}`, url: "https://example.com" }), final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("task", deps, log, false, reviewedPhase({ capabilities: ["filesystem-read"] }))).rejects.toMatchObject({ phase: { attemptedToolCalls: 1, successfulToolCalls: 0 } });
+    expect(policyRequests).toEqual([]);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages.at(-1).content).toContain("outside the reviewed phase");
+    await expect(access(path)).rejects.toThrow();
+  });
+
+  it("rejects a whole overflowing batch before any policy or filesystem effect", async () => {
+    const root = await workspace();
+    const paths = [join(root, "one"), join(root, "two")];
+    await router([batch(...paths.map(path => tool("file_write", { path, content: "Not written" })))], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("task", deps, log, false, reviewedPhase({ maxToolCalls: 1 }))).rejects.toMatchObject({
+      message: expect.stringContaining("exceeds maxToolCalls"), evidence: { rounds: 1, usage: { totalTokens: 11 } },
+      phase: { attemptedToolCalls: 0, successfulToolCalls: 0 },
+    });
+    expect(policyRequests).toEqual([]);
+    for (const path of paths) await expect(access(path)).rejects.toThrow();
+  });
+
+  it("caps later batches after success and exports no artifacts on failure", async () => {
+    const root = await workspace();
+    const first = join(root, "first.txt"), second = join(root, "second.txt");
+    await router([
+      tool("file_write", { path: first, content: "First evidence", artifact_name: "first.txt" }),
+      tool("file_write", { path: second, content: "Must not write" }),
+    ], 200, { allowed: true });
+    const error = await executeTaskWithEvidence("task", deps, log, true, reviewedPhase({ maxToolCalls: 1 })).catch(error => error);
+    expect(error).toBeInstanceOf(TaskExecutionError);
+    expect(error.phase).toMatchObject({ attemptedToolCalls: 1, successfulToolCalls: 1 });
+    expect(error.evidence.usage.totalTokens).toBe(22);
+    expect(error.artifacts).toBeUndefined();
+    expect(policyRequests).toHaveLength(1);
+    await expect(access(second)).rejects.toThrow();
+  });
+
+  it("keeps router denial authoritative and counts denied retries against the ceiling", async () => {
+    const path = join(await workspace(), "denied.txt");
+    await router([tool("file_write", { path, content: "Denied" })]);
+    const error = await executeTaskWithEvidence("task", deps, log, false, reviewedPhase()).catch(error => error);
+    expect(error.message).toContain("exceeds maxToolCalls");
+    expect(error.phase).toMatchObject({ attemptedToolCalls: 2, successfulToolCalls: 0 });
+    expect(error.evidence.usage.totalTokens).toBe(33);
+    expect(policyRequests).toHaveLength(2);
+    await expect(access(path)).rejects.toThrow();
+  });
+
+  it.each(["null", "[]", "{", '{"path":1,"content":"no"}', '{"path":"/tmp/../../etc/forbidden","content":"no"}', '{"path":"/tmp/a","content":1}', '{"path":"/tmp/a","content":"no","extra":true}'])("does not count invalid arguments as successful (%#)", async args => {
+    const response = tool("file_write");
+    response.choices[0].message.tool_calls[0].function.arguments = args;
+    await router([response, final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("task", deps, log, false, reviewedPhase())).rejects.toMatchObject({
+      message: expect.stringContaining("requires 1 successful tool calls"), phase: { attemptedToolCalls: 1, successfulToolCalls: 0 },
+    });
+    expect(policyRequests).toEqual([]);
+  });
+
+  it("permits correction within the remaining attempt budget without counting the failed call", async () => {
+    const root = await workspace();
+    await router([
+      tool("file_read", { path: join(root, "missing") }),
+      tool("file_write", { path: join(root, "briefing"), content: "New useful evidence" }), final(),
+    ], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("task", deps, log, false, reviewedPhase({ capabilities: ["filesystem-read", "filesystem-write"] }));
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 2, successfulToolCalls: 1 });
+    expect(policyRequests).toHaveLength(2);
+    expect(requests[1].messages.at(-1).content).toContain("file_read error");
+  });
+
+  it("does not count failed writes or nonregular-file reads as successes", async () => {
+    const root = await workspace();
+    await router([batch(tool("file_write", { path: root, content: "Fails on directory" }), tool("file_read", { path: root })), final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("task", deps, log, false, reviewedPhase({ capabilities: ["filesystem-read", "filesystem-write"] }))).rejects.toMatchObject({ phase: { attemptedToolCalls: 2, successfulToolCalls: 0 } });
+    expect(policyRequests).toHaveLength(2);
+  });
+
+  it("rejects a final response below the successful-call minimum", async () => {
+    await router([final("I completed everything")]);
+    await expect(executeTaskWithEvidence("task", deps, log, false, reviewedPhase())).rejects.toMatchObject({
+      phase: { attemptedToolCalls: 0, successfulToolCalls: 0 }, evidence: { usage: { totalTokens: 11 } },
+    });
+  });
+
+  it("preserves successful-call counts and ambiguous spend on later transport failure", async () => {
+    const path = join(await workspace(), "briefing");
+    await router([tool("file_write", { path, content: "Useful evidence" }), (res: ServerResponse) => res.destroy()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("task", deps, log, false, reviewedPhase())).rejects.toMatchObject({
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 1 }, evidence: { rounds: 1, usage: null },
+    });
+  });
+
+  it.each(["interrupt", "evidence callback"])("keeps phase accounting but exports no artifacts after %s failure", async failure => {
+    const path = join(await workspace(), "briefing");
+    let observedRounds = 0;
+    await router([tool("file_write", { path, content: "Useful evidence", artifact_name: "briefing.md" }), final()], 200, { allowed: true });
+    const error = await executeTaskWithEvidence("task", {
+      ...deps,
+      isInterruptRequested: () => failure === "interrupt" && observedRounds === 1,
+      onEvidence: evidence => {
+        observedRounds = evidence.rounds;
+        if (failure === "evidence callback" && observedRounds === 2) throw new Error("Evidence persistence failed");
+      },
+    }, log, true, reviewedPhase()).catch(error => error);
+    expect(error).toBeInstanceOf(TaskExecutionError);
+    expect(error.phase).toMatchObject({ attemptedToolCalls: 1, successfulToolCalls: 1 });
+    expect(error.evidence).toMatchObject({ rounds: failure === "interrupt" ? 1 : 2, usage: { totalTokens: failure === "interrupt" ? 11 : 22 } });
+    expect(error.artifacts).toBeUndefined();
+    expect(policyRequests).toHaveLength(1);
+    expect(await readFile(path, "utf8")).toBe("Useful evidence");
+  });
+
+  it("does not reuse successful calls across executions", async () => {
+    const path = join(await workspace(), "briefing");
+    await router([tool("file_write", { path, content: "Useful evidence" }), final(), final()], 200, { allowed: true });
+    const contract = reviewedPhase();
+    await executeTaskWithEvidence("first task", deps, log, false, contract);
+    await expect(executeTaskWithEvidence("second task", deps, log, false, contract)).rejects.toMatchObject({ phase: { attemptedToolCalls: 0, successfulToolCalls: 0 } });
+  });
 });
 
 describe("explicit mission attachments", () => {

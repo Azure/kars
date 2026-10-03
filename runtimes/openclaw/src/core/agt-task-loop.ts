@@ -23,6 +23,7 @@ import { routerUrl } from "./router-client.js";
 import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js";
 import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
 import { authorizeTaskAction } from "./task-policy.js";
+import { TaskPhaseGuard, type TaskPhaseEvidence } from "./task-phase.js";
 import type { MissionArtifacts } from "@kars/mesh/dist/mission-protocol.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -72,14 +73,17 @@ export async function executeTaskWithEvidence(
   deps: TaskLoopDeps,
   log: Logger,
   artifactsEnabled = false,
-): Promise<TaskExecutionEvidence & { output: string; artifacts?: MissionArtifacts }> {
+  reviewedPhase?: unknown,
+): Promise<TaskExecutionEvidence & { output: string; artifacts?: MissionArtifacts; phase?: TaskPhaseEvidence }> {
   const ledger = new TaskCompletionLedger(taskModel(), artifactsEnabled);
+  let phase: TaskPhaseGuard | undefined;
   try {
-    const output = await processTaskWithTools(taskContent, deps, log, ledger);
-    return { ...ledger.snapshot(), ...ledger.artifactSnapshot(), output };
+    phase = reviewedPhase === undefined ? undefined : new TaskPhaseGuard(reviewedPhase);
+    const output = await processTaskWithTools(taskContent, deps, log, ledger, phase);
+    return { ...ledger.snapshot(), ...ledger.artifactSnapshot(), output, ...(phase ? { phase: phase.snapshot() } : {}) };
   } catch (error) {
-    if (error instanceof TaskExecutionError) throw error;
-    throw new TaskExecutionError(error instanceof Error ? error.message : "Task execution failed", ledger.snapshot());
+    if (error instanceof TaskExecutionError && !phase) throw error;
+    throw new TaskExecutionError(error instanceof Error ? error.message : "Task execution failed", ledger.snapshot(), phase?.snapshot());
   }
 }
 
@@ -93,12 +97,14 @@ export async function processTaskWithTools(
   deps: TaskLoopDeps,
   log: Logger,
   ledger?: TaskCompletionLedger,
+  phase?: TaskPhaseGuard,
 ): Promise<string> {
+  if (phase && !ledger) throw new Error("Reviewed phase execution requires measured task accounting");
   const http = await import("node:http");
   const { execSync } = await import("node:child_process");
   const model = taskModel();
 
-  const tools = getTaskTools().map(tool => !ledger?.artifactsEnabled || tool.function.name !== "file_write" ? tool : {
+  const tools = getTaskTools().filter(tool => !phase || phase.allowsTool(tool.function.name)).map(tool => !ledger?.artifactsEnabled || tool.function.name !== "file_write" ? tool : {
     ...tool, function: {
       ...tool.function,
       description: "Write UTF-8 text locally. To deliver this exact content through Bridge on mission success, set artifact_name to a safe filename (not response.md). Use null for private scratch files. At most 16 named artifacts and 128 KiB serialized total; do not export secrets or unrelated data.",
@@ -158,6 +164,8 @@ export async function processTaskWithTools(
       content: typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent),
     },
   ];
+
+  if (phase) messages[0].content += `\n${phase.instructions()}`;
 
   // Tool-calling loop (max 25 rounds to prevent runaway)
   for (let round = 0; round < 25; round++) {
@@ -260,6 +268,7 @@ export async function processTaskWithTools(
 
     // If the model wants to call tools, execute them and continue
     if (msg.tool_calls && msg.tool_calls.length > 0) {
+      phase?.reserveBatch(msg.tool_calls.length);
       // Provider responses may carry metadata that is not valid on the governed request wire.
       messages.push(ledger ? {
         role: "assistant", content: msg.content ?? null,
@@ -271,6 +280,7 @@ export async function processTaskWithTools(
       } : msg);
       for (const tc of msg.tool_calls) {
         let result: string = "";
+        let toolSucceeded = false;
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           let args: any;
@@ -290,6 +300,11 @@ export async function processTaskWithTools(
             continue;
           }
           const fnName = tc.function.name;
+          const phaseError = phase?.argumentError(fnName, args);
+          if (phaseError) {
+            messages.push({ role: "tool", tool_call_id: tc.id, content: `Blocked by reviewed phase: ${phaseError}` });
+            continue;
+          }
           if (ledger && (!tools.some((tool) => tool.function.name === fnName)
             || !await authorizeTaskAction(`tool:${fnName}`, { tool: fnName, tool_call_id: tc.id, arguments: args }))) {
             messages.push({ role: "tool", tool_call_id: tc.id, content: "Blocked by policy: unknown tool, denied, or evaluation unavailable" });
@@ -312,6 +327,7 @@ export async function processTaskWithTools(
                 log.info(`AGT sub-agent file_write: ${filePath} (${bytes} bytes)`);
                 if (staged) ledger!.commitArtifacts(staged);
                 result = `OK: wrote ${bytes} bytes to ${filePath}${staged ? `; attached as ${args.artifact_name} for Bridge on mission success` : ledger ? "; local only" : ""}`;
+                toolSucceeded = true;
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
               } catch (err: any) {
                 result = `file_write error: ${err.message}`;
@@ -364,17 +380,18 @@ export async function processTaskWithTools(
                       const totalBytes = Number(stat.size);
                       const readBytes = Math.min(totalBytes, maxBytes);
                       const buf = Buffer.alloc(readBytes);
-                      fs.readSync(fd, buf, 0, readBytes, 0);
+                      const returnedBytes = fs.readSync(fd, buf, 0, readBytes, 0);
                       const truncated = totalBytes > maxBytes;
-                      const text = buf.toString("utf-8");
+                      const text = buf.subarray(0, returnedBytes).toString("utf-8");
                       log.info(`AGT sub-agent file_read: ${resolved} (${totalBytes} bytes${truncated ? `, truncated to ${maxBytes}` : ""})`);
                       result = JSON.stringify({
                         path: resolved,
                         bytes: totalBytes,
                         truncated,
-                        returned_bytes: readBytes,
+                        returned_bytes: returnedBytes,
                         content: text,
                       });
+                      toolSucceeded = true;
                     }
                   } finally {
                     fs.closeSync(fd);
@@ -383,6 +400,7 @@ export async function processTaskWithTools(
               }
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } catch (err: any) {
+              toolSucceeded = false;
               result = `file_read error: ${err.message}`;
             }
           } else if (fnName === "http_fetch") {
@@ -1529,13 +1547,16 @@ export async function processTaskWithTools(
           }
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } catch (e: any) {
+          toolSucceeded = false;
           result = e.stderr || e.stdout || e.message || "Command failed";
         }
+        if (toolSucceeded) phase?.recordSuccess();
         messages.push({ role: "tool", tool_call_id: tc.id, content: result });
       }
       continue;
     }
 
+    phase?.finish();
     return ledger ? ledger.finish(choice) : msg.content || "";
   }
 
