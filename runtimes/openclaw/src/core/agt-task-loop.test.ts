@@ -10,7 +10,7 @@ const log = { info: vi.fn(), warn: vi.fn() };
 const deps: TaskLoopDeps = { meshClient: () => null, isInterruptRequested: () => false, interruptReason: () => "", setInterrupt: () => {} };
 const usage = { prompt_tokens: 7, completion_tokens: 4, total_tokens: 11 };
 const final = (content: unknown = "A useful briefing", finish_reason = "stop", measured: unknown = usage) => ({
-  choices: [{ finish_reason, message: { content } }], usage: measured,
+  choices: [{ finish_reason, message: { role: "assistant", content } }], usage: measured,
 });
 let server: Server | undefined;
 let requests: Record<string, any>[];
@@ -50,7 +50,7 @@ afterEach(async () => {
 });
 
 const tool = (name = "mesh_inbox", args = {}) => ({
-  choices: [{ finish_reason: "tool_calls", message: { content: null, tool_calls: [{ id: "call-1", type: "function", function: { name, arguments: JSON.stringify(args) } }] } }], usage,
+  choices: [{ finish_reason: "tool_calls", message: { role: "assistant", content: null, tool_calls: [{ id: "call-1", type: "function", function: { name, arguments: JSON.stringify(args) } }] } }], usage,
 });
 
 describe("measured task execution through the local router", () => {
@@ -64,6 +64,35 @@ describe("measured task execution through the local router", () => {
     expect(requests).toHaveLength(2);
     expect(requests[0]).toMatchObject({ model: "gpt-5.4-mini", max_completion_tokens: 8192 });
     expect(onEvidence).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([null, undefined, "Checking the inbox"])("serializes only request fields in a tool follow-up (content %j)", async (content) => {
+    const response = tool();
+    const message = response.choices[0].message;
+    await router([{ ...response, choices: [{ finish_reason: "tool_calls", message: {
+      ...message, content, refusal: null, annotations: [], provider_metadata: { trace: "response-only" },
+      tool_calls: message.tool_calls.map((call) => ({ ...call, index: 0,
+        function: { ...call.function, response_metadata: "response-only" } })),
+    } }] }, final()]);
+    await executeTaskWithEvidence("Write", deps, log);
+    expect(requests[1].messages[2]).toEqual({
+      role: "assistant", content: content ?? null, refusal: null, tool_calls: message.tool_calls,
+    });
+    expect(requests[1].messages[3]).toMatchObject({ role: "tool", tool_call_id: "call-1" });
+  });
+
+  it.each([
+    { role: "user" }, { role: undefined }, { content: { text: "invalid" } },
+    { content: [{ type: "audio", data: "unsupported" }] }, { refusal: {} },
+  ])("rejects unsupported assistant tool messages before side effects: %j", async (fields) => {
+    const response = tool("exec_command", { command: "printf SHOULD_NOT_EXECUTE" });
+    Object.assign(response.choices[0].message, fields);
+    await router([response, final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log)).rejects.toMatchObject({
+      name: "TaskExecutionError", message: expect.stringContaining("Invalid assistant tool message"),
+      evidence: { rounds: 1, usage: { totalTokens: 11 } },
+    });
+    expect(requests).toHaveLength(1);
   });
 
   it.each(["length", "content_filter", "tool_calls", "unknown"])("does not deliver a %s response", async (reason) => {
