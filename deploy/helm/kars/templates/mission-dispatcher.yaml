@@ -1,0 +1,176 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- include "kars.missionDispatcher.validate" . }}
+{{- $mission := .Values.missionDispatcher | default dict }}
+{{- if $mission.enabled }}
+{{- $meshNamespace := (.Values.agentMesh | default dict).namespace | default "agentmesh" }}
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kars-mission-dispatcher
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kars-mission-dispatcher-root
+  namespace: {{ .Release.Namespace }}
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames: ["kars-mission-dispatcher-identity"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kars-mission-dispatcher-root
+  namespace: {{ .Release.Namespace }}
+subjects:
+  - kind: ServiceAccount
+    name: kars-mission-dispatcher
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kars-mission-dispatcher-root
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: {{ .Release.Name }}-{{ .Release.Namespace }}-mission-dispatcher
+rules:
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karstasks"]
+    verbs: ["get", "list", "patch"]
+  - apiGroups: ["kars.azure.com"]
+    resources: ["karssandboxes"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["namespaces"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list"]
+  - apiGroups: ["apps"]
+    resources: ["deployments", "replicasets"]
+    verbs: ["get", "list"]
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    verbs: ["get", "create", "update", "patch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: {{ .Release.Name }}-{{ .Release.Namespace }}-mission-dispatcher
+subjects:
+  - kind: ServiceAccount
+    name: kars-mission-dispatcher
+    namespace: {{ .Release.Namespace }}
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: {{ .Release.Name }}-{{ .Release.Namespace }}-mission-dispatcher
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kars-mission-dispatcher
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: mission-dispatcher
+    app.kubernetes.io/managed-by: {{ .Release.Service }}
+  annotations:
+    meta.helm.sh/release-name: {{ .Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
+spec:
+  replicas: 1
+  strategy:
+    type: Recreate
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: kars
+      app.kubernetes.io/component: mission-dispatcher
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: kars
+        app.kubernetes.io/component: mission-dispatcher
+    spec:
+      serviceAccountName: kars-mission-dispatcher
+      automountServiceAccountToken: true
+      terminationGracePeriodSeconds: 35
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+        runAsGroup: 1000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: mission-dispatcher
+          image: {{ if $mission.image.digest }}{{ $mission.image.repository }}@{{ $mission.image.digest }}{{ else }}{{ $mission.image.repository }}:latest{{ end }}
+          imagePullPolicy: Always
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          env:
+            - name: KARS_MISSION_AUTH_MODE
+              value: {{ $mission.authMode | quote }}
+            - name: KARS_MISSION_DISPATCHER_DEPLOYMENT
+              value: kars-mission-dispatcher
+            - name: KARS_MISSION_DISPATCHER_RELEASE
+              value: {{ .Release.Name | quote }}
+            - name: KARS_MISSION_IDENTITY_ROOT
+              valueFrom:
+                secretKeyRef:
+                  name: kars-mission-dispatcher-identity
+                  key: root
+                  optional: false
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_UID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.uid
+            - name: AGENTMESH_RELAY_URL
+              value: {{ $mission.relayUrl | default (printf "ws://agentmesh-relay.%s.svc.cluster.local:8765" $meshNamespace) | quote }}
+            - name: AGENTMESH_REGISTRY_URL
+              value: {{ $mission.registryUrl | default (printf "http://agentmesh-registry.%s.svc.cluster.local:8080" $meshNamespace) | quote }}
+          ports:
+            - name: health
+              containerPort: 8080
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            periodSeconds: 5
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: health
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: "1"
+              memory: 512Mi
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+{{- end }}

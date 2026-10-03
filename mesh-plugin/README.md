@@ -182,8 +182,8 @@ role, Sandbox UID and Pod UID using HMAC-SHA256 over the JSON array
 that the supplied DID matches this derivation as well as the complete binding.
 It cannot prove root entropy, Secret provenance or controller ownership.
 `KARS_IDENTITY_SEED` and public application IDs cannot substitute for this root.
-The current chart/controller do not yet provide these bindings or a mission
-dispatcher; the enabled path remains source-only.
+The opt-in Core chart/controller provide these bindings and the dispatcher
+process described below. Source and package checks do not qualify live delivery.
 
 Reserved messages never fall through to legacy task handlers, even when the
 receiver is disabled. Reassembled legacy chunks are rejected because they lack
@@ -305,9 +305,10 @@ Nonterminal and uncertain claims are never automatically retried. A send timeout
 cannot cancel an already-started transport send, and a crashed dispatcher's claim
 may remain pending. The `ownerSession` field is not a leadership lease or process
 fence. The controller now implements the default-off binding/Secret producer
-below. The executable helper lifecycle, Helm/RBAC wiring, orphan handling,
-correlated Bridge activity readers and live end-to-end execution remain
-integration work. These source-level tests are not evidence of a delivered mission.
+below. The executable helper and opt-in Core Helm wiring are implemented as
+described below. Orphan handling, correlated Bridge activity readers and live
+end-to-end execution remain integration work. These source-level tests are not
+evidence of a delivered mission.
 
 ### Controller identity and binding producer
 
@@ -344,6 +345,67 @@ creation uses CREATE, never forced apply over a competing create. Suspension,
 Task authorization, credential-rebind and private-activation checks still apply.
 The feature is not wired into the installed Core release yet; source tests do not
 qualify Kubernetes defaulting, useful delivery, Entra identity or either beta gate.
+
+### Core dispatcher process (development qualification)
+
+`mesh-plugin/Dockerfile.dispatcher` builds the actual Node 22 process from the
+pinned official AGT SDK. `npm run start:dispatcher` runs the compiled executable.
+For installations using a private npm mirror, pass the existing configuration as
+an optional BuildKit secret, not a build argument or copied file:
+
+```sh
+docker build --secret id=npmrc,src="$HOME/.npmrc" \
+  -f mesh-plugin/Dockerfile.dispatcher -t your-registry/kars-mission-dispatcher:latest .
+```
+
+The configuration is mounted only for dependency installation and is not copied
+into image layers. The lockfile and official SDK checksum remain authoritative.
+Core Helm's `missionDispatcher.enabled` defaults to false; enabling it also
+requires explicit `missionDispatcher.authMode=development`. Unsupported Entra
+configuration fails closed rather than silently selecting anonymous transport.
+This is a Kind qualification path, **not** an Entra-authenticated AKS dispatcher.
+
+The Core chart includes the singleton Recreate Deployment, service account,
+read-only workload discovery, Task run annotation updates, and durable ConfigMap
+writes. Secret access is only GET of the helper's named root in Core's namespace;
+it cannot read runtime identity roots. Kubernetes administrators must protect
+these accounts and workload objects: cluster-scoped Task and ConfigMap access is
+not a per-tenant RBAC boundary. Do not run multiple Core dispatchers against the
+same Task population. No extra Helm release, Service or Ingress is required.
+
+Before creating its one SDK/key manager, the process acquires writer custody and
+validates its actual Helm Deployment/ReplicaSet/Pod, controller-pinned immutable
+root and mounted-root equality. It does not require its own Ready condition to
+bootstrap. It independently refreshes custody during active delivery; only an
+exact currently-bound active agent is admitted. Runtime KNOCK admission likewise
+recognizes only its controller-configured dispatcher, while the encrypted receiver
+still requires the exact target and `task:execute` permission.
+
+Existing pending Task runs are discovered and resolved afresh. Persisted attempts
+are recovered before consulting replacement runtime bindings: terminal evidence
+can be republished, but ambiguous/nonterminal work is never resent. Shutdown stops
+new work, permits the active handback to drain, and retires transport before
+releasing writer custody. The process exits after a bounded 30-second shutdown;
+Core grants 35 seconds. `/livez` remains available during bootstrap and `/readyz`
+requires a connected transport and fresh custody, not useful mission completion.
+Polling defaults to 2 seconds and each mission deadline is at most 5 minutes.
+
+Example opt-in values (merge with the installation's existing values):
+
+```yaml
+missionDispatcher:
+  enabled: true
+  authMode: development
+  image:
+    repository: your-registry/kars-mission-dispatcher
+    # Optional digest pins the built image; otherwise the chart uses :latest.
+    digest: ""
+```
+
+Registry and relay URLs default to the Core-managed official AgentMesh services;
+`registryUrl` and `relayUrl` can select an existing official deployment. Identity
+roots are never user-provided values. This configuration and the passing source
+tests alone do not prove live execution or connected Bridge activity.
 
 ## Files created
 

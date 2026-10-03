@@ -20,6 +20,18 @@ schemaHook:
   # Exact API service/backend IPv4 /32s and TCP ports for this cluster/CNI.
   apiDestinations: []
 
+# Durable encrypted dispatch is opt-in while live delivery is being qualified.
+# Development mode is explicit; this helper does not yet support Entra authentication.
+# Identity roots are generated/pinned by the controller, never supplied through values.
+missionDispatcher:
+  enabled: false
+  authMode: ""
+  image:
+    repository: karsacr.azurecr.io/kars-mission-dispatcher
+    digest: ""
+  relayUrl: ""
+  registryUrl: ""
+
 localInference:
   # Opt in to namespace-wide model egress, or prefer precise pod targets below.
   namespaces: []

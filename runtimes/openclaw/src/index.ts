@@ -369,6 +369,7 @@ import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _st
 import { processTaskWithTools as _processTaskWithTools, executeTaskWithEvidence, type TaskLoopDeps } from "./core/agt-task-loop.js";
 import { MissionReceiver, missionTargetFromEnvironment } from "./core/mission-receiver.js";
 import { initializeMissionIdentity } from "./core/mission-bootstrap.js";
+import { missionKnockHandler } from "./core/mission-admission.js";
 import { isMissionMessage } from "@kars/mesh/dist/mission-protocol.js";
 import { authorizeTaskAction } from "./core/task-policy.js";
 import { runHandoffOrchestration as _runHandoffOrchestrationCore } from "./core/agt-handoff.js";
@@ -618,13 +619,14 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Messages can arrive immediately after connect() returns, so handlers
     // must be in place first.
 
+    const missionTarget = missionTargetFromEnvironment(agtIdentity.did);
     // KNOCK handler — policy-gated session establishment with trust scoring.
     const AGT_TRUST_THRESHOLD = parseInt(process.env.AGT_TRUST_THRESHOLD || "0", 10); // 0 = accept all (dev)
     if (AGT_TRUST_THRESHOLD > 0) {
       agtMeshClient.enableKnockEnforcement();
       log.info(`AGT KNOCK enforcement enabled (threshold: ${AGT_TRUST_THRESHOLD})`);
     }
-    agtMeshClient.onKnock(async (fromAmid: string, request: any) => {
+    agtMeshClient.onKnock(missionKnockHandler(missionTarget, async (fromAmid: string, request: any) => {
       const intent = request?.intent?.capability || '*';
       // Use full AMID as identifier when name resolution fails — a truncated
       // prefix (slice(0,12) = "did:agentmes") collapses every unresolved
@@ -705,7 +707,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       log.info(`AGT KNOCK accepted: bootstrapped trust for ${fromName} / ${fromAmid.slice(0, 12)}... (score=500)`);
 
       return { accept: true };
-    });
+    }));
 
     // Handle E2E decryption failures, KNOCK rejections, and transport errors.
     //
@@ -800,7 +802,6 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       }
     });
 
-    const missionTarget = missionTargetFromEnvironment(agtIdentity.did);
     const missionReceiver = missionTarget ? new MissionReceiver({
       target: missionTarget,
       authorize: (assignment) => authorizeTaskAction("task:execute", {
