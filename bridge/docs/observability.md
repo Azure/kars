@@ -84,8 +84,12 @@ signing points concrete — how trust is established, end to end.
 
 ## Live stream
 
-One SSE stream per run (`/api/namespaces/{ns}/tasks/{name}/stream`) feeds both the
-graph and the per-round/per-tool feed. The BFF aggregates the principal's trace
-and every spawned sub-agent's, tagging each event with the emitting agent and its
-role; the client de-dupes on the router-stamped `seq` so an event never
-double-counts across the persisted seed and the live tail.
+The Mission SSE endpoint (`/api/namespaces/{ns}/tasks/{name}/stream`) refreshes
+run-bound state and existing durable Activity. It does not substitute a live
+pod's trace for missing revision evidence. Runtime-forwarded router observations
+arrive with the successful terminal artifact bundle, not as a live per-tool feed.
+
+Retained evidence stays attached to its original run. Current-run projection,
+stream reads, and downloads are revision-fenced so feedback cannot silently mix
+an earlier result with a newer assignment. An empty Activity view means evidence
+is unavailable; it is not proof that no agent or tool ran.
