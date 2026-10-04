@@ -24,6 +24,7 @@ import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js"
 import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
 import { authorizeTaskAction } from "./task-policy.js";
 import { TaskPhaseGuard, type TaskPhaseEvidence } from "./task-phase.js";
+import { readTaskFile, writeTaskFile } from "./task-filesystem.js";
 import type { MissionArtifacts } from "@kars/mesh/dist/mission-protocol.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -320,11 +321,7 @@ export async function processTaskWithTools(
             } else {
               try {
                 const staged = ledger && args.artifact_name != null ? ledger.prepareArtifact(args.artifact_name, args.content) : undefined;
-                const fs = await import("node:fs");
-                const path = await import("node:path");
-                fs.mkdirSync(path.dirname(filePath), { recursive: true });
-                fs.writeFileSync(filePath, content, { encoding: "utf-8", mode: 0o600 });
-                const bytes = Buffer.byteLength(content, "utf-8");
+                const bytes = await writeTaskFile(filePath, content);
                 log.info(`AGT sub-agent file_write: ${filePath} (${bytes} bytes)`);
                 if (staged) ledger!.commitArtifacts(staged);
                 result = `OK: wrote ${bytes} bytes to ${filePath}${staged ? `; attached as ${args.artifact_name} for Bridge on mission success` : ledger ? "; local only" : ""}`;
@@ -335,70 +332,14 @@ export async function processTaskWithTools(
               }
             }
           } else if (fnName === "file_read") {
-            // Companion to file_write. Declared in AGT_POLICY (see
-            // runtimes/openclaw/src/index.ts), so every agent expects it to
-            // be invocable. Reads any regular file under /sandbox/ or /tmp/
-            // (after path.resolve, so .. traversal is blocked) up to
-            // max_bytes (default 1 MiB, ceiling 16 MiB) and returns a JSON
-            // envelope with the UTF-8 content plus a truncated flag.
             const filePath = String(args.path || "");
             const maxBytesRaw = typeof args.max_bytes === "number" ? args.max_bytes : 1048576;
             const maxBytes = Math.min(Math.max(Math.floor(maxBytesRaw), 1), 16 * 1024 * 1024);
             try {
-              const fs = await import("node:fs");
-              const path = await import("node:path");
-              const resolved = path.resolve(filePath);
-              if (!resolved.startsWith("/sandbox/") && !resolved.startsWith("/tmp/")) {
-                result = `file_read error: path must resolve under /sandbox/ or /tmp/ (got: ${resolved})`;
-              } else {
-                // Atomic open+stat+read (CWE-367 TOCTOU): a path-check chain
-                // like existsSync→statSync→readFileSync lets an attacker
-                // swap the file (e.g. symlink the path under /tmp to a
-                // sensitive file outside the sandbox) between calls. Open
-                // the FD once with O_RDONLY|O_NOFOLLOW, fstat from the FD,
-                // then read from the same FD. Every operation acts on the
-                // exact same inode the open() resolved.
-                let fd: number;
-                try {
-                  fd = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-                } catch (e: unknown) {
-                  const code = (e as NodeJS.ErrnoException | undefined)?.code;
-                  if (code === "ENOENT") {
-                    result = `file_read error: not found: ${resolved}`;
-                  } else if (code === "ELOOP") {
-                    result = `file_read error: refusing to follow symlink: ${resolved}`;
-                  } else {
-                    result = `file_read error: ${(e as Error).message}`;
-                  }
-                  fd = -1;
-                }
-                if (fd !== -1) {
-                  try {
-                    const stat = fs.fstatSync(fd);
-                    if (!stat.isFile()) {
-                      result = `file_read error: not a regular file: ${resolved}`;
-                    } else {
-                      const totalBytes = Number(stat.size);
-                      const readBytes = Math.min(totalBytes, maxBytes);
-                      const buf = Buffer.alloc(readBytes);
-                      const returnedBytes = fs.readSync(fd, buf, 0, readBytes, 0);
-                      const truncated = totalBytes > maxBytes;
-                      const text = buf.subarray(0, returnedBytes).toString("utf-8");
-                      log.info(`AGT sub-agent file_read: ${resolved} (${totalBytes} bytes${truncated ? `, truncated to ${maxBytes}` : ""})`);
-                      result = JSON.stringify({
-                        path: resolved,
-                        bytes: totalBytes,
-                        truncated,
-                        returned_bytes: returnedBytes,
-                        content: text,
-                      });
-                      toolSucceeded = true;
-                    }
-                  } finally {
-                    fs.closeSync(fd);
-                  }
-                }
-              }
+              const evidence = await readTaskFile(filePath, maxBytes);
+              log.info(`AGT sub-agent file_read: ${evidence.path} (${evidence.bytes} bytes${evidence.truncated ? `, returned ${evidence.returned_bytes}` : ""})`);
+              result = JSON.stringify(evidence);
+              toolSucceeded = true;
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } catch (err: any) {
               toolSucceeded = false;

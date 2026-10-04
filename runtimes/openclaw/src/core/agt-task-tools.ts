@@ -64,7 +64,7 @@ export const TASK_TOOLS: any[] = [
     type: "function" as const,
     function: {
       name: "file_write",
-      description: "Write text content directly to a file inside the sandbox. Use this whenever you need to save an artifact LOCALLY (e.g. so foundry_code_execute can read it, or as the source for mesh_transfer_file). Path must be absolute and under /sandbox/ or /tmp/. Parent directories are created automatically. Overwrites existing files. **SIZE LIMIT — read carefully:** the `content` argument is part of the tool-call JSON arguments string; if it exceeds ~4 KB the LLM occasionally emits malformed escapes and the call fails to parse. For artifacts larger than ~4 KB use `foundry_code_execute` with `json.dump(data, open('/mnt/data/x.json','w'))` (or write/append the file in chunks) and then ship the resulting file via `mesh_transfer_file`. NEVER pass a multi-kilobyte JSON blob inline as a `mesh_send` payload — siblings expect FILES for anything over a few KB.",
+      description: "Write UTF-8 text to a local regular file, up to 16 MiB. Path must be absolute and resolve under /sandbox/ or /tmp/. Symlinks in untrusted parent components and existing final symlinks or special files are refused. Missing parents are created with mode 0700. Replaces the directory entry atomically with a new mode-0600 file; does not append or preserve prior permissions, inode identity or hard links. Use this to save local artifacts for other permitted tools. The content is encoded in tool-call JSON: large arguments can suffer malformed escapes, so prefer concise artifacts. If available and authorized, foundry_code_execute can generate larger artifacts and mesh_transfer_file can transfer them; neither tool is implied by file_write access. NEVER put multi-kilobyte artifacts inline in mesh_send payloads.",
       parameters: {
         type: "object",
         properties: {
@@ -79,12 +79,12 @@ export const TASK_TOOLS: any[] = [
     type: "function" as const,
     function: {
       name: "file_read",
-      description: "Read text content from a file inside the sandbox. Path must be absolute and resolve under /sandbox/ or /tmp/. Use this to read artifacts delivered by other agents over the mesh (typically under /sandbox/.openclaw/workspace/incoming/) BEFORE embedding their content in a downstream tool call such as foundry_code_execute. Returns the file as UTF-8 text. Symlinks and paths that escape the sandbox via `..` are rejected. For binary files use foundry_code_execute with python (open(p,'rb')) — file_read decodes as UTF-8 and is intended for JSON, markdown, and other text artifacts.",
+      description: "Read a local regular file as UTF-8 text with its initial size, actual returned byte count and truncation status. Path must be absolute and resolve under /sandbox/ or /tmp/. Symlinks in untrusted parent components and the final file, special files, and paths resolving outside those roots are rejected. Defaults to 1 MiB, with a maximum of 16 MiB. Concurrent changes are not a filesystem snapshot. Use this to inspect received artifacts before passing their content to another permitted tool. UTF-8 decoding replaces incomplete or invalid byte sequences; this tool is for text, not binary artifacts.",
       parameters: {
         type: "object",
         properties: {
           path: { type: "string", description: "Absolute path to read (e.g. /sandbox/.openclaw/workspace/incoming/analyst.json). Must resolve under /sandbox/ or /tmp/." },
-          max_bytes: { type: "number", description: "Optional cap on bytes returned. Default 1048576 (1 MiB). Files larger than this are truncated and the truncation is noted in the response." },
+          max_bytes: { type: "number", description: "Optional cap on returned bytes, 1 through 16777216 (16 MiB). Default 1048576 (1 MiB). The response reports actual returned bytes and whether fewer bytes were read than the initial file size." },
         },
         required: ["path"],
       },

@@ -57,6 +57,24 @@ is still required. `maxToolCalls` limits attempted calls (including denied,
 malformed and failed calls); an overflowing batch fails before any tool runs.
 `minToolCalls` counts only successful authorized filesystem operations.
 
+Filesystem operations use the packaged Python standard-library helper at
+`dist/core/task-filesystem.py` (requires `/usr/bin/python3`, already in the sandbox
+base). The helper runs without a shell, site packages or inherited environment,
+with bounded input/output and a 10-second timeout. Both tools resolve paths under
+`/sandbox/` or `/tmp/`, then open each untrusted parent relative to a held directory
+descriptor without following symlinks. Administrator-owned roots may be platform
+aliases, such as macOS `/tmp`. Open descriptors pin directory/file identity across
+path swaps; this is not a snapshot or a prohibition on concurrent inode renames.
+Reads accept regular files only, do not block on FIFOs, loop over short reads and
+report actual bytes and incomplete reads. Writes are capped at 16 MiB and replace
+a directory entry atomically with a new mode-0600 inode, rather than truncating an
+existing hard-linked inode. Existing symlinks/special files are refused; a symlink
+raced in before replacement is replaced, never followed. Successful writes do
+not preserve prior inode identity, permissions or hard links. Failed operations
+are not counted as success and do not commit or export artifacts. A helper timeout is a
+failure, not proof that no filesystem effect occurred. These tools do not isolate
+all same-UID processes or replace sandbox OS permissions and mount boundaries.
+
 The runtime reports copied accounting after each response, batch reservation and
 attempted call. The receiver and durable journal reject changed contracts,
 regressing counters and erased evidence. Unknown usage cannot become known after

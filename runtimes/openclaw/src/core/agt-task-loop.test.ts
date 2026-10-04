@@ -4,7 +4,7 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
-import { mkdtemp, readFile, rm, access, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, access, writeFile, symlink } from "node:fs/promises";
 import { executeTaskWithEvidence, processTaskWithTools, type TaskLoopDeps } from "./agt-task-loop.js";
 import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
 import { MissionReceiver, type MissionReceiverOptions } from "./mission-receiver.js";
@@ -128,6 +128,38 @@ describe("reviewed filesystem phase execution", () => {
     expect(result.usage?.totalTokens).toBe(22);
     expect(requests[0].tools.map((t: any) => t.function.name)).toEqual(["file_write"]);
     expect(policyRequests).toHaveLength(1);
+  });
+
+  it.each([
+    ["file_read", "parent"], ["file_read", "final"],
+    ["file_write", "parent"], ["file_write", "final"],
+  ])("refuses %s through a %s symlink without successful evidence or artifacts", async (name, kind) => {
+    const directory = await workspace();
+    const outside = await mkdtemp("/var/tmp/kars-mission-outside-");
+    tempDirectories.push(outside);
+    const externalPath = join(outside, "document.md");
+    const sensitive = "External bytes must neither leak nor change";
+    await writeFile(externalPath, sensitive);
+    const alias = join(directory, "alias");
+    await symlink(kind === "parent" ? outside : externalPath, alias);
+    const path = kind === "parent" ? join(alias, "document.md") : alias;
+    const args = name === "file_read" ? { path } : { path, content: "Replacement", artifact_name: "document.md" };
+    await router([tool(name, args), final()], 200, { allowed: true });
+    let failure: unknown;
+    try {
+      await executeTaskWithEvidence("task", deps, log, true, reviewedPhase({
+        capabilities: [name === "file_read" ? "filesystem-read" : "filesystem-write"],
+      }));
+    } catch (error) { failure = error; }
+    expect(failure).toBeInstanceOf(TaskExecutionError);
+    expect(failure).toMatchObject({ phase: { attemptedToolCalls: 1, successfulToolCalls: 0 },
+      evidence: { rounds: 2, usage: { totalTokens: 22 } } });
+    expect(failure).not.toHaveProperty("artifacts");
+    expect(policyRequests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages.at(-1).content).toContain(`${name} error:`);
+    expect(JSON.stringify(requests)).not.toContain(sensitive);
+    expect(await readFile(externalPath, "utf8")).toBe(sensitive);
   });
 
   it("counts an actual read without requiring write permission", async () => {
@@ -311,7 +343,7 @@ describe("reviewed filesystem phase execution", () => {
       send: async (_to, reply) => { replies.push(reply); }, warn: log.warn });
     expect(parseMissionMessage(assignment)).not.toBeNull();
     await receiver.handle(target.dispatcherDid, assignment, "encrypted");
-    await vi.waitFor(() => expect(replies.at(-1)?.status).toBe("failed"));
+    await vi.waitFor(() => expect(replies.at(-1)?.status).toBe("failed"), { timeout: 10_000 });
     expect(requests).toHaveLength(25);
     expect(policyRequests).toHaveLength(32);
     expect(replies).toHaveLength(84);
