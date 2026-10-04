@@ -72,6 +72,7 @@ export interface TaskDetail {
    *  Artifacts tab (a PR is a delivery type). Empty when none. */
   pull_requests?: PullRequestRef[];
   activity: ActivityEvent[];
+  router_activity?: import("../router-activity").RouterActivity | null;
   telemetry: MissionTelemetry | null;
   checkpoint: TaskCheckpoint | null;
   agent_identity: AgentIdentity | null;

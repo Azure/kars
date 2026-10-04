@@ -386,6 +386,8 @@ pub struct TaskDetailDto {
     /// until a mesh run produces a trace. This is the source of the Activity
     /// timeline and the clean per-tool audit path.
     pub activity: Vec<serde_json::Value>,
+    /// Exact-run, runtime-forwarded observations; not independent execution proof.
+    pub router_activity: Option<super::router_activity::RouterActivity>,
     /// Run telemetry rollup (rounds, tool calls) parsed from the mission output.
     /// Token totals live on `result`; this carries the loop-shape counts.
     pub telemetry: Option<MissionTelemetryDto>,

@@ -31,6 +31,7 @@ async fn cursor(State(state): State<AppState>) -> Response {
 struct Since {
     #[serde(default)]
     since: u64,
+    rounds: Option<String>,
 }
 async fn trace(
     State(state): State<AppState>,
@@ -41,7 +42,27 @@ async fn trace(
         Ok(scope) => scope,
         Err(err) => return error(err),
     };
-    match state.services.telemetry.snapshot(scope, query.since) {
+    let snapshot = if let Some(raw) = query.rounds {
+        let rounds = raw
+            .split(',')
+            .map(str::parse::<u64>)
+            .collect::<Result<Vec<_>, _>>();
+        let Ok(rounds) = rounds else {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        };
+        if query.since != 0
+            || rounds.is_empty()
+            || rounds.len() > 32
+            || rounds.contains(&0)
+            || rounds.windows(2).any(|pair| pair[0] >= pair[1])
+        {
+            return axum::http::StatusCode::BAD_REQUEST.into_response();
+        }
+        state.services.telemetry.selected_snapshot(scope, &rounds)
+    } else {
+        state.services.telemetry.snapshot(scope, query.since)
+    };
+    match snapshot {
         Some(trace) => Json(trace).into_response(),
         None => error(Error::StaleScope),
     }

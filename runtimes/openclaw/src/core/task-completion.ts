@@ -3,6 +3,7 @@
 
 import { validMissionArtifacts, type MissionArtifacts } from "@kars/mesh/dist/mission-protocol.js";
 import type { TaskPhaseEvidence } from "./task-phase.js";
+import { ROUTER_OBSERVATIONS_ARTIFACT } from "./router-observations.js";
 
 export interface TaskUsage {
   promptTokens: number;
@@ -48,14 +49,22 @@ export class TaskCompletionLedger {
   prepareArtifact(name: unknown, content: unknown): MissionArtifacts {
     if (!this.artifactsEnabled) throw new Error("Dispatcher does not support named artifacts; return the full content inline");
     if (typeof name !== "string" || typeof content !== "string") throw new Error("Artifact name and content must be strings");
+    if (name === ROUTER_OBSERVATIONS_ARTIFACT) throw new Error("Router observation filename is reserved for runtime evidence");
     const next = { ...this.artifacts, [name]: content };
     if (!validMissionArtifacts(next)) throw new Error("Artifact requires a safe, nonreserved filename, nonempty UTF-8 text, at most 16 files and 128 KiB serialized total");
     return next;
   }
 
   commitArtifacts(artifacts: MissionArtifacts): void {
-    if (!this.artifactsEnabled || !validMissionArtifacts(artifacts)) throw new Error("Invalid or unnegotiated mission artifacts");
+    if (!this.artifactsEnabled || Object.hasOwn(artifacts, ROUTER_OBSERVATIONS_ARTIFACT) || !validMissionArtifacts(artifacts)) throw new Error("Invalid or unnegotiated mission artifacts");
     this.artifacts = { ...artifacts };
+  }
+
+  attachRouterObservations(content: string): boolean {
+    const next = { ...this.artifacts, [ROUTER_OBSERVATIONS_ARTIFACT]: content };
+    if (!this.artifactsEnabled || !validMissionArtifacts(next)) return false;
+    this.artifacts = next;
+    return true;
   }
 
   artifactSnapshot(): { artifacts?: MissionArtifacts } {

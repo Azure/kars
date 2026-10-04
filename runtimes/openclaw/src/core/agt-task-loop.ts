@@ -22,6 +22,7 @@ import { validateMeshPayload } from "./mesh-payload-guard.js";
 import { routerUrl } from "./router-client.js";
 import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js";
 import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
+import { ReturnedRouterResponses } from "./router-observations.js";
 import { authorizeTaskAction } from "./task-policy.js";
 import { TaskPhaseGuard, type TaskPhaseEvidence } from "./task-phase.js";
 import { readTaskFile, writeTaskFile } from "./task-filesystem.js";
@@ -80,7 +81,12 @@ export async function executeTaskWithEvidence(
   let phase: TaskPhaseGuard | undefined;
   try {
     phase = reviewedPhase === undefined ? undefined : new TaskPhaseGuard(reviewedPhase);
-    const output = await processTaskWithTools(taskContent, deps, log, ledger, phase);
+    const observations = artifactsEnabled ? new ReturnedRouterResponses() : undefined;
+    const output = await processTaskWithTools(taskContent, deps, log, ledger, phase, observations);
+    const observationArtifact = await observations?.artifact();
+    if (observationArtifact && !ledger.attachRouterObservations(observationArtifact)) {
+      log.warn("Router observations omitted: negotiated artifact capacity was used by deliverables");
+    }
     return { ...ledger.snapshot(), ...ledger.artifactSnapshot(), output, ...(phase ? { phase: phase.snapshot() } : {}) };
   } catch (error) {
     if (error instanceof TaskExecutionError && !phase) throw error;
@@ -99,6 +105,7 @@ export async function processTaskWithTools(
   log: Logger,
   ledger?: TaskCompletionLedger,
   phase?: TaskPhaseGuard,
+  observations?: ReturnedRouterResponses,
 ): Promise<string> {
   if (phase && !ledger) throw new Error("Reviewed phase execution requires measured task accounting");
   const http = await import("node:http");
@@ -220,6 +227,7 @@ export async function processTaskWithTools(
         },
         timeout: 60000,
       }, (res) => {
+        observations?.capture(res.headers);
         let body = "";
         res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
         res.on("end", () => {

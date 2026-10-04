@@ -42,7 +42,9 @@ import { currentPrincipal } from "@/lib/session";
 import { egressScope } from "@/lib/format";
 import { Icon } from "@/components/icon";
 import { HaltButton } from "./halt-button";
-import { TIER_LABELS, type MissionArtifact } from "@/lib/types";
+import { TIER_LABELS } from "@/lib/types";
+import { RouterActivityPanel } from "@/components/router-activity-panel";
+import { reviewKind } from "@/lib/mission-run-evidence";
 import { MissionServerTabs, EnvelopeFact, ObjectiveBlock, NextStep, AgentIdentityCard, RecordedRunPanel, ArtifactsPanel, ResultPanel, FailureDiagnostic, CompositionPanel } from "./mission-detail-panels";
 
 
@@ -57,18 +59,6 @@ const AUTONOMY_INTERACTION: Record<number, string> = {
   4: "Supervised — it runs autonomously with periodic checkpoints you sign off on in your Inbox.",
   5: "Full — it runs to completion within budget; you review the result. Only hard-stops would ask you.",
 };
-
-function reviewKind(artifacts: MissionArtifact[] | undefined): string {
-  if (!artifacts || artifacts.length === 0) return "output";
-  const exts = artifacts.map((a) => a.name.split(".").pop()?.toLowerCase() ?? "");
-  const code = ["ts", "tsx", "js", "jsx", "rs", "py", "go", "java", "rb", "c", "cpp", "h", "sh", "yaml", "yml", "toml", "json"];
-  const docs = ["md", "mdx", "txt", "rst", "adoc", "html"];
-  const data = ["csv", "tsv", "parquet", "xlsx"];
-  if (exts.some((e) => code.includes(e))) return "code";
-  if (exts.some((e) => data.includes(e))) return "data";
-  if (exts.some((e) => docs.includes(e))) return "docs";
-  return "output";
-}
 
 export default async function MissionDetail({
   params,
@@ -122,7 +112,7 @@ export default async function MissionDetail({
   );
 
   const needsYou = approvals.some((a) => a.actionable);
-  const { currentResult, realDelivery, failed } = missionRunState(task);
+  const { currentResult, realDelivery, failed, routerActivity } = missionRunState(task);
   const displayTask = { ...task, result: currentResult };
   const blocked = currentResult?.blocked ?? null;
   const producer = currentResult?.run_evidence;
@@ -450,7 +440,9 @@ export default async function MissionDetail({
               <div className="space-y-4">
                 {task.launched && currentResult == null && <DeployTimeline task={displayTask} />}
                 {currentResult && <RecordedRunPanel result={currentResult} />}
+                {routerActivity && currentRunNonce && <RouterActivityPanel activity={routerActivity} producer={producer?.agent_name ?? name} ns={ns} name={name} runNonce={currentRunNonce} />}
                 <ExecutionExplorer
+                  routerActivityPresented={routerActivity != null && currentRunNonce != null}
                   running={running}
                   activity={task.activity}
                   telemetry={task.telemetry}
@@ -533,7 +525,7 @@ export default async function MissionDetail({
             label: "Artifacts",
             badge: ((task.artifacts?.length ?? 0) + (task.pull_requests?.length ?? 0)) || null,
             node: (task.artifacts && task.artifacts.length > 0) || (task.pull_requests && task.pull_requests.length > 0) ? (
-              <ArtifactsPanel ns={ns} task={name} runNonce={task.current_run_nonce} artifacts={task.artifacts} pullRequests={task.pull_requests ?? []} activity={task.activity} egress={task.composition?.egress ?? []} tokens={currentResult?.total_tokens ?? null} />
+              <ArtifactsPanel ns={ns} task={name} runNonce={task.current_run_nonce} routerActivityState={routerActivity?.state ?? null} artifacts={task.artifacts} pullRequests={task.pull_requests ?? []} activity={task.activity} egress={task.composition?.egress ?? []} tokens={currentResult?.total_tokens ?? null} />
             ) : realDelivery ? (
               <HonestState
                 variant="empty"

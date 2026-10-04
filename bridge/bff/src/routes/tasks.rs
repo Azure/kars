@@ -19,6 +19,7 @@ mod models;
 mod presentation;
 mod queries;
 mod revision;
+mod router_activity;
 pub(crate) mod run_evidence;
 
 #[cfg(test)]
