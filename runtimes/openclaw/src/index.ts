@@ -367,8 +367,8 @@ import { TASK_TOOLS } from "./core/agt-task-tools.js";
 import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect, notifyInboxToMemory as _notifyInboxToMemory, startTaskProgressHeartbeat } from "./core/agt-heartbeat.js";
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
 import { processTaskWithTools as _processTaskWithTools, executeTaskWithEvidence, type TaskLoopDeps } from "./core/agt-task-loop.js";
-import { MissionReceiver, missionTargetFromEnvironment } from "./core/mission-receiver.js";
-import { initializeMissionIdentity } from "./core/mission-bootstrap.js";
+import { MissionReceiver } from "./core/mission-receiver.js";
+import { initializeMissionBinding } from "./core/mission-bootstrap.js";
 import { missionKnockHandler } from "./core/mission-admission.js";
 import { isMissionMessage } from "@kars/mesh/dist/mission-protocol.js";
 import { authorizeTaskAction } from "./core/task-policy.js";
@@ -516,7 +516,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
 
     // Mission identities are Pod-bound and never persisted to the legacy identity file.
     // Acquire process-external prekey writer custody before deriving keys or creating the SDK.
-    const meshIdentity = await initializeMissionIdentity() ?? await meshMod.generateIdentity();
+    const missionBinding = await initializeMissionBinding();
+    const meshIdentity = missionBinding?.identity ?? await meshMod.generateIdentity();
     agtIdentity = {
       amid: meshIdentity.amid,
       did: meshIdentity.did,
@@ -619,7 +620,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Messages can arrive immediately after connect() returns, so handlers
     // must be in place first.
 
-    const missionTarget = missionTargetFromEnvironment(agtIdentity.did);
+    const missionTarget = missionBinding?.target ?? null;
     // KNOCK handler — policy-gated session establishment with trust scoring.
     const AGT_TRUST_THRESHOLD = parseInt(process.env.AGT_TRUST_THRESHOLD || "0", 10); // 0 = accept all (dev)
     if (AGT_TRUST_THRESHOLD > 0) {
@@ -802,8 +803,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       }
     });
 
-    const missionReceiver = missionTarget ? new MissionReceiver({
-      target: missionTarget,
+    const missionReceiver = missionBinding ? new MissionReceiver({
+      target: missionBinding.target,
+      expectedContract: missionBinding.contract,
       authorize: (assignment) => authorizeTaskAction("task:execute", {
         task_uid: assignment.taskUid, run_nonce: assignment.runNonce,
         dispatcher_did: assignment.dispatcherDid, assignment_id: assignment.assignmentId,

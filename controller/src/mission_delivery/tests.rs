@@ -368,6 +368,7 @@ async fn prepares_secret_backed_projection_without_mutating_the_requested_run() 
             .find(|e| e["name"] == name)
             .unwrap()
     };
+    assert_eq!(find("KARS_MISSION_CONTRACT")["value"], r#"{"version":1}"#);
     assert_eq!(
         find("KARS_MISSION_POD_UID")["valueFrom"]["fieldRef"]["fieldPath"],
         "metadata.uid"

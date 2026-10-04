@@ -168,7 +168,7 @@ describe("reviewed filesystem phase receiver", () => {
       counters.phase!.successfulToolCalls = 0;
       return { ...measured(), output: "Written briefing", artifacts: { "briefing.md": "Real result bytes\r\n" } };
     });
-    const s = setup({ execute, authorize: () => new Promise(resolve => { allow = resolve; }) });
+    const s = setup({ expectedContract: contract, execute, authorize: () => new Promise(resolve => { allow = resolve; }) });
     await s.receiver.handle(target.dispatcherDid, { ...target, ...contract, type: "mission:probe", challenge: "phase-probe", runNonce: "run-1" }, "encrypted");
     expect(s.replies[0]).toMatchObject({ ...contract, status: "ready" });
     const input = structuredClone(constrained);
@@ -188,7 +188,7 @@ describe("reviewed filesystem phase receiver", () => {
     expect(execute).toHaveBeenCalledTimes(1);
   });
   it.each(["missing", "regressing", "unknown-to-known", "swallowed"])("fails closed on %s progress without erasing validated counters", async variant => {
-    const s = setup({ execute: async (_content, progress) => {
+    const s = setup({ expectedContract: contract, execute: async (_content, progress) => {
       progress(variant === "unknown-to-known" ? { ...measured(), usage: null } : measured());
       const invalid = variant === "missing" ? evidence : variant === "regressing" ? measured(0, 0) : measured();
       if (variant === "swallowed") {
@@ -205,13 +205,13 @@ describe("reviewed filesystem phase receiver", () => {
     expect(s.replies.every(reply => parseMissionMessage(reply))).toBe(true);
   });
   it("refuses success below the minimum but retains exact bounded accounting", async () => {
-    const s = setup({ execute: async () => ({ ...measured(1, 0), output: "Prose is not a successful file operation" }) });
+    const s = setup({ expectedContract: contract, execute: async () => ({ ...measured(1, 0), output: "Prose is not a successful file operation" }) });
     await s.receiver.handle(target.dispatcherDid, constrained, "encrypted");
     await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("failed"));
     expect(s.replies.at(-1)?.evidence).toEqual(measured(1, 0));
   });
   it.each(["artifacts", "oversized-output", "interrupted"])("retains measured phase counts after %s failure", async variant => {
-    const s = setup({ execute: async (_content, progress) => {
+    const s = setup({ expectedContract: contract, execute: async (_content, progress) => {
       progress(measured(1, 0));
       if (variant === "interrupted") throw new TaskExecutionError("Interrupted", measured());
       return { ...measured(), output: variant === "oversized-output" ? "x".repeat(192 * 1024) : "Result",
@@ -224,7 +224,7 @@ describe("reviewed filesystem phase receiver", () => {
     expect(s.replies.at(-1)).not.toHaveProperty("output");
   });
   it("ignores malformed error evidence while preserving prior counters and unknown final usage", async () => {
-    const s = setup({ execute: async (_content, progress) => {
+    const s = setup({ expectedContract: contract, execute: async (_content, progress) => {
       progress(measured()); throw new TaskExecutionError("Untrusted failure counts", measured(0, 0));
     } });
     await s.receiver.handle(target.dispatcherDid, constrained, "encrypted");
@@ -233,7 +233,7 @@ describe("reviewed filesystem phase receiver", () => {
   });
   it("caps journal events and seals callbacks after execution", async () => {
     let callback!: (value: NonNullable<MissionReply["evidence"]>) => void;
-    const s = setup({ execute: async (_content, progress) => {
+    const s = setup({ expectedContract: contract, execute: async (_content, progress) => {
       callback = progress;
       for (let i = 0; i < 127; i++) progress(measured());
       return { ...measured(), output: "Unreachable" };
@@ -252,7 +252,7 @@ describe("reviewed filesystem phase receiver", () => {
     input.padding = "x".repeat(MAX_MISSION_MESSAGE_BYTES - Buffer.byteLength(JSON.stringify(input)));
     expect(Buffer.byteLength(JSON.stringify(input))).toBe(MAX_MISSION_MESSAGE_BYTES);
     expect(parseMissionMessage(input)).not.toBeNull();
-    const s = setup();
+    const s = setup({ expectedContract: readyContract });
     await s.receiver.handle(target.dispatcherDid, input, "encrypted");
     expect(s.replies).toHaveLength(1);
     expect(s.replies[0]).toMatchObject({ ...target, ...readyContract, status: "ready", challenge: "phase-probe", runNonce: "run-1", bootId: "boot-1" });
@@ -277,7 +277,7 @@ describe("reviewed filesystem phase receiver", () => {
       if (measuredFailure) throw new TaskExecutionError("🔥".repeat(4096), counters);
       throw new Error("🔥".repeat(4096));
     });
-    const s = setup({ execute });
+    const s = setup({ expectedContract: boundedContract, execute });
     await s.receiver.handle(target.dispatcherDid, input, "encrypted");
     await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("failed"));
     expect(s.replies.map(reply => reply.status)).toEqual(["accepted", "running", "failed"]);
@@ -318,6 +318,97 @@ describe("reviewed filesystem phase receiver", () => {
   });
 });
 
+describe("installed mission receiver binding", () => {
+  const contract = missionContract({ name: "write-briefing", objective: "Write a useful bounded briefing", capabilities: ["filesystem-write"], minToolCalls: 1, maxToolCalls: 2 });
+  const other = missionContract({ ...contract.reviewedPhase, maxToolCalls: 3 });
+  it.each([null, { version: 3 }, { version: 1, extra: undefined },
+    { ...contract, phaseDigest: "sha256:" + "0".repeat(64) }, { ...contract, extra: undefined },
+  ])("refuses invalid installed contracts before receiving messages %#", expectedContract => {
+    expect(() => setup({ expectedContract: expectedContract as MissionReceiverOptions["expectedContract"] })).toThrow("Invalid installed mission contract");
+  });
+  it.each([null, {}, { ...target, taskUid: "" }, { ...target, extra: undefined },
+    { ...target, agentDid: "invalid" }, { ...target, runNonce: "injected" },
+  ])("refuses invalid installed targets %#", installedTarget => {
+    expect(() => setup({ target: installedTarget as MissionReceiverOptions["target"] })).toThrow();
+  });
+  it.each(["", "invalid boot id"])("refuses invalid boot identity %#", bootId => {
+    expect(() => setup({ bootId })).toThrow("Invalid installed mission target or boot identity");
+  });
+  it("rejects accessor-backed target and contract without invoking getters", () => {
+    const get = vi.fn(() => "task-uid");
+    const installedTarget = Object.defineProperty({ ...target }, "taskUid", { get, enumerable: true });
+    expect(() => setup({ target: installedTarget })).toThrow();
+    const expectedContract = Object.defineProperty({ ...contract }, "reviewedPhase", { get, enumerable: true });
+    expect(() => setup({ expectedContract })).toThrow();
+    expect(get).not.toHaveBeenCalled();
+  });
+  it.each([
+    { installed: undefined, incoming: contract },
+    { installed: missionContract(), incoming: contract },
+    { installed: contract, incoming: missionContract() },
+    { installed: contract, incoming: other },
+  ])("rejects mismatched probes and assignments before authorization or nonce reservation %#", async ({ installed, incoming }) => {
+    const expected = installed ?? missionContract();
+    const phase = expected.reviewedPhase ? { name: expected.reviewedPhase.name, attemptedToolCalls: 1, successfulToolCalls: 1, minToolCalls: 1, maxToolCalls: 2 } : undefined;
+    const execute = vi.fn(async () => ({ ...evidence, ...(phase ? { phase } : {}), output: "A useful briefing" }));
+    const s = setup({ expectedContract: installed, execute });
+    for (let i = 0; i < 129; i++) {
+      const runNonce = i === 0 ? assignment.runNonce : `rejected-${i}`;
+      expect(await s.receiver.handle(target.dispatcherDid, { ...target, ...incoming, type: "mission:probe", challenge: "probe-1", runNonce }, "encrypted")).toBe(true);
+      expect(await s.receiver.handle(target.dispatcherDid, { ...assignment, ...incoming, runNonce }, "encrypted")).toBe(true);
+    }
+    expect(s.replies).toEqual([]);
+    expect(s.authorize).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    const accepted = { ...assignment, ...expected };
+    await s.receiver.handle(target.dispatcherDid, accepted, "encrypted");
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
+    const terminal = s.replies.at(-1);
+    await s.receiver.handle(target.dispatcherDid, accepted, "encrypted");
+    expect(s.replies.map(reply => reply.status)).toEqual(["accepted", "succeeded", "succeeded"]);
+    expect(s.replies.at(-1)).toBe(terminal);
+    expect(s.authorize).toHaveBeenCalledTimes(1);
+    expect(execute).toHaveBeenCalledTimes(1);
+  });
+  it("captures options independently and executes the installed immutable phase, not caller-owned data", async () => {
+    const replies: MissionReply[] = [];
+    const expectedContract = structuredClone(contract);
+    const installedTarget = { ...target };
+    let authorized: MissionAssignment | undefined;
+    const execute = vi.fn<MissionReceiverOptions["execute"]>(async (_content, _progress, _artifacts, phase) => {
+      expect(phase).toEqual(contract.reviewedPhase);
+      expect(phase).not.toBe(expectedContract.reviewedPhase);
+      expect(phase).not.toBe(authorized?.reviewedPhase);
+      expect(Object.isFrozen(phase)).toBe(true);
+      expect(Object.isFrozen(phase?.capabilities)).toBe(true);
+      expect(() => { phase!.maxToolCalls = 32; }).toThrow(TypeError);
+      return { ...evidence, phase: { name: phase!.name, attemptedToolCalls: 1, successfulToolCalls: 1, minToolCalls: 1, maxToolCalls: 2 }, output: "A useful briefing" };
+    });
+    const authorize = vi.fn<MissionReceiverOptions["authorize"]>(async incoming => { authorized = incoming; return true; });
+    const options: MissionReceiverOptions = { target: installedTarget, expectedContract, execute, authorize,
+      send: async (_to, reply) => { replies.push(reply); }, warn: vi.fn(), bootId: "boot-1" };
+    const receiver = new MissionReceiver(options);
+    installedTarget.taskUid = "mutated-task";
+    expectedContract.reviewedPhase!.maxToolCalls = 32;
+    expectedContract.phaseDigest = other.phaseDigest;
+    options.target = { ...target, podUid: "other-pod" };
+    options.expectedContract = other;
+    options.bootId = "other-boot";
+    options.authorize = vi.fn(async () => false);
+    options.execute = vi.fn(async () => { throw new Error("replacement executor"); });
+    options.send = vi.fn(async () => undefined);
+    await receiver.handle(target.dispatcherDid, { ...target, ...contract, type: "mission:probe", challenge: "probe-1", runNonce: assignment.runNonce }, "encrypted");
+    expect(replies.at(-1)).toMatchObject({ ...target, ...contract, status: "ready", bootId: "boot-1" });
+    await receiver.handle(target.dispatcherDid, { ...assignment, ...contract }, "encrypted");
+    await vi.waitFor(() => expect(replies.at(-1)?.status).toBe("succeeded"));
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(authorize).toHaveBeenCalledTimes(1);
+    expect(options.authorize).not.toHaveBeenCalled();
+    expect(options.execute).not.toHaveBeenCalled();
+    expect(options.send).not.toHaveBeenCalled();
+  });
+});
+
 describe("mission wire and environment validation", () => {
   const environment = {
     KARS_MISSION_DISPATCH_ENABLED: "true", KARS_MISSION_IDENTITY_ROOT: "c".repeat(64), KARS_MISSION_TASK_NAME: target.taskName,
@@ -328,7 +419,9 @@ describe("mission wire and environment validation", () => {
   it("requires a complete binding and independently secret root", () => {
     expect(missionTargetFromEnvironment(target.agentDid, {})).toBeNull();
     expect(() => missionTargetFromEnvironment(target.agentDid, { KARS_MISSION_DISPATCH_ENABLED: "true" })).toThrow("Secret-backed");
-    expect(missionTargetFromEnvironment(derivedDid, environment)).toEqual({ ...target, agentDid: derivedDid });
+    const captured = missionTargetFromEnvironment(derivedDid, environment);
+    expect(captured).toEqual({ ...target, agentDid: derivedDid });
+    expect(Object.isFrozen(captured)).toBe(true);
   });
   it.each(["KARS_MISSION_SANDBOX_UID", "KARS_MISSION_POD_UID", "KARS_MISSION_IDENTITY_ROOT"])("rejects a DID from a different %s", field => {
     const value = field === "KARS_MISSION_IDENTITY_ROOT" ? "d".repeat(64) : "different-uid";
