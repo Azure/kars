@@ -5,6 +5,7 @@ import { acquireMissionWriter, missionIdentity } from "@kars/mesh/dist/mission-i
 import type { MeshIdentity } from "@kars/mesh/dist/identity.js";
 import { missionContract, parseMissionContract, type MissionContract, type MissionTarget } from "@kars/mesh/dist/mission-protocol.js";
 import { missionTargetFromEnvironment } from "./mission-receiver.js";
+import { parseMissionAdmission, type MissionAdmission } from "@kars/mesh/dist/mission-admission.js";
 
 const WRITER_KEY = Symbol.for("kars-mission-prekey-writer");
 
@@ -12,6 +13,16 @@ export interface MissionRuntimeBinding {
   readonly identity: MeshIdentity;
   readonly target: Omit<MissionTarget, "runNonce">;
   readonly contract: MissionContract;
+  readonly admission: MissionAdmission;
+}
+
+function installedAdmission(value: string | undefined): MissionAdmission {
+  try {
+    if (value === undefined || Buffer.byteLength(value, "utf8") > 8192) throw new Error("Missing or oversized admission");
+    const admission = parseMissionAdmission(JSON.parse(value));
+    if (admission) return admission;
+  } catch { /* Invalid admission cannot authorize any run. */ }
+  throw new Error("Invalid KARS_MISSION_ADMISSION configuration");
 }
 
 function installedContract(value: string | undefined): MissionContract {
@@ -39,5 +50,6 @@ export async function initializeMissionBinding(environment = process.env): Promi
     env.KARS_MISSION_SANDBOX_UID ?? "", env.KARS_MISSION_POD_UID ?? "");
   const target = missionTargetFromEnvironment(identity.did, env);
   if (!target) throw new Error("Mission binding was disabled during initialization");
-  return Object.freeze({ identity, target, contract: installedContract(env.KARS_MISSION_CONTRACT) });
+  return Object.freeze({ identity, target, contract: installedContract(env.KARS_MISSION_CONTRACT),
+    admission: installedAdmission(env.KARS_MISSION_ADMISSION) });
 }

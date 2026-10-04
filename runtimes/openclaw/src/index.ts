@@ -806,6 +806,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     const missionReceiver = missionBinding ? new MissionReceiver({
       target: missionBinding.target,
       expectedContract: missionBinding.contract,
+      admission: missionBinding.admission,
       authorize: (assignment) => authorizeTaskAction("task:execute", {
         task_uid: assignment.taskUid, run_nonce: assignment.runNonce,
         dispatcher_did: assignment.dispatcherDid, assignment_id: assignment.assignmentId,

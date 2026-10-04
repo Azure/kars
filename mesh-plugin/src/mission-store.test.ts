@@ -11,6 +11,8 @@ import type { MissionMetadata, MissionWorkloadResources } from "./mission-worklo
 
 const c: MissionCandidate = { namespace: "kars-system", taskName: "briefing", taskUid: "task-uid", sandboxUid: "sandbox-uid", podUid: "pod-uid",
   runNonce: "run-1", agentDid: `did:mesh:${"a".repeat(32)}`, dispatcherDid: `did:mesh:${"b".repeat(32)}`, agentName: "Briefing writer", content: "Write an approval checklist." };
+const admission = { version: 1, state: "run", taskGeneration: 1, authorizationDigest: `sha256:${"a".repeat(64)}`,
+  runNonce: c.runNonce, objectiveDigest: missionContentDigest(c.content) };
 const p = "kars.azure.com/";
 const taskPath = `/apis/kars.azure.com/v1alpha1/namespaces/${c.namespace}/karstasks/${c.taskName}`;
 const mapsPath = `/api/v1/namespaces/${c.namespace}/configmaps`;
@@ -24,7 +26,7 @@ const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 interface Resource {
   metadata: MissionMetadata;
   spec?: NonNullable<MissionWorkloadResources["deployment"]["spec"]> & { objective?: string; execution?: { launch: boolean }; suspended?: boolean; blueprint?: { executionPlan?: unknown } };
-  status?: NonNullable<MissionWorkloadResources["deployment"]["status"]> & { executionPhase?: string; sandboxRef?: { name: string }; phase?: string; conditions?: Array<{ type: string; status: string }> };
+  status?: NonNullable<MissionWorkloadResources["deployment"]["status"]> & { executionPhase?: string; envelopeDigest?: string; sandboxRef?: { name: string }; phase?: string; conditions?: Array<{ type: string; status: string }> };
   data?: Record<string, string>; immutable?: boolean;
 }
 
@@ -57,11 +59,12 @@ class Api implements KubernetesJson {
 function fixture() {
   const api = new Api();
   const task = { apiVersion: "kars.azure.com/v1alpha1", kind: "KarsTask", metadata: { name: c.taskName, namespace: c.namespace, uid: c.taskUid, generation: 1, annotations: { [`${p}run-requested`]: c.runNonce } },
-    spec: { objective: c.content, execution: { launch: true } }, status: { observedGeneration: 1, executionPhase: "Running", sandboxRef: { name: "briefing" } } };
+    spec: { objective: c.content, execution: { launch: true } }, status: { observedGeneration: 1, executionPhase: "Running", sandboxRef: { name: "briefing" },
+      phase: "Ready", conditions: [{ type: "Ready", status: "True" }], envelopeDigest: admission.authorizationDigest } };
   api.put(taskPath, task);
   const bindingPath = `${mapsPath}/kars-mission-binding-${c.taskName}`;
   api.put(bindingPath, { metadata: { name: `kars-mission-binding-${c.taskName}`, namespace: c.namespace, uid: "binding-uid", ownerReferences: [owner] },
-    data: { "binding.json": JSON.stringify({ ...c, sandboxName: "briefing", podName: "briefing-abc", namespaceUid: "namespace-uid",
+    data: { "binding.json": JSON.stringify({ ...c, admission, sandboxName: "briefing", podName: "briefing-abc", namespaceUid: "namespace-uid",
       deploymentUid: "deployment-uid", deploymentGeneration: 1, replicaSetName: "briefing-rs", replicaSetUid: "replicaset-uid" }) } });
   const sandboxPath = `/apis/kars.azure.com/v1alpha1/namespaces/${c.namespace}/karssandboxes/briefing`;
   api.put(sandboxPath, { metadata: { name: "briefing", namespace: c.namespace, uid: c.sandboxUid, ownerReferences: [owner], annotations: { [`${p}namespace-uid`]: "namespace-uid" } } });
@@ -70,7 +73,10 @@ function fixture() {
     [`${p}namespace-claim-version`]: "v1", [`${p}sandbox-namespace`]: c.namespace, [`${p}sandbox-name`]: "briefing", [`${p}sandbox-uid`]: c.sandboxUid,
   } }, status: { phase: "Active" } });
   const deploymentPath = "/apis/apps/v1/namespaces/kars-briefing/deployments/briefing";
-  const template = { metadata: { labels: { [`${p}sandbox`]: "briefing" } }, spec: { containers: [{ name: "openclaw", image: "sandbox:latest" }] } };
+  const template = { metadata: { labels: { [`${p}sandbox`]: "briefing" } }, spec: { containers: [{ name: "openclaw", image: "sandbox:latest", env: [
+    { name: "KARS_MISSION_ADMISSION", value: JSON.stringify(admission) },
+    { name: "KARS_MISSION_CONTRACT", value: JSON.stringify(missionContract()) },
+  ] }] } };
   const replicas = { observedGeneration: 1, replicas: 1, readyReplicas: 1, availableReplicas: 1 };
   api.put(deploymentPath, { metadata: { name: "briefing", namespace: "kars-briefing", uid: "deployment-uid", generation: 1,
     labels: { [`${p}sandbox`]: "briefing", [`${p}component`]: "sandbox", [`${p}parent-namespace`]: c.namespace },
@@ -107,6 +113,98 @@ const key = missionAttemptName(c).replace("kars-mission-attempt-", "");
 const outputPath = `${mapsPath}/kars-mission-output-${key}`;
 const artifactPath = `${mapsPath}/kars-mission-artifacts-${key}`;
 const projectionPath = `${mapsPath}/kars-mission-output-${c.taskName}`;
+
+describe("installed mission admission", () => {
+  it.each(["missing digest", "changed digest", "generation", "observed generation", "phase", "condition", "missing condition"])("rejects stale Task authority: %s", async kind => {
+    const h = fixture(); const task = h.api.resources.get(taskPath)!;
+    if (kind === "missing digest") delete task.status!.envelopeDigest;
+    if (kind === "changed digest") task.status!.envelopeDigest = `sha256:${"b".repeat(64)}`;
+    if (kind === "generation") { task.metadata.generation = 2; task.status!.observedGeneration = 2; }
+    if (kind === "observed generation") task.status!.observedGeneration = 0;
+    if (kind === "phase") task.status!.phase = "Pending";
+    if (kind === "condition") task.status!.conditions = [{ type: "Ready", status: "False" }];
+    if (kind === "missing condition") delete task.status!.conditions;
+    expect(await h.store.isCurrent(c)).toBe(false);
+    expect(await h.store.candidate(c, c.dispatcherDid)).toBeNull();
+    expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+  });
+
+  it.each([
+    undefined, null, {},
+    { version: 1, state: "idle", taskGeneration: 1, authorizationDigest: admission.authorizationDigest },
+    { ...admission, taskGeneration: 2 }, { ...admission, taskGeneration: 0 },
+    { ...admission, authorizationDigest: `sha256:${"b".repeat(64)}` },
+    { ...admission, runNonce: "other-run" },
+    { ...admission, objectiveDigest: missionContentDigest(`${c.content}!`) },
+  ])("rejects missing or mismatched binding admission %j", async value => {
+    const h = fixture(); const cm = h.api.resources.get(h.bindingPath)!;
+    cm.data!["binding.json"] = JSON.stringify({ ...JSON.parse(cm.data!["binding.json"]), admission: value });
+    expect(await h.store.isCurrent(c)).toBe(false);
+    expect(await h.store.candidate(c, c.dispatcherDid)).toBeNull();
+    expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+  });
+
+  const invalidEnv = ["missing", "duplicate", "valueFrom", "nonstring", "malformed", "oversized", "mismatched"] as const;
+  it.each(["KARS_MISSION_ADMISSION", "KARS_MISSION_CONTRACT"])("requires exact explicit %s in the actual coherent workload", async name => {
+    for (const kind of invalidEnv) {
+      const h = fixture();
+      for (const path of [h.deploymentPath, h.replicaSetPath]) {
+        const container = h.api.resources.get(path)!.spec!.template!.spec!.containers![0];
+        const env = container.env as Array<Record<string, unknown>>;
+        const entry = env.find(e => e.name === name)!;
+        if (kind === "missing") container.env = env.filter(e => e.name !== name);
+        if (kind === "duplicate") env.push(clone(entry));
+        if (kind === "valueFrom") entry.valueFrom = { secretKeyRef: { name: "credentials", key: name } };
+        if (kind === "nonstring") entry.value = 1;
+        if (kind === "malformed") entry.value = "{";
+        if (kind === "oversized") entry.value = `${" ".repeat(8193)}${entry.value}`;
+        if (kind === "mismatched") entry.value = JSON.stringify(name === "KARS_MISSION_ADMISSION"
+          ? { ...admission, runNonce: "other-run" } : phaseContract);
+      }
+      expect(await h.store.isCurrent(c), kind).toBe(false);
+      expect(await h.store.candidate(c, c.dispatcherDid), kind).toBeNull();
+      expect(h.api.calls.every(call => call.method === "GET"), kind).toBe(true);
+    }
+  });
+
+  it.each(["task", "binding", "deployment"] as const)("rejects %s admission changing during reverse validation", async kind => {
+    const h = fixture(); let reads = 0;
+    h.api.before = (method, path) => {
+      if (method !== "GET" || path !== h.paths[kind] || ++reads !== 2) return;
+      const resource = clone(h.api.resources.get(path)!);
+      if (kind === "task") resource.status!.envelopeDigest = `sha256:${"b".repeat(64)}`;
+      if (kind === "binding") {
+        const binding = JSON.parse(resource.data!["binding.json"]);
+        binding.admission.runNonce = "other-run";
+        resource.data!["binding.json"] = JSON.stringify(binding);
+      }
+      if (kind === "deployment") {
+        const env = resource.spec!.template!.spec!.containers![0].env as Array<Record<string, unknown>>;
+        env.find(e => e.name === "KARS_MISSION_ADMISSION")!.value = JSON.stringify({ ...admission, runNonce: "other-run" });
+      }
+      h.api.put(path, resource);
+    };
+    expect(await h.store.isCurrent(c)).toBe(false);
+    expect(reads).toBe(2);
+    expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+  });
+
+  it("retains terminal evidence without an admitted replacement runtime or new dispatch", async () => {
+    const h = fixture(); const completed = await terminal(h.store);
+    h.api.resources.delete(h.bindingPath);
+    h.api.resources.get(taskPath)!.status!.phase = "Pending";
+    expect(await h.store.candidate(c, c.dispatcherDid)).toEqual(c);
+    expect(await h.store.isCurrent(c)).toBe(false);
+    expect(await h.store.publish(completed)).toBe(true);
+    expect(h.api.resources.get(outputPath)).toBeDefined();
+    expect(h.api.resources.get(artifactPath)).toBeDefined();
+    expect(h.api.resources.get(projectionPath)).toBeDefined();
+    expect(h.api.resources.get(taskPath)!.metadata.annotations![`${p}run-completed`]).toBe(c.runNonce);
+    expect(await h.store.candidate(c, c.dispatcherDid)).toBeNull();
+    expect(h.api.calls.filter(call => call.method === "POST" && call.path === mapsPath
+      && (call.body as ConfigMap).metadata.name === missionAttemptName(c))).toHaveLength(1);
+  });
+});
 
 describe("mission candidate discovery", () => {
   it.each(["typed plan", "null plan", "marker", "unknown marker", "empty marker"])("rejects new execution with %s before resolving a runtime binding", async kind => {
@@ -402,6 +500,26 @@ describe("Kubernetes mission attempt store", () => {
     const invalid = Buffer.from([0xff]);
     Object.assign(task.metadata.annotations, { [`${p}run-objective-b64`]: invalid.toString("base64"), [`${p}run-objective-digest`]: missionContentDigest(invalid.toString()) });
     expect(missionObjective(task, "rev-1")).toBeNull();
+  });
+  it("matches controller objective whitespace and standard-base64 admission semantics", () => {
+    const { task } = fixture();
+    const bind = (text: string, encoded = Buffer.from(text).toString("base64")) => {
+      Object.assign(task.metadata.annotations!, { [`${p}run-objective-nonce`]: "rev-1",
+        [`${p}run-objective-b64`]: encoded, [`${p}run-objective-digest`]: missionContentDigest(text) });
+      return missionObjective(task, "rev-1");
+    };
+    for (const text of ["", " \t\r\n", "\ufeff", "\u00a0\u1680\u2000\u200a\u2028\u2029\u202f\u205f\u3000"]) {
+      expect(bind(text)).toBeNull(); task.spec!.objective = text;
+      expect(missionObjective(task, "initial")).toBeNull();
+    }
+    for (const text of ["\u0085", "\u200b", "\ufeff Briefing\r\nCafé — 日本語 🌍 \n"]) {
+      expect(bind(text)).toBe(text); task.spec!.objective = text;
+      expect(missionObjective(task, "initial")).toBe(text);
+    }
+    for (const encoded of ["eA==", "eB==", "eP=="]) expect(bind("x", encoded)).toBe("x");
+    for (const encoded of ["eA", "eA=", "eA===", " eA==", "eA==\n", "e_==", "e-==", "eA==eA==", "!"]) {
+      expect(bind("x", encoded), encoded).toBeNull();
+    }
   });
   it("atomically excludes competing creates and rejects stale resourceVersion updates", async () => {
     const h = fixture(); const results = await Promise.all([h.store.create(initial()), h.store.create(initial())]);

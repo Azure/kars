@@ -3394,6 +3394,11 @@ pub async fn run(client: Client) -> Result<()> {
             namespace_ownership::to_sandbox_ref,
         )
         .watches(
+            Api::<crate::kars_task::KarsTask>::all(ctx.client.clone()),
+            crate::watch_config::bounded(),
+            task_to_sandbox_ref,
+        )
+        .watches(
             Api::<Deployment>::all(ctx.client.clone()),
             crate::watch_config::bounded(),
             deployment_to_sandbox_ref,
@@ -3469,10 +3474,34 @@ fn deployment_to_sandbox_ref(d: Deployment) -> Option<ObjectRef<KarsSandbox>> {
     Some(ObjectRef::<KarsSandbox>::new(sandbox_name).within(parent_ns))
 }
 
+// Annotation-only run requests must refresh the installed admission without waiting for a spec change.
+fn task_to_sandbox_ref(task: crate::kars_task::KarsTask) -> Option<ObjectRef<KarsSandbox>> {
+    let name = task.metadata.name.as_deref().filter(|v| !v.is_empty())?;
+    let namespace = task.metadata.namespace.as_deref().filter(|v| !v.is_empty())?;
+    Some(ObjectRef::<KarsSandbox>::new(name).within(namespace))
+}
+
 #[cfg(test)]
 mod watch_tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn task_mapper_requires_nonempty_name_and_namespace() {
+        let mut task = crate::kars_task::KarsTask::new("writer", Default::default());
+        task.metadata.namespace = Some("team-work".into());
+        let reference = task_to_sandbox_ref(task.clone()).unwrap();
+        assert_eq!(reference.name, "writer");
+        assert_eq!(reference.namespace.as_deref(), Some("team-work"));
+        for value in [None, Some(String::new())] {
+            let mut missing_name = task.clone();
+            missing_name.metadata.name = value.clone();
+            assert!(task_to_sandbox_ref(missing_name).is_none());
+            let mut missing_namespace = task.clone();
+            missing_namespace.metadata.namespace = value;
+            assert!(task_to_sandbox_ref(missing_namespace).is_none());
+        }
+    }
 
     fn deploy_with_labels(labels: BTreeMap<String, String>) -> Deployment {
         Deployment {

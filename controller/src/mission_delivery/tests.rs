@@ -370,6 +370,12 @@ async fn prepares_secret_backed_projection_without_mutating_the_requested_run() 
     };
     assert_eq!(find("KARS_MISSION_CONTRACT")["value"], r#"{"version":1}"#);
     assert_eq!(
+        serde_json::from_str::<Value>(find("KARS_MISSION_ADMISSION")["value"].as_str().unwrap())
+            .unwrap(),
+        admission::for_task(&prepared.task).unwrap()
+    );
+    assert!(find("KARS_MISSION_ADMISSION").get("valueFrom").is_none());
+    assert_eq!(
         find("KARS_MISSION_POD_UID")["valueFrom"]["fieldRef"]["fieldPath"],
         "metadata.uid"
     );
@@ -627,6 +633,77 @@ async fn workload_reads_reject_overlap_truncation_and_changed_reverse_snapshot()
 }
 
 #[tokio::test]
+async fn admission_projection_is_stable_on_ack_but_changes_for_new_run_authority() {
+    let f = Fixture::new().await;
+    let original: Deployment = f.get(DEPLOYMENT);
+    let (prepared, expected) = f.prepare().await;
+    let project_task = |task: &KarsTask| {
+        let mut desired = original.clone();
+        project(
+            &mut desired,
+            task,
+            &prepared.sandbox,
+            &prepared.runtime_root.uid,
+            &prepared.dispatcher_did,
+        )
+        .unwrap();
+        desired
+    };
+    let mut acknowledged = prepared.task.clone();
+    for key in ["kars.azure.com/run-ack", "kars.azure.com/run-completed"] {
+        acknowledged
+            .metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert(key.into(), "preserved-run".into());
+    }
+    assert_eq!(project_task(&acknowledged), expected);
+    for change in ["run", "objective", "generation", "authority"] {
+        let mut task = acknowledged.clone();
+        match change {
+            "run" => {
+                task.metadata
+                    .annotations
+                    .as_mut()
+                    .unwrap()
+                    .insert("kars.azure.com/run-requested".into(), "next-run".into());
+            }
+            "objective" => task.spec.objective.push('!'),
+            "generation" => task.metadata.generation = Some(2),
+            "authority" => task.spec.envelope.delegation_depth += 1,
+            _ => unreachable!(),
+        }
+        assert_ne!(
+            project_task(&task).spec.unwrap().template,
+            expected.spec.as_ref().unwrap().template,
+            "{change}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn binding_rejects_a_ready_workload_with_a_different_installed_admission() {
+    let f = Fixture::new().await;
+    let prepared = f.applied().await;
+    let mut deployment: Value = f.get(DEPLOYMENT);
+    let env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array_mut()
+        .unwrap();
+    let installed = env
+        .iter_mut()
+        .find(|e| e["name"] == "KARS_MISSION_ADMISSION")
+        .unwrap();
+    let mut admission = admission::for_task(&prepared.task).unwrap();
+    admission["runNonce"] = "other-run".into();
+    installed["value"] = admission.to_string().into();
+    f.install_workload(deployment);
+    assert!(publish(&f.client, &prepared).await.is_err());
+    assert_eq!(f.writes("/api/v1/namespaces/work/configmaps"), 0);
+    assert_eq!(f.writes(TASK), 0);
+}
+
+#[tokio::test]
 async fn publishes_actual_uid_binding_and_repeated_publication_is_a_read_only_noop() {
     let f = Fixture::new().await;
     let original: Value = f.get(TASK);
@@ -640,7 +717,8 @@ async fn publishes_actual_uid_binding_and_repeated_publication_is_a_read_only_no
         json!({"taskName":"run","taskUid":"task-uid","sandboxName":"run","sandboxUid":"sandbox-uid",
         "namespaceUid":"runtime-uid","deploymentUid":"run-deployment","deploymentGeneration":1,"replicaSetName":"run-hash",
         "replicaSetUid":"run-rs","podName":"run-hash-pod","podUid":"run-pod","dispatcherDid":prepared.dispatcher_did,
-        "agentDid":identity::did(&prepared.runtime_root.value,identity::Role::Runtime,"sandbox-uid","run-pod").unwrap()})
+        "agentDid":identity::did(&prepared.runtime_root.value,identity::Role::Runtime,"sandbox-uid","run-pod").unwrap(),
+        "admission":admission::for_task(&prepared.task).unwrap()})
     );
     assert_eq!(map["metadata"]["ownerReferences"][0]["uid"], "task-uid");
     publish(&f.client, &prepared).await.unwrap();

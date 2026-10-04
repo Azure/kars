@@ -2,18 +2,21 @@
 // Licensed under the MIT License.
 
 import { isDeepStrictEqual } from "node:util";
+import { missionAdmissionAllows, parseMissionAdmission, type MissionAdmission } from "./mission-admission.js";
 import { KubernetesError, type KubernetesJson } from "./kubernetes-json.js";
 import { missionAttemptName, missionContentDigest, type MissionAttempt, type MissionAttemptStore, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
-import { missionContract, missionEvidenceAdvances, parseMissionMessage, sameMissionContract, sameMissionTarget, type MissionReply } from "./mission-protocol.js";
+import { missionContract, missionEvidenceAdvances, parseMissionContract, parseMissionMessage, sameMissionContract, sameMissionTarget, type MissionReply } from "./mission-protocol.js";
 import { currentMissionWorkload, singleControllerOwner, type MissionMetadata as Metadata, type MissionWorkloadBinding, type MissionWorkloadResources } from "./mission-workload.js";
 interface ConfigMap { apiVersion: "v1"; kind: "ConfigMap"; metadata: Metadata; data: Record<string, string>; immutable?: boolean }
 interface Task {
   apiVersion: string; kind: string; metadata: Metadata;
   spec: { objective: string; execution?: { launch?: boolean }; blueprint?: { executionPlan?: unknown } };
-  status?: { observedGeneration?: number; executionPhase?: string; sandboxRef?: { name: string } };
+  status?: { observedGeneration?: number; executionPhase?: string; sandboxRef?: { name: string };
+    envelopeDigest?: string; phase?: string; conditions?: Array<{ type: string; status: string }> };
 }
 interface Binding extends MissionWorkloadBinding {
   taskName: string; taskUid: string; agentDid: string; dispatcherDid: string;
+  admission: MissionAdmission;
 }
 function parseBinding(value: unknown): Binding | null {
   if (!value || typeof value !== "object" || Array.isArray(value)) return null;
@@ -26,7 +29,8 @@ function parseBinding(value: unknown): Binding | null {
   if (![b.sandboxName, b.podName, b.replicaSetName].every(v => name.test(v as string) && (v as string).length <= 253)
     || !/^[a-z0-9](?:[a-z0-9-]*[a-z0-9])?$/.test(`kars-${b.sandboxName}`)
     || `kars-${b.sandboxName}`.length > 63) return null;
-  return value as Binding;
+  const admission = parseMissionAdmission(b.admission);
+  return admission ? { ...b, admission } as Binding : null;
 }
 const prefix = "kars.azure.com/";
 const requested = `${prefix}run-requested`;
@@ -57,6 +61,20 @@ export function missionObjective(task: Task, nonce: string): string | null {
   // A revision nonce without its bound objective must not silently execute the original request.
   if (nonce.startsWith("rev-")) return null;
   return typeof task.spec.objective === "string" && task.spec.objective.trim() ? task.spec.objective : null;
+}
+
+function installedAdmissionMatches(deployment: MissionWorkloadResources["deployment"], admission: MissionAdmission): boolean {
+  const containers = deployment.spec?.template?.spec?.containers?.filter(c => c.name === "openclaw");
+  if (containers?.length !== 1 || !Array.isArray(containers[0].env)) return false;
+  const env = containers[0].env as Array<Record<string, unknown>>;
+  const explicit = (name: string): unknown => {
+    const matches = env.filter(e => e && e.name === name);
+    if (matches.length !== 1 || matches[0].valueFrom !== undefined || typeof matches[0].value !== "string"
+      || Buffer.byteLength(matches[0].value) > 8192) return null;
+    return JSON.parse(matches[0].value);
+  };
+  return parseMissionContract(explicit("KARS_MISSION_CONTRACT"))?.version === 1
+    && isDeepStrictEqual(parseMissionAdmission(explicit("KARS_MISSION_ADMISSION")), admission);
 }
 
 function supportsTaskExecution(task: Task): boolean {
@@ -135,7 +153,8 @@ export class KubernetesMissionStore implements MissionAttemptStore {
     const task = await this.task(candidate);
     if (!this.current(task, candidate) || !task.metadata.resourceVersion
       || !Number.isSafeInteger(task.metadata.generation) || task.metadata.generation! < 1
-      || task.status?.observedGeneration !== task.metadata.generation || task.status?.executionPhase !== "Running") return false;
+      || task.status?.observedGeneration !== task.metadata.generation || task.status?.executionPhase !== "Running"
+      || task.status.phase !== "Ready" || task.status.conditions?.some(c => c.type === "Ready" && c.status === "True") !== true) return false;
     try {
       const cm = await this.api.request<ConfigMap>("GET", mapPath(candidate.namespace, `kars-mission-binding-${candidate.taskName}`));
       if (!owned(cm.metadata, candidate) || !cm.metadata.uid || !cm.metadata.resourceVersion
@@ -145,7 +164,10 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       if (!binding || binding.taskName !== candidate.taskName || binding.taskUid !== candidate.taskUid
         || binding.sandboxUid !== candidate.sandboxUid || binding.podUid !== candidate.podUid
         || binding.agentDid !== candidate.agentDid || binding.dispatcherDid !== candidate.dispatcherDid
-        || binding.sandboxName !== task.status.sandboxRef?.name) return false;
+        || binding.sandboxName !== task.status.sandboxRef?.name
+        || binding.admission.taskGeneration !== task.metadata.generation
+        || binding.admission.authorizationDigest !== task.status.envelopeDigest
+        || !missionAdmissionAllows(binding.admission, candidate.runNonce, candidate.content)) return false;
       const runtimeNamespace = segment(`kars-${binding.sandboxName}`);
       const paths = {
         sandbox: `/apis/kars.azure.com/v1alpha1/namespaces/${segment(candidate.namespace)}/karssandboxes/${segment(binding.sandboxName)}`,
@@ -160,7 +182,8 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       const deployment = await this.api.request<MissionWorkloadResources["deployment"]>("GET", paths.deployment);
       const replicaSet = await this.api.request<MissionWorkloadResources["replicaSet"]>("GET", paths.replicaSet);
       const pod = await this.api.request<MissionWorkloadResources["pod"]>("GET", paths.pod);
-      if (!currentMissionWorkload(binding, candidate.namespace, { sandbox, namespace, deployment, replicaSet, pod })) return false;
+      if (!currentMissionWorkload(binding, candidate.namespace, { sandbox, namespace, deployment, replicaSet, pod })
+        || !installedAdmissionMatches(deployment, binding.admission)) return false;
       // A bounded second collection catches changes during traversal, not changes after this check.
       // This is deliberately not a multi-resource transaction or an execution lease.
       const snapshots: Array<[string, { metadata: Metadata }]> = [

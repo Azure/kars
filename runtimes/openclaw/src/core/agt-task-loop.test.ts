@@ -8,6 +8,7 @@ import { mkdtemp, readFile, rm, access, writeFile, symlink } from "node:fs/promi
 import { executeTaskWithEvidence, processTaskWithTools, type TaskLoopDeps } from "./agt-task-loop.js";
 import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
 import { MissionReceiver, type MissionReceiverOptions } from "./mission-receiver.js";
+import { missionObjectiveDigest } from "@kars/mesh/dist/mission-admission.js";
 import { missionContract, parseMissionMessage, type MissionReply } from "@kars/mesh/dist/mission-protocol.js";
 
 const log = { info: vi.fn(), warn: vi.fn() };
@@ -339,7 +340,8 @@ describe("reviewed filesystem phase execution", () => {
     const assignment = { ...target, ...missionContract(reviewedPhase({ maxToolCalls: 32 })), type: "mission:assign", runNonce: "run-1", assignmentId: "assignment-1", bootId: "boot-1", content: "Write the bounded briefing", artifactFormat: "text-v1" };
     const replies: MissionReply[] = [];
     const execute = vi.fn<MissionReceiverOptions["execute"]>(async (content, onEvidence, artifactsEnabled, phase) => executeTaskWithEvidence(content, { ...deps, onEvidence }, log, artifactsEnabled, phase));
-    const receiver = new MissionReceiver({ target, expectedContract: missionContract(reviewedPhase({ maxToolCalls: 32 })), bootId: "boot-1", authorize: async () => true, execute,
+    const receiver = new MissionReceiver({ target, admission: { version: 1, state: "run", taskGeneration: 1,
+      authorizationDigest: `sha256:${"a".repeat(64)}`, runNonce: assignment.runNonce, objectiveDigest: missionObjectiveDigest(assignment.content) }, expectedContract: missionContract(reviewedPhase({ maxToolCalls: 32 })), bootId: "boot-1", authorize: async () => true, execute,
       send: async (_to, reply) => { replies.push(reply); }, warn: log.warn });
     expect(parseMissionMessage(assignment)).not.toBeNull();
     await receiver.handle(target.dispatcherDid, assignment, "encrypted");
