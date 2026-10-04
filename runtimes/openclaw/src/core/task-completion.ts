@@ -14,6 +14,7 @@ export interface TaskExecutionEvidence {
   model: string;
   rounds: number;
   usage: TaskUsage | null;
+  phase?: TaskPhaseEvidence;
 }
 
 export class TaskExecutionError extends Error {
@@ -22,12 +23,14 @@ export class TaskExecutionError extends Error {
   constructor(message: string, evidence: TaskExecutionEvidence, phase?: TaskPhaseEvidence) {
     super(message);
     this.name = "TaskExecutionError";
-    if (phase) this.phase = { ...phase };
+    const measuredPhase = phase ?? evidence.phase;
+    if (measuredPhase) this.phase = { ...measuredPhase };
     this.evidence = {
       model: evidence.model, rounds: evidence.rounds,
       usage: evidence.usage ? {
         promptTokens: evidence.usage.promptTokens, completionTokens: evidence.usage.completionTokens, totalTokens: evidence.usage.totalTokens,
       } : null,
+      ...(measuredPhase ? { phase: { ...measuredPhase } } : {}),
     };
   }
 }

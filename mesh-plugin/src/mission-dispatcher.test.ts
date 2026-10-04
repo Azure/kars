@@ -4,7 +4,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MissionDispatcher, missionAttemptName, missionContentDigest, type MissionAttemptStore, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
 import type { IMeshTransport, MessageSecurity } from "./transport-interface.js";
-import type { MissionAssignment, MissionProbe, MissionReply } from "./mission-protocol.js";
+import { missionContract, type MissionAssignment, type MissionProbe, type MissionReply } from "./mission-protocol.js";
 
 const candidate: MissionCandidate = {
   namespace: "kars-system", taskName: "briefing", taskUid: "task-uid", sandboxUid: "sandbox-uid", podUid: "pod-uid",
@@ -12,6 +12,9 @@ const candidate: MissionCandidate = {
   agentName: "Briefing writer", content: "Write three benefits, three risks and an approval checklist.",
 };
 const evidence = { model: "gpt-5.4-mini", rounds: 1, usage: { promptTokens: 20, completionTokens: 30, totalTokens: 50 } };
+const phaseContract = missionContract({ name: "write-briefing", objective: "Write a useful bounded briefing", capabilities: ["filesystem-write"], minToolCalls: 1, maxToolCalls: 2 });
+const phasedCandidate: MissionCandidate = { ...candidate, reviewedPhase: phaseContract.reviewedPhase };
+const phaseEvidence = { ...evidence, phase: { name: "write-briefing", attemptedToolCalls: 1, successfulToolCalls: 1, minToolCalls: 1, maxToolCalls: 2 } };
 
 function harness() {
   let stored: StoredMissionAttempt | null = null;
@@ -47,6 +50,7 @@ function harness() {
       for (const status of statuses) {
         const reply: MissionReply = { ...assignment, type: "mission:reply", status,
           ...(status === "succeeded" ? { output: "Three benefits, three risks, approval checklist.", evidence } : {}),
+          ...(assignment.version === 2 && (status === "running" || status === "succeeded") ? { evidence: structuredClone(phaseEvidence) } : {}),
         };
         inbox.push({ payload: alter(reply), from: candidate.agentDid, security: "encrypted" });
       }
@@ -67,6 +71,101 @@ function harness() {
 }
 
 describe("durable encrypted mission dispatcher", () => {
+  it("negotiates the same reviewed phase before claiming and recovers its terminal evidence without resending", async () => {
+    const h = harness();
+    vi.mocked(h.store.publish).mockRejectedValueOnce(new Error("Publication unavailable"));
+    await expect(h.dispatcher().dispatch(phasedCandidate)).rejects.toThrow("Publication unavailable");
+    expect(h.mesh.sendWithAck).toHaveBeenCalledWith(candidate.agentDid, expect.objectContaining(phaseContract), expect.any(Function), expect.any(Object));
+    const attempt = h.state()!.attempt;
+    expect(attempt.assignment).toMatchObject(phaseContract);
+    expect(attempt.candidate.reviewedPhase).toEqual(phaseContract.reviewedPhase);
+    expect(attempt.reply?.evidence).toEqual(phaseEvidence);
+    expect(attempt.events.map(event => event.status)).toEqual(["accepted", "running", "succeeded"]);
+    expect(await h.dispatcher().dispatch(phasedCandidate)).toBe("already-claimed");
+    expect(h.mesh.sendWithAck).toHaveBeenCalledTimes(1);
+    expect(h.mesh.send).toHaveBeenCalledTimes(1);
+    expect(h.store.publish).toHaveBeenLastCalledWith(attempt);
+  });
+
+  it.each(["downgrade", "changed phase", "missing digest"])("rejects %s readiness before the durable claim", async change => {
+    const h = harness();
+    vi.mocked(h.mesh.sendWithAck).mockImplementationOnce(async (_to, payload, predicate) => {
+      const ready = { ...(payload as MissionProbe), type: "mission:reply", status: "ready", bootId: "boot-1" };
+      if (change === "downgrade") { Object.assign(ready, { version: 1 }); delete ready.reviewedPhase; delete ready.phaseDigest; }
+      if (change === "changed phase") Object.assign(ready, missionContract({ ...phaseContract.reviewedPhase, maxToolCalls: 3 }));
+      if (change === "missing digest") delete ready.phaseDigest;
+      expect(predicate(ready, candidate.agentDid, "encrypted")).toBeNull();
+      throw new Error("No matching phase readiness");
+    });
+    await expect(h.dispatcher().dispatch(phasedCandidate)).rejects.toThrow("No matching phase readiness");
+    expect(h.store.create).not.toHaveBeenCalled();
+    expect(h.mesh.send).not.toHaveBeenCalled();
+  });
+
+  it("captures the candidate and phase before the first asynchronous store lookup", async () => {
+    const h = harness();
+    const input = structuredClone(phasedCandidate);
+    vi.mocked(h.store.get).mockImplementationOnce(async captured => {
+      input.content = "Replaced while looking up the claim";
+      input.reviewedPhase!.maxToolCalls = 32;
+      input.reviewedPhase!.capabilities.length = 0;
+      expect(Object.isFrozen(captured)).toBe(true);
+      expect(Object.isFrozen(captured.reviewedPhase?.capabilities)).toBe(true);
+      return null;
+    });
+    expect(await h.dispatcher().dispatch(input)).toBe("succeeded");
+    expect(h.state()!.attempt.candidate).toEqual(phasedCandidate);
+    expect(h.state()!.attempt.assignment).toMatchObject({ ...phaseContract, content: candidate.content });
+  });
+
+  it.each(["downgrade", "changed phase", "missing phase", "missing evidence"])("never publishes a %s terminal reply for a phased assignment", async change => {
+    const h = harness(); h.setStatuses(["succeeded"]);
+    h.alterReply(reply => {
+      if (change === "downgrade") { reply.version = 1; delete reply.reviewedPhase; delete reply.phaseDigest; delete reply.evidence!.phase; }
+      if (change === "changed phase") Object.assign(reply, missionContract({ ...phaseContract.reviewedPhase, maxToolCalls: 3 }));
+      if (change === "missing phase") delete reply.reviewedPhase;
+      if (change === "missing evidence") delete reply.evidence;
+      return reply;
+    });
+    expect(await h.dispatcher().dispatch(phasedCandidate)).toBe("uncertain");
+    expect(h.state()!.attempt.events).toEqual([]);
+    expect(h.store.publish).not.toHaveBeenCalled();
+  });
+
+  it.each(["attempts", "successes", "rounds", "usage", "erased evidence", "unknown to known"])("ignores regressing %s without erasing the durable phase progress", async change => {
+    const h = harness(); h.setStatuses(["running", "failed"]);
+    h.alterReply(reply => {
+      if (reply.status === "running") {
+        reply.evidence!.rounds = 2;
+        if (change === "unknown to known") reply.evidence!.usage = null;
+      } else {
+        reply.evidence = structuredClone(phaseEvidence);
+        reply.evidence.rounds = 2;
+        if (change === "attempts") { reply.evidence.phase!.attemptedToolCalls = 0; reply.evidence.phase!.successfulToolCalls = 0; }
+        if (change === "successes") reply.evidence.phase!.successfulToolCalls = 0;
+        if (change === "rounds") reply.evidence.rounds = 1;
+        if (change === "usage") reply.evidence.usage = { promptTokens: 19, completionTokens: 30, totalTokens: 49 };
+        if (change === "erased evidence") delete reply.evidence;
+      }
+      return reply;
+    });
+    expect(await h.dispatcher().dispatch(phasedCandidate)).toBe("uncertain");
+    expect(h.state()!.attempt.events.map(event => event.status)).toEqual(["running"]);
+    expect(h.state()!.attempt.reply?.evidence?.phase).toEqual(phaseEvidence.phase);
+    expect(h.state()!.attempt.reply?.evidence?.usage).toEqual(change === "unknown to known" ? null : evidence.usage);
+    expect(h.store.publish).not.toHaveBeenCalled();
+    expect(await h.dispatcher().dispatch(phasedCandidate)).toBe("already-claimed");
+    expect(h.mesh.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("publishes an honest unknown-spend failure without losing measured phase progress", async () => {
+    const h = harness(); h.setStatuses(["running", "failed"]);
+    h.alterReply(reply => reply.status === "failed" ? { ...reply, evidence: { ...structuredClone(phaseEvidence), usage: null } } : reply);
+    expect(await h.dispatcher().dispatch(phasedCandidate)).toBe("failed");
+    expect(h.state()!.attempt.reply?.evidence).toEqual({ ...phaseEvidence, usage: null });
+    expect(h.store.publish).toHaveBeenCalledTimes(1);
+  });
+
   it("claims before sending once and persists actual output before publishing completion", async () => {
     const h = harness();
     expect(await h.dispatcher().dispatch(candidate)).toBe("succeeded");

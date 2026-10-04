@@ -4,12 +4,12 @@
 import { isDeepStrictEqual } from "node:util";
 import { KubernetesError, type KubernetesJson } from "./kubernetes-json.js";
 import { missionAttemptName, missionContentDigest, type MissionAttempt, type MissionAttemptStore, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
-import { parseMissionMessage, sameMissionTarget } from "./mission-protocol.js";
+import { missionContract, missionEvidenceAdvances, parseMissionMessage, sameMissionContract, sameMissionTarget, type MissionReply } from "./mission-protocol.js";
 import { currentMissionWorkload, singleControllerOwner, type MissionMetadata as Metadata, type MissionWorkloadBinding, type MissionWorkloadResources } from "./mission-workload.js";
 interface ConfigMap { apiVersion: "v1"; kind: "ConfigMap"; metadata: Metadata; data: Record<string, string>; immutable?: boolean }
 interface Task {
   apiVersion: string; kind: string; metadata: Metadata;
-  spec: { objective: string; execution?: { launch?: boolean } };
+  spec: { objective: string; execution?: { launch?: boolean }; blueprint?: { executionPlan?: unknown } };
   status?: { observedGeneration?: number; executionPhase?: string; sandboxRef?: { name: string } };
 }
 interface Binding extends MissionWorkloadBinding {
@@ -59,6 +59,12 @@ export function missionObjective(task: Task, nonce: string): string | null {
   return typeof task.spec.objective === "string" && task.spec.objective.trim() ? task.spec.objective : null;
 }
 
+function supportsTaskExecution(task: Task): boolean {
+  // A single phase is not authority to execute a reviewed multi-role plan.
+  return task.spec.blueprint?.executionPlan === undefined
+    && task.metadata.annotations?.[`${prefix}mission-decomposition`] === undefined;
+}
+
 /** ConfigMap create/CAS supplies durable exclusion, including across dispatcher restarts. */
 export class KubernetesMissionStore implements MissionAttemptStore {
   constructor(private readonly api: KubernetesJson, private readonly dispatchCurrent: () => Promise<boolean> = async () => true) {}
@@ -99,7 +105,7 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       return this.unpack(cm, key).attempt.candidate;
     } catch (e) { if (!isMissing(e)) throw e; }
     const content = missionObjective(task, runNonce);
-    if (!content || task.spec.execution?.launch !== true) return null;
+    if (!content || task.spec.execution?.launch !== true || !supportsTaskExecution(task)) return null;
     try {
       const cm = await this.api.request<ConfigMap>("GET", mapPath(reference.namespace, `kars-mission-binding-${reference.taskName}`));
       const binding = parseBinding(JSON.parse(cm.data?.["binding.json"] ?? "null"));
@@ -117,7 +123,8 @@ export class KubernetesMissionStore implements MissionAttemptStore {
     catch (e) { if (isMissing(e)) return null; throw e; }
   }
   private current(task: Task | null, candidate: MissionCandidate): task is Task {
-    return !!task && !task.metadata.deletionTimestamp && task.metadata.uid === candidate.taskUid
+    return !!task && supportsTaskExecution(task) && candidate.reviewedPhase === undefined
+      && !task.metadata.deletionTimestamp && task.metadata.uid === candidate.taskUid
       && task.metadata.name === candidate.taskName && task.metadata.namespace === candidate.namespace
       && task.metadata.annotations?.[requested] === candidate.runNonce
       && task.metadata.annotations?.[completed] !== candidate.runNonce
@@ -179,6 +186,7 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       || attempt.candidate?.taskName !== candidate.taskName || attempt.candidate?.namespace !== candidate.namespace
       || parseMissionMessage(attempt.assignment)?.type !== "mission:assign"
       || !sameMissionTarget(attempt.candidate, attempt.assignment)
+      || !sameMissionContract(missionContract(attempt.candidate.reviewedPhase), attempt.assignment)
       || attempt.contentDigest !== missionContentDigest(attempt.candidate.content)
       || attempt.assignment.content !== attempt.candidate.content || !Array.isArray(attempt.events) || attempt.events.length > 128
       || !["dispatching", "accepted", "running", "succeeded", "failed", "rejected", "uncertain"].includes(attempt.phase)
@@ -191,7 +199,8 @@ export class KubernetesMissionStore implements MissionAttemptStore {
       || (attempt.phase === "dispatching" && (attempt.events.length !== 0 || attempt.reply !== undefined || attempt.error !== undefined))
       || (attempt.phase === "uncertain" && (!attempt.error || (attempt.reply && !["accepted", "running"].includes(attempt.reply.status))))
       || (attempt.reply && (parseMissionMessage(attempt.reply)?.type !== "mission:reply"
-        || !sameMissionTarget(attempt.assignment, attempt.reply) || attempt.reply.bootId !== attempt.assignment.bootId
+        || !sameMissionTarget(attempt.assignment, attempt.reply) || !sameMissionContract(attempt.assignment, attempt.reply)
+        || attempt.reply.bootId !== attempt.assignment.bootId
         || attempt.reply.assignmentId !== attempt.assignment.assignmentId
         || (attempt.reply.artifactFormat !== undefined && attempt.reply.artifactFormat !== attempt.assignment.artifactFormat)))
       || (["accepted", "running", "succeeded", "failed", "rejected"].includes(attempt.phase) && attempt.reply?.status !== attempt.phase)) {
@@ -199,6 +208,7 @@ export class KubernetesMissionStore implements MissionAttemptStore {
     }
     let lastTime = Date.parse(attempt.startedAt);
     let lastStatus: string | undefined;
+    let lastEvidence: MissionReply["evidence"];
     for (const event of attempt.events) {
       if (!event || typeof event.at !== "string" || !Number.isFinite(Date.parse(event.at))
         || Date.parse(event.at) < lastTime || Date.parse(event.at) > Date.parse(attempt.updatedAt)
@@ -206,12 +216,14 @@ export class KubernetesMissionStore implements MissionAttemptStore {
         || (lastStatus === "running" && event.status === "accepted")
         || (["accepted", "running"].includes(lastStatus ?? "") && event.status === "rejected")
         || ["succeeded", "failed", "rejected"].includes(lastStatus ?? "")
+        || (attempt.assignment.version === 2 && !missionEvidenceAdvances(lastEvidence, event.evidence))
         || !parseMissionMessage({ ...attempt.assignment, type: "mission:reply", status: event.status,
           evidence: event.evidence, ...(event.status === "succeeded" ? { output: attempt.reply?.output } : {}) })) {
         throw new Error("Malformed mission event journal");
       }
       lastTime = Date.parse(event.at);
       lastStatus = event.status;
+      lastEvidence = event.evidence;
     }
     if ((attempt.reply?.status !== lastStatus) || !isDeepStrictEqual(attempt.reply?.evidence, attempt.events.at(-1)?.evidence)) {
       throw new Error("Mission reply does not match event journal");
@@ -294,7 +306,7 @@ export class KubernetesMissionStore implements MissionAttemptStore {
   async publish(attempt: MissionAttempt): Promise<boolean> {
     const { candidate, reply, assignment } = attempt;
     if (!reply || !["succeeded", "failed", "rejected"].includes(attempt.phase) || reply.status !== attempt.phase
-      || parseMissionMessage(reply)?.type !== "mission:reply" || !sameMissionTarget(assignment, reply)
+      || parseMissionMessage(reply)?.type !== "mission:reply" || !sameMissionTarget(assignment, reply) || !sameMissionContract(assignment, reply)
       || assignment.assignmentId !== reply.assignmentId || assignment.bootId !== reply.bootId
       || (reply.artifactFormat !== undefined && reply.artifactFormat !== assignment.artifactFormat)) throw new Error("Mission has no valid terminal reply");
     const durable = await this.get(candidate);

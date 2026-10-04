@@ -807,8 +807,9 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       authorize: (assignment) => authorizeTaskAction("task:execute", {
         task_uid: assignment.taskUid, run_nonce: assignment.runNonce,
         dispatcher_did: assignment.dispatcherDid, assignment_id: assignment.assignmentId,
+        ...(assignment.phaseDigest ? { phase_digest: assignment.phaseDigest, reviewed_phase: assignment.reviewedPhase } : {}),
       }),
-      execute: (content, onEvidence, artifactsEnabled) => executeTaskWithEvidence(content, { ...taskLoopDeps(), onEvidence }, log, artifactsEnabled),
+      execute: (content, onEvidence, artifactsEnabled, reviewedPhase) => executeTaskWithEvidence(content, { ...taskLoopDeps(), onEvidence }, log, artifactsEnabled, reviewedPhase),
       send: (to, reply) => agtMeshClient!.send(to, reply),
       warn: (message) => log.warn(message),
     }) : null;

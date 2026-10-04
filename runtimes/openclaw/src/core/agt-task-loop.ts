@@ -241,7 +241,7 @@ export async function processTaskWithTools(
     });
 
     ledger?.record(response);
-    if (ledger) deps.onEvidence?.(ledger.snapshot());
+    if (ledger) deps.onEvidence?.({ ...ledger.snapshot(), ...(phase ? { phase: phase.snapshot() } : {}) });
     const choice = response?.choices?.[0];
     if (!choice?.message) throw new Error("No LLM response");
     if (ledger && choice.finish_reason !== "stop" && choice.finish_reason !== "tool_calls") {
@@ -269,6 +269,7 @@ export async function processTaskWithTools(
     // If the model wants to call tools, execute them and continue
     if (msg.tool_calls && msg.tool_calls.length > 0) {
       phase?.reserveBatch(msg.tool_calls.length);
+      if (ledger && phase) deps.onEvidence?.({ ...ledger.snapshot(), phase: phase.snapshot() });
       // Provider responses may carry metadata that is not valid on the governed request wire.
       messages.push(ledger ? {
         role: "assistant", content: msg.content ?? null,
@@ -1549,8 +1550,10 @@ export async function processTaskWithTools(
         } catch (e: any) {
           toolSucceeded = false;
           result = e.stderr || e.stdout || e.message || "Command failed";
+        } finally {
+          if (toolSucceeded) phase?.recordSuccess();
+          if (ledger && phase) deps.onEvidence?.({ ...ledger.snapshot(), phase: phase.snapshot() });
         }
-        if (toolSucceeded) phase?.recordSuccess();
         messages.push({ role: "tool", tool_call_id: tc.id, content: result });
       }
       continue;

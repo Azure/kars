@@ -6,7 +6,9 @@ import { createServer, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { mkdtemp, readFile, rm, access, writeFile } from "node:fs/promises";
 import { executeTaskWithEvidence, processTaskWithTools, type TaskLoopDeps } from "./agt-task-loop.js";
-import { TaskCompletionLedger, TaskExecutionError } from "./task-completion.js";
+import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
+import { MissionReceiver, type MissionReceiverOptions } from "./mission-receiver.js";
+import { missionContract, parseMissionMessage, type MissionReply } from "@kars/mesh/dist/mission-protocol.js";
 
 const log = { info: vi.fn(), warn: vi.fn() };
 const deps: TaskLoopDeps = { meshClient: () => null, isInterruptRequested: () => false, interruptReason: () => "", setInterrupt: () => {} };
@@ -249,6 +251,85 @@ describe("reviewed filesystem phase execution", () => {
     expect(error.artifacts).toBeUndefined();
     expect(policyRequests).toHaveLength(1);
     expect(await readFile(path, "utf8")).toBe("Useful evidence");
+  });
+
+  it.each([true, false])("reports response, reservation and every attempted call with policy allowed=%s", async allowed => {
+    const path = `${await workspace()}/briefing.md`;
+    const malformed = tool("file_write");
+    malformed.choices[0].message.tool_calls[0].function.arguments = "{";
+    await router([batch(malformed, tool("mesh_inbox"), tool("file_write", {
+      path, content: "Verified briefing bytes", artifact_name: "briefing.md",
+    })), final()], 200, { allowed });
+    const progress: TaskExecutionEvidence[] = [];
+    const execution = executeTaskWithEvidence("task", { ...deps, onEvidence: event => { progress.push(event); } }, log, true, reviewedPhase({ maxToolCalls: 3 }));
+    if (allowed) expect((await execution).artifacts).toEqual({ "briefing.md": "Verified briefing bytes" });
+    else await expect(execution).rejects.toMatchObject({ evidence: { rounds: 2, phase: { attemptedToolCalls: 3, successfulToolCalls: 0 } } });
+    const successful = allowed ? 1 : 0;
+    expect(progress.map(event => [event.rounds, event.phase?.attemptedToolCalls, event.phase?.successfulToolCalls, event.usage?.totalTokens])).toEqual([
+      [1, 0, 0, 11], [1, 3, 0, 11], [1, 3, 0, 11], [1, 3, 0, 11], [1, 3, successful, 11], [2, 3, successful, 22],
+    ]);
+    expect(policyRequests).toHaveLength(1);
+    expect(requests).toHaveLength(2);
+    if (allowed) expect(await readFile(path, "utf8")).toBe("Verified briefing bytes");
+    else await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+    progress.at(-1)!.phase!.successfulToolCalls = 0;
+    expect(progress[4].phase?.successfulToolCalls).toBe(successful);
+    expect(progress[0].phase?.attemptedToolCalls).toBe(0);
+  });
+
+  it.each([0, 1])("retains measured counters if progress persistence fails after reservation with %i successful calls", async successfulToolCalls => {
+    const path = `${await workspace()}/briefing.md`;
+    await router([tool("file_write", { path, content: "Written before handback", artifact_name: "briefing.md" }), final()], 200, { allowed: true });
+    const execution = executeTaskWithEvidence("task", { ...deps, onEvidence: event => {
+      if (event.phase?.attemptedToolCalls === 1 && event.phase.successfulToolCalls === successfulToolCalls) throw new Error("Progress persistence failed");
+    } }, log, true, reviewedPhase());
+    const error = await execution.catch(value => value);
+    expect(error).toBeInstanceOf(TaskExecutionError);
+    expect(error).toMatchObject({ message: "Progress persistence failed", evidence: {
+      rounds: 1, usage: { promptTokens: 7, completionTokens: 4, totalTokens: 11 },
+      phase: { attemptedToolCalls: 1, successfulToolCalls },
+    } });
+    expect(error).not.toHaveProperty("artifacts");
+    expect(requests).toHaveLength(1);
+    expect(policyRequests).toHaveLength(successfulToolCalls);
+    if (successfulToolCalls) expect(await readFile(path, "utf8")).toBe("Written before handback");
+    else await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+  });
+
+  it("fits the real maximum-round, maximum-call execution into the receiver journal without replay", async () => {
+    const path = `${await workspace()}/briefing.md`;
+    const write = (index: number) => tool("file_write", { path, content: `Revision ${index}`, artifact_name: "briefing.md" });
+    await router([
+      batch(...Array.from({ length: 8 }, (_, index) => write(index))),
+      ...Array.from({ length: 24 }, (_, index) => write(index + 8)),
+    ], 200, { allowed: true });
+    const target = { taskName: "mission", taskUid: "task-uid", sandboxUid: "sandbox-uid", podUid: "pod-uid", agentDid: `did:mesh:${"a".repeat(32)}`, dispatcherDid: `did:mesh:${"b".repeat(32)}` };
+    const assignment = { ...target, ...missionContract(reviewedPhase({ maxToolCalls: 32 })), type: "mission:assign", runNonce: "run-1", assignmentId: "assignment-1", bootId: "boot-1", content: "Write the bounded briefing", artifactFormat: "text-v1" };
+    const replies: MissionReply[] = [];
+    const execute = vi.fn<MissionReceiverOptions["execute"]>(async (content, onEvidence, artifactsEnabled, phase) => executeTaskWithEvidence(content, { ...deps, onEvidence }, log, artifactsEnabled, phase));
+    const receiver = new MissionReceiver({ target, bootId: "boot-1", authorize: async () => true, execute,
+      send: async (_to, reply) => { replies.push(reply); }, warn: log.warn });
+    expect(parseMissionMessage(assignment)).not.toBeNull();
+    await receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    await vi.waitFor(() => expect(replies.at(-1)?.status).toBe("failed"));
+    expect(requests).toHaveLength(25);
+    expect(policyRequests).toHaveLength(32);
+    expect(replies).toHaveLength(84);
+    expect(replies.filter(reply => reply.status === "running")).toHaveLength(82);
+    expect(replies.every(reply => parseMissionMessage(reply) !== null)).toBe(true);
+    const terminal = replies.at(-1)!;
+    expect(terminal).toMatchObject({ status: "failed", error: expect.stringContaining("maximum tool-calling rounds"), evidence: {
+      rounds: 25, usage: { promptTokens: 175, completionTokens: 100, totalTokens: 275 },
+      phase: { attemptedToolCalls: 32, successfulToolCalls: 32, maxToolCalls: 32 },
+    } });
+    expect(terminal).not.toHaveProperty("artifacts");
+    expect(terminal).not.toHaveProperty("output");
+    expect(await readFile(path, "utf8")).toBe("Revision 31");
+    await receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    expect(replies.at(-1)).toEqual(terminal);
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(requests).toHaveLength(25);
+    expect(policyRequests).toHaveLength(32);
   });
 
   it("does not reuse successful calls across executions", async () => {

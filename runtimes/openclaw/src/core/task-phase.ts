@@ -3,23 +3,8 @@
 
 import { resolve } from "node:path";
 
-export interface TaskPhaseEvidence {
-  name: string;
-  attemptedToolCalls: number;
-  successfulToolCalls: number;
-  minToolCalls: number;
-  maxToolCalls: number;
-}
-
-interface FilesystemPhase {
-  name: string;
-  objective: string;
-  capabilities: string[];
-  requiredToolCalls: never[];
-  minToolCalls: number;
-  maxToolCalls: number;
-  freshContext: boolean;
-}
+import { filesystemPhase, type FilesystemPhase, type TaskPhaseEvidence } from "@kars/mesh/dist/mission-phase.js";
+export type { TaskPhaseEvidence } from "@kars/mesh/dist/mission-phase.js";
 
 function record(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -33,33 +18,7 @@ export class TaskPhaseGuard {
   private successes = 0;
 
   constructor(input: unknown) {
-    const keys = ["name", "objective", "capabilities", "requiredToolCalls", "minToolCalls", "maxToolCalls", "freshContext"];
-    if (!record(input) || Object.keys(input).some(key => !keys.includes(key))) {
-      throw new Error("Invalid reviewed phase object");
-    }
-    const { name, objective, maxToolCalls } = input;
-    const capabilities = input.capabilities === undefined ? [] : input.capabilities;
-    const requiredToolCalls = input.requiredToolCalls === undefined ? [] : input.requiredToolCalls;
-    const minToolCalls = input.minToolCalls === undefined ? 0 : input.minToolCalls;
-    const freshContext = input.freshContext === undefined ? false : input.freshContext;
-    if (typeof name !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,46}[a-z0-9])?$/.test(name)
-      || typeof objective !== "string" || Buffer.byteLength(objective.trim()) < 20 || Buffer.byteLength(objective) > 1200
-      || !Number.isSafeInteger(minToolCalls) || !Number.isSafeInteger(maxToolCalls)
-      || (minToolCalls as number) < 0 || (maxToolCalls as number) > 32 || (maxToolCalls as number) < (minToolCalls as number)
-      || typeof freshContext !== "boolean") {
-      throw new Error("Invalid reviewed phase name, objective, or call bounds");
-    }
-    if (!Array.isArray(capabilities) || capabilities.some(capability => capability !== "filesystem-read" && capability !== "filesystem-write")
-      || new Set(capabilities).size !== capabilities.length) {
-      throw new Error("Unsupported reviewed phase capabilities: only filesystem-read and filesystem-write are executable");
-    }
-    if (!Array.isArray(requiredToolCalls) || requiredToolCalls.length !== 0) {
-      throw new Error("Required tool-call contracts are not supported by the filesystem phase executor");
-    }
-    if ((minToolCalls as number) > 0 && capabilities.length === 0) {
-      throw new Error("Reviewed phase requires successful calls but grants no supported tools");
-    }
-    this.phase = { name, objective, capabilities: [...capabilities], requiredToolCalls: [], minToolCalls: minToolCalls as number, maxToolCalls: maxToolCalls as number, freshContext };
+    this.phase = filesystemPhase(input);
   }
 
   allowsTool(name: string): boolean {

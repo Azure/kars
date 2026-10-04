@@ -5,7 +5,7 @@ import { describe, expect, it } from "vitest";
 import { KubernetesError, type KubernetesJson } from "./kubernetes-json.js";
 import { KubernetesMissionStore, missionObjective } from "./mission-store.js";
 import { MissionDispatcher, missionAttemptName, missionContentDigest, type MissionAttempt, type MissionCandidate } from "./mission-dispatcher.js";
-import type { MissionReply } from "./mission-protocol.js";
+import { missionContract, type MissionReply } from "./mission-protocol.js";
 import type { IMeshTransport } from "./transport-interface.js";
 import type { MissionMetadata, MissionWorkloadResources } from "./mission-workload.js";
 
@@ -16,11 +16,14 @@ const taskPath = `/apis/kars.azure.com/v1alpha1/namespaces/${c.namespace}/karsta
 const mapsPath = `/api/v1/namespaces/${c.namespace}/configmaps`;
 const owner = { apiVersion: "kars.azure.com/v1alpha1", kind: "KarsTask", name: c.taskName, uid: c.taskUid, controller: true };
 const evidence = { model: "gpt-5.4-mini", rounds: 1, usage: { promptTokens: 20, completionTokens: 30, totalTokens: 50 } };
+const phaseContract = missionContract({ name: "write-briefing", objective: "Write a useful bounded briefing", capabilities: ["filesystem-write"], minToolCalls: 1, maxToolCalls: 2 });
+const phasedCandidate: MissionCandidate = { ...c, reviewedPhase: phaseContract.reviewedPhase };
+const phaseEvidence = { ...evidence, phase: { name: "write-briefing", attemptedToolCalls: 1, successfulToolCalls: 1, minToolCalls: 1, maxToolCalls: 2 } };
 const stamp = "2026-10-02T20:00:00.000Z";
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 interface Resource {
   metadata: MissionMetadata;
-  spec?: NonNullable<MissionWorkloadResources["deployment"]["spec"]> & { objective?: string; execution?: { launch: boolean }; suspended?: boolean };
+  spec?: NonNullable<MissionWorkloadResources["deployment"]["spec"]> & { objective?: string; execution?: { launch: boolean }; suspended?: boolean; blueprint?: { executionPlan?: unknown } };
   status?: NonNullable<MissionWorkloadResources["deployment"]["status"]> & { executionPhase?: string; sandboxRef?: { name: string }; phase?: string; conditions?: Array<{ type: string; status: string }> };
   data?: Record<string, string>; immutable?: boolean;
 }
@@ -87,12 +90,13 @@ function fixture() {
   return { api, store: new KubernetesMissionStore(api), task, bindingPath, sandboxPath, namespacePath, deploymentPath, replicaSetPath, podPath, paths };
 }
 function initial(candidate = c): MissionAttempt {
-  return { version: 1, candidate, assignment: { ...candidate, type: "mission:assign", version: 1, bootId: "boot-1", assignmentId: "assignment-1" },
+  return { version: 1, candidate, assignment: { ...candidate, ...missionContract(candidate.reviewedPhase), type: "mission:assign", bootId: "boot-1", assignmentId: "assignment-1" },
     contentDigest: missionContentDigest(candidate.content), ownerSession: "dispatcher-process", startedAt: stamp, updatedAt: stamp, phase: "dispatching", events: [] };
 }
 function next(prior: MissionAttempt, status: "accepted" | "running" | "succeeded" | "failed" | "rejected"): MissionAttempt {
   const reply: MissionReply = { ...prior.assignment, type: "mission:reply", status,
-    ...(status === "succeeded" ? { output: "Actual approval checklist.", evidence } : {}) };
+    ...(status === "succeeded" ? { output: "Actual approval checklist.", evidence } : {}),
+    ...(prior.assignment.version === 2 && (status === "running" || status === "succeeded") ? { evidence: clone(phaseEvidence) } : {}) };
   return { ...prior, phase: status, reply, events: [...prior.events, { at: stamp, status, ...(reply.evidence ? { evidence: reply.evidence } : {}) }] };
 }
 async function terminal(store: KubernetesMissionStore, status: "succeeded" | "failed" = "succeeded") {
@@ -105,6 +109,36 @@ const artifactPath = `${mapsPath}/kars-mission-artifacts-${key}`;
 const projectionPath = `${mapsPath}/kars-mission-output-${c.taskName}`;
 
 describe("mission candidate discovery", () => {
+  it.each(["typed plan", "null plan", "marker", "unknown marker", "empty marker"])("rejects new execution with %s before resolving a runtime binding", async kind => {
+    const h = fixture(); const task = h.api.resources.get(taskPath)!;
+    if (kind === "typed plan" || kind === "null plan") task.spec!.blueprint = { executionPlan: kind === "null plan" ? null : { schema: "kars.execution-plan/v1" } };
+    else task.metadata.annotations![`${p}mission-decomposition`] = kind === "marker" ? "execution-plan/v1" : kind === "empty marker" ? "" : "unknown/v2";
+    expect(await h.store.isCurrent(c)).toBe(false);
+    expect(await h.store.candidate(c, c.dispatcherDid)).toBeNull();
+    expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+    expect(h.api.calls.some(call => call.path === h.bindingPath)).toBe(false);
+  });
+
+  it("does not treat a caller-supplied phase as trusted Task execution authority", async () => {
+    const h = fixture();
+    expect(await h.store.isCurrent(phasedCandidate)).toBe(false);
+    expect(h.api.calls.map(call => call.path)).toEqual([taskPath]);
+    expect(await h.store.candidate(c, c.dispatcherDid)).toEqual({ ...c, agentName: "briefing" });
+  });
+
+  it("recovers a persisted phase claim before the typed-plan activation guard without authorizing another dispatch", async () => {
+    const h = fixture();
+    const created = (await h.store.create(initial(phasedCandidate)))!;
+    const completed = await h.store.replace(created, next(created.attempt, "succeeded"));
+    h.api.resources.get(taskPath)!.spec!.blueprint = { executionPlan: { schema: "kars.execution-plan/v1" } };
+    h.api.resources.delete(h.bindingPath);
+    h.api.calls.length = 0;
+    expect(await h.store.candidate(c, c.agentDid)).toEqual(phasedCandidate);
+    expect(h.api.calls.map(call => call.path)).toEqual([taskPath, `${mapsPath}/${missionAttemptName(c)}`]);
+    expect(await h.store.get(phasedCandidate)).toEqual(completed);
+    expect(await h.store.isCurrent(phasedCandidate)).toBe(false);
+  });
+
   it("rereads the Task and validates its live binding before returning a candidate", async () => {
     const h = fixture();
     expect(await h.store.candidate(c, c.dispatcherDid)).toEqual({ ...c, agentName: "briefing" });
@@ -155,6 +189,68 @@ describe("mission candidate discovery", () => {
 });
 
 describe("Kubernetes mission attempt store", () => {
+  it("round-trips canonical phase authority and cumulative evidence in the durable envelope", async () => {
+    const h = fixture();
+    let stored = (await h.store.create(initial(phasedCandidate)))!;
+    stored = await h.store.replace(stored, next(stored.attempt, "running"));
+    stored = await h.store.replace(stored, next(stored.attempt, "succeeded"));
+    const recovered = (await h.store.get(phasedCandidate))!;
+    expect(recovered).toEqual(stored);
+    expect(recovered.attempt.version).toBe(1);
+    expect(recovered.attempt.assignment).toMatchObject(phaseContract);
+    expect(recovered.attempt.reply?.evidence).toEqual(phaseEvidence);
+    expect(recovered.attempt.events.map(event => event.evidence)).toEqual([phaseEvidence, phaseEvidence]);
+  });
+
+  it.each(["candidate", "assignment", "reply"])("rejects independently valid but mismatched %s phase contracts without a write", async changed => {
+    const h = fixture();
+    const created = (await h.store.create(initial(phasedCandidate)))!;
+    const corrupt = next(created.attempt, "succeeded");
+    const altered = missionContract({ ...phaseContract.reviewedPhase, objective: "A different reviewed briefing objective" });
+    if (changed === "candidate") corrupt.candidate = { ...corrupt.candidate, reviewedPhase: altered.reviewedPhase };
+    if (changed === "assignment") corrupt.assignment = { ...corrupt.assignment, ...altered };
+    if (changed === "reply") corrupt.reply = { ...corrupt.reply!, ...altered };
+    const cm = h.api.resources.get(`${mapsPath}/${missionAttemptName(c)}`)!;
+    cm.data!["attempt.json"] = JSON.stringify(corrupt);
+    h.api.calls.length = 0;
+    await expect(h.store.get(phasedCandidate)).rejects.toThrow("Malformed durable mission attempt");
+    expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+  });
+
+  it.each(["attempts", "successes", "rounds", "usage", "erased evidence", "unknown to known"])("rejects %s regression on both journal write and recovery", async change => {
+    const h = fixture();
+    const created = (await h.store.create(initial(phasedCandidate)))!;
+    const running = next(created.attempt, "running");
+    running.reply!.evidence!.rounds = 2;
+    if (change === "unknown to known") running.reply!.evidence!.usage = null;
+    const stored = await h.store.replace(created, running);
+    const bad = next(stored.attempt, "failed");
+    bad.reply!.evidence = { ...clone(phaseEvidence), rounds: 2 };
+    if (change === "attempts") { bad.reply!.evidence.phase!.attemptedToolCalls = 0; bad.reply!.evidence.phase!.successfulToolCalls = 0; }
+    if (change === "successes") bad.reply!.evidence.phase!.successfulToolCalls = 0;
+    if (change === "rounds") bad.reply!.evidence.rounds = 1;
+    if (change === "usage") bad.reply!.evidence.usage = { promptTokens: 19, completionTokens: 30, totalTokens: 49 };
+    if (change === "erased evidence") delete bad.reply!.evidence;
+    bad.events.at(-1)!.evidence = bad.reply!.evidence;
+    h.api.calls.length = 0;
+    await expect(h.store.replace(stored, bad)).rejects.toThrow("Malformed mission event journal");
+    expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+    expect(await h.store.get(phasedCandidate)).toEqual(stored);
+    h.api.resources.get(`${mapsPath}/${missionAttemptName(c)}`)!.data!["attempt.json"] = JSON.stringify(bad);
+    await expect(h.store.get(phasedCandidate)).rejects.toThrow("Malformed mission event journal");
+  });
+
+  it("retains validated counters when a later failure makes spend unknown", async () => {
+    const h = fixture();
+    const created = (await h.store.create(initial(phasedCandidate)))!;
+    const running = await h.store.replace(created, next(created.attempt, "running"));
+    const failed = next(running.attempt, "failed");
+    failed.reply!.evidence = { ...clone(phaseEvidence), usage: null };
+    failed.events.at(-1)!.evidence = failed.reply!.evidence;
+    await h.store.replace(running, failed);
+    expect((await h.store.get(phasedCandidate))!.attempt.reply?.evidence).toEqual({ ...phaseEvidence, usage: null });
+  });
+
   it("requires a current owned Task, Sandbox, binding and exact Ready Pod", async () => {
     const h = fixture(); expect(await h.store.isCurrent(c)).toBe(true);
     expect(await h.store.isCurrent({ ...c, taskUid: "replacement" })).toBe(false);
