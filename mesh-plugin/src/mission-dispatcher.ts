@@ -3,12 +3,14 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { IMeshTransport } from "./transport-interface.js";
-import { parseMissionMessage, sameMissionTarget, type MissionAssignment, type MissionReply, type MissionTarget } from "./mission-protocol.js";
+import { missionContract, missionEvidenceAdvances, parseMissionMessage, sameMissionContract, sameMissionTarget, snapshotMissionData, type MissionAssignment, type MissionReply, type MissionTarget } from "./mission-protocol.js";
+import type { FilesystemPhase } from "./mission-phase.js";
 
 export interface MissionCandidate extends MissionTarget {
   namespace: string;
   agentName: string;
   content: string;
+  reviewedPhase?: FilesystemPhase;
 }
 export interface MissionAttempt {
   version: 1;
@@ -51,9 +53,12 @@ export class MissionDispatcher {
   }
 
   async dispatch(candidate: MissionCandidate): Promise<DispatchOutcome> {
+    candidate = snapshotMissionData(candidate) as MissionCandidate;
+    const contract = missionContract(candidate.reviewedPhase);
+    if (contract.reviewedPhase) candidate = Object.freeze({ ...candidate, reviewedPhase: contract.reviewedPhase });
     const { taskName, taskUid, sandboxUid, podUid, runNonce, agentDid, dispatcherDid, content } = candidate;
     const target: MissionTarget = { taskName, taskUid, sandboxUid, podUid, runNonce, agentDid, dispatcherDid };
-    const probe = { ...target, type: "mission:probe" as const, version: 1 as const, challenge: randomUUID() };
+    const probe = { ...target, ...contract, type: "mission:probe" as const, challenge: randomUUID() };
     if (!parseMissionMessage(probe) || typeof content !== "string" || !content.trim()
       || typeof candidate.agentName !== "string" || !candidate.agentName.trim()
       || typeof candidate.namespace !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(candidate.namespace)
@@ -75,10 +80,11 @@ export class MissionDispatcher {
     const ready = await this.mesh.sendWithAck(agentDid, probe, (payload, from, security) => {
       const reply = parseMissionMessage(payload);
       return security === "encrypted" && from === agentDid && reply?.type === "mission:reply"
-        && reply.status === "ready" && reply.challenge === probe.challenge && sameMissionTarget(target, reply) ? reply : null;
+        && reply.status === "ready" && reply.challenge === probe.challenge && sameMissionTarget(target, reply)
+        && sameMissionContract(probe, reply) ? reply : null;
     }, { retries: 0, timeoutMs: Math.min(this.timeoutMs, 15_000) });
     const assignment: MissionAssignment = {
-      ...target, type: "mission:assign", version: 1, bootId: ready.bootId, assignmentId: randomUUID(), artifactFormat: "text-v1", content,
+      ...target, ...contract, type: "mission:assign", bootId: ready.bootId, assignmentId: randomUUID(), artifactFormat: "text-v1", content,
     };
     if (!parseMissionMessage(assignment)) throw new Error("Mission assignment exceeds protocol bounds");
     if (!await this.store.isCurrent(candidate)) return "stale";
@@ -107,7 +113,7 @@ export class MissionDispatcher {
         const reply = await this.mesh.waitForMessage((payload, from, security) => {
           const message = parseMissionMessage(payload);
           return security === "encrypted" && from === agentDid && message?.type === "mission:reply"
-            && message.status !== "ready" && sameMissionTarget(assignment, message)
+            && message.status !== "ready" && sameMissionTarget(assignment, message) && sameMissionContract(assignment, message)
             && message.bootId === assignment.bootId && message.assignmentId === assignment.assignmentId
             && (message.artifactFormat === undefined || message.artifactFormat === assignment.artifactFormat) ? message : null;
         }, Math.max(1, deadline - Date.now()), { consume: true });
@@ -117,6 +123,7 @@ export class MissionDispatcher {
         if (reply.status === "rejected" && ["accepted", "running"].includes(previous.phase)) continue;
         if (reply.status === "running" && previous.reply?.evidence && reply.evidence
           && reply.evidence.rounds < previous.reply.evidence.rounds) continue;
+        if (assignment.version === 2 && !missionEvidenceAdvances(previous.reply?.evidence, reply.evidence)) continue;
         if (previous.events.length >= 128) throw new Error("Mission reply event limit exceeded");
         const receivedAt = this.now();
         stored = await this.store.replace(stored, {

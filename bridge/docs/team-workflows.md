@@ -37,9 +37,10 @@ packages. Bridge compares the API's captured plan with the reviewed plan before
 continuing creation or plan updates. An older CRD that prunes the plan must fail
 this check; saving a name or objective is not equivalent to saving the plan.
 
-**Typed-plan execution is not implemented yet.** The existing encrypted mission
-executor delivers an objective to one runtime; it does not enforce the reviewed
-role DAG, phases, capability sets, tool-call bounds, per-role budgets or synthesis.
+**Full typed-plan execution is not implemented yet.** The production encrypted
+mission path delivers an objective to one runtime; it does not execute the reviewed
+role DAG or schedule its phases with per-role budgets and synthesis. The tested
+single-phase contract below is not yet authorized by the production Task store.
 A valid plan can be saved inactive for review, but launch, resume and manual run
 requests reject it with `TypedPlanExecutionUnavailable`. A decomposition marker
 without its plan, or an unsupported marker, rejects with
@@ -47,16 +48,31 @@ without its plan, or an unsupported marker, rejects with
 marker declares one. Stopping a Task or purely pausing a Team remains allowed.
 Unmarked legacy planless execution remains supported.
 
-The OpenClaw measured loop has a tested **local single-phase filesystem guard**:
-only explicitly granted `filesystem-read`/`filesystem-write` tools are exposed,
-actual calls are checked again, and router policy authorization is still required.
-`maxToolCalls` limits attempted calls (including denied, malformed and failed
-calls); an overflowing batch fails before any tool runs. `minToolCalls` counts
-only successful authorized filesystem operations. Failure preserves accounting
-but exports no artifacts. Unsupported capabilities and required tool contracts
-are rejected before inference. This local guard is not yet supplied by encrypted
-assignments and does not implement role scheduling, fresh-context handoffs or
-per-role/synthesis budgets. It must not be used to unlock typed-plan activation.
+The OpenClaw measured loop and encrypted mission protocol support a tested
+**single-phase filesystem contract**. Version 2 requires a canonical phase and
+its SHA256 digest in readiness, assignment and replies; version 1 cannot silently
+drop constraints. Only explicitly granted `filesystem-read`/`filesystem-write`
+tools are exposed, actual calls are checked again, and router policy authorization
+is still required. `maxToolCalls` limits attempted calls (including denied,
+malformed and failed calls); an overflowing batch fails before any tool runs.
+`minToolCalls` counts only successful authorized filesystem operations.
+
+The runtime reports copied accounting after each response, batch reservation and
+attempted call. The receiver and durable journal reject changed contracts,
+regressing counters and erased evidence. Unknown usage cannot become known after
+consumption. Failures retain validated counters but export no artifacts; an
+unmeasured failure reports unknown usage. Bounded immutable replies and cached
+terminal replay preserve the journal limit without re-executing tools. Tests
+exercise real HTTP/filesystem execution through the receiver at 25 model rounds
+and 32 tool attempts, including failure and exact replay.
+
+These are library/runtime and in-process durability proofs, **not live Team
+activation**. The production store still rejects new dispatch for any typed plan,
+decomposition marker or caller-supplied phase; previously claimed attempts remain
+recoverable without resend. Trusted Task-level plan/phase authority, role
+scheduling, fresh-context handoffs and per-role/synthesis budgets remain required.
+Unsupported capabilities and required tool contracts fail before inference. This
+single-phase support must not be used to unlock typed-plan activation.
 
 The roster alone is not proof that specialists performed work. The published
 manual-run admission path is distinct from engineering intake and milestone

@@ -2,7 +2,8 @@
 // Licensed under the MIT License.
 
 import { createHash, randomUUID } from "node:crypto";
-import { isMissionMessage, parseMissionMessage, sameMissionTarget, validMissionArtifacts, type MissionAssignment, type MissionReply, type MissionTarget } from "@kars/mesh/dist/mission-protocol.js";
+import { isMissionMessage, missionEvidenceAdvances, parseMissionMessage, sameMissionTarget, validMissionArtifacts, type MissionAssignment, type MissionReply, type MissionTarget } from "@kars/mesh/dist/mission-protocol.js";
+import type { FilesystemPhase } from "@kars/mesh/dist/mission-phase.js";
 import type { MessageSecurity } from "@kars/mesh/dist/transport-interface.js";
 import { missionIdentity } from "@kars/mesh/dist/mission-identity.js";
 import { TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
@@ -10,7 +11,7 @@ import { TaskExecutionError, type TaskExecutionEvidence } from "./task-completio
 export interface MissionReceiverOptions {
   target: Omit<MissionTarget, "runNonce">;
   authorize: (assignment: MissionAssignment) => Promise<boolean>;
-  execute: (content: string, progress: (evidence: TaskExecutionEvidence) => void, artifactsEnabled: boolean) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
+  execute: (content: string, progress: (evidence: TaskExecutionEvidence) => void, artifactsEnabled: boolean, reviewedPhase?: FilesystemPhase) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
   send: (to: string, reply: MissionReply) => Promise<unknown>;
   warn: (message: string) => void;
   bootId?: string;
@@ -52,8 +53,15 @@ export class MissionReceiver {
     if (!message || security !== "encrypted" || from !== this.options.target.dispatcherDid
       || !sameMissionTarget(message, { ...this.options.target, runNonce: message.runNonce })) return true;
     if (message.type === "mission:probe") {
-      const { type: _type, ...target } = message;
-      await this.send({ ...target, type: "mission:reply", bootId: this.bootId, status: "ready" });
+      const ready = parseMissionMessage({
+        type: "mission:reply", status: "ready", version: message.version,
+        taskName: message.taskName, taskUid: message.taskUid, sandboxUid: message.sandboxUid,
+        podUid: message.podUid, runNonce: message.runNonce, agentDid: message.agentDid,
+        dispatcherDid: message.dispatcherDid, challenge: message.challenge, bootId: this.bootId,
+        ...(message.reviewedPhase ? { reviewedPhase: message.reviewedPhase, phaseDigest: message.phaseDigest } : {}),
+      });
+      if (ready?.type === "mission:reply") await this.send(ready);
+      else this.options.warn("Invalid bounded mission readiness reply");
       return true;
     }
     if (message.type !== "mission:assign" || message.bootId !== this.bootId) return true;
@@ -76,8 +84,15 @@ export class MissionReceiver {
   }
 
   private reply(assignment: MissionAssignment, status: MissionReply["status"], extra: Partial<MissionReply> = {}): MissionReply {
-    const { content: _content, type: _type, ...binding } = assignment;
-    return { ...binding, type: "mission:reply", status, ...extra };
+    return {
+      type: "mission:reply", status, version: assignment.version,
+      taskName: assignment.taskName, taskUid: assignment.taskUid, sandboxUid: assignment.sandboxUid,
+      podUid: assignment.podUid, runNonce: assignment.runNonce, agentDid: assignment.agentDid,
+      dispatcherDid: assignment.dispatcherDid, bootId: assignment.bootId, assignmentId: assignment.assignmentId,
+      ...(assignment.artifactFormat ? { artifactFormat: assignment.artifactFormat } : {}),
+      ...(assignment.reviewedPhase ? { reviewedPhase: assignment.reviewedPhase, phaseDigest: assignment.phaseDigest } : {}),
+      ...extra,
+    };
   }
 
   private async send(reply: MissionReply): Promise<void> {
@@ -87,30 +102,69 @@ export class MissionReceiver {
 
   private async run(execution: Execution): Promise<void> {
     let progressSends = Promise.resolve();
+    let latest: MissionReply["evidence"];
+    let progressCount = 0;
+    let finished = false;
+    let progressError: Error | undefined;
+    const validateEvidence = (evidence: TaskExecutionEvidence, status: "running" | "failed"): MissionReply => {
+      const reply = parseMissionMessage(this.reply(execution.assignment, status, { evidence }));
+      if (!reply || reply.type !== "mission:reply"
+        || (execution.assignment.version === 2 && !missionEvidenceAdvances(latest, reply.evidence))) {
+        throw new Error("Invalid or regressing mission execution evidence");
+      }
+      latest = reply.evidence;
+      return reply;
+    };
     try {
       if (!await this.options.authorize(execution.assignment)) throw new Error("Mission policy denied or evaluation unavailable");
       execution.reply = this.reply(execution.assignment, "accepted");
       await this.send(execution.reply);
       const result = await this.options.execute(execution.assignment.content, (evidence) => {
-        execution.reply = this.reply(execution.assignment, "running", { evidence });
-        const progress = execution.reply;
-        progressSends = progressSends.then(() => this.send(progress));
-      }, execution.assignment.artifactFormat === "text-v1");
-      if (result.artifacts !== undefined && (execution.assignment.artifactFormat !== "text-v1" || !validMissionArtifacts(result.artifacts))) {
-        throw new TaskExecutionError("Invalid or unnegotiated mission artifacts", result);
+        try {
+          if (finished || progressError || progressCount >= 126) throw new Error("Mission progress is closed or exceeds the journal bound");
+          const progress = validateEvidence(evidence, "running");
+          progressCount++;
+          execution.reply = progress;
+          progressSends = progressSends.then(() => this.send(progress));
+        } catch (error) {
+          progressError = error instanceof Error ? error : new Error("Invalid mission progress");
+          throw progressError;
+        }
+      }, execution.assignment.artifactFormat === "text-v1", execution.assignment.reviewedPhase);
+      finished = true;
+      if (progressError) throw progressError;
+      const descriptors = Object.getOwnPropertyDescriptors(result);
+      const measured: Record<string, unknown> = {};
+      for (const key of ["model", "rounds", "usage", "phase"] as const) {
+        const field = descriptors[key];
+        if (field && (!field.enumerable || !("value" in field))) throw new Error("Invalid mission evidence field");
+        if (field) measured[key] = field.value;
       }
-      const reply = this.reply(execution.assignment, "succeeded", {
-        output: result.output, ...(result.artifacts ? { artifacts: { ...result.artifacts } } : {}),
-        evidence: { model: result.model, rounds: result.rounds, usage: result.usage },
-      });
-      if (!parseMissionMessage(reply)) throw new TaskExecutionError("Final deliverable exceeds the mission envelope or lacks valid evidence", result);
+      validateEvidence(measured as unknown as TaskExecutionEvidence, "failed");
+      if (result.artifacts !== undefined && (execution.assignment.artifactFormat !== "text-v1" || !validMissionArtifacts(result.artifacts))) {
+        throw new TaskExecutionError("Invalid or unnegotiated mission artifacts", latest!);
+      }
+      const reply = parseMissionMessage(this.reply(execution.assignment, "succeeded", {
+        output: result.output, ...(result.artifacts ? { artifacts: result.artifacts } : {}), evidence: latest,
+      }));
+      if (!reply || reply.type !== "mission:reply") throw new TaskExecutionError("Final deliverable exceeds the mission envelope or lacks valid evidence", latest!);
       execution.reply = reply;
     } catch (error) {
-      execution.reply = this.reply(execution.assignment, "failed", {
+      let measuredFailure = false;
+      if (error instanceof TaskExecutionError) {
+        try { validateEvidence(error.evidence, "failed"); measuredFailure = true; }
+        catch { /* Retain the last validated counters, not malformed terminal evidence. */ }
+      }
+      // An unmeasured failure cannot certify that no further inference consumed tokens.
+      if (!measuredFailure && latest) latest = { ...latest, usage: null };
+      const failed = parseMissionMessage(this.reply(execution.assignment, "failed", {
         error: error instanceof Error ? error.message.slice(0, 2048) : "Mission execution failed",
-        ...(error instanceof TaskExecutionError ? { evidence: error.evidence } : {}),
-      });
+        ...(latest ? { evidence: latest } : {}),
+      }));
+      if (!failed || failed.type !== "mission:reply") throw new Error("Invalid bounded mission failure");
+      execution.reply = failed;
     } finally {
+      finished = true;
       await progressSends;
       this.active = null;
     }
