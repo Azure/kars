@@ -123,6 +123,7 @@ pub(super) async fn publish(client: &Client, prepared: &Prepared) -> Result<()> 
         "agentDid": super::identity::did(&prepared.runtime_root.value, super::identity::Role::Runtime,
             identity(&prepared.sandbox.metadata)?.0, identity(&runtime.pod.metadata)?.0)?,
         "dispatcherDid": prepared.dispatcher_did,
+        "admission": super::admission::for_task(&prepared.task)?,
     });
     let name = format!("kars-mission-binding-{}", prepared.task.name_any());
     if name.len() > 253 {

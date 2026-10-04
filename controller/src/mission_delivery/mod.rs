@@ -3,6 +3,7 @@
 
 //! Controller-owned identity projection and current-workload mission bindings.
 
+mod admission;
 mod binding;
 mod identity;
 mod roots;
@@ -425,7 +426,9 @@ fn project(
     if env.iter().any(|e| e.name.starts_with("KARS_MISSION_")) {
         return Err(Error::Invalid("mission environment is already configured"));
     }
+    let admission = admission::for_task(task)?.to_string();
     for (key, value) in [
+        ("KARS_MISSION_ADMISSION", admission.as_str()),
         ("KARS_MISSION_DISPATCH_ENABLED", "true"),
         ("KARS_MISSION_CONTRACT", r#"{"version":1}"#),
         (

@@ -4,6 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isMissionMessage, missionContract, missionEvidenceAdvances, parseMissionContract, parseMissionMessage, sameMissionContract, sameMissionTarget, snapshotMissionData, validMissionArtifacts, type MissionAssignment, type MissionContract, type MissionReply, type MissionTarget } from "@kars/mesh/dist/mission-protocol.js";
 import type { FilesystemPhase } from "@kars/mesh/dist/mission-phase.js";
+import { missionAdmissionAllows, parseMissionAdmission, type MissionAdmission } from "@kars/mesh/dist/mission-admission.js";
 import type { MessageSecurity } from "@kars/mesh/dist/transport-interface.js";
 import { missionIdentity } from "@kars/mesh/dist/mission-identity.js";
 import { TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
@@ -11,6 +12,7 @@ import { TaskExecutionError, type TaskExecutionEvidence } from "./task-completio
 export interface MissionReceiverOptions {
   target: Omit<MissionTarget, "runNonce">;
   expectedContract?: MissionContract;
+  admission: MissionAdmission;
   authorize: (assignment: MissionAssignment) => Promise<boolean>;
   execute: (content: string, progress: (evidence: TaskExecutionEvidence) => void, artifactsEnabled: boolean, reviewedPhase?: FilesystemPhase) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
   send: (to: string, reply: MissionReply) => Promise<unknown>;
@@ -56,7 +58,9 @@ export class MissionReceiver {
         challenge: "validation", runNonce: "validation", bootId: this.bootId })) {
       throw new Error("Invalid installed mission target or boot identity");
     }
-    this.options = Object.freeze({ ...options, target, expectedContract });
+    const admission = parseMissionAdmission(options.admission);
+    if (!admission) throw new Error("Invalid installed mission admission");
+    this.options = Object.freeze({ ...options, target, expectedContract, admission });
   }
 
   async handle(from: string, value: unknown, security: MessageSecurity): Promise<boolean> {
@@ -64,7 +68,9 @@ export class MissionReceiver {
     const message = parseMissionMessage(value);
     if (!message || security !== "encrypted" || from !== this.options.target.dispatcherDid
       || !sameMissionTarget(message, { ...this.options.target, runNonce: message.runNonce })
-      || !sameMissionContract(message, this.options.expectedContract)) return true;
+      || !sameMissionContract(message, this.options.expectedContract)
+      || !missionAdmissionAllows(this.options.admission, message.runNonce,
+        message.type === "mission:assign" ? message.content : undefined)) return true;
     if (message.type === "mission:probe") {
       const ready = parseMissionMessage({
         type: "mission:reply", status: "ready", version: message.version,

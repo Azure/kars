@@ -72,6 +72,29 @@ projects the supported legacy version-1 contract into the workload, overriding
 any `envFrom` credentials value; an independently configured phase contract is
 not selected by the production controller.
 
+Legacy execution also requires a controller-installed `KARS_MISSION_ADMISSION`,
+captured with the bootstrap binding before the first await. Its strict, bounded
+JSON contains the Task generation and full authorization digest plus either an
+idle state or an exact run nonce and objective digest. Idle runtimes accept no
+mission probes or assignments. Run runtimes reject a different nonce or assignment
+objective before readiness, policy authorization, ledger reservation or execution.
+The authorization digest covers effective Task instructions (including its
+trimmed objective); the separate objective digest covers the exact untrimmed UTF8
+execution bytes, including run-bound revision objectives.
+
+Before new dispatch, the store requires current Task readiness, observed generation
+and authorization digest, then checks the controller binding against the actual
+Deployment's explicit admission and version-1 contract. Workload ownership,
+incarnation and reverse-read freshness checks remain mandatory. The controller
+watches annotation-only Task requests to refresh the installed admission;
+acknowledgment and completion alone do not change the pod template. Already-recorded
+terminal evidence can still be recovered and published without requiring a
+replacement runtime or resending its assignment. These bounded checks and startup
+capture are **not an online lease or atomic revocation**. They do not implement
+reviewed role/phase authority or remove typed-plan activation guards. Controller,
+dispatcher and runtime updates must be coordinated: new dispatch rejects missing
+admission, and an enabled runtime with missing admission fails initialization.
+
 Filesystem operations use the packaged Python standard-library helper at
 `dist/core/task-filesystem.py` (requires `/usr/bin/python3`, already in the sandbox
 base). The helper runs without a shell, site packages or inherited environment,

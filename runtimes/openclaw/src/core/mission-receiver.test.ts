@@ -4,17 +4,20 @@
 import { describe, expect, it, vi } from "vitest";
 import { MissionReceiver, missionTargetFromEnvironment, type MissionReceiverOptions } from "./mission-receiver.js";
 import { MAX_MISSION_MESSAGE_BYTES, missionContract, parseMissionMessage, type MissionAssignment, type MissionReply } from "@kars/mesh/dist/mission-protocol.js";
+import { missionObjectiveDigest, type MissionAdmission } from "@kars/mesh/dist/mission-admission.js";
 import { TaskExecutionError } from "./task-completion.js";
 import { missionIdentity } from "@kars/mesh/dist/mission-identity.js";
 
 const target = { taskName: "mission", taskUid: "task-uid", sandboxUid: "sandbox-uid", podUid: "pod-uid", agentDid: `did:mesh:${"a".repeat(32)}`, dispatcherDid: `did:mesh:${"b".repeat(32)}` };
 const assignment: MissionAssignment = { ...target, type: "mission:assign", version: 1, runNonce: "run-1", assignmentId: "assignment-1", bootId: "boot-1", content: "Produce a useful briefing" };
+const admission: MissionAdmission = { version: 1, state: "run", taskGeneration: 1, authorizationDigest: `sha256:${"a".repeat(64)}`,
+  runNonce: assignment.runNonce, objectiveDigest: missionObjectiveDigest(assignment.content) };
 const evidence = { model: "gpt-5.4-mini", rounds: 1, usage: { promptTokens: 10, completionTokens: 12, totalTokens: 22 } };
 function setup(overrides: Partial<ConstructorParameters<typeof MissionReceiver>[0]> = {}) {
   const replies: MissionReply[] = [];
   const execute = vi.fn(async () => ({ ...evidence, output: "A useful briefing" }));
   const authorize = vi.fn(async () => true);
-  const receiver = new MissionReceiver({ target, execute, authorize, send: async (_to, reply) => { replies.push(reply); }, warn: vi.fn(), bootId: "boot-1", ...overrides });
+  const receiver = new MissionReceiver({ target, admission, execute, authorize, send: async (_to, reply) => { replies.push(reply); }, warn: vi.fn(), bootId: "boot-1", ...overrides });
   return { receiver, replies, execute, authorize };
 }
 
@@ -111,7 +114,7 @@ describe("encrypted mission receiver", () => {
     await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
     await s.receiver.handle(target.dispatcherDid, { ...assignment, runNonce: "run-2", assignmentId: "assignment-2" }, "encrypted");
     expect(s.execute).not.toHaveBeenCalled();
-    expect(s.replies.map(r => r.status)).toEqual(["rejected"]);
+    expect(s.replies).toEqual([]);
     allow(true);
     await vi.waitFor(() => expect(s.execute).toHaveBeenCalledTimes(1));
   });
@@ -151,6 +154,58 @@ describe("encrypted mission receiver", () => {
     const s = setup();
     expect(await s.receiver.handle(target.dispatcherDid, { type: "mission:future" }, "encrypted")).toBe(true);
     expect(await s.receiver.handle(target.dispatcherDid, { type: "task_request" }, "encrypted")).toBe(false);
+  });
+});
+
+describe("installed run admission", () => {
+  const probe = { ...target, type: "mission:probe", version: 1, challenge: "probe-1", runNonce: assignment.runNonce };
+  it.each([undefined, null, {}, { ...admission, taskGeneration: 0 }])("rejects invalid constructor admission %#", value => {
+    expect(() => setup({ admission: value as MissionAdmission })).toThrow("Invalid installed mission admission");
+  });
+  it("keeps an idle runtime silent without authorizing or executing", async () => {
+    const s = setup({ admission: { version: 1, state: "idle", taskGeneration: 1, authorizationDigest: admission.authorizationDigest } });
+    for (const message of [probe, assignment]) expect(await s.receiver.handle(target.dispatcherDid, message, "encrypted")).toBe(true);
+    expect(s.replies).toEqual([]);
+    expect(s.authorize).not.toHaveBeenCalled();
+    expect(s.execute).not.toHaveBeenCalled();
+  });
+  it("drops uninstalled runs and altered objectives before they can consume replay capacity", async () => {
+    const s = setup();
+    for (let i = 0; i < 129; i++) {
+      for (const message of [{ ...probe, runNonce: `other-${i}` }, { ...assignment, runNonce: `other-${i}` },
+        { ...assignment, content: `${assignment.content} ${i}` }]) {
+        await s.receiver.handle(target.dispatcherDid, message, "encrypted");
+      }
+    }
+    expect(s.replies).toEqual([]);
+    expect(s.authorize).not.toHaveBeenCalled();
+    expect(s.execute).not.toHaveBeenCalled();
+    await s.receiver.handle(target.dispatcherDid, probe, "encrypted");
+    expect(s.replies.at(-1)?.status).toBe("ready");
+    await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
+    const terminal = s.replies.at(-1);
+    await s.receiver.handle(target.dispatcherDid, assignment, "encrypted");
+    expect(s.replies.at(-1)).toEqual(terminal);
+    expect(s.authorize).toHaveBeenCalledTimes(1);
+    expect(s.execute).toHaveBeenCalledTimes(1);
+  });
+  it("captures admission across asynchronous authorization and keeps exact objective bytes", async () => {
+    const content = "\ufeff Briefing\r\nCafé — 日本語 🌍 \n";
+    const installed = { ...admission, objectiveDigest: missionObjectiveDigest(content) };
+    let allow!: (allowed: boolean) => void;
+    const s = setup({ admission: installed, authorize: () => new Promise(resolve => { allow = resolve; }) });
+    await s.receiver.handle(target.dispatcherDid, { ...assignment, content: content.trim() }, "encrypted");
+    expect(s.replies).toEqual([]);
+    await s.receiver.handle(target.dispatcherDid, { ...assignment, content }, "encrypted");
+    installed.runNonce = "other-run"; installed.objectiveDigest = missionObjectiveDigest("replacement");
+    await s.receiver.handle(target.dispatcherDid, { ...probe, runNonce: "other-run" }, "encrypted");
+    expect(s.replies).toEqual([]);
+    allow(true);
+    await vi.waitFor(() => expect(s.replies.at(-1)?.status).toBe("succeeded"));
+    expect(s.execute).toHaveBeenCalledWith(content, expect.any(Function), false, undefined);
+    await s.receiver.handle(target.dispatcherDid, { ...assignment, content }, "encrypted");
+    expect(s.execute).toHaveBeenCalledTimes(1);
   });
 });
 
@@ -385,7 +440,7 @@ describe("installed mission receiver binding", () => {
       return { ...evidence, phase: { name: phase!.name, attemptedToolCalls: 1, successfulToolCalls: 1, minToolCalls: 1, maxToolCalls: 2 }, output: "A useful briefing" };
     });
     const authorize = vi.fn<MissionReceiverOptions["authorize"]>(async incoming => { authorized = incoming; return true; });
-    const options: MissionReceiverOptions = { target: installedTarget, expectedContract, execute, authorize,
+    const options: MissionReceiverOptions = { target: installedTarget, admission, expectedContract, execute, authorize,
       send: async (_to, reply) => { replies.push(reply); }, warn: vi.fn(), bootId: "boot-1" };
     const receiver = new MissionReceiver(options);
     installedTarget.taskUid = "mutated-task";
