@@ -132,11 +132,27 @@ export function snapshotMissionData(value: unknown): unknown {
 }
 
 export function missionContract(reviewedPhase?: unknown): MissionContract {
-  if (reviewedPhase === undefined) return { version: MISSION_PROTOCOL_VERSION };
+  if (reviewedPhase === undefined) return Object.freeze({ version: MISSION_PROTOCOL_VERSION });
   const phase = filesystemPhase(reviewedPhase);
   Object.freeze(phase.capabilities);
   Object.freeze(phase.requiredToolCalls);
-  return { version: PHASE_MISSION_PROTOCOL_VERSION, reviewedPhase: Object.freeze(phase), phaseDigest: missionPhaseDigest(phase) };
+  return Object.freeze({ version: PHASE_MISSION_PROTOCOL_VERSION, reviewedPhase: Object.freeze(phase), phaseDigest: missionPhaseDigest(phase) });
+}
+
+/** Validate the installed contract independently of a peer's message. No envelope fields are allowed. */
+export function parseMissionContract(value: unknown): MissionContract | null {
+  try {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const keys = Reflect.ownKeys(value);
+    const v = snapshotMissionData(value) as Record<string, unknown>;
+    if (v.version === MISSION_PROTOCOL_VERSION) {
+      return keys.length === 1 && keys[0] === "version" ? missionContract() : null;
+    }
+    if (v.version !== PHASE_MISSION_PROTOCOL_VERSION || keys.length !== 3
+      || !keys.every(key => ["version", "reviewedPhase", "phaseDigest"].includes(String(key)))) return null;
+    const contract = missionContract(v.reviewedPhase);
+    return contract.version === PHASE_MISSION_PROTOCOL_VERSION && v.phaseDigest === contract.phaseDigest ? contract : null;
+  } catch { return null; }
 }
 
 export function sameMissionContract(a: MissionContract, b: MissionContract): boolean {

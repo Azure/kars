@@ -57,6 +57,21 @@ is still required. `maxToolCalls` limits attempted calls (including denied,
 malformed and failed calls); an overflowing batch fails before any tool runs.
 `minToolCalls` counts only successful authorized filesystem operations.
 
+The receiver captures its target and installed contract once at startup. Only an
+exact contract match can answer readiness or reserve a run; incoming assignments
+cannot select or downgrade that contract. OpenClaw bootstrap captures
+`KARS_MISSION_CONTRACT` together with the Secret-backed identity and workload
+binding before awaiting exclusive prekey-writer custody. Absent configuration
+selects legacy version 1; present configuration must be a valid JSON contract of
+at most 8 KiB (exact version/phase/digest fields), or initialization fails closed
+without releasing custody for an unsafe retry. The receiver passes its own
+immutable phase to execution, not the peer's copy. This pins local configuration;
+it does **not** establish reviewed Task/role/run/phase authority, and does not
+remove the production typed-plan activation guard. The controller explicitly
+projects the supported legacy version-1 contract into the workload, overriding
+any `envFrom` credentials value; an independently configured phase contract is
+not selected by the production controller.
+
 Filesystem operations use the packaged Python standard-library helper at
 `dist/core/task-filesystem.py` (requires `/usr/bin/python3`, already in the sandbox
 base). The helper runs without a shell, site packages or inherited environment,

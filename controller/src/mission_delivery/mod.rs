@@ -427,6 +427,7 @@ fn project(
     }
     for (key, value) in [
         ("KARS_MISSION_DISPATCH_ENABLED", "true"),
+        ("KARS_MISSION_CONTRACT", r#"{"version":1}"#),
         (
             "KARS_MISSION_TASK_NAME",
             task.metadata.name.as_deref().unwrap_or_default(),

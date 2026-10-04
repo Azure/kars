@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { createHash, randomUUID } from "node:crypto";
-import { isMissionMessage, missionEvidenceAdvances, parseMissionMessage, sameMissionTarget, validMissionArtifacts, type MissionAssignment, type MissionReply, type MissionTarget } from "@kars/mesh/dist/mission-protocol.js";
+import { isMissionMessage, missionContract, missionEvidenceAdvances, parseMissionContract, parseMissionMessage, sameMissionContract, sameMissionTarget, snapshotMissionData, validMissionArtifacts, type MissionAssignment, type MissionContract, type MissionReply, type MissionTarget } from "@kars/mesh/dist/mission-protocol.js";
 import type { FilesystemPhase } from "@kars/mesh/dist/mission-phase.js";
 import type { MessageSecurity } from "@kars/mesh/dist/transport-interface.js";
 import { missionIdentity } from "@kars/mesh/dist/mission-identity.js";
@@ -10,6 +10,7 @@ import { TaskExecutionError, type TaskExecutionEvidence } from "./task-completio
 
 export interface MissionReceiverOptions {
   target: Omit<MissionTarget, "runNonce">;
+  expectedContract?: MissionContract;
   authorize: (assignment: MissionAssignment) => Promise<boolean>;
   execute: (content: string, progress: (evidence: TaskExecutionEvidence) => void, artifactsEnabled: boolean, reviewedPhase?: FilesystemPhase) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
   send: (to: string, reply: MissionReply) => Promise<unknown>;
@@ -29,7 +30,7 @@ export function missionTargetFromEnvironment(agentDid: string, env = process.env
   if (missionIdentity(env.KARS_MISSION_IDENTITY_ROOT!, "runtime", target.sandboxUid, target.podUid).did !== agentDid) {
     throw new Error("Mission identity does not match its controller-owned Sandbox and Pod binding");
   }
-  return target;
+  return Object.freeze(target);
 }
 
 interface Execution {
@@ -43,15 +44,27 @@ export class MissionReceiver {
   private readonly bootId: string;
   private readonly executions = new Map<string, Execution>();
   private active: string | null = null;
-  constructor(private readonly options: MissionReceiverOptions) {
+  private readonly options: MissionReceiverOptions & { expectedContract: MissionContract };
+  constructor(options: MissionReceiverOptions) {
+    const targetKeys = Reflect.ownKeys(options.target);
+    const target = snapshotMissionData(options.target) as MissionReceiverOptions["target"];
+    const expectedContract = parseMissionContract(options.expectedContract === undefined ? missionContract() : options.expectedContract);
+    if (!expectedContract) throw new Error("Invalid installed mission contract");
     this.bootId = options.bootId ?? randomUUID();
+    if (!target || targetKeys.length !== 6 || Object.keys(target).sort().join(",") !== "agentDid,dispatcherDid,podUid,sandboxUid,taskName,taskUid"
+      || !parseMissionMessage({ ...target, ...expectedContract, type: "mission:reply", status: "ready",
+        challenge: "validation", runNonce: "validation", bootId: this.bootId })) {
+      throw new Error("Invalid installed mission target or boot identity");
+    }
+    this.options = Object.freeze({ ...options, target, expectedContract });
   }
 
   async handle(from: string, value: unknown, security: MessageSecurity): Promise<boolean> {
     if (!isMissionMessage(value)) return false;
     const message = parseMissionMessage(value);
     if (!message || security !== "encrypted" || from !== this.options.target.dispatcherDid
-      || !sameMissionTarget(message, { ...this.options.target, runNonce: message.runNonce })) return true;
+      || !sameMissionTarget(message, { ...this.options.target, runNonce: message.runNonce })
+      || !sameMissionContract(message, this.options.expectedContract)) return true;
     if (message.type === "mission:probe") {
       const ready = parseMissionMessage({
         type: "mission:reply", status: "ready", version: message.version,
@@ -130,7 +143,7 @@ export class MissionReceiver {
           progressError = error instanceof Error ? error : new Error("Invalid mission progress");
           throw progressError;
         }
-      }, execution.assignment.artifactFormat === "text-v1", execution.assignment.reviewedPhase);
+      }, execution.assignment.artifactFormat === "text-v1", this.options.expectedContract.reviewedPhase);
       finished = true;
       if (progressError) throw progressError;
       const descriptors = Object.getOwnPropertyDescriptors(result);

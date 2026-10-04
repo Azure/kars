@@ -339,7 +339,7 @@ describe("reviewed filesystem phase execution", () => {
     const assignment = { ...target, ...missionContract(reviewedPhase({ maxToolCalls: 32 })), type: "mission:assign", runNonce: "run-1", assignmentId: "assignment-1", bootId: "boot-1", content: "Write the bounded briefing", artifactFormat: "text-v1" };
     const replies: MissionReply[] = [];
     const execute = vi.fn<MissionReceiverOptions["execute"]>(async (content, onEvidence, artifactsEnabled, phase) => executeTaskWithEvidence(content, { ...deps, onEvidence }, log, artifactsEnabled, phase));
-    const receiver = new MissionReceiver({ target, bootId: "boot-1", authorize: async () => true, execute,
+    const receiver = new MissionReceiver({ target, expectedContract: missionContract(reviewedPhase({ maxToolCalls: 32 })), bootId: "boot-1", authorize: async () => true, execute,
       send: async (_to, reply) => { replies.push(reply); }, warn: log.warn });
     expect(parseMissionMessage(assignment)).not.toBeNull();
     await receiver.handle(target.dispatcherDid, assignment, "encrypted");

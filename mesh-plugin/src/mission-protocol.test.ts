@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { describe, expect, it, vi } from "vitest";
-import { MAX_MISSION_ARTIFACT_BYTES, MAX_MISSION_MESSAGE_BYTES, isMissionMessage, missionContract, missionEvidenceAdvances, parseMissionMessage, snapshotMissionData, validMissionArtifacts } from "./mission-protocol.js";
+import { MAX_MISSION_ARTIFACT_BYTES, MAX_MISSION_MESSAGE_BYTES, isMissionMessage, missionContract, missionEvidenceAdvances, parseMissionContract, parseMissionMessage, snapshotMissionData, validMissionArtifacts } from "./mission-protocol.js";
 
 const assignment = { type: "mission:assign", version: 1, taskName: "briefing", taskUid: "task-uid", sandboxUid: "sandbox-uid", podUid: "pod-uid", runNonce: "run-1", agentDid: `did:mesh:${"a".repeat(32)}`, dispatcherDid: `did:mesh:${"b".repeat(32)}`, bootId: "boot-1", assignmentId: "assignment-1", content: "Write a briefing" };
 const reply = { ...assignment, type: "mission:reply", status: "succeeded", output: "Briefing attached", evidence: { model: "model", rounds: 1, usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 } } };
@@ -96,6 +96,51 @@ describe("mandatory reviewed phase contract", () => {
     wire.padding = "x".repeat(MAX_MISSION_MESSAGE_BYTES - Buffer.byteLength(JSON.stringify(wire)));
     expect(Buffer.byteLength(JSON.stringify(wire))).toBe(MAX_MISSION_MESSAGE_BYTES);
     expect(parseMissionMessage(wire)).toBeNull();
+  });
+});
+
+describe("installed mission contracts", () => {
+  const phase = { name: "write-briefing", objective: "Write a bounded useful briefing", capabilities: ["filesystem-write", "filesystem-read"], minToolCalls: 1, maxToolCalls: 2 };
+  const contract = missionContract(phase);
+  it("canonicalizes an independent immutable contract without changing caller data", () => {
+    const input = { ...structuredClone(contract), reviewedPhase: structuredClone(phase) };
+    const parsed = parseMissionContract(input)!;
+    expect(parsed).toEqual(contract);
+    expect(input.reviewedPhase.capabilities).toEqual(["filesystem-write", "filesystem-read"]);
+    input.reviewedPhase.maxToolCalls = 32;
+    input.reviewedPhase.capabilities.length = 0;
+    expect(parsed.reviewedPhase?.maxToolCalls).toBe(2);
+    expect(parsed.reviewedPhase?.capabilities).toEqual(["filesystem-read", "filesystem-write"]);
+    for (const value of [parsed, parsed.reviewedPhase, parsed.reviewedPhase?.capabilities, parsed.reviewedPhase?.requiredToolCalls,
+      missionContract(), missionContract(phase)]) expect(Object.isFrozen(value)).toBe(true);
+    expect(parseMissionContract(Object.assign(Object.create(null), contract))).toEqual(contract);
+    expect(parseMissionContract({ version: 1 })).toEqual(missionContract());
+  });
+  it.each([undefined, null, [], {}, 1, "1", { version: 0 }, { version: 3 }, { version: "1" },
+    { version: 1, phaseDigest: undefined }, { version: 1, extra: undefined },
+    { version: 1, reviewedPhase: contract.reviewedPhase }, { version: 2 },
+    { version: 2, reviewedPhase: contract.reviewedPhase }, { version: 2, phaseDigest: contract.phaseDigest },
+    { ...contract, phaseDigest: "sha256:" + "0".repeat(64) },
+    { ...contract, reviewedPhase: { ...contract.reviewedPhase, maxToolCalls: 3 } },
+    { ...contract, type: "mission:probe" }, { ...contract, extra: undefined },
+    { ...contract, reviewedPhase: { ...contract.reviewedPhase, objective: "é".repeat(601) } },
+  ])("rejects malformed contracts and envelope fields without fallback %#", input => {
+    expect(parseMissionContract(input)).toBeNull();
+  });
+  it("refuses getters, symbols, hidden properties and exotic objects without invoking getters", () => {
+    const get = vi.fn(() => contract.reviewedPhase);
+    const hidden = Object.defineProperty({ version: 1 }, "hidden", { value: undefined });
+    const nested = Object.defineProperty({ ...contract.reviewedPhase }, "objective", { get, enumerable: true });
+    for (const input of [Object.defineProperty({ ...contract }, "reviewedPhase", { get, enumerable: true }),
+      { ...contract, reviewedPhase: nested }, { ...contract, [Symbol("extra")]: undefined }, hidden,
+      Object.create(contract), new Date(), new Proxy({}, { ownKeys() { throw new Error("invalid"); } })]) {
+      expect(parseMissionContract(input)).toBeNull();
+    }
+    expect(get).not.toHaveBeenCalled();
+  });
+  it("accepts the maximum supported phase contract", () => {
+    const maximum = missionContract({ name: "a".repeat(48), objective: "é".repeat(600), capabilities: ["filesystem-read", "filesystem-write"], minToolCalls: 32, maxToolCalls: 32, requiredToolCalls: [], freshContext: true });
+    expect(parseMissionContract(maximum)).toEqual(maximum);
   });
 });
 
