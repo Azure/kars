@@ -20,11 +20,12 @@
   ],
   "type": "module",
   "scripts": {
-    "build": "tsc",
+    "build": "tsc && cp src/core/task-filesystem.py dist/core/task-filesystem.py",
     "dev": "tsx watch src/index.ts",
     "lint": "oxlint .",
     "format": "oxfmt .",
     "test": "vitest run",
+    "test:filesystem": "/usr/bin/python3 -I -S -B src/core/task-filesystem.test.py",
     "test:watch": "vitest",
     "typecheck": "tsc --noEmit"
   },
