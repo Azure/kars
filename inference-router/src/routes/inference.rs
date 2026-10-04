@@ -410,6 +410,7 @@ async fn responses(
                 Body::from_stream(stream.map_err(std::io::Error::other)),
             )
                 .into_response();
+            crate::task_telemetry::observe::copy_correlation(response.headers_mut(), &resp_headers);
             if let Some(ct) = resp_headers.get("content-type") {
                 response.headers_mut().insert("content-type", ct.clone());
             }

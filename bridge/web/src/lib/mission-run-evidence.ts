@@ -1,7 +1,20 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import type { ActivityEvent, MissionResult, TaskAssignmentStatus } from "./types";
+import type { ActivityEvent, MissionArtifact, MissionResult, TaskAssignmentStatus } from "./types";
+import { isSystemEvidenceArtifact, type RouterActivity } from "./router-activity";
+
+export function reviewKind(artifacts: MissionArtifact[] | undefined): string {
+  const exts = (artifacts ?? []).filter(a => !isSystemEvidenceArtifact(a.name))
+    .map(a => a.name.split(".").pop()?.toLowerCase() ?? "");
+  const code = ["ts", "tsx", "js", "jsx", "rs", "py", "go", "java", "rb", "c", "cpp", "h", "sh", "yaml", "yml", "toml", "json"];
+  const docs = ["md", "mdx", "txt", "rst", "adoc", "html"];
+  const data = ["csv", "tsv", "parquet", "xlsx"];
+  if (exts.some(e => code.includes(e))) return "code";
+  if (exts.some(e => data.includes(e))) return "data";
+  if (exts.some(e => docs.includes(e))) return "docs";
+  return "output";
+}
 
 export function missionFailureAdvice(reason: string): { cause: string; remedy: string } {
   const message = reason.toLowerCase();
@@ -27,6 +40,7 @@ export function missionRunState(task: {
   current_run_nonce: string | null;
   result: MissionResult | null;
   assignment: TaskAssignmentStatus | null;
+  router_activity?: RouterActivity | null;
 }) {
   const nonce = task.current_run_nonce;
   const result = task.result && nonce && task.result.assignment_nonce === nonce
@@ -45,7 +59,12 @@ export function missionRunState(task: {
   const failed = currentResult != null
     ? !realDelivery && currentResult.blocked == null
     : assignmentMatches && task.assignment?.completed_at != null && task.assignment.state === "Failed";
-  return { currentResult, awaitingAssignment, assignmentInFlight, realDelivery, failed };
+  const routerActivity = currentResult?.status === "ok"
+    && currentResult.source === "durable_agent"
+    && currentResult.run_evidence?.status === "succeeded"
+    && currentResult.run_evidence.run_nonce === nonce
+    ? task.router_activity ?? null : null;
+  return { currentResult, awaitingAssignment, assignmentInFlight, realDelivery, failed, routerActivity };
 }
 
 export function activityForRevision(event: unknown, nonce: string): event is ActivityEvent {

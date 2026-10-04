@@ -34,6 +34,39 @@ When a run has sub-agents, an **Org activity** roster makes the delegation tree
 legible: every agent (principal + subs) with its role badge, live phase, per-agent
 tool-call count, and hosts reached — the "who did what".
 
+## Revision-bound router observations
+
+A delivered Mission can show **runtime-forwarded router observations** beside its
+recorded producer and run. OpenClaw captures the scope and round IDs returned by
+the shared inference router, requests only those recorded rounds, and forwards
+them through the existing successful-delivery artifact path. Bridge binds the
+projection to the current Task UID and run; a later revision does not inherit an
+earlier revision's observations.
+
+- `kars-router-observations.json` is **system evidence**, not a deliverable. It
+  does not turn a writing task into a code review or replace useful output files.
+- A router round is an upstream request, not necessarily an agent turn. Only
+  returned response IDs are selected; hidden retries, failures before a response,
+  and adapters that cannot forward IDs may be absent.
+- Tool proposals are not execution results. A correlated result identifies both
+  its proposal round and the later reporting round; ambiguous reused call IDs
+  are not attributed. Reported outcomes are not independent tool-success proof.
+- Missing token usage remains unavailable, not zero. Missing rounds, recorder
+  eviction, truncation, and read failures are shown explicitly.
+- These observations are not independent authorship, approval, or cryptographic
+  attestation. Existing admission and immutable artifact custody establish the
+  producer/run binding.
+
+The bounded attachment is collected only after successful negotiated `text-v1`
+execution. It never displaces useful files when the artifact allowance is full.
+Runtimes without returned IDs produce no attachment; retained deliveries are not
+backfilled. The shared recorder serves multiple runtimes, but this forwarding
+integration is currently OpenClaw-specific. Existing nonempty legacy evidence
+remains visible separately.
+
+Downloads stay pinned to the selected run. Observation JSON contains selected
+metadata, not prompts, tool arguments/results, credentials, or request URLs.
+
 ## Proofs & attestations
 
 The graph also visualizes **where and when** a run's cryptographic proofs are

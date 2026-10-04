@@ -26,10 +26,17 @@ async function workspace() {
   tempDirectories.push(directory);
   return directory;
 }
-async function router(responses: unknown[], policyStatus = 200, policyBody: unknown = { allowed: false }) {
-  requests = []; policyRequests = [];
+let observationRequests: { url: string; scope: string | string[] | undefined }[];
+async function router(responses: unknown[], policyStatus = 200, policyBody: unknown = { allowed: false }, observations?: unknown) {
+  requests = []; policyRequests = []; observationRequests = [];
   let index = 0;
   server = createServer((req, res) => {
+    if (req.method === "GET" && req.url?.startsWith("/telemetry/trace?")) {
+      observationRequests.push({ url: req.url, scope: req.headers["x-kars-service-scope"] });
+      res.writeHead(observations ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(observations ?? {}));
+      return;
+    }
     let body = "";
     req.on("data", (data) => { body += data; });
     req.on("end", () => {
@@ -79,6 +86,84 @@ const batch = (...responses: ReturnType<typeof tool>[]) => ({
   })) } }],
 });
 
+describe("router observations in completed task handoffs", () => {
+  const correlated = (round: number, response: unknown) => (res: ServerResponse) => {
+    res.writeHead(200, { "content-type": "application/json", "x-kars-telemetry-scope": "scope-a", "x-kars-telemetry-round": String(round) });
+    res.end(JSON.stringify(response));
+  };
+  const selection = {
+    scope_id: "scope-a", rounds: [1, 2], coverage: "returned-responses-only", durable: false,
+    missing_rounds: [], dropped_events: 0, truncated: false,
+    events: [1, 2].map(round => ({ kind: "round", scope_id: "scope-a", round, seq: round,
+      source: "router-upstream", provider: "foundry", model: "gpt-5.4-mini", http_status: 200,
+      accepted: true, outcome: "complete", usage, usage_state: "present", finish_reason: "stop",
+      partial_observation: false, ms: 10, tool_calls_observed: 0 })),
+  };
+  const filename = "kars-router-observations.json";
+
+  it("attaches selected existing router records alongside the actual useful file", async () => {
+    const path = join(await workspace(), "briefing.md");
+    await router([
+      correlated(1, tool("file_write", { path, content: "Useful briefing\r\n✓", artifact_name: "briefing.md" })),
+      correlated(2, final()),
+    ], 200, { allowed: true }, selection);
+    const result = await executeTaskWithEvidence("task", deps, log, true, reviewedPhase());
+    expect(result.artifacts?.["briefing.md"]).toBe(await readFile(path, "utf8"));
+    expect(JSON.parse(result.artifacts![filename])).toEqual({
+      version: 1, source: "runtime-forwarded-router-observations", coverage: "returned-responses-only",
+      responses: 2, scope_id: "scope-a", rounds: [1, 2], state: "observed", trace: selection,
+    });
+    expect(observationRequests).toEqual([{ url: "/telemetry/trace?rounds=1,2", scope: "scope-a" }]);
+    expect(result.usage?.totalTokens).toBe(22);
+    expect(result.rounds).toBe(2);
+  });
+
+  it("does not fetch or export observations when execution fails after a real write", async () => {
+    const path = join(await workspace(), "briefing.md");
+    await router([
+      correlated(1, tool("file_write", { path, content: "Actual file", artifact_name: "briefing.md" })),
+      correlated(2, final("", "length")),
+    ], 200, { allowed: true }, selection);
+    const failure = await executeTaskWithEvidence("task", deps, log, true, reviewedPhase()).catch(error => error);
+    expect(failure).toBeInstanceOf(TaskExecutionError);
+    expect(failure.artifacts).toBeUndefined();
+    expect(await readFile(path, "utf8")).toBe("Actual file");
+    expect(observationRequests).toEqual([]);
+  });
+
+  it("refuses model-written system evidence before the filesystem write", async () => {
+    const path = join(await workspace(), "forged.json");
+    await router([tool("file_write", { path, content: "Forged observations", artifact_name: filename }), final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("task", deps, log, true, reviewedPhase())).rejects.toBeInstanceOf(TaskExecutionError);
+    await expect(access(path)).rejects.toThrow();
+    expect(observationRequests).toEqual([]);
+  });
+
+  it("preserves all useful files when observation attachment has no remaining capacity", async () => {
+    const directory = await workspace();
+    const files = Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`part-${i}.md`, `Useful part ${i}`]));
+    await router([
+      correlated(1, batch(...Object.entries(files).map(([name, content]) => tool("file_write", {
+        path: join(directory, name), content, artifact_name: name,
+      })))),
+      correlated(2, final()),
+    ], 200, { allowed: true }, selection);
+    const result = await executeTaskWithEvidence("task", deps, log, true, reviewedPhase({ minToolCalls: 16, maxToolCalls: 16 }));
+    expect(result.artifacts).toEqual(files);
+    expect(result.usage?.totalTokens).toBe(22);
+    expect(observationRequests).toHaveLength(1);
+    expect(log.warn).toHaveBeenCalledWith("Router observations omitted: negotiated artifact capacity was used by deliverables");
+    for (const [name, content] of Object.entries(files)) expect(await readFile(join(directory, name), "utf8")).toBe(content);
+  });
+
+  it("does not collect observations without negotiated artifact transport", async () => {
+    await router([correlated(1, final())], 200, { allowed: true }, selection);
+    const result = await executeTaskWithEvidence("task", deps, log, false);
+    expect(result.artifacts).toBeUndefined();
+    expect(observationRequests).toEqual([]);
+  });
+});
+
 describe("reviewed filesystem phase execution", () => {
   it.each([
     null, [], {},
@@ -125,6 +210,7 @@ describe("reviewed filesystem phase execution", () => {
     } }, log, true, contract);
     expect(result.phase).toEqual({ name: "write-briefing", attemptedToolCalls: 1, successfulToolCalls: 1, minToolCalls: 1, maxToolCalls: 1 });
     expect(result.artifacts).toEqual({ "briefing.md": "Useful briefing\r\n✓" });
+    expect(observationRequests).toEqual([]);
     expect(await readFile(path, "utf8")).toBe("Useful briefing\r\n✓");
     expect(result.usage?.totalTokens).toBe(22);
     expect(requests[0].tools.map((t: any) => t.function.name)).toEqual(["file_write"]);

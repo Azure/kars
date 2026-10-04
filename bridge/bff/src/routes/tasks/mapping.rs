@@ -82,6 +82,7 @@ pub(super) fn to_detail(
     egress_mode: Option<String>,
 ) -> TaskDetailDto {
     let e = &task.spec.envelope;
+    let router_activity = super::router_activity::from_artifacts(task, result.as_ref(), &artifacts);
     let (role_plan, collaboration_events) = structured_team_evidence(&artifacts);
     let mut assignment_events = task
         .status
@@ -182,6 +183,7 @@ pub(super) fn to_detail(
         collaboration_events,
         pull_requests,
         activity,
+        router_activity,
         telemetry,
         checkpoint,
         agent_identity,

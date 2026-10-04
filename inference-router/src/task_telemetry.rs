@@ -104,6 +104,48 @@ impl TaskTelemetry {
             "events": events,
         }))
     }
+    /// Select returned response IDs, never a sandbox-wide time window. These
+    /// observations are not authenticated assignment or tool-success evidence.
+    pub fn selected_snapshot(&self, scope: &str, rounds: &[u64]) -> Option<Value> {
+        if rounds.is_empty() || rounds.len() > 32 || rounds.contains(&0) {
+            return None;
+        }
+        let inner = self.inner.lock().ok()?;
+        if inner.scope != scope {
+            return None;
+        }
+        let selected = inner
+            .events
+            .iter()
+            .filter(|event| {
+                event["round"]
+                    .as_u64()
+                    .is_some_and(|round| rounds.contains(&round))
+                    && match event["kind"].as_str() {
+                        Some("round" | "tool_proposed") => true,
+                        Some("tool_result") => event["reported_in_round"]
+                            .as_u64()
+                            .is_some_and(|round| rounds.contains(&round)),
+                        _ => false,
+                    }
+            })
+            .collect::<Vec<_>>();
+        let missing = rounds
+            .iter()
+            .filter(|round| {
+                !selected.iter().any(|event| {
+                    event["kind"] == "round" && event["round"].as_u64() == Some(**round)
+                })
+            })
+            .copied()
+            .collect::<Vec<_>>();
+        Some(json!({
+            "scope_id": scope, "rounds": rounds, "missing_rounds": missing,
+            "dropped_events": inner.dropped, "truncated": selected.len() > 256,
+            "coverage": "returned-responses-only", "durable": false,
+            "events": selected.into_iter().take(256).collect::<Vec<_>>(),
+        }))
+    }
     pub fn begin(
         self: &Arc<Self>,
         path: &str,
@@ -116,16 +158,18 @@ impl TaskTelemetry {
         inner
             .model_tools
             .retain(|_, pending| pending.at.elapsed() < TOOL_TTL);
+        inner.round = inner.round.saturating_add(1);
+        let reporting_round = inner.round;
         for (id, ok) in parse::request_results(body, shape) {
             if let Some(pending) = inner.model_tools.remove(&id) {
                 Self::push(
                     &mut inner,
                     json!({"kind":"tool_result", "call_id":id, "name":pending.name,
-                    "round":pending.round, "ok":ok, "source":"harness-reported"}),
+                    "round":pending.round, "reported_in_round":reporting_round,
+                    "ok":ok, "source":"harness-reported"}),
                 );
             }
         }
-        inner.round = inner.round.saturating_add(1);
         Some(observe::Observation::new(
             self.clone(),
             inner.scope.clone(),

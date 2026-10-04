@@ -711,6 +711,10 @@ pub(super) async fn chat_completions(
                     return *block;
                 }
                 let mut response = (resp_status, Body::from(chat_body)).into_response();
+                crate::task_telemetry::observe::copy_correlation(
+                    response.headers_mut(),
+                    &resp_hdrs,
+                );
                 if let Some(ct) = resp_hdrs.get("content-type") {
                     response.headers_mut().insert("content-type", ct.clone());
                 }
@@ -794,7 +798,7 @@ pub(super) async fn chat_completions(
                     )
                     .await
                     {
-                        Ok((resp_status, _, resp_body, _selected)) => {
+                        Ok((resp_status, resp_headers, resp_body, _selected)) => {
                             let chat_body = responses_to_chat_body(&resp_body);
                             if let Ok(bj) = serde_json::from_slice::<serde_json::Value>(&chat_body)
                                 && let Some(total) = bj
@@ -820,6 +824,10 @@ pub(super) async fn chat_completions(
                                 String::from_utf8_lossy(&chat_body)
                             );
                             let mut response = (resp_status, Body::from(sse)).into_response();
+                            crate::task_telemetry::observe::copy_correlation(
+                                response.headers_mut(),
+                                &resp_headers,
+                            );
                             response.headers_mut().insert(
                                 "content-type",
                                 axum::http::HeaderValue::from_static("text/event-stream"),
@@ -965,6 +973,10 @@ pub(super) async fn chat_completions(
                     };
                 let body = Body::from_stream(guarded);
                 let mut response = (status, body).into_response();
+                crate::task_telemetry::observe::copy_correlation(
+                    response.headers_mut(),
+                    &resp_headers,
+                );
                 if let Some(ct) = resp_headers.get("content-type") {
                     response.headers_mut().insert("content-type", ct.clone());
                 }
@@ -1048,6 +1060,10 @@ pub(super) async fn chat_completions(
                             return *block;
                         }
                         let mut response = (resp_status, Body::from(chat_body)).into_response();
+                        crate::task_telemetry::observe::copy_correlation(
+                            response.headers_mut(),
+                            &resp_hdrs,
+                        );
                         if let Some(ct) = resp_hdrs.get("content-type") {
                             response.headers_mut().insert("content-type", ct.clone());
                         }
@@ -1274,6 +1290,10 @@ pub(super) async fn chat_completions(
                 }
 
                 let mut response = (status, Body::from(resp_body.clone())).into_response();
+                crate::task_telemetry::observe::copy_correlation(
+                    response.headers_mut(),
+                    &resp_headers,
+                );
                 // Forward content-type from upstream
                 if let Some(ct) = resp_headers.get("content-type") {
                     response.headers_mut().insert("content-type", ct.clone());

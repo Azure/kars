@@ -17,6 +17,34 @@ use std::{
 
 mod stream;
 
+pub const SCOPE_HEADER: &str = "x-kars-telemetry-scope";
+pub const ROUND_HEADER: &str = "x-kars-telemetry-round";
+
+pub fn response_headers(
+    upstream: &axum::http::HeaderMap,
+    observation: Option<&Observation>,
+) -> axum::http::HeaderMap {
+    let mut headers = upstream.clone();
+    headers.remove(SCOPE_HEADER);
+    headers.remove(ROUND_HEADER);
+    if let Some(observation) = observation {
+        let (scope, round) = observation.correlation();
+        if let Ok(scope) = axum::http::HeaderValue::from_str(scope) {
+            headers.insert(SCOPE_HEADER, scope);
+            headers.insert(ROUND_HEADER, round.into());
+        }
+    }
+    headers
+}
+
+pub fn copy_correlation(target: &mut axum::http::HeaderMap, source: &axum::http::HeaderMap) {
+    for name in [SCOPE_HEADER, ROUND_HEADER] {
+        if let Some(value) = source.get(name) {
+            target.insert(name, value.clone());
+        }
+    }
+}
+
 pub struct Observation {
     telemetry: Arc<TaskTelemetry>,
     scope: String,
@@ -51,6 +79,9 @@ impl Observation {
     }
     pub fn headers(&mut self, status: u16) {
         self.status = Some(status);
+    }
+    pub fn correlation(&self) -> (&str, u64) {
+        (&self.scope, self.round)
     }
     pub fn fail(&mut self, outcome: &str) {
         self.finish_parsed(

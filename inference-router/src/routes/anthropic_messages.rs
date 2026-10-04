@@ -483,7 +483,7 @@ pub(super) async fn anthropic_messages(
     .await;
 
     match result {
-        Ok((status, _resp_headers, resp_body)) => {
+        Ok((status, resp_headers, resp_body)) => {
             if !status.is_success() {
                 // Pass through Foundry error verbatim — it's already JSON.
                 return (status, [("content-type", "application/json")], resp_body).into_response();
@@ -558,7 +558,9 @@ pub(super) async fn anthropic_messages(
                 }
             }
 
-            (StatusCode::OK, Json(anthropic_resp)).into_response()
+            let mut response = (StatusCode::OK, Json(anthropic_resp)).into_response();
+            crate::task_telemetry::observe::copy_correlation(response.headers_mut(), &resp_headers);
+            response
         }
         Err(e) => {
             tracing::warn!(sandbox = %sandbox_name, error = %e, "Anthropic upstream call failed");

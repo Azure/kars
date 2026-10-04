@@ -5,6 +5,7 @@
 
 import Link from "next/link";
 import { missionFailureAdvice, revisionArtifactUrl } from "@/lib/mission-run-evidence";
+import { isSystemEvidenceArtifact } from "@/lib/router-activity";
 import { DeliverableView, DeliverableBody } from "@/components/deliverable-view";
 import { ProvenanceStory } from "@/components/provenance-story";
 import type { ReactNode } from "react";
@@ -13,8 +14,6 @@ import { Icon } from "@/components/icon";
 import { type Composition, type MissionResult, type MissionArtifact, type AgentIdentity, type TaskDetail } from "@/lib/types";
 
 
-/** Infer the review kind from the produced artifact set, for typed routing
- *  (§16): code → review as a change, docs → prose, data → values. */
 /** True when an artifact is prose (markdown/plain text) that should render as a
  * formatted document rather than a raw monospace dump. Code/data files
  * (json/csv/yaml/source) stay verbatim in <pre>. Extensionless files are
@@ -276,7 +275,9 @@ export function AgentIdentityCard({ identity }: { identity: AgentIdentity }) {
   );
 }
 
-export function ArtifactsPanel({ ns, task, runNonce, artifacts, pullRequests, activity, egress, tokens }: { ns: string; task: string; runNonce: string | null; artifacts: MissionArtifact[]; pullRequests: import("@/lib/types").PullRequestRef[]; activity: import("@/lib/types").ActivityEvent[]; egress: string[]; tokens: number | null }) {
+export function ArtifactsPanel({ ns, task, runNonce, artifacts, pullRequests, activity, egress, tokens, routerActivityState = null }: { ns: string; task: string; runNonce: string | null; artifacts: MissionArtifact[]; pullRequests: import("@/lib/types").PullRequestRef[]; activity: import("@/lib/types").ActivityEvent[]; egress: string[]; tokens: number | null; routerActivityState?: "observed" | "unavailable" | null }) {
+  const systemFiles = artifacts.filter(a => isSystemEvidenceArtifact(a.name)).length;
+  const outputFiles = artifacts.length - systemFiles;
   const fmtSize = (n: number | null) =>
     n == null ? "" : n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
   return (
@@ -290,7 +291,7 @@ export function ArtifactsPanel({ ns, task, runNonce, artifacts, pullRequests, ac
           </p>
         </div>
         <span className="shrink-0 rounded-full bg-surface-muted px-2.5 py-1 text-xs font-medium">
-          {artifacts.length} file{artifacts.length === 1 ? "" : "s"}
+          {outputFiles} output file{outputFiles === 1 ? "" : "s"}{systemFiles > 0 && ` · ${systemFiles} system evidence file${systemFiles === 1 ? "" : "s"}`}
         </span>
       </div>
       {!runNonce && artifacts.length > 0 && <p className="mt-3 text-xs text-foreground-muted">Downloads unavailable: no current revision is recorded.</p>}
@@ -320,9 +321,13 @@ export function ArtifactsPanel({ ns, task, runNonce, artifacts, pullRequests, ac
       )}
       <div className="mt-4 rounded-lg border border-border bg-background/40 p-4">
         <h3 className="text-xs font-semibold">Available activity evidence</h3>
+        {routerActivityState && <p className="mt-2 text-xs text-foreground-muted">
+          {routerActivityState === "observed" ? "Partial router observations are shown in Activity." : "The router observation handoff records an unavailable trace; see Activity for the reason."}
+          {" "}System evidence is not a deliverable or independent proof that tools succeeded.
+        </p>}
         {activity.length > 0
           ? <div className="mt-2"><ProvenanceStory activity={activity} egress={egress} tokens={tokens} /></div>
-          : <p className="mt-2 text-xs text-foreground-muted">Detailed revision-bound trace unavailable. See Recorded run for terminal producer and usage evidence.</p>}
+          : !routerActivityState && <p className="mt-2 text-xs text-foreground-muted">Detailed revision-bound trace unavailable. See Recorded run for terminal producer and usage evidence.</p>}
       </div>
       <ul className="mt-4 divide-y divide-border rounded-lg border border-border">
         {artifacts.map((a, i) => (
@@ -332,6 +337,7 @@ export function ArtifactsPanel({ ns, task, runNonce, artifacts, pullRequests, ac
                 <span className="flex items-center gap-2 font-mono text-xs">
                   <span aria-hidden className="text-foreground-muted transition-transform group-open:rotate-180">⌄</span>
                   {a.name}
+                  {isSystemEvidenceArtifact(a.name) && <span className="font-sans text-foreground-muted">System evidence · not a deliverable</span>}
                 </span>
                 <span className="flex shrink-0 items-center gap-3 text-xs text-foreground-muted">
                   <a
