@@ -4,6 +4,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { isMissionMessage, missionContract, missionEvidenceAdvances, parseMissionContract, parseMissionMessage, sameMissionContract, sameMissionTarget, snapshotMissionData, validMissionArtifacts, type MissionAssignment, type MissionContract, type MissionReply, type MissionTarget } from "@kars/mesh/dist/mission-protocol.js";
 import type { FilesystemPhase } from "@kars/mesh/dist/mission-phase.js";
+import type { MissionInput } from "@kars/mesh/dist/mission-inputs.js";
 import { missionAdmissionAllows, parseMissionAdmission, type MissionAdmission } from "@kars/mesh/dist/mission-admission.js";
 import type { MessageSecurity } from "@kars/mesh/dist/transport-interface.js";
 import { missionIdentity } from "@kars/mesh/dist/mission-identity.js";
@@ -14,7 +15,7 @@ export interface MissionReceiverOptions {
   expectedContract?: MissionContract;
   admission: MissionAdmission;
   authorize: (assignment: MissionAssignment) => Promise<boolean>;
-  execute: (content: string, progress: (evidence: TaskExecutionEvidence) => void, artifactsEnabled: boolean, reviewedPhase?: FilesystemPhase) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
+  execute: (content: string, progress: (evidence: TaskExecutionEvidence) => void, artifactsEnabled: boolean, reviewedPhase?: FilesystemPhase, inputArtifacts?: readonly MissionInput[]) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
   send: (to: string, reply: MissionReply) => Promise<unknown>;
   warn: (message: string) => void;
   bootId?: string;
@@ -78,6 +79,7 @@ export class MissionReceiver {
         podUid: message.podUid, runNonce: message.runNonce, agentDid: message.agentDid,
         dispatcherDid: message.dispatcherDid, challenge: message.challenge, bootId: this.bootId,
         ...(message.reviewedPhase ? { reviewedPhase: message.reviewedPhase, phaseDigest: message.phaseDigest } : {}),
+        ...(message.inputDigest ? { inputDigest: message.inputDigest } : {}),
       });
       if (ready?.type === "mission:reply") await this.send(ready);
       else this.options.warn("Invalid bounded mission readiness reply");
@@ -110,6 +112,7 @@ export class MissionReceiver {
       dispatcherDid: assignment.dispatcherDid, bootId: assignment.bootId, assignmentId: assignment.assignmentId,
       ...(assignment.artifactFormat ? { artifactFormat: assignment.artifactFormat } : {}),
       ...(assignment.reviewedPhase ? { reviewedPhase: assignment.reviewedPhase, phaseDigest: assignment.phaseDigest } : {}),
+      ...(assignment.inputDigest ? { inputDigest: assignment.inputDigest } : {}),
       ...extra,
     };
   }
@@ -128,7 +131,7 @@ export class MissionReceiver {
     const validateEvidence = (evidence: TaskExecutionEvidence, status: "running" | "failed"): MissionReply => {
       const reply = parseMissionMessage(this.reply(execution.assignment, status, { evidence }));
       if (!reply || reply.type !== "mission:reply"
-        || (execution.assignment.version === 2 && !missionEvidenceAdvances(latest, reply.evidence))) {
+        || (execution.assignment.version !== 1 && !missionEvidenceAdvances(latest, reply.evidence))) {
         throw new Error("Invalid or regressing mission execution evidence");
       }
       latest = reply.evidence;
@@ -149,7 +152,7 @@ export class MissionReceiver {
           progressError = error instanceof Error ? error : new Error("Invalid mission progress");
           throw progressError;
         }
-      }, execution.assignment.artifactFormat === "text-v1", this.options.expectedContract.reviewedPhase);
+      }, execution.assignment.artifactFormat === "text-v1", this.options.expectedContract.reviewedPhase, execution.assignment.inputArtifacts);
       finished = true;
       if (progressError) throw progressError;
       const descriptors = Object.getOwnPropertyDescriptors(result);

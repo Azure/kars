@@ -10,6 +10,8 @@ import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } 
 import { MissionReceiver, type MissionReceiverOptions } from "./mission-receiver.js";
 import { missionObjectiveDigest } from "@kars/mesh/dist/mission-admission.js";
 import { missionContract, parseMissionMessage, type MissionReply } from "@kars/mesh/dist/mission-protocol.js";
+import { missionInputContentDigest } from "@kars/mesh/dist/mission-inputs.js";
+import { TASK_INPUT_ROOT, TaskInputFiles } from "./task-filesystem.js";
 
 const log = { info: vi.fn(), warn: vi.fn() };
 const deps: TaskLoopDeps = { meshClient: () => null, isInterruptRequested: () => false, interruptReason: () => "", setInterrupt: () => {} };
@@ -247,6 +249,88 @@ describe("reviewed filesystem phase execution", () => {
     expect(requests[1].messages.at(-1).content).toContain(`${name} error:`);
     expect(JSON.stringify(requests)).not.toContain(sensitive);
     expect(await readFile(externalPath, "utf8")).toBe(sensitive);
+  });
+
+  describe("immutable input execution", () => {
+    const path = `${TASK_INPUT_ROOT}/draft.md`;
+    const content = "Untrusted upstream draft\r\n✓ 日本語 🌍";
+    const input = () => ({ name: "draft.md", content, sha256: missionInputContentDigest(content), source: {
+      namespace: "kars-system", taskName: "writer", taskUid: "upstream-task", sandboxUid: "upstream-sandbox",
+      podUid: "upstream-pod", runNonce: "upstream-run", assignmentId: "upstream-assignment", agentDid: `did:mesh:${"a".repeat(32)}`, artifactName: "draft.md",
+    } });
+    const readPhase = (overrides = {}) => reviewedPhase({ capabilities: ["filesystem-read"], ...overrides });
+
+    it("reads captured bytes through the authorized tool, not system instructions, without automatic export", async () => {
+      const original = input(); const caller = [structuredClone(original)];
+      await router([(res: ServerResponse) => {
+        caller[0].content = "Changed while model was running"; caller[0].source.runNonce = "changed"; caller.length = 0;
+        res.writeHead(200, { "content-type": "application/json" }); res.end(JSON.stringify(tool("file_read", { path })));
+      }, final()], 200, { allowed: true });
+      const result = await executeTaskWithEvidence("Review the supplied draft", deps, log, true, readPhase(), caller);
+      expect(result.phase).toMatchObject({ attemptedToolCalls: 1, successfulToolCalls: 1 });
+      expect(result.artifacts).toBeUndefined();
+      expect(requests[0].messages[0].content).toContain(path);
+      expect(requests[0].messages[0].content).toContain(original.sha256);
+      expect(JSON.stringify(requests[0])).not.toContain("Untrusted upstream draft");
+      expect(requests[0].tools.map((t: any) => t.function.name)).toEqual(["file_read"]);
+      expect(JSON.parse(requests[1].messages.at(-1).content)).toMatchObject({ content, bytes: Buffer.byteLength(content), truncated: false,
+        input: { source: original.source, sha256: original.sha256, readOnly: true } });
+      expect(policyRequests).toHaveLength(1);
+    });
+
+    it.each([undefined, reviewedPhase(), readPhase({ minToolCalls: 0, maxToolCalls: 0 })])("rejects inputs without usable reviewed read permission before model or policy (%#)", async phase => {
+      await router([final()], 200, { allowed: true });
+      await expect(executeTaskWithEvidence("task", deps, log, true, phase, [input()])).rejects.toMatchObject({
+        message: expect.stringContaining("Immutable inputs require"), evidence: { rounds: 0 },
+      });
+      expect(requests).toEqual([]); expect(policyRequests).toEqual([]);
+    });
+
+    it("rejects invalid input bytes before model execution and disallows an unmeasured input loop", async () => {
+      await router([final()], 200, { allowed: true });
+      await expect(executeTaskWithEvidence("task", deps, log, true, readPhase(), [{ ...input(), content: "digest mismatch" }])).rejects.toBeInstanceOf(TaskExecutionError);
+      await expect(processTaskWithTools("task", deps, log, undefined, undefined, undefined, new TaskInputFiles([input()]))).rejects.toThrow("measured reviewed");
+      expect(requests).toEqual([]); expect(policyRequests).toEqual([]);
+    });
+
+    it("keeps router denial authoritative and does not reveal contents or count a successful read", async () => {
+      await router([tool("file_read", { path }), final()]);
+      const failure = await executeTaskWithEvidence("task", deps, log, true, readPhase(), [input()]).catch(error => error);
+      expect(failure).toBeInstanceOf(TaskExecutionError);
+      expect(failure).toMatchObject({ phase: { attemptedToolCalls: 1, successfulToolCalls: 0 } });
+      expect(failure).not.toHaveProperty("artifacts");
+      expect(JSON.stringify(requests)).not.toContain("Untrusted upstream draft");
+      expect(policyRequests).toHaveLength(1);
+    });
+
+    it.each([`${TASK_INPUT_ROOT}/unknown.md`, `${TASK_INPUT_ROOT}/../draft.md`, "/sandbox//.kars-inputs/draft.md"]) ("rejects missing or aliased input path %s without exposure", async alias => {
+      await router([tool("file_read", { path: alias }), final()], 200, { allowed: true });
+      await expect(executeTaskWithEvidence("task", deps, log, true, readPhase(), [input()])).rejects.toMatchObject({ phase: { attemptedToolCalls: 1, successfulToolCalls: 0 } });
+      expect(JSON.stringify(requests)).not.toContain("Untrusted upstream draft");
+      expect(requests[1].messages.at(-1).content).toContain("file_read error");
+    });
+
+    it("reads upstream data then attaches only explicitly written downstream output", async () => {
+      const output = join(await workspace(), "review.md");
+      await router([tool("file_read", { path }), tool("file_write", { path: output, content: "Reviewed draft: one correction", artifact_name: "review.md" }), final()], 200, { allowed: true });
+      const result = await executeTaskWithEvidence("Review the supplied draft", deps, log, true,
+        readPhase({ capabilities: ["filesystem-read", "filesystem-write"], minToolCalls: 2 }), [input()]);
+      expect(result.phase).toMatchObject({ attemptedToolCalls: 2, successfulToolCalls: 2 });
+      expect(result.artifacts).toEqual({ "review.md": "Reviewed draft: one correction" });
+      expect(await readFile(output, "utf8")).toBe("Reviewed draft: one correction");
+      expect(policyRequests).toHaveLength(2);
+    });
+
+    it("exports nothing if execution fails after reading input and writing a result", async () => {
+      const output = join(await workspace(), "review.md");
+      await router([tool("file_read", { path }), tool("file_write", { path: output, content: "Incomplete review", artifact_name: "review.md" }),
+        (res: ServerResponse) => res.destroy()], 200, { allowed: true });
+      const failure = await executeTaskWithEvidence("task", deps, log, true,
+        readPhase({ capabilities: ["filesystem-read", "filesystem-write"], minToolCalls: 2 }), [input()]).catch(error => error);
+      expect(failure).toBeInstanceOf(TaskExecutionError);
+      expect(failure).toMatchObject({ phase: { attemptedToolCalls: 2, successfulToolCalls: 2 }, evidence: { usage: null } });
+      expect(failure).not.toHaveProperty("artifacts");
+    });
   });
 
   it("counts an actual read without requiring write permission", async () => {

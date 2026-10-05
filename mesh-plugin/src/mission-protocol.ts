@@ -2,9 +2,11 @@
 // Licensed under the MIT License.
 
 import { filesystemPhase, missionPhaseDigest, validPhaseEvidence, type FilesystemPhase, type TaskPhaseEvidence } from "./mission-phase.js";
+import { missionInputs, missionInputsDigest, type MissionInput } from "./mission-inputs.js";
 
 export const MISSION_PROTOCOL_VERSION = 1;
 export const PHASE_MISSION_PROTOCOL_VERSION = 2;
+export const INPUT_MISSION_PROTOCOL_VERSION = 3;
 export const MAX_MISSION_MESSAGE_BYTES = 192 * 1024;
 export const MAX_MISSION_ARTIFACT_BYTES = 128 * 1024;
 export const MAX_MISSION_ARTIFACTS = 16;
@@ -36,9 +38,10 @@ export interface MissionTarget {
   dispatcherDid: string;
 }
 export interface MissionContract {
-  version: 1 | 2;
+  version: 1 | 2 | 3;
   reviewedPhase?: FilesystemPhase;
   phaseDigest?: string;
+  inputDigest?: string;
 }
 export interface MissionProbe extends MissionTarget, MissionContract {
   type: "mission:probe";
@@ -50,6 +53,7 @@ export interface MissionAssignment extends MissionTarget, MissionContract {
   assignmentId: string;
   artifactFormat?: "text-v1";
   content: string;
+  inputArtifacts?: readonly MissionInput[];
 }
 export interface MissionReply extends MissionTarget, MissionContract {
   type: "mission:reply";
@@ -131,12 +135,18 @@ export function snapshotMissionData(value: unknown): unknown {
   return result;
 }
 
-export function missionContract(reviewedPhase?: unknown): MissionContract {
-  if (reviewedPhase === undefined) return Object.freeze({ version: MISSION_PROTOCOL_VERSION });
+export function missionContract(reviewedPhase?: unknown, inputArtifacts?: unknown): MissionContract {
+  if (reviewedPhase === undefined) {
+    if (inputArtifacts !== undefined) throw new Error("Mission inputs require a reviewed read-capable phase");
+    return Object.freeze({ version: MISSION_PROTOCOL_VERSION });
+  }
   const phase = filesystemPhase(reviewedPhase);
   Object.freeze(phase.capabilities);
   Object.freeze(phase.requiredToolCalls);
-  return Object.freeze({ version: PHASE_MISSION_PROTOCOL_VERSION, reviewedPhase: Object.freeze(phase), phaseDigest: missionPhaseDigest(phase) });
+  const contract = { reviewedPhase: Object.freeze(phase), phaseDigest: missionPhaseDigest(phase) };
+  if (inputArtifacts === undefined) return Object.freeze({ version: PHASE_MISSION_PROTOCOL_VERSION, ...contract });
+  if (!phase.capabilities.includes("filesystem-read") || phase.maxToolCalls < 1) throw new Error("Mission inputs require a reviewed read-capable phase");
+  return Object.freeze({ version: INPUT_MISSION_PROTOCOL_VERSION, ...contract, inputDigest: missionInputsDigest(inputArtifacts) });
 }
 
 /** Validate the installed contract independently of a peer's message. No envelope fields are allowed. */
@@ -148,15 +158,21 @@ export function parseMissionContract(value: unknown): MissionContract | null {
     if (v.version === MISSION_PROTOCOL_VERSION) {
       return keys.length === 1 && keys[0] === "version" ? missionContract() : null;
     }
-    if (v.version !== PHASE_MISSION_PROTOCOL_VERSION || keys.length !== 3
-      || !keys.every(key => ["version", "reviewedPhase", "phaseDigest"].includes(String(key)))) return null;
+    const hasInputs = v.version === INPUT_MISSION_PROTOCOL_VERSION;
+    const expected = hasInputs ? ["version", "reviewedPhase", "phaseDigest", "inputDigest"] : ["version", "reviewedPhase", "phaseDigest"];
+    if ((!hasInputs && v.version !== PHASE_MISSION_PROTOCOL_VERSION) || keys.length !== expected.length
+      || !keys.every(key => typeof key === "string" && expected.includes(key))) return null;
     const contract = missionContract(v.reviewedPhase);
-    return contract.version === PHASE_MISSION_PROTOCOL_VERSION && v.phaseDigest === contract.phaseDigest ? contract : null;
+    if (contract.version !== PHASE_MISSION_PROTOCOL_VERSION || v.phaseDigest !== contract.phaseDigest) return null;
+    if (!hasInputs) return contract;
+    if (typeof v.inputDigest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(v.inputDigest)
+      || !contract.reviewedPhase!.capabilities.includes("filesystem-read") || contract.reviewedPhase!.maxToolCalls < 1) return null;
+    return Object.freeze({ ...contract, version: INPUT_MISSION_PROTOCOL_VERSION, inputDigest: v.inputDigest });
   } catch { return null; }
 }
 
 export function sameMissionContract(a: MissionContract, b: MissionContract): boolean {
-  return a.version === b.version && a.phaseDigest === b.phaseDigest;
+  return a.version === b.version && a.phaseDigest === b.phaseDigest && a.inputDigest === b.inputDigest;
 }
 
 /** A constrained execution cannot erase prior counts or make unknown consumed usage known. */
@@ -176,12 +192,18 @@ export function parseMissionMessage(value: unknown): MissionMessage | null {
   try { value = snapshotMissionData(value); } catch { return null; }
   const v = value as Record<string, unknown>;
   if (v.version === MISSION_PROTOCOL_VERSION) {
-    if (v.reviewedPhase !== undefined || v.phaseDigest !== undefined) return null;
-  } else if (v.version === PHASE_MISSION_PROTOCOL_VERSION) {
+    if (v.reviewedPhase !== undefined || v.phaseDigest !== undefined || v.inputDigest !== undefined || v.inputArtifacts !== undefined) return null;
+  } else if (v.version === PHASE_MISSION_PROTOCOL_VERSION || v.version === INPUT_MISSION_PROTOCOL_VERSION) {
     try {
-      const contract = missionContract(v.reviewedPhase);
-      if (contract.version !== PHASE_MISSION_PROTOCOL_VERSION || v.phaseDigest !== contract.phaseDigest) return null;
-      value = Object.freeze({ ...v, ...contract });
+      const hasInputs = v.version === INPUT_MISSION_PROTOCOL_VERSION;
+      if (!hasInputs && (v.inputDigest !== undefined || v.inputArtifacts !== undefined)) return null;
+      if (v.type !== "mission:assign" && v.inputArtifacts !== undefined) return null;
+      const contract = parseMissionContract({ version: v.version, reviewedPhase: v.reviewedPhase, phaseDigest: v.phaseDigest,
+        ...(hasInputs ? { inputDigest: v.inputDigest } : {}) });
+      if (!contract) return null;
+      const inputs = hasInputs && v.type === "mission:assign" ? missionInputs(v.inputArtifacts) : undefined;
+      if (inputs && missionInputsDigest(inputs) !== contract.inputDigest) return null;
+      value = Object.freeze({ ...v, ...contract, ...(inputs ? { inputArtifacts: inputs } : {}) });
       if (Buffer.byteLength(JSON.stringify(value)) > MAX_MISSION_MESSAGE_BYTES) return null;
     } catch { return null; }
   } else return null;
@@ -212,7 +234,7 @@ export function parseMissionMessage(value: unknown): MissionMessage | null {
         || u.promptTokens + u.completionTokens !== u.totalTokens) return null;
     }
   }
-  if (v.version === PHASE_MISSION_PROTOCOL_VERSION && v.status === "running" && !v.evidence) return null;
+  if (v.version !== MISSION_PROTOCOL_VERSION && v.status === "running" && !v.evidence) return null;
   if (v.status === "succeeded") {
     const e = v.evidence as MissionReply["evidence"];
     if (typeof v.output !== "string" || !v.output.trim() || !e?.usage || e.usage.totalTokens <= 0 || e.rounds <= 0) return null;

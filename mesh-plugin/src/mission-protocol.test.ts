@@ -4,8 +4,62 @@
 import { describe, expect, it, vi } from "vitest";
 import { MAX_MISSION_ARTIFACT_BYTES, MAX_MISSION_MESSAGE_BYTES, isMissionMessage, missionContract, missionEvidenceAdvances, parseMissionContract, parseMissionMessage, snapshotMissionData, validMissionArtifacts } from "./mission-protocol.js";
 
+import { missionInputContentDigest, missionInputsDigest } from "./mission-inputs.js";
+
 const assignment = { type: "mission:assign", version: 1, taskName: "briefing", taskUid: "task-uid", sandboxUid: "sandbox-uid", podUid: "pod-uid", runNonce: "run-1", agentDid: `did:mesh:${"a".repeat(32)}`, dispatcherDid: `did:mesh:${"b".repeat(32)}`, bootId: "boot-1", assignmentId: "assignment-1", content: "Write a briefing" };
 const reply = { ...assignment, type: "mission:reply", status: "succeeded", output: "Briefing attached", evidence: { model: "model", rounds: 1, usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 } } };
+
+describe("immutable input mission contract", () => {
+  const phase = { name: "review-draft", objective: "Review the supplied immutable document", capabilities: ["filesystem-read"], minToolCalls: 1, maxToolCalls: 2 };
+  const content = "Upstream draft\r\n✓ 日本語 🌍";
+  const inputs = [{ name: "draft.md", content, sha256: missionInputContentDigest(content), source: {
+    namespace: "kars-system", taskName: "writer", taskUid: "upstream-task", sandboxUid: "upstream-sandbox",
+    podUid: "upstream-pod", runNonce: "upstream-run", assignmentId: "upstream-assignment", agentDid: assignment.agentDid, artifactName: "draft.md",
+  } }];
+  const contract = missionContract(phase, inputs);
+  const assigned = { ...assignment, ...contract, inputArtifacts: inputs };
+
+  it("pins a canonical digest independently of assignment bytes and freezes its snapshot", () => {
+    expect(contract).toMatchObject({ version: 3, inputDigest: missionInputsDigest(inputs) });
+    expect(parseMissionContract(contract)).toEqual(contract);
+    expect(contract).not.toHaveProperty("inputArtifacts");
+    const caller = structuredClone(assigned);
+    const parsed = parseMissionMessage(caller)!;
+    expect(parsed).toEqual(assigned);
+    caller.inputArtifacts[0].content = "changed";
+    caller.inputArtifacts[0].source.runNonce = "changed";
+    expect(parsed).toMatchObject({ inputArtifacts: inputs });
+    if (parsed.type !== "mission:assign") throw new Error("Expected assignment");
+    for (const value of [parsed.inputArtifacts, parsed.inputArtifacts![0], parsed.inputArtifacts![0].source]) expect(Object.isFrozen(value)).toBe(true);
+  });
+
+  it.each([undefined, { ...phase, capabilities: ["filesystem-write"] }, { ...phase, minToolCalls: 0, maxToolCalls: 0 }])("requires a reviewed read-capable phase with a positive ceiling (%#)", invalid => {
+    expect(() => missionContract(invalid, inputs)).toThrow();
+  });
+
+  it("allows only assignments to transport input bytes, never probes or replies", () => {
+    const probe = { ...assignment, ...contract, type: "mission:probe", challenge: "input-probe" };
+    const ready = { ...probe, type: "mission:reply", status: "ready" };
+    const success = { ...reply, ...contract, evidence: { ...reply.evidence,
+      phase: { name: phase.name, minToolCalls: 1, maxToolCalls: 2, attemptedToolCalls: 1, successfulToolCalls: 1 } } };
+    for (const message of [probe, ready, success]) {
+      expect(parseMissionMessage(message)).not.toBeNull();
+      expect(parseMissionMessage({ ...message, inputArtifacts: inputs })).toBeNull();
+    }
+    for (const extra of [{ inputArtifacts: inputs }, { extra: undefined }]) expect(parseMissionContract({ ...contract, ...extra })).toBeNull();
+  });
+
+  it("rejects absent inputs, digest mismatches, changed provenance and protocol downgrades", () => {
+    const changed = structuredClone(inputs);
+    changed[0].content += " changed"; changed[0].sha256 = missionInputContentDigest(changed[0].content);
+    const rebound = structuredClone(inputs); rebound[0].source.runNonce = "another-run";
+    for (const fields of [{ inputArtifacts: undefined }, { inputArtifacts: [] }, { inputDigest: undefined },
+      { inputDigest: `sha256:${"0".repeat(64)}` }, { inputArtifacts: changed }, { inputArtifacts: rebound },
+      { version: 1 }, { version: 2 }]) expect(parseMissionMessage({ ...assigned, ...fields })).toBeNull();
+    expect(parseMissionMessage({ ...assignment, inputArtifacts: inputs })).toBeNull();
+    expect(parseMissionContract({ ...contract, reviewedPhase: { ...phase, capabilities: ["filesystem-write"] } })).toBeNull();
+  });
+});
 
 describe("mandatory reviewed phase contract", () => {
   const phase = { name: "write-briefing", objective: "Write a bounded useful briefing", capabilities: ["filesystem-write", "filesystem-read"], minToolCalls: 1, maxToolCalls: 2 };
