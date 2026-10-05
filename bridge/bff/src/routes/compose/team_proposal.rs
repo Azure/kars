@@ -270,13 +270,11 @@ pub(super) fn parse_and_validate_team(
         roles = plan
             .roles
             .iter()
-            .enumerate()
-            .map(|(index, planned_role)| {
+            .map(|planned_role| {
                 let mut role = proposed_roles
                     .iter()
                     .find(|role| role.name == planned_role.name)
                     .cloned()
-                    .or_else(|| proposed_roles.get(index).cloned())
                     .unwrap_or_else(|| ComposeTeamRole {
                         name: planned_role.name.clone(),
                         system_prompt: planned_role.objective.clone(),
@@ -284,7 +282,6 @@ pub(super) fn parse_and_validate_team(
                         model: String::new(),
                         skills: Vec::new(),
                     });
-                role.name = planned_role.name.clone();
                 if role.system_prompt.trim().is_empty() {
                     role.system_prompt = planned_role.objective.clone();
                 }
