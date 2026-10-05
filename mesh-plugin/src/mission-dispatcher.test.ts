@@ -5,6 +5,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MissionDispatcher, missionAttemptName, missionContentDigest, type MissionAttemptStore, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
 import type { IMeshTransport, MessageSecurity } from "./transport-interface.js";
 import { missionContract, type MissionAssignment, type MissionProbe, type MissionReply } from "./mission-protocol.js";
+import { missionInputContentDigest, missionInputs, type MissionInput } from "./mission-inputs.js";
 
 const candidate: MissionCandidate = {
   namespace: "kars-system", taskName: "briefing", taskUid: "task-uid", sandboxUid: "sandbox-uid", podUid: "pod-uid",
@@ -47,10 +48,15 @@ function harness() {
     send: vi.fn(async (_to, assignment: MissionAssignment) => {
       expect(stored?.attempt.phase).toBe("dispatching");
       expect(stored?.attempt.assignment).toEqual(assignment);
+      const replyContract = { ...assignment };
+      delete replyContract.inputArtifacts;
       for (const status of statuses) {
-        const reply: MissionReply = { ...assignment, type: "mission:reply", status,
+        const phase = assignment.reviewedPhase;
+        const reply: MissionReply = { ...replyContract, type: "mission:reply", status,
           ...(status === "succeeded" ? { output: "Three benefits, three risks, approval checklist.", evidence } : {}),
-          ...(assignment.version === 2 && (status === "running" || status === "succeeded") ? { evidence: structuredClone(phaseEvidence) } : {}),
+          ...(phase && (status === "running" || status === "succeeded") ? { evidence: { ...structuredClone(evidence), phase: {
+            name: phase.name, attemptedToolCalls: 1, successfulToolCalls: 1, minToolCalls: phase.minToolCalls, maxToolCalls: phase.maxToolCalls,
+          } } } : {}),
         };
         inbox.push({ payload: alter(reply), from: candidate.agentDid, security: "encrypted" });
       }
@@ -69,6 +75,98 @@ function harness() {
     alterReply: (f: typeof alter) => { alter = f; }, dispatcher: () => new MissionDispatcher(mesh, store, "dispatcher-process", 100),
   };
 }
+
+describe("immutable input dispatch", () => {
+  const content = "# Upstream draft\r\nCafé — 日本語 🌍\n";
+  const source = { namespace: candidate.namespace, taskName: "writer", taskUid: "writer-uid", sandboxUid: "writer-sandbox",
+    podUid: "writer-pod", runNonce: "writer-run", assignmentId: "writer-assignment", agentDid: candidate.agentDid, artifactName: "draft.md" };
+  const input: MissionInput = { name: "draft.md", source, content, sha256: missionInputContentDigest(content) };
+  const readPhase = { name: "read-draft", objective: "Read and assess the supplied draft", capabilities: ["filesystem-read"], minToolCalls: 1, maxToolCalls: 2 };
+  const contract = missionContract(readPhase, [input]);
+  const withInputs: MissionCandidate = { ...candidate, reviewedPhase: contract.reviewedPhase, inputArtifacts: [input] };
+
+  it("captures canonical input bytes before async lookup and keeps probes and replies digest-only", async () => {
+    const h = harness();
+    const mutable = structuredClone(withInputs);
+    vi.mocked(h.store.get).mockImplementationOnce(async captured => {
+      mutable.inputArtifacts![0].content = "Changed during lookup";
+      mutable.inputArtifacts![0].source.taskUid = "replacement-writer";
+      expect(Object.isFrozen(captured.inputArtifacts)).toBe(true);
+      expect(Object.isFrozen(captured.inputArtifacts?.[0].source)).toBe(true);
+      return null;
+    });
+    expect(await h.dispatcher().dispatch(mutable)).toBe("succeeded");
+    const probe = vi.mocked(h.mesh.sendWithAck).mock.calls[0][1];
+    expect(probe).toMatchObject(contract);
+    expect(probe).not.toHaveProperty("inputArtifacts");
+    expect(JSON.stringify(probe)).not.toContain(content);
+    const attempt = h.state()!.attempt;
+    expect(attempt.candidate.inputArtifacts).toEqual(missionInputs([input]));
+    expect(attempt.assignment).toMatchObject({ ...contract, inputArtifacts: [input] });
+    expect(attempt.reply).toMatchObject(contract);
+    expect(attempt.reply).not.toHaveProperty("inputArtifacts");
+    expect(attempt.events.map(event => event.status)).toEqual(["accepted", "running", "succeeded"]);
+  });
+
+  it.each(["missing digest", "changed digest", "downgrade", "input bytes"])("rejects %s readiness before claiming", async change => {
+    const h = harness();
+    vi.mocked(h.mesh.sendWithAck).mockImplementationOnce(async (_to, payload, predicate) => {
+      const ready = { ...(payload as MissionProbe), type: "mission:reply", status: "ready", bootId: "boot-1" };
+      if (change === "missing digest") delete ready.inputDigest;
+      if (change === "changed digest") ready.inputDigest = `sha256:${"0".repeat(64)}`;
+      if (change === "downgrade") { ready.version = 2; delete ready.inputDigest; }
+      if (change === "input bytes") Object.assign(ready, { inputArtifacts: [input] });
+      expect(predicate(ready, candidate.agentDid, "encrypted")).toBeNull();
+      throw new Error("No matching input readiness");
+    });
+    await expect(h.dispatcher().dispatch(withInputs)).rejects.toThrow("No matching input readiness");
+    expect(h.store.create).not.toHaveBeenCalled();
+    expect(h.mesh.send).not.toHaveBeenCalled();
+  });
+
+  it.each(["missing digest", "changed digest", "downgrade", "input bytes"])("never publishes a %s terminal", async change => {
+    const h = harness(); h.setStatuses(["succeeded"]);
+    h.alterReply(reply => {
+      if (change === "missing digest") delete reply.inputDigest;
+      if (change === "changed digest") reply.inputDigest = `sha256:${"0".repeat(64)}`;
+      if (change === "downgrade") { reply.version = 2; delete reply.inputDigest; }
+      if (change === "input bytes") Object.assign(reply, { inputArtifacts: [input] });
+      return reply;
+    });
+    expect(await h.dispatcher().dispatch(withInputs)).toBe("uncertain");
+    expect(h.state()!.attempt.events).toEqual([]);
+    expect(h.store.publish).not.toHaveBeenCalled();
+  });
+
+  it("recovers exact persisted input and output custody without another send", async () => {
+    const h = harness();
+    const artifacts = { "review.md": "One correction to the supplied draft." };
+    h.alterReply(reply => reply.status === "succeeded" ? { ...reply, artifacts } : reply);
+    vi.mocked(h.store.publish).mockRejectedValueOnce(new Error("Publication unavailable"));
+    await expect(h.dispatcher().dispatch(withInputs)).rejects.toThrow("Publication unavailable");
+    const persisted = h.state()!.attempt;
+    expect(persisted.assignment.inputArtifacts).toEqual([input]);
+    expect(persisted.reply?.artifacts).toEqual(artifacts);
+    expect(await h.dispatcher().dispatch(withInputs)).toBe("already-claimed");
+    expect(h.mesh.sendWithAck).toHaveBeenCalledTimes(1);
+    expect(h.mesh.send).toHaveBeenCalledTimes(1);
+    expect(h.store.publish).toHaveBeenLastCalledWith(persisted);
+  });
+
+  it("preserves phase progress when a version-3 terminal regresses successful reads", async () => {
+    const h = harness(); h.setStatuses(["running", "failed"]);
+    h.alterReply(reply => {
+      if (reply.status === "failed") reply.evidence = { ...evidence, phase: {
+        name: readPhase.name, attemptedToolCalls: 1, successfulToolCalls: 0, minToolCalls: 1, maxToolCalls: 2,
+      } };
+      return reply;
+    });
+    expect(await h.dispatcher().dispatch(withInputs)).toBe("uncertain");
+    expect(h.state()!.attempt.events.map(event => event.status)).toEqual(["running"]);
+    expect(h.state()!.attempt.reply?.evidence?.phase?.successfulToolCalls).toBe(1);
+    expect(h.store.publish).not.toHaveBeenCalled();
+  });
+});
 
 describe("durable encrypted mission dispatcher", () => {
   it("negotiates the same reviewed phase before claiming and recovers its terminal evidence without resending", async () => {

@@ -9,6 +9,10 @@ use serde_json::Value;
 use super::models::{MissionResultDto, MissionTelemetryDto};
 use super::presentation::{classify_blocked, deliverable_text, is_real_deliverable};
 
+mod contract;
+#[cfg(test)]
+mod contract_tests;
+
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
 /// Recorded producer identity, not the identity of today's running sandbox.
@@ -46,18 +50,30 @@ struct Reply {
     boot_id: String,
     status: String,
     output: Option<String>,
+    #[serde(default, deserialize_with = "present_evidence")]
     evidence: Option<Evidence>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
+}
+
+fn present_evidence<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<Evidence>, D::Error> {
+    Evidence::deserialize(deserializer).map(Some)
 }
 
 #[derive(Deserialize)]
 struct Evidence {
     model: String,
     rounds: i64,
+    #[serde(deserialize_with = "Option::<Usage>::deserialize")]
     usage: Option<Usage>,
+    #[serde(flatten)]
+    extensions: BTreeMap<String, Value>,
 }
 
 #[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct Usage {
     prompt_tokens: i64,
     completion_tokens: i64,
@@ -102,7 +118,7 @@ fn terminal(data: &BTreeMap<String, String>) -> Option<(MissionRunEvidenceDto, O
         _ => return None,
     };
     if reply.kind != "mission:reply"
-        || reply.version != 1
+        || contract::valid(&reply).is_none()
         || data.get("status").map(String::as_str) != Some(expected_status)
         || !did(&reply.agent_did)
         || !did(&reply.dispatcher_did)
@@ -143,6 +159,7 @@ fn terminal(data: &BTreeMap<String, String>) -> Option<(MissionRunEvidenceDto, O
     }
     if let Some(evidence) = &reply.evidence
         && (evidence.model.trim().is_empty()
+            || evidence.model.len() > 253
             || !safe_integer(evidence.rounds)
             || data.get("model") != Some(&evidence.model))
     {

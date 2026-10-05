@@ -25,7 +25,7 @@ import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } 
 import { ReturnedRouterResponses } from "./router-observations.js";
 import { authorizeTaskAction } from "./task-policy.js";
 import { TaskPhaseGuard, type TaskPhaseEvidence } from "./task-phase.js";
-import { readTaskFile, writeTaskFile } from "./task-filesystem.js";
+import { readTaskFile, writeTaskFile, TaskInputFiles } from "./task-filesystem.js";
 import type { MissionArtifacts } from "@kars/mesh/dist/mission-protocol.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
@@ -76,13 +76,18 @@ export async function executeTaskWithEvidence(
   log: Logger,
   artifactsEnabled = false,
   reviewedPhase?: unknown,
+  inputArtifacts?: unknown,
 ): Promise<TaskExecutionEvidence & { output: string; artifacts?: MissionArtifacts; phase?: TaskPhaseEvidence }> {
   const ledger = new TaskCompletionLedger(taskModel(), artifactsEnabled);
   let phase: TaskPhaseGuard | undefined;
   try {
     phase = reviewedPhase === undefined ? undefined : new TaskPhaseGuard(reviewedPhase);
+    if (inputArtifacts !== undefined && !phase?.allowsTool("file_read")) {
+      ledger.fail("Immutable inputs require a reviewed filesystem-read phase with a positive tool-call ceiling");
+    }
+    const inputs = inputArtifacts === undefined ? undefined : new TaskInputFiles(inputArtifacts);
     const observations = artifactsEnabled ? new ReturnedRouterResponses() : undefined;
-    const output = await processTaskWithTools(taskContent, deps, log, ledger, phase, observations);
+    const output = await processTaskWithTools(taskContent, deps, log, ledger, phase, observations, inputs);
     const observationArtifact = await observations?.artifact();
     if (observationArtifact && !ledger.attachRouterObservations(observationArtifact)) {
       log.warn("Router observations omitted: negotiated artifact capacity was used by deliverables");
@@ -106,8 +111,10 @@ export async function processTaskWithTools(
   ledger?: TaskCompletionLedger,
   phase?: TaskPhaseGuard,
   observations?: ReturnedRouterResponses,
+  inputs?: TaskInputFiles,
 ): Promise<string> {
   if (phase && !ledger) throw new Error("Reviewed phase execution requires measured task accounting");
+  if (inputs && (!ledger || !phase?.allowsTool("file_read"))) throw new Error("Immutable inputs require measured reviewed filesystem-read execution");
   const http = await import("node:http");
   const { execSync } = await import("node:child_process");
   const model = taskModel();
@@ -174,6 +181,7 @@ export async function processTaskWithTools(
   ];
 
   if (phase) messages[0].content += `\n${phase.instructions()}`;
+  if (inputs) messages[0].content += `\n${inputs.instructions()}`;
 
   // Tool-calling loop (max 25 rounds to prevent runaway)
   for (let round = 0; round < 25; round++) {
@@ -344,7 +352,7 @@ export async function processTaskWithTools(
             const maxBytesRaw = typeof args.max_bytes === "number" ? args.max_bytes : 1048576;
             const maxBytes = Math.min(Math.max(Math.floor(maxBytesRaw), 1), 16 * 1024 * 1024);
             try {
-              const evidence = await readTaskFile(filePath, maxBytes);
+              const evidence = await readTaskFile(filePath, maxBytes, inputs);
               log.info(`AGT sub-agent file_read: ${evidence.path} (${evidence.bytes} bytes${evidence.truncated ? `, returned ${evidence.returned_bytes}` : ""})`);
               result = JSON.stringify(evidence);
               toolSucceeded = true;

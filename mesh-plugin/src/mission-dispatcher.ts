@@ -5,12 +5,14 @@ import { createHash, randomUUID } from "node:crypto";
 import type { IMeshTransport } from "./transport-interface.js";
 import { missionContract, missionEvidenceAdvances, parseMissionMessage, sameMissionContract, sameMissionTarget, snapshotMissionData, type MissionAssignment, type MissionReply, type MissionTarget } from "./mission-protocol.js";
 import type { FilesystemPhase } from "./mission-phase.js";
+import { missionInputs, type MissionInput } from "./mission-inputs.js";
 
 export interface MissionCandidate extends MissionTarget {
   namespace: string;
   agentName: string;
   content: string;
   reviewedPhase?: FilesystemPhase;
+  inputArtifacts?: readonly MissionInput[];
 }
 export interface MissionAttempt {
   version: 1;
@@ -54,8 +56,10 @@ export class MissionDispatcher {
 
   async dispatch(candidate: MissionCandidate): Promise<DispatchOutcome> {
     candidate = snapshotMissionData(candidate) as MissionCandidate;
-    const contract = missionContract(candidate.reviewedPhase);
-    if (contract.reviewedPhase) candidate = Object.freeze({ ...candidate, reviewedPhase: contract.reviewedPhase });
+    const inputs = candidate.inputArtifacts === undefined ? undefined : missionInputs(candidate.inputArtifacts);
+    const contract = missionContract(candidate.reviewedPhase, inputs);
+    if (contract.reviewedPhase) candidate = Object.freeze({ ...candidate, reviewedPhase: contract.reviewedPhase,
+      ...(inputs ? { inputArtifacts: inputs } : {}) });
     const { taskName, taskUid, sandboxUid, podUid, runNonce, agentDid, dispatcherDid, content } = candidate;
     const target: MissionTarget = { taskName, taskUid, sandboxUid, podUid, runNonce, agentDid, dispatcherDid };
     const probe = { ...target, ...contract, type: "mission:probe" as const, challenge: randomUUID() };
@@ -85,6 +89,7 @@ export class MissionDispatcher {
     }, { retries: 0, timeoutMs: Math.min(this.timeoutMs, 15_000) });
     const assignment: MissionAssignment = {
       ...target, ...contract, type: "mission:assign", bootId: ready.bootId, assignmentId: randomUUID(), artifactFormat: "text-v1", content,
+      ...(inputs ? { inputArtifacts: inputs } : {}),
     };
     if (!parseMissionMessage(assignment)) throw new Error("Mission assignment exceeds protocol bounds");
     if (!await this.store.isCurrent(candidate)) return "stale";
@@ -123,7 +128,7 @@ export class MissionDispatcher {
         if (reply.status === "rejected" && ["accepted", "running"].includes(previous.phase)) continue;
         if (reply.status === "running" && previous.reply?.evidence && reply.evidence
           && reply.evidence.rounds < previous.reply.evidence.rounds) continue;
-        if (assignment.version === 2 && !missionEvidenceAdvances(previous.reply?.evidence, reply.evidence)) continue;
+        if (assignment.version !== 1 && !missionEvidenceAdvances(previous.reply?.evidence, reply.evidence)) continue;
         if (previous.events.length >= 128) throw new Error("Mission reply event limit exceeded");
         const receivedAt = this.now();
         stored = await this.store.replace(stored, {

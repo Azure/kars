@@ -5,9 +5,11 @@ import { isDeepStrictEqual } from "node:util";
 import { missionAdmissionAllows, parseMissionAdmission, type MissionAdmission } from "./mission-admission.js";
 import { KubernetesError, type KubernetesJson } from "./kubernetes-json.js";
 import { missionAttemptName, missionContentDigest, type MissionAttempt, type MissionAttemptStore, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
-import { missionContract, missionEvidenceAdvances, parseMissionContract, parseMissionMessage, sameMissionContract, sameMissionTarget, type MissionReply } from "./mission-protocol.js";
-import { currentMissionWorkload, singleControllerOwner, type MissionMetadata as Metadata, type MissionWorkloadBinding, type MissionWorkloadResources } from "./mission-workload.js";
-interface ConfigMap { apiVersion: "v1"; kind: "ConfigMap"; metadata: Metadata; data: Record<string, string>; immutable?: boolean }
+import { parseMissionContract, parseMissionMessage } from "./mission-protocol.js";
+import { missionRecordOwner as owner, missionRecordOwned as owned, missionResultMaps, unpackMissionAttempt, type MissionConfigMap as ConfigMap } from "./mission-record.js";
+import { readRetainedMissionInputs } from "./mission-input-custody.js";
+import type { MissionInput } from "./mission-inputs.js";
+import { currentMissionWorkload, type MissionMetadata as Metadata, type MissionWorkloadBinding, type MissionWorkloadResources } from "./mission-workload.js";
 interface Task {
   apiVersion: string; kind: string; metadata: Metadata;
   spec: { objective: string; execution?: { launch?: boolean }; blueprint?: { executionPlan?: unknown } };
@@ -44,9 +46,6 @@ const mapsPath = (namespace: string): string => `/api/v1/namespaces/${segment(na
 const mapPath = (namespace: string, name: string): string => `${mapsPath(namespace)}/${segment(name)}`;
 const isMissing = (e: unknown): boolean => e instanceof KubernetesError && e.status === 404;
 const isConflict = (e: unknown): boolean => e instanceof KubernetesError && e.status === 409;
-const owner = (candidate: MissionCandidate) => ({ apiVersion: "kars.azure.com/v1alpha1", kind: "KarsTask", name: candidate.taskName, uid: candidate.taskUid, controller: true });
-const owned = (metadata: Metadata, candidate: Pick<MissionCandidate, "taskName" | "taskUid">): boolean =>
-  !metadata.deletionTimestamp && singleControllerOwner(metadata, "kars.azure.com/v1alpha1", "KarsTask", candidate.taskName, candidate.taskUid);
 
 export function missionObjective(task: Task, nonce: string): string | null {
   const annotations = task.metadata.annotations ?? {};
@@ -141,7 +140,7 @@ export class KubernetesMissionStore implements MissionAttemptStore {
     catch (e) { if (isMissing(e)) return null; throw e; }
   }
   private current(task: Task | null, candidate: MissionCandidate): task is Task {
-    return !!task && supportsTaskExecution(task) && candidate.reviewedPhase === undefined
+    return !!task && supportsTaskExecution(task) && candidate.reviewedPhase === undefined && candidate.inputArtifacts === undefined
       && !task.metadata.deletionTimestamp && task.metadata.uid === candidate.taskUid
       && task.metadata.name === candidate.taskName && task.metadata.namespace === candidate.namespace
       && task.metadata.annotations?.[requested] === candidate.runNonce
@@ -201,57 +200,13 @@ export class KubernetesMissionStore implements MissionAttemptStore {
   }
 
   private unpack(cm: ConfigMap, candidate: Pick<MissionCandidate, "namespace" | "taskName" | "taskUid" | "runNonce">): StoredMissionAttempt {
-    if (!owned(cm.metadata, candidate) || !cm.metadata.resourceVersion || cm.metadata.namespace !== candidate.namespace
-      || cm.metadata.name !== missionAttemptName(candidate)) throw new Error("Mission attempt ownership or revision mismatch");
-    if (!cm.data?.["attempt.json"] || Buffer.byteLength(cm.data["attempt.json"]) > 900 * 1024) throw new Error("Mission attempt exceeds storage bounds");
-    const attempt = JSON.parse(cm.data["attempt.json"]) as MissionAttempt;
-    if (!attempt || attempt.version !== 1 || attempt.candidate?.taskUid !== candidate.taskUid || attempt.candidate?.runNonce !== candidate.runNonce
-      || attempt.candidate?.taskName !== candidate.taskName || attempt.candidate?.namespace !== candidate.namespace
-      || parseMissionMessage(attempt.assignment)?.type !== "mission:assign"
-      || !sameMissionTarget(attempt.candidate, attempt.assignment)
-      || !sameMissionContract(missionContract(attempt.candidate.reviewedPhase), attempt.assignment)
-      || attempt.contentDigest !== missionContentDigest(attempt.candidate.content)
-      || attempt.assignment.content !== attempt.candidate.content || !Array.isArray(attempt.events) || attempt.events.length > 128
-      || !["dispatching", "accepted", "running", "succeeded", "failed", "rejected", "uncertain"].includes(attempt.phase)
-      || typeof attempt.candidate.agentName !== "string" || !attempt.candidate.agentName.trim() || Buffer.byteLength(attempt.candidate.agentName) > 512
-      || typeof attempt.ownerSession !== "string" || !attempt.ownerSession || attempt.ownerSession.length > 253
-      || typeof attempt.startedAt !== "string" || typeof attempt.updatedAt !== "string"
-      || !Number.isFinite(Date.parse(attempt.startedAt)) || !Number.isFinite(Date.parse(attempt.updatedAt))
-      || Date.parse(attempt.updatedAt) < Date.parse(attempt.startedAt)
-      || (attempt.error !== undefined && (typeof attempt.error !== "string" || attempt.error.length > 2048))
-      || (attempt.phase === "dispatching" && (attempt.events.length !== 0 || attempt.reply !== undefined || attempt.error !== undefined))
-      || (attempt.phase === "uncertain" && (!attempt.error || (attempt.reply && !["accepted", "running"].includes(attempt.reply.status))))
-      || (attempt.reply && (parseMissionMessage(attempt.reply)?.type !== "mission:reply"
-        || !sameMissionTarget(attempt.assignment, attempt.reply) || !sameMissionContract(attempt.assignment, attempt.reply)
-        || attempt.reply.bootId !== attempt.assignment.bootId
-        || attempt.reply.assignmentId !== attempt.assignment.assignmentId
-        || (attempt.reply.artifactFormat !== undefined && attempt.reply.artifactFormat !== attempt.assignment.artifactFormat)))
-      || (["accepted", "running", "succeeded", "failed", "rejected"].includes(attempt.phase) && attempt.reply?.status !== attempt.phase)) {
-      throw new Error("Malformed durable mission attempt");
-    }
-    let lastTime = Date.parse(attempt.startedAt);
-    let lastStatus: string | undefined;
-    let lastEvidence: MissionReply["evidence"];
-    for (const event of attempt.events) {
-      if (!event || typeof event.at !== "string" || !Number.isFinite(Date.parse(event.at))
-        || Date.parse(event.at) < lastTime || Date.parse(event.at) > Date.parse(attempt.updatedAt)
-        || !["accepted", "running", "succeeded", "failed", "rejected"].includes(event.status)
-        || (lastStatus === "running" && event.status === "accepted")
-        || (["accepted", "running"].includes(lastStatus ?? "") && event.status === "rejected")
-        || ["succeeded", "failed", "rejected"].includes(lastStatus ?? "")
-        || (attempt.assignment.version === 2 && !missionEvidenceAdvances(lastEvidence, event.evidence))
-        || !parseMissionMessage({ ...attempt.assignment, type: "mission:reply", status: event.status,
-          evidence: event.evidence, ...(event.status === "succeeded" ? { output: attempt.reply?.output } : {}) })) {
-        throw new Error("Malformed mission event journal");
-      }
-      lastTime = Date.parse(event.at);
-      lastStatus = event.status;
-      lastEvidence = event.evidence;
-    }
-    if ((attempt.reply?.status !== lastStatus) || !isDeepStrictEqual(attempt.reply?.evidence, attempt.events.at(-1)?.evidence)) {
-      throw new Error("Mission reply does not match event journal");
-    }
-    return { revision: cm.metadata.resourceVersion, attempt };
+    return unpackMissionAttempt(cm, candidate);
+  }
+  async readRetainedInputs(references: unknown): Promise<readonly MissionInput[]> {
+    return readRetainedMissionInputs(references, {
+      task: source => this.api.request("GET", taskPath(source)),
+      configMap: (namespace, name) => this.api.request("GET", mapPath(namespace, name)),
+    });
   }
   async get(candidate: MissionCandidate): Promise<StoredMissionAttempt | null> {
     try {
@@ -327,43 +282,20 @@ export class KubernetesMissionStore implements MissionAttemptStore {
   }
 
   async publish(attempt: MissionAttempt): Promise<boolean> {
-    const { candidate, reply, assignment } = attempt;
-    if (!reply || !["succeeded", "failed", "rejected"].includes(attempt.phase) || reply.status !== attempt.phase
-      || parseMissionMessage(reply)?.type !== "mission:reply" || !sameMissionTarget(assignment, reply) || !sameMissionContract(assignment, reply)
-      || assignment.assignmentId !== reply.assignmentId || assignment.bootId !== reply.bootId
-      || (reply.artifactFormat !== undefined && reply.artifactFormat !== assignment.artifactFormat)) throw new Error("Mission has no valid terminal reply");
+    const { candidate } = attempt;
+    const canonical = missionResultMaps(attempt);
     const durable = await this.get(candidate);
     if (!durable || !isDeepStrictEqual(durable.attempt, attempt)) throw new Error("Terminal reply must be persisted before publication");
-    const key = missionAttemptName(candidate).replace("kars-mission-attempt-", "");
-    const metadata = (name: string, role: "canonical" | "current", label: string): Metadata => ({
-      name, namespace: candidate.namespace, ownerReferences: [owner(candidate)],
-      labels: { [`${prefix}${label}`]: key },
-      annotations: { [`${prefix}mission-evidence-key`]: key, [`${prefix}mission-evidence-role`]: role,
-        [`${prefix}mission-principal-name`]: candidate.taskName, [`${prefix}mission-task-uid`]: candidate.taskUid,
-        [`${prefix}mission-run-nonce`]: candidate.runNonce },
-    });
-    const success = reply.status === "succeeded";
-    const artifacts: Record<string, string> = success ? { "response.md": reply.output!, ...reply.artifacts } : {};
-    const data: Record<string, string> = {
-      taskName: candidate.taskName, taskUid: candidate.taskUid, assignmentNonce: candidate.runNonce,
-      assignmentId: assignment.assignmentId, agentName: candidate.agentName, agentDid: candidate.agentDid,
-      dispatcherDid: candidate.dispatcherDid, sandboxUid: candidate.sandboxUid, podUid: candidate.podUid,
-      runtimeBootId: assignment.bootId, status: success ? "ok" : reply.status, output: success ? reply.output! : "",
-      error: reply.error ?? "", startedAt: attempt.startedAt, finishedAt: attempt.updatedAt,
-      model: reply.evidence?.model ?? "",
-      ...(reply.evidence?.usage ? { totalTokens: String(reply.evidence.usage.totalTokens) } : {}),
-      usageKnown: String(reply.evidence?.usage !== null && reply.evidence?.usage !== undefined),
-      artifactCount: String(Object.keys(artifacts).length), "evidence.json": JSON.stringify(reply),
-    };
-    await this.immutable({ apiVersion: "v1", kind: "ConfigMap", metadata: metadata(`kars-mission-output-${key}`, "canonical", "mission-output"), data });
-    await this.immutable({ apiVersion: "v1", kind: "ConfigMap", metadata: metadata(`kars-mission-artifacts-${key}`, "canonical", "mission-artifacts"), data: artifacts });
+    await this.immutable(canonical.output);
+    await this.immutable(canonical.artifacts);
     const task = await this.task(candidate);
     if (task?.metadata.uid === candidate.taskUid && !task.metadata.deletionTimestamp
       && task.metadata.name === candidate.taskName && task.metadata.namespace === candidate.namespace
       && task.metadata.annotations?.[requested] === candidate.runNonce && task.metadata.annotations?.[completed] === candidate.runNonce) return true;
     if (!this.current(task, candidate)) return false;
-    await this.projection(candidate, { apiVersion: "v1", kind: "ConfigMap", metadata: metadata(`kars-mission-artifacts-${candidate.taskName}`, "current", "mission-artifacts"), data: artifacts });
-    await this.projection(candidate, { apiVersion: "v1", kind: "ConfigMap", metadata: metadata(`kars-mission-output-${candidate.taskName}`, "current", "mission-output"), data });
+    const current = missionResultMaps(attempt, "current");
+    await this.projection(candidate, current.artifacts);
+    await this.projection(candidate, current.output);
     await this.annotate(candidate, completed);
     return true;
   }

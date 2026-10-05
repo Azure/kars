@@ -57,6 +57,58 @@ is still required. `maxToolCalls` limits attempted calls (including denied,
 malformed and failed calls); an overflowing batch fails before any tool runs.
 `minToolCalls` counts only successful authorized filesystem operations.
 
+The local version-3 contract additionally supports bounded **immutable input
+artifacts**. Its canonical SHA256 digest binds the exact UTF-8 bytes, input aliases
+and upstream Task/run/assignment/producer identities. Only encrypted assignments
+carry input bytes; readiness probes, installed contracts and replies carry the
+digest, not those bytes. The receiver checks its independently installed digest
+before authorization or reserving execution, and exact replay returns the cached
+reply rather than executing again.
+
+An admitted downstream execution reads these snapshots through the existing
+`file_read` tool at `/sandbox/.kars-inputs/<alias>`. The namespace is read-only and
+execution-local: unknown inputs or path aliases cannot fall through to disk, and
+another execution cannot access a previous snapshot. Model instructions contain
+only the input manifest, not the upstream document text as system instructions.
+The reviewed read capability, attempted-call ceiling and router authorization
+still apply. Inputs are never automatically exported; useful downstream output
+must be explicitly captured as a separately named artifact. Failed execution
+exports no artifacts.
+
+The retained-result reader accepts **content-free references**, not caller-provided
+bytes. It checks the live source Task UID, the owned successful text-v1 attempt,
+the exact assignment and producer, and both canonical immutable result ConfigMaps
+using the same decoder and projection builder as publication. It verifies the
+named document's hash, snapshots the bytes and rechecks every resource before
+returning. Synthetic `response.md` and router-observation system evidence cannot
+be selected as useful input documents. A source Task may have moved to a later
+run: this reads retained evidence, not the current deliverable or its approval.
+
+Bridge's terminal-evidence reader accepts validated version-1, version-2 and
+version-3 replies. It checks the canonical filesystem phase digest, supported
+capabilities, attempted/successful call bounds and digest-only input contract,
+then applies the existing Task UID, run, assignment, producer and exact-usage
+checks. Valid newer replies feed the same revision-bound Activity reader; they do
+not add a second recorder, a live fallback or permission to execute a plan.
+Shared JSON fixtures are checked by both the TypeScript wire parser and the Rust
+reader, including defaults, capability ordering and Unicode canonicalization.
+
+These are **locally tested handoff primitives, not deployed Team execution**.
+Custody checks do not authorize a downstream Team dependency, role, phase or
+review decision; the reverse reads are not a cross-resource transaction. Reviewed
+scheduling, independently installed execution authority and budget enforcement
+are still required. New production dispatch remains version 1, planless and
+input-free; no activation check is relaxed by this local input support.
+
+Role and synthesis budgets must also fit the installed inference contract. The
+existing ledger reserves the contract's attested maximum input plus the requested
+output, not an estimate from prompt length. For example, an input bound of
+272,000 tokens requires at least 272,001 tokens even with a one-token output
+limit; proposed role caps of 80,000 or 120,000 cannot admit that request. Lowering
+the output limit alone does not fix that mismatch. Reviewed allocation must leave
+room for synthesis and remain within the finite Team lifetime budget; neither
+input attestations nor approved caps may be silently weakened or increased.
+
 The receiver captures its target and installed contract once at startup. Only an
 exact contract match can answer readiness or reserve a run; incoming assignments
 cannot select or downgrade that contract. OpenClaw bootstrap captures
