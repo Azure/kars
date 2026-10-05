@@ -37,6 +37,13 @@ packages. Bridge compares the API's captured plan with the reviewed plan before
 continuing creation or plan updates. An older CRD that prunes the plan must fail
 this check; saving a name or objective is not equivalent to saving the plan.
 
+During proposal parsing, role configuration is matched by exact name (after
+trimming surrounding whitespace), never by roster position. Reordering proposed
+roles preserves each named role's prompt, runtime, model and skills. A planned
+role without a matching roster entry starts with its own objective and no
+role-specific overrides; subsequent route qualification still applies. A blank
+matched prompt also uses that role's planned objective.
+
 **Full typed-plan execution is not implemented yet.** The production encrypted
 mission path delivers an objective to one runtime; it does not execute the reviewed
 role DAG or schedule its phases with per-role budgets and synthesis. The tested

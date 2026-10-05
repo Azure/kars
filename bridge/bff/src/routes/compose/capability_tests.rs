@@ -12,13 +12,13 @@ use super::routing::{
     recommendation_is_actionable, should_strengthen_team_principal,
 };
 use super::team::{TEAM_COMPOSE_MAX_TOKENS, team_proposal_is_complete};
-use super::team_proposal::is_synthesis_only_team_role;
+use super::team_proposal::{is_synthesis_only_team_role, parse_and_validate_team};
 use super::{
     ComposeEgress, ComposeTeamProposal, delegation_budget_allocation, is_autonomous_harness,
     is_non_autonomous_harness, validate_execution_plan,
 };
 use crate::routes::efficiency::EfficiencyDto;
-use crate::routes::options::{IsolationOption, ModelOption, Options, RuntimeOption};
+use crate::routes::options::{IsolationOption, ModelOption, Options, RefOption, RuntimeOption};
 
 fn test_options() -> Options {
     Options {
@@ -109,6 +109,170 @@ fn empty_team_proposal_is_not_reported_as_available() {
         milestones: Vec::new(),
     };
     assert!(!team_proposal_is_complete(&proposal));
+}
+
+fn team_role_binding_fixture() -> (Options, serde_json::Value) {
+    let mut options = test_options();
+    options.models.push(ModelOption {
+        provider: "azure-foundry".into(),
+        deployment: "gpt-5.4-mini".into(),
+        is_default: false,
+        detail: None,
+    });
+    options.runtimes.push(RuntimeOption {
+        kind: "Hermes".into(),
+        label: "Hermes".into(),
+        wired: true,
+        status: "validated".into(),
+        note: "ready".into(),
+    });
+    options.skills = ["source-reading", "decision-writing"]
+        .into_iter()
+        .map(|name| RefOption {
+            name: name.into(),
+            namespace: "kars-system".into(),
+            summary: None,
+            mode: None,
+            discovered_tools: Vec::new(),
+            tool_schema_digest: None,
+            compiled_digest: None,
+            backend: None,
+            readiness: None,
+            version: None,
+            recipe: None,
+            version_digest: None,
+            qualified_routes: Vec::new(),
+        })
+        .collect();
+    let value = serde_json::json!({
+        "instructions": "Coordinate source reading and decision writing for the reviewer.",
+        "model": "github-copilot::gpt-5.6-sol",
+        "roles": [
+            {
+                "name": "source-reader",
+                "system_prompt": "Read supplied sources and preserve precise supporting quotations.",
+                "runtime": "Hermes",
+                "model": "azure-foundry::gpt-5.4-mini",
+                "skills": ["source-reading"]
+            },
+            {
+                "name": "decision-writer",
+                "system_prompt": "Write a decision document with cited evidence and explicit uncertainty.",
+                "runtime": "OpenClaw",
+                "model": "github-copilot::gpt-5.6-sol",
+                "skills": ["decision-writing"]
+            }
+        ],
+        "execution_plan": {
+            "schema": "kars.execution-plan/v1",
+            "roles": [
+                {
+                    "name": "source-reader",
+                    "objective": "Read the supplied source material and retain exact evidence.",
+                    "phases": [{
+                        "name": "collect",
+                        "objective": "Collect the required source evidence without synthesis.",
+                        "capabilities": ["filesystem-read"],
+                        "max_tool_calls": 4
+                    }]
+                },
+                {
+                    "name": "decision-writer",
+                    "objective": "Produce the requested decision from the retained source evidence.",
+                    "depends_on": ["source-reader"],
+                    "phases": [{
+                        "name": "draft",
+                        "objective": "Draft the decision using only retained dependency evidence.",
+                        "capabilities": ["filesystem-write"],
+                        "max_tool_calls": 2
+                    }]
+                }
+            ],
+            "max_parallel": 1,
+            "synthesis": {
+                "objective": "Reconcile the role handbacks into the final answer.",
+                "capabilities": [],
+                "max_tool_calls": 0
+            },
+            "deliverables": [{"name": "decision.md", "media_type": "text/markdown"}]
+        }
+    });
+    (options, value)
+}
+
+#[test]
+fn team_role_binding_does_not_inherit_an_unmatched_roles_configuration() {
+    let (options, mut raw) = team_role_binding_fixture();
+    raw["roles"][0]["name"] = serde_json::json!("unrelated-observer");
+    let (proposal, _) = parse_and_validate_team(&raw.to_string(), &options, &test_efficiency(), "");
+    assert!(team_proposal_is_complete(&proposal));
+    assert_eq!(proposal.roles.len(), 2);
+    assert_eq!(
+        serde_json::to_value(&proposal.roles[0]).unwrap(),
+        serde_json::json!({
+            "name": "source-reader",
+            "system_prompt": raw["execution_plan"]["roles"][0]["objective"],
+            "runtime": "",
+            "model": "",
+            "skills": []
+        })
+    );
+    assert_eq!(
+        serde_json::to_value(&proposal.roles[1]).unwrap(),
+        raw["roles"][1]
+    );
+}
+
+#[test]
+fn team_role_binding_preserves_configuration_by_name_in_plan_order() {
+    let (options, mut raw) = team_role_binding_fixture();
+    let expected = raw["roles"].clone();
+    raw["roles"].as_array_mut().unwrap().reverse();
+    raw["roles"][0]["name"] = serde_json::json!("  decision-writer  ");
+    let (proposal, _) = parse_and_validate_team(&raw.to_string(), &options, &test_efficiency(), "");
+    assert!(team_proposal_is_complete(&proposal));
+    assert_eq!(serde_json::to_value(&proposal.roles).unwrap(), expected);
+    assert_eq!(
+        proposal.execution_plan.unwrap().roles[1].depends_on,
+        vec!["source-reader"]
+    );
+}
+
+#[test]
+fn team_role_binding_missing_roster_uses_each_planned_objective_and_defaults() {
+    let (options, mut raw) = team_role_binding_fixture();
+    raw.as_object_mut().unwrap().remove("roles");
+    let (proposal, _) = parse_and_validate_team(&raw.to_string(), &options, &test_efficiency(), "");
+    assert!(team_proposal_is_complete(&proposal));
+    assert_eq!(proposal.roles.len(), 2);
+    let plan = proposal.execution_plan.as_ref().unwrap();
+    for (role, planned) in proposal.roles.iter().zip(&plan.roles) {
+        assert_eq!(role.name, planned.name);
+        assert_eq!(role.system_prompt, planned.objective);
+        assert!(role.runtime.is_empty());
+        assert!(role.model.is_empty());
+        assert!(role.skills.is_empty());
+    }
+}
+
+#[test]
+fn team_role_binding_blank_matched_prompt_uses_its_own_objective() {
+    let (options, mut raw) = team_role_binding_fixture();
+    let mut expected = raw["roles"].clone();
+    raw["roles"][0]["system_prompt"] = serde_json::json!(" \n\t ");
+    expected[0]["system_prompt"] = raw["execution_plan"]["roles"][0]["objective"].clone();
+    let (proposal, _) = parse_and_validate_team(&raw.to_string(), &options, &test_efficiency(), "");
+    assert!(team_proposal_is_complete(&proposal));
+    assert_eq!(serde_json::to_value(&proposal.roles).unwrap(), expected);
+}
+
+#[test]
+fn team_role_binding_preserves_legacy_planless_roster() {
+    let (options, mut raw) = team_role_binding_fixture();
+    raw.as_object_mut().unwrap().remove("execution_plan");
+    let (proposal, _) = parse_and_validate_team(&raw.to_string(), &options, &test_efficiency(), "");
+    assert!(proposal.execution_plan.is_none());
+    assert_eq!(serde_json::to_value(&proposal.roles).unwrap(), raw["roles"]);
 }
 
 #[test]
