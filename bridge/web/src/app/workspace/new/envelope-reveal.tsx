@@ -82,12 +82,12 @@ export function EnvelopeReveal({
           ? `${delegation.roles.map((role) => role.name).join(", ")} · up to ${delegation.max_parallel} in parallel.`
           : "Best for small, tightly coupled work where delegation would add overhead.",
     },
-    { icon: "wrench", label: "Tool policy", value: blueprint.tool_policy ?? "none — model only", why: blueprint.tool_policy ? "Bounds every tool the agent may call." : "No tools — pure reasoning." },
+    { icon: "wrench", label: "Tool policy", value: blueprint.tool_policy?.trim() || "kars-default (default)", why: blueprint.tool_policy?.trim() ? "Review this policy's permitted actions before launch." : "Default permits governed tools, including shell and Foundry tools. No-tools instructions do not disable tools." },
     { icon: "plug", label: "Connected services", value: blueprint.mcp_servers?.length ? blueprint.mcp_servers.map(humanizeMcp).join(", ") : "none", why: blueprint.mcp_servers?.length ? "MCP servers the agent may reach, bounded by the tool policy." : undefined },
     { icon: "globe", label: "Network egress", value: blueprint.egress?.length ? blueprint.egress.map((e) => e.host + (e.port ? `:${e.port}` : "")).join(", ") : "model path only", why: blueprint.egress?.length ? "Exact host:port destinations allowed at the network boundary; everything else is denied." : "Default-deny — only the model path is reachable." },
     { icon: "shield", label: "Isolation", value: blueprint.isolation ?? "standard", why: "Sandbox hardening level." },
     { icon: "database", label: "Shared memory", value: blueprint.memory ?? "none", why: blueprint.memory ? "Knowledge commons the mission reads + writes." : undefined },
-    { icon: "coin", label: "Budget", value: budgetTokens ? `${Number(budgetTokens).toLocaleString()} tokens` : "no cap", why: "Hard ceiling on spend." },
+    { icon: "coin", label: "Budget", value: budgetTokens?.trim() ? `${Number(budgetTokens).toLocaleString()} tokens · GovernedInference` : "no aggregate cap", why: budgetTokens?.trim() ? "Requested mission-tree lifetime cap; broker and model-contract readiness are checked at launch. Not a ceiling on tools or infrastructure costs." : "No aggregate inference limit requested; no spending protection is implied." },
   ];
 
   return (

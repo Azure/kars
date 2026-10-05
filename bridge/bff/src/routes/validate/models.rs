@@ -5,6 +5,37 @@
 
 use super::{Check, CheckStatus};
 
+fn route_check_status(evidence: &Result<bool, String>, validation: bool) -> CheckStatus {
+    match evidence {
+        Ok(true) => CheckStatus::Pass,
+        Ok(false) if validation => CheckStatus::Warn,
+        Ok(false) | Err(_) => CheckStatus::Fail,
+    }
+}
+
+#[cfg(test)]
+#[test]
+fn route_validation_warns_without_claiming_proof_or_hiding_configuration_errors() {
+    assert!(matches!(
+        route_check_status(&Ok(false), false),
+        CheckStatus::Fail
+    ));
+    assert!(matches!(
+        route_check_status(&Ok(false), true),
+        CheckStatus::Warn
+    ));
+    for validation in [false, true] {
+        assert!(matches!(
+            route_check_status(&Ok(true), validation),
+            CheckStatus::Pass
+        ));
+        assert!(matches!(
+            route_check_status(&Err("invalid records".into()), validation),
+            CheckStatus::Fail
+        ));
+    }
+}
+
 pub(crate) fn qualification_requirements(
     bp: &crate::routes::tasks::BlueprintDto,
     workload: Option<&str>,
@@ -113,6 +144,9 @@ pub(super) async fn check_models(
                         budget_tokens,
                     );
                     let qualified = qualification.as_ref().copied().unwrap_or(false);
+                    let validation_note = crate::routes::options::route_validation_note()
+                        .ok()
+                        .flatten();
                     checks.push(Check {
                         id: "route_qualification".into(),
                         label: if qualified {
@@ -126,11 +160,7 @@ pub(super) async fn check_models(
                                 model.provider, model.deployment
                             )
                         },
-                        status: if qualified {
-                            CheckStatus::Pass
-                        } else {
-                            CheckStatus::Fail
-                        },
+                        status: route_check_status(&qualification, validation_note.is_some()),
                         detail: if let Err(error) = qualification {
                             format!("Route qualification configuration error: {error}")
                         } else if qualified {
@@ -138,6 +168,8 @@ pub(super) async fn check_models(
                                 "This route has verified evidence for capabilities: {}.",
                                 required_capabilities.iter().cloned().collect::<Vec<_>>().join(", ")
                             )
+                        } else if let Some(note) = validation_note {
+                            note.into()
                         } else {
                             let missing = crate::routes::options::route_qualification_gap(
                                 runtime,
@@ -149,7 +181,7 @@ pub(super) async fn check_models(
                             )
                             .unwrap_or_else(|_| required_capabilities.clone());
                             format!(
-                                "This route lacks verified evidence for: {}. Existing retained evidence covers the other required capabilities, but qualification records are atomic and cannot be combined.",
+                                "No retained record proves the complete route contract. Missing capability evidence: {}. Records are atomic and cannot be combined.",
                                 missing.iter().cloned().collect::<Vec<_>>().join(", ")
                             )
                         },
@@ -385,16 +417,19 @@ pub(super) async fn check_models(
                         option.provider == fallback.provider
                             && option.deployment == fallback.deployment
                     });
-                    let route_qualified = known
-                        && crate::routes::options::route_qualification(
-                            runtime,
-                            &fallback.provider,
-                            &fallback.deployment,
-                            &required_capabilities,
-                            max_parallel,
-                            budget_tokens,
-                        )
-                        .unwrap_or(false);
+                    let route_qualification = crate::routes::options::route_qualification(
+                        runtime,
+                        &fallback.provider,
+                        &fallback.deployment,
+                        &required_capabilities,
+                        max_parallel,
+                        budget_tokens,
+                    );
+                    let route_qualified =
+                        known && route_qualification.as_ref().copied().unwrap_or(false);
+                    let validation_note = crate::routes::options::route_validation_note()
+                        .ok()
+                        .flatten();
                     let mcp_qualified = bp.mcp_servers.iter().all(|server| {
                         options
                             .mcp_servers
@@ -449,19 +484,23 @@ pub(super) async fn check_models(
                         } else {
                             format!("Fallback {route} is not qualified")
                         },
-                        status: if qualified {
-                            CheckStatus::Pass
-                        } else {
+                        status: if !known || !mcp_qualified || !memory_qualified || !skills_qualified {
                             CheckStatus::Fail
+                        } else {
+                            route_check_status(&route_qualification, validation_note.is_some())
                         },
-                        detail: if qualified {
-                            "Retained evidence proves the complete capability and selected-resource contract for this fallback route.".into()
+                        detail: if let Err(error) = route_qualification {
+                            format!("Route qualification configuration error: {error}")
                         } else if !known {
                             "This fallback is absent from the live model catalogue.".into()
-                        } else if !route_qualified {
-                            "No atomic qualification record proves the complete capability contract for this fallback.".into()
+                        } else if !mcp_qualified || !memory_qualified || !skills_qualified {
+                            "At least one selected MCP server, memory binding, or skill version lacks current resource-scoped evidence on this fallback.".into()
+                        } else if qualified {
+                            "Retained evidence proves the complete capability and selected-resource contract for this fallback route.".into()
+                        } else if let Some(note) = validation_note {
+                            note.into()
                         } else {
-                            "The route is generally qualified, but at least one selected MCP server, memory binding, or skill version lacks current resource-scoped evidence on it.".into()
+                            "No atomic qualification record proves the complete capability contract for this fallback.".into()
                         },
                     });
                 }

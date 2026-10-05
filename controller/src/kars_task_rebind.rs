@@ -306,18 +306,33 @@ pub(crate) async fn fence_deployment(
     {
         return Err("Task runtime authorization changed before deployment apply".into());
     }
+    let namespace = Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone())
+        .get(&runtime)
+        .await
+        .map_err(|_| "Task runtime namespace recheck failed")?;
+    crate::reconciler::namespace_ownership::recheck(client, &live, &namespace)
+        .await
+        .map_err(|e| e.to_string())?;
     if let Some(prior) = prior {
-        let namespace = Api::<k8s_openapi::api::core::v1::Namespace>::all(client.clone())
-            .get(&runtime)
-            .await
-            .map_err(|_| "Task runtime namespace recheck failed")?;
-        crate::reconciler::namespace_ownership::recheck(client, &live, &namespace)
-            .await
-            .map_err(|e| e.to_string())?;
         crate::reconciler::credential_sources::validate_owned_deployment(&prior, &live, &namespace)
             .map_err(|e| e.to_string())?;
+        if deployment
+            .metadata
+            .uid
+            .as_ref()
+            .is_some_and(|uid| Some(uid) != prior.metadata.uid.as_ref())
+            || deployment
+                .metadata
+                .resource_version
+                .as_ref()
+                .is_some_and(|rv| Some(rv) != prior.metadata.resource_version.as_ref())
+        {
+            return Err("Task runtime deployment changed after preparation".into());
+        }
         deployment.metadata.uid = prior.metadata.uid;
         deployment.metadata.resource_version = prior.metadata.resource_version;
+    } else if deployment.metadata.uid.is_some() || deployment.metadata.resource_version.is_some() {
+        return Err("Prepared task runtime disappeared; no replacement was adopted".into());
     }
     Ok(())
 }
@@ -335,11 +350,32 @@ pub(crate) async fn apply_deployment(
     if crate::private_activation::apply_deployment(client, sandbox, &mut deployment).await? {
         return Ok(());
     }
-    Api::<k8s_openapi::api::apps::v1::Deployment>::namespaced(
+    let api = Api::<k8s_openapi::api::apps::v1::Deployment>::namespaced(
         client.clone(),
         &format!("kars-{}", sandbox.name_any()),
-    )
-    .patch(
+    );
+    if deployment.metadata.uid.is_none()
+        && sandbox
+            .metadata
+            .owner_references
+            .iter()
+            .flatten()
+            .any(|owner| owner.kind == "KarsTask" && owner.controller == Some(true))
+    {
+        api.create(
+            &kube::api::PostParams {
+                field_manager: Some(crate::field_managers::CLAWSANDBOX.into()),
+                ..Default::default()
+            },
+            &deployment,
+        )
+        .await
+        .map_err(|e| {
+            crate::credential_grants::api_error("Create current task credential runtime", e)
+        })?;
+        return Ok(());
+    }
+    api.patch(
         &sandbox.name_any(),
         &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
         &Patch::Apply(deployment),

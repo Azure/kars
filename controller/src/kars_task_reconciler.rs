@@ -81,6 +81,21 @@ enum EnvelopeCheck {
 /// reconciler with a bad envelope is surfaced as `Degraded` rather than
 /// silently digested.
 fn check_envelope(task: &KarsTask) -> EnvelopeCheck {
+    if let Err(why) = crate::task_execution_plan::validate_activation(
+        task.spec
+            .blueprint
+            .as_ref()
+            .and_then(|blueprint| blueprint.execution_plan.as_ref()),
+        task.annotations()
+            .get("kars.azure.com/mission-decomposition")
+            .map(String::as_str),
+        task.spec
+            .execution
+            .as_ref()
+            .is_some_and(|execution| execution.launch),
+    ) {
+        return EnvelopeCheck::Invalid(why);
+    }
     let e = &task.spec.envelope;
     if e.tier < TIER_MIN || e.tier > TIER_MAX {
         return EnvelopeCheck::Invalid(format!("tier {} out of range 1..5", e.tier));

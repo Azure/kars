@@ -24,6 +24,11 @@ metadata:
   labels:
     app.kubernetes.io/name: kars
 rules:
+  {{- if (.Values.missionDispatcher | default dict).enabled }}
+  - apiGroups: ["apps"]
+    resources: ["replicasets"]
+    verbs: ["get", "list"]
+  {{- end }}
   # Manage KarsSandbox CRDs
   - apiGroups: ["kars.azure.com"]
     resources: ["karssandboxes", "karssandboxes/status"]

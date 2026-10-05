@@ -5,6 +5,38 @@ import { describe, it, expect } from "vitest";
 import { LocalInbox } from "./local-inbox.js";
 
 describe("LocalInbox", () => {
+  it("defaults legacy delivery to unknown, not encrypted", () => {
+    const inbox = new LocalInbox({ buildHash: "test" });
+    inbox.deliver("alice", { security: "encrypted" });
+    expect(inbox.drainInbox()[0].security).toBe("unknown");
+  });
+
+  it.each([false, true])("only satisfies encrypted waiters with encrypted evidence (queued=%s)", async queued => {
+    const inbox = new LocalInbox({ buildHash: "test" });
+    const deliver = () => {
+      inbox.deliver("alice", "unknown");
+      inbox.deliver("alice", "plaintext", "plaintext");
+      inbox.deliver("alice", "encrypted", "encrypted");
+    };
+    if (queued) deliver();
+    const wait = inbox.waitForMessage((content, from, security) =>
+      from === "alice" && security === "encrypted" ? content : null);
+    if (!queued) deliver();
+    await expect(wait).resolves.toBe("encrypted");
+    expect(inbox.getInbox().map(message => message.security)).toEqual(["unknown", "plaintext"]);
+  });
+
+  it.each([false, true])("preserves evidence in non-consuming waiters (queued=%s)", async queued => {
+    const inbox = new LocalInbox({ buildHash: "test" });
+    if (queued) inbox.deliver("alice", "hello", "encrypted");
+    const wait = inbox.waitForMessage((_content, _from, security) => security, 1000, { consume: false });
+    if (!queued) inbox.deliver("alice", "hello", "encrypted");
+    await expect(wait).resolves.toBe("encrypted");
+    const message = inbox.getInbox()[0];
+    inbox.markRead([message.id]);
+    expect(inbox.consumeInbox(item => item.security === "encrypted")[0].security).toBe("encrypted");
+  });
+
   it("delivers messages into FIFO inbox when no waiter is registered", () => {
     const inbox = new LocalInbox({ buildHash: "test" });
     const claimed = inbox.deliver("amid:alice", { hello: "world" });

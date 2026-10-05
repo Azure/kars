@@ -36,6 +36,8 @@ export function PreflightCheck({
   blueprint,
   tier,
   budgetTokens,
+  budgetScope,
+  budgetUsdMicros,
   workload = "mission",
   onResult,
   disabled,
@@ -43,6 +45,8 @@ export function PreflightCheck({
   blueprint: unknown;
   tier?: number;
   budgetTokens?: number | null;
+  budgetScope?: "GovernedInference" | null;
+  budgetUsdMicros?: number | null;
   workload?: "mission" | "team";
   /** Notified with the result so the caller can gate its launch/create button. */
   onResult?: (r: ValidationResult) => void;
@@ -59,6 +63,8 @@ export function PreflightCheck({
         const r = await validatePackageAction(blueprint, {
           tier,
           budget_tokens: budgetTokens ?? null,
+          budget_scope: budgetScope ?? null,
+          budget_usd_micros: budgetUsdMicros ?? null,
           workload,
         });
         setResult(r);

@@ -74,6 +74,30 @@ impl Cluster {
             .get(GRANT)
             .await
             .map_err(|e| safe("Read workspace credential grant", e))?;
+        self.validate_credential_grant(namespace, document).await
+    }
+
+    async fn optional_credential_grant(
+        &self,
+        namespace: &str,
+    ) -> Result<Option<Grant>, kube::Error> {
+        let Some(document) = object_api(self, namespace, "KarsCredentialGrant")
+            .get_opt(GRANT)
+            .await
+            .map_err(|e| safe("Read workspace credential grant", e))?
+        else {
+            return Ok(None);
+        };
+        self.validate_credential_grant(namespace, document)
+            .await
+            .map(Some)
+    }
+
+    async fn validate_credential_grant(
+        &self,
+        namespace: &str,
+        document: kube::api::DynamicObject,
+    ) -> Result<Grant, kube::Error> {
         if document.metadata.deletion_timestamp.is_some()
             || document.data["spec"]["enabled"] != true
             || document.data["status"]["phase"] != "Ready"
@@ -143,8 +167,40 @@ impl Cluster {
         let grant = self.credential_grant(&namespace).await?;
         let store=grant.stores.into_iter().find(|store|store.secret.name==name)
             .ok_or_else(||failure("Integration store is not explicitly enrolled; no broad Secret fallback is allowed"))?;
-        let secret = Api::<Secret>::namespaced(self.client.clone(), &namespace)
-            .get(name)
+        self.read_enrolled_integration_store(&namespace, store)
+            .await
+    }
+
+    /// Discovery may omit an unenrolled optional store, but must never hide
+    /// broken authority or read a Secret outside an exact UID-bound grant.
+    pub(super) async fn optional_integration_store(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<Option<(Store, Secret)>, kube::Error> {
+        let namespace = self.operator_store_namespace(namespace, name);
+        let Some(grant) = self.optional_credential_grant(&namespace).await? else {
+            return Ok(None);
+        };
+        let Some(store) = grant
+            .stores
+            .into_iter()
+            .find(|store| store.secret.name == name)
+        else {
+            return Ok(None);
+        };
+        self.read_enrolled_integration_store(&namespace, store)
+            .await
+            .map(Some)
+    }
+
+    async fn read_enrolled_integration_store(
+        &self,
+        namespace: &str,
+        store: Store,
+    ) -> Result<(Store, Secret), kube::Error> {
+        let secret = Api::<Secret>::namespaced(self.client.clone(), namespace)
+            .get(&store.secret.name)
             .await
             .map_err(|e| safe("Read enrolled integration store", e))?;
         if secret.uid().as_deref() != Some(store.secret.uid.as_str())

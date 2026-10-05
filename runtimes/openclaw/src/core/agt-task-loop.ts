@@ -21,6 +21,12 @@ import { meshSendWithIdentity, type MeshIdentity } from "./mesh-transport.js";
 import { validateMeshPayload } from "./mesh-payload-guard.js";
 import { routerUrl } from "./router-client.js";
 import { resolveMemoryStoreName, resolveMemoryScope } from "./memory-binding.js";
+import { TaskCompletionLedger, TaskExecutionError, type TaskExecutionEvidence } from "./task-completion.js";
+import { ReturnedRouterResponses } from "./router-observations.js";
+import { authorizeTaskAction } from "./task-policy.js";
+import { TaskPhaseGuard, type TaskPhaseEvidence } from "./task-phase.js";
+import { readTaskFile, writeTaskFile, TaskInputFiles } from "./task-filesystem.js";
+import type { MissionArtifacts } from "@kars/mesh/dist/mission-protocol.js";
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 type AnyMeshClient = any;
@@ -61,6 +67,40 @@ export interface TaskLoopDeps {
    * absent, blocking tools fall back to a single immediate read.
    */
   waitForInbox?: (timeoutMs: number) => Promise<boolean>;
+  onEvidence?: (evidence: TaskExecutionEvidence) => void;
+}
+
+export async function executeTaskWithEvidence(
+  taskContent: unknown,
+  deps: TaskLoopDeps,
+  log: Logger,
+  artifactsEnabled = false,
+  reviewedPhase?: unknown,
+  inputArtifacts?: unknown,
+): Promise<TaskExecutionEvidence & { output: string; artifacts?: MissionArtifacts; phase?: TaskPhaseEvidence }> {
+  const ledger = new TaskCompletionLedger(taskModel(), artifactsEnabled);
+  let phase: TaskPhaseGuard | undefined;
+  try {
+    phase = reviewedPhase === undefined ? undefined : new TaskPhaseGuard(reviewedPhase);
+    if (inputArtifacts !== undefined && !phase?.allowsTool("file_read")) {
+      ledger.fail("Immutable inputs require a reviewed filesystem-read phase with a positive tool-call ceiling");
+    }
+    const inputs = inputArtifacts === undefined ? undefined : new TaskInputFiles(inputArtifacts);
+    const observations = artifactsEnabled ? new ReturnedRouterResponses() : undefined;
+    const output = await processTaskWithTools(taskContent, deps, log, ledger, phase, observations, inputs);
+    const observationArtifact = await observations?.artifact();
+    if (observationArtifact && !ledger.attachRouterObservations(observationArtifact)) {
+      log.warn("Router observations omitted: negotiated artifact capacity was used by deliverables");
+    }
+    return { ...ledger.snapshot(), ...ledger.artifactSnapshot(), output, ...(phase ? { phase: phase.snapshot() } : {}) };
+  } catch (error) {
+    if (error instanceof TaskExecutionError && !phase) throw error;
+    throw new TaskExecutionError(error instanceof Error ? error.message : "Task execution failed", ledger.snapshot(), phase?.snapshot());
+  }
+}
+
+function taskModel(): string {
+  return process.env.OPENCLAW_MODEL || process.env.KARS_MODEL || process.env.MODEL || "gpt-4.1";
 }
 
 export async function processTaskWithTools(
@@ -68,12 +108,28 @@ export async function processTaskWithTools(
   taskContent: any,
   deps: TaskLoopDeps,
   log: Logger,
+  ledger?: TaskCompletionLedger,
+  phase?: TaskPhaseGuard,
+  observations?: ReturnedRouterResponses,
+  inputs?: TaskInputFiles,
 ): Promise<string> {
+  if (phase && !ledger) throw new Error("Reviewed phase execution requires measured task accounting");
+  if (inputs && (!ledger || !phase?.allowsTool("file_read"))) throw new Error("Immutable inputs require measured reviewed filesystem-read execution");
   const http = await import("node:http");
   const { execSync } = await import("node:child_process");
-  const model = process.env.OPENCLAW_MODEL || process.env.MODEL || "gpt-4.1";
+  const model = taskModel();
 
-  const tools = getTaskTools();
+  const tools = getTaskTools().filter(tool => !phase || phase.allowsTool(tool.function.name)).map(tool => !ledger?.artifactsEnabled || tool.function.name !== "file_write" ? tool : {
+    ...tool, function: {
+      ...tool.function,
+      description: "Write UTF-8 text locally. To deliver this exact content through Bridge on mission success, set artifact_name to a safe filename (not response.md). Use null for private scratch files. At most 16 named artifacts and 128 KiB serialized total; do not export secrets or unrelated data.",
+      parameters: {
+        ...tool.function.parameters,
+        properties: { ...tool.function.parameters.properties, artifact_name: { type: ["string", "null"], description: "Explicit Bridge attachment filename, or null for local-only scratch" } },
+        required: [...tool.function.parameters.required, "artifact_name"],
+      },
+    },
+  });
   const strictCount = tools.filter((t: any) => t?.function?.strict === true).length;
   log.info(`AGT task-loop: ${tools.length} tools loaded (strict=${strictCount}, KARS_STRICT_TOOLS=${process.env.KARS_STRICT_TOOLS || "<unset>"}, model=${process.env.OPENCLAW_MODEL || process.env.KARS_MODEL || "<unset>"})`);
   const provider = process.env.KARS_PROVIDER;
@@ -112,13 +168,20 @@ export async function processTaskWithTools(
   const messages: Array<{ role: string; content?: string; tool_calls?: any[]; tool_call_id?: string; name?: string }> = [
     {
       role: "system",
-      content: process.env.OFFLOAD_REQUEST_ID ? offloadPrompt : subAgentPrompt,
+      content: ledger
+        ? `You are a Kars mission agent. Complete the user's reviewed task within its constraints and the authorized tools. Do not invent observations, citations, work performed, or results. Tool access does not authorize external actions outside the task. Return the actual useful deliverable, never only a promise, status, or sandbox path. Your final answer is sent securely to Bridge as response.md for review, not to a sibling agent. Do not send messages or transfer files to peers unless the task explicitly requires it. ${ledger.artifactsEnabled
+          ? "For a named text deliverable, call file_write with the complete content and artifact_name set to its download filename; check that the tool confirms it was attached. Only explicitly attached successful writes are returned to Bridge. Local-only writes, existing files and tool-generated files are NOT harvested. Keep the final answer concise when attachments contain the deliverable, and name those attachments. If attaching fails, fix it or include the complete deliverable inline."
+          : "This dispatcher supports inline delivery only: include the full requested content in your final answer. Local files are NOT delivered."}`
+        : process.env.OFFLOAD_REQUEST_ID ? offloadPrompt : subAgentPrompt,
     },
     {
       role: "user",
       content: typeof taskContent === "string" ? taskContent : JSON.stringify(taskContent),
     },
   ];
+
+  if (phase) messages[0].content += `\n${phase.instructions()}`;
+  if (inputs) messages[0].content += `\n${inputs.instructions()}`;
 
   // Tool-calling loop (max 25 rounds to prevent runaway)
   for (let round = 0; round < 25; round++) {
@@ -135,6 +198,10 @@ export async function processTaskWithTools(
       } catch { /* ignore */ }
     }
     if (deps.isInterruptRequested()) {
+      if (ledger) {
+        deps.setInterrupt(false, "");
+        ledger.fail(`Task interrupted for handoff at round ${round}`);
+      }
       log.info(`🛑 Handoff interrupt: saving progress at round ${round}/${25}`);
       try {
         const fs = await import("node:fs");
@@ -155,8 +222,9 @@ export async function processTaskWithTools(
       return `Task interrupted for handoff at round ${round}. Progress saved to .task-in-progress.json — will resume after handoff.`;
     }
 
-    const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: 2048 });
+    const postData = JSON.stringify({ model, messages, tools, max_completion_tokens: ledger ? 8192 : 2048 });
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ledger?.beginRequest();
     const response = await new Promise<any>((resolve, reject) => {
       const req = http.request(routerUrl("/v1/chat/completions"), {
         method: "POST",
@@ -167,6 +235,7 @@ export async function processTaskWithTools(
         },
         timeout: 60000,
       }, (res) => {
+        observations?.capture(res.headers);
         let body = "";
         res.on("data", (chunk: Buffer) => { body += chunk.toString(); });
         res.on("end", () => {
@@ -179,7 +248,8 @@ export async function processTaskWithTools(
             }
           } catch { reject(new Error(`LLM parse error: ${body.slice(0, 200)}`)); }
         });
-        res.on("error", () => {});
+        res.on("error", reject);
+        res.on("aborted", () => reject(new Error("LLM response aborted")));
       });
       req.on("error", (e) => reject(e));
       req.on("timeout", () => { req.destroy(); reject(new Error("LLM timeout")); });
@@ -187,16 +257,48 @@ export async function processTaskWithTools(
       req.end();
     });
 
+    ledger?.record(response);
+    if (ledger) deps.onEvidence?.({ ...ledger.snapshot(), ...(phase ? { phase: phase.snapshot() } : {}) });
     const choice = response?.choices?.[0];
-    if (!choice) throw new Error("No LLM response");
+    if (!choice?.message) throw new Error("No LLM response");
+    if (ledger && choice.finish_reason !== "stop" && choice.finish_reason !== "tool_calls") {
+      ledger.fail(`Incomplete model response (${String(choice.finish_reason)})`);
+    }
 
     const msg = choice.message;
+    if (ledger) {
+      const calls = msg.tool_calls;
+      const hasCalls = Array.isArray(calls) && calls.length > 0;
+      if ((calls != null && !Array.isArray(calls)) || (choice.finish_reason === "tool_calls") !== hasCalls) {
+        ledger.fail("Invalid tool-call finish reason or shape");
+      }
+      if (hasCalls && (msg.role !== "assistant"
+        || (msg.content != null && typeof msg.content !== "string")
+        || (msg.refusal != null && typeof msg.refusal !== "string"))) {
+        ledger.fail("Invalid assistant tool message");
+      }
+      if (hasCalls && (new Set(calls.map((tc: any) => tc?.id)).size !== calls.length
+        || calls.some((tc: any) => !tc || typeof tc.id !== "string" || !tc.id
+          || tc.type !== "function" || typeof tc.function?.name !== "string" || !tc.function.name
+          || typeof tc.function.arguments !== "string"))) ledger.fail("Invalid tool-call envelope");
+    }
 
     // If the model wants to call tools, execute them and continue
     if (msg.tool_calls && msg.tool_calls.length > 0) {
-      messages.push(msg);
+      phase?.reserveBatch(msg.tool_calls.length);
+      if (ledger && phase) deps.onEvidence?.({ ...ledger.snapshot(), phase: phase.snapshot() });
+      // Provider responses may carry metadata that is not valid on the governed request wire.
+      messages.push(ledger ? {
+        role: "assistant", content: msg.content ?? null,
+        ...(msg.refusal !== undefined ? { refusal: msg.refusal } : {}),
+        tool_calls: msg.tool_calls.map((tc: any) => ({
+          id: tc.id, type: "function",
+          function: { name: tc.function.name, arguments: tc.function.arguments },
+        })),
+      } : msg);
       for (const tc of msg.tool_calls) {
         let result: string = "";
+        let toolSucceeded = false;
         try {
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
           let args: any;
@@ -205,7 +307,9 @@ export async function processTaskWithTools(
           } catch (parseErr) {
             const argLen = (tc.function.arguments || "").length;
             const fn = tc.function.name;
-            const hint = (fn === "file_write" || fn === "mesh_send" || fn === "foundry_code_execute")
+            const hint = ledger
+              ? " — use valid JSON with shorter, properly escaped arguments, or return the complete deliverable in the final response. Do not replace the deliverable with a sandbox path or send it to peers."
+              : (fn === "file_write" || fn === "mesh_send" || fn === "foundry_code_execute")
               ? ` — the ${fn} arguments JSON is malformed because a large string field (${argLen} bytes) was not properly escaped by the model. DO NOT retry the same call. INSTEAD, shrink the arguments by moving the large content out of the tool-call envelope: (1) call foundry_code_execute with a SHORT snippet that builds the data structure programmatically (e.g. fetch results from a prior tool call, or json.loads a small string) and json.dump's it to /mnt/data/<name>.json; the wrapper auto-downloads to /sandbox/.openclaw/workspace/. (2) then call mesh_transfer_file(to_agent='<sibling>', file_path='/sandbox/.openclaw/workspace/<name>.json') — both arguments are tiny so the call cannot corrupt. Never put multi-KB stringified-JSON inside any tool-call argument field.`
               : "";
             result = `${fn} error: invalid tool-call arguments JSON (${argLen} bytes, parse failed: ${(parseErr as Error).message})${hint}`;
@@ -214,6 +318,16 @@ export async function processTaskWithTools(
             continue;
           }
           const fnName = tc.function.name;
+          const phaseError = phase?.argumentError(fnName, args);
+          if (phaseError) {
+            messages.push({ role: "tool", tool_call_id: tc.id, content: `Blocked by reviewed phase: ${phaseError}` });
+            continue;
+          }
+          if (ledger && (!tools.some((tool) => tool.function.name === fnName)
+            || !await authorizeTaskAction(`tool:${fnName}`, { tool: fnName, tool_call_id: tc.id, arguments: args }))) {
+            messages.push({ role: "tool", tool_call_id: tc.id, content: "Blocked by policy: unknown tool, denied, or evaluation unavailable" });
+            continue;
+          }
 
           if (fnName === "file_write") {
             const filePath = String(args.path || "");
@@ -222,84 +336,29 @@ export async function processTaskWithTools(
               result = `file_write error: path must be under /sandbox/ or /tmp/ (got: ${filePath})`;
             } else {
               try {
-                const fs = await import("node:fs");
-                const path = await import("node:path");
-                fs.mkdirSync(path.dirname(filePath), { recursive: true });
-                fs.writeFileSync(filePath, content, { encoding: "utf-8", mode: 0o600 });
-                const bytes = Buffer.byteLength(content, "utf-8");
+                const staged = ledger && args.artifact_name != null ? ledger.prepareArtifact(args.artifact_name, args.content) : undefined;
+                const bytes = await writeTaskFile(filePath, content);
                 log.info(`AGT sub-agent file_write: ${filePath} (${bytes} bytes)`);
-                result = `OK: wrote ${bytes} bytes to ${filePath}`;
+                if (staged) ledger!.commitArtifacts(staged);
+                result = `OK: wrote ${bytes} bytes to ${filePath}${staged ? `; attached as ${args.artifact_name} for Bridge on mission success` : ledger ? "; local only" : ""}`;
+                toolSucceeded = true;
                 // eslint-disable-next-line @typescript-eslint/no-explicit-any
               } catch (err: any) {
                 result = `file_write error: ${err.message}`;
               }
             }
           } else if (fnName === "file_read") {
-            // Companion to file_write. Declared in AGT_POLICY (see
-            // runtimes/openclaw/src/index.ts), so every agent expects it to
-            // be invocable. Reads any regular file under /sandbox/ or /tmp/
-            // (after path.resolve, so .. traversal is blocked) up to
-            // max_bytes (default 1 MiB, ceiling 16 MiB) and returns a JSON
-            // envelope with the UTF-8 content plus a truncated flag.
             const filePath = String(args.path || "");
             const maxBytesRaw = typeof args.max_bytes === "number" ? args.max_bytes : 1048576;
             const maxBytes = Math.min(Math.max(Math.floor(maxBytesRaw), 1), 16 * 1024 * 1024);
             try {
-              const fs = await import("node:fs");
-              const path = await import("node:path");
-              const resolved = path.resolve(filePath);
-              if (!resolved.startsWith("/sandbox/") && !resolved.startsWith("/tmp/")) {
-                result = `file_read error: path must resolve under /sandbox/ or /tmp/ (got: ${resolved})`;
-              } else {
-                // Atomic open+stat+read (CWE-367 TOCTOU): a path-check chain
-                // like existsSync→statSync→readFileSync lets an attacker
-                // swap the file (e.g. symlink the path under /tmp to a
-                // sensitive file outside the sandbox) between calls. Open
-                // the FD once with O_RDONLY|O_NOFOLLOW, fstat from the FD,
-                // then read from the same FD. Every operation acts on the
-                // exact same inode the open() resolved.
-                let fd: number;
-                try {
-                  fd = fs.openSync(resolved, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW);
-                } catch (e: unknown) {
-                  const code = (e as NodeJS.ErrnoException | undefined)?.code;
-                  if (code === "ENOENT") {
-                    result = `file_read error: not found: ${resolved}`;
-                  } else if (code === "ELOOP") {
-                    result = `file_read error: refusing to follow symlink: ${resolved}`;
-                  } else {
-                    result = `file_read error: ${(e as Error).message}`;
-                  }
-                  fd = -1;
-                }
-                if (fd !== -1) {
-                  try {
-                    const stat = fs.fstatSync(fd);
-                    if (!stat.isFile()) {
-                      result = `file_read error: not a regular file: ${resolved}`;
-                    } else {
-                      const totalBytes = Number(stat.size);
-                      const readBytes = Math.min(totalBytes, maxBytes);
-                      const buf = Buffer.alloc(readBytes);
-                      fs.readSync(fd, buf, 0, readBytes, 0);
-                      const truncated = totalBytes > maxBytes;
-                      const text = buf.toString("utf-8");
-                      log.info(`AGT sub-agent file_read: ${resolved} (${totalBytes} bytes${truncated ? `, truncated to ${maxBytes}` : ""})`);
-                      result = JSON.stringify({
-                        path: resolved,
-                        bytes: totalBytes,
-                        truncated,
-                        returned_bytes: readBytes,
-                        content: text,
-                      });
-                    }
-                  } finally {
-                    fs.closeSync(fd);
-                  }
-                }
-              }
+              const evidence = await readTaskFile(filePath, maxBytes, inputs);
+              log.info(`AGT sub-agent file_read: ${evidence.path} (${evidence.bytes} bytes${evidence.truncated ? `, returned ${evidence.returned_bytes}` : ""})`);
+              result = JSON.stringify(evidence);
+              toolSucceeded = true;
               // eslint-disable-next-line @typescript-eslint/no-explicit-any
             } catch (err: any) {
+              toolSucceeded = false;
               result = `file_read error: ${err.message}`;
             }
           } else if (fnName === "http_fetch") {
@@ -1437,45 +1496,30 @@ export async function processTaskWithTools(
           } else {
             const cmd = String(args.command || args.cmd || "echo 'no command'");
             log.info(`AGT sub-agent exec: ${sanitizeLog(cmd, 200)}`);
-            let policyAllowed = true;
-            let policyReason = "";
-            try {
-              const policyHttp = await import("node:http");
-              const policyBody = JSON.stringify({ action: `shell:${cmd}`, context: { tool: "exec_command" } });
-              const policyResult = await new Promise<{ allowed: boolean; reason?: string }>((resolve) => {
-                const req = policyHttp.request(routerUrl("/agt/evaluate"), {
-                  method: "POST", timeout: 2000,
-                  headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(policyBody) },
-                }, (res) => {
-                  let data = "";
-                  res.on("data", (c: Buffer) => { data += c.toString(); });
-                  res.on("end", () => { try { resolve(JSON.parse(data)); } catch { resolve({ allowed: true }); } });
-                });
-                req.on("error", () => resolve({ allowed: true }));
-                req.on("timeout", () => { req.destroy(); resolve({ allowed: true }); });
-                req.write(policyBody);
-                req.end();
-              });
-              policyAllowed = policyResult.allowed !== false;
-              policyReason = policyResult.reason || "";
-            } catch { /* router unavailable — allow */ }
+            const policyAllowed = await authorizeTaskAction(`shell:${cmd}`, { tool: "exec_command" });
             if (!policyAllowed) {
-              result = `Blocked by policy: ${policyReason || "denied"}`;
+              result = "Blocked by policy: denied or evaluation unavailable";
             } else {
               result = execSync(cmd, { timeout: 15000, encoding: "utf8", maxBuffer: 64 * 1024 }).trim();
             }
           }
           // eslint-disable-next-line @typescript-eslint/no-explicit-any
         } catch (e: any) {
+          toolSucceeded = false;
           result = e.stderr || e.stdout || e.message || "Command failed";
+        } finally {
+          if (toolSucceeded) phase?.recordSuccess();
+          if (ledger && phase) deps.onEvidence?.({ ...ledger.snapshot(), phase: phase.snapshot() });
         }
         messages.push({ role: "tool", tool_call_id: tc.id, content: result });
       }
       continue;
     }
 
-    return msg.content || "";
+    phase?.finish();
+    return ledger ? ledger.finish(choice) : msg.content || "";
   }
 
+  if (ledger) ledger.fail("Sub-agent reached maximum tool-calling rounds (25) without a final response");
   return "Sub-agent reached maximum tool-calling rounds (25) without a final response.";
 }

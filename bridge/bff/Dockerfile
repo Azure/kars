@@ -9,6 +9,7 @@
 #   docker build -f bff/Dockerfile -t <registry>/kars-bridge-bff:<tag> bff
 ARG AZURELINUX_DISTROLESS=mcr.microsoft.com/azurelinux/distroless/base:3.0
 FROM rust:1-bookworm AS build
+ARG CARGO_BUILD_JOBS=1
 WORKDIR /src
 # Compile only the real sources against the reviewed lockfile.
 COPY . .

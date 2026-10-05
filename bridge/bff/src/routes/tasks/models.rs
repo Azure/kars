@@ -386,6 +386,8 @@ pub struct TaskDetailDto {
     /// until a mesh run produces a trace. This is the source of the Activity
     /// timeline and the clean per-tool audit path.
     pub activity: Vec<serde_json::Value>,
+    /// Exact-run, runtime-forwarded observations; not independent execution proof.
+    pub router_activity: Option<super::router_activity::RouterActivity>,
     /// Run telemetry rollup (rounds, tool calls) parsed from the mission output.
     /// Token totals live on `result`; this carries the loop-shape counts.
     pub telemetry: Option<MissionTelemetryDto>,
@@ -491,9 +493,11 @@ pub struct MissionTelemetryDto {
 #[derive(Debug, Serialize)]
 pub struct MissionResultDto {
     pub output: String,
-    /// Run status the output reflects: `ok` (a real deliverable) or `error`
-    /// (e.g. a delivery timeout). The UI must not present an `error` output as
-    /// the mission's deliverable.
+    pub reviewable: bool,
+    pub usage_known: bool,
+    pub run_evidence: Option<super::run_evidence::MissionRunEvidenceDto>,
+    /// Stored status (`ok`, `failed`, `rejected`, or legacy `error`).
+    /// Only `reviewable` establishes eligibility for deliverable approval.
     pub status: Option<String>,
     pub model: Option<String>,
     pub total_tokens: Option<i64>,
@@ -503,9 +507,9 @@ pub struct MissionResultDto {
     /// Assignment nonce that produced this output. Used to hide stale results
     /// while a newer run is materializing.
     pub assignment_nonce: Option<String>,
-    /// How the deliverable was produced: `"single_turn"` when the mesh agent
-    /// loop was unavailable and this is one model turn (no tools/sub-agents).
-    /// Absent (`None`) for a full agent-loop run — the normal case.
+    /// `durable_agent` has validated terminal evidence; `invalid_evidence`
+    /// failed validation. Legacy `single_turn` and absent sources are retained,
+    /// but absence does not prove a full agent-loop run.
     pub source: Option<String>,
     /// Set when the run's `ok` output is actually a capability/limit STOP rather
     /// than a real deliverable — today the daily token budget (enforced by the

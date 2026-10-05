@@ -2,132 +2,144 @@
 // Licensed under the MIT License.
 
 use super::{AgentIdentity, Cluster, MeshRunOutcome};
+use crate::kars::task::KarsTask;
 use crate::providers::signing::sha256_hex;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use k8s_openapi::api::core::v1::ConfigMap;
-use kube::api::Api;
+use kube::api::{Api, Patch, PatchParams};
+
+const REQUESTED: &str = "kars.azure.com/run-requested";
+const COMPLETED: &str = "kars.azure.com/run-completed";
+
+#[derive(Debug, thiserror::Error)]
+pub enum MissionRunError {
+    #[error("{0}")]
+    Conflict(&'static str),
+    #[error("{0}")]
+    Cluster(#[from] kube::Error),
+}
+
+fn run_identity(task: &KarsTask) -> Result<(&str, &str, &str, &str), MissionRunError> {
+    let meta = &task.metadata;
+    match (
+        meta.namespace.as_deref(),
+        meta.name.as_deref(),
+        meta.uid.as_deref(),
+        meta.resource_version.as_deref(),
+    ) {
+        (Some(ns), Some(name), Some(uid), Some(rv))
+            if !ns.is_empty()
+                && !name.is_empty()
+                && !uid.is_empty()
+                && !rv.is_empty()
+                && meta.deletion_timestamp.is_none()
+                && task
+                    .spec
+                    .execution
+                    .as_ref()
+                    .is_some_and(|execution| execution.launch) =>
+        {
+            Ok((ns, name, uid, rv))
+        }
+        _ => Err(MissionRunError::Conflict(
+            "the mission must be current and launched; reload before requesting a run",
+        )),
+    }
+}
+
+fn annotation<'a>(task: &'a KarsTask, key: &str) -> Option<&'a str> {
+    task.metadata
+        .annotations
+        .as_ref()?
+        .get(key)
+        .map(String::as_str)
+        .filter(|v| !v.is_empty())
+}
+
+fn run_nonce(prefix: &str, uid: &str, rv: &str) -> String {
+    // The API-server revision is unique for this UID. The patch's CAS admits at
+    // most one request from that revision, including across BFF processes.
+    format!(
+        "{prefix}-{}",
+        sha256_hex(serde_json::json!([uid, rv]).to_string().as_bytes())
+    )
+}
 
 impl Cluster {
-    /// Request a **mesh-driven agent run** of a task by stamping the
-    /// `kars.azure.com/run-requested` annotation with a fresh nonce. The core
-    /// controller (a live mesh peer) watches this annotation, discovers the
-    /// agent over the mesh, delivers the objective straight into the agent's
-    /// native loop (gated by the AGT `task:execute` policy), captures the
-    /// reply, writes it to `kars-mission-output-<task>`, and stamps
-    /// `kars.azure.com/run-completed` with the same nonce. This is the Bridge
-    /// *consuming* a neutral core capability — the Bridge never reaches into
-    /// the agent itself. Returns the nonce to correlate completion.
-    pub async fn request_mesh_run(&self, ns: &str, name: &str) -> anyhow::Result<String> {
-        use kube::api::{Patch, PatchParams};
-        // In-flight guard: if a run is already pending (run-requested set to a
-        // nonce the controller hasn't completed yet), REUSE that nonce instead of
-        // stamping a fresh one. Two concurrent triggers (double-click, cadence +
-        // run-now) would otherwise each mint a distinct nonce; the controller acks
-        // only the last, the first caller's await never matches → it single-turns
-        // while the mesh also delivers → the task executes twice and the outputs
-        // clobber. Reusing the pending nonce makes both callers await the same run.
-        if let Ok(Some(task)) = self.tasks(ns).get_opt(name).await {
-            let ann = task.metadata.annotations.unwrap_or_default();
-            let requested = ann.get("kars.azure.com/run-requested").cloned();
-            let completed = ann.get("kars.azure.com/run-completed").cloned();
-            if let Some(req) = requested.filter(|r| !r.is_empty())
-                && completed.as_deref() != Some(req.as_str())
-            {
-                return Ok(req);
-            }
+    /// Persist a run request against the caller's authorized Task snapshot.
+    /// Pending requests are reused without mutation. A new request uses UID/RV
+    /// preconditions; conflicts and ambiguous responses never trigger execution
+    /// through another path. Execution still requires a deployed Core dispatcher.
+    pub async fn request_mesh_run(&self, task: &KarsTask) -> Result<String, MissionRunError> {
+        let (ns, name, uid, rv) = run_identity(task)?;
+        if let Some(requested) = annotation(task, REQUESTED)
+            && annotation(task, COMPLETED) != Some(requested)
+        {
+            return Ok(requested.to_owned());
         }
-        let nonce = format!(
-            "run-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
+        let nonce = run_nonce("run", uid, rv);
         let patch = serde_json::json!({
-            "metadata": { "annotations": { "kars.azure.com/run-requested": nonce } }
+            "metadata": { "uid": uid, "resourceVersion": rv,
+                "annotations": { "kars.azure.com/run-requested": nonce } }
         });
         self.tasks(ns)
             .patch(name, &PatchParams::default(), &Patch::Merge(patch))
             .await?;
-        // Re-read and adopt whatever nonce actually won the annotation, so two
-        // truly-simultaneous triggers converge on the SAME run instead of each
-        // awaiting its own (last-write-wins) nonce.
-        if let Ok(Some(task)) = self.tasks(ns).get_opt(name).await
-            && let Some(actual) = task
-                .metadata
-                .annotations
-                .and_then(|a| a.get("kars.azure.com/run-requested").cloned())
-                .filter(|r| !r.is_empty())
-        {
-            return Ok(actual);
-        }
         Ok(nonce)
     }
 
-    /// Poll the task's `kars.azure.com/run-completed` annotation until it
-    /// equals `nonce` (the controller stamps it once the mesh round-trip is
-    /// done) or `timeout` elapses. Returns the freshly-written mission output
-    /// on completion, or `None` on timeout.
-    /// Outcome of awaiting a mesh run. Distinguishes "the mesh peer never picked
-    /// this up" (safe to fall back to a single turn) from "it acknowledged and is
-    /// actively delivering" (must NOT single-turn — that would race the
-    /// controller's deliverable write).
+    /// Await output for this exact Task UID and nonce, never a later revision
+    /// observed during the output read. Missing ACKs are not proof of non-delivery
+    /// and never permit a fallback or cancellation. Unbound router traces are not
+    /// evidence of activity for this run.
     pub async fn await_mesh_run(
         &self,
-        ns: &str,
-        name: &str,
+        expected: &KarsTask,
         nonce: &str,
         timeout: std::time::Duration,
     ) -> MeshRunOutcome {
-        let deadline = std::time::Instant::now() + timeout;
+        let Ok((ns, name, uid, _)) = run_identity(expected) else {
+            return MeshRunOutcome::InProgress;
+        };
         let mut saw_ack = false;
-        let mut saw_activity = false;
-        loop {
-            if let Ok(Some(task)) = self.tasks(ns).get_opt(name).await {
-                let ann = task.metadata.annotations.clone().unwrap_or_default();
-                if ann.get("kars.azure.com/run-ack").map(String::as_str) == Some(nonce) {
-                    saw_ack = true;
+        let outcome = tokio::time::timeout(timeout, async {
+            loop {
+                if let Ok(Some(task)) = self.tasks(ns).get_opt(name).await {
+                    if task.metadata.uid.as_deref() != Some(uid)
+                        || task.metadata.name.as_deref() != Some(name)
+                        || task.metadata.namespace.as_deref() != Some(ns)
+                        || task.metadata.deletion_timestamp.is_some()
+                        || annotation(&task, REQUESTED) != Some(nonce)
+                    {
+                        return MeshRunOutcome::InProgress;
+                    }
+                    if annotation(&task, "kars.azure.com/run-ack") == Some(nonce) {
+                        saw_ack = true;
+                    }
+                    if annotation(&task, COMPLETED) == Some(nonce) {
+                        return match self.read_mission_output(name).await {
+                            Some(out)
+                                if ns == "kars-system"
+                                    && out.get("taskUid").map(String::as_str) == Some(uid)
+                                    && out.get("assignmentNonce").map(String::as_str)
+                                        == Some(nonce) =>
+                            {
+                                MeshRunOutcome::Completed(out)
+                            }
+                            _ => MeshRunOutcome::InProgress,
+                        };
+                    }
                 }
-                if ann.get("kars.azure.com/run-completed").map(String::as_str) == Some(nonce) {
-                    return match self.read_mission_output(name).await {
-                        Some(out) => MeshRunOutcome::Completed(out),
-                        None => MeshRunOutcome::InProgress,
-                    };
-                }
+                tokio::time::sleep(std::time::Duration::from_secs(2)).await;
             }
-            // LIVE-ACTIVITY signal — the robust "a real agent loop is running"
-            // proof that works even against an OLD controller that never stamps
-            // run-ack. If the sandbox's router is emitting rounds/tool calls, a
-            // genuine run is in flight and we must NEVER single-turn over it
-            // (that produced a garbage one-shot deliverable that clobbered the
-            // real streaming run). Latch it once seen.
-            if !saw_activity && !self.sandbox_live_trace(name).await.is_empty() {
-                saw_activity = true;
-            }
-            if std::time::Instant::now() >= deadline {
-                return if saw_ack || saw_activity {
-                    MeshRunOutcome::InProgress
-                } else {
-                    MeshRunOutcome::NeverProcessed
-                };
-            }
-            tokio::time::sleep(std::time::Duration::from_secs(2)).await;
-        }
-    }
-
-    /// Clear the pending `run-requested` annotation — used when the BFF gives up
-    /// on the mesh path and single-turns, so a late mesh-peer recovery doesn't
-    /// ALSO deliver + write the output (double-write).
-    pub async fn clear_run_request(&self, ns: &str, name: &str) {
-        use kube::api::{Patch, PatchParams};
-        let patch = serde_json::json!({
-            "metadata": { "annotations": { "kars.azure.com/run-requested": serde_json::Value::Null } }
-        });
-        let _ = self
-            .tasks(ns)
-            .patch(name, &PatchParams::default(), &Patch::Merge(patch))
-            .await;
+        })
+        .await;
+        outcome.unwrap_or(if saw_ack {
+            MeshRunOutcome::InProgress
+        } else {
+            MeshRunOutcome::NeverProcessed
+        })
     }
 
     /// Discover a running agent's **mesh identity** from the AGT registry — the
@@ -191,100 +203,143 @@ impl Cluster {
         &self,
         task: &str,
     ) -> Option<std::collections::BTreeMap<String, String>> {
-        self.configmap_data(&format!("kars-mission-review-{task}"))
-            .await
+        self.review_snapshot("kars-system", task).await.ok()??.data
     }
 
-    /// Write a task's review record (`kars-mission-review-<task>`), SSA-merged.
+    pub async fn review_snapshot(
+        &self,
+        ns: &str,
+        task: &str,
+    ) -> Result<Option<ConfigMap>, MissionRunError> {
+        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), ns);
+        let name = format!("kars-mission-review-{task}");
+        let snapshot = cms.get_opt(&name).await?;
+        if snapshot.as_ref().is_some_and(|cm| {
+            cm.metadata.name.as_deref() != Some(name.as_str())
+                || cm.metadata.namespace.as_deref() != Some(ns)
+                || cm.metadata.uid.as_deref().is_none_or(str::is_empty)
+                || cm
+                    .metadata
+                    .resource_version
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+                || cm.metadata.deletion_timestamp.is_some()
+        }) {
+            return Err(MissionRunError::Conflict(
+                "the review record is stale; reload before reviewing",
+            ));
+        }
+        Ok(snapshot)
+    }
+
+    /// Write exactly the review snapshot read by the caller, without adopting
+    /// concurrent decisions. This is not a transaction with the Task run patch.
     pub async fn write_review(
         &self,
-        task: &str,
+        task: &KarsTask,
+        prior: Option<&ConfigMap>,
         data: std::collections::BTreeMap<String, String>,
-    ) -> anyhow::Result<()> {
-        use kube::api::{Patch, PatchParams};
-        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");
-        let name = format!("kars-mission-review-{task}");
-        let patch = serde_json::json!({
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": { "name": name, "labels": { "kars.azure.com/mission-review": task } },
-            "data": data,
-        });
-        cms.patch(
-            &name,
-            &PatchParams::apply("kars-bridge-bff").force(),
-            &Patch::Apply(patch),
-        )
-        .await?;
+    ) -> Result<(), MissionRunError> {
+        use kube::api::PostParams;
+        let ns = task
+            .metadata
+            .namespace
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or(MissionRunError::Conflict("mission namespace is missing"))?;
+        let task_name = task
+            .metadata
+            .name
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or(MissionRunError::Conflict("mission name is missing"))?;
+        let uid = task
+            .metadata
+            .uid
+            .as_deref()
+            .filter(|s| !s.is_empty())
+            .ok_or(MissionRunError::Conflict("mission UID is missing"))?;
+        let name = format!("kars-mission-review-{task_name}");
+        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), ns);
+        if data.get("taskUid").map(String::as_str) != Some(uid) {
+            return Err(MissionRunError::Conflict(
+                "review must be bound to the mission UID",
+            ));
+        }
+        if let Some(previous) = prior {
+            if previous.metadata.namespace.as_deref() != Some(ns)
+                || previous.metadata.name.as_deref() != Some(&name)
+                || previous.metadata.deletion_timestamp.is_some()
+                || previous.metadata.uid.as_deref().is_none_or(str::is_empty)
+                || previous
+                    .metadata
+                    .resource_version
+                    .as_deref()
+                    .is_none_or(str::is_empty)
+                || previous
+                    .data
+                    .as_ref()
+                    .and_then(|d| d.get("taskUid"))
+                    .map(String::as_str)
+                    != Some(uid)
+            {
+                return Err(MissionRunError::Conflict(
+                    "the review record is stale or unbound; reload before reviewing",
+                ));
+            }
+            let mut next = previous.clone();
+            next.data = Some(data);
+            cms.replace(&name, &PostParams::default(), &next).await?;
+        } else {
+            let next = ConfigMap {
+                metadata: kube::core::ObjectMeta {
+                    name: Some(name),
+                    namespace: Some(ns.into()),
+                    labels: Some(std::collections::BTreeMap::from([(
+                        "kars.azure.com/mission-review".into(),
+                        task_name.into(),
+                    )])),
+                    ..Default::default()
+                },
+                data: Some(data),
+                ..Default::default()
+            };
+            cms.create(&PostParams::default(), &next).await?;
+        }
         Ok(())
     }
 
-    /// Re-drive a task on reviewer feedback without mutating its immutable spec.
-    /// The revision objective is nonce-bound and digest-protected in annotations;
-    /// the controller verifies it before constructing the signed task contract.
+    /// Create a distinct revision from the exact completed run reviewed by the
+    /// caller. Never replace a pending objective or adopt another review's nonce.
+    /// Retired missions must be explicitly relaunched through the normal gates.
     pub async fn redrive_with_revision(
         &self,
-        ns: &str,
-        name: &str,
+        task: &KarsTask,
+        reviewed_nonce: &str,
         revised_objective: &str,
-    ) -> anyhow::Result<String> {
-        use kube::api::{Patch, PatchParams};
-        // In-flight guard (same rationale as request_mesh_run): if a run is
-        // already pending, don't stamp a second concurrent redrive — reuse the
-        // pending nonce so two concurrent request_changes reviews can't double-
-        // execute the producing agent. The revision remains nonce-scoped.
-        if let Ok(Some(task)) = self.tasks(ns).get_opt(name).await {
-            let ann = task.metadata.annotations.clone().unwrap_or_default();
-            let requested = ann.get("kars.azure.com/run-requested").cloned();
-            let completed = ann.get("kars.azure.com/run-completed").cloned();
-            if let Some(req) = requested.filter(|r| !r.is_empty())
-                && completed.as_deref() != Some(req.as_str())
-            {
-                let encoded = BASE64_STANDARD.encode(revised_objective.as_bytes());
-                let digest = format!("sha256:{}", sha256_hex(revised_objective.as_bytes()));
-                let patch = serde_json::json!({
-                    "metadata": { "annotations": {
-                        "kars.azure.com/run-objective-nonce": req.clone(),
-                        "kars.azure.com/run-objective-b64": encoded,
-                        "kars.azure.com/run-objective-digest": digest
-                    }}
-                });
-                self.tasks(ns)
-                    .patch(name, &PatchParams::default(), &Patch::Merge(patch))
-                    .await?;
-                return Ok(req);
-            }
+    ) -> Result<String, MissionRunError> {
+        let (ns, name, uid, rv) = run_identity(task)?;
+        if reviewed_nonce.is_empty()
+            || revised_objective.trim().is_empty()
+            || annotation(task, REQUESTED) != Some(reviewed_nonce)
+            || annotation(task, COMPLETED) != Some(reviewed_nonce)
+        {
+            return Err(MissionRunError::Conflict(
+                "the reviewed run is no longer current or a revision is pending; reload before requesting changes",
+            ));
         }
-        let nonce = format!(
-            "rev-{}",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_nanos())
-                .unwrap_or(0)
-        );
-        let encoded = BASE64_STANDARD.encode(revised_objective.as_bytes());
-        let digest = format!("sha256:{}", sha256_hex(revised_objective.as_bytes()));
+        let nonce = run_nonce("rev", uid, rv);
         let patch = serde_json::json!({
-            "metadata": { "annotations": {
-                "kars.azure.com/run-requested": nonce.clone(),
-                "kars.azure.com/run-objective-nonce": nonce.clone(),
-                "kars.azure.com/run-objective-b64": encoded,
-                "kars.azure.com/run-objective-digest": digest
+            "metadata": { "uid": uid, "resourceVersion": rv, "annotations": {
+                "kars.azure.com/run-requested": nonce,
+                "kars.azure.com/run-objective-nonce": nonce,
+                "kars.azure.com/run-objective-b64": BASE64_STANDARD.encode(revised_objective.as_bytes()),
+                "kars.azure.com/run-objective-digest": format!("sha256:{}", sha256_hex(revised_objective.as_bytes()))
             }}
         });
         self.tasks(ns)
             .patch(name, &PatchParams::default(), &Patch::Merge(patch))
             .await?;
-        // Adopt whichever nonce won, so concurrent redrives converge on one run.
-        if let Ok(Some(task)) = self.tasks(ns).get_opt(name).await
-            && let Some(actual) = task
-                .metadata
-                .annotations
-                .and_then(|a| a.get("kars.azure.com/run-requested").cloned())
-                .filter(|r| !r.is_empty())
-        {
-            return Ok(actual);
-        }
         Ok(nonce)
     }
 }

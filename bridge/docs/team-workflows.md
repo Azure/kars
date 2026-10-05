@@ -29,6 +29,200 @@ Intent
   -> approved team memory + next milestone
 ```
 
+## Current execution boundary
+
+A reviewed `kars.execution-plan/v1` is retained in Task and Team blueprints,
+including role overrides, replication, authority digests and signed launch
+packages. Bridge compares the API's captured plan with the reviewed plan before
+continuing creation or plan updates. An older CRD that prunes the plan must fail
+this check; saving a name or objective is not equivalent to saving the plan.
+
+During proposal parsing, role configuration is matched by exact name (after
+trimming surrounding whitespace), never by roster position. Reordering proposed
+roles preserves each named role's prompt, runtime, model and skills. A planned
+role without a matching roster entry starts with its own objective and no
+role-specific overrides; subsequent route qualification still applies. A blank
+matched prompt also uses that role's planned objective.
+
+**Full typed-plan execution is not implemented yet.** The production encrypted
+mission path delivers an objective to one runtime; it does not execute the reviewed
+role DAG or schedule its phases with per-role budgets and synthesis. The tested
+single-phase contract below is not yet authorized by the production Task store.
+A valid plan can be saved inactive for review, but launch, resume and manual run
+requests reject it with `TypedPlanExecutionUnavailable`. A decomposition marker
+without its plan, or an unsupported marker, rejects with
+`ReviewedExecutionPlanMissing`. A missing plan is not a legacy fallback when a
+marker declares one. Stopping a Task or purely pausing a Team remains allowed.
+Unmarked legacy planless execution remains supported.
+
+The OpenClaw measured loop and encrypted mission protocol support a tested
+**single-phase filesystem contract**. Version 2 requires a canonical phase and
+its SHA256 digest in readiness, assignment and replies; version 1 cannot silently
+drop constraints. Only explicitly granted `filesystem-read`/`filesystem-write`
+tools are exposed, actual calls are checked again, and router policy authorization
+is still required. `maxToolCalls` limits attempted calls (including denied,
+malformed and failed calls); an overflowing batch fails before any tool runs.
+`minToolCalls` counts only successful authorized filesystem operations.
+
+The local version-3 contract additionally supports bounded **immutable input
+artifacts**. Its canonical SHA256 digest binds the exact UTF-8 bytes, input aliases
+and upstream Task/run/assignment/producer identities. Only encrypted assignments
+carry input bytes; readiness probes, installed contracts and replies carry the
+digest, not those bytes. The receiver checks its independently installed digest
+before authorization or reserving execution, and exact replay returns the cached
+reply rather than executing again.
+
+An admitted downstream execution reads these snapshots through the existing
+`file_read` tool at `/sandbox/.kars-inputs/<alias>`. The namespace is read-only and
+execution-local: unknown inputs or path aliases cannot fall through to disk, and
+another execution cannot access a previous snapshot. Model instructions contain
+only the input manifest, not the upstream document text as system instructions.
+The reviewed read capability, attempted-call ceiling and router authorization
+still apply. Inputs are never automatically exported; useful downstream output
+must be explicitly captured as a separately named artifact. Failed execution
+exports no artifacts.
+
+The retained-result reader accepts **content-free references**, not caller-provided
+bytes. It checks the live source Task UID, the owned successful text-v1 attempt,
+the exact assignment and producer, and both canonical immutable result ConfigMaps
+using the same decoder and projection builder as publication. It verifies the
+named document's hash, snapshots the bytes and rechecks every resource before
+returning. Synthetic `response.md` and router-observation system evidence cannot
+be selected as useful input documents. A source Task may have moved to a later
+run: this reads retained evidence, not the current deliverable or its approval.
+
+Bridge's terminal-evidence reader accepts validated version-1, version-2 and
+version-3 replies. It checks the canonical filesystem phase digest, supported
+capabilities, attempted/successful call bounds and digest-only input contract,
+then applies the existing Task UID, run, assignment, producer and exact-usage
+checks. Valid newer replies feed the same revision-bound Activity reader; they do
+not add a second recorder, a live fallback or permission to execute a plan.
+Shared JSON fixtures are checked by both the TypeScript wire parser and the Rust
+reader, including defaults, capability ordering and Unicode canonicalization.
+
+These are **locally tested handoff primitives, not deployed Team execution**.
+Custody checks do not authorize a downstream Team dependency, role, phase or
+review decision; the reverse reads are not a cross-resource transaction. Reviewed
+scheduling, independently installed execution authority and budget enforcement
+are still required. New production dispatch remains version 1, planless and
+input-free; no activation check is relaxed by this local input support.
+
+Role and synthesis budgets must also fit the installed inference contract. The
+existing ledger reserves the contract's attested maximum input plus the requested
+output, not an estimate from prompt length. For example, an input bound of
+272,000 tokens requires at least 272,001 tokens even with a one-token output
+limit; proposed role caps of 80,000 or 120,000 cannot admit that request. Lowering
+the output limit alone does not fix that mismatch. Reviewed allocation must leave
+room for synthesis and remain within the finite Team lifetime budget; neither
+input attestations nor approved caps may be silently weakened or increased.
+
+The receiver captures its target and installed contract once at startup. Only an
+exact contract match can answer readiness or reserve a run; incoming assignments
+cannot select or downgrade that contract. OpenClaw bootstrap captures
+`KARS_MISSION_CONTRACT` together with the Secret-backed identity and workload
+binding before awaiting exclusive prekey-writer custody. Absent configuration
+selects legacy version 1; present configuration must be a valid JSON contract of
+at most 8 KiB (exact version/phase/digest fields), or initialization fails closed
+without releasing custody for an unsafe retry. The receiver passes its own
+immutable phase to execution, not the peer's copy. This pins local configuration;
+it does **not** establish reviewed Task/role/run/phase authority, and does not
+remove the production typed-plan activation guard. The controller explicitly
+projects the supported legacy version-1 contract into the workload, overriding
+any `envFrom` credentials value; an independently configured phase contract is
+not selected by the production controller.
+
+Legacy execution also requires a controller-installed `KARS_MISSION_ADMISSION`,
+captured with the bootstrap binding before the first await. Its strict, bounded
+JSON contains the Task generation and full authorization digest plus either an
+idle state or an exact run nonce and objective digest. Idle runtimes accept no
+mission probes or assignments. Run runtimes reject a different nonce or assignment
+objective before readiness, policy authorization, ledger reservation or execution.
+The authorization digest covers effective Task instructions (including its
+trimmed objective); the separate objective digest covers the exact untrimmed UTF8
+execution bytes, including run-bound revision objectives.
+
+Before new dispatch, the store requires current Task readiness, observed generation
+and authorization digest, then checks the controller binding against the actual
+Deployment's explicit admission and version-1 contract. Workload ownership,
+incarnation and reverse-read freshness checks remain mandatory. The controller
+watches annotation-only Task requests to refresh the installed admission;
+acknowledgment and completion alone do not change the pod template. Already-recorded
+terminal evidence can still be recovered and published without requiring a
+replacement runtime or resending its assignment. These bounded checks and startup
+capture are **not an online lease or atomic revocation**. They do not implement
+reviewed role/phase authority or remove typed-plan activation guards. Controller,
+dispatcher and runtime updates must be coordinated: new dispatch rejects missing
+admission, and an enabled runtime with missing admission fails initialization.
+
+Filesystem operations use the packaged Python standard-library helper at
+`dist/core/task-filesystem.py` (requires `/usr/bin/python3`, already in the sandbox
+base). The helper runs without a shell, site packages or inherited environment,
+with bounded input/output and a 10-second timeout. Both tools resolve paths under
+`/sandbox/` or `/tmp/`, then open each untrusted parent relative to a held directory
+descriptor without following symlinks. Administrator-owned roots may be platform
+aliases, such as macOS `/tmp`. Open descriptors pin directory/file identity across
+path swaps; this is not a snapshot or a prohibition on concurrent inode renames.
+Reads accept regular files only, do not block on FIFOs, loop over short reads and
+report actual bytes and incomplete reads. Writes are capped at 16 MiB and replace
+a directory entry atomically with a new mode-0600 inode, rather than truncating an
+existing hard-linked inode. Existing symlinks/special files are refused; a symlink
+raced in before replacement is replaced, never followed. Successful writes do
+not preserve prior inode identity, permissions or hard links. Failed operations
+are not counted as success and do not commit or export artifacts. A helper timeout is a
+failure, not proof that no filesystem effect occurred. These tools do not isolate
+all same-UID processes or replace sandbox OS permissions and mount boundaries.
+
+The runtime reports copied accounting after each response, batch reservation and
+attempted call. The receiver and durable journal reject changed contracts,
+regressing counters and erased evidence. Unknown usage cannot become known after
+consumption. Failures retain validated counters but export no artifacts; an
+unmeasured failure reports unknown usage. Bounded immutable replies and cached
+terminal replay preserve the journal limit without re-executing tools. Tests
+exercise real HTTP/filesystem execution through the receiver at 25 model rounds
+and 32 tool attempts, including failure and exact replay.
+
+These are library/runtime and in-process durability proofs, **not live Team
+activation**. The production store still rejects new dispatch for any typed plan,
+decomposition marker or caller-supplied phase; previously claimed attempts remain
+recoverable without resend. Trusted Task-level plan/phase authority, role
+scheduling, fresh-context handoffs and per-role/synthesis budgets remain required.
+Unsupported capabilities and required tool contracts fail before inference. This
+single-phase support must not be used to unlock typed-plan activation.
+
+The roster alone is not proof that specialists performed work. The published
+manual-run admission path is distinct from engineering intake and milestone
+execution: automatic queue claiming, dependency advancement and revision-bound
+checkpoint continuation still need their consumers. The journey below is the
+intended product contract, not a claim that those integrations are complete.
+
+## Reviewed Team lifetime budget
+
+New Teams created in Bridge require an explicitly reviewed positive whole-number
+**token limit** with `GovernedInference` scope. There is no preselected cap.
+The same Team-UID lifetime account bounds the principal, members and every run,
+including later intake; starting another run does not replenish the allowance.
+Changing the cap invalidates the composer's previous pre-flight result.
+Pre-flight and model-route qualification check the proposed envelope, not whether
+its eventual live budget account, broker or provider reservation is ready.
+
+The API retains compatibility with omitted/null budgets for legacy callers; this
+is not governed budget enrollment. When a budget is supplied, it must have
+explicit `GovernedInference` scope and at least one positive safe whole-number
+limit (tokens and/or micro-USD). Empty, zero, negative, fractional and unsafe
+limits are rejected, not silently removed. Principal, specialist and fallback
+route qualification uses the reviewed token limit. Route edits use the stored
+limit and cannot increase it. Team detail shows the configured limit and scope,
+not a guessed remaining balance. A changed lifetime limit requires a separately
+reviewed new Team, not editing or removing an existing Team's cap. Team update
+requests that explicitly include `budget`, even `null`, are rejected; unrelated
+route or lifecycle edits keep the stored lifetime limit.
+
+Creation remains paused by default. The UI's opt-in launch sequence creates the
+Team paused, installs its queue and engineering settings, then requests resume;
+that sequence does not bypass the typed-plan activation guard above. Until a
+plan-aware executor is available, retain the Team as a reviewed paused draft.
+This budget contract alone is not proof of useful Team delivery or beta readiness.
+
 ## What each Workspace concept means
 
 | Workspace concept | What it is | What it is not |
@@ -44,6 +238,68 @@ Intent
 | Approval | A typed human decision that changes workflow state. | Free-form feedback with no controller effect. |
 | Memory | Approved retained knowledge injected into later runs. | A replay of every raw conversation. |
 | Engineering intake | Repository signal discovery and backlog creation. | The activity timeline or the agents doing the work. |
+
+### Current artifacts versus retained evidence
+
+The mission artifact download endpoint serves only the current committed run of
+a live Task in `kars-system`. Its Task UID, requested/completed run nonce and
+artifact ownership must match. A missing, recreated or superseded Task does not
+make an old file current. Downloads require an explicit `run_nonce` query
+parameter; omitted revisions return 400, superseded or incomplete revisions 409,
+and missing or inaccessible records 404. Ownership and revision are rechecked
+after reading evidence and before serving bytes. Retained historical evidence is
+a separate capability; this endpoint does not establish artifact access after
+Task deletion.
+
+### Revision-bound mission evidence
+
+Mission detail and list results join the live Task UID with its exact requested
+and completed revision, not a name-only retained output. A changed or deleted
+Task during a detail read withholds that response. Feedback requests a distinct
+revision; it does not prove the next execution has started.
+
+For durable agent results, the recorded producer includes agent DID, assignment,
+Task UID, sandbox/pod/boot identity, and timestamps. Current registry identity is
+not evidence of who produced an earlier result. Whole-run usage comes from a
+validated terminal record; cumulative progress snapshots are never added together.
+Missing usage or activity is unavailable, not zero. Revision-pinned activity
+streams close when the revision changes and only signal completion from a
+matching terminal result, never merely because an artifact exists. If detailed
+trace records are unavailable, Activity says so instead of showing a zero-work
+graph or asking you to launch an already completed run. Available assignment and
+approval records remain visible, without claiming a complete timeline. Produced
+and review-history timestamps use explicitly labelled UTC for consistent display
+across server rendering and browser timezones.
+
+Approval requires an eligible useful successful result in the current revision.
+Invalid terminal evidence cannot authorize a review mutation. Task-level receipts
+without revision binding are explicitly labelled as such. Budget/failure messages
+are reported observations, not independent accounting, proof of a root cause,
+or a promise of reset or automatic recovery.
+
+### Explicit text attachments on mission success
+
+The bounded mission dispatcher advertises `artifactFormat: "text-v1"`. With a
+compatible OpenClaw runtime, an authorized `file_write` can supply `artifact_name`
+to attach the exact UTF-8 content it successfully wrote. The final answer remains
+`response.md`; a path or an “artifact ready” message is not the document itself.
+When attachment support is absent, the agent must return the complete answer
+inline instead.
+
+Attachments use flat filenames (letters/digits first, then letters, digits,
+periods, underscores or hyphens; at most 128 characters). `response.md`,
+`__proto__`, `constructor` and `prototype` are reserved. There may be at most
+16 additional files, totaling 128 KiB of serialized JSON including UTF-8 text,
+escaping and filenames. The entire encrypted mission payload remains bounded by
+192 KiB, including final answer and evidence; exceeding it fails the mission.
+
+A null or omitted `artifact_name` is local-only scratch. Nothing scans the
+filesystem, reads older files, or implicitly exports output from another tool.
+The last successful explicitly attached write to a name wins; later local-only
+or failed writes do not replace it. Staged attachments are execution-local and
+publish only with a successful terminal result, never on failure or in a later
+revision. Named files share the current-run ownership and download fences above.
+Transport success and valid files still require review for useful content.
 
 ### Engineering intake identity and existing PRs
 
@@ -134,14 +390,51 @@ Each milestone contains:
 - acceptance criteria;
 - optional review gate.
 
-Only a milestone whose dependencies are `done` may run. A milestone in
-`active` or `awaiting_review` blocks later assignments. This is why a team can
-have many queued milestones but only one current execution cell.
+The intended dependency contract allows only a milestone whose dependencies are
+`done` to run; `active` or `awaiting_review` work must block dependent assignments.
+The graph records that contract, but its automatic execution and review
+continuation are not yet connected to the durable manual-run consumer. Do not
+interpret queued milestones or a successful queue write as agent activity.
 
 ## 3. Launch and watch a run
 
-**Run now** creates a one-shot request. The BFF rejects a second request while
-one is pending or active, and the button changes to **Run in progress**.
+**Run now** records a one-shot request, not proof that an agent started or
+produced a deliverable. The BFF checks the current owner and Team UID, rejects
+paused Teams, pending requests and exact-owned active task forces, and writes
+with UID/resourceVersion preconditions. Active-run checks cover the entire
+namespace; labels alone neither establish ownership nor hide a running Task.
+Concurrent Team changes return a conflict instead of overwriting newer intent.
+
+The manual admission protocol separates durable stages:
+
+1. Stage an exact-owned, **unlaunched** Task under a stable request identity.
+2. Persist its Task UID, authority/spec digests and admission sequence in
+   `status.runAdmission`, counting the reservation once.
+3. Recheck current authority, finite shared budget and capacity; activate that
+   exact Task with UID/resourceVersion preconditions.
+4. Acknowledge only the matching request. A retry after a lost acknowledgement
+   reuses the reservation rather than creating or relaunching work.
+
+The latest admission remains after acknowledgement. Requests use canonical
+`manual-<sequence>-<sha256>` identities; a later request advances the sequence
+and creates a distinct Task under the same Team budget root, without resetting
+settled spend. Missing, replaced or altered reserved Tasks fail closed rather
+than being recreated. Credential drift still pauses the runtime promptly; only
+its final credential-spec rewrite waits for a pending acknowledgement so the
+original admission spec can be verified before rebinding.
+
+Legacy timestamp-only `run-now` annotations are not silently converted or
+executed. They remain rejected/pending. An operator must inspect the Team and
+retained Task evidence before clearing an obsolete request with current UID/RV
+preconditions and submitting a new reviewed request. Do not clear the retained
+admission watermark, replay an old sequence, or treat a retry as permission to
+reset the budget.
+
+These are bounded cross-object checks, not a distributed transaction or lease.
+A request, reservation, acknowledgement, Ready pod or generated-task count is
+not delivery evidence. Manual admission also does not establish engineering
+backlog assignment or checkpoint/revision continuation; those paths require
+their own connected evidence and acceptance tests.
 
 The run page has four views:
 

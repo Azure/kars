@@ -58,6 +58,60 @@ fn readiness_requires_current_generation_digest_and_valid_contract() {
 }
 
 #[test]
+fn execution_plan_readiness_requires_a_retained_supported_contract() {
+    for marker in ["execution-plan/v1", "execution-plan/v2"] {
+        let mut task = task_with(1, 1, 0);
+        task.metadata.generation = Some(1);
+        task.status = Some(ready_status(None, Some(1), task.envelope_digest(), vec![]));
+        assert!(task_is_ready(&task));
+        task.annotations_mut()
+            .insert("kars.azure.com/mission-decomposition".into(), marker.into());
+        assert_eq!(
+            task.status.as_ref().unwrap().envelope_digest,
+            Some(task.envelope_digest())
+        );
+        match check_envelope(&task) {
+            EnvelopeCheck::Invalid(why) => assert!(why.contains("ReviewedExecutionPlanMissing")),
+            EnvelopeCheck::Valid => panic!("missing plan accepted for {marker}"),
+        }
+        assert!(!task_is_ready(&task));
+    }
+}
+
+#[test]
+fn execution_plan_drafts_are_ready_but_unsupported_launches_are_not() {
+    let mut task = task_with(1, 1, 0);
+    task.metadata.generation = Some(1);
+    task.spec.blueprint = Some(crate::kars_task::TaskBlueprint {
+        execution_plan: Some(crate::task_execution_plan::test_plan()),
+        ..Default::default()
+    });
+    task.spec.execution = Some(crate::kars_task::TaskExecution {
+        launch: false,
+        runtime: None,
+    });
+    task.status = Some(ready_status(None, Some(1), task.envelope_digest(), vec![]));
+    assert!(task_is_ready(&task));
+    task.spec.execution.as_mut().unwrap().launch = true;
+    task.status = Some(ready_status(None, Some(1), task.envelope_digest(), vec![]));
+    match check_envelope(&task) {
+        EnvelopeCheck::Invalid(why) => assert!(why.contains("TypedPlanExecutionUnavailable")),
+        EnvelopeCheck::Valid => panic!("unsupported plan execution accepted"),
+    }
+    assert!(!task_is_ready(&task));
+    task.spec.execution.as_mut().unwrap().launch = false;
+    task.status = Some(ready_status(None, Some(1), task.envelope_digest(), vec![]));
+    assert!(task_is_ready(&task));
+    task.spec.blueprint.as_mut().unwrap().execution_plan = None;
+    task.spec.execution.as_mut().unwrap().launch = true;
+    task.status = Some(ready_status(None, Some(1), task.envelope_digest(), vec![]));
+    assert!(
+        task_is_ready(&task),
+        "legacy unmarked launch remains supported"
+    );
+}
+
+#[test]
 fn completeness_floor_is_not_inferred_from_resource_names() {
     let completeness = gather_completeness();
     assert!(!completeness.floor_enforced);

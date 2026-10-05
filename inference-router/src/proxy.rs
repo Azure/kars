@@ -116,7 +116,8 @@ fn build_upstream_headers(
     let mut headers = HeaderMap::new();
     for (name, value) in request_headers.iter() {
         match name.as_str() {
-            "authorization" | "api-key" | "x-api-key" => continue,
+            "authorization" | "api-key" | "x-api-key" | "x-kars-service-scope" => continue,
+            name if name.starts_with("x-kars-telemetry-") => continue,
             "host" | "connection" | "transfer-encoding" | "content-length" => continue,
             // Don't pass through Copilot's own static headers from the inbound
             // request — we always emit our own canonical values below.
@@ -335,7 +336,8 @@ pub async fn forward(
 
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let response_headers = response.headers().clone();
+    let response_headers =
+        crate::task_telemetry::observe::response_headers(response.headers(), observation.as_ref());
     if let Some(observation) = observation.as_mut() {
         observation.headers(status.as_u16());
     }
@@ -609,7 +611,8 @@ pub async fn forward_stream(
 
     let status =
         StatusCode::from_u16(response.status().as_u16()).unwrap_or(StatusCode::BAD_GATEWAY);
-    let response_headers = response.headers().clone();
+    let response_headers =
+        crate::task_telemetry::observe::response_headers(response.headers(), observation.as_ref());
     if let Some(observation) = observation.as_mut() {
         observation.headers(status.as_u16());
     }

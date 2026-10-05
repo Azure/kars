@@ -1,0 +1,45 @@
+{
+  "version": 1,
+  "source": "runtime-forwarded-router-observations",
+  "coverage": "returned-responses-only",
+  "responses": 3,
+  "scope_id": "scope-a",
+  "rounds": [1, 2],
+  "state": "observed",
+  "trace": {
+    "scope_id": "scope-a",
+    "rounds": [1, 2],
+    "missing_rounds": [],
+    "dropped_events": 0,
+    "truncated": false,
+    "coverage": "returned-responses-only",
+    "durable": false,
+    "events": [
+      {
+        "kind": "round", "scope_id": "scope-a", "round": 1, "seq": 1,
+        "source": "router-upstream", "provider": "qualified-provider", "model": "model",
+        "http_status": 200, "accepted": true, "outcome": "complete",
+        "usage": { "prompt_tokens": 0, "completion_tokens": null, "total_tokens": null },
+        "usage_state": "partial", "finish_reason": "tool_calls", "partial_observation": false,
+        "ms": 0, "tool_calls_observed": 1
+      },
+      {
+        "kind": "tool_proposed", "scope_id": "scope-a", "round": 1, "seq": 2,
+        "source": "model-proposed", "call_id": "call-1", "name": "fetch", "ok": null
+      },
+      {
+        "kind": "tool_result", "scope_id": "scope-a", "round": 1, "seq": 3,
+        "source": "harness-reported", "call_id": "call-1", "name": "fetch", "ok": false,
+        "reported_in_round": 2
+      },
+      {
+        "kind": "round", "scope_id": "scope-a", "round": 2, "seq": 4,
+        "source": "router-upstream", "provider": "qualified-provider", "model": "model",
+        "http_status": 200, "accepted": true, "outcome": "complete",
+        "usage": { "prompt_tokens": null, "completion_tokens": null, "total_tokens": null },
+        "usage_state": "missing", "finish_reason": "stop", "partial_observation": false,
+        "ms": 0, "tool_calls_observed": 0
+      }
+    ]
+  }
+}

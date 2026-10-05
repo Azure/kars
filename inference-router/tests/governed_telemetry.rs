@@ -40,18 +40,219 @@ fn events(telemetry: &TaskTelemetry) -> Vec<Value> {
         .clone()
 }
 
-#[tokio::test]
-async fn buffered_http_producer_observes_usage_but_never_api_bodies_or_tool_arguments() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
-        "choices":[{"finish_reason":"tool_calls","message":{"content":"output-secret-marker","tool_calls":[
-            {"id":"call-1","function":{"name":"fetch","arguments":"argument-secret-marker"}}
-        ]}}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
-    }))).mount(&server).await;
+#[test]
+fn selected_rounds_match_the_runtime_and_bridge_contract() {
     let telemetry = telemetry();
-    let target = upstream(server.uri(), telemetry.clone());
+    let mut first = telemetry
+        .begin("chat/completions", "qualified-provider", "model", b"{}")
+        .unwrap();
+    first.buffered(200, br#"{"choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"call-1","function":{"name":"fetch","arguments":"private-arguments"}}]}}],"usage":{"prompt_tokens":0}}"#);
+    let mut second = telemetry.begin("chat/completions", "qualified-provider", "model",
+        br#"{"messages":[{"role":"tool","tool_call_id":"call-1","content":"private-result","is_error":true}]}"#).unwrap();
+    second.buffered(
+        200,
+        br#"{"choices":[{"finish_reason":"stop","message":{"content":"private-output"}}]}"#,
+    );
+    let mut selected = telemetry.selected_snapshot("scope-a", &[1, 2]).unwrap();
+    for event in selected["events"].as_array_mut().unwrap() {
+        if event["kind"] == "round" {
+            event["ms"] = json!(0);
+        }
+    }
+    let contract: Value =
+        serde_json::from_str(include_str!("fixtures/router-observations-v1.json")).unwrap();
+    let mut router_trace = contract["trace"].clone();
+    for event in router_trace["events"].as_array_mut().unwrap() {
+        if event["kind"] == "round" {
+            event["usage"]["cached_tokens"] = Value::Null;
+        }
+    }
+    assert_eq!(selected, router_trace);
+    for rounds in [&[1][..], &[2][..]] {
+        let selected = telemetry.selected_snapshot("scope-a", rounds).unwrap();
+        assert!(
+            selected["events"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .all(|event| event["kind"] != "tool_result"
+                    && rounds.contains(&event["round"].as_u64().unwrap()))
+        );
+    }
+    assert!(telemetry.selected_snapshot("wrong-scope", &[1]).is_none());
+    for rounds in [vec![], vec![0], (1..=33).collect()] {
+        assert!(telemetry.selected_snapshot("scope-a", &rounds).is_none());
+    }
+    assert_eq!(
+        telemetry.selected_snapshot("scope-a", &[1, 2, 3]).unwrap()["missing_rounds"],
+        json!([3])
+    );
+    telemetry.reset("scope-b".into());
+    assert!(telemetry.selected_snapshot("scope-a", &[1, 2]).is_none());
+    assert_eq!(
+        telemetry.selected_snapshot("scope-b", &[1, 2]).unwrap()["missing_rounds"],
+        json!([1, 2])
+    );
+}
+
+#[test]
+fn selected_rounds_report_truncation_eviction_and_reused_call_ids() {
+    let telemetry = telemetry();
+    let response = json!({"choices":[{"message":{"tool_calls":(0..16).map(|n|
+        json!({"id":format!("call-{n}"),"function":{"name":"fetch","arguments":"private"}})).collect::<Vec<_>>()}}]});
+    let body = serde_json::to_vec(&response).unwrap();
+    for _ in 0..20 {
+        telemetry
+            .begin("chat/completions", "provider", "model", b"{}")
+            .unwrap()
+            .buffered(200, &body);
+    }
+    let selection = telemetry
+        .selected_snapshot("scope-a", &(1..=20).collect::<Vec<_>>())
+        .unwrap();
+    assert_eq!(selection["events"].as_array().unwrap().len(), 256);
+    assert_eq!(selection["truncated"], true);
+    assert_eq!(selection["missing_rounds"], json!([]));
+    assert!(selection["dropped_events"].as_u64().unwrap() > 0);
+    let mut report = telemetry
+        .begin(
+            "chat/completions",
+            "provider",
+            "model",
+            br#"{"messages":[{"role":"tool","tool_call_id":"call-0","content":"private"}]}"#,
+        )
+        .unwrap();
+    report.buffered(200, b"{}");
+    let selected = telemetry
+        .selected_snapshot("scope-a", &[1, 20, 21])
+        .unwrap();
+    let results: Vec<_> = selected["events"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|e| e["kind"] == "tool_result")
+        .collect();
+    // Reused call IDs are ambiguous, so the recorder must not attribute a result.
+    assert!(results.is_empty());
+    for _ in 0..1100 {
+        telemetry.record_policy("scope-a", "fetch", false);
+    }
+    let evicted = telemetry
+        .selected_snapshot("scope-a", &[1, 20, 21])
+        .unwrap();
+    assert_eq!(evicted["events"], json!([]));
+    assert_eq!(evicted["missing_rounds"], json!([1, 20, 21]));
+    assert_eq!(evicted["truncated"], false);
+    assert!(evicted["dropped_events"].as_u64().unwrap() > 0);
+}
+
+#[tokio::test]
+async fn selected_rounds_http_validates_queries_and_preserves_cursor_mode() {
+    let state = state("workspace", "uid");
+    let scope = state.services.telemetry.cursor().0;
+    state
+        .services
+        .telemetry
+        .begin("responses", "provider", "model", b"{}")
+        .unwrap()
+        .buffered(200, b"{}");
+    let app = app(state);
+    let mut invalid = vec![
+        "".to_owned(),
+        "0".into(),
+        "1,1".into(),
+        "2,1".into(),
+        "-1".into(),
+        "1,".into(),
+        "1,,2".into(),
+        "a".into(),
+        "18446744073709551616".into(),
+        "1&since=1".into(),
+    ];
+    invalid.push(
+        (1..=33)
+            .map(|n| n.to_string())
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    for query in invalid {
+        let path = format!("/telemetry/trace?rounds={query}");
+        let response = app
+            .clone()
+            .oneshot(request("GET", &path, json!({}), None, Some(&scope), true))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{path}");
+    }
+    for suffix in ["rounds=1,2", "rounds=1,2&since=0"] {
+        let (status, selected) = send(
+            &app,
+            request(
+                "GET",
+                &format!("/telemetry/trace?{suffix}"),
+                json!({}),
+                None,
+                Some(&scope),
+                true,
+            ),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(selected["rounds"], json!([1, 2]));
+        assert_eq!(selected["missing_rounds"], json!([2]));
+        assert_eq!(selected["coverage"], "returned-responses-only");
+    }
+    for bad_scope in [None, Some("wrong-scope")] {
+        assert_eq!(
+            send(
+                &app,
+                request(
+                    "GET",
+                    "/telemetry/trace?rounds=1",
+                    json!({}),
+                    None,
+                    bad_scope,
+                    true
+                )
+            )
+            .await
+            .0,
+            StatusCode::CONFLICT
+        );
+    }
+    let (status, cursor) = send(
+        &app,
+        request(
+            "GET",
+            "/telemetry/trace?since=0",
+            json!({}),
+            None,
+            Some(&scope),
+            true,
+        ),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(cursor["coverage"], "router-observed-only");
+    assert!(cursor.get("rounds").is_none());
+}
+
+#[tokio::test]
+async fn providers_cannot_advertise_router_ids_without_an_observer() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .insert_header("x-kars-telemetry-scope", "provider-spoof")
+                .insert_header("x-kars-telemetry-round", "999")
+                .set_body_json(json!({})),
+        )
+        .mount(&server)
+        .await;
+    let mut target = upstream(server.uri(), telemetry());
+    target.telemetry = None;
     let client = reqwest::Client::builder().no_proxy().build().unwrap();
-    let (_, _, body) = proxy::forward(
+    let (_, headers, _) = proxy::forward(
         &WorkloadIdentityAuth::new(),
         None,
         &client,
@@ -59,10 +260,62 @@ async fn buffered_http_producer_observes_usage_but_never_api_bodies_or_tool_argu
         Method::POST,
         "chat/completions",
         &HeaderMap::new(),
+        Bytes::from("{}"),
+    )
+    .await
+    .unwrap();
+    assert!(!headers.contains_key("x-kars-telemetry-scope"));
+    assert!(!headers.contains_key("x-kars-telemetry-round"));
+    let (_, headers, stream) = proxy::forward_stream(
+        Arc::new(WorkloadIdentityAuth::new()),
+        None,
+        client,
+        target,
+        "chat/completions",
+        HeaderMap::new(),
+        Bytes::from("{}"),
+    )
+    .await
+    .unwrap();
+    assert!(!headers.contains_key("x-kars-telemetry-scope"));
+    assert!(!headers.contains_key("x-kars-telemetry-round"));
+    let _: Vec<_> = stream.try_collect().await.unwrap();
+}
+
+#[tokio::test]
+async fn buffered_http_producer_observes_usage_but_never_api_bodies_or_tool_arguments() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({
+        "choices":[{"finish_reason":"tool_calls","message":{"content":"output-secret-marker","tool_calls":[
+            {"id":"call-1","function":{"name":"fetch","arguments":"argument-secret-marker"}}
+        ]}}],"usage":{"prompt_tokens":11,"completion_tokens":7,"total_tokens":18}
+    })).insert_header("x-kars-telemetry-scope", "provider-spoof")
+        .insert_header("x-kars-telemetry-round", "999")).mount(&server).await;
+    let telemetry = telemetry();
+    let target = upstream(server.uri(), telemetry.clone());
+    let client = reqwest::Client::builder().no_proxy().build().unwrap();
+    let mut caller_headers = HeaderMap::new();
+    caller_headers.insert("x-kars-service-scope", "caller-spoof".parse().unwrap());
+    caller_headers.insert("x-kars-telemetry-scope", "caller-spoof".parse().unwrap());
+    caller_headers.insert("x-kars-telemetry-round", "888".parse().unwrap());
+    let (_, headers, body) = proxy::forward(
+        &WorkloadIdentityAuth::new(),
+        None,
+        &client,
+        &target,
+        Method::POST,
+        "chat/completions",
+        &caller_headers,
         Bytes::from(r#"{"messages":[{"role":"user","content":"prompt-secret-marker"}]}"#),
     )
     .await
     .unwrap();
+    assert_eq!(headers["x-kars-telemetry-scope"], "scope-a");
+    assert_eq!(headers["x-kars-telemetry-round"], "1");
+    let received = server.received_requests().await.unwrap();
+    assert!(!received[0].headers.contains_key("x-kars-service-scope"));
+    assert!(!received[0].headers.contains_key("x-kars-telemetry-scope"));
+    assert!(!received[0].headers.contains_key("x-kars-telemetry-round"));
     assert!(String::from_utf8_lossy(&body).contains("output-secret-marker"));
     let trace = events(&telemetry);
     assert_eq!(trace[0]["usage"]["total_tokens"], 18);
@@ -276,7 +529,7 @@ async fn streaming_http_producer_reports_missing_usage_and_no_replay_after_incom
         .mount(&server)
         .await;
     let telemetry = telemetry();
-    let (_, _, stream) = proxy::forward_stream(
+    let (_, headers, stream) = proxy::forward_stream(
         Arc::new(WorkloadIdentityAuth::new()),
         None,
         reqwest::Client::builder().no_proxy().build().unwrap(),
@@ -287,6 +540,8 @@ async fn streaming_http_producer_reports_missing_usage_and_no_replay_after_incom
     )
     .await
     .unwrap();
+    assert_eq!(headers["x-kars-telemetry-scope"], "scope-a");
+    assert_eq!(headers["x-kars-telemetry-round"], "1");
     let _: Vec<_> = stream.try_collect().await.unwrap();
     let events = events(&telemetry);
     assert_eq!(events.len(), 1);
@@ -384,6 +639,12 @@ async fn physical_failover_attempts_keep_actual_provider_identity_without_counti
     .await
     .unwrap();
     assert_eq!(result.0, StatusCode::OK);
+    assert_eq!(result.1["x-kars-telemetry-scope"], "scope-a");
+    assert_eq!(result.1["x-kars-telemetry-round"], "2");
+    let selected = telemetry.selected_snapshot("scope-a", &[2]).unwrap();
+    assert_eq!(selected["coverage"], "returned-responses-only");
+    assert_eq!(selected["events"].as_array().unwrap().len(), 1);
+    assert_eq!(selected["events"][0]["provider"], "second");
     let events = events(&telemetry);
     assert_eq!(events.len(), 2);
     assert_eq!(events[0]["provider"], "first");

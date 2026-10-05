@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use super::{Cluster, MissionOutputRecord};
+use crate::kars::task::KarsTask;
 use crate::providers::signing::sha256_hex;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::api::Api;
@@ -49,6 +50,58 @@ fn mission_principal_name(cm: &ConfigMap) -> Option<String> {
                 .as_ref()
                 .and_then(|labels| labels.get("kars.azure.com/mission-principal").cloned())
         })
+}
+
+// Read ConfigMaps before the Task: a projection alone is not a commit marker.
+// Unbound legacy records remain history, never evidence of the current run.
+pub(super) fn current_mission_record(cm: &ConfigMap, task: &KarsTask, output: bool) -> bool {
+    let (Some(name), Some(namespace), Some(uid)) = (
+        task.metadata.name.as_deref(),
+        task.metadata.namespace.as_deref(),
+        task.metadata.uid.as_deref().filter(|uid| !uid.is_empty()),
+    ) else {
+        return false;
+    };
+    let Some(task_annotations) = task.metadata.annotations.as_ref() else {
+        return false;
+    };
+    let Some(nonce) = task_annotations
+        .get("kars.azure.com/run-requested")
+        .filter(|nonce| !nonce.is_empty())
+    else {
+        return false;
+    };
+    let Some(annotations) = cm.metadata.annotations.as_ref() else {
+        return false;
+    };
+    task.metadata.deletion_timestamp.is_none()
+        && cm.metadata.deletion_timestamp.is_none()
+        && cm.metadata.namespace.as_deref() == Some(namespace)
+        && task_annotations.get("kars.azure.com/run-completed") == Some(nonce)
+        && annotations
+            .get("kars.azure.com/mission-task-uid")
+            .map(String::as_str)
+            == Some(uid)
+        && annotations.get("kars.azure.com/mission-run-nonce") == Some(nonce)
+        && annotations
+            .get("kars.azure.com/mission-principal-name")
+            .map(String::as_str)
+            == Some(name)
+        && cm.metadata.owner_references.as_ref().is_some_and(|owners| {
+            owners.iter().any(|owner| {
+                owner.api_version == "kars.azure.com/v1alpha1"
+                    && owner.kind == "KarsTask"
+                    && owner.name == name
+                    && owner.uid == uid
+                    && owner.controller == Some(true)
+            })
+        })
+        && (!output
+            || cm.data.as_ref().is_some_and(|data| {
+                data.get("taskName").map(String::as_str) == Some(name)
+                    && data.get("taskUid").map(String::as_str) == Some(uid)
+                    && data.get("assignmentNonce") == Some(nonce)
+            }))
 }
 
 pub(super) fn mission_output_candidate(
@@ -124,7 +177,7 @@ pub(super) fn select_mission_evidence_records(
     )>,
 ) -> Vec<(String, std::collections::BTreeMap<String, String>)> {
     let mut grouped = std::collections::BTreeMap::<
-        String,
+        (Option<String>, Option<String>, String),
         Vec<(
             String,
             Option<String>,
@@ -132,10 +185,13 @@ pub(super) fn select_mission_evidence_records(
         )>,
     >::new();
     for (key, role, data) in records {
-        let identity = data
-            .get("assignmentNonce")
-            .cloned()
-            .unwrap_or_else(|| key.clone());
+        let identity = (
+            data.get("taskUid").cloned(),
+            data.get("taskName").cloned(),
+            data.get("assignmentNonce")
+                .cloned()
+                .unwrap_or_else(|| key.clone()),
+        );
         grouped.entry(identity).or_default().push((key, role, data));
     }
     grouped
@@ -222,46 +278,55 @@ impl Cluster {
         Ok(())
     }
 
-    /// Read a mission's persisted run output ConfigMap, if present.
+    async fn current_mission_configmap(&self, task: &str, kind: &str) -> Option<ConfigMap> {
+        let name = format!("kars-mission-{kind}-{task}");
+        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");
+        let cm = cms.get_opt(&name).await.ok().flatten()?;
+        let current = self
+            .tasks("kars-system")
+            .get_opt(task)
+            .await
+            .ok()
+            .flatten()?;
+        (cm.metadata.name.as_deref() == Some(name.as_str())
+            && current.metadata.name.as_deref() == Some(task)
+            && current.metadata.namespace.as_deref() == Some("kars-system")
+            && current_mission_record(&cm, &current, kind == "output"))
+        .then_some(cm)
+    }
+
+    /// Read only output committed for this Task UID's current requested run.
     pub async fn read_mission_output(
         &self,
         task: &str,
     ) -> Option<std::collections::BTreeMap<String, String>> {
-        self.configmap_data(&format!("kars-mission-output-{task}"))
-            .await
+        self.current_mission_configmap(task, "output").await?.data
     }
 
-    /// Read a mission's persisted artifact set — the complete file set the
-    /// agent produced over the mesh, written by the controller to
-    /// `kars-mission-artifacts-<task>`. Text artifacts come back as `data`
-    /// (filename → content); binary artifacts are reported by name + size via
-    /// the output ConfigMap's manifest (their bytes live in the ConfigMap's
-    /// `binaryData` and aren't inlined here). Returns `None` when the mission
-    /// produced no artifacts (honest empty, never fabricated).
+    /// Read text artifacts committed for the current Task UID and requested run.
+    /// Binary artifacts live in `binaryData` and are served by the download path.
+    /// `None` also covers missing, stale, unbound or unreadable records; it does
+    /// not establish that the agent produced no artifacts.
     pub async fn read_mission_artifacts(
         &self,
         task: &str,
     ) -> Option<std::collections::BTreeMap<String, String>> {
-        self.configmap_data(&format!("kars-mission-artifacts-{task}"))
-            .await
+        self.current_mission_configmap(task, "artifacts")
+            .await?
+            .data
     }
 
     /// Read a single artifact file's raw bytes for download — text artifacts
     /// from the ConfigMap's `data`, binary ones from `binaryData` (base64). The
     /// filename is matched against the same sanitized key the manifest exposes.
-    /// Returns `(bytes, is_binary)` or `None` when the file isn't found. This is
-    /// the Bridge-native fetch path so operators never need `kubectl`.
+    /// Returns `(bytes, is_binary)` only for the committed current run; `None`
+    /// covers absent files and stale, unbound or unreadable records.
     pub async fn read_mission_artifact_bytes(
         &self,
         task: &str,
         key: &str,
     ) -> Option<(Vec<u8>, bool)> {
-        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");
-        let cm = cms
-            .get_opt(&format!("kars-mission-artifacts-{task}"))
-            .await
-            .ok()
-            .flatten()?;
+        let cm = self.current_mission_configmap(task, "artifacts").await?;
         if let Some(text) = cm.data.as_ref().and_then(|d| d.get(key)) {
             return Some((text.clone().into_bytes(), false));
         }
@@ -271,6 +336,15 @@ impl Cluster {
             return Some((bytes.0.clone(), true));
         }
         None
+    }
+
+    /// Read a terminal mission trace only when bound to the current Task UID/run.
+    pub async fn read_current_mission_trace(&self, task: &str) -> Option<String> {
+        self.current_mission_configmap(task, "trace")
+            .await?
+            .data?
+            .get("trace.json")
+            .cloned()
     }
 
     /// Read a mission's persisted execution trace — the clean per-tool audit
@@ -307,13 +381,11 @@ impl Cluster {
             .unwrap_or(0)
     }
 
-    /// List every mission that has produced a captured deliverable — one entry
-    /// per `kars-mission-output-*` ConfigMap. New records retain the full
-    /// evidence key in an annotation because nonce-scoped label values can
-    /// exceed Kubernetes' 63-byte limit; legacy records fall back to the label.
-    /// Returns `(task, data)` pairs so the caller can build the cross-mission
-    /// Artifacts index from real, durable records (never fabricated). Sorted by
-    /// `finishedAt` descending so the most recent deliverables surface first.
+    /// List one committed current deliverable per Task, validated against a Task
+    /// snapshot read after the ConfigMaps. Stale projections cannot outrank a
+    /// valid canonical record. API errors return an empty list, not evidence of
+    /// no delivery. Historical and unbound legacy records use the evidence API.
+    /// Results are sorted by `finishedAt` descending.
     pub async fn list_mission_outputs(&self) -> Vec<MissionOutputRecord> {
         use kube::api::ListParams;
         let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");
@@ -324,13 +396,27 @@ impl Cluster {
             Ok(l) => l,
             Err(_) => return Vec::new(),
         };
-        let records: Vec<(
-            String,
-            Option<String>,
-            std::collections::BTreeMap<String, String>,
-        )> = list
+        let tasks = match self.tasks("kars-system").list(&ListParams::default()).await {
+            Ok(tasks) => tasks
+                .items
+                .into_iter()
+                .filter_map(|task| task.metadata.name.clone().map(|name| (name, task)))
+                .collect::<std::collections::HashMap<_, _>>(),
+            Err(_) => return Vec::new(),
+        };
+        let records = list
             .items
             .into_iter()
+            .filter(|cm| {
+                cm.data
+                    .as_ref()
+                    .and_then(|data| data.get("taskName"))
+                    .and_then(|name| tasks.get(name))
+                    .is_some_and(|task| {
+                        task.metadata.namespace.as_deref() == Some("kars-system")
+                            && current_mission_record(cm, task, true)
+                    })
+            })
             .filter_map(mission_output_candidate)
             .collect();
         let mut out = select_mission_output_records(records)
@@ -348,8 +434,8 @@ impl Cluster {
     }
 
     /// List each nonce-scoped execution exactly once for accounting, efficiency,
-    /// and historical evidence. Immutable archives/canonical records are kept;
-    /// task-keyed current-pointer mirrors are excluded.
+    /// and historical evidence. Immutable archives/canonical records outrank
+    /// current-pointer mirrors of the same Task UID/name and run nonce.
     pub async fn list_mission_output_evidence(&self) -> Vec<MissionOutputRecord> {
         use kube::api::ListParams;
         let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");

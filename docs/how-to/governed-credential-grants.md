@@ -43,7 +43,14 @@ which admission plugin ran or turn a rejected consumer into an approved one.
 delegation. It pins the workspace UID, writer ServiceAccount UIDs, permitted
 agent key names, and each enrolled integration Secret's exact name/UID/purpose.
 There are no credential values in the CRD. The operator ClusterRole is unbound;
-Bridge cannot author or widen its grant.
+the running Bridge cannot author or widen its grant. An installing operator may
+explicitly select the Bridge chart's `workspaceEnrollment.enabled=true` to create
+a UID-bound **zero-writer, zero-store** workspace grant after Core installation.
+This opt-in uses the Helm caller's existing authority, grants no BFF permissions,
+and leaves readiness to the controller. It refuses adoption or overwrite of
+expanded grants. Disable this option before separately reviewed private
+enrollment; the resource is retained on disable/uninstall, not implicitly
+revoked. See the [Helm enrollment instructions](../../bridge/deploy/helm/kars-bridge/README.md#credential-free-workspace-enrollment).
 
 Core creates source-only writer Roles behind fail-closed admission. The
 parameter-independent source boundary continues to restrict Secret creation

@@ -72,6 +72,7 @@ export interface TaskDetail {
    *  Artifacts tab (a PR is a delivery type). Empty when none. */
   pull_requests?: PullRequestRef[];
   activity: ActivityEvent[];
+  router_activity?: import("../router-activity").RouterActivity | null;
   telemetry: MissionTelemetry | null;
   checkpoint: TaskCheckpoint | null;
   agent_identity: AgentIdentity | null;
@@ -153,7 +154,11 @@ export interface MissionTelemetry {
 /** One event in the agent's live execution trace. A `round` event records the
  * model call (real token usage); a `tool` event records one tool invocation
  * with a sanitized args/result preview. */
-export type ActivityEvent =
+export type ActivityEvent = {
+  runNonce?: string;
+  assignmentNonce?: string;
+  assignment_nonce?: string;
+} & (
   | {
       kind: "round";
       round: number;
@@ -187,7 +192,7 @@ export type ActivityEvent =
       seq?: number;
       /** Present on tools authoritatively executed and recorded by the router. */
       source?: "router" | "harness" | "governance";
-    };
+    });
 
 /** One artifact file in a mission's deliverable set. `content` is present for
  * text artifacts (markdown/json/csv/…) and null for binary ones. */
@@ -210,8 +215,29 @@ export interface AgentIdentity {
   reputation_score: number | null;
 }
 
-/** A captured mission run result — a real deliverable + real token cost. */
+/** Producer recorded by the committed run, independent of today's registry. */
+export interface MissionRunEvidence {
+  task_uid: string;
+  run_nonce: string;
+  assignment_id: string;
+  agent_name: string;
+  agent_did: string;
+  dispatcher_did: string;
+  sandbox_uid: string;
+  pod_uid: string;
+  runtime_boot_id: string;
+  status: string;
+  started_at: string;
+  finished_at: string;
+  rounds: number | null;
+}
+
+/** A captured run outcome; presence alone does not establish a deliverable. */
 export interface MissionResult {
+  /** Optional during rolling upgrades; missing eligibility never enables approval. */
+  reviewable?: boolean;
+  usage_known?: boolean;
+  run_evidence?: MissionRunEvidence | null;
   output: string;
   status: string | null;
   model: string | null;
@@ -220,9 +246,7 @@ export interface MissionResult {
   completion_tokens: number | null;
   finished_at: string | null;
   assignment_nonce: string | null;
-  /** How the deliverable was produced. "single_turn" = one model turn (no
-   *  tools/sub-agents) because the mesh agent loop was unavailable; absent for
-   *  a full agent-loop run. */
+  /** Recorded source classification; absence does not prove tools or agent execution. */
   source: string | null;
   /** Set when this run's ok-output is actually a capability/limit STOP (today the
    *  daily token budget), not a deliverable — rendered as an actionable state. */

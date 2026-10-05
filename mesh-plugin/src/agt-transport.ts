@@ -5,7 +5,7 @@
  * AGT-backed mesh transport — implements IMeshTransport using the
  * upstream Microsoft Agent Governance SDK.
  *
- * Package: @microsoft/agent-governance-sdk (^3.5.0)
+ * Package: @microsoft/agent-governance-sdk (pinned in package.json)
  * Module:  @microsoft/agent-governance-sdk/dist/encryption (or default export)
  *
  * Sole mesh transport implementation. Wire compatibility: speaks
@@ -21,8 +21,10 @@ import type {
   FileTransferAck,
   InboxMessage,
   InboxDiagnostics,
+  MessageSecurity,
 } from "./transport-interface.js";
 import { LocalInbox } from "./local-inbox.js";
+import { AgtSocketOwner } from "./agt-socket.js";
 import { ed25519 } from "@noble/curves/ed25519.js";
 import * as crypto from "node:crypto";
 
@@ -33,11 +35,7 @@ const MAX_FILE_SIZE = 30 * 1024 * 1024;
 // now (upstream port of vendored SDK patch #12). We reach it via
 // MeshClient.getRegistry() — see lookup() below.
 
-// ── Lazy SDK loading (optional dependency) ───────────────────────
-//
-// The upstream SDK is an *optional* npm dependency: vendored deployments
-// don't need it installed. Loading is deferred to connect() so that
-// `new AgtTransport(...)` is cheap and side-effect-free.
+// Defer loading the pinned SDK until connect() so construction has no side effects.
 
 interface AgtSdkModule {
   X3DHKeyManager: new (
@@ -93,6 +91,7 @@ interface AgtMeshClientOptions {
   registrationMetadata?: Record<string, string>;
   oneTimePrekeyCount?: number;
   autoRegister?: boolean;
+  autoReconnect?: boolean;
 }
 
 interface AgtMeshClient {
@@ -102,7 +101,7 @@ interface AgtMeshClient {
   reconnect(): Promise<void>;
   send(peerId: string, payload: unknown): Promise<void>;
   onMessage(
-    handler: (from: string, payload: unknown, isPlaintext: boolean) => void,
+    handler: (from: string, payload: unknown, isPlaintext?: boolean) => void,
   ): void;
   onKnock(handler: (from: string, intent: unknown) => Promise<boolean>): void;
   sendHeartbeat(): void;
@@ -133,14 +132,8 @@ interface AgtMeshClient {
   onE2EVerified?: (
     handler: (peerAmid: string, isFirstPeer: boolean) => void,
   ) => void;
-  /**
-   * (legacy/optional) Some SDK forks expose this name. The real upstream
-   * method is establishSession(toAmid, options). We no longer call either
-   * here — AgentMeshClient.send() auto-bootstraps the X3DH handshake on
-   * first contact. Kept on the type only to document the historical API
-   * surface; consumers should NOT depend on it.
-   */
-  establishSessionWithPeer?: (peerId: string) => Promise<unknown>;
+  /** The pinned SDK requires session establishment before encrypted send. */
+  establishSessionWithPeer(peerId: string): Promise<unknown>;
 }
 
 let agtSdkPromise: Promise<AgtSdkModule> | null = null;
@@ -148,9 +141,7 @@ async function loadAgtSdk(): Promise<AgtSdkModule> {
   if (agtSdkPromise) return agtSdkPromise;
   agtSdkPromise = (async () => {
     try {
-      // Use a computed specifier so TypeScript doesn't try to resolve the
-      // optional dependency at compile time (it may not be installed in the
-      // vendored deployment path).
+      // Keep SDK loading deferred in bundled runtimes as well as Node.
       const pkg = "@microsoft/agent-governance-sdk";
       const mod = (await import(/* @vite-ignore */ pkg)) as Record<
         string,
@@ -172,7 +163,7 @@ async function loadAgtSdk(): Promise<AgtSdkModule> {
       const msg = e instanceof Error ? e.message : String(e);
       throw new Error(
         `@microsoft/agent-governance-sdk is required for AGT mesh transport. ` +
-          `Install: npm i @microsoft/agent-governance-sdk@^3.5.0. ` +
+          `Restore the pinned dependency with npm ci in mesh-plugin. ` +
           `Underlying error: ${msg}`,
       );
     }
@@ -208,7 +199,7 @@ export class AgtTransport implements IMeshTransport {
   private readonly options: AgtTransportOptions;
   private client: AgtMeshClient | null = null;
   private readonly messageHandlers: Array<
-    (from: string, payload: unknown) => void
+    (from: string, payload: unknown, security: MessageSecurity) => void
   > = [];
   private readonly knockHandlers: Array<
     (from: string, intent: unknown) => Promise<{ accept: boolean }>
@@ -216,6 +207,14 @@ export class AgtTransport implements IMeshTransport {
   private readonly _plaintextPeers: Set<string>;
   private _connected = false;
   private readonly inbox: LocalInbox;
+  private readonly sockets: AgtSocketOwner;
+  private lifecycle: Promise<void> = Promise.resolve();
+  private wantConnected = false;
+  private epoch = 0;
+  private fatal: Error | null = null;
+  private registered = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempt = 0;
 
   // Phase 2 diagnostic hooks — fan out from AGT MeshClient callbacks
   // (registered in connect() once the client exists).
@@ -243,6 +242,7 @@ export class AgtTransport implements IMeshTransport {
     this.options = options;
     this._plaintextPeers = new Set(options.plaintextPeers ?? []);
     this.inbox = new LocalInbox({ buildHash: "agt" });
+    this.sockets = new AgtSocketOwner(options.wsFactory);
   }
 
   get isConnected(): boolean {
@@ -274,11 +274,93 @@ export class AgtTransport implements IMeshTransport {
     );
   }
 
-  async connect(opts?: {
+  connect(opts?: { capabilities?: string[]; displayName?: string }): Promise<void> {
+    this.wantConnected = true;
+    this.clearReconnect();
+    return this.serialize(() => this.connectOnce(opts));
+  }
+
+  private serialize(operation: () => Promise<void>): Promise<void> {
+    const result = this.lifecycle.then(operation);
+    this.lifecycle = result.catch(() => {});
+    return result;
+  }
+
+  private clearReconnect(): void {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = null;
+  }
+
+  private scheduleReconnect(): void {
+    if (!this.wantConnected || this.fatal || this.reconnectTimer) return;
+    const delay = Math.min(60_000, 1_000 * 2 ** Math.min(this.reconnectAttempt++, 6));
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.wantConnected) return;
+      void this.serialize(() => this.connectOnce()).catch(() => this.scheduleReconnect());
+    }, delay);
+    this.reconnectTimer.unref();
+  }
+
+  private async retireConnection(): Promise<void> {
+    this._connected = false;
+    this.epoch++;
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+    let failure: unknown;
+    try { await this.client?.disconnect(); } catch (error) { failure = error; }
+    try { await this.sockets.retire(); } catch (error) { failure ??= error; }
+    this.clearReconnect();
+    if (failure) {
+      this.fatal = new Error("AGT transport cleanup failed; a new connection is forbidden", { cause: failure });
+      throw this.fatal;
+    }
+  }
+
+  private async connectOnce(opts?: { capabilities?: string[]; displayName?: string }): Promise<void> {
+    if (this.fatal) throw this.fatal;
+    if (!this.wantConnected || this.isConnected) return;
+    await this.retireConnection();
+    await this.initializeClient(opts);
+    if (!this.wantConnected) return;
+    const client = this.client!;
+    const opens = this.sockets.openCount;
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        client.connect(),
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            expired = true;
+            reject(new Error("AGT connection/registration deadline exceeded"));
+          }, 30_000);
+        }),
+      ]);
+      this.registered = true;
+      if (!client.isConnected) throw new Error("AGT relay closed during registration");
+      if (!this.wantConnected) return;
+      this._connected = true;
+      this.reconnectAttempt = 0;
+      this.clearReconnect();
+      this.startHeartbeat();
+    } catch (error) {
+      // Registration writes cannot be cancelled or safely repeated after an ambiguous failure.
+      if (expired || (!this.registered && this.sockets.openCount !== opens)) {
+        this.fatal = new Error("AGT registration outcome is uncertain; reconnect is forbidden", { cause: error });
+      }
+      await this.retireConnection();
+      throw this.fatal ?? error;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  private async initializeClient(opts?: {
     capabilities?: string[];
     displayName?: string;
   }): Promise<void> {
-    if (this.isConnected) return;
+    if (this.client) return;
     const sdk = await loadAgtSdk();
 
     // X3DH key manager — MeshClient.registerSelf() will call
@@ -305,29 +387,33 @@ export class AgtTransport implements IMeshTransport {
       keyManager,
       agentDid: this.options.identity.agentId,
       displayName,
-      wsFactory: this.options.wsFactory,
+      wsFactory: this.sockets.create,
       plaintextPeers: [...this._plaintextPeers],
       knockTimeout: this.options.knockTimeout,
       capabilities,
       oneTimePrekeyCount: this.options.oneTimePreKeyCount ?? 20,
       autoRegister: true,
+      autoReconnect: false,
     });
 
     // Bridge SDK callbacks → our handler arrays + LocalInbox.
-    this.client.onMessage((from, payload, _isPlaintext) => {
+    this.client.onMessage((from, payload, isPlaintext) => {
+      const security: MessageSecurity = isPlaintext === false
+        ? "encrypted"
+        : isPlaintext === true ? "plaintext" : "unknown";
       // First fan out to subscribed handlers (Phase 2 callers); then deliver
       // to the inbox so polling code (mesh_inbox tool, waitForMessage) sees
       // every message exactly once via either the waiter set or the FIFO.
       for (const handler of this.messageHandlers) {
         try {
-          handler(from, payload);
+          handler(from, payload, security);
         } catch (e) {
           // Handler errors must not poison the SDK callback chain.
           // eslint-disable-next-line no-console
           console.error("[agt-transport] message handler threw:", e);
         }
       }
-      this.inbox.deliver(from, payload);
+      this.inbox.deliver(from, payload, security);
     });
 
     this.client.onKnock(async (from, intent) => {
@@ -360,14 +446,19 @@ export class AgtTransport implements IMeshTransport {
       }
     });
     this.client.onDisconnect?.((reason, code) => {
+      this._connected = false;
+      this.epoch++;
+      if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+      this.heartbeatTimer = null;
+      this.scheduleReconnect();
       for (const h of this._disconnectHandlers) {
         try { h(reason, code); } catch { /* swallow */ }
       }
     });
 
-    await this.client.connect();
-    this._connected = true;
+  }
 
+  private startHeartbeat(): void {
     // Start auto-heartbeat ticker (see field comment for rationale).
     if (this.heartbeatTimer === null) {
       this.heartbeatTimer = setInterval(() => {
@@ -395,24 +486,18 @@ export class AgtTransport implements IMeshTransport {
     }
   }
 
-  async disconnect(): Promise<void> {
-    if (this.heartbeatTimer !== null) {
-      clearInterval(this.heartbeatTimer);
-      this.heartbeatTimer = null;
-    }
-    if (this.client) {
-      try {
-        await this.client.disconnect();
-      } catch {
-        // best-effort — connection may already be down
-      }
-    }
+  disconnect(): Promise<void> {
+    this.wantConnected = false;
     this._connected = false;
-    this.client = null;
+    this.epoch++;
+    this.clearReconnect();
+    return this.serialize(() => this.retireConnection());
   }
 
   async send(toAmid: string, payload: unknown): Promise<string | undefined> {
-    if (!this.client) throw new Error("AgtTransport not connected");
+    const client = this.client;
+    const epoch = this.epoch;
+    if (!client || !this.isConnected) throw new Error("AgtTransport not connected");
     // @microsoft/agent-governance-sdk MeshClient.send() throws
     // "No encrypted session with <peer>. Call establishSession() first."
     // when no SecureChannel exists for the peer — it does NOT auto-bootstrap
@@ -423,7 +508,7 @@ export class AgtTransport implements IMeshTransport {
     // on the hot path.
     if (!this._plaintextPeers.has(toAmid)) {
       try {
-        await this.client.establishSessionWithPeer!(toAmid);
+        await client.establishSessionWithPeer(toAmid);
       } catch (e: unknown) {
         // Surface the real error verbatim — the caller's retry loop matches
         // on /prekey/i, so a generic "prekey bootstrap failed" wrapper hides
@@ -442,11 +527,12 @@ export class AgtTransport implements IMeshTransport {
         throw e instanceof Error ? e : new Error(String(e));
       }
     }
-    await this.client.send(toAmid, payload);
+    if (this.epoch !== epoch || !this.isConnected) throw new Error("AGT connection changed during session establishment");
+    await client.send(toAmid, payload);
     return undefined;
   }
 
-  onMessage(handler: (fromAmid: string, payload: unknown) => void): void {
+  onMessage(handler: (fromAmid: string, payload: unknown, security: MessageSecurity) => void): void {
     this.messageHandlers.push(handler);
   }
 
@@ -553,7 +639,7 @@ export class AgtTransport implements IMeshTransport {
   }
 
   waitForMessage<T>(
-    predicate: (content: unknown, from: string) => T | null,
+    predicate: (content: unknown, from: string, security: MessageSecurity) => T | null,
     timeoutMs?: number,
     opts?: { consume?: boolean },
   ): Promise<T> {
@@ -573,7 +659,7 @@ export class AgtTransport implements IMeshTransport {
   async sendWithAck<T>(
     toAmid: string,
     payload: unknown,
-    ackPredicate: (content: unknown, from: string) => T | null,
+    ackPredicate: (content: unknown, from: string, security: MessageSecurity) => T | null,
     opts: { timeoutMs?: number; retries?: number; retryDelayMs?: number } = {},
   ): Promise<T> {
     const timeoutMs = opts.timeoutMs ?? 5000;

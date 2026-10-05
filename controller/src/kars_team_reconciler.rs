@@ -10,6 +10,7 @@ pub(crate) mod credential_bindings;
 #[cfg(test)]
 mod persistence_tests;
 mod promotion;
+mod requests;
 mod runs;
 pub(crate) mod specs;
 #[cfg(test)]
@@ -137,7 +138,21 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     }
     let outcome = reconcile_valid(&teams, &tasks_api, &effective, &ctx.client).await;
     if let Err(error) = &outcome {
-        write_degraded(&teams, &team, &error.to_string()).await?;
+        // Admission may already have persisted a reservation. Retain it, and
+        // never publish stale status over a replaced or edited Team.
+        match teams.get(&team.name_any()).await {
+            Ok(fresh)
+                if fresh.metadata.uid == team.metadata.uid
+                    && fresh.metadata.generation == team.metadata.generation
+                    && fresh.metadata.deletion_timestamp.is_none() =>
+            {
+                if let Err(status_error) = write_degraded(&teams, &fresh, &error.to_string()).await
+                {
+                    tracing::warn!(%status_error, "Could not record Team reconciliation failure");
+                }
+            }
+            _ => {}
+        }
     }
     outcome
 }
@@ -166,7 +181,7 @@ async fn write_degraded(
     status.observed_generation = team.metadata.generation;
     status.envelope_digest = None;
     status.detail = Some(detail.into());
-    write_status(teams, team, status).await
+    write_status(teams, team, status).await.map(|_| ())
 }
 
 async fn reconcile_valid(
@@ -226,16 +241,36 @@ async fn reconcile_valid(
         None
     };
     let bounded_plan = unsupported || budget_error.is_some();
-    let cadence_blocked = bounded_plan && every.is_some() && !team.spec.paused;
+    let manual_pending = requests::pending(team)?.is_some();
+    let cadence_blocked = bounded_plan && (every.is_some() || manual_pending) && !team.spec.paused;
+    let prepared = requests::prepare(
+        client,
+        tasks_api,
+        team,
+        !team.spec.paused && !bounded_plan && stats.active < MAX_CONCURRENT_RUNS,
+    )
+    .await?;
     let mut generated = prior.generated_task_count;
     let mut last_generated = prior.last_generated_task.clone();
     let mut last_run_at = prior.last_run_at.clone();
+    if let Some(admission) = &prepared
+        && admission.newly_reserved
+    {
+        generated = generated.saturating_add(1);
+        last_generated = Some(admission.record.task_name.clone());
+        last_run_at = Some(now.to_rfc3339());
+    }
     let mut next_run_at = None;
     if let Some(minutes) = every {
         let interval = chrono::Duration::minutes(i64::from(minutes));
         let previous = parse_optional_time(prior.last_run_at.as_deref(), "lastRunAt")?;
         let due = previous.is_none_or(|previous| now >= previous + interval);
-        if !team.spec.paused && !bounded_plan && due && stats.active < MAX_CONCURRENT_RUNS {
+        if !team.spec.paused
+            && !bounded_plan
+            && !manual_pending
+            && due
+            && stats.active < MAX_CONCURRENT_RUNS
+        {
             let name = runs::cadence_name(team)?;
             let allowance = specs::run_knowledge_budget(team).map_err(ReconcileError::Invalid)?;
             let knowledge = crate::team_commons::prior_knowledge(client, team, allowance).await?;
@@ -336,7 +371,7 @@ async fn reconcile_valid(
             stats.succeeded
         )
     };
-    write_status(
+    let persisted = write_status(
         teams,
         team,
         KarsTeamStatus {
@@ -369,11 +404,20 @@ async fn reconcile_valid(
             last_success_at,
             last_digest_at,
             inference_budget_account: prior.inference_budget_account.clone(),
+            run_admission: prepared
+                .as_ref()
+                .map(|admission| admission.record.clone())
+                .or(prior.run_admission),
             ..Default::default()
         },
     )
     .await?;
-    Ok(Action::requeue(if every.is_some() && !team.spec.paused {
+    if let Some(prepared) = &prepared {
+        requests::finish(client, teams, tasks_api, &persisted, prepared).await?;
+    }
+    Ok(Action::requeue(if manual_pending {
+        REQUEUE_PENDING
+    } else if every.is_some() && !team.spec.paused {
         Duration::from_secs(30)
     } else {
         REQUEUE_OK
@@ -384,7 +428,7 @@ async fn write_status(
     teams: &Api<KarsTeam>,
     team: &KarsTeam,
     status: KarsTeamStatus,
-) -> Result<(), ReconcileError> {
+) -> Result<KarsTeam, ReconcileError> {
     let mut value = serde_json::to_value(status)?;
     // Merge-patch must clear removed optional authority facts, not retain a stale digest.
     if let Some(previous) = &team.status {
@@ -400,17 +444,19 @@ async fn write_status(
                 .or_insert(serde_json::Value::Null);
         }
     }
-    teams
+    Ok(teams
         .patch_status(
             &team.name_any(),
             &PatchParams::default(),
             &Patch::Merge(json!({
-                "metadata": { "resourceVersion": resource_version(team)? },
+                "metadata": {
+                    "uid": tasks::owner_ref(team)?.uid,
+                    "resourceVersion": resource_version(team)?,
+                },
                 "status": value,
             })),
         )
-        .await?;
-    Ok(())
+        .await?)
 }
 
 fn parse_rfc3339(value: &str) -> Option<DateTime<Utc>> {

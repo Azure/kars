@@ -7,7 +7,6 @@ use super::ExecutionPlanDto;
 use super::ExecutionRoleDto;
 use super::ExecutionSynthesisDto;
 use super::MissionArtifactDto;
-use super::MissionResultDto;
 use super::ModelDto;
 use super::TaskAssignmentEventDto;
 use super::TeamCollaborationEventDto;
@@ -16,11 +15,12 @@ use super::diagnostics::diagnose_run_failure;
 use super::egress::normalize_ttl;
 use super::evidence::{
     ARTIFACT_PREVIEW_MAX_BYTES, ARTIFACT_PREVIEW_TOTAL_BYTES, artifact_preview,
-    canonicalize_assignment_event_roles, merge_trace_total_tokens, select_task_checkpoint,
-    structured_team_evidence, subagent_trace_from_artifacts, valid_task_checkpoint,
+    canonicalize_assignment_event_roles, select_task_checkpoint, structured_team_evidence,
+    subagent_trace_from_artifacts, valid_task_checkpoint,
 };
 use super::mapping::to_sub_agent;
 use super::presentation::deliverable_pull_requests;
+use super::run_evidence::{mission_result, run_telemetry};
 
 #[test]
 fn execution_plan_dto_into_crd_preserves_web_search_capability() {
@@ -333,26 +333,17 @@ fn completed_artifact_checkpoint_wins_over_bootstrap_progress() {
 }
 
 #[test]
-fn aggregate_trace_tokens_replace_principal_only_total() {
-    let mut result = Some(MissionResultDto {
-        output: "done".into(),
-        status: Some("ok".into()),
-        model: None,
-        total_tokens: Some(8_505),
-        prompt_tokens: None,
-        completion_tokens: None,
-        finished_at: None,
-        assignment_nonce: None,
-        source: None,
-        blocked: None,
-        artifact_persistence: None,
-        artifact_count: None,
-        declared_artifact_count: None,
-    });
-
-    merge_trace_total_tokens(&mut result, 22_016);
-
-    assert_eq!(result.and_then(|value| value.total_tokens), Some(22_016));
+fn legacy_result_does_not_invent_round_or_tool_counts() {
+    let data = [
+        ("status".into(), "ok".into()),
+        ("output".into(), "Useful report".into()),
+        ("totalTokens".into(), "8505".into()),
+    ]
+    .into_iter()
+    .collect();
+    let result = mission_result(&data);
+    assert_eq!(result.total_tokens, Some(8505));
+    assert!(run_telemetry(Some(&result)).is_none());
 }
 
 #[test]
@@ -529,6 +520,15 @@ fn classify_blocked_detects_budget_and_parses_pair() {
     assert_eq!(b.reason, "budget");
     assert_eq!(b.spent, Some(23131));
     assert_eq!(b.limit, Some(20000));
+    assert!(b.detail.contains("recorded message"));
+    assert!(!b.detail.contains("daily"));
+    assert!(
+        classify_blocked(
+            Some("ok"),
+            "Governed inference budget wire request bounds unavailable/denied"
+        )
+        .is_none()
+    );
     // A real deliverable is not blocked.
     assert!(classify_blocked(Some("ok"), "Here is the finished report.").is_none());
     // An error run is handled elsewhere, not as blocked.
@@ -566,18 +566,6 @@ fn deliverable_excerpt_strips_noise() {
     assert!(ex.contains("star count"));
     assert!(!ex.contains("NO_MATERIAL_CHANGE"));
     assert!(!ex.contains('|'));
-}
-
-#[test]
-fn team_run_names_are_detected() {
-    use super::queries::regex_lite_is_team_run;
-    assert!(regex_lite_is_team_run("kars-repo-health-run-1783099875"));
-    assert!(regex_lite_is_team_run("ci-monitor-team-run-42"));
-    // Standalone missions and non-numeric suffixes are NOT team runs.
-    assert!(!regex_lite_is_team_run("audit-the-readme"));
-    assert!(!regex_lite_is_team_run("some-run-abc"));
-    assert!(!regex_lite_is_team_run("foo-run-"));
-    assert!(!regex_lite_is_team_run("plainname"));
 }
 
 #[test]

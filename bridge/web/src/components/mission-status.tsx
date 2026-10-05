@@ -52,7 +52,7 @@ export function missionStatus(
 }
 
 const META: Record<MissionStatus, { label: string; cls: string }> = {
-  drafting: { label: "Ready to launch", cls: "border-border bg-surface-muted text-foreground-muted" },
+  drafting: { label: "Draft", cls: "border-border bg-surface-muted text-foreground-muted" },
   deploying: { label: "Deploying", cls: "border-signal/40 bg-signal/10 text-signal" },
   running: { label: "Running", cls: "border-signal/40 bg-signal/10 text-signal" },
   needs_you: { label: "Needs you", cls: "border-warning/40 bg-warning/10 text-warning" },

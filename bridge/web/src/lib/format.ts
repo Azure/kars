@@ -4,6 +4,14 @@
 // kars Bridge web — value formatting helpers. Disciplined, audit-friendly
 // rendering of machine values (counts, budgets, money).
 
+/** Explicit UTC keeps server-rendered and hydrated evidence timestamps identical. */
+export function formatEvidenceTime(value: string | null | undefined): string {
+  if (!value || !/(?:Z|[+-]\d{2}:\d{2})$/i.test(value)) return "Time unavailable";
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Time unavailable";
+  return `${date.toISOString().slice(0, 19).replace("T", " ")} UTC`;
+}
+
 /** Thousands-separated integer, or an em dash when null. */
 export function formatInt(n: number | null | undefined): string {
   if (n == null) return "—";

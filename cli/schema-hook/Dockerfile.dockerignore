@@ -1,0 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+**
+!cli/schema-hook/Dockerfile
+!cli/schema-hook/Dockerfile.dockerignore

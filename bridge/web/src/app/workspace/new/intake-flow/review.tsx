@@ -87,6 +87,7 @@ export function renderReview({
       <input type="hidden" name="objective" value={objective} />
       <input type="hidden" name="tier" value={tier} />
       <input type="hidden" name="budget_tokens" value={budgetTokens} />
+      <input type="hidden" name="budget_scope" value={budgetTokens.trim() === "" ? "" : "GovernedInference"} />
       <input type="hidden" name="launch" value={launch ? "on" : "off"} />
       <input type="hidden" name="blueprint_json" value={JSON.stringify(blueprint)} />
       <input type="hidden" name="delegation_json" value={JSON.stringify(delegation)} />
@@ -357,7 +358,7 @@ export function renderReview({
           onChange={(e) => setToolPolicy(e.target.value)}
           className="mt-1.5 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
         >
-          <option value="">None — model only (no governed tools)</option>
+          <option value="">Default — kars-default (governed tools permitted)</option>
           {options.tool_policies.map((t) => (
             <option key={t.name} value={t.name}>
               {t.name}
@@ -365,6 +366,11 @@ export function renderReview({
             </option>
           ))}
         </select>
+        <p className="mt-1.5 text-xs text-foreground-muted">
+          Leaving this at Default selects kars-default, which permits governed tools, including
+          shell and Foundry tools. It does not disable tools. Instructions to avoid tools are
+          not a no-tools policy; review the selected policy before launch.
+        </p>
 
         <div className="mt-4">
           <label className="text-xs font-medium text-foreground-muted">Connected services (MCP)</label>
@@ -548,18 +554,26 @@ export function renderReview({
         </p>
       </PackageSection>
 
-      <PackageSection title="Budget" subtitle="An optional token ceiling for the whole mission.">
+      <PackageSection title="Budget" subtitle="Aggregate governed-inference token cap — this mission and its delegated tasks, across retries and reruns.">
         <div className="flex items-center gap-2">
           <input
+            aria-label="Aggregate inference token cap"
             type="number"
-            min={0}
+            min={1}
+            step={1}
             value={budgetTokens}
             onChange={(e) => setBudgetTokens(e.target.value)}
             placeholder="e.g. 200000"
             className="w-48 rounded-lg border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
           />
-          <span className="text-xs text-foreground-muted">tokens — leave blank for no cap</span>
+          <span className="text-xs text-foreground-muted">tokens — blank means no aggregate cap</span>
         </div>
+        <p className="mt-2 text-xs text-foreground-muted">
+          A finite cap explicitly enrolls this new mission in GovernedInference accounting.
+          Input, output, and reasoning tokens count; tools, infrastructure and other costs do not.
+          Launch requires the configured broker and model contract. Each request reserves the
+          model’s full input bound plus its output limit, even for a short prompt.
+        </p>
       </PackageSection>
 
       <PackageSection title="Governance envelope" subtitle="The hard limits this mission runs under.">

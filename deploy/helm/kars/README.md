@@ -5,8 +5,11 @@ Licensed under the MIT License. -->
 
 This chart installs the Kars CRDs, controller, RBAC, admission controls,
 policies, and optional operational components into an existing Kubernetes
-cluster. It does not provision the cluster, registry, inference backend, cloud
-identity, or inference credentials. The generic profile also deploys the
+cluster. It does not provision the cluster, registry, inference backend, or cloud
+identity. For no-Entra development, it can store an operator-supplied initial API
+key using the [Helm inference bootstrap](../../../docs/how-to/helm-inference-bootstrap.md).
+Read that guide's release-history and router workload-specification exposure
+boundaries before supplying credentials. The generic profile also deploys the
 Microsoft AGT AgentMesh relay and registry from the public Kars release images.
 
 ## Support status
@@ -58,6 +61,17 @@ To use an externally managed AgentMesh deployment instead, set:
 agentMesh:
   enabled: false
 ```
+
+## Helm-only first-install preview
+
+The opt-in `schemaHook` moves first-install CRD publication into Core's own Helm
+invocation, without `kars schemas prepare` or a third product release. See the
+[schema bootstrap guide](../../../cli/schema-hook/README.md) for the exact
+Helm/Kubernetes versions, image build and digest, API-only networking, installation
+command and retained-helper lifecycle. It remains disabled by default until the
+image and native installation are qualified. It does not yet qualify Bridge,
+Kind/AKS journeys or Helm-only upgrades. Existing CLI preparation below remains
+available for existing installations, not as the accepted beta install path.
 
 ## Validate
 

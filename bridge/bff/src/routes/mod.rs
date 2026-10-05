@@ -32,6 +32,9 @@ pub mod teams_internal;
 pub mod telemetry;
 pub mod validate;
 
+#[cfg(test)]
+mod execution_plan_tests;
+
 use axum::Router;
 use axum::routing::{delete, get, post, put};
 

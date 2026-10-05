@@ -1,0 +1,258 @@
+[
+  {
+    "name": "legacy",
+    "reply": {
+      "type": "mission:reply",
+      "version": 1,
+      "taskName": "briefing",
+      "taskUid": "task-uid",
+      "runNonce": "rev-2",
+      "assignmentId": "assignment-2",
+      "agentDid": "did:mesh:11111111111111111111111111111111",
+      "dispatcherDid": "did:mesh:22222222222222222222222222222222",
+      "sandboxUid": "sandbox-uid",
+      "podUid": "old-pod",
+      "bootId": "old-boot",
+      "status": "succeeded",
+      "output": "Useful briefing",
+      "evidence": {
+        "model": "recorded-model",
+        "rounds": 2,
+        "usage": {
+          "promptTokens": 6940,
+          "completionTokens": 485,
+          "totalTokens": 7425
+        }
+      }
+    }
+  },
+  {
+    "name": "defaults",
+    "reply": {
+      "type": "mission:reply",
+      "version": 2,
+      "reviewedPhase": {
+        "name": "summarize",
+        "objective": "Produce a useful concise briefing.",
+        "maxToolCalls": 0
+      },
+      "phaseDigest": "sha256:94f0dce843bb843d96d612b913b922d15200616a920510ecac5eb7eb5bbd372b",
+      "taskName": "briefing",
+      "taskUid": "task-uid",
+      "runNonce": "rev-2",
+      "assignmentId": "assignment-2",
+      "agentDid": "did:mesh:11111111111111111111111111111111",
+      "dispatcherDid": "did:mesh:22222222222222222222222222222222",
+      "sandboxUid": "sandbox-uid",
+      "podUid": "old-pod",
+      "bootId": "old-boot",
+      "status": "succeeded",
+      "output": "Useful briefing",
+      "evidence": {
+        "model": "recorded-model",
+        "rounds": 2,
+        "usage": {
+          "promptTokens": 6940,
+          "completionTokens": 485,
+          "totalTokens": 7425
+        },
+        "phase": {
+          "name": "summarize",
+          "attemptedToolCalls": 0,
+          "successfulToolCalls": 0,
+          "minToolCalls": 0,
+          "maxToolCalls": 0
+        }
+      }
+    }
+  },
+  {
+    "name": "sorted-capabilities",
+    "reply": {
+      "type": "mission:reply",
+      "version": 2,
+      "reviewedPhase": {
+        "name": "draft",
+        "objective": "Write a useful briefing from the reviewed inputs.",
+        "capabilities": [
+          "filesystem-write",
+          "filesystem-read"
+        ],
+        "requiredToolCalls": [],
+        "minToolCalls": 1,
+        "maxToolCalls": 3,
+        "freshContext": true
+      },
+      "phaseDigest": "sha256:d5c9f098f584900ce3c864b0f20e75a75e053e4ca67b0e49d6aa85c8ffa06f83",
+      "taskName": "briefing",
+      "taskUid": "task-uid",
+      "runNonce": "rev-2",
+      "assignmentId": "assignment-2",
+      "agentDid": "did:mesh:11111111111111111111111111111111",
+      "dispatcherDid": "did:mesh:22222222222222222222222222222222",
+      "sandboxUid": "sandbox-uid",
+      "podUid": "old-pod",
+      "bootId": "old-boot",
+      "status": "succeeded",
+      "output": "Useful briefing",
+      "evidence": {
+        "model": "recorded-model",
+        "rounds": 2,
+        "usage": {
+          "promptTokens": 6940,
+          "completionTokens": 485,
+          "totalTokens": 7425
+        },
+        "phase": {
+          "name": "draft",
+          "attemptedToolCalls": 1,
+          "successfulToolCalls": 1,
+          "minToolCalls": 1,
+          "maxToolCalls": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "unicode-and-escaping",
+    "reply": {
+      "type": "mission:reply",
+      "version": 2,
+      "reviewedPhase": {
+        "name": "draft",
+        "objective": "﻿ Review \"quoted\" \\ paths\nwith\tUnicode ✓ 😀 and boundaries. ﻿",
+        "capabilities": [
+          "filesystem-write",
+          "filesystem-read"
+        ],
+        "requiredToolCalls": [],
+        "minToolCalls": 1,
+        "maxToolCalls": 3,
+        "freshContext": true
+      },
+      "phaseDigest": "sha256:b91f37c905afc2b8565af94345864597a5dc4b4543a0844ce36e1cce9c376254",
+      "taskName": "briefing",
+      "taskUid": "task-uid",
+      "runNonce": "rev-2",
+      "assignmentId": "assignment-2",
+      "agentDid": "did:mesh:11111111111111111111111111111111",
+      "dispatcherDid": "did:mesh:22222222222222222222222222222222",
+      "sandboxUid": "sandbox-uid",
+      "podUid": "old-pod",
+      "bootId": "old-boot",
+      "status": "succeeded",
+      "output": "Useful briefing",
+      "evidence": {
+        "model": "recorded-model",
+        "rounds": 2,
+        "usage": {
+          "promptTokens": 6940,
+          "completionTokens": 485,
+          "totalTokens": 7425
+        },
+        "phase": {
+          "name": "draft",
+          "attemptedToolCalls": 1,
+          "successfulToolCalls": 1,
+          "minToolCalls": 1,
+          "maxToolCalls": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "ecmascript-not-rust-trim",
+    "reply": {
+      "type": "mission:reply",
+      "version": 2,
+      "reviewedPhase": {
+        "name": "draft",
+        "objective": "",
+        "capabilities": [
+          "filesystem-write",
+          "filesystem-read"
+        ],
+        "requiredToolCalls": [],
+        "minToolCalls": 1,
+        "maxToolCalls": 3,
+        "freshContext": true
+      },
+      "phaseDigest": "sha256:00d9b929f699329094e14e3c9308eecac6f44fa69f34e35783723cb52514bf04",
+      "taskName": "briefing",
+      "taskUid": "task-uid",
+      "runNonce": "rev-2",
+      "assignmentId": "assignment-2",
+      "agentDid": "did:mesh:11111111111111111111111111111111",
+      "dispatcherDid": "did:mesh:22222222222222222222222222222222",
+      "sandboxUid": "sandbox-uid",
+      "podUid": "old-pod",
+      "bootId": "old-boot",
+      "status": "succeeded",
+      "output": "Useful briefing",
+      "evidence": {
+        "model": "recorded-model",
+        "rounds": 2,
+        "usage": {
+          "promptTokens": 6940,
+          "completionTokens": 485,
+          "totalTokens": 7425
+        },
+        "phase": {
+          "name": "draft",
+          "attemptedToolCalls": 1,
+          "successfulToolCalls": 1,
+          "minToolCalls": 1,
+          "maxToolCalls": 3
+        }
+      }
+    }
+  },
+  {
+    "name": "immutable-input",
+    "reply": {
+      "type": "mission:reply",
+      "version": 3,
+      "reviewedPhase": {
+        "name": "draft",
+        "objective": "Write a useful briefing from the reviewed inputs.",
+        "capabilities": [
+          "filesystem-write",
+          "filesystem-read"
+        ],
+        "requiredToolCalls": [],
+        "minToolCalls": 1,
+        "maxToolCalls": 3,
+        "freshContext": true
+      },
+      "phaseDigest": "sha256:d5c9f098f584900ce3c864b0f20e75a75e053e4ca67b0e49d6aa85c8ffa06f83",
+      "inputDigest": "sha256:86f78876e8632cf75884c60c32456d9bbfd838092af0015d5e209e1724acb1a2",
+      "taskName": "briefing",
+      "taskUid": "task-uid",
+      "runNonce": "rev-2",
+      "assignmentId": "assignment-2",
+      "agentDid": "did:mesh:11111111111111111111111111111111",
+      "dispatcherDid": "did:mesh:22222222222222222222222222222222",
+      "sandboxUid": "sandbox-uid",
+      "podUid": "old-pod",
+      "bootId": "old-boot",
+      "status": "succeeded",
+      "output": "Useful briefing",
+      "evidence": {
+        "model": "recorded-model",
+        "rounds": 2,
+        "usage": {
+          "promptTokens": 6940,
+          "completionTokens": 485,
+          "totalTokens": 7425
+        },
+        "phase": {
+          "name": "draft",
+          "attemptedToolCalls": 1,
+          "successfulToolCalls": 1,
+          "minToolCalls": 1,
+          "maxToolCalls": 3
+        }
+      }
+    }
+  }
+]

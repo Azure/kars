@@ -164,6 +164,15 @@ Node.js 22's built-in `fetch()` ignores `HTTPS_PROXY`. The sandbox uses `proxy-b
 
 ## Implementation Quality
 
+### Review before adding or replacing code
+
+- **Inspect before implementing.** Trace the existing feature end to end: producers, transport, persistence, consumers, configuration, and tests. If it previously worked, inspect relevant Git history and other branches (`git log --all`) before declaring it missing. Missing wiring or a UI symptom is not proof that the feature needs rebuilding.
+- **Check every supported runtime and shared layer.** For cross-runtime behavior, inspect both Hermes and OpenClaw and the inference router before adding runtime-specific logic. Prefer repairing the shared implementation over duplicating it.
+- **Choose reuse, repair, replacement, or removal explicitly.** State the existing implementation, the concrete gap, and why the smallest selected change is necessary. Replace code only for demonstrated defects or requirements it cannot meet; remove it when it is no longer needed. Do not rewrite working behavior merely for style or architectural preference.
+- **Leave one maintained path, not dead alternatives.** When replacing an implementation, migrate its callers and remove superseded code, exports, dependencies, configuration, and obsolete documentation within the authorized scope. Preserve behavioral regression tests. Keep compatibility paths only for identified consumers, with a removal condition; do not leave speculative abstractions, dormant flags, or disconnected drafts as production features.
+- **Prove removal and replacement.** Check static and dynamic registrations, public/plugin APIs, configuration, and supported deployments before calling code unused. Run focused behavior and compatibility tests for affected runtimes. If usage or migration safety cannot be established, report the uncertainty rather than deleting blindly. Preserve unrelated user changes.
+- **Report outcomes and scope.** Summarize what was reused, changed, removed, and verified. Distinguish local tests, deployed behavior, and live acceptance; passing tests alone are not proof of a working customer journey.
+
 - **No mocks or stubs in production code.** Always provide real, working implementations. If a dependency is unavailable, build the real integration or defer the feature — never ship a mock.
 - **No TODO/FIXME/HACK comments as placeholders.** If something needs to be done, do it now or track it as a GitHub issue. Code with TODO comments will not be merged.
 - **No placeholder or skeleton implementations.** Every function, class, and module must be fully implemented and tested. Empty methods, `throw new Error("not implemented")`, or `// TODO` stubs are not acceptable.

@@ -1305,6 +1305,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     // still run — they form the *overlay* that kars layers on top
     // of the upstream Pod.
     let mut service_projection = None;
+    let mut mission_pending = false;
     'deployment_block: {
         if overlay_mode {
             break 'deployment_block;
@@ -2684,6 +2685,23 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
         service_identity.decorate(&mut deployment);
         crate::credential_grants::decorate_observations(&mut deployment, &sandbox);
+        let mission = crate::mission_delivery::prepare(client, &sandbox, &mut deployment).await;
+        if matches!(mission, Err(crate::mission_delivery::Error::NotReady(_))) {
+            match crate::mission_delivery::defer_until_ready(client, &sandbox, &mut deployment)
+                .await
+            {
+                Ok(()) => {}
+                Err(crate::mission_delivery::Error::NotReady(_)) => {
+                    return Ok(Action::requeue(Duration::from_secs(5)));
+                }
+                Err(error) => return Err(ReconcileError::Configuration(error.to_string())),
+            }
+        } else if mission.is_err() {
+            // Keep the existing credential/private-activation fence in the pause path.
+            if let Some(spec) = deployment.spec.as_mut() {
+                spec.replicas = Some(0);
+            }
+        }
         crate::kars_task_reconciler::rebind::apply_deployment(
             client,
             &sandbox,
@@ -2692,6 +2710,19 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         )
         .await
         .map_err(ReconcileError::Configuration)?;
+        let result = match mission {
+            Ok(Some(prepared)) => crate::mission_delivery::publish(client, &prepared).await,
+            Ok(None) => Ok(()),
+            Err(error) => Err(error),
+        };
+        match result {
+            Ok(()) => {}
+            Err(crate::mission_delivery::Error::NotReady(reason)) => {
+                mission_pending = true;
+                tracing::debug!(sandbox = %name, reason, "Mission binding is awaiting workload convergence");
+            }
+            Err(error) => return Err(ReconcileError::Configuration(error.to_string())),
+        }
         service_projection = Some(service_identity);
     } // end 'deployment_block
 
@@ -3137,13 +3168,14 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
     }
 
     tracing::info!("KarsSandbox {name} reconciled successfully");
-    Ok(Action::requeue(
-        if sre_projection.is_some() || !governance_config.effective_mcp_server_refs().is_empty() {
-            Duration::from_secs(30)
-        } else {
-            credential_sources::refresh_interval(&sandbox)
-        },
-    ))
+    Ok(Action::requeue(if mission_pending {
+        Duration::from_secs(5)
+    } else if sre_projection.is_some() || !governance_config.effective_mcp_server_refs().is_empty()
+    {
+        Duration::from_secs(30)
+    } else {
+        credential_sources::refresh_interval(&sandbox)
+    }))
 }
 
 /// How long to wait before requeuing a failed reconcile, by error kind.
@@ -3362,6 +3394,11 @@ pub async fn run(client: Client) -> Result<()> {
             namespace_ownership::to_sandbox_ref,
         )
         .watches(
+            Api::<crate::kars_task::KarsTask>::all(ctx.client.clone()),
+            crate::watch_config::bounded(),
+            task_to_sandbox_ref,
+        )
+        .watches(
             Api::<Deployment>::all(ctx.client.clone()),
             crate::watch_config::bounded(),
             deployment_to_sandbox_ref,
@@ -3437,10 +3474,34 @@ fn deployment_to_sandbox_ref(d: Deployment) -> Option<ObjectRef<KarsSandbox>> {
     Some(ObjectRef::<KarsSandbox>::new(sandbox_name).within(parent_ns))
 }
 
+// Annotation-only run requests must refresh the installed admission without waiting for a spec change.
+fn task_to_sandbox_ref(task: crate::kars_task::KarsTask) -> Option<ObjectRef<KarsSandbox>> {
+    let name = task.metadata.name.as_deref().filter(|v| !v.is_empty())?;
+    let namespace = task.metadata.namespace.as_deref().filter(|v| !v.is_empty())?;
+    Some(ObjectRef::<KarsSandbox>::new(name).within(namespace))
+}
+
 #[cfg(test)]
 mod watch_tests {
     use super::*;
     use std::collections::BTreeMap;
+
+    #[test]
+    fn task_mapper_requires_nonempty_name_and_namespace() {
+        let mut task = crate::kars_task::KarsTask::new("writer", Default::default());
+        task.metadata.namespace = Some("team-work".into());
+        let reference = task_to_sandbox_ref(task.clone()).unwrap();
+        assert_eq!(reference.name, "writer");
+        assert_eq!(reference.namespace.as_deref(), Some("team-work"));
+        for value in [None, Some(String::new())] {
+            let mut missing_name = task.clone();
+            missing_name.metadata.name = value.clone();
+            assert!(task_to_sandbox_ref(missing_name).is_none());
+            let mut missing_namespace = task.clone();
+            missing_namespace.metadata.namespace = value;
+            assert!(task_to_sandbox_ref(missing_namespace).is_none());
+        }
+    }
 
     fn deploy_with_labels(labels: BTreeMap<String, String>) -> Deployment {
         Deployment {

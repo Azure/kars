@@ -172,6 +172,7 @@ pub async fn replicate_task(
     let count = req.count.clamp(1, 5);
     let api: Api<KarsTask> = cluster.tasks(&ns);
     let source = require_owned_task(cluster, &ns, &name, &principal).await?;
+    crate::kars::execution_plans::validate(&source, req.launch).map_err(AppError::BadRequest)?;
     if source
         .spec
         .blueprint
@@ -213,10 +214,21 @@ pub async fn replicate_task(
             .get_or_insert_with(Default::default);
         annotations.insert("kars.azure.com/owner-sub".into(), principal.sub.clone());
         annotations.insert("kars.azure.com/owner-name".into(), principal.name.clone());
+        if let Some(marker) = source
+            .annotations()
+            .get("kars.azure.com/mission-decomposition")
+        {
+            annotations.insert(
+                "kars.azure.com/mission-decomposition".into(),
+                marker.clone(),
+            );
+        }
         let captured = api
             .create(&PostParams::default(), &task)
             .await
             .map_err(map_kube_err)?;
+        crate::kars::execution_plans::ensure_preserved(&task, &captured)
+            .map_err(AppError::Upstream)?;
         cluster
             .finish_created_credentials(
                 &crate::kars::credentials::Target {
@@ -260,11 +272,17 @@ pub async fn launch_task(
     Json(req): Json<LaunchRequest>,
 ) -> AppResult<Json<TaskDetailDto>> {
     let cluster = require_cluster(&state)?;
-    require_owned_task(cluster, &ns, &name, &principal).await?;
+    let task = require_owned_task(cluster, &ns, &name, &principal).await?;
+    if req.launch {
+        crate::kars::execution_plans::validate(&task, true).map_err(AppError::BadRequest)?;
+    }
+    let fence =
+        crate::kars::execution_plans::identity_fence(&task.metadata).map_err(AppError::Conflict)?;
     let api: Api<KarsTask> = cluster.tasks(&ns);
     let patch = serde_json::json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsTask",
+        "metadata": fence,
         "spec": { "execution": { "launch": req.launch } },
     });
     let patched = api

@@ -15,6 +15,7 @@ import { MissionBlockers } from "@/app/workspace/missions/[name]/mission-blocker
 import { authWired, defaultNamespace, operatorIdentity } from "@/lib/config";
 import { getArchivedTeamRun, getTask, getTeam, listTaskApprovals } from "@/lib/bff";
 import { analyzeTeamRun } from "@/lib/team-run-evidence";
+import { revisionArtifactUrl } from "@/lib/mission-run-evidence";
 import { currentPrincipal } from "@/lib/session";
 import type { ReactNode } from "react";
 import { HaltTeamRunButton } from "./halt-button";
@@ -440,6 +441,7 @@ export default async function TeamRunPage({
                   approvals={approvals}
                   ns={ns}
                   name={run}
+                  runNonce={task.current_run_nonce}
                   agentLabel={team.display_name ?? team.name}
                   agentPhase={team.paused ? "Hibernating" : task.assignment?.state ?? task.execution_phase ?? task.phase}
                   agentRuntime={principalRuntime}
@@ -496,7 +498,7 @@ export default async function TeamRunPage({
                         <div className="border-t border-border px-4 py-3">
                           <ArtifactBody
                             artifact={a}
-                            downloadHref={`/api/namespaces/${encodeURIComponent(ns)}/tasks/${encodeURIComponent(run)}/artifact/${encodeURIComponent(a.name)}`}
+                            downloadHref={revisionArtifactUrl(ns, run, a.name, task.current_run_nonce)}
                           />
                         </div>
                       </details>
@@ -507,7 +509,7 @@ export default async function TeamRunPage({
                         <div className="border-t border-border px-4 py-3">
                           <ArtifactBody
                             artifact={a}
-                            downloadHref={`/api/namespaces/${encodeURIComponent(ns)}/tasks/${encodeURIComponent(run)}/artifact/${encodeURIComponent(a.name)}`}
+                            downloadHref={revisionArtifactUrl(ns, run, a.name, task.current_run_nonce)}
                           />
                         </div>
                       </details>
@@ -679,9 +681,9 @@ function ArtifactBody({
   downloadHref,
 }: {
   artifact: import("@/lib/types").MissionArtifact;
-  downloadHref: string;
+  downloadHref: string | undefined;
 }) {
-  const actions = (
+  const actions = downloadHref ? (
     <span className="flex flex-wrap gap-2">
       <a
         href={downloadHref}
@@ -699,7 +701,7 @@ function ArtifactBody({
         Download
       </a>
     </span>
-  );
+  ) : <span className="text-xs text-foreground-muted">Download unavailable: no current revision is recorded.</span>;
   if (artifact.content == null) {
     return (
       <div className="flex flex-wrap items-center justify-between gap-3">

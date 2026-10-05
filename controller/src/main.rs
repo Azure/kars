@@ -76,6 +76,7 @@ mod mcp_server_reconciler;
 mod mesh_peer;
 mod metrics;
 mod metrics_server;
+mod mission_delivery;
 #[path = "../../shared/observation_privacy.rs"]
 mod observation_privacy;
 mod pairing;
@@ -96,6 +97,7 @@ mod sre_authority;
 mod sre_privacy;
 mod sre_registration;
 mod status;
+mod task_execution_plan;
 pub(crate) mod task_identity;
 mod task_models;
 mod team_commons;
