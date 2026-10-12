@@ -10,26 +10,45 @@
 
 import { getOptions, getFoundry, getIntegrations, getGithubApp, listAdditionalProviders, getLocalInferenceStatus, getLocalInferenceCatalog, listLocalModelDeployments } from "@/lib/bff";
 import { PageHeader, Section, Badge } from "@/components/ui";
-import { ProviderWizard } from "./provider-wizard";
+import { DefaultProviderCard, ProviderWizard } from "./provider-wizard";
 import { ModelCatalogue } from "./model-catalogue";
 import { OperatorGithubStatus } from "../operator-github-status";
 import { Icon } from "@/components/icon";
-import type { Options } from "@/lib/types";
+import { ConsoleLoadError } from "@/components/console-load-error";
+import { headlampLink } from "@/lib/headlamp";
 
 export const dynamic = "force-dynamic";
 
 export default async function ConfigurationPage() {
-  const options: Options | null = await getOptions().catch(() => null);
-  const foundry = await getFoundry().catch(() => null);
-  const integrations = await getIntegrations().catch(() => null);
-  const githubApp = await getGithubApp().catch(() => ({ configured: false, slug: null, install_url: null }));
-  const localInferenceStatus = await getLocalInferenceStatus().catch(() => null);
-  const localInferenceCatalog = await getLocalInferenceCatalog().catch(() => []);
-  // Discover every AI Runway ModelDeployment cluster-wide. Bridge-managed
-  // deployments are also auto-wired by this call; externally managed ones are
-  // read-only discoveries and still appear in the provider summary.
-  const localDeployments = await listLocalModelDeployments().catch(() => []);
-  const additionalProviders = await listAdditionalProviders().catch(() => []);
+  const [optionsRead, foundryRead, integrationsRead, githubAppRead, localStatusRead,
+    localCatalogRead, localDeploymentsRead, additionalProvidersRead] = await Promise.allSettled([
+      getOptions(), getFoundry(), getIntegrations(), getGithubApp(),
+      getLocalInferenceStatus(), getLocalInferenceCatalog(),
+      listLocalModelDeployments(), listAdditionalProviders(),
+  ]);
+  const options = optionsRead.status === "fulfilled" ? optionsRead.value : null;
+  const integrations = integrationsRead.status === "fulfilled" ? integrationsRead.value : null;
+  const defaultProvider = options?.provider
+    ? {
+        ...options.provider,
+        models: options.models.filter((model) => model.provider === options.provider?.id)
+          .map((model) => model.deployment),
+      }
+    : null;
+  const providerReads = [
+    ["default provider", optionsRead],
+    ["Foundry connection", foundryRead],
+    ["local inference", localStatusRead],
+    ["local deployments", localDeploymentsRead],
+    ["additional providers", additionalProvidersRead],
+  ] as const;
+  const modelReads = [
+    ["model catalogue", optionsRead],
+    ["local inference", localStatusRead],
+    ["local model catalogue", localCatalogRead],
+    ["local deployments", localDeploymentsRead],
+  ] as const;
+  const headlampUrl = integrations?.headlamp_url;
 
   return (
     <div className="space-y-6">
@@ -49,31 +68,42 @@ export default async function ConfigurationPage() {
         title="Inference provider"
         subtitle="The service(s) this cluster authenticates to for model calls. One default every mission inherits, plus any additional providers an InferencePolicy can route specific sandboxes to."
       >
-        <ProviderWizard
-          hasDefaultProvider={!!options?.provider}
-          defaultProvider={
-            options?.provider
-              ? {
-                  id: options.provider.id,
-                  label: options.provider.label,
-                  note: options.provider.note,
-                  models: (options.models ?? []).filter((m) => m.provider === options.provider!.id).map((m) => m.deployment),
-                }
-              : null
-          }
-          additionalProviders={additionalProviders}
-          localInferenceStatus={localInferenceStatus}
-          localDeployments={localDeployments}
-          foundryStatus={foundry ?? { connected: false, project_endpoint: null, inference_endpoint: null, memory_store_id: null, auth: null, has_api_key: false }}
-        />
+        {optionsRead.status === "fulfilled" && foundryRead.status === "fulfilled"
+          && localStatusRead.status === "fulfilled" && localDeploymentsRead.status === "fulfilled"
+          && additionalProvidersRead.status === "fulfilled" ? (
+            <ProviderWizard
+              hasDefaultProvider={!!defaultProvider}
+              defaultProvider={defaultProvider}
+              additionalProviders={additionalProvidersRead.value}
+              localInferenceStatus={localStatusRead.value}
+              localDeployments={localDeploymentsRead.value}
+              foundryStatus={foundryRead.value}
+            />
+          ) : (
+            <div className="space-y-3">
+              {defaultProvider && <ul><DefaultProviderCard p={defaultProvider} /></ul>}
+              {providerReads.map(([title, read]) => read.status === "rejected"
+                ? <ConsoleLoadError key={title} inline title={title} error={read.reason} />
+                : null)}
+            </div>
+          )}
       </Section>
 
-      <ModelCatalogue
-        models={options?.models ?? []}
-        localStatus={localInferenceStatus}
-        localCatalog={localInferenceCatalog}
-        localDeployments={localDeployments}
-      />
+      {optionsRead.status === "fulfilled" && localStatusRead.status === "fulfilled"
+        && localCatalogRead.status === "fulfilled" && localDeploymentsRead.status === "fulfilled" ? (
+          <ModelCatalogue
+            models={optionsRead.value.models}
+            localStatus={localStatusRead.value}
+            localCatalog={localCatalogRead.value}
+            localDeployments={localDeploymentsRead.value}
+          />
+        ) : (
+          <Section title="Model catalogue">
+            {modelReads.map(([title, read]) => read.status === "rejected"
+              ? <ConsoleLoadError key={title} inline title={title} error={read.reason} />
+              : null)}
+          </Section>
+        )}
 
       {/* Cluster integrations — the real kars add-ons (SRE agent + Headlamp
           plugin), with live status and either deep-links or activation. */}
@@ -81,6 +111,9 @@ export default async function ConfigurationPage() {
         title="Integrations"
         subtitle="kars add-ons for this cluster — the SRE agent and the Headlamp dashboard plugin. Activate or open them here."
       >
+        {integrationsRead.status === "rejected" ? (
+          <ConsoleLoadError inline title="Integrations" error={integrationsRead.reason} />
+        ) : (
         <div className="grid gap-3 sm:grid-cols-2">
           {/* kars-SRE agent */}
           <div className="rounded-xl border border-border bg-surface p-4">
@@ -93,8 +126,8 @@ export default async function ConfigurationPage() {
             {integrations?.sre_present ? (
               <p className="mt-2 text-xs text-foreground-muted">
                 The SRE sandbox is running{integrations.sre_ready ? ` (${integrations.sre_ready} ready)` : ""} — it triages cluster health and proposes operator-approved fixes (KarsSREAction).
-                {integrations.headlamp_url && (
-                  <> Open its console: <a className="text-signal hover:underline" href={`${integrations.headlamp_url}/kars/sre`} target="_blank" rel="noreferrer">Headlamp → /kars/sre ↗</a></>
+                {headlampUrl && (
+                  <> Open its console: <a className="text-signal hover:underline" href={headlampLink(headlampUrl, "/kars/sre")} target="_blank" rel="noreferrer">Headlamp → SRE console ↗</a></>
                 )}
               </p>
             ) : (
@@ -113,12 +146,12 @@ export default async function ConfigurationPage() {
                 {integrations?.headlamp_deployed ? (integrations.headlamp_url ? "linked" : "deployed") : "not found"}
               </Badge>
             </div>
-            {integrations?.headlamp_url ? (
+            {headlampUrl ? (
               <div className="mt-2">
                 <p className="text-xs text-foreground-muted">The kars Headlamp plugin — deep dashboard views for kars resources:</p>
                 <div className="mt-2 flex flex-wrap gap-2">
-                  {integrations.headlamp_paths.map((l) => (
-                    <a key={l.path} href={`${integrations.headlamp_url}${l.path}`} target="_blank" rel="noreferrer" className="rounded-md border border-signal/40 bg-signal/10 px-2.5 py-1 text-[11px] font-medium text-signal hover:bg-signal/15">
+                  {integrationsRead.value.headlamp_paths.map((l) => (
+                    <a key={l.path} href={headlampLink(headlampUrl, l.path)} target="_blank" rel="noreferrer" className="rounded-md border border-signal/40 bg-signal/10 px-2.5 py-1 text-[11px] font-medium text-signal hover:bg-signal/15">
                       {l.label} ↗
                     </a>
                   ))}
@@ -126,13 +159,14 @@ export default async function ConfigurationPage() {
               </div>
             ) : integrations?.headlamp_deployed ? (
               <p className="mt-2 text-xs text-foreground-muted">
-                Headlamp is deployed but not linked here. Install the kars plugin and set <code className="font-mono">BRIDGE_HEADLAMP_URL</code> to deep-link its <code className="font-mono">/kars/*</code> views. <span className="text-foreground-muted">{integrations.headlamp_install_hint}</span>
+                Headlamp is deployed but not linked here. Install the kars plugin and set <code className="font-mono">BRIDGE_HEADLAMP_URL</code> to deep-link its <code className="font-mono">/kars/*</code> views. <span className="text-foreground-muted">{integrations?.headlamp_install_hint}</span>
               </p>
             ) : (
               <p className="mt-2 text-xs text-foreground-muted">No Headlamp deployment detected. Install Headlamp + the kars plugin (tools/headlamp-plugin), then set <code className="font-mono">BRIDGE_HEADLAMP_URL</code>.</p>
             )}
           </div>
         </div>
+        )}
       </Section>
 
       {/* GitHub App — a platform-level integration like SRE/Headlamp above,
@@ -143,7 +177,9 @@ export default async function ConfigurationPage() {
         title="GitHub App (platform identity)"
         subtitle="Configure the one shared kars GitHub App that lets workspaces open pull requests. Operators set this up once; users then connect their own repos from their Workspace → Connections."
       >
-        <OperatorGithubStatus configured={githubApp.configured} slug={githubApp.slug} />
+        {githubAppRead.status === "fulfilled"
+          ? <OperatorGithubStatus configured={githubAppRead.value.configured} slug={githubAppRead.value.slug} />
+          : <ConsoleLoadError inline title="GitHub App" error={githubAppRead.reason} />}
       </Section>
     </div>
   );

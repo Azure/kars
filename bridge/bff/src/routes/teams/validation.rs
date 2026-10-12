@@ -46,7 +46,7 @@ pub(super) fn validate_team_budget(
 
 /// Build a `spec.roster` array from create/update role inputs, shared by team
 /// creation and roster editing so both paths produce identical role shapes
-/// (per-member systemPrompt + blueprint{runtime, model} + skills).
+/// (per-member systemPrompt + blueprint{runtime, model, toolPolicy} + skills).
 /// Reject roster role names that collide with the reserved task names the
 /// controller derives from the team (`<team>-principal`). A role named
 /// "principal" would otherwise re-materialize the principal task as a member
@@ -66,7 +66,11 @@ pub(super) fn reject_reserved_role_names(team: &str, roles: &[CreateRole]) -> Ap
     Ok(())
 }
 
-pub(super) fn build_roster(roles: &[CreateRole]) -> Vec<serde_json::Value> {
+pub(super) fn build_roster(
+    roles: &[CreateRole],
+    tool_policy: Option<&str>,
+    parent: Option<&crate::kars::task::TaskBlueprint>,
+) -> Vec<serde_json::Value> {
     roles
         .iter()
         .filter(|r| !r.name.trim().is_empty())
@@ -101,6 +105,32 @@ pub(super) fn build_roster(roles: &[CreateRole]) -> Vec<serde_json::Value> {
                 );
             }
             if !bp.is_empty() {
+                // The form's unset route fields mean Team defaults, while an
+                // explicit CRD blueprint is a complete override. Bind only the
+                // reviewed route; never inherit omitted egress or capabilities.
+                if let Some(parent) = parent {
+                    if !bp.contains_key("runtime")
+                        && let Some(runtime) = &parent.runtime
+                    {
+                        bp.insert("runtime".into(), serde_json::json!(runtime));
+                    }
+                    if !bp.contains_key("model") {
+                        if let Some(model) = &parent.model {
+                            bp.insert("model".into(), serde_json::json!(model));
+                        }
+                        if !parent.model_fallbacks.is_empty() {
+                            bp.insert(
+                                "modelFallbacks".into(),
+                                serde_json::json!(parent.model_fallbacks),
+                            );
+                        }
+                    }
+                }
+                // The controller treats an explicit role blueprint as a complete
+                // override, so runtime/model overrides must retain the bound policy.
+                if let Some(policy) = tool_policy {
+                    bp.insert("toolPolicy".into(), serde_json::json!(policy));
+                }
                 role["blueprint"] = serde_json::Value::Object(bp);
             }
             if !r.skills.is_empty() {
@@ -133,6 +163,17 @@ pub(super) fn normalize_autonomous_runtime(runtime: &mut Option<String>) {
         && (value.trim().is_empty() || crate::routes::compose::is_non_autonomous_harness(value))
     {
         *runtime = Some("OpenClaw".into());
+    }
+}
+
+pub(super) fn normalize_role_runtime(runtime: &mut Option<String>) {
+    if runtime
+        .as_deref()
+        .is_some_and(|value| value.trim().is_empty())
+    {
+        *runtime = None;
+    } else {
+        normalize_autonomous_runtime(runtime);
     }
 }
 
@@ -288,7 +329,7 @@ pub(super) fn validate_team_model_routes(
                 "MCP server `{server}` is not present in the live options catalogue"
             ))
         })?;
-        match crate::routes::options::mcp_server_qualified_for_route(
+        match crate::routes::options::mcp_server_admitted_for_route(
             principal_runtime,
             principal_model.0,
             principal_model.1,
@@ -314,7 +355,7 @@ pub(super) fn validate_team_model_routes(
                 "memory `{memory}` is not present in the live options catalogue"
             ))
         })?;
-        match crate::routes::options::memory_binding_qualified_for_route(
+        match crate::routes::options::memory_binding_admitted_for_route(
             principal_runtime,
             principal_model.0,
             principal_model.1,
@@ -350,7 +391,8 @@ pub(super) fn validate_team_model_routes(
             .filter(|runtime| !runtime.is_empty())
             .unwrap_or(principal_runtime);
         let role_required = team_role_qualification_requirements(execution_plan, &role.name);
-        validate_qualified_model_route(role_runtime, role_route, &role_required, 1, total_tokens)?;
+        let role_tokens = execution_plan.role_qualification_budget(&role.name, total_tokens);
+        validate_qualified_model_route(role_runtime, role_route, &role_required, 1, role_tokens)?;
         let (provider, deployment) = role_route.split_once("::").ok_or_else(|| {
             AppError::BadRequest(format!(
                 "model route `{role_route}` must use provider::deployment"
@@ -366,7 +408,7 @@ pub(super) fn validate_team_model_routes(
                             "MCP server `{server}` is not present in the live options catalogue"
                         ))
                     })?;
-                match crate::routes::options::mcp_server_qualified_for_route(
+                match crate::routes::options::mcp_server_admitted_for_route(
                     role_runtime,
                     provider,
                     deployment,
@@ -396,7 +438,7 @@ pub(super) fn validate_team_model_routes(
                     "memory `{memory}` is not present in the live options catalogue"
                 ))
             })?;
-            match crate::routes::options::memory_binding_qualified_for_route(
+            match crate::routes::options::memory_binding_admitted_for_route(
                 role_runtime,
                 provider,
                 deployment,
@@ -424,7 +466,7 @@ pub(super) fn validate_team_model_routes(
                     "skill `{skill}` is not present in the approved live catalogue"
                 ))
             })?;
-            match crate::routes::options::skill_version_qualified_for_route(
+            match crate::routes::options::skill_version_admitted_for_route(
                 role_runtime,
                 provider,
                 deployment,
@@ -592,6 +634,104 @@ pub(super) async fn validate_mcp_servers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn roster_runtime_and_model_overrides_preserve_parent_tool_policy() {
+        for runtime in [Some("OpenClaw"), Some("Hermes"), None] {
+            for model in [Some("azure-foundry::gpt-5.4-mini"), None] {
+                let roles = [CreateRole {
+                    name: "writer".into(),
+                    system_prompt: Some("Write the reviewed checklist".into()),
+                    runtime: runtime.map(str::to_string),
+                    model: model.map(str::to_string),
+                    skills: vec!["checklist-review".into()],
+                }];
+                for policy in ["kars-default", "reviewed-read-only"] {
+                    let roster = build_roster(&roles, Some(policy), None);
+                    assert_eq!(roster[0]["name"], "writer");
+                    assert_eq!(roster[0]["systemPrompt"], "Write the reviewed checklist");
+                    assert_eq!(roster[0]["skills"], serde_json::json!(["checklist-review"]));
+                    if runtime.is_some() || model.is_some() {
+                        assert_eq!(roster[0]["blueprint"]["toolPolicy"], policy);
+                        assert_eq!(roster[0]["blueprint"]["runtime"].as_str(), runtime);
+                        assert_eq!(
+                            roster[0]["blueprint"]["model"]["deployment"].as_str(),
+                            model.map(|_| "gpt-5.4-mini")
+                        );
+                        assert!(roster[0]["blueprint"].get("egress").is_none());
+                        assert!(roster[0]["blueprint"].get("executionPlan").is_none());
+                    } else {
+                        assert!(roster[0].get("blueprint").is_none());
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn roster_policy_binding_does_not_invent_an_unresolved_policy() {
+        let roles = [CreateRole {
+            name: "reviewer".into(),
+            system_prompt: None,
+            runtime: Some("OpenClaw".into()),
+            model: None,
+            skills: vec![],
+        }];
+        let roster = build_roster(&roles, None, None);
+        assert_eq!(roster[0]["blueprint"]["runtime"], "OpenClaw");
+        assert!(roster[0]["blueprint"].get("toolPolicy").is_none());
+    }
+
+    #[test]
+    fn roster_partial_routes_bind_team_defaults_for_both_harnesses_without_extra_capabilities() {
+        let parent: crate::kars::task::TaskBlueprint = serde_json::from_value(serde_json::json!({
+            "runtime":"Hermes",
+            "model":{"provider":"github-copilot","deployment":"primary"},
+            "modelFallbacks":[{"provider":"azure-foundry","deployment":"backup"}],
+            "egress":[{"host":"private.example","port":443}],
+            "mcpServers":["private-service"],
+            "toolPolicy":"reviewed"
+        }))
+        .unwrap();
+        for runtime in [Some("OpenClaw"), Some("Hermes"), None, Some("")] {
+            for model in [Some("azure-foundry::explicit"), None] {
+                let mut role = CreateRole {
+                    name: "writer".into(),
+                    system_prompt: None,
+                    skills: vec![],
+                    runtime: runtime.map(str::to_string),
+                    model: model.map(str::to_string),
+                };
+                normalize_role_runtime(&mut role.runtime);
+                let roster = build_roster(&[role], Some("reviewed"), Some(&parent));
+                let bp = &roster[0]["blueprint"];
+                if runtime.is_none_or(str::is_empty) && model.is_none() {
+                    assert!(
+                        bp.is_null(),
+                        "no overrides must inherit the whole Team blueprint"
+                    );
+                    continue;
+                }
+                assert_eq!(
+                    bp["runtime"],
+                    runtime
+                        .filter(|value| !value.is_empty())
+                        .unwrap_or("Hermes")
+                );
+                assert_eq!(bp["toolPolicy"], "reviewed");
+                assert!(bp.get("egress").is_none() && bp.get("mcpServers").is_none());
+                if model.is_some() {
+                    assert_eq!(bp["model"]["provider"], "azure-foundry");
+                    assert_eq!(bp["model"]["deployment"], "explicit");
+                    assert!(bp.get("modelFallbacks").is_none());
+                } else {
+                    assert_eq!(bp["model"]["provider"], "github-copilot");
+                    assert_eq!(bp["model"]["deployment"], "primary");
+                    assert_eq!(bp["modelFallbacks"][0]["deployment"], "backup");
+                }
+            }
+        }
+    }
 
     #[test]
     fn team_budget_absence_is_legacy_compatibility_not_enrollment() {
@@ -784,27 +924,44 @@ mod tests {
             memories: vec![],
             skills: vec![],
         };
-        let plan = serde_json::from_value(serde_json::json!({
+        let plan: crate::routes::tasks::ExecutionPlanDto = serde_json::from_value(serde_json::json!({
             "schema": "kars.execution-plan/v1", "max_parallel": 1,
-            "roles": [{"name": "writer", "objective": "Write briefing", "phases": [{
-                "name": "draft", "objective": "Draft briefing", "capabilities": ["team", "telemetry"], "max_tool_calls": 0
-            }]}],
+            "roles": [
+                {"name": "writer", "objective": "Write briefing", "phases": [{
+                    "name": "draft", "objective": "Draft briefing", "capabilities": ["team", "telemetry"], "max_tool_calls": 0
+                }]},
+                {"name": "reader", "objective": "Read sources", "budget_tokens": 10000, "phases": [{
+                    "name": "read", "objective": "Read sources", "capabilities": ["team", "telemetry"], "max_tool_calls": 0
+                }]}
+            ],
             "synthesis": {"objective": "Combine briefing", "capabilities": [], "max_tool_calls": 0}
         })).unwrap();
-        let roles = vec![CreateRole {
-            name: "writer".into(),
-            system_prompt: None,
-            runtime: Some("Hermes".into()),
-            model: Some("test::specialist".into()),
-            skills: vec![],
-        }];
+        // Deliberately reverse roster order: the reader's cap must not fund the writer.
+        let roles = vec![
+            CreateRole {
+                name: "reader".into(),
+                system_prompt: None,
+                runtime: None,
+                model: None,
+                skills: vec![],
+            },
+            CreateRole {
+                name: "writer".into(),
+                system_prompt: None,
+                runtime: Some("Hermes".into()),
+                model: Some("test::specialist".into()),
+                skills: vec![],
+            },
+        ];
         let fallbacks = vec!["test::fallback".into()];
-        let validate = |tokens| {
+        let validate = |tokens, role_tokens| {
+            let mut plan = plan.clone();
+            plan.roles[0].budget_tokens = role_tokens;
             validate_team_model_routes(
                 &options,
                 TeamModelRoutes {
                     namespace: "kars-system",
-                    total_tokens: Some(tokens),
+                    total_tokens: tokens,
                     runtime: Some("OpenClaw"),
                     model: Some("test::primary"),
                     model_fallbacks: &fallbacks,
@@ -815,15 +972,60 @@ mod tests {
                 },
             )
         };
-        validate(2500).expect("sufficient reviewed lifetime cap");
-        let (runtime, model) = routes[target.parse::<usize>().unwrap()];
-        let error = validate(1500).expect_err("insufficient cap must reach every route");
-        assert!(
-            error
-                .to_string()
-                .contains(&format!("{runtime} · test::{model}")),
-            "{error}"
+        validate(Some(2500), None).expect("sufficient reviewed lifetime cap");
+        validate(None, None).expect("legacy unspecified cap semantics");
+        validate(Some(2000), Some(2000)).expect("exact qualification minimum");
+        validate(Some(2500), Some(4000)).expect("role cap above sufficient ancestor cap");
+        validate(None, Some(2000)).expect("explicit role cap without a lifetime cap");
+        let target = target.parse::<usize>().unwrap();
+        let (runtime, model) = routes[target];
+        let assert_route_error = |error: AppError| {
+            assert!(
+                error
+                    .to_string()
+                    .contains(&format!("{runtime} · test::{model}")),
+                "{error}"
+            );
+        };
+        assert_route_error(
+            validate(Some(1500), None).expect_err("lifetime cap reaches every route"),
         );
+        assert_route_error(
+            validate(Some(1500), Some(4000))
+                .expect_err("larger role cap cannot bypass lifetime cap"),
+        );
+        if matches!(target, 1 | 3) {
+            assert_route_error(
+                validate(Some(2500), Some(1999))
+                    .expect_err("lifetime cap cannot fund an under-budget role"),
+            );
+            assert_route_error(
+                validate(None, Some(1999))
+                    .expect_err("explicit role cap applies without lifetime cap"),
+            );
+        } else {
+            validate(Some(2500), Some(1000))
+                .expect("member uses its own route minimum, not the principal's");
+            let mut plan = plan.clone();
+            plan.roles[1].budget_tokens = Some(1999);
+            assert_route_error(
+                validate_team_model_routes(
+                    &options,
+                    TeamModelRoutes {
+                        namespace: "kars-system",
+                        total_tokens: Some(2500),
+                        runtime: Some("OpenClaw"),
+                        model: Some("test::primary"),
+                        model_fallbacks: &fallbacks,
+                        roles: &roles,
+                        execution_plan: &plan,
+                        mcp_servers: &[],
+                        memory: None,
+                    },
+                )
+                .expect_err("default member and fallback routes respect the member's cap"),
+            );
+        }
     }
 
     #[test]

@@ -43,7 +43,7 @@ function app({ sso = true, floor, roleCookie, token } = {}) {
     runInNewContext(ts.transpileModule(source, {
       compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 },
     }).outputText, {
-      exports, Headers, Response, TextEncoder, process: { env }, console,
+      exports, Headers, Response, TextEncoder, URL, process: { env }, console,
       fetch: async (...args) => { calls.push(args); return new Response(null, { status: 204 }); },
       require: (name) => {
         if (name === "next/headers") return {
@@ -169,5 +169,113 @@ test("non-admin browser mutations stop before the catch-all forwards a principal
       assert.equal(response.status, 403);
     }
     assert.equal(service.calls.length, 0);
+  }
+});
+
+test("every protected surface redirects expired or invalid document requests before rendering", async () => {
+  for (const signed of [
+    undefined, "forged", await token(["admin"], secret, "0s"),
+    await token(["user"], "wrong-key"), await token([]),
+  ]) {
+    const service = app({ token: signed, roleCookie: "admin", floor: "admin" });
+    for (const path of [
+      "/workspace", "/workspace/missions/example?tab=deliverable",
+      "/console/integrations?provider=foundry", "/audit/receipts",
+    ]) {
+      for (const method of ["GET", "POST"]) {
+        const request = service.request(path, method);
+        request.headers.set("x-bridge-return-to", "https://untrusted.example");
+        const response = await service.edge.proxy(request);
+        assert.equal(response.status, method === "GET" ? 307 : 303);
+        const location = new URL(response.headers.get("location"));
+        assert.equal(location.origin, "https://bridge.example");
+        assert.equal(location.pathname, "/auth/login");
+        assert.equal(location.searchParams.get("returnTo"), path);
+        assert.equal(response.headers.get("x-middleware-next"), null);
+      }
+    }
+    assert.equal(service.calls.length, 0);
+  }
+});
+
+test("expired Team RSC navigation and prefetch stop before following document login into Dex", async () => {
+  for (const signed of [undefined, "forged", await token(["user"], secret, "0s")]) {
+    const service = app({ token: signed });
+    for (const path of [
+      "/workspace/teams?_rsc=prefetch",
+      "/workspace/teams/clinic/runs/run-1?tab=activity&_rsc=refresh",
+    ]) {
+      for (const prefetch of [false, true]) {
+        const request = service.request(path, "GET");
+        request.headers.set("rsc", "1");
+        if (prefetch) request.headers.set("next-router-prefetch", "1");
+        const response = await service.edge.proxy(request);
+        assert.equal(response.status, 401);
+        assert.equal(response.headers.get("location"), null, "fetch must not follow login into the IdP");
+        assert.equal(response.headers.get("x-middleware-next"), null);
+        assert.match(response.headers.get("cache-control"), /no-store/);
+        assert.equal((await response.json()).error.code, "unauthorized");
+      }
+      const valid = app({ token: await token(["user"]) });
+      const request = valid.request(path, "GET"); request.headers.set("rsc", "1");
+      assert.equal((await valid.edge.proxy(request)).headers.get("x-middleware-next"), "1");
+    }
+    assert.equal(service.calls.length, 0);
+  }
+});
+
+test("installed Next converts a rejected RSC response into document navigation", async () => {
+  const path = "/workspace/teams/clinic?tab=activity";
+  const service = app();
+  const request = service.request(`${path}&_rsc=refresh`, "GET");
+  request.headers.set("rsc", "1");
+  const response = await service.edge.proxy(request);
+  assert.equal(response.status, 401);
+  const source = ts.createSourceFile("next-fetch.js", readFileSync(require.resolve(
+    "next/dist/client/components/router-reducer/fetch-server-response"), "utf8"), ts.ScriptTarget.Latest, true);
+  const functions = source.statements.filter(node => ts.isFunctionDeclaration(node)
+    && ["fetchServerResponse", "doMpaNavigation"].includes(node.name?.text));
+  assert.equal(functions.length, 2);
+  const exports = {};
+  let fetches = 0;
+  runInNewContext(`${functions.map(node => node.getText(source)).join("\n")}
+    exports.fetchServerResponse = fetchServerResponse;`, {
+    exports, URL, process: { env: { NODE_ENV: "production" } },
+    location: { origin: "https://bridge.example" },
+    console: { error: (...args) => assert.fail(`Unexpected Next fallback error: ${args}`) },
+    _approuterheaders: require("next/dist/client/components/app-router-headers"),
+    _routeparams: require("next/dist/client/route-params"),
+    _flightdatahelpers: { prepareFlightRouterStateForRequest: JSON.stringify },
+    createFetch: async () => {
+      fetches++;
+      return { url: request.url, headers: response.headers, ok: response.ok, body: response.body, redirected: false };
+    },
+  });
+  assert.equal(await exports.fetchServerResponse(new URL(request.url), {
+    flightRouterState: [], nextUrl: null,
+  }), `https://bridge.example${path}`);
+  assert.equal(fetches, 1, "the router must not fetch the external IdP");
+  const document = await service.edge.proxy(service.request(path, "GET"));
+  assert.equal(document.status, 307);
+  assert.equal(new URL(document.headers.get("location")).searchParams.get("returnTo"), path);
+});
+
+test("valid sessions and development surfaces retain navigation without a login loop", async () => {
+  for (const options of [
+    { token: await token(["user"]) },
+    { token: await token(["operator"]) },
+    { token: await token(["auditor"]) },
+    { sso: false, roleCookie: "user" },
+  ]) {
+    const service = app(options);
+    for (const path of ["/workspace/missions/example", "/console", "/audit"]) {
+      const response = await service.edge.proxy(service.request(path, "GET"));
+      assert.equal(response.headers.get("x-middleware-next"), "1");
+      assert.equal(response.headers.get("location"), null);
+    }
+  }
+  const service = app();
+  for (const path of ["/auth/login", "/auth/callback", "/api/namespaces/work/tasks"]) {
+    assert.equal((await service.edge.proxy(service.request(path, "GET"))).headers.get("x-middleware-next"), "1");
   }
 });

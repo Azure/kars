@@ -320,6 +320,15 @@ impl KarsTeam {
         ) {
             errs.push(error);
         }
+        if !self.spec.paused
+            && self.spec.blueprint.as_ref().is_some_and(|b| b.execution_plan.is_some())
+            && let Err(error) = crate::task_execution_plan::validate_reviewed_delegation_depth(
+                i64::from(self.spec.envelope.delegation_depth),
+                crate::task_execution_plan::REVIEWED_TEAM_DELEGATION_DEPTH,
+            )
+        {
+            errs.push(error);
+        }
         for role in &self.spec.roster {
             if let Err(error) = crate::task_execution_plan::validate_activation(
                 role.blueprint
@@ -352,6 +361,15 @@ impl KarsTeam {
                 ));
             }
             let child = specs::member_spec(self, role);
+            if !self.spec.paused
+                && child.blueprint.as_ref().is_some_and(|b| b.execution_plan.is_some())
+                && let Err(error) = crate::task_execution_plan::validate_reviewed_delegation_depth(
+                    i64::from(child.envelope.delegation_depth),
+                    crate::task_execution_plan::REVIEWED_TASK_DELEGATION_DEPTH,
+                )
+            {
+                errs.push(format!("roster role '{}': {error}", role.name));
+            }
             for error in specs::envelope_errors(&child.envelope)
                 .into_iter()
                 .chain(specs::policy_errors(&child))

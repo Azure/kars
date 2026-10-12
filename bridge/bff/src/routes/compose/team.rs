@@ -305,6 +305,35 @@ pub(super) fn team_proposal_is_complete(proposal: &ComposeTeamProposal) -> bool 
     !proposal.instructions.trim().is_empty()
         && !proposal.roles.is_empty()
         && proposal.execution_plan.is_some()
+        && team_plan_roster_error(proposal).is_none()
+}
+
+pub(super) fn team_plan_roster_error(proposal: &ComposeTeamProposal) -> Option<String> {
+    let plan = proposal.execution_plan.as_ref()?;
+    if plan.roles.iter().any(|role| role.name == "principal")
+        || proposal
+            .roles
+            .iter()
+            .any(|role| role.name.eq_ignore_ascii_case("principal"))
+    {
+        return Some("principal is reserved for execution_plan.synthesis, not a roster or execution_plan.roles entry".into());
+    }
+    let roster = proposal
+        .roles
+        .iter()
+        .map(|role| role.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    let planned = plan
+        .roles
+        .iter()
+        .map(|role| role.name.as_str())
+        .collect::<std::collections::BTreeSet<_>>();
+    if roster.len() != proposal.roles.len() || roster != planned {
+        return Some(
+            "execution-plan role names must exactly match the independent member roster".into(),
+        );
+    }
+    None
 }
 
 fn incomplete_team_proposal_detail(
@@ -312,6 +341,7 @@ fn incomplete_team_proposal_detail(
     execution_plan_error: Option<&str>,
 ) -> String {
     let mut missing = Vec::new();
+    let roster_error = team_plan_roster_error(proposal);
     if proposal.instructions.trim().is_empty() {
         missing.push("instructions");
     }
@@ -323,6 +353,9 @@ fn incomplete_team_proposal_detail(
             execution_plan_error
                 .unwrap_or("valid execution_plan with role names exactly matching the roster"),
         );
+    }
+    if let Some(error) = roster_error.as_deref() {
+        missing.push(error);
     }
     if missing.is_empty() {
         "unknown structural mismatch".into()

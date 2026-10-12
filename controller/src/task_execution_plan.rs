@@ -3,10 +3,13 @@
 
 #[path = "../../shared/execution_plan.rs"]
 mod contract;
-pub use contract::{ExecutionPlan, validate_activation};
+pub use contract::{
+    ExecutionPhase, ExecutionPlan, REVIEWED_TASK_DELEGATION_DEPTH, REVIEWED_TEAM_DELEGATION_DEPTH,
+    validate_activation, validate_filesystem_execution, validate_reviewed_delegation_depth,
+};
 
 #[cfg(test)]
-pub(crate) use contract::tests::plan as test_plan;
+pub(crate) use contract::tests::{filesystem_plan as test_filesystem_plan, plan as test_plan};
 
 pub fn schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let name = serde_json::json!({"type":"string","minLength":1,"maxLength":48,

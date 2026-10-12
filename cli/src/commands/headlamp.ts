@@ -3,6 +3,8 @@
 
 import { Command } from "commander";
 import chalk from "chalk";
+import { hasCoreHeadlamp, HEADLAMP_OPERATOR_LOGIN } from "../lib/headlamp-ownership.js";
+import { monitoringServices } from "../lib/monitoring-services.js";
 
 /**
  * `kars headlamp` — open the Headlamp Kubernetes dashboard for the
@@ -105,7 +107,9 @@ export function headlampCommand(): Command {
         // Headlamp uses bearer-token auth out of the box; the SA is
         // created by the chart in the same namespace as the deployment.
         let token = "";
-        try {
+        if (await hasCoreHeadlamp(ctx!, options.namespace)) {
+          console.log(HEADLAMP_OPERATOR_LOGIN);
+        } else try {
           const { stdout } = await execa(
             "kubectl",
             kctl([
@@ -145,21 +149,16 @@ export function headlampCommand(): Command {
 
         // Best-effort: if the cluster also has kube-prometheus-stack
         // installed (which `kars dev` ships out of the box), forward
-        // Prometheus on :19091 and Grafana on :3000 so the Headlamp
-        // kars plugin's metric panels (Mesh Topology, Token
-        // Budget, AGT decisions) light up without manual setup. The
-        // plugin reads `window.KARS_PROMETHEUS_URL` which defaults
-        // to http://127.0.0.1:19091.
+        // Prometheus on :19091 and Grafana on :3000 for direct operator
+        // access. The Kars plugin uses Headlamp's authenticated Service
+        // proxy by default; the local forward remains an explicit
+        // window.KARS_PROMETHEUS_URL override for standalone use.
         const promPort = 19091;
         const grafanaPort = 3000;
+        const monitoring = await monitoringServices(ctx!);
         let promForwarded = false;
         let grafanaForwarded = false;
-        try {
-          await execa(
-            "kubectl",
-            kctl(["get", "svc", "kps-kube-prometheus-stack-prometheus", "-n", "monitoring", "--no-headers"]),
-            { stdio: "pipe" },
-          );
+        if (monitoring.prometheus) {
           await freePort(execa, promPort);
           const pfProm = spawn(
             "kubectl",
@@ -174,17 +173,8 @@ export function headlampCommand(): Command {
           );
           pfProm.unref();
           promForwarded = true;
-        } catch {
-          // Prometheus not present — plugin panels will show the
-          // "Prometheus unreachable" hint, which is the correct UX
-          // for a cluster without monitoring.
         }
-        try {
-          await execa(
-            "kubectl",
-            kctl(["get", "svc", "kps-grafana", "-n", "monitoring", "--no-headers"]),
-            { stdio: "pipe" },
-          );
+        if (monitoring.grafana) {
           await freePort(execa, grafanaPort);
           const pfGraf = spawn(
             "kubectl",
@@ -199,8 +189,6 @@ export function headlampCommand(): Command {
           );
           pfGraf.unref();
           grafanaForwarded = true;
-        } catch {
-          // Grafana not present — fine.
         }
         if (promForwarded || grafanaForwarded) {
           // Give the forwards a moment to bind.

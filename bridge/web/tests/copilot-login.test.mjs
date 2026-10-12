@@ -230,6 +230,45 @@ function moduleFrom(path, dependencies, globals = {}) {
   return exports;
 }
 
+test("default login timers retain the browser host receiver through start, polling and cancellation", async () => {
+  const time = clock();
+  const view = ui();
+  const host = {
+    setTimeout(callback, milliseconds) {
+      assert.equal(this, host, "Browser timers require their Window receiver");
+      return time.setTimeout(callback, milliseconds);
+    },
+    clearTimeout(timer) {
+      assert.equal(this, host, "Browser timers require their Window receiver");
+      time.clearTimeout(timer);
+    },
+  };
+  const browserLogin = moduleFrom("../src/lib/copilot-login.ts", {}, {
+    globalThis: host, setTimeout: host.setTimeout, clearTimeout: host.clearTimeout,
+    Date: { now: time.now },
+  });
+  let starts = 0, polls = 0;
+  const control = browserLogin.createCopilotLoginController({
+    start: async () => { starts++; return { ok: true, data: contract.start }; },
+    poll: async () => { polls++; return contract.pending; },
+  }, view.callbacks);
+  await control.begin();
+  assert.equal(starts, 1);
+  assert.equal(view.state.starting, false);
+  assert.equal(view.state.flow.user_code, contract.start.user_code);
+  await time.advance(contract.start.interval * 1000);
+  assert.equal(polls, 1);
+  control.cancel();
+  assert.equal(view.state.flow, null);
+  assert.deepEqual(time.deadlines(), []);
+  await control.begin();
+  await time.advance(contract.start.expires_in * 1000);
+  assert.equal(view.state.error, login.copilotErrors.copilot_expired);
+  assert.equal(view.state.starting, false);
+  control.dispose();
+  assert.deepEqual(time.deadlines(), []);
+});
+
 async function server(t, handler) {
   const calls = [];
   const http = createServer(async (req, res) => {

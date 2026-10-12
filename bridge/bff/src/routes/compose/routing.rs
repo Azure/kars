@@ -72,7 +72,9 @@ pub(super) fn select_orchestrator_route(
                 let route = efficiency
                     .routes
                     .iter()
-                    .find(|route| route.route == model.deployment);
+                    .find(|route| route.route == model.deployment
+                        && Some(route.harness.as_str()) == efficiency.recommended_harness.as_deref()
+                        && route.verified_runs == route.runs);
                 let frontier_bonus = if actionable_recommendation == Some(model.deployment.as_str()) {
                     80
                 } else {
@@ -107,13 +109,15 @@ pub(super) fn efficiency_basis(
     eff: &crate::routes::efficiency::EfficiencyDto,
     deployment: &str,
 ) -> String {
-    if let Some(r) = eff.routes.iter().find(|r| r.route == deployment) {
+    if let Some(r) = eff.routes.iter().find(|r| {
+        r.route == deployment && Some(r.harness.as_str()) == eff.recommended_harness.as_deref()
+    }) {
         let acc = (r.acceptance_rate * 100.0).round() as i64;
         // Distinguish a CONFIDENT recommendation (enough runs, a real acceptance
         // rate) from the best of a sparse/weak set. Without this, a route that is
         // merely "least-bad" — e.g. 7% accepted over a handful of runs — read as a
         // glowing endorsement next to the word "Recommended", which is dishonest.
-        let strong = r.runs >= 5 && r.acceptance_rate >= 0.5;
+        let strong = !eff.recommended_low_confidence && r.runs >= 5 && r.acceptance_rate >= 0.5;
         let mut s = if strong {
             format!(
                 "Best learned route — {acc}% accepted over {} run{}",
@@ -172,4 +176,45 @@ pub(super) fn efficient_member_route_is_qualified(runs: i64, acceptance_rate: f6
     // team inherits it. This is intentionally stricter on sample count than a
     // descriptive efficiency-basis label because it changes live execution.
     runs >= 3 && acceptance_rate >= 0.67
+}
+
+#[cfg(test)]
+mod efficiency_consumer_tests {
+    use super::*;
+    use crate::routes::efficiency::{EfficiencyDto, RouteEfficiency};
+
+    #[test]
+    fn basis_uses_the_recommended_harness_not_first_same_model_row() {
+        let eff = EfficiencyDto {
+            routes: vec![
+                RouteEfficiency {
+                    route: "shared-model".into(),
+                    harness: "OpenClaw".into(),
+                    runs: 100,
+                    acceptance_rate: 1.0,
+                    ..Default::default()
+                },
+                RouteEfficiency {
+                    route: "shared-model".into(),
+                    harness: "Hermes".into(),
+                    runs: 2,
+                    acceptance_rate: 0.5,
+                    ..Default::default()
+                },
+            ],
+            recommended: Some("shared-model".into()),
+            recommended_harness: Some("Hermes".into()),
+            recommended_basis: None,
+            recommended_low_confidence: true,
+            total_runs: 102,
+            priced: false,
+        };
+        let basis = efficiency_basis(&eff, "shared-model");
+        assert!(basis.contains("50% accepted over 2 runs on Hermes"));
+        assert!(!basis.contains("100 runs") && !basis.contains("Best learned route"));
+        assert!(!recommendation_is_actionable(
+            eff.recommended.as_deref(),
+            eff.recommended_low_confidence
+        ));
+    }
 }

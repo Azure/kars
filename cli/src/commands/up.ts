@@ -5,7 +5,6 @@ import { Command } from "commander";
 import { assertSafeMutation } from "../lib/sre-authority.js";
 import chalk from "chalk";
 import { existsSync } from "fs";
-import * as path from "path";
 import * as os from "node:os";
 import { Stepper, banner } from "../stepper.js";
 import { isValidAzureHost } from "./up/preflight.js";
@@ -16,6 +15,11 @@ import { cliReleaseTag } from "../lib/version.js";
 import { prepareCoreHelmSchemas } from "../lib/core-helm-schemas.js";
 import { assertControllerMutationAllowed } from "../lib/private-root-upgrade-guard.js";
 import { preflightUpRoot } from "./up/root-preflight.js";
+import { helmUsesEntra, inspectUpMeshTrust, upMeshHelmArgs, validateMeshTrustOptions, verifyHelmMeshTrust } from "./up/mesh-trust.js";
+import { recheckMeshOwnership } from "../lib/mesh-release.js";
+import { createSubscriptionPinnedExeca } from "../lib/azure-subscription.js";
+import { validateWorkloadIdentityConfig } from "../lib/workload-identity.js";
+import { restartOwnedMetrics } from "../lib/metrics-image-apply.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -58,19 +62,19 @@ export function upCommand(): Command {
     // ── Foundry / Azure OpenAI ────────────────────────────────────────
     .option("--foundry-endpoint <url>", "Existing Azure AI Foundry project endpoint (services.ai.azure.com)")
     .option("--openai-endpoint <url>", "Existing Azure OpenAI endpoint (openai.azure.com, derived from Foundry if omitted)")
-    // ── Entra Agent ID (auto-provisioned by `kars up`) ────────────────
+    // ── Entra Agent ID (reviewed Core Helm activation) ──────────────
     .option(
       "--service-tree <guid>",
-      "ServiceTree / service-management-reference GUID. Required only in Microsoft-style enterprise tenants when creating Entra blueprints. Falls back to KARS_SERVICE_TREE env var.",
+      "Reserved for provisioning; currently refused by up. Configure the Blueprint through reviewed Core Helm activation instead.",
     )
     // ── Mesh federation ───────────────────────────────────────────────
     .option("--mesh-peer", "Enable mesh federation peer (default: on; use --no-mesh-peer to disable)", true)
     .option("--global-registry <url>", "Use an external AgentMesh registry (skip local registry deployment)")
-    .option("--expose-registry", "Deploy AGIC Ingress to expose this cluster's registry publicly", false)
+    .option("--expose-registry", "Temporarily unavailable: configure and verify public ingress separately; refused before changes", false)
     .option("-m, --mesh-provider <provider>", "Mesh stack to deploy. Only 'agt' is supported (vendored Rust relay/registry were removed in Phase 5.2). Kept as a flag for backward-compatible scripts.", "agt")
     .option(
       "--mesh-trust <mode>",
-      "Mesh peer trust mode. 'anonymous' (default): peers register without verification — works on any tenant, simpler setup. 'entra': peers must present Entra-signed JWTs from per-sandbox Agent Identity SPs — registry stamps verified_app_id + tier=verified; requires 'Agent ID Developer' Entra role at first kars up.",
+      "Mesh trust requirement. 'anonymous' (default): allow the installed mode without downgrading existing Entra trust. 'entra': require already-reviewed same-release Core Helm Entra activation and verify both mesh templates. Does not provision identities or prove token acceptance.",
       "anonymous",
     )
     // ── Output / lifecycle ────────────────────────────────────────────
@@ -120,7 +124,8 @@ Auto-resume:
         process.exit(1);
       }
 
-      const { execa } = await import("execa");
+      const meshTrustMode = validateMeshTrustOptions(options);
+      const { execa: execute } = await import("execa");
 
       // ── DEMO MODE (recording-friendly walkthrough) ─────────────────
       // Walks every phase using read-only queries against the current
@@ -157,13 +162,14 @@ Auto-resume:
       // name / isolation / backend), RBAC + provider preflight, SKU
       // availability check, and the --dry-run plan print. Returns
       // null when --dry-run was taken (we early-return), otherwise
-      // returns the derived `rg` for the production-deploy section.
+      // returns the resource group and selected subscription for deployment.
       const { runPreflight } = await import("./up/preflight.js");
       const preflightResult = await runPreflight(options);
       if (preflightResult === null) {
         return;
       }
-      const { rg } = preflightResult;
+      const { rg, subscriptionId } = preflightResult;
+      const execa = createSubscriptionPinnedExeca(execute, subscriptionId);
 
 
       banner("kars · Production Deploy", "Secure AI Agent Runtime on Azure");
@@ -171,6 +177,13 @@ Auto-resume:
       const clusterName = options.clusterName ?? "kars";
       const baseName = clusterName.replace(/-aks$/, "");
       const rootConnected = await preflightUpRoot(execa, rg, `${baseName}-aks`, options.skipInfra === true);
+      if (rootConnected) {
+        const trust = await inspectUpMeshTrust(execa, meshTrustMode, options.globalRegistry);
+        await verifyHelmMeshTrust(execa, trust.mesh, meshTrustMode === "entra");
+      }
+      else if (meshTrustMode === "entra") {
+        throw new Error("Install Core first, then activate Entra through the reviewed same-release Helm upgrade; see deploy/helm/kars/README.md. No infrastructure was provisioned.");
+      }
       if (rootConnected && !options.forceInfra) options.skipInfra = true;
       let acrName = ""; // resolved from Bicep output after deployment
 
@@ -212,20 +225,10 @@ Auto-resume:
       //   4. Get AKS credentials
       //   5. Build OR import images
       //   6. Helm install (CRD + controller + seccomp DS)
-      //   7. (optional) Entra Agent ID trust anchor — only with --mesh-trust=entra
-      //   8. AgentMesh infrastructure (relay + registry)
-      //   9. (optional) AgentMesh Ingress — only with --expose-registry
-      //  10. Create KarsSandbox CR
-      //  11. Wait for sandbox Running
-      // Base (without the two optionals) = 9 phases. We over-count rather than
-      // under-count for the rare resume path that skips the Entra provisioning
-      // step: a graceful `9/10` is fine; a broken `10/9` is not.
-      const meshTrustForCount = (options as { meshTrust?: string }).meshTrust ?? "anonymous";
-      const totalSteps =
-        9 +
-        (options.exposeRegistry ? 1 : 0) +
-        (meshTrustForCount === "entra" ? 1 : 0);
-      const stepper = new Stepper({ totalSteps });
+      //   7. Verify AgentMesh infrastructure (relay + registry)
+      //   8. Create KarsSandbox CR
+      //   9. Wait for sandbox Running
+      const stepper = new Stepper({ totalSteps: 9 });
 
       try {
         const path = await import("path");
@@ -599,6 +602,13 @@ Auto-resume:
         await assertControllerMutationAllowed(execa);
         await assertSafeMutation(execa);
 
+        // Recheck the connected target before acquiring images or changing Helm state.
+        const meshTrust = await inspectUpMeshTrust(execa, meshTrustMode, options.globalRegistry);
+        const helmExists = meshTrust.releaseExists;
+        const requireEntra = meshTrustMode === "entra"
+          || (meshTrust.mesh.kind === "helm" && helmUsesEntra(meshTrust.mesh.values));
+        await verifyHelmMeshTrust(execa, meshTrust.mesh, requireEntra);
+
         // ── Step 6: Get images into ACR ──────────────────────────────
         const acr = acrLoginServer.replace(".azurecr.io", "");
         await acquireImages({
@@ -614,16 +624,6 @@ Auto-resume:
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
         stepper.step("Deploying Helm chart (controller + CRD + RBAC)...");
 
-        // Check if Helm release already exists
-        let helmExists = false;
-        try {
-          const { stdout: helmStatus } = await execa("helm", [
-            "status", "kars", "-n", "kars-system", "-o", "json",
-          ], { stdio: "pipe" });
-          const status = JSON.parse(helmStatus);
-          if (status.info?.status === "deployed") helmExists = true;
-        } catch { /* not installed */ }
-
         const foundryEndpoint = options.foundryEndpoint || "";
 
         // Use explicitly provided OpenAI endpoint, or derive from Foundry resource name
@@ -636,40 +636,6 @@ Auto-resume:
             openAiEndpoint = `https://${match[1]}.openai.azure.com`;
             console.log(`  Derived OpenAI inference endpoint: ${openAiEndpoint}`);
           }
-        }
-
-        // Fix orphaned namespace: label it for Helm adoption if it exists but isn't Helm-managed
-        try {
-          await execa("kubectl", [
-            "label", "namespace", "kars-system",
-            "app.kubernetes.io/managed-by=Helm",
-            "--overwrite",
-          ], { stdio: "pipe" }).catch(() => {});
-          await execa("kubectl", [
-            "annotate", "namespace", "kars-system",
-            "meta.helm.sh/release-name=kars",
-            "meta.helm.sh/release-namespace=kars-system",
-            "--overwrite",
-          ], { stdio: "pipe" }).catch(() => {});
-        } catch {
-          // Namespace may not exist yet — Helm will create it
-        }
-
-        // Clean up stale Helm releases (pending-install from failed previous attempts)
-        try {
-          const { stdout: helmSecrets } = await execa("kubectl", [
-            "get", "secrets", "-n", "kars-system",
-            "-l", "owner=helm,status=pending-install",
-            "-o", "jsonpath={.items[*].metadata.name}",
-          ], { stdio: "pipe" });
-          if (helmSecrets.trim()) {
-            for (const secret of helmSecrets.trim().split(" ")) {
-              stepper.update("Cleaning stale Helm release...");
-              await execa("kubectl", ["delete", "secret", secret, "-n", "kars-system"], { stdio: "pipe" }).catch(() => {});
-            }
-          }
-        } catch {
-          // No stale secrets — normal
         }
 
         stepper.update("Detecting kubelet managed identity for IMDS auth...");
@@ -744,7 +710,12 @@ Auto-resume:
           "upgrade", "--install", "kars", helmPath,
           "--namespace", "kars-system",
           "--create-namespace",
+          ...upMeshHelmArgs(meshTrust, options.globalRegistry),
           "--set", `controller.image.repository=${acrLoginServer}/kars-controller`,
+          "--set", `metricsServer.image.repository=${acrLoginServer}/kars-metrics-server`,
+          "--set", "metricsServer.image.tag=latest",
+          "--set", `headlamp.image.repository=${acrLoginServer}/kars-headlamp`,
+          "--set", "headlamp.image.tag=latest",
           "--set", `controller.image.tag=latest`,
           "--set", `inferenceRouter.image.repository=${acrLoginServer}/kars-inference-router`,
           "--set", `inferenceRouter.image.tag=latest`,
@@ -820,30 +791,25 @@ Auto-resume:
           helmArgs.push("--set-string", `foundry.deployments=${escaped}`);
         }
 
-        // Pass federated credential config so controller can auto-create fedcreds for sub-agents
-        try {
-          const { stdout: oidcIssuerUrl } = await execa("az", [
-            "aks", "show",
-            "--name", `${baseName}-aks`,
-            "--resource-group", rg,
-            "--query", "oidcIssuerProfile.issuerUrl",
-            "--output", "tsv",
-          ], { stdio: "pipe", timeout: 15000 });
-          const { stdout: subIdRaw } = await execa("az", [
-            "account", "show", "--query", "id", "--output", "tsv",
-          ], { stdio: "pipe", timeout: 10000 });
-          if (oidcIssuerUrl.trim() && subIdRaw.trim()) {
-            helmArgs.push(
-              "--set", `fedcred.subscriptionId=${subIdRaw.trim()}`,
-              "--set", `fedcred.identityName=${baseName}-aks-sandbox-wi`,
-              "--set", `fedcred.identityResourceGroup=${rg}`,
-              "--set", `fedcred.oidcIssuerUrl=${oidcIssuerUrl.trim()}`,
-            );
-          }
-        } catch { /* non-critical — controller will log warning */ }
+        const { stdout: oidcIssuerUrl } = await execa("az", [
+          "aks", "show", "--name", `${baseName}-aks`, "--resource-group", rg,
+          "--query", "oidcIssuerProfile.issuerUrl", "--output", "tsv",
+        ], { stdio: "pipe", timeout: 15000 });
+        const federation = validateWorkloadIdentityConfig({
+          subscriptionId, resourceGroup: rg,
+          identityName: `${baseName}-aks-sandbox-wi`, issuer: oidcIssuerUrl.trim(),
+        });
+        helmArgs.push(
+          "--set-string", `fedcred.subscriptionId=${federation.subscriptionId}`,
+          "--set-string", `fedcred.identityName=${federation.identityName}`,
+          "--set-string", `fedcred.identityResourceGroup=${federation.resourceGroup}`,
+          "--set-string", `fedcred.oidcIssuerUrl=${federation.issuer}`,
+        );
 
         stepper.update(`${helmExists ? "Upgrading" : "Installing"} kars Helm chart (controller + CRD + RBAC + seccomp)...`);
+        await recheckMeshOwnership(execa, meshTrust.mesh);
         await prepareCoreHelmSchemas(execa, helmArgs);
+        await recheckMeshOwnership(execa, meshTrust.mesh);
         await execa("helm", helmArgs, { stdio: "pipe" });
         stepper.detail(helmExists ? "ok" : "new", `Helm release — ${helmExists ? "upgraded" : "installed"}`);
 
@@ -852,106 +818,27 @@ Auto-resume:
         await execa("kubectl", [
           "rollout", "restart", "deployment/kars-controller",
           "-n", "kars-system",
-        ], { stdio: "pipe" }).catch(() => {});
+        ], { stdio: "pipe" });
         await execa("kubectl", [
           "rollout", "status", "deployment/kars-controller",
           "-n", "kars-system",
           "--timeout=120s",
-        ], { stdio: "pipe" }).catch(() => {});
+        ], { stdio: "pipe" });
 
+        await restartOwnedMetrics(execa);
         stepper.done(`Controller ${helmExists ? "upgraded" : "deployed"}`);
         markPhaseDone("helm", {}, resumeTopology);
 
-        // ── Step 6b: Entra Agent ID trust anchor (idempotent) ────────
-        // Only fires when --mesh-trust=entra (default is 'anonymous').
-        // Provisions the tenant-wide blueprint + controller MI +
-        // MI-as-FIC + KarsAuthConfig CR. Skipped automatically when
-        // KarsAuthConfig/default already exists.
-        //
-        // When --mesh-trust=anonymous (default), this whole block is
-        // skipped — the cluster runs without per-sandbox Entra
-        // identities and the relay accepts unverified WebSocket
-        // connects. Operators can opt in later via
-        // `kars mesh setup-trust` followed by patching
-        // KarsAuthConfig.spec.meshAuthBackend=EntraAgentIdentity.
-        let entraVerifyForMesh: { audience: string; tenantId: string } | undefined;
-        const meshTrustMode = (options as { meshTrust?: string }).meshTrust ?? "anonymous";
-        if (meshTrustMode !== "anonymous" && meshTrustMode !== "entra") {
-          throw new Error(
-            `--mesh-trust must be 'anonymous' or 'entra' (got '${meshTrustMode}')`,
-          );
-        }
-        if (meshTrustMode === "entra") {
-          try {
-            const { karsAuthConfigExists, ensureAgentIdTrustAutoFallback } = await import(
-              "./mesh/agent_id_setup.js"
-            );
-            const already = await karsAuthConfigExists();
-            if (already) {
-              stepper.detail("ok", "KarsAuthConfig/default already present — skipping Entra Agent ID setup");
-              // Read the existing CR to wire Phase 6.c on the relay
-              // even though setup-trust itself was skipped.
-              try {
-                const { execa } = await import("execa");
-                const { stdout } = await execa("kubectl", [
-                  "get", "karsauthconfig", "default", "-o",
-                  "jsonpath={.spec.agentId.blueprintClientId}|{.spec.tenant.tenantId}",
-                ], { stdio: "pipe" });
-                const [bp, tid] = stdout.split("|");
-                if (bp && tid) {
-                  entraVerifyForMesh = { audience: bp, tenantId: tid };
-                }
-              } catch { /* best effort */ }
-            } else {
-              stepper.step("Provisioning Entra Agent ID trust anchor (--mesh-trust=entra)...");
-              const result = await ensureAgentIdTrustAutoFallback({
-                clusterName: baseName,
-                resourceGroup: rg,
-                region: options.region,
-                serviceTree: (options as { serviceTree?: string }).serviceTree,
-              });
-              stepper.done(
-                result.freshlyCreated
-                  ? `Entra Agent ID trust created (blueprint=${result.blueprintClientId})`
-                  : `Entra Agent ID trust reused (blueprint=${result.blueprintClientId})`,
-              );
-              entraVerifyForMesh = {
-                audience: result.blueprintClientId,
-                tenantId: result.tenantId,
-              };
-            }
-          } catch (e) {
-            const msg = (e as Error).message;
-            stepper.detail(
-              "info",
-              `Entra Agent ID setup skipped — ${msg.split("\n")[0].slice(0, 160)}`,
-            );
-            console.log(
-              chalk.yellow(
-                "  ⚠ --mesh-trust=entra requested but setup failed; falling back to anonymous tier.",
-              ),
-            );
-            if (msg.includes("Agent ID Developer")) {
-              console.log(
-                chalk.dim(
-                  "    Grant the 'Agent ID Developer' Entra role to your account and retry.",
-                ),
-              );
-            }
-          }
-        } else {
-          stepper.detail("ok", "--mesh-trust=anonymous (default) — skipping Entra Agent ID provisioning");
-        }
-
-        // ── Step 6c: Inspektor Gadget + AgentMesh deploy ──────────
-        // (S15.d.3: extracted to ./up/agentmesh_deploy.ts)
+        // AgentMesh and Entra configuration are reconciled by the same Core release.
+        // Verify that result before creating a sandbox; never patch auth after startup.
         const { deployAgentMesh } = await import("./up/agentmesh_deploy.js");
         const meshResult = await deployAgentMesh(
-          { repoRoot, acr, acrLoginServer, baseName, rg, stepper, entraVerify: entraVerifyForMesh },
+          { stepper },
           {
             globalRegistry: options.globalRegistry,
             exposeRegistry: options.exposeRegistry,
             meshProvider: "agt",
+            meshTrust: requireEntra ? "entra" : meshTrustMode,
           },
         );
         const registryMode = meshResult.registryMode;
@@ -968,7 +855,7 @@ Auto-resume:
           baseName, rg,
           acrLoginServer, foundryEndpoint, openAiEndpoint, kvName,
           wiClientId, imdsClientId,
-          repoRoot, stepper,
+          repoRoot, stepper, federation,
           registryMode, globalRegistryUrl, globalRelayUrl,
         });
 

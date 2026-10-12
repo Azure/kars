@@ -19,10 +19,25 @@ Optional [workspace credential sources](credential-sources.md) require the
 matching controller and CRD. Upgrade both before using `--credential-source`;
 legacy direct credential Secrets remain the default.
 
+## Helm-only first-install preview
+
+For the two-release Core + Bridge beta path, use the opt-in
+[Core schema bootstrap](../../cli/schema-hook/README.md) and the
+[beta first-install sequence](../../bridge/docs/public-beta-helm.md#helm-only-first-install-preview--the-beta-acceptance-path).
+The hook stages schemas inside the original Core Helm install; it does not
+require a separate CLI schema command or a third product release. It remains
+disabled by default pending helper-image and native installation qualification.
+Its reviewed Helm/Kubernetes versions, image digest, API-only networking and
+retained-helper lifecycle are required inputs, not inferred defaults.
+
+The hook is not an upgrade, rollback or existing-release migration mechanism.
+The CLI-assisted procedures below remain the compatibility path when it is
+disabled; they do not satisfy the Helm-only beta acceptance gate.
+
 ## Required schema-before-admission stage
 
-Use the matching CLI/chart to stage schemas **before** Helm creates or updates
-the admission policies:
+When the first-install hook is disabled, use the matching CLI/chart to stage
+schemas **before** Helm creates or updates the admission policies:
 
 ```bash
 kars schemas prepare --release kars --namespace kars-system \

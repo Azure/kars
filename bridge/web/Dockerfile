@@ -17,7 +17,7 @@ WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
 ENV NEXT_TELEMETRY_DISABLED=1
-RUN npm run build
+RUN --network=none npm run build
 
 FROM mcr.microsoft.com/azurelinux/distroless/base:3.0 AS runtime-base
 

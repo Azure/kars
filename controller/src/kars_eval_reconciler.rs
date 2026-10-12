@@ -27,6 +27,7 @@
 //! slice 6.4.
 
 mod corpus;
+mod egress;
 mod evidence;
 mod observation;
 mod report;
@@ -49,6 +50,7 @@ use kube::{
     api::{Api, DeleteParams, ListParams, ObjectMeta, Patch, PatchParams, PostParams},
     runtime::controller::{Action, Controller},
 };
+#[cfg(test)]
 use runner::runner_pod_spec_json;
 use serde_json::json;
 use status::{build_conditions, patch_sandbox_drift, write_degraded};
@@ -57,6 +59,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::crd::KarsSandbox;
+use crate::eval_names::{bounded_name, short_hash};
 use crate::kars_eval::{
     ANNOTATION_RUN_NOW, CorpusSource, EvalResult, KarsEval, KarsEvalStatus, TYPE_CONFORMANCE_DRIFT,
     reason,
@@ -143,7 +146,7 @@ async fn reconcile_inner(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, R
     let cronjobs: Api<CronJob> = Api::namespaced(ctx.client.clone(), &ns);
 
     if eval.metadata.deletion_timestamp.is_some() {
-        return finalize(&evals_api, &configmaps, &jobs, &cronjobs, &eval, &name).await;
+        return finalize(&evals_api, &eval, &name).await;
     }
 
     if !eval
@@ -205,9 +208,24 @@ async fn reconcile_inner(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, R
         &target_url,
     )
     .await?;
+    let corpus = kars_eval_corpus::parse(&resolved.bytes)
+        .map_err(|error| anyhow::anyhow!("resolved evaluation corpus changed: {error}"))?;
+    if corpus.cases.iter().any(|case| {
+        matches!(
+            case.scenario,
+            kars_eval_corpus::Scenario::EgressConnect { .. }
+        )
+    }) {
+        let target = egress::Target::resolve(&ctx.client, &eval).await?;
+        intent.revalidate(&ctx.client, &eval).await?;
+        target.grant(&ctx.client, &eval).await?;
+        intent = intent.with_proxy(target)?;
+    } else {
+        egress::revoke(&ctx.client, &eval, None).await?;
+    }
 
     // -------- 2. Ensure corpus ConfigMap --------------------------
-    let cm_name = format!("karseval-{name}-corpus");
+    let cm_name = corpus_configmap_name(&name);
     if let Err(e) = ensure_corpus_configmap(&configmaps, &cm_name, &eval, &resolved).await {
         tracing::warn!(karseval = %name, error_class = e.class(), "KarsEvalCorpusWriteFailed");
         return write_degraded(
@@ -238,45 +256,18 @@ async fn reconcile_inner(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, R
                 .map(String::as_str),
         );
         intent.revalidate(&ctx.client, &eval).await?;
-        ensure_run_now_job(
-            &jobs,
-            &job_name,
-            &eval,
-            &intent,
-            &cm_name,
-            &runner_image,
-            &target_url,
-            &resolved.label,
-        )
-        .await?;
+        ensure_run_now_job(&jobs, &job_name, &eval, &intent).await?;
         spawned_run_now = Some(job_name.clone());
         eval = workloads::acknowledge_trigger(&evals_api, &eval, &job_name).await?;
-        intent = workloads::Intent::new(
-            &ctx.client,
-            &eval,
-            &resolved.digest,
-            &runner_image,
-            &target_url,
-        )
-        .await?;
+        // Acknowledgement changes request annotations, not the bound Pod spec.
+        intent.revalidate(&ctx.client, &eval).await?;
     }
 
     // -------- 4. Ensure CronJob or delete -------------------------
     let cron_job_name = if let Some(schedule) = eval.spec.schedule.as_deref() {
         let cj_name = cron_job_name(&name);
         intent.revalidate(&ctx.client, &eval).await?;
-        ensure_cronjob(
-            &cronjobs,
-            &cj_name,
-            &eval,
-            &intent,
-            schedule,
-            &cm_name,
-            &runner_image,
-            &target_url,
-            &resolved.label,
-        )
-        .await?;
+        ensure_cronjob(&cronjobs, &cj_name, &eval, &intent, schedule).await?;
         Some(cj_name)
     } else {
         let cj_name = cron_job_name(&name);
@@ -461,7 +452,7 @@ async fn ensure_corpus_configmap(
                     "app.kubernetes.io/managed-by".into(),
                     "kars-controller".into(),
                 ),
-                (LABEL_KEY_CLAW_EVAL.into(), owner),
+                (LABEL_KEY_CLAW_EVAL.into(), bounded_name(&owner, 63)),
                 ("kars.azure.com/artifact".into(), "claw-eval-corpus".into()),
             ])),
             owner_references: Some(owner_refs),
@@ -519,8 +510,13 @@ fn karseval_owner_refs(eval_name: &str, uid: &str) -> serde_json::Value {
     }])
 }
 
+fn corpus_configmap_name(eval_name: &str) -> String {
+    bounded_name(&format!("karseval-{eval_name}-corpus"), 253)
+}
+
 fn cron_job_name(eval_name: &str) -> String {
-    format!("karseval-{eval_name}")
+    // Kubernetes reserves 11 characters for the scheduled Job suffix.
+    bounded_name(&format!("karseval-{eval_name}"), 52)
 }
 
 /// Build a deterministic Job name for a run-now spawn. The CR's
@@ -532,37 +528,23 @@ fn run_now_job_name(eval_name: &str, resource_version: Option<&str>) -> String {
     let suffix = resource_version
         .map(short_hash)
         .unwrap_or_else(|| "now".into());
-    format!("karseval-{eval_name}-runnow-{suffix}")
+    // The Job controller copies this name into a 63-byte label value.
+    bounded_name(&format!("karseval-{eval_name}-runnow-{suffix}"), 63)
 }
 
-fn short_hash(s: &str) -> String {
-    use sha2::Digest;
-    let mut h = sha2::Sha256::new();
-    h.update(s.as_bytes());
-    let digest = h.finalize();
-    // 10 hex chars is plenty for K8s name uniqueness within one CR.
-    digest.iter().take(5).map(|b| format!("{b:02x}")).collect()
-}
-
-#[allow(clippy::too_many_arguments)]
 async fn ensure_run_now_job(
     api: &Api<Job>,
     job_name: &str,
     eval: &KarsEval,
     intent: &workloads::Intent,
-    cm_name: &str,
-    runner_image: &str,
-    target_url: &str,
-    corpus_label: &str,
 ) -> Result<(), ReconcileError> {
     let eval_name = eval.name_any();
-    let pod_spec =
-        runner_pod_spec_json(&eval_name, cm_name, runner_image, target_url, corpus_label);
+    let pod_spec = &intent.pod_spec;
     let mut metadata = json!({
         "name": job_name,
         "labels": {
             "app.kubernetes.io/managed-by": "kars-controller",
-            LABEL_KEY_CLAW_EVAL: eval_name,
+            LABEL_KEY_CLAW_EVAL: bounded_name(&eval_name, 63),
             "kars.azure.com/karseval-trigger": "run-now",
         },
         "annotations": {
@@ -586,7 +568,7 @@ async fn ensure_run_now_job(
                     "annotations": intent.annotations(),
                     "labels": {
                         "app.kubernetes.io/managed-by": "kars-controller",
-                        LABEL_KEY_CLAW_EVAL: eval_name,
+                        LABEL_KEY_CLAW_EVAL: bounded_name(&eval_name, 63),
                     },
                 },
                 "spec": pod_spec,
@@ -611,26 +593,20 @@ async fn ensure_run_now_job(
     Ok(())
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn ensure_cronjob(
     api: &Api<CronJob>,
     cj_name: &str,
     eval: &KarsEval,
     intent: &workloads::Intent,
     schedule: &str,
-    cm_name: &str,
-    runner_image: &str,
-    target_url: &str,
-    corpus_label: &str,
 ) -> Result<(), ReconcileError> {
     let eval_name = eval.name_any();
-    let pod_spec =
-        runner_pod_spec_json(&eval_name, cm_name, runner_image, target_url, corpus_label);
+    let pod_spec = &intent.pod_spec;
     let mut metadata = json!({
         "name": cj_name,
         "labels": {
             "app.kubernetes.io/managed-by": "kars-controller",
-            LABEL_KEY_CLAW_EVAL: eval_name,
+            LABEL_KEY_CLAW_EVAL: bounded_name(&eval_name, 63),
         },
     });
     metadata["namespace"] = json!(eval.namespace());
@@ -649,7 +625,7 @@ async fn ensure_cronjob(
                     "annotations": intent.annotations(),
                     "labels": {
                         "app.kubernetes.io/managed-by": "kars-controller",
-                        LABEL_KEY_CLAW_EVAL: eval_name,
+                        LABEL_KEY_CLAW_EVAL: bounded_name(&eval_name, 63),
                         "kars.azure.com/karseval-trigger": "schedule",
                     },
                 },
@@ -661,7 +637,7 @@ async fn ensure_cronjob(
                             "annotations": intent.annotations(),
                             "labels": {
                                 "app.kubernetes.io/managed-by": "kars-controller",
-                                LABEL_KEY_CLAW_EVAL: eval_name,
+                                LABEL_KEY_CLAW_EVAL: bounded_name(&eval_name, 63),
                             },
                         },
                         "spec": pod_spec,
@@ -691,47 +667,19 @@ async fn ensure_cronjob(
     Ok(())
 }
 
-async fn delete_if_exists<K>(api: &Api<K>, name: &str) -> Result<(), ReconcileError>
-where
-    K: kube::Resource + Clone + serde::de::DeserializeOwned + std::fmt::Debug,
-    <K as kube::Resource>::DynamicType: Default,
-{
-    match api.delete(name, &DeleteParams::default()).await {
-        Ok(_) => Ok(()),
-        Err(kube::Error::Api(ae)) if ae.code == 404 => Ok(()),
-        Err(e) => Err(e.into()),
-    }
-}
-
 // ─────────────────────────────────────────────────────────────────────
 // Finalizer
 // ─────────────────────────────────────────────────────────────────────
 
 async fn finalize(
     api: &Api<KarsEval>,
-    configmaps: &Api<ConfigMap>,
-    jobs: &Api<Job>,
-    cronjobs: &Api<CronJob>,
     eval: &KarsEval,
     name: &str,
 ) -> Result<Action, ReconcileError> {
-    let cm_name = format!("karseval-{name}-corpus");
-    let _ = delete_if_exists(configmaps, &cm_name).await;
-    let cj_name = cron_job_name(name);
-    let _ = delete_if_exists(cronjobs, &cj_name).await;
-
-    // Delete any Jobs the controller spawned. Per `Job` semantics, the
-    // pods are garbage-collected by the JobController as a side effect.
-    let job_lp = ListParams::default().labels(&format!("{LABEL_KEY_CLAW_EVAL}={name}"));
-    if let Ok(job_list) = jobs.list(&job_lp).await {
-        for j in job_list.items {
-            let jn = j.name_any();
-            let _ = jobs
-                .delete(&jn, &DeleteParams::default().grace_period(0))
-                .await;
-        }
-    }
-
+    egress::revoke(&api.clone().into_client(), eval, None).await?;
+    // ConfigMaps, Jobs, CronJobs and service accounts have Eval UID owners.
+    // Let Kubernetes GC follow those references, never name/label lookalikes.
+    let (uid, rv) = workloads::identity(&eval.metadata)?;
     let finalizers: Vec<String> = eval
         .metadata
         .finalizers
@@ -741,14 +689,10 @@ async fn finalize(
     let patch = json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsEval",
-        "metadata": {"finalizers": finalizers},
+        "metadata": {"uid": uid, "resourceVersion": rv, "finalizers": finalizers},
     });
-    api.patch(
-        name,
-        &PatchParams::apply(FIELD_MANAGER).force(),
-        &Patch::Apply(patch),
-    )
-    .await?;
+    api.patch(name, &PatchParams::default(), &Patch::Merge(patch))
+        .await?;
     tracing::info!(karseval = %name, "KarsEvalDeleted");
     Ok(Action::await_change())
 }

@@ -105,7 +105,7 @@ export function EvalDetail({ name }: { name: string }) {
           onClick={toggle}
           className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium text-foreground-muted hover:text-foreground"
         >
-          {open ? "Hide" : "View"} detailed report{report ? ` · ${report.cases.length} cases` : ""}
+          {open ? "Hide" : "View"} detailed report{report ? ` · ${report.cases.length} case${report.cases.length === 1 ? "" : "s"}` : ""}
         </button>
         {report && (
           <button
@@ -125,8 +125,8 @@ export function EvalDetail({ name }: { name: string }) {
           {report && (
             <>
               <p className="text-[11px] text-foreground-muted">
-                Baseline: <span className="font-mono">{report.corpus ?? name}</span> — {report.cases.length} adversarial
-                case{report.cases.length === 1 ? "" : "s"}
+                Baseline: <span className="font-mono">{report.corpus ?? name}</span> — {report.cases.length}
+                {" "}case{report.cases.length === 1 ? "" : "s"}
                 {report.completed_at ? ` · last run ${new Date(report.completed_at).toLocaleString()}` : " · not run yet"}.
               </p>
               {!report.per_case_available && report.completed_at && (

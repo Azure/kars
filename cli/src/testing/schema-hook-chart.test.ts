@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 import { execFileSync } from 'node:child_process';
+import { createHash, createPrivateKey, X509Certificate } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { beforeAll, describe, expect, it } from 'vitest';
@@ -24,6 +25,25 @@ function render(args: string[] = [], release = 'kars', namespace = 'test-core'):
   }).filter(Boolean);
 }
 const schemaHooks = (docs: Json[]) => docs.filter(doc => doc.metadata.name.includes('-schema-'));
+function comparableResources(docs: Json[]): Json[] {
+  const result = structuredClone(docs);
+  const secret = result.find(doc => doc.kind === 'Secret' && doc.metadata.name === 'kars-metrics-server-tls')!;
+  const metrics = result.find(doc => doc.kind === 'Deployment' && doc.metadata.name === 'kars-metrics-server')!;
+  const api = result.find(doc => doc.kind === 'APIService' && doc.metadata.name === 'v1beta1.metrics.k8s.io')!;
+  const ca = new X509Certificate(Buffer.from(secret.data['ca.crt'], 'base64'));
+  const certificate = new X509Certificate(Buffer.from(secret.data['tls.crt'], 'base64'));
+  expect(certificate.verify(ca.publicKey)).toBe(true);
+  expect(certificate.checkPrivateKey(createPrivateKey(Buffer.from(secret.data['tls.key'], 'base64')))).toBe(true);
+  expect(api.spec.caBundle).toBe(secret.data['ca.crt']);
+  const checksum = 'checksum/serving-certificate';
+  expect(metrics.spec.template.metadata.annotations[checksum])
+    .toBe(createHash('sha256').update(secret.data['tls.crt']).digest('hex'));
+  // Separate offline renders generate independent certificates, even with identical values.
+  for (const key of ['ca.crt', 'tls.crt', 'tls.key']) secret.data[key] = '<generated>';
+  api.spec.caBundle = '<generated>';
+  metrics.spec.template.metadata.annotations[checksum] = '<generated>';
+  return result;
+}
 let baseline: Json[], documents: Json[], hooks: Json[], job: Json, identity: string;
 beforeAll(() => {
   baseline = render(); documents = render(enabled); hooks = schemaHooks(documents);
@@ -33,7 +53,8 @@ beforeAll(() => {
 describe('Core first-install schema stage', () => {
   it('is disabled by default and leaves every ordinary resource unchanged', () => {
     expect(schemaHooks(baseline)).toEqual([]);
-    expect(documents.filter(doc => !hooks.includes(doc))).toEqual(baseline);
+    expect(comparableResources(documents.filter(doc => !hooks.includes(doc))))
+      .toEqual(comparableResources(baseline));
     expect(hooks.map(doc => doc.kind).sort()).toEqual(['ServiceAccount', 'ClusterRole', 'ClusterRoleBinding',
       'Role', 'RoleBinding', 'ConfigMap', 'NetworkPolicy', 'Job'].sort());
     for (const crd of documents.filter(doc => doc.kind === 'CustomResourceDefinition')) {
@@ -122,6 +143,8 @@ describe('Core first-install schema stage', () => {
     const operator = documents.find(doc => doc.kind === 'NetworkPolicy' && doc.metadata.name === 'kars-system-operator-allow')!;
     expect(operator.spec.podSelector.matchExpressions).toEqual([{
       key: 'app.kubernetes.io/component', operator: 'NotIn', values: ['schema-hook'],
+    }, {
+      key: 'kars.azure.com/metrics-managed', operator: 'NotIn', values: ['true'],
     }]);
     const deny = documents.find(doc => doc.kind === 'NetworkPolicy' && doc.metadata.name === 'kars-system-default-deny')!;
     expect(deny.spec).toEqual({ podSelector: {}, policyTypes: ['Ingress', 'Egress'], ingress: [], egress: [] });
@@ -138,6 +161,31 @@ describe('Core first-install schema stage', () => {
     }
     expect(result.find(doc => doc.kind === 'Job')!.spec.template.spec.containers[0].args.slice(0, 4))
       .toEqual(['--release', 'maintenance-core', '--namespace', 'customer-core']);
+  });
+
+  it('allows the Cilium API identity only on reviewed ports without broadening other helper traffic', () => {
+    const result = schemaHooks(render([...enabled,
+      '--api-versions', 'cilium.io/v2/CiliumNetworkPolicy',
+      '--set', 'schemaHook.apiDestinations[1].cidr=172.20.0.5/32',
+      '--set', 'schemaHook.apiDestinations[1].port=6443',
+      '--set', 'schemaHook.apiDestinations[2].cidr=172.20.0.6/32',
+      '--set', 'schemaHook.apiDestinations[2].port=6443']));
+    const helper = result.find(doc => doc.kind === 'Job')!;
+    const policy = result.find(doc => doc.kind === 'CiliumNetworkPolicy')!;
+    expect(policy).toBeDefined();
+    expect(policy.metadata.namespace).toBe('test-core');
+    expect(policy.spec).toEqual({
+      endpointSelector: { matchLabels: { 'kars.azure.com/schema-hook': helper.metadata.name } },
+      egress: [{ toEntities: ['kube-apiserver'],
+        toPorts: [{ ports: [{ port: '443', protocol: 'TCP' }, { port: '6443', protocol: 'TCP' }] }] }],
+    });
+    expect(policy.metadata.annotations['helm.sh/hook']).toBe('pre-install');
+    expect(policy.metadata.annotations['helm.sh/hook-delete-policy']).toBe('before-hook-creation');
+    expect(Number(policy.metadata.annotations['helm.sh/hook-weight']))
+      .toBeLessThan(Number(helper.metadata.annotations['helm.sh/hook-weight']));
+    expect(result.find(doc => doc.kind === 'NetworkPolicy')!.spec.ingress).toEqual([]);
+    expect(hooks.some(doc => doc.kind === 'CiliumNetworkPolicy')).toBe(false);
+    expect(helper.spec.template.spec.securityContext).toEqual(job.spec.template.spec.securityContext);
   });
 
   it('selects an explicitly qualified native ARM helper without relaxing its security profile', () => {

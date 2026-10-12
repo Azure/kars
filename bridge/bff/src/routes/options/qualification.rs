@@ -126,7 +126,7 @@ impl RouteQualificationMode {
 
 pub(crate) fn route_validation_note() -> Result<Option<&'static str>, String> {
     Ok((RouteQualificationMode::from_env()? == RouteQualificationMode::Validation).then_some(
-        "Unqualified validation mode: prior runtime/model route evidence is advisory. This is not E2E qualification. Resource-specific evidence, authorization, admission, budgets, tool policy, and approval requirements still apply.",
+        "Unqualified validation mode: prior runtime/model and current-version MCP, memory, and skill execution evidence is advisory. Test runs do not establish E2E qualification. Current resource bindings, authorization, admission, budgets, tool policy, and approval requirements still apply. Channel evidence remains required.",
     ))
 }
 
@@ -243,6 +243,43 @@ fn resource_is_qualified(
     resource_is_qualified_in(&raw, runtime, provider, deployment, resource)
 }
 
+pub(super) fn resource_admitted_in(
+    mode: RouteQualificationMode,
+    raw: &str,
+    runtime: &str,
+    provider: &str,
+    deployment: &str,
+    resource: &QualifiedResourceSelection,
+) -> Result<bool, String> {
+    let qualified = resource_is_qualified_in(raw, runtime, provider, deployment, resource)?;
+    if mode == RouteQualificationMode::Required {
+        return Ok(qualified);
+    }
+    let present = |value: Option<&str>| value.is_some_and(|value| !value.trim().is_empty());
+    let bound = !resource.name.trim().is_empty()
+        && match resource.kind.as_str() {
+            "mcp" => present(resource.schema_digest.as_deref()),
+            "memory" => {
+                present(resource.backend.as_deref()) && present(resource.schema_digest.as_deref())
+            }
+            "skill" => present(resource.version_digest.as_deref()),
+            _ => false,
+        };
+    // Admission for testing must not populate the separate qualification projections.
+    Ok(bound)
+}
+
+fn resource_admitted(
+    runtime: &str,
+    provider: &str,
+    deployment: &str,
+    resource: &QualifiedResourceSelection,
+) -> Result<bool, String> {
+    let mode = RouteQualificationMode::from_env()?;
+    let raw = qualification_records_raw_from_env()?;
+    resource_admitted_in(mode, &raw, runtime, provider, deployment, resource)
+}
+
 pub(super) fn mcp_resource_selection(option: &RefOption) -> QualifiedResourceSelection {
     QualifiedResourceSelection {
         kind: "mcp".into(),
@@ -318,6 +355,48 @@ pub(crate) fn skill_version_qualified_for_route(
     option: &RefOption,
 ) -> Result<bool, String> {
     resource_is_qualified(
+        runtime,
+        provider,
+        deployment,
+        &skill_resource_selection(option),
+    )
+}
+
+pub(crate) fn mcp_server_admitted_for_route(
+    runtime: &str,
+    provider: &str,
+    deployment: &str,
+    option: &RefOption,
+) -> Result<bool, String> {
+    resource_admitted(
+        runtime,
+        provider,
+        deployment,
+        &mcp_resource_selection(option),
+    )
+}
+
+pub(crate) fn memory_binding_admitted_for_route(
+    runtime: &str,
+    provider: &str,
+    deployment: &str,
+    option: &RefOption,
+) -> Result<bool, String> {
+    resource_admitted(
+        runtime,
+        provider,
+        deployment,
+        &memory_resource_selection(option),
+    )
+}
+
+pub(crate) fn skill_version_admitted_for_route(
+    runtime: &str,
+    provider: &str,
+    deployment: &str,
+    option: &RefOption,
+) -> Result<bool, String> {
+    resource_admitted(
         runtime,
         provider,
         deployment,

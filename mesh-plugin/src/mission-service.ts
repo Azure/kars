@@ -11,6 +11,8 @@ import { KubernetesMissionStore } from "./mission-store.js";
 import type { KubernetesJson } from "./kubernetes-json.js";
 import { createMeshTransport } from "./transport-factory.js";
 import type { IMeshTransport } from "./transport-interface.js";
+import { RequiredMeshAuth, meshAuthRequest } from "./required-mesh-auth.js";
+import { dispatcherAuthRequest, dispatcherSocketFactory, verifyDispatcherIdentity, type DispatcherEntraConfig } from "./mission-entra.js";
 
 export interface MissionServiceConfig {
   location: DispatcherLocation;
@@ -19,17 +21,21 @@ export interface MissionServiceConfig {
   registryUrl: string;
   pollMs: number;
   timeoutMs: number;
+  entra?: DispatcherEntraConfig;
 }
 export type MissionServiceEvent = "custody-unavailable" | "discovery-unavailable" | "candidate-unavailable" | "transport-error";
 export interface MissionServiceDependencies {
   acquireWriter: typeof acquireMissionWriter;
   custody: typeof dispatcherCustody;
   transport: typeof createMeshTransport;
+  authRequest: typeof meshAuthRequest;
+  socketFactory: typeof dispatcherSocketFactory;
   now: () => number;
   warn: (event: MissionServiceEvent) => void;
 }
 const defaults: MissionServiceDependencies = {
   acquireWriter: acquireMissionWriter, custody: dispatcherCustody, transport: createMeshTransport,
+  authRequest: meshAuthRequest, socketFactory: dispatcherSocketFactory,
   now: Date.now, warn: event => console.warn(`[mission-dispatcher] ${event}`),
 };
 async function pause(ms: number, signal: AbortSignal): Promise<void> {
@@ -46,6 +52,7 @@ export class MissionDispatchService {
   private anchor: DispatcherCustody | undefined;
   private checking: Promise<boolean> | undefined;
   private mesh: IMeshTransport | undefined;
+  private auth: RequiredMeshAuth<IMeshTransport> | undefined;
   private active: MissionCandidate | undefined;
 
   constructor(private readonly api: KubernetesJson, private readonly config: MissionServiceConfig,
@@ -69,7 +76,8 @@ export class MissionDispatchService {
 
   private async checkCustody(): Promise<boolean> {
     try {
-      const next = await this.deps.custody(this.api, this.config.location, this.config.root);
+      const next = await this.deps.custody(this.api, this.config.location, this.config.root, this.config.entra);
+      if (this.config.entra && !next.entra) throw new Error("Dispatcher Entra custody is missing");
       if (this.anchor && !isDeepStrictEqual(this.anchor, next)) {
         this.fatal = true;
         throw new Error("Dispatcher identity custody changed");
@@ -79,6 +87,7 @@ export class MissionDispatchService {
       return true;
     } catch {
       this.verifiedAt = null;
+      if (this.auth) { this.fatal = true; void this.auth.fail(); }
       this.deps.warn("custody-unavailable");
       return false;
     }
@@ -105,12 +114,33 @@ export class MissionDispatchService {
       while (!this.stopping && !await this.current()) await pause(this.config.pollMs, signal);
       if (this.stopping) return;
       const identity = missionIdentity(this.config.root, "dispatcher", this.anchor!.deploymentUid, this.anchor!.podUid);
-      this.mesh = await this.deps.transport({
+      const wsFactory = this.config.entra ? await this.deps.socketFactory(() => this.auth!) : undefined;
+      const raw = await this.deps.transport({
         identity, relayUrl: this.config.relayUrl, registryUrl: this.config.registryUrl,
-        capabilities: ["kars:mission-dispatch"], displayName: "Kars mission dispatcher",
+        capabilities: ["kars:mission-dispatch"], displayName: "Kars mission dispatcher", ...(wsFactory ? { wsFactory } : {}),
       });
-      const admission = new KubernetesMissionStore(this.api, () => this.current());
-      const store = new KubernetesMissionStore(this.api, async () => !this.stopping && await this.current() && !this.stopping);
+      this.mesh = raw;
+      if (this.config.entra) {
+        const binding = this.anchor!.entra!;
+        const request = dispatcherAuthRequest(this.config.location.namespace, this.config.registryUrl, binding, this.deps.authRequest);
+        this.auth = new RequiredMeshAuth(raw, {
+          publish: () => {},
+          revoke: () => { this.verifiedAt = null; },
+          fatal: () => { this.fatal = true; },
+          verify: (result, did) => verifyDispatcherIdentity(result, did, identity.did, binding),
+          request: async (...args) => {
+            if (this.stopping || !await this.current()) throw new Error("Dispatcher custody unavailable");
+            const result = await request(...args);
+            if (this.stopping || !await this.current()) throw new Error("Dispatcher custody unavailable");
+            return result;
+          },
+        });
+        this.mesh = this.auth.client;
+      }
+      const admitted = async () => !this.stopping && (!this.auth || this.auth.usable)
+        && await this.current() && !this.stopping && (!this.auth || this.auth.usable);
+      const admission = new KubernetesMissionStore(this.api, admitted);
+      const store = new KubernetesMissionStore(this.api, admitted);
       this.mesh.onKnock(async from => {
         const active = this.active;
         if (!active || from !== active.agentDid || this.mesh?.isConnected !== true) return { accept: false };
@@ -152,6 +182,7 @@ export class MissionDispatchService {
       await monitor;
       // A failed disconnect deliberately retains the writer until process death.
       await this.mesh?.disconnect();
+      if (this.auth?.state === "quarantined") throw new Error("Dispatcher transport retirement uncertain; writer retained until process exit");
       await writer.close();
     }
   }

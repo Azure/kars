@@ -25,14 +25,18 @@ function PhaseDot({ team }: { team: TeamSummary }) {
   const awaitingReview = team.health === "AwaitingReview";
   const unhealthy =
     team.health === "Stalled" || team.health === "Unproductive" || team.phase === "Degraded";
-  const label = team.paused
+  const label = team.phase === "Degraded"
+    ? "Degraded"
+    : team.paused
     ? "Hibernating"
     : awaitingReview
       ? "Awaiting review"
     : unhealthy
       ? (team.health ?? team.phase)
       : (team.runtime_state ?? team.phase);
-  const color = team.paused
+  const color = team.phase === "Degraded"
+    ? "bg-rose-500"
+    : team.paused
     ? "bg-foreground-muted"
     : awaitingReview
       ? "bg-amber-500"

@@ -34,7 +34,7 @@ spec:
       hostNetwork: false
       initContainers:
         - name: install-profile
-          image: mcr.microsoft.com/azurelinux/base/core:3.0
+          image: {{ .Values.sandbox.seccompInstallerImage | default "mcr.microsoft.com/azurelinux/base/core:3.0" | quote }}
           command:
             - /bin/sh
             - -c
@@ -55,7 +55,7 @@ spec:
         # DaemonSet requires at least one container — sleep indefinitely to keep
         # the pod alive (ensures profiles survive node restarts via restart policy)
         - name: pause
-          image: mcr.microsoft.com/azurelinux/base/core:3.0
+          image: {{ .Values.sandbox.seccompInstallerImage | default "mcr.microsoft.com/azurelinux/base/core:3.0" | quote }}
           command: ["sleep", "infinity"]
           resources:
             requests:

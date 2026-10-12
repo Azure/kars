@@ -306,7 +306,7 @@ pub async fn teams_command(
     let team_name = &req.team_name;
 
     // Enforce team ownership — same as browser handlers
-    crate::routes::teams::require_owned_team(cluster, ns, team_name, &principal).await?;
+    let owned_team = crate::routes::teams::require_owned_team(cluster, ns, team_name, &principal).await?;
 
     match req.command.as_str() {
         "status" => {
@@ -339,8 +339,7 @@ pub async fn teams_command(
             ))
         }
         "list-tasks" => {
-            let raw = cluster.read_team_tasks(team_name).await;
-            let tasks: Vec<serde_json::Value> = serde_json::from_str(&raw).unwrap_or_default();
+            let tasks = crate::routes::teams::read_tasks(cluster, &owned_team).await?;
             if tasks.is_empty() {
                 return Ok((
                     StatusCode::OK,
@@ -351,9 +350,7 @@ pub async fn teams_command(
             }
             let mut lines = vec![format!("**{team_name}** backlog ({} tasks):", tasks.len())];
             for task in tasks.iter().take(10) {
-                let id = task.get("id").and_then(|v| v.as_str()).unwrap_or("?");
-                let title = task.get("title").and_then(|v| v.as_str()).unwrap_or("?");
-                let status = task.get("status").and_then(|v| v.as_str()).unwrap_or("?");
+                let (id, title, status) = (&task.id, &task.title, &task.status);
                 lines.push(format!("• `{id}` — {title} [{status}]"));
             }
             if tasks.len() > 10 {
@@ -371,35 +368,16 @@ pub async fn teams_command(
                 return Err(AppError::BadRequest("add-task requires a title".into()));
             }
             let title = req.args.trim().to_string();
-            let task_id = format!("t-{}", chrono::Utc::now().timestamp_micros());
-            let new_task = serde_json::json!({
-                "id": task_id,
-                "title": title,
-                "description": "",
-                "depends_on": [],
-                "acceptance_criteria": [],
-                "review_required": false,
-                "status": "pending",
-                "created_at": chrono::Utc::now().to_rfc3339(),
-            });
-            cluster
-                .update_configmap_data(
-                    &format!("kars-team-tasks-{team_name}"),
-                    &[("kars.azure.com/team-tasks", team_name.as_str())],
-                    |data| {
-                        let mut tasks: Vec<serde_json::Value> = data
-                            .get("tasks.json")
-                            .and_then(|raw| serde_json::from_str(raw).ok())
-                            .unwrap_or_default();
-                        tasks.push(new_task.clone());
-                        data.insert(
-                            "tasks.json".into(),
-                            serde_json::to_string(&tasks).unwrap_or_else(|_| "[]".into()),
-                        );
-                    },
-                )
-                .await
-                .map_err(|e| AppError::Upstream(e.to_string()))?;
+            let Json(task) = crate::routes::teams::add_team_task(
+                State(state.clone()),
+                axum::extract::Extension(principal.clone()),
+                axum::extract::Path((ns.clone(), team_name.clone())),
+                Json(crate::routes::teams::AddTaskRequest {
+                    title: title.clone(),
+                    ..Default::default()
+                }),
+            ).await?;
+            let task_id = task.id;
             Ok((
                 StatusCode::OK,
                 Json(TeamsCommandResponse {

@@ -9,6 +9,7 @@ import { HonestState } from "@/components/honest-state";
 import { listTasks } from "@/lib/bff";
 import { defaultNamespace } from "@/lib/config";
 import { type TaskSummary } from "@/lib/types";
+import { isStandaloneMission } from "@/lib/mission-run-evidence";
 import { MissionsList } from "./missions-list";
 
 export const dynamic = "force-dynamic";
@@ -18,7 +19,7 @@ export default async function MissionsPage() {
   let tasks: TaskSummary[] = [];
   let error = false;
   try {
-    tasks = (await listTasks(ns)).filter((t) => !t.team);
+    tasks = (await listTasks(ns)).filter(isStandaloneMission);
   } catch {
     error = true;
   }

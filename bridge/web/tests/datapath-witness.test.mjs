@@ -61,15 +61,35 @@ test("copy is only clipboard with explicit context and no privileged web actuato
   assert.ok(documentation.includes(helpers.WITNESS_DISABLE_COMMAND));
   const copied = [];
   const clipboard = { writeText: async (value) => copied.push(value) };
-  for (const action of ["enable", "disable"]) {
-    const result = await helpers.copyWitnessCommand(action, clipboard);
-    assert.match(result, /No cluster change/);
-    assert.match(copied.at(-1), /--kube-context "\$\{KARS_CONTEXT:\?/);
-    assert.match(copied.at(-1), /--set enabled=(true|false)/);
-    assert.doesNotMatch(copied.at(-1), /install\.sh|--take-ownership|--force/);
+  for (const owner of [undefined, "kars", "kars-datapath-witness"]) {
+    for (const action of ["enable", "disable"]) {
+      const result = await helpers.copyWitnessCommand(action, clipboard, owner);
+      assert.match(result, /No cluster change/);
+      assert.match(copied.at(-1), /--kube-context "\$\{KARS_CONTEXT:\?/);
+      assert.match(copied.at(-1), /--set (datapathWitness\.)?enabled=(true|false)/);
+      assert.ok(documentation.includes(copied.at(-1)));
+      assert.equal(copied.at(-1).includes("--set datapathWitness."), owner !== "kars-datapath-witness");
+      assert.doesNotMatch(copied.at(-1), /install\.sh|--take-ownership|--force/);
+    }
   }
   await assert.rejects(helpers.copyWitnessCommand("enable", undefined), /Clipboard unavailable/);
   await assert.rejects(helpers.copyWitnessCommand("enable", { writeText: async () => { throw Error("denied"); } }), /denied/);
+});
+
+test("operator setup requires reviewed images for both AL3 runtime roles", () => {
+  const { DatapathSetup } = load("../src/components/datapath-setup.tsx", {
+    "@/lib/datapath-witness": helpers,
+  });
+  const html = renderToStaticMarkup(React.createElement(DatapathSetup));
+  assert.match(html, /AL3 runtime digest/);
+  assert.match(html, /aggregator\.image/);
+  assert.match(html, /gadget\.image/);
+  assert.match(html, /both the client and daemon/);
+  assert.match(html, /does not promise a prepublished image/);
+  assert.match(html, /No third Helm release/);
+  const standalone = renderToStaticMarkup(React.createElement(DatapathSetup, { ownerRelease: "kars-datapath-witness" }));
+  assert.match(standalone, /standalone release/);
+  assert.doesNotMatch(standalone, /--set datapathWitness/);
 });
 
 async function page(admin, value = report, fails = false) {
@@ -79,7 +99,9 @@ async function page(admin, value = report, fails = false) {
       Stat: ({ label, value }) => React.createElement("span", null, label, value),
       Badge: ({ children }) => React.createElement("span", null, children),
     },
-    "@/components/datapath-setup": { DatapathSetup: () => React.createElement("button", null, "Copy enable Helm command") },
+    "@/components/datapath-setup": {
+      DatapathSetup: ({ ownerRelease }) => React.createElement("button", { "data-owner": ownerRelease }, "Copy enable Helm command"),
+    },
     "@/lib/bff": { getDatapathWitness: async () => { if (fails) throw Error("denied"); return value; } },
     "@/lib/datapath-witness": { witnessPresentation: (w) => helpers.witnessPresentation(w, now) },
     "@/lib/session": { canAdminister: async () => admin },
@@ -89,6 +111,9 @@ async function page(admin, value = report, fails = false) {
 
 test("server page exposes command controls only to resolved admins; failures stay explicit", async () => {
   assert.match(await page(true), /Copy enable Helm command/);
+  for (const owner of ["kars", "kars-datapath-witness"]) {
+    assert.ok((await page(true, { ...report, owner_release: owner })).includes(`data-owner="${owner}"`));
+  }
   const operator = await page(false);
   assert.doesNotMatch(operator, /Copy enable Helm command/);
   assert.match(operator, /cluster operator outside Bridge/);

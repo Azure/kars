@@ -71,6 +71,45 @@ describe("mcpCommand — buildMcpSpecFromFlags", () => {
 });
 
 describe("mcpCommand — validateMcpSpec", () => {
+  it.each(["playwright", "everything"])("accepts the managed %s preset without an external URL", (preset) => {
+    expect(validateMcpSpec({
+      managed: { preset },
+      allowedTools: [],
+      allowedSandboxes: { matchLabels: { team: "research" } },
+      displayName: "Research tools",
+    })).toEqual([]);
+  });
+
+  it.each([{}, [], "playwright", 1, true, { preset: "custom" }, { preset: null }]
+    .map((managed) => ({ managed })))(
+    "rejects malformed or unsupported managed configuration $managed",
+    ({ managed }) => {
+      expect(validateMcpSpec({ managed }).join(" ")).toMatch(/spec.managed/);
+    },
+  );
+
+  it.each(["image", "command", "env", "volumes"])("rejects managed workload override %s", (field) => {
+    expect(validateMcpSpec({ managed: { preset: "playwright", [field]: "override" } }).join(" "))
+      .toMatch(/only.*preset/);
+  });
+
+  it.each([
+    ["url", "http://example.com"],
+    ["oauth", { issuer: "https://example.com" }],
+    ["productionMode", false],
+    ["scopes", []],
+    ["bearerFromEnv", ""],
+    ["bundleRef", {}],
+  ])("rejects managed configuration combined with %s", (field, value) => {
+    expect(validateMcpSpec({ managed: { preset: "playwright" }, [String(field)]: value }).join(" "))
+      .toContain(`spec.${field}`);
+  });
+
+  it("keeps nullable managed configuration on the external URL path", () => {
+    expect(validateMcpSpec({ managed: null, url: "https://example.com" })).toEqual([]);
+    expect(validateMcpSpec({ managed: null }).join(" ")).toMatch(/spec.url/);
+  });
+
   it("requires url", () => {
     const errs = validateMcpSpec({});
     expect(errs[0]).toMatch(/spec.url/);

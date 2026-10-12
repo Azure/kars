@@ -114,4 +114,17 @@ describe("preflightTools — AGT toolkit gating", () => {
     const hasAgtError = errorCalls.some((l) => l.includes("Agent Governance Toolkit"));
     expect(hasAgtError).toBe(true);
   });
+
+  it("recognizes the AGT5 core owner without the obsolete upstream mesh Dockerfile", async () => {
+    const root = fs.mkdtempSync(path.join(os.tmpdir(), "kars-agt-core-"));
+    try {
+      const core = path.join(root, "agent-governance-python", "agent-governance-toolkit-core");
+      fs.mkdirSync(core, { recursive: true });
+      fs.writeFileSync(path.join(core, "pyproject.toml"), '[project]\nname="agent-governance-toolkit-core"\n');
+      await preflightTools("local-k8s", root, { build: true, noMesh: false });
+      expect(exitCalls).toEqual([]);
+    } finally {
+      fs.rmSync(root, { recursive: true, force: true });
+    }
+  });
 });

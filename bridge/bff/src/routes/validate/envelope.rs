@@ -6,6 +6,28 @@
 use super::{Check, CheckStatus};
 use crate::kars::task::{BudgetScope, TaskBudget};
 
+pub(super) async fn check_workspace(
+    cluster: &crate::kars::cluster::Cluster,
+    namespace: &str,
+) -> Check {
+    let (status, detail) = match cluster.credential_grant(namespace).await {
+        Ok(_) => (
+            CheckStatus::Pass,
+            "Workspace enrollment is Ready and bound to the current namespace identity. This does not grant credential-writing authority or prove private provider access.".into(),
+        ),
+        Err(error) => (
+            CheckStatus::Fail,
+            format!("Workspace enrollment is unavailable: {error}. An operator must enroll or repair this workspace before creating or launching a Mission or Team."),
+        ),
+    };
+    Check {
+        id: "workspace_enrollment".into(),
+        label: "Workspace enrollment".into(),
+        status,
+        detail,
+    }
+}
+
 fn check_budget(budget: Option<&TaskBudget>) -> Check {
     let tokens = budget.and_then(|b| b.tokens);
     let usd_micros = budget.and_then(|b| b.usd_micros);
@@ -76,7 +98,7 @@ pub(super) async fn check_envelope(
     let runtime = bp.runtime.as_deref().unwrap_or("OpenClaw");
     checks.push(check_budget(budget));
     if let Some(plan) = bp.execution_plan.as_ref() {
-        checks.push(match crate::routes::compose::validate_execution_plan(plan) {
+        checks.push(match crate::routes::compose::validate_execution_plan_for_launch(plan) {
             Ok(()) => Check {
                 id: "execution_plan".into(),
                 label: format!(
@@ -87,7 +109,7 @@ pub(super) async fn check_envelope(
                 ),
                 status: CheckStatus::Pass,
                 detail:
-                    "Role dependencies, phases, capabilities, tool-call bounds, synthesis, and deliverables are valid."
+                    "The reviewed plan satisfies the installed executor's activation contract. Runtime admission, budgets and completion are checked separately."
                         .into(),
             },
             Err(error) => Check {
@@ -99,23 +121,25 @@ pub(super) async fn check_envelope(
         });
     }
 
-    // 0b. Runtime image and registry credentials. This is a real launch blocker:
-    // allowing a configured private image without a matching pull secret produces
-    // an immediate ImagePullBackOff before the agent can execute anything.
+    // Declarative image coverage is not proof of an actual pull or execution.
     let runnable_runtimes = cluster.runnable_runtimes().await;
     checks.push(if runnable_runtimes.contains(runtime) {
         Check {
             id: "runtime".into(),
-            label: format!("Runtime “{runtime}” can start on this cluster"),
+            label: format!("Runtime “{runtime}” configuration is covered"),
             status: CheckStatus::Pass,
-            detail: "The runtime image is configured and its registry is covered by the controller's pull credentials.".into(),
+            detail: if runtime == "BYO" {
+                "BYO selection is available; its image and runtime admission are checked by the BYO contract.".into()
+            } else {
+                "The runtime image is configured and its registry has declared access coverage, which may use credentials, node identity or anonymous access. This is not an image-pull test or execution qualification.".into()
+            },
         }
     } else {
         Check {
             id: "runtime".into(),
-            label: format!("Runtime “{runtime}” cannot start on this cluster"),
+            label: format!("Runtime “{runtime}” configuration is not covered"),
             status: CheckStatus::Fail,
-            detail: "The runtime image is missing or its private registry is not covered by the controller's pull credentials. Launch is blocked to prevent ImagePullBackOff.".into(),
+            detail: "The runtime image is missing or its registry lacks declared access coverage. An operator must configure the image and registry access before launch; actual pulling and execution remain separate checks.".into(),
         }
     });
     if runtime != "OpenClaw" && !bp.skills.is_empty() {
@@ -133,6 +157,67 @@ mod tests {
     use super::*;
     use crate::routes::validate::ValidateRequest;
     use serde_json::json;
+
+    #[tokio::test]
+    async fn workspace_preflight_reuses_current_uid_bound_enrollment_without_secret_access() {
+        use axum::{body::Body, http::{Request, Response}};
+        use tower::service_fn;
+        for case in ["ready", "absent", "denied", "stale", "disabled", "terminating",
+            "namespace_replaced", "namespace_terminating", "malformed_inventory"] {
+            let mut grant = json!({
+                "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsCredentialGrant",
+                "metadata":{"name":"workspace","namespace":"work","uid":"grant",
+                    "generation":1,"resourceVersion":"1"},
+                "spec":{"enabled":true,"workspaceUid":"workspace","integrationStores":[]},
+                "status":{"phase":"Ready","observedGeneration":1,"sources":[]}
+            });
+            let mut namespace = json!({"apiVersion":"v1","kind":"Namespace",
+                "metadata":{"name":"work","uid":"workspace"}});
+            match case {
+                "stale" => grant["status"]["observedGeneration"] = json!(0),
+                "disabled" => grant["spec"]["enabled"] = json!(false),
+                "terminating" => grant["metadata"]["deletionTimestamp"] = json!("2026-10-11T00:00:00Z"),
+                "namespace_replaced" => namespace["metadata"]["uid"] = json!("replacement"),
+                "namespace_terminating" => namespace["metadata"]["deletionTimestamp"] = json!("2026-10-11T00:00:00Z"),
+                "malformed_inventory" => grant["status"]["sources"] = json!("invalid"),
+                _ => {}
+            }
+            let service = service_fn(move |request: Request<kube::client::Body>| {
+                let grant = grant.clone();
+                let namespace = namespace.clone();
+                async move {
+                    assert_eq!(request.method(), "GET");
+                    let (status, body) = match request.uri().path() {
+                        "/apis/kars.azure.com/v1alpha1/namespaces/work/karscredentialgrants/workspace" => {
+                            if case == "absent" || case == "denied" {
+                                let status = if case == "absent" { 404 } else { 403 };
+                                (status, json!({"apiVersion":"v1","kind":"Status","status":"Failure",
+                                    "reason":if status == 404 { "NotFound" } else { "Forbidden" },
+                                    "code":status,"message":"private upstream details"}))
+                            } else {
+                                (200, grant)
+                            }
+                        }
+                        "/api/v1/namespaces/work" => (200, namespace),
+                        path => panic!("Unexpected preflight access: {path}"),
+                    };
+                    Ok::<_, std::io::Error>(Response::builder().status(status)
+                        .header("content-type", "application/json")
+                        .body(Body::from(body.to_string())).unwrap())
+                }
+            });
+            let state = crate::state::AppState::for_test_client(kube::Client::new(service, "work"), "work");
+            let check = check_workspace(state.cluster().unwrap(), "work").await;
+            assert_eq!(check.id, "workspace_enrollment");
+            assert_eq!(check.status, if case == "ready" { CheckStatus::Pass } else { CheckStatus::Fail }, "{case}");
+            assert!(!check.detail.contains("private upstream details"));
+            if case == "ready" {
+                assert!(check.detail.contains("does not grant credential-writing authority"));
+            } else {
+                assert!(check.detail.contains("before creating or launching"));
+            }
+        }
+    }
 
     #[test]
     fn positive_legacy_caps_fail_instead_of_promising_enforcement() {

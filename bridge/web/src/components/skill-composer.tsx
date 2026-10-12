@@ -48,16 +48,22 @@ export function SkillComposer({
   const [version, setVersion] = useState("1.0.0");
   const [summary, setSummary] = useState("");
   const [recipe, setRecipe] = useState("");
-  const [boundingPolicy, setBoundingPolicy] = useState(toolPolicies[0]?.name ?? "kars-default");
+  const [boundingPolicy, setBoundingPolicy] = useState(toolPolicies[0]?.name ?? "");
   const [files, setFiles] = useState<{ name: string; content: string }[]>([]);
   const [error, setError] = useState<string | null>(null);
   const [done, setDone] = useState(false);
   const [pending, start] = useTransition();
 
-  const valid = displayName.trim().length >= 2 && summary.trim().length >= 8 && version.trim().length > 0 && boundingPolicy.trim().length > 0;
+  const valid = displayName.trim().length >= 2 && slugify(displayName).length > 0
+    && summary.trim().length >= 8 && version.trim().length > 0
+    && toolPolicies.some((policy) => policy.name === boundingPolicy);
 
   function onSubmit() {
     setError(null);
+    if (files.some((file) => !file.name.trim())) {
+      setError("Every file needs a relative path. Complete or remove the unnamed file; no files will be silently dropped.");
+      return;
+    }
     start(async () => {
       const res = await submit({
         name: slugify(displayName),
@@ -66,7 +72,7 @@ export function SkillComposer({
         summary: summary.trim(),
         bounding_policy: boundingPolicy,
         recipe: recipe.trim() || undefined,
-        files: files.filter((f) => f.name.trim() && f.content.trim()),
+        files,
       });
       if (res.ok) {
         setDone(true);
@@ -89,7 +95,7 @@ export function SkillComposer({
         <div>
           <p className="text-sm font-medium">Upload a skill</p>
           <p className="text-xs text-foreground-muted">
-            Propose a capability package. It goes to an operator to scan, review, and sign before it&apos;s usable.
+            Propose a capability package. It needs content validation and independent operator review before use.
           </p>
         </div>
         <div className="flex items-center gap-2">
@@ -110,12 +116,12 @@ export function SkillComposer({
     <div className="kb-card space-y-4 p-5">
       <div className="flex items-center justify-between">
         <h2 className="text-sm font-semibold">Upload a skill</h2>
-        <button type="button" onClick={() => setOpen(false)} className="text-xs text-foreground-muted hover:text-foreground">
+        <button type="button" disabled={pending} onClick={() => setOpen(false)} className="text-xs text-foreground-muted hover:text-foreground disabled:opacity-50">
           Cancel
         </button>
       </div>
 
-      <fieldset className="rounded-lg border border-border p-3">
+      <fieldset disabled={pending} className="rounded-lg border border-border p-3">
         <legend className="flex items-center gap-1.5 px-1 text-xs font-medium text-foreground-muted"><Icon name="bolt" size={13} /> Package details</legend>
         <div className="grid gap-3 sm:grid-cols-2">
           <Field label="Name">
@@ -140,6 +146,7 @@ export function SkillComposer({
           <Field label="Summary">
             <input
               value={summary}
+              maxLength={512}
               onChange={(e) => setSummary(e.target.value)}
               placeholder="What the skill does, in one or two plain sentences."
               className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-signal"
@@ -159,9 +166,9 @@ export function SkillComposer({
         </div>
       </fieldset>
 
-      <fieldset className="rounded-lg border border-border p-3">
+      <fieldset disabled={pending} className="rounded-lg border border-border p-3">
         <div className="flex items-center justify-between">
-          <legend className="flex items-center gap-1.5 px-1 text-xs font-medium text-foreground-muted"><Icon name="file" size={13} /> Package files — SKILL.md + scripts (optional)</legend>
+          <legend className="flex items-center gap-1.5 px-1 text-xs font-medium text-foreground-muted"><Icon name="file" size={13} /> Package files — SKILL.md and references (optional)</legend>
           <div className="flex gap-2">
             {!files.some((f) => f.name === "SKILL.md") && (
               <button
@@ -175,7 +182,7 @@ export function SkillComposer({
                         (slugify(displayName) || "my-skill") +
                         "\ndescription: One clear sentence on WHAT this does and WHEN to use it — the agent reads this to decide.\n---\n\n# " +
                         (displayName || "My skill") +
-                        "\n\nHow to use this capability. Reference scripts by name, e.g. run `bash hello.sh`.\n",
+                        "\n\nUse the provided task inputs. Read references from the listed skill paths. Follow the reviewed task and existing tool limits; skill approval does not enable shell or network access.\n",
                     },
                     ...prev,
                   ])
@@ -195,9 +202,10 @@ export function SkillComposer({
           </div>
         </div>
         <p className="mt-1 text-[11px] text-foreground-muted">
-          A real package the agent installs and runs. It must include a <span className="font-mono">SKILL.md</span> with a
-          frontmatter <span className="font-mono">description</span> — that&apos;s how the agent discovers and decides to use it.
-          Flat filenames only (no folders). Installed on OpenClaw sandboxes.
+          Read-only instructions and assets for selected OpenClaw and Hermes missions and teams. Include <span className="font-mono">SKILL.md</span> with
+          YAML frontmatter containing the matching skill <span className="font-mono">name</span> and a <span className="font-mono">description</span>.
+          Relative subdirectories are supported. Package use requires a reviewed filesystem-read phase; scripts do not enable extra tools.
+          Keep each file within 65,536 UTF-8 bytes for Hermes. The encoded package and combined selected catalog each have a 1 MiB limit.
         </p>
         <div className="mt-2 space-y-2">
           {files.map((f, i) => (
@@ -205,12 +213,14 @@ export function SkillComposer({
               <div className="flex items-center gap-2">
                 <input
                   value={f.name}
+                  aria-label={`File ${i + 1} path`}
                   onChange={(e) => setFiles((prev) => prev.map((x, j) => (j === i ? { ...x, name: e.target.value } : x)))}
-                  placeholder="filename (e.g. SKILL.md, hello.sh)"
+                  placeholder="filename (e.g. SKILL.md, references/checklist.md)"
                   className="flex-1 rounded border border-border bg-surface px-2 py-1 font-mono text-xs outline-none focus:border-signal"
                 />
                 <button
                   type="button"
+                  aria-label={`Remove file ${f.name || i + 1}`}
                   onClick={() => setFiles((prev) => prev.filter((_, j) => j !== i))}
                   className="shrink-0 text-foreground-muted hover:text-danger"
                 >
@@ -219,6 +229,7 @@ export function SkillComposer({
               </div>
               <textarea
                 value={f.content}
+                aria-label={`Content of ${f.name || `file ${i + 1}`}`}
                 onChange={(e) => setFiles((prev) => prev.map((x, j) => (j === i ? { ...x, content: e.target.value } : x)))}
                 rows={4}
                 placeholder="file content"
@@ -229,14 +240,16 @@ export function SkillComposer({
         </div>
       </fieldset>
 
-      <fieldset className="rounded-lg border border-border p-3">
+      <fieldset disabled={pending} className="rounded-lg border border-border p-3">
         <legend className="flex items-center gap-1.5 px-1 text-xs font-medium text-foreground-muted"><Icon name="shield" size={13} /> Bounding tool policy</legend>
         <select
+          aria-label="Bounding tool policy"
           value={boundingPolicy}
           onChange={(e) => setBoundingPolicy(e.target.value)}
           className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-signal"
         >
-          {(toolPolicies.length ? toolPolicies : [{ name: "kars-default", summary: null }]).map((p) => (
+          {toolPolicies.length === 0 && <option value="">No bounding policies available</option>}
+          {toolPolicies.map((p) => (
             <option key={p.name} value={p.name}>
               {p.name}
               {p.summary ? ` — ${p.summary}` : ""}
@@ -248,7 +261,7 @@ export function SkillComposer({
         </p>
       </fieldset>
 
-      {error && <p className="rounded-lg border border-danger/30 bg-danger/[0.06] px-3 py-2 text-xs text-danger">{error}</p>}
+      {error && <p role="alert" className="rounded-lg border border-danger/30 bg-danger/[0.06] px-3 py-2 text-xs text-danger">{error}</p>}
 
       <div className="flex items-center gap-2">
         <button
@@ -259,7 +272,7 @@ export function SkillComposer({
         >
           {pending ? "Submitting…" : "Submit for review"}
         </button>
-        <p className="text-[11px] text-foreground-muted">Lands pending — an operator scans + signs before it&apos;s usable.</p>
+        <p className="text-[11px] text-foreground-muted">Pending until a different operator reviews and approves the current content.</p>
       </div>
     </div>
   );

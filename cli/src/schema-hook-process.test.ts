@@ -2,7 +2,10 @@
 // Licensed under the MIT License.
 
 import { spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { mkdtempSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { describe, expect, it } from "vitest";
 
 const entries = [
@@ -13,6 +16,39 @@ const args = ["--release", "kars", "--namespace", "kars-system", "--revision", "
   "--operation", "install", "--installer-helm-version", "v4.1.3"];
 
 describe.each(entries)("$name schema hook process", ({ entry }) => {
+  it("executes through a projected ConfigMap symlink instead of silently succeeding", () => {
+    const root = mkdtempSync(join(tmpdir(), "kars-schema-projection-"));
+    try {
+      symlinkSync(dirname(entry), join(root, "..2026_10_10"), "dir");
+      symlinkSync("..2026_10_10", join(root, "..data"), "dir");
+      const projected = join(root, basename(entry));
+      symlinkSync(join("..data", basename(entry)), projected);
+      const result = spawnSync(process.execPath, [projected, ...args], {
+        encoding: "utf8", timeout: 5000,
+        env: { PATH: "/nonexistent", KUBERNETES_SERVICE_HOST: "127.0.0.1", KUBERNETES_SERVICE_PORT: "1" },
+      });
+      expect(result.error).toBeUndefined();
+      expect(result.signal).toBeNull();
+      expect(result.status).toBe(1);
+      expect(result.stdout).toBe("");
+      expect(result.stderr).toBe("Core schema staging failed. Helm must not proceed; no cluster cleanup, force or automatic write retry was attempted.\n");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  it("remains importable from stdin without running the hook", () => {
+    const result = spawnSync(process.execPath, ["--input-type=module", "-"], {
+      input: `await import(${JSON.stringify(pathToFileURL(entry).href)});`,
+      encoding: "utf8", timeout: 5000,
+      env: { PATH: "/nonexistent" },
+    });
+    expect(result.error).toBeUndefined();
+    expect(result.status).toBe(0);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe("");
+  });
+
   it("reports missing projected credentials without exposing filesystem paths or stack", () => {
     const result = spawnSync(process.execPath, [entry, ...args], { encoding: "utf8", timeout: 5000,
       env: { PATH: "/nonexistent", KUBERNETES_SERVICE_HOST: "127.0.0.1", KUBERNETES_SERVICE_PORT: "1" } });

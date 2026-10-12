@@ -7,6 +7,7 @@ import { useEffect, useMemo, useState } from "react";
 import { createPortal } from "react-dom";
 import { Icon } from "@/components/icon";
 import { useLiveTrace } from "./use-live-trace";
+import type { BoundRouterActivity } from "@/lib/router-activity";
 import type {
   ActivityEvent,
   AgentIdentity,
@@ -46,6 +47,8 @@ export function AgentGraph({
   agentModel = null,
   subAgents = [],
   events: externalEvents,
+  routerActivity: externalRouterActivity,
+  phases = [],
   identity = null,
   envelopeDigest = null,
   receipt = null,
@@ -62,6 +65,8 @@ export function AgentGraph({
   agentModel?: string | null;
   subAgents?: SubAgent[];
   events?: ActivityEvent[];
+  routerActivity?: BoundRouterActivity | null;
+  phases?: import("@/lib/types/missions").ReviewedExecution["phases"];
   identity?: AgentIdentity | null;
   envelopeDigest?: string | null;
   receipt?: Receipt | null;
@@ -99,7 +104,13 @@ export function AgentGraph({
     };
   }, [enlarged]);
 
-  const events = externalEvents ?? sharedEvents;
+  const events = externalEvents ?? sharedEvents.events;
+  const liveRouter = sharedEvents.routerActivity;
+  const routerActivity = useMemo(() => {
+    const binding = externalRouterActivity ?? (liveRouter
+      ? { producer: liveRouter, observations: liveRouter.observations, provisional: true } : null);
+    return runNonce && binding?.producer.run_nonce === runNonce ? binding : null;
+  }, [externalRouterActivity, liveRouter, runNonce]);
   const hasRecentActivity = (agent: AgentExecution): boolean => {
     if (!running || clientNow === null || !agent.lastActivity) return false;
     const timestamp = new Date(agent.lastActivity).getTime();
@@ -117,7 +128,9 @@ export function AgentGraph({
     name,
     running,
     subAgents,
-  }), [agentLabel, agentModel, agentPhase, agentRuntime, events, name, running, subAgents]);
+    routerActivity,
+    phases,
+  }), [agentLabel, agentModel, agentPhase, agentRuntime, events, name, running, subAgents, routerActivity, phases]);
 
   const normalizedQuery = normalize(query);
   const graph = useMemo(() => buildGraphLayout(agents, expandedGroups, normalizedQuery, selectedAgentId), [agents, expandedGroups, normalizedQuery, selectedAgentId]);
@@ -212,7 +225,9 @@ export function AgentGraph({
         <div className="max-w-2xl">
           <h2 id="execution-graph-title" className="text-sm font-semibold">Agent execution graph</h2>
           <p id="execution-graph-description" className="mt-0.5 text-xs leading-relaxed text-foreground-muted">
-            Principal-to-specialist topology with live action and destination leaves. Select nodes for retained evidence or connectors for relationship context.
+            {routerActivity
+              ? "Revision-bound producer and router observations. Select nodes to distinguish model proposals from reported results. Available timestamps identify router observations; destinations are not recorded."
+              : "Principal-to-specialist topology with live action and destination leaves. Select nodes for retained evidence or connectors for relationship context."}
           </p>
         </div>
         <div className="flex flex-wrap items-center justify-end gap-2">
@@ -396,13 +411,13 @@ export function AgentGraph({
                       ? "border-signal/40 bg-signal/10 text-signal"
                       : "border-accent/35 bg-accent/10 text-accent"
                   }`}>
-                    {layout.agent.isPrincipal ? "core" : "agt"}
+                    {routerActivity ? "agt" : layout.agent.isPrincipal ? "core" : "agt"}
                     {recentlyActive && <span className="kb-graph-orbit absolute -inset-1 rounded-[14px] border border-signal/45" />}
                   </span>
                   <span className="min-w-0 flex-1">
                     <span className="flex items-center gap-1.5">
                       <span className="truncate text-sm font-semibold">{layout.agent.displayName}</span>
-                      {layout.agent.isPrincipal && (
+                      {!routerActivity && layout.agent.isPrincipal && (
                         <span className="rounded-full bg-signal/10 px-1.5 py-0.5 text-[8px] font-bold uppercase tracking-wider text-signal">
                           root
                         </span>
@@ -504,7 +519,8 @@ export function AgentGraph({
                   <span className="min-w-0">
                     <span className="block truncate text-[10px] font-semibold">{leaf.label}</span>
                     <span className="block truncate text-[9px] text-foreground-muted">
-                      {isDestination ? "destination" : isFolded ? "folded cluster" : "recorded action"}
+                      {isDestination ? "destination" : isFolded ? "folded cluster"
+                        : leaf.kind === "action" && leaf.action.source !== "legacy" ? leaf.action.source : "recorded action"}
                     </span>
                   </span>
                 </button>
@@ -602,12 +618,12 @@ export function AgentGraph({
 
       <SelectionInspector selection={selected} />
 
-      <ProofPoints
+      {!routerActivity && <ProofPoints
         envelopeDigest={envelopeDigest}
         identity={identity}
         subCount={agents.filter((agent) => !agent.isPrincipal).length}
         receipt={receipt}
-      />
+      />}
     </section>
   );
   if (enlarged && typeof document !== "undefined") {

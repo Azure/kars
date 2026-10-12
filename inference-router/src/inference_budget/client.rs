@@ -40,6 +40,32 @@ fn failure(stage: &'static str) -> Error {
     }
 }
 
+pub(super) fn transport_from_env() -> Result<(String, reqwest::Client), Error> {
+    let endpoint =
+        std::env::var("KARS_INFERENCE_BUDGET_ENDPOINT").map_err(|_| failure("endpoint"))?;
+    let url = reqwest::Url::parse(&endpoint).map_err(|_| failure("endpoint"))?;
+    if url.scheme() != "https"
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+    {
+        return Err(failure("TLS endpoint"));
+    }
+    let ca_path =
+        std::env::var("KARS_INFERENCE_BUDGET_CA").map_err(|_| failure("CA configuration"))?;
+    let ca = std::fs::read(ca_path).map_err(|_| failure("CA material"))?;
+    let certificate = reqwest::Certificate::from_pem(&ca).map_err(|_| failure("CA material"))?;
+    let http = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .tls_built_in_root_certs(false)
+        .add_root_certificate(certificate)
+        .timeout(std::time::Duration::from_secs(15))
+        .build()
+        .map_err(|_| failure("TLS client"))?;
+    Ok((endpoint.trim_end_matches('/').into(), http))
+}
+
 pub struct Client {
     pub binding: RouterBinding,
     pub identity: ExecutionIdentity,
@@ -79,33 +105,11 @@ impl Client {
             pod_uid: std::env::var("POD_UID").map_err(|_| failure("Pod UID"))?,
         };
         identity.validate().map_err(|_| failure("identity"))?;
-        let endpoint =
-            std::env::var("KARS_INFERENCE_BUDGET_ENDPOINT").map_err(|_| failure("endpoint"))?;
-        let url = reqwest::Url::parse(&endpoint).map_err(|_| failure("endpoint"))?;
-        if url.scheme() != "https"
-            || !url.username().is_empty()
-            || url.password().is_some()
-            || url.query().is_some()
-            || url.fragment().is_some()
-        {
-            return Err(failure("TLS endpoint"));
-        }
-        let ca_path =
-            std::env::var("KARS_INFERENCE_BUDGET_CA").map_err(|_| failure("CA configuration"))?;
-        let ca = std::fs::read(ca_path).map_err(|_| failure("CA material"))?;
-        let certificate =
-            reqwest::Certificate::from_pem(&ca).map_err(|_| failure("CA material"))?;
-        let http = reqwest::Client::builder()
-            .redirect(reqwest::redirect::Policy::none())
-            .tls_built_in_root_certs(false)
-            .add_root_certificate(certificate)
-            .timeout(std::time::Duration::from_secs(15))
-            .build()
-            .map_err(|_| failure("TLS client"))?;
+        let (endpoint, http) = transport_from_env()?;
         Ok(Some(Arc::new(Self {
             binding,
             identity,
-            endpoint: endpoint.trim_end_matches('/').into(),
+            endpoint,
             token_path: TOKEN_PATH.into(),
             http,
             reservation_lock: Mutex::new(()),

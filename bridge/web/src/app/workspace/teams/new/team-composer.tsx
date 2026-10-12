@@ -14,7 +14,6 @@ import { createTeamAction, composeTeamAction, type NewTeamState } from "./action
 import { RepoAccess } from "@/components/repo-access";
 import type {
   ComposeTeamMilestone,
-  ExecutionPlan,
   Options,
   ProfileSummary,
   TeamLifecycleMode,
@@ -51,7 +50,12 @@ function parseEgressLines(value: string): { host: string; port?: number }[] {
     });
 }
 
-export function TeamComposer({ options, profile, initialCharter }: { options: Options; profile?: ProfileSummary | null; initialCharter?: string }) {
+export function TeamComposer({ options, profile, profileEnvelope, initialCharter }: {
+  options: Options;
+  profile?: ProfileSummary | null;
+  profileEnvelope?: import("@/lib/team-profile").TeamProfileEnvelope;
+  initialCharter?: string;
+}) {
   const availableSkillNames = useMemo(
     () => new Set(options.skills.map((skill) => skill.name)),
     [options.skills],
@@ -68,17 +72,21 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
   const [name, setName] = useState("");
   const [displayName, setDisplayName] = useState(profile?.display_name ?? "");
   const [charter, setCharter] = useState(profile?.charter_template ?? initialCharter ?? "");
-  const [tier, setTier] = useState(profile?.tier ?? 3);
-  const [budgetTokens, setBudgetTokens] = useState("");
+  const [tier, setTier] = useState(profileEnvelope?.tier ?? profile?.tier ?? 3);
+  const [authorityCeiling, setAuthorityCeiling] = useState(profileEnvelope?.authorityCeiling.toString() ?? "");
+  const [delegationDepth, setDelegationDepth] = useState(profileEnvelope?.delegationDepth.toString() ?? "");
+  const [budgetTokens, setBudgetTokens] = useState(profileEnvelope?.budget?.tokens?.toString() ?? "");
+  const [budgetUsdMicros, setBudgetUsdMicros] = useState(profileEnvelope?.budget?.usd_micros?.toString() ?? "");
   const budgetScope = "GovernedInference";
-  const parsedBudget = parseTeamBudget(budgetTokens, budgetScope);
+  const parsedBudget = parseTeamBudget(budgetTokens, budgetScope, budgetUsdMicros);
   const [addNote, setAddNote] = useState<string | null>(null);
   useEffect(() => { if (!addNote) return; const t = setTimeout(() => setAddNote(null), 2500); return () => clearTimeout(t); }, [addNote]);
   const [cadence, setCadence] = useState(0);
   const [lifecycleMode, setLifecycleMode] = useState<TeamLifecycleMode>("resourceOptimized");
   const [warmIdleMinutes, setWarmIdleMinutes] = useState(15);
   const [reporting, setReporting] = useState("");
-  const [toolPolicy, setToolPolicy] = useState(profile?.tool_policy ?? "");
+  const [toolPolicy, setToolPolicy] = useState(profileEnvelope?.toolPolicy ?? profile?.tool_policy ?? "");
+  const [pinToolPolicy, setPinToolPolicy] = useState(!!profileEnvelope?.toolPolicy);
   const [runtime, setRuntime] = useState("");
   const [model, setModel] = useState("");
   const [modelFallbacks, setModelFallbacks] = useState<string[]>([]);
@@ -104,7 +112,7 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
       })) ?? [],
   );
   const [milestones, setMilestones] = useState<ComposeTeamMilestone[]>([]);
-  const [executionPlan, setExecutionPlan] = useState<ExecutionPlan | null>(null);
+  const [executionPlan, setExecutionPlan] = useState<object | null>(null);
   const [executionPlanDraft, setExecutionPlanDraft] = useState("");
   const [executionPlanError, setExecutionPlanError] = useState<string | null>(null);
   const [validation, setValidation] = useState<ValidationResult | null>(null);
@@ -137,8 +145,8 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
     };
   }, [runtime, toolPolicy, roles, mcp, memory, model, modelFallbacks, egressText, egressMode, executionPlan]);
   const teamFingerprint = useMemo(
-    () => JSON.stringify({ blueprint: teamBlueprint, tier, budgetTokens, budgetScope }),
-    [teamBlueprint, tier, budgetTokens, budgetScope],
+    () => JSON.stringify({ blueprint: teamBlueprint, roles, tier, authorityCeiling, delegationDepth, budgetTokens, budgetUsdMicros, budgetScope, pinToolPolicy }),
+    [teamBlueprint, roles, tier, authorityCeiling, delegationDepth, budgetTokens, budgetUsdMicros, budgetScope, pinToolPolicy],
   );
   const currentValidation = validatedFingerprint === teamFingerprint ? validation : null;
   const selectedMemoryOption = useMemo(
@@ -420,8 +428,9 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
             {expectedTokens != null
               ? `Historical expectation: about ${expectedTokens.toLocaleString()} tokens per delivered outcome across ${efficiencyRuns} retained run${efficiencyRuns === 1 ? "" : "s"}. `
               : "No reliable cost expectation is available yet. "}
-            Composed from your charter, the cluster&apos;s live capabilities, and retained efficiency
-            evidence. Edit anything below.
+            {profile
+              ? "Copied from the selected profile, not an AI-composed proposal. Later profile edits do not update this draft. Review the retained settings below."
+              : "Composed from your charter, the cluster's live capabilities, and retained efficiency evidence. Edit anything below."}
           </p>
         </div>
       )}
@@ -446,7 +455,10 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
             <label className="text-xs text-foreground-muted">Autonomy tier<select value={tier} onChange={(e) => setTier(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"><option value={1}>1 Manual</option><option value={2}>2 Shared</option><option value={3}>3 Conditional</option><option value={4}>4 Supervised</option><option value={5}>5 Full</option></select></label>
             <label className="text-xs text-foreground-muted">Cadence (min, 0 = passive)<input type="number" min={0} value={cadence} onChange={(e) => setCadence(Number(e.target.value))} className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm" /></label>
             <label className="text-xs text-foreground-muted">Reports to (optional)<input value={reporting} onChange={(e) => setReporting(e.target.value)} placeholder="steering inbox" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm" /></label>
+            <label className="text-xs text-foreground-muted">Authority ceiling<input name="authority_ceiling" type="number" min={1} max={tier} step={1} value={authorityCeiling} onChange={(e) => setAuthorityCeiling(e.target.value)} placeholder="Same as tier" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm" /></label>
+            <label className="text-xs text-foreground-muted">Delegation depth<input name="delegation_depth" type="number" min={0} max={2147483647} step={1} value={delegationDepth} onChange={(e) => setDelegationDepth(e.target.value)} placeholder="Server reviewed-workflow default" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm" /></label>
           </div>
+          <p className="mt-2 text-xs text-foreground-muted">Explicit limits are preserved, not increased automatically. Reviewed execution may require more delegation hops; the server checks this before launch.</p>
         </fieldset>
         <fieldset className="mt-3 rounded-lg border border-border p-3">
           <legend className="flex items-center gap-1.5 px-1 text-xs font-medium text-foreground-muted"><Icon name="box" size={13} /> Runtime lifecycle</legend>
@@ -510,6 +522,10 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
           egressText,
           setEgressText,
         })}
+        <label className="mt-3 flex items-start gap-2 text-xs text-foreground-muted">
+          <input name="pin_tool_policy" type="checkbox" checked={pinToolPolicy} onChange={(event) => setPinToolPolicy(event.target.checked)} />
+          Pin the selected tool policy in the authority envelope. Descendants must retain this exact policy reference.
+        </label>
         <p className="mt-3 text-xs text-foreground-muted">Charter: <span className="text-foreground">{charter}</span></p>
       </div>
 
@@ -517,6 +533,8 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
       {renderOrgPanel({
         name,
         tier,
+        authorityCeiling,
+        delegationDepth,
         roles,
         options,
         addFromArchetype,
@@ -531,32 +549,38 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
         <p className="mt-0.5 text-xs text-foreground-muted">
           Explicit dependencies, phases, capabilities, tool-call bounds, and synthesis. No permissions are inferred from role names.
         </p>
-        {executionPlanDraft ? (
-          <>
-            <textarea
-              value={executionPlanDraft}
-              onChange={(event) => {
-                const next = event.target.value;
-                setExecutionPlanDraft(next);
-                try {
-                  const parsed = JSON.parse(next) as ExecutionPlan;
-                  setExecutionPlan(parsed);
-                  setExecutionPlanError(null);
-                } catch {
-                  setExecutionPlanError("The execution plan must be valid JSON.");
-                }
-              }}
-              rows={18}
-              spellCheck={false}
-              className="mt-3 w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
-            />
-            {executionPlanError && (
-              <p className="mt-2 text-xs text-danger">{executionPlanError}</p>
-            )}
-          </>
-        ) : (
+        <textarea
+          aria-label="Typed execution plan JSON"
+          value={executionPlanDraft}
+          onChange={(event) => {
+            const next = event.target.value;
+            setExecutionPlanDraft(next);
+            try {
+              const parsed: unknown = JSON.parse(next);
+              if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                  setExecutionPlan(null);
+                  setExecutionPlanError("The execution plan must be a JSON object. The server validates its roles, phases and bounds.");
+                  return;
+              }
+              setExecutionPlan(parsed);
+              setExecutionPlanError(null);
+            } catch {
+              setExecutionPlan(null);
+              setExecutionPlanError("The execution plan must be valid JSON.");
+            }
+          }}
+          rows={18}
+          spellCheck={false}
+          className="mt-3 w-full resize-y rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+        />
+        {executionPlanError && (
+          <p role="alert" className="mt-2 text-xs text-danger">{executionPlanError}</p>
+        )}
+        {!executionPlanDraft && (
           <p className="mt-3 rounded-lg border border-danger/30 bg-danger/5 px-3 py-2 text-xs text-danger">
-            No execution plan is available. Re-run composition before creating the team.
+            No execution plan is available. Enter a reviewed plan above, or re-run composition.
+            Its role names must exactly match the roster. The server validates the plan before creation;
+            JSON syntax alone does not authorize execution.
           </p>
         )}
       </div>
@@ -692,9 +716,15 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
         <p id="team-budget-help" className="mt-2 text-xs text-foreground-muted">
           GovernedInference: one finite limit for this Team’s lifetime, shared by its principal,
           members and all runs. Later intake does not replenish it. This is not a per-run allowance
-          or a dollar spending limit. Edit cannot raise it; a different limit requires a separately
+          or a total infrastructure spending limit. Edit cannot raise it; a different limit requires a separately
           reviewed new Team. Pre-flight checks do not prove the live budget account is ready.
         </p>
+        <label htmlFor="team-budget-usd-micros" className="mt-3 block text-sm font-medium">Lifetime inference cost limit (micro-USD, optional)</label>
+        <input id="team-budget-usd-micros" name="budget_usd_micros" type="number" min={1} max={Number.MAX_SAFE_INTEGER} step={1}
+          value={budgetUsdMicros} onChange={(event) => setBudgetUsdMicros(event.target.value)}
+          aria-describedby="team-cost-help team-budget-error"
+          className="mt-2 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm" />
+        <p id="team-cost-help" className="mt-2 text-xs text-foreground-muted">1,000,000 micro-USD = $1. When set, both token and cost limits apply; the cost limit also requires an operator pricing contract. Blank means no separate cost limit.</p>
         <p id="team-budget-error" className="mt-2 text-xs text-danger">{parsedBudget.error}</p>
       </fieldset>
 
@@ -703,8 +733,9 @@ export function TeamComposer({ options, profile, initialCharter }: { options: Op
         blueprint={teamBlueprint}
         tier={tier}
         budgetTokens={parsedBudget.budget?.tokens}
+        budgetUsdMicros={parsedBudget.budget?.usd_micros}
         budgetScope={budgetScope}
-        disabled={parsedBudget.error !== null}
+        disabled={parsedBudget.error !== null || executionPlan === null || executionPlanError !== null}
         workload="team"
         onResult={(result) => {
           setValidation(result);

@@ -28,6 +28,234 @@ fn controller_model_catalog_accepts_json_and_legacy_csv_without_inventing_models
     }
 }
 
+#[test]
+fn provider_switch_requires_a_retained_route_for_the_previous_default() {
+    use super::providers::{inherited_model_settings, inherited_provider_registered};
+    use k8s_openapi::api::core::v1::EnvVar;
+    let azure: Vec<EnvVar> = serde_json::from_value(json!([
+        {"name":"FOUNDRY_ENDPOINT","value":"https://example.cognitiveservices.azure.com/"},
+        {"name":"FOUNDRY_DEPLOYMENTS","value":"[\"azure-only\"]"},
+        {"name":"AZURE_OPENAI_API_KEY","valueFrom":{"secretKeyRef":{"name":"bootstrap","key":"api-key"}}}
+    ])).unwrap();
+    let mut keys = BTreeMap::from([
+        ("COPILOT_GITHUB_TOKEN".into(), "test-only-token".into()),
+        (
+            "KARS_PROVIDER_OTHER_ENDPOINT".into(),
+            "https://unrelated.example".into(),
+        ),
+    ]);
+    assert!(!inherited_provider_registered(&azure, &keys));
+    keys.insert(
+        "KARS_PROVIDER_AZURE_FOUNDRY_ENDPOINT".into(),
+        "https://example.cognitiveservices.azure.com".into(),
+    );
+    assert!(inherited_provider_registered(&azure, &keys));
+    let copilot: Vec<EnvVar> = serde_json::from_value(json!([
+        {"name":"KARS_PROVIDER","value":"github-copilot"},
+        {"name":"AZURE_OPENAI_ENDPOINT","value":"https://api.githubcopilot.com"},
+        {"name":"FOUNDRY_DEPLOYMENTS","value":"[\"azure-only\"]"},
+        {"name":"KARS_MODEL_CATALOG","value":"copilot-model"}
+    ]))
+    .unwrap();
+    assert!(inherited_provider_registered(&copilot, &keys));
+    keys.remove("COPILOT_GITHUB_TOKEN");
+    assert!(!inherited_provider_registered(&copilot, &keys));
+    assert!(inherited_model_settings(&copilot, "github-copilot", "azure-only").is_none());
+    assert!(inherited_model_settings(&copilot, "github-copilot", "copilot-model").is_some());
+    assert!(inherited_provider_registered(&[], &BTreeMap::new()));
+}
+
+#[tokio::test]
+async fn unregistered_bootstrap_default_cannot_be_discarded_by_a_provider_switch() {
+    use axum::{
+        Json, Router,
+        http::{Method, StatusCode, Uri},
+        response::IntoResponse,
+    };
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    async fn handle(method: Method, uri: Uri) -> axum::response::Response {
+        assert_eq!(
+            method,
+            Method::GET,
+            "Must not mutate the current provider or read its bootstrap credential"
+        );
+        if uri.path().ends_with("/deployments/kars-controller") {
+            return Json(json!({
+                "apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"kars-controller"},
+                "spec":{"selector":{"matchLabels":{"app":"controller"}},"template":{"spec":{"containers":[
+                    {"name":"controller","env":[{"name":"FOUNDRY_ENDPOINT","value":"https://bootstrap.example"}]}
+                ]}}}
+            })).into_response();
+        }
+        assert!(
+            uri.path().contains("/karscredentialgrants/"),
+            "No arbitrary bootstrap Secret read"
+        );
+        (StatusCode::NOT_FOUND, Json(json!({
+            "apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","message":"absent","code":404
+        }))).into_response()
+    }
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let config = kube::Config::new(
+        format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    );
+    let server = tokio::spawn(async move {
+        axum::serve(listener, Router::new().fallback(handle))
+            .await
+            .unwrap()
+    });
+    let cluster = super::Cluster {
+        client: kube::Client::try_from(config).unwrap(),
+    };
+    for error in [
+        cluster
+            .set_copilot_as_default("copilot-model")
+            .await
+            .unwrap_err(),
+        cluster
+            .set_controller_catalog("new-model", Some("https://new.example"), None)
+            .await
+            .unwrap_err(),
+    ] {
+        assert!(
+            matches!(error, kube::Error::Api(status) if status.code == 409 && status.reason == "ProviderRegistrationRequired")
+        );
+    }
+    server.abort();
+}
+
+#[test]
+fn inherited_model_selection_preserves_bootstrap_provider_and_credentials() {
+    use super::providers::inherited_model_settings;
+    use k8s_openapi::api::core::v1::EnvVar;
+
+    for (provider, endpoint, override_name) in [
+        (
+            "azure-foundry",
+            "https://example.cognitiveservices.azure.com/",
+            None,
+        ),
+        (
+            "github-models",
+            "https://models.github.ai/inference",
+            Some("github-models"),
+        ),
+        (
+            "github-copilot",
+            "https://api.githubcopilot.com",
+            Some("github-copilot"),
+        ),
+        (
+            "local-inference",
+            "http://model.kars-local-inference.svc.cluster.local",
+            None,
+        ),
+    ] {
+        for catalog in [r#"["first","selected"]"#, "first,selected"] {
+            let mut raw = vec![
+                json!({"name":"FOUNDRY_ENDPOINT","value":endpoint}),
+                json!({"name":"FOUNDRY_DEPLOYMENTS","value":catalog}),
+                json!({"name":"AZURE_OPENAI_API_KEY","valueFrom":{"secretKeyRef":{"name":"bootstrap","key":"key"}}}),
+                json!({"name":"AZURE_CLIENT_ID","value":"workload-client"}),
+            ];
+            if let Some(name) = override_name {
+                raw.push(json!({"name":"KARS_PROVIDER","value":name}));
+            }
+            let envs: Vec<EnvVar> = serde_json::from_value(json!(raw)).unwrap();
+            assert_eq!(
+                inherited_model_settings(&envs, provider, "selected").unwrap(),
+                vec![
+                    json!({"name":"KARS_TASK_DEFAULT_MODEL","value":"selected"}),
+                    json!({"name":"AZURE_OPENAI_DEPLOYMENT","value":"selected"}),
+                ]
+            );
+            for (wrong_provider, wrong_model) in [
+                (provider, "unserved"),
+                (provider, ""),
+                ("other", "selected"),
+            ] {
+                assert!(inherited_model_settings(&envs, wrong_provider, wrong_model).is_none());
+            }
+            assert_eq!(serde_json::to_value(&envs).unwrap(), json!(raw));
+        }
+    }
+}
+
+#[tokio::test]
+async fn inherited_model_selection_requires_enrollment_and_propagates_read_errors() {
+    use axum::{
+        Json, Router,
+        extract::State,
+        http::{Method, StatusCode, Uri},
+        response::IntoResponse,
+    };
+    use std::sync::{Arc, Mutex};
+
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    type Fixture = Arc<(bool, Mutex<Vec<String>>)>;
+    async fn handle(
+        State(state): State<Fixture>,
+        method: Method,
+        uri: Uri,
+    ) -> axum::response::Response {
+        assert_eq!(method, Method::GET, "No writes without enrollment");
+        state.1.lock().unwrap().push(uri.path().to_string());
+        if state.0 && uri.path().ends_with("/deployments/kars-controller") {
+            return Json(json!({
+                "apiVersion":"apps/v1","kind":"Deployment",
+                "metadata":{"name":"kars-controller"},
+                "spec":{"selector":{"matchLabels":{"app":"controller"}},
+                    "template":{"spec":{"containers":[{"name":"controller","env":[
+                        {"name":"FOUNDRY_ENDPOINT","value":"https://example.cognitiveservices.azure.com"},
+                        {"name":"FOUNDRY_DEPLOYMENTS","value":"[\"selected\"]"}
+                    ]}]}}}
+            })).into_response();
+        }
+        (
+            StatusCode::FORBIDDEN,
+            Json(json!({
+                "apiVersion":"v1","kind":"Status","status":"Failure",
+                "reason":"Forbidden","message":"read denied","code":403
+            })),
+        )
+            .into_response()
+    }
+    for deployment_readable in [false, true] {
+        let state: Fixture = Arc::new((deployment_readable, Mutex::new(Vec::new())));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let config = kube::Config::new(
+            format!("http://{}", listener.local_addr().unwrap())
+                .parse()
+                .unwrap(),
+        );
+        let app = Router::new().fallback(handle).with_state(state.clone());
+        let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+        let cluster = super::Cluster {
+            client: kube::Client::try_from(config).unwrap(),
+        };
+        assert!(
+            cluster
+                .try_set_inherited_model("azure-foundry", "selected")
+                .await
+                .is_err()
+        );
+        let requests = state.1.lock().unwrap();
+        assert!(requests[0].ends_with("/deployments/kars-controller"));
+        if deployment_readable {
+            assert!(
+                requests
+                    .iter()
+                    .any(|path| path.contains("/karscredentialgrants/"))
+            );
+        } else {
+            assert_eq!(requests.len(), 1);
+        }
+        server.abort();
+    }
+}
+
 #[tokio::test]
 async fn orchestrator_bootstrap_uses_the_controller_route_instead_of_a_fixed_provider() {
     use axum::{Json, Router, body::Bytes, extract::State, http::Method};

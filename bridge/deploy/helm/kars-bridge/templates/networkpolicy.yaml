@@ -1,5 +1,17 @@
 {{/* Copyright (c) Microsoft Corporation.
-Licensed under the MIT License. */}}{{- if .Values.networkPolicy.create }}
+Licensed under the MIT License. */}}
+{{- if not (kindIs "bool" .Values.networkPolicy.routerApiServerIngress) }}
+{{- fail "networkPolicy.routerApiServerIngress must be a boolean" }}
+{{- end }}
+{{- if .Values.networkPolicy.routerApiServerIngress }}
+{{- if not .Values.networkPolicy.create }}
+{{- fail "networkPolicy.routerApiServerIngress requires networkPolicy.create" }}
+{{- end }}
+{{- if not (.Capabilities.APIVersions.Has "cilium.io/v2/CiliumClusterwideNetworkPolicy") }}
+{{- fail "networkPolicy.routerApiServerIngress requires the CiliumClusterwideNetworkPolicy API" }}
+{{- end }}
+{{- end }}
+{{- if .Values.networkPolicy.create }}
 # kars Bridge — additive NetworkPolicies.
 #
 # kars applies a `kars-system-default-deny` policy that selects EVERY pod in the
@@ -79,4 +91,31 @@ spec:
       ports:
         - port: {{ .Values.bff.port }}
           protocol: TCP
+{{- if .Values.networkPolicy.routerApiServerIngress }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumClusterwideNetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-{{ include "kars-bridge.namespace" . }}-router-apiserver
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      kars.azure.com/component: sandbox
+      io.cilium.k8s.namespace.labels.kars.azure.com/role: sandbox
+  ingress:
+    - fromEntities: ["kube-apiserver"]
+      toPorts:
+        - ports:
+            - port: "8443"
+              protocol: TCP
+    - fromNodes:
+        - matchLabels:
+            node-role.kubernetes.io/control-plane: ""
+      toPorts:
+        - ports:
+            - port: "8443"
+              protocol: TCP
+{{- end }}
 {{- end }}

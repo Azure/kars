@@ -36,9 +36,14 @@ function request(payload: Record<string, unknown>, server?: string): Promise<Res
       });
       response.on("error", () => reject(new Error("MCP response transport failed")));
       response.on("end", () => {
+        const status = response.statusCode ?? 500;
+        if (status < 200 || status >= 300) {
+          resolve({ status, headers: response.headers, body: undefined });
+          return;
+        }
         try {
           const bytes = Buffer.concat(chunks).toString("utf8");
-          resolve({ status: response.statusCode ?? 500, headers: response.headers,
+          resolve({ status, headers: response.headers,
             body: bytes ? JSON.parse(bytes) : undefined });
         } catch { reject(new Error("MCP router response is not valid JSON")); }
       });
@@ -109,8 +114,8 @@ function text(value: unknown, failed = false): Result {
     ...(failed || (value as { isError?: unknown } | undefined)?.isError === true ? { isError: true } : {}) };
 }
 
-export function registerMcpBridgeTools(api: { registerTool(tool: Tool): void }): void {
-  api.registerTool({
+export const MCP_BRIDGE_TOOLS: Tool[] = [
+  {
     name: "kars_mcp_list", label: "Kars MCP Tool List",
     description: "List qualified MCP tools mounted in this sandbox. Optional server scope narrows the catalog.",
     parameters: { type: "object", properties: { server: { type: "string" } } },
@@ -121,8 +126,8 @@ export function registerMcpBridgeTools(api: { registerTool(tool: Tool): void }):
         return text(result);
       } catch (error) { return text({ error: error instanceof Error ? error.message : "MCP discovery failed" }, true); }
     },
-  });
-  api.registerTool({
+  },
+  {
     name: "kars_mcp_call", label: "Kars MCP Tool Call",
     description: "Invoke the exact MCP tool name returned by kars_mcp_list. Calls are never automatically replayed.",
     parameters: { type: "object", properties: { name: { type: "string" }, arguments: { type: "object" }, server: { type: "string" } }, required: ["name"] },
@@ -135,7 +140,11 @@ export function registerMcpBridgeTools(api: { registerTool(tool: Tool): void }):
       try { return text(await invokeMcp("tools/call", { name: args.name, arguments: argumentsValue }, args.server as string | undefined)); }
       catch (error) { return text({ error: error instanceof Error ? error.message : "MCP invocation failed" }, true); }
     },
-  });
+  },
+];
+
+export function registerMcpBridgeTools(api: { registerTool(tool: Tool): void }): void {
+  for (const tool of MCP_BRIDGE_TOOLS) api.registerTool(tool);
 }
 
 export function resetMcpBridgeForTests(): void {

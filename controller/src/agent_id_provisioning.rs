@@ -138,11 +138,10 @@ impl SkipReason {
 /// concurrent sandbox reconciles, so back-to-back sandbox creates
 /// don't each roundtrip Entra for a blueprint token.
 ///
-/// The cache also serves as the source of truth for the cluster UID
-/// (passed in at first cache fill from the controller's leader-election
-/// lease metadata). Keying by blueprint client ID lets us tolerate the
-/// (rare) case where a KarsAuthConfig is edited to point at a new
-/// blueprint mid-flight — the cache just grows by one entry.
+/// Keep one current client per blueprint. Changes to its effective
+/// identity configuration replace the client and its token cache so
+/// future token acquisitions use the current credentials and authority.
+/// Existing in-flight reconciles retain their client until completion.
 pub struct ProvisionerCache {
     clients: RwLock<BTreeMap<String, Arc<AgentIdentityClient>>>,
 }
@@ -154,25 +153,29 @@ impl ProvisionerCache {
         }
     }
 
-    async fn get_or_init(
+    pub(crate) async fn get_or_init(
         &self,
         spec: &KarsAuthConfigSpec,
         cluster_uid: &str,
     ) -> Arc<AgentIdentityClient> {
         let key = spec.agent_id.blueprint_client_id.clone();
+        let cfg = AgentIdentityConfig::from_auth_config(spec, cluster_uid.to_string());
         {
             let r = self.clients.read().await;
-            if let Some(c) = r.get(&key) {
+            if let Some(c) = r.get(&key)
+                && c.matches_config(&cfg)
+            {
                 return c.clone();
             }
         }
         let mut w = self.clients.write().await;
         // Double-check after acquiring write lock — another task may
         // have raced and inserted while we waited.
-        if let Some(c) = w.get(&key) {
+        if let Some(c) = w.get(&key)
+            && c.matches_config(&cfg)
+        {
             return c.clone();
         }
-        let cfg = AgentIdentityConfig::from_auth_config(spec, cluster_uid.to_string());
         let client = Arc::new(AgentIdentityClient::new(cfg));
         w.insert(key, client.clone());
         client
@@ -803,10 +806,8 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn provisioner_cache_returns_same_client_for_same_blueprint() {
-        let cache = ProvisionerCache::new();
-        let spec = KarsAuthConfigSpec {
+    fn auth_config_for_cache_test() -> KarsAuthConfigSpec {
+        KarsAuthConfigSpec {
             tenant: crate::auth_config::TenantConfig {
                 tenant_id: "t".into(),
                 authority_host: "https://login.microsoftonline.com/".into(),
@@ -827,10 +828,99 @@ mod tests {
             foundry_rbac: vec![],
             mesh_auth_backend: Default::default(),
             mesh_auth_audience: None,
-        };
+        }
+    }
+
+    #[tokio::test]
+    async fn provisioner_cache_returns_same_client_for_same_blueprint() {
+        let cache = ProvisionerCache::new();
+        let spec = auth_config_for_cache_test();
         let c1 = cache.get_or_init(&spec, "cluster-1").await;
         let c2 = cache.get_or_init(&spec, "cluster-1").await;
         assert!(Arc::ptr_eq(&c1, &c2));
+    }
+
+    #[tokio::test]
+    async fn provisioner_cache_replaces_client_after_mi_rotation() {
+        let cache = ProvisionerCache::new();
+        let spec = auth_config_for_cache_test();
+        let original = cache.get_or_init(&spec, "cluster-1").await;
+        let mut rotated = spec.clone();
+        rotated.controller.managed_identity_client_id = Some("mi-rotated".into());
+
+        let (first, second) = tokio::join!(
+            cache.get_or_init(&rotated, "cluster-1"),
+            cache.get_or_init(&rotated, "cluster-1"),
+        );
+        assert!(
+            !Arc::ptr_eq(&original, &first),
+            "MI rotation must discard the client with retired credentials and its token cache"
+        );
+        assert!(Arc::ptr_eq(&first, &second));
+
+        let restored = cache.get_or_init(&spec, "cluster-1").await;
+        assert!(!Arc::ptr_eq(&restored, &original));
+        assert!(!Arc::ptr_eq(&restored, &first));
+        assert_eq!(cache.clients.read().await.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn provisioner_cache_replaces_client_for_other_config_changes() {
+        for field in ["tenant", "authority", "cluster", "removed-mi"] {
+            let cache = ProvisionerCache::new();
+            let mut spec = auth_config_for_cache_test();
+            let original = cache.get_or_init(&spec, "cluster-1").await;
+            let mut cluster = "cluster-1";
+            match field {
+                "tenant" => spec.tenant.tenant_id = "tenant-2".into(),
+                "authority" => {
+                    spec.tenant.authority_host = "https://login.microsoftonline.us/".into()
+                }
+                "cluster" => cluster = "cluster-2",
+                "removed-mi" => spec.controller.managed_identity_client_id = None,
+                _ => unreachable!(),
+            }
+            let current = cache.get_or_init(&spec, cluster).await;
+            assert!(
+                !Arc::ptr_eq(&original, &current),
+                "client must be replaced after a change to {field}"
+            );
+            assert!(Arc::ptr_eq(
+                &current,
+                &cache.get_or_init(&spec, cluster).await
+            ));
+            assert_eq!(cache.clients.read().await.len(), 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn provisioner_cache_keeps_independent_blueprints() {
+        let cache = ProvisionerCache::new();
+        let spec = auth_config_for_cache_test();
+        let original = cache.get_or_init(&spec, "cluster-1").await;
+        let mut other_spec = spec.clone();
+        other_spec.agent_id.blueprint_client_id = "blueprint-2".into();
+        let other = cache.get_or_init(&other_spec, "cluster-1").await;
+        assert!(!Arc::ptr_eq(&original, &other));
+        assert!(Arc::ptr_eq(
+            &original,
+            &cache.get_or_init(&spec, "cluster-1").await
+        ));
+        assert_eq!(cache.clients.read().await.len(), 2);
+    }
+
+    #[tokio::test]
+    async fn provisioner_cache_reuses_client_for_non_auth_edits() {
+        let cache = ProvisionerCache::new();
+        let mut spec = auth_config_for_cache_test();
+        let original = cache.get_or_init(&spec, "cluster-1").await;
+        spec.agent_id
+            .sponsor_user_object_ids
+            .push("sponsor-2".into());
+        spec.controller.managed_identity_principal_id = Some("principal-2".into());
+        spec.controller.managed_identity_resource_id = Some("resource-2".into());
+        let current = cache.get_or_init(&spec, "cluster-1").await;
+        assert!(Arc::ptr_eq(&original, &current));
     }
 
     /// Pins the scale-out invariant from the Phase 5 security review:

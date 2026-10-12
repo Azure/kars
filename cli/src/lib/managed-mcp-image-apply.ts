@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import type { Execute } from "./deployment-target.js";
-import { MANAGED_MCP_IMAGE_TARGET, type PushedImage } from "./image-targets.js";
+import { managedMcpTarget, type PushedImage } from "./image-targets.js";
 
 interface ObjectRecord {
   metadata: { name: string; namespace?: string; uid: string; resourceVersion: string; generation?: number;
@@ -29,15 +29,20 @@ async function read(execute: Execute, kind: string, name: string, namespace?: st
 }
 
 export async function inspectManagedMcpPlans(execute: Execute, images: PushedImage[]): Promise<ManagedMcpImagePlan[]> {
-  const image = images.find(image => image.name === MANAGED_MCP_IMAGE_TARGET.name)?.image;
-  if (!image) return [];
+  const selected = images.flatMap(({ name, image }) => {
+    const target = managedMcpTarget(name);
+    return target ? [{ preset: target.preset, image }] : [];
+  });
+  if (!selected.length) return [];
   const result = await execute("kubectl", ["get", "mcpservers", "-A", "-o", "json"], { stdio: "pipe" });
   const list = JSON.parse(String(result.stdout));
   if (!Array.isArray(list.items)) throw new Error("Managed MCP inventory is invalid");
-  return list.items.filter((item: ObjectRecord) => item.spec?.managed?.preset === "everything").map((item: unknown) => {
+  return list.items.flatMap((item: ObjectRecord) => {
+    const target = selected.find(target => item.spec?.managed?.preset === target.preset);
+    if (!target) return [];
     const source = checked(item);
     if (!source.metadata.namespace || !source.metadata.generation) throw new Error("Managed MCP source lacks workspace/generation");
-    return { source, image };
+    return [{ source, image: target.image }];
   });
 }
 

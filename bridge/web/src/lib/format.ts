@@ -18,6 +18,14 @@ export function formatInt(n: number | null | undefined): string {
   return n.toLocaleString();
 }
 
+export function formatUptime(seconds: number | null | undefined): string {
+  if (seconds == null) return "—";
+  if (seconds < 60) return `${seconds}s`;
+  if (seconds < 3600) return `${Math.floor(seconds / 60)}m`;
+  if (seconds < 86400) return `${Math.floor(seconds / 3600)}h ${Math.floor((seconds % 3600) / 60)}m`;
+  return `${Math.floor(seconds / 86400)}d`;
+}
+
 export function formatWarmIdle(seconds: number | null | undefined): string {
   const value = seconds ?? 900;
   if (value <= 0) return "immediately";

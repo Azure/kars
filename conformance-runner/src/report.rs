@@ -5,9 +5,9 @@
 //! and the slice-6.3 `KarsEval` reconciler.
 //!
 //! The runner writes one [`RunReport`] per invocation to both
-//! `--output <path>` and stdout (one-shot JSON, no trailing newline).
-//! The reconciler reads the file by mounting a shared volume; the
-//! stdout copy is the fallback path consumed via `kubectl logs`.
+//! `--output <path>` and stdout as one JSON line for merged Pod-log consumption.
+//! For `/dev/stdout`, it emits exactly once.
+//! The reconciler uses that stdout destination and consumes the Pod logs.
 //!
 //! ### Frozen wire fields
 //!

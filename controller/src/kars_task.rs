@@ -35,7 +35,7 @@
 //! caps the tier any *descendant* task may hold, and is itself `<= tier`.
 
 use k8s_openapi::apimachinery::pkg::apis::meta::v1::Condition;
-use kube::CustomResource;
+use kube::{CustomResource, Resource};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -114,6 +114,59 @@ pub struct KarsTaskSpec {
 }
 
 impl KarsTask {
+    /// Repair missing user attribution only within exact controller-parent custody.
+    /// Existing attribution is immutable; an ownerless parent cannot adopt it.
+    pub(crate) fn inherit_user_owner<K: Resource<DynamicType = ()>>(
+        &mut self,
+        parent: &K,
+    ) -> Result<bool, String> {
+        const KEY: &str = "kars.azure.com/owner-sub";
+        let expected = parent
+            .controller_owner_ref(&())
+            .filter(|owner| !owner.uid.is_empty() && !owner.name.is_empty())
+            .ok_or("user-owner inheritance requires a current parent identity")?;
+        let controllers: Vec<_> = self
+            .metadata
+            .owner_references
+            .iter()
+            .flatten()
+            .filter(|owner| owner.controller == Some(true))
+            .collect();
+        if parent
+            .meta()
+            .namespace
+            .as_ref()
+            .is_none_or(String::is_empty)
+            || self.metadata.namespace != parent.meta().namespace
+            || parent.meta().deletion_timestamp.is_some()
+            || self.metadata.deletion_timestamp.is_some()
+            || controllers.len() != 1
+            || controllers[0].api_version != expected.api_version
+            || controllers[0].kind != expected.kind
+            || controllers[0].name != expected.name
+            || controllers[0].uid != expected.uid
+        {
+            return Err("user-owner inheritance is outside exact parent custody".into());
+        }
+        let owner = parent.meta().annotations.as_ref().and_then(|a| a.get(KEY));
+        let prior = self.metadata.annotations.as_ref().and_then(|a| a.get(KEY));
+        if owner.is_some_and(|owner| owner.trim().is_empty()) || (prior.is_some() && prior != owner)
+        {
+            return Err("refusing to change an existing Task user owner".into());
+        }
+        if prior == owner {
+            return Ok(false);
+        }
+        if let Some(owner) = owner {
+            self.metadata
+                .annotations
+                .get_or_insert_with(Default::default)
+                .insert(KEY.into(), owner.clone());
+            return Ok(true);
+        }
+        Ok(false)
+    }
+
     /// Current authorization digest, not the envelope-only delegation lattice
     /// digest. Approval consumers must also match the bound Kubernetes task UID.
     #[must_use]
@@ -220,6 +273,10 @@ pub struct TaskBlueprint {
     /// policy).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub mcp_servers: Vec<String>,
+
+    /// Same-namespace, independently approved skills pinned at runtime creation.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skills: Vec<String>,
 
     /// Network destinations the mission may reach. Drives
     /// `KarsSandbox.spec.networkPolicy.allowedEndpoints`. Task sandboxes always
@@ -560,7 +617,20 @@ pub fn validate_execution_contract(spec: &KarsTaskSpec) -> Result<(), String> {
             .as_ref()
             .is_some_and(|execution| execution.launch),
     )?;
-    task_runtime(spec)?;
+    let runtime = task_runtime(spec)?;
+    if let Some(blueprint) = &spec.blueprint {
+        crate::skill_delivery::validate_selection(&blueprint.skills)?;
+        if !blueprint.skills.is_empty()
+            && (!matches!(
+                runtime,
+                crate::crd::RuntimeKind::OpenClaw | crate::crd::RuntimeKind::Hermes
+            ) || effective_tool_policy(spec).is_none())
+        {
+            return Err(
+                "Skills require OpenClaw or Hermes and an explicit bounding tool policy".into(),
+            );
+        }
+    }
     if let Some(blueprint) = &spec.blueprint
         && let Some(binding) = &blueprint.github_binding
     {

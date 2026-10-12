@@ -351,6 +351,7 @@ mod tests {
             decision: "allowed".to_string(),
             previous_hash: "0".repeat(64),
             hash: "1".repeat(64),
+            skill_audit_metadata: None,
         }
     }
 

@@ -9,6 +9,27 @@ import { missionInputContentDigest, missionInputsDigest } from "./mission-inputs
 const assignment = { type: "mission:assign", version: 1, taskName: "briefing", taskUid: "task-uid", sandboxUid: "sandbox-uid", podUid: "pod-uid", runNonce: "run-1", agentDid: `did:mesh:${"a".repeat(32)}`, dispatcherDid: `did:mesh:${"b".repeat(32)}`, bootId: "boot-1", assignmentId: "assignment-1", content: "Write a briefing" };
 const reply = { ...assignment, type: "mission:reply", status: "succeeded", output: "Briefing attached", evidence: { model: "model", rounds: 1, usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 } } };
 
+describe("negotiated provisional activity", () => {
+  const routerObservations = JSON.stringify({ version: 1, source: "runtime-forwarded-router-observations", coverage: "returned-responses-only",
+    responses: 1, rounds: [1], state: "unavailable", reason: "Router observations unavailable after execution (reset, expiry or read failure)" });
+  const progress = { ...reply, status: "running", activityFormat: "router-observations-v1", routerObservations };
+  it("keeps bounded activity outside evidence and installed authority", () => {
+    expect(parseMissionMessage(progress)).toMatchObject({ routerObservations, evidence: reply.evidence });
+    expect(parseMissionContract({ version: 1, activityFormat: "router-observations-v1" })).toBeNull();
+    expect(parseMissionMessage({ ...assignment, activityFormat: "router-observations-v1" })).not.toBeNull();
+    expect(parseMissionMessage(assignment)).not.toHaveProperty("activityFormat");
+  });
+  it.each(["ready", "accepted", "succeeded", "failed", "rejected"])("rejects provisional bytes on %s", status => {
+    expect(parseMissionMessage({ ...progress, status })).toBeNull();
+  });
+  it.each([undefined, "unknown"])("rejects unnegotiated activity (%s)", activityFormat => {
+    expect(parseMissionMessage({ ...progress, activityFormat })).toBeNull();
+  });
+  it.each(["{", "null", "{}", "x".repeat(32769), JSON.stringify({ state: "observed" })])("rejects malformed or oversized snapshots (%#)", value => {
+    expect(parseMissionMessage({ ...progress, routerObservations: value })).toBeNull();
+  });
+});
+
 describe("immutable input mission contract", () => {
   const phase = { name: "review-draft", objective: "Review the supplied immutable document", capabilities: ["filesystem-read"], minToolCalls: 1, maxToolCalls: 2 };
   const content = "Upstream draft\r\n✓ 日本語 🌍";
@@ -58,6 +79,58 @@ describe("immutable input mission contract", () => {
       { version: 1 }, { version: 2 }]) expect(parseMissionMessage({ ...assigned, ...fields })).toBeNull();
     expect(parseMissionMessage({ ...assignment, inputArtifacts: inputs })).toBeNull();
     expect(parseMissionContract({ ...contract, reviewedPhase: { ...phase, capabilities: ["filesystem-write"] } })).toBeNull();
+  });
+});
+
+describe("typed required output mission contract", () => {
+  const phase = { name: "synthesis", objective: "Synthesize the reviewed document", capabilities: ["filesystem-read", "filesystem-write"], minToolCalls: 1, maxToolCalls: 2, freshContext: true };
+  const contract = missionContract(phase, undefined, ["report.md"]);
+  const measured = { ...reply.evidence, phase: { name: phase.name, attemptedToolCalls: 1, successfulToolCalls: 1, minToolCalls: 1, maxToolCalls: 2 } };
+  const success = { ...reply, ...contract, artifactFormat: "text-v1", artifacts: { "report.md": "Reviewed report — 日本語" }, evidence: measured };
+  it("preserves the required-output version in installed contracts, assignments and replies", () => {
+    expect(contract.version).toBe(4);
+    expect(parseMissionContract(contract)).toEqual(contract);
+    expect(Object.isFrozen(contract.requiredOutputs)).toBe(true);
+    expect(parseMissionMessage({ ...assignment, ...contract })).toMatchObject(contract);
+    expect(parseMissionMessage(success)).toMatchObject({ ...contract, artifacts: success.artifacts });
+    const empty = missionContract(phase, undefined, []);
+    expect(parseMissionContract(empty)).toEqual({ ...empty, version: 4 });
+  });
+  it("sorts multiple required outputs without mutating the caller or its immutable snapshot", () => {
+    const names = Object.freeze(["sources.json", "report.md"]);
+    const multiple = missionContract(phase, undefined, names);
+    expect(multiple.requiredOutputs).toEqual(["report.md", "sources.json"]);
+    expect(names).toEqual(["sources.json", "report.md"]);
+    expect(Object.isFrozen(multiple.requiredOutputs)).toBe(true);
+    expect(parseMissionContract(multiple)).toEqual(multiple);
+    expect(parseMissionMessage({ ...assignment, ...multiple })).toMatchObject(multiple);
+    expect(parseMissionMessage({ ...success, ...multiple })).toBeNull();
+    const artifacts = { ...success.artifacts, "sources.json": "{\"sources\":[]}" };
+    expect(parseMissionMessage({ ...success, ...multiple, artifacts })).toMatchObject({ ...multiple, artifacts });
+  });
+  it("preserves required outputs when the contract also binds immutable inputs", () => {
+    const content = "Successful immutable handoff";
+    const inputs = [{ name: "draft.md", content, sha256: missionInputContentDigest(content), source: {
+      namespace: "kars-system", taskName: "writer", taskUid: "source-task", sandboxUid: "source-sandbox",
+      podUid: "source-pod", runNonce: "source-run", assignmentId: "source-assignment", agentDid: assignment.agentDid, artifactName: "handoff.md",
+    } }];
+    const withInputs = missionContract(phase, inputs, ["report.md"]);
+    expect(parseMissionContract(withInputs)).toEqual(withInputs);
+    expect(parseMissionMessage({ ...assignment, ...withInputs, inputArtifacts: inputs })).toMatchObject(withInputs);
+    expect(parseMissionMessage({ ...assignment, ...withInputs })).toBeNull();
+  });
+  it.each([1, 2, 3])("rejects output contracts downgraded to version %s", version => {
+    expect(parseMissionContract({ ...contract, version })).toBeNull();
+    expect(parseMissionMessage({ ...assignment, ...contract, version })).toBeNull();
+  });
+  it.each([undefined, ["report.md", "report.md"], ["../report.md"], ["response.md"]])("rejects missing or invalid required names %#", requiredOutputs => {
+    const value = { ...contract, requiredOutputs };
+    expect(parseMissionContract(value)).toBeNull();
+    expect(parseMissionMessage({ ...assignment, ...value })).toBeNull();
+  });
+  it.each([undefined, {}, { "other.md": "Not the required report" }, { "report.md": " " }])("rejects successful replies without the required nonblank export %#", artifacts => {
+    expect(parseMissionMessage({ ...success, artifacts })).toBeNull();
+    expect(parseMissionMessage({ ...success, status: "failed", artifacts: undefined })).not.toBeNull();
   });
 });
 
@@ -174,6 +247,9 @@ describe("installed mission contracts", () => {
     { version: 1, phaseDigest: undefined }, { version: 1, extra: undefined },
     { version: 1, reviewedPhase: contract.reviewedPhase }, { version: 2 },
     { version: 2, reviewedPhase: contract.reviewedPhase }, { version: 2, phaseDigest: contract.phaseDigest },
+    { version: 2, reviewedPhase: undefined, phaseDigest: undefined },
+    { version: 3, reviewedPhase: undefined, phaseDigest: undefined, inputDigest: `sha256:${"0".repeat(64)}` },
+    { version: 4, reviewedPhase: undefined, phaseDigest: undefined, requiredOutputs: [] },
     { ...contract, phaseDigest: "sha256:" + "0".repeat(64) },
     { ...contract, reviewedPhase: { ...contract.reviewedPhase, maxToolCalls: 3 } },
     { ...contract, type: "mission:probe" }, { ...contract, extra: undefined },

@@ -16,6 +16,39 @@ fn fixture() -> Value {
     .unwrap()
 }
 
+#[test]
+fn calendar_initialization_provenance_is_not_backfilled_during_legacy_adoption() {
+    let f = fixture();
+    let mut sb = sandbox(&f["sandbox"]);
+    let legacy = namespace(&f["namespace"]);
+    let key = crate::inference_budget::calendar::INITIALIZATION_ANNOTATION;
+    assert!(claim_patch(&legacy, &sb).unwrap()["metadata"]["annotations"][key].is_null());
+    assert!(!new_namespace(&sb).unwrap().annotations().contains_key(key));
+
+    sb.status = None;
+    assert_eq!(
+        new_namespace(&sb).unwrap().annotations().get(key),
+        sb.metadata.uid.as_ref()
+    );
+    let mut prestage = legacy.clone();
+    prestage.metadata.annotations = Some(
+        serde_json::from_value(json!({
+            VERSION: "v1", SOURCE_NAMESPACE: "workspace-a",
+            SOURCE_NAME: "demo", PRESTAGE: "bind-next-sandbox"
+        }))
+        .unwrap(),
+    );
+    sb.metadata
+        .annotations
+        .get_or_insert_default()
+        .insert(NAMESPACE_UID.into(), "namespace-a".into());
+    assert!(prestaged(&prestage, &sb));
+    assert_eq!(
+        claim_patch(&prestage, &sb).unwrap()["metadata"]["annotations"][key],
+        json!(sb.uid())
+    );
+}
+
 fn sandbox(value: &Value) -> KarsSandbox {
     serde_json::from_value(value.clone()).unwrap()
 }

@@ -1,12 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// kars Bridge BFF — cross-harness efficiency frontier (design note §3B, Pillar
-// B). Built entirely from the REAL per-run telemetry the router captures on
-// every mission run and the controller persists (mission-output ConfigMap +
-// the per-round/per-tool execution trace). Groups runs by the model/harness
-// route they took and computes the 2026 efficiency facts that let an operator
-// see — and the orchestrator recommend — the best governed route per outcome.
+// Cross-harness efficiency from ownership-fenced terminal evidence and retained
+// attempts. Legacy measurements remain descriptive history, not route authority.
 //
 // 2026 metric grounding (SWE-bench Verified resolve-rate, Terminal-Bench 2.0
 // task-resolution, τ²/τ³-bench pass^k reliability + fault attribution): the
@@ -45,6 +41,11 @@ pub struct RouteEfficiency {
     pub harness: String,
     /// Total runs observed on this route.
     pub runs: i64,
+    /// Runs with validated durable terminal evidence; legacy history is separate
+    /// from recommendation authority even when it shares a model name.
+    pub verified_runs: i64,
+    pub measured_token_runs: i64,
+    pub measured_tokens: Option<i64>,
     /// Runs that produced a substantive deliverable (tokens spent, ok).
     pub delivered: i64,
     /// Delivery success rate (delivered / runs), 0..1.
@@ -55,31 +56,31 @@ pub struct RouteEfficiency {
     /// Acceptance rate (accepted / runs), 0..1 — the real success metric.
     pub acceptance_rate: f64,
     /// Mean total tokens across delivered runs.
-    pub avg_tokens: i64,
+    pub avg_tokens: Option<i64>,
     /// Tokens spent per *successfully delivered* outcome — the cost-per-outcome
     /// efficiency metric (lower is better).
-    pub tokens_per_outcome: i64,
+    pub tokens_per_outcome: Option<i64>,
     /// Mean model rounds per delivered run (orchestration efficiency).
-    pub avg_rounds: f64,
+    pub avg_rounds: Option<f64>,
     /// Mean tool calls per delivered run (orchestration efficiency).
-    pub avg_tool_calls: f64,
+    pub avg_tool_calls: Option<f64>,
 
     // ── 2026 enrichments ────────────────────────────────────────────────────
     /// Mean prompt (input) tokens per delivered run.
-    pub avg_prompt_tokens: i64,
+    pub avg_prompt_tokens: Option<i64>,
     /// Mean completion (output) tokens per delivered run.
-    pub avg_completion_tokens: i64,
+    pub avg_completion_tokens: Option<i64>,
     /// Fraction of tool calls that FAILED (ok=false) across delivered runs,
     /// 0..1 — rework/effort signal. Lower is better.
-    pub tool_fail_rate: f64,
-    /// Mean wall-clock duration (ms) of a delivered run — first trace event to
-    /// last. The latency a human actually waits (minus human-approval waits).
-    pub avg_wall_ms: i64,
+    pub tool_fail_rate: Option<f64>,
+    /// Mean terminal startedAt-to-finishedAt duration (ms); legacy trace span
+    /// when available. Not model compute time or time spent in human review.
+    pub avg_wall_ms: Option<i64>,
     /// p95 wall-clock duration (ms) across delivered runs — tail latency.
-    pub p95_wall_ms: i64,
+    pub p95_wall_ms: Option<i64>,
     /// Mean time-to-first-action (ms): latency of the first model round — how
     /// quickly the agent starts doing something.
-    pub avg_ttfa_ms: i64,
+    pub avg_ttfa_ms: Option<i64>,
     /// pass^k reliability, 0..1: among packages RUN MORE THAN ONCE on this
     /// route, the fraction whose EVERY attempt was accepted. `None` when no
     /// package has repeated here yet (can't claim reliability from one shot).
@@ -89,13 +90,12 @@ pub struct RouteEfficiency {
     pub reliability_k: Option<i64>,
     /// Number of repeated packages behind `reliability_rate` (the sample size).
     pub reliability_samples: i64,
-    /// USD per accepted outcome — `None` unless a price is configured for this
+    /// USD per measured delivered outcome — `None` unless a price is configured for this
     /// route's model (see `KARS_MODEL_PRICES`). Never a fabricated price.
     pub usd_per_outcome: Option<f64>,
     /// Fraction of prompt (input) tokens served from the provider cache across
-    /// delivered runs, 0..1 — higher means cheaper input. 0 when the trace has
-    /// no cache info (older runs / cache-unaware router).
-    pub cache_hit_rate: f64,
+    /// delivered runs, 0..1. Absent when cache measurements are unavailable.
+    pub cache_hit_rate: Option<f64>,
     /// The most common fault among this route's UNACCEPTED runs (agent vs
     /// environment vs policy vs capacity), or "" when none/all accepted — the
     /// honest "why does this route miss" signal. See `classify_fault`.
@@ -153,15 +153,16 @@ pub struct RunMetrics {
     pub package: String,
     pub delivered: bool,
     pub accepted: bool,
-    pub total_tokens: i64,
-    pub prompt_tokens: i64,
-    pub completion_tokens: i64,
-    pub rounds: i64,
-    pub tool_calls: i64,
-    pub tool_fail: i64,
-    pub wall_ms: i64,
-    pub ttfa_ms: i64,
-    pub cached_tokens: i64,
+    pub verified: bool,
+    pub total_tokens: Option<i64>,
+    pub prompt_tokens: Option<i64>,
+    pub completion_tokens: Option<i64>,
+    pub rounds: Option<i64>,
+    pub tool_calls: Option<i64>,
+    pub tool_fail: Option<i64>,
+    pub wall_ms: Option<i64>,
+    pub ttfa_ms: Option<i64>,
+    pub cached_tokens: Option<i64>,
     /// Fault attribution when the run wasn't accepted ("" when accepted / no signal).
     pub fault: String,
 }
@@ -181,7 +182,13 @@ fn load_price_table() -> BTreeMap<String, (f64, f64)> {
     for (k, v) in map {
         let in_p = v.get("in").and_then(|x| x.as_f64());
         let out_p = v.get("out").and_then(|x| x.as_f64());
-        if let (Some(i), Some(o)) = (in_p, out_p) {
+        if let (Some(i), Some(o)) = (in_p, out_p)
+            && i.is_finite()
+            && o.is_finite()
+            && i >= 0.0
+            && o >= 0.0
+            && !k.is_empty()
+        {
             table.insert(k.to_lowercase(), (i, o));
         }
     }
@@ -197,15 +204,13 @@ fn price_for<'a>(route: &str, table: &'a BTreeMap<String, (f64, f64)>) -> Option
         .map(|(_, v)| v)
 }
 
-/// Normalize an objective into a stable package key for pass^k grouping:
-/// lowercased, whitespace-collapsed, length-bounded. Empty when no objective.
+/// Legacy exact objective identity, never a sensitive prefix in a response.
 fn package_key(objective: &str) -> String {
-    let collapsed = objective
-        .split_whitespace()
-        .collect::<Vec<_>>()
-        .join(" ")
-        .to_lowercase();
-    collapsed.chars().take(200).collect()
+    if objective.trim().is_empty() {
+        String::new()
+    } else {
+        crate::providers::signing::sha256_hex(objective)
+    }
 }
 
 /// Derive latency + tool-failure + cache facts from a mission's execution trace
@@ -327,93 +332,162 @@ pub async fn compute_efficiency_for_owner(
     cluster: &crate::kars::cluster::Cluster,
     owner_subject: Option<&str>,
 ) -> EfficiencyDto {
-    let outputs = cluster.list_mission_output_evidence().await;
+    // Reuse the maintained ownership/UID/commit fence, including historical
+    // revisions. Raw output maps omit ownerSub on modern producer records.
+    let outputs = cluster
+        .list_mission_deliverables()
+        .await
+        .unwrap_or_default();
     let mut runs: Vec<RunMetrics> = Vec::with_capacity(outputs.len());
 
     for record in &outputs {
-        let task = &record.task_name;
-        let data = &record.data;
+        let task = &record.output.task_name;
+        let data = &record.output.data;
         if owner_subject
             .is_some_and(|owner| data.get("ownerSub").map(String::as_str) != Some(owner))
         {
             continue;
         }
-        let route = data
-            .get("model")
-            .cloned()
-            .unwrap_or_else(|| "unknown".to_string());
-        let harness = data.get("harness").cloned().unwrap_or_default();
-        let total_tokens = data
-            .get("totalTokens")
-            .and_then(|t| t.parse::<i64>().ok())
-            .unwrap_or(0);
-        let prompt_tokens = data
-            .get("promptTokens")
-            .and_then(|t| t.parse::<i64>().ok())
-            .unwrap_or(0);
-        let completion_tokens = data
-            .get("completionTokens")
-            .and_then(|t| t.parse::<i64>().ok())
-            .unwrap_or(0);
-        let ok = data.get("status").map(String::as_str) == Some("ok");
-        let artifacts = data
-            .get("artifactCount")
-            .and_then(|t| t.parse::<i64>().ok())
-            .unwrap_or(0);
-        // "accepted" is the HONEST outcome signal: a human approved the
-        // deliverable (review status), not merely that the model emitted tokens.
-        let task_review = cluster.read_review(task).await.unwrap_or_default();
-        let review = if crate::routes::review::review_matches_output(data, &task_review) {
-            task_review
+        let review = cluster.read_review(task).await.unwrap_or_default();
+        let attempt = match (data.get("taskUid"), data.get("assignmentNonce")) {
+            (Some(uid), Some(nonce)) if data.contains_key("evidence.json") => {
+                cluster.read_mission_attempt(uid, nonce).await
+            }
+            _ => None,
+        };
+        let trace = if !data.contains_key("evidence.json") {
+            cluster
+                .read_mission_trace(&record.output.evidence_key)
+                .await
         } else {
-            Default::default()
+            None
         };
-        let accepted = review.get("status").map(String::as_str) == Some("approved");
-        // A run a human APPROVED was necessarily delivered — otherwise there'd be
-        // nothing to approve. Folding `accepted` into `delivered` keeps the funnel
-        // coherent (accepted ⊆ delivered) and stops "1 accepted, 0 delivered"
-        // when a delivered run under-reports telemetry (e.g. tokens==0 &&
-        // artifacts==0 on a harness whose token accounting lagged).
-        let delivered = accepted || (ok && (total_tokens > 0 || artifacts > 0));
-        let rounds = data
-            .get("rounds")
-            .and_then(|t| t.parse::<i64>().ok())
-            .unwrap_or(0);
-        let tool_calls = data
-            .get("toolCalls")
-            .and_then(|t| t.parse::<i64>().ok())
-            .unwrap_or(0);
-        let package = package_key(data.get("objective").map(String::as_str).unwrap_or(""));
-
-        // Enrich with latency + tool-failure + cache from the execution trace.
-        let trace = cluster.read_mission_trace(&record.evidence_key).await;
-        let (wall_ms, ttfa_ms, tool_fail, cached_tokens) = match &trace {
-            Some(t) => derive_from_trace(t),
-            None => (0, 0, 0, 0),
-        };
-        let finish = trace.as_deref().map(last_finish_reason).unwrap_or_default();
-        let fault = classify_fault(accepted, tool_fail, &finish).to_string();
-
-        runs.push(RunMetrics {
-            route,
-            harness,
-            package,
-            delivered,
-            accepted,
-            total_tokens,
-            prompt_tokens,
-            completion_tokens,
-            rounds,
-            tool_calls,
-            tool_fail,
-            wall_ms,
-            ttfa_ms,
-            cached_tokens,
-            fault,
-        });
+        runs.push(normalize_run(
+            data,
+            &review,
+            attempt.as_ref(),
+            trace.as_deref(),
+        ));
     }
 
     aggregate(runs, &load_price_table())
+}
+
+/// Inputs come from the fenced deliverable reader. Modern terminal evidence
+/// never falls back to unbound flattened fields or a legacy trace.
+fn normalize_run(
+    data: &BTreeMap<String, String>,
+    review: &BTreeMap<String, String>,
+    attempt: Option<&k8s_openapi::api::core::v1::ConfigMap>,
+    trace: Option<&str>,
+) -> RunMetrics {
+    use crate::routes::tasks::run_evidence;
+    let result = run_evidence::mission_result(data);
+    let modern = data.contains_key("evidence.json") || data.contains_key("runtimeBootId");
+    let valid = result.run_evidence.is_some();
+    let accepted = result.reviewable && accepted_revision(data, review);
+    let mut run = RunMetrics {
+        route: result
+            .model
+            .clone()
+            .filter(|s| !s.trim().is_empty())
+            .unwrap_or_else(|| "unknown".into()),
+        delivered: result.reviewable,
+        accepted,
+        verified: valid,
+        total_tokens: result.total_tokens,
+        prompt_tokens: result.prompt_tokens,
+        completion_tokens: result.completion_tokens,
+        ..Default::default()
+    };
+    if modern {
+        let Some(evidence) = result.run_evidence else {
+            return RunMetrics {
+                route: "unknown".into(),
+                ..Default::default()
+            };
+        };
+        run.rounds = evidence.rounds;
+        run.wall_ms = parse_ts_ms(&evidence.finished_at)
+            .zip(parse_ts_ms(&evidence.started_at))
+            .and_then(|(end, start)| end.checked_sub(start))
+            .filter(|n| *n >= 0);
+        if let Some(metrics) =
+            attempt.and_then(|cm| run_evidence::efficiency::from_attempt(data, cm))
+        {
+            run.harness = metrics.harness;
+            run.package = metrics.package;
+            run.tool_calls = metrics.tool_calls;
+            run.tool_fail = metrics.tool_fail;
+        }
+    } else {
+        let number = |key: &str| {
+            data.get(key)
+                .and_then(|s| s.parse::<i64>().ok())
+                .filter(|n| (0..=9_007_199_254_740_991).contains(n))
+        };
+        run.harness = data.get("harness").cloned().unwrap_or_default();
+        run.package = package_key(data.get("objective").map(String::as_str).unwrap_or(""));
+        run.rounds = number("rounds");
+        run.tool_calls = number("toolCalls");
+        if let Some(trace) = trace
+            && let Ok(Value::Array(events)) = serde_json::from_str::<Value>(trace)
+            && !events.is_empty()
+        {
+            let (wall, ttfa, fails, cached) = derive_from_trace(trace);
+            run.wall_ms = (wall > 0).then_some(wall);
+            run.ttfa_ms = (ttfa > 0).then_some(ttfa);
+            run.tool_fail = events
+                .iter()
+                .any(|e| e.get("kind").and_then(Value::as_str) == Some("tool"))
+                .then_some(fails);
+            let round_events: Vec<_> = events
+                .iter()
+                .filter(|e| e.get("kind").and_then(Value::as_str) == Some("round"))
+                .collect();
+            run.cached_tokens = (!round_events.is_empty()
+                && round_events.iter().all(|e| {
+                    e.get("cached_tokens")
+                        .and_then(Value::as_i64)
+                        .is_some_and(|n| n >= 0)
+                }))
+            .then_some(cached);
+            run.fault = classify_fault(accepted, fails, &last_finish_reason(trace)).into();
+        }
+    }
+    run
+}
+
+fn accepted_revision(data: &BTreeMap<String, String>, review: &BTreeMap<String, String>) -> bool {
+    use crate::routes::review::{ReviewEntry, review_matches_output};
+    if review_matches_output(data, review) {
+        return review.get("status").map(String::as_str) == Some("approved");
+    }
+    let Some(nonce) = data
+        .get("assignmentNonce")
+        .filter(|nonce| !nonce.is_empty())
+    else {
+        return false;
+    };
+    if data
+        .get("taskUid")
+        .is_none_or(|uid| uid.is_empty() || review.get("taskUid") != Some(uid))
+    {
+        return false;
+    }
+    // The maintained review journal records the exact reviewed nonce. A later
+    // revision must not erase that acceptance or transfer it to another Task.
+    let history = review
+        .get("history")
+        .filter(|raw| raw.len() <= 1024 * 1024)
+        .and_then(|raw| serde_json::from_str::<Vec<ReviewEntry>>(raw).ok())
+        .unwrap_or_default();
+    history
+        .iter()
+        .filter(|entry| entry.assignment_nonce.as_ref() == Some(nonce))
+        .filter_map(|entry| parse_ts_ms(&entry.decided_at).map(|at| (at, entry)))
+        .max_by_key(|(at, _)| *at)
+        .is_some_and(|(_, entry)| entry.attested && entry.decision == "approve")
 }
 
 /// Pure aggregation of per-run metrics into the route frontier — unit-testable.
@@ -423,20 +497,24 @@ pub fn aggregate(runs: Vec<RunMetrics>, prices: &BTreeMap<String, (f64, f64)>) -
         route: String,
         harness: String,
         runs: i64,
+        verified: i64,
         delivered: i64,
         accepted: i64,
         tokens: i64,
-        /// Delivered runs that actually REPORTED token usage (> 0). Token
-        /// averages divide by this, not `delivered`, so a delivered run whose
-        /// harness under-reported tokens (0) can't dilute the per-run cost and
-        /// make a route look artificially cheap.
+        /// Delivered runs with measured usage (including a genuine zero).
+        /// Missing usage never dilutes the measured average.
         tokens_n: i64,
         prompt: i64,
         completion: i64,
+        split_n: i64,
         rounds: i64,
+        rounds_n: i64,
         tool_calls: i64,
+        tools_n: i64,
         tool_fail: i64,
+        assessed_calls: i64,
         cached: i64,
+        cache_prompt: i64,
         wall: Vec<i64>,
         ttfa: i64,
         ttfa_n: i64,
@@ -446,20 +524,18 @@ pub fn aggregate(runs: Vec<RunMetrics>, prices: &BTreeMap<String, (f64, f64)>) -
         packages: BTreeMap<String, Vec<bool>>,
     }
 
-    // Group by the composite (model × harness) route so harness efficiency is
-    // measurable. The map key joins the two with a unit separator that can't
-    // appear in a model/harness name.
-    let mut by_route: BTreeMap<String, Acc> = BTreeMap::new();
+    let mut by_route: BTreeMap<(String, String), Acc> = BTreeMap::new();
     let total_runs = runs.len() as i64;
 
     for r in &runs {
-        let key = format!("{}\u{1}{}", r.route, r.harness);
+        let key = (r.route.clone(), r.harness.clone());
         let acc = by_route.entry(key).or_default();
         if acc.route.is_empty() {
             acc.route = r.route.clone();
             acc.harness = r.harness.clone();
         }
         acc.runs += 1;
+        acc.verified += i64::from(r.verified);
         if r.accepted {
             acc.accepted += 1;
         }
@@ -468,21 +544,44 @@ pub fn aggregate(runs: Vec<RunMetrics>, prices: &BTreeMap<String, (f64, f64)>) -
         }
         if r.delivered {
             acc.delivered += 1;
-            acc.tokens += r.total_tokens;
-            if r.total_tokens > 0 {
+            if let Some(tokens) = r.total_tokens.filter(|n| *n >= 0) {
+                acc.tokens += tokens;
                 acc.tokens_n += 1;
             }
-            acc.prompt += r.prompt_tokens;
-            acc.completion += r.completion_tokens;
-            acc.rounds += r.rounds;
-            acc.tool_calls += r.tool_calls;
-            acc.tool_fail += r.tool_fail;
-            acc.cached += r.cached_tokens;
-            if r.wall_ms > 0 {
-                acc.wall.push(r.wall_ms);
+            if let Some((prompt, completion)) = r
+                .prompt_tokens
+                .zip(r.completion_tokens)
+                .filter(|(p, c)| *p >= 0 && *c >= 0 && p.checked_add(*c) == r.total_tokens)
+            {
+                acc.prompt += prompt;
+                acc.completion += completion;
+                acc.split_n += 1;
             }
-            if r.ttfa_ms > 0 {
-                acc.ttfa += r.ttfa_ms;
+            if let Some(rounds) = r.rounds.filter(|n| *n >= 0) {
+                acc.rounds += rounds;
+                acc.rounds_n += 1;
+            }
+            if let Some(calls) = r.tool_calls.filter(|n| *n >= 0) {
+                acc.tool_calls += calls;
+                acc.tools_n += 1;
+                if let Some(fails) = r.tool_fail.filter(|n| *n >= 0 && *n <= calls) {
+                    acc.tool_fail += fails;
+                    acc.assessed_calls += calls;
+                }
+            }
+            if let Some((cached, prompt)) = r
+                .cached_tokens
+                .zip(r.prompt_tokens)
+                .filter(|(c, p)| *c >= 0 && *c <= *p && *p > 0)
+            {
+                acc.cached += cached;
+                acc.cache_prompt += prompt;
+            }
+            if let Some(wall) = r.wall_ms.filter(|n| *n >= 0) {
+                acc.wall.push(wall);
+            }
+            if let Some(ttfa) = r.ttfa_ms.filter(|n| *n >= 0) {
+                acc.ttfa += ttfa;
                 acc.ttfa_n += 1;
             }
         }
@@ -498,19 +597,22 @@ pub fn aggregate(runs: Vec<RunMetrics>, prices: &BTreeMap<String, (f64, f64)>) -
         .into_values()
         .map(|mut a| {
             let route = a.route.clone();
-            let d = a.delivered.max(0);
-            // Token averages use the count of runs that actually reported tokens
-            // (tokens_n), not delivered (d), so zero-token deliveries don't dilute
-            // the per-outcome cost. Rounds/tool-calls still divide by d.
+            // Each average uses its own measured population, never all deliveries.
             let tn = a.tokens_n.max(0);
-            let tokens_per_outcome = if tn > 0 { a.tokens / tn } else { 0 };
+            let tokens_per_outcome = (tn > 0).then(|| a.tokens / tn);
             let usd_per_outcome = price_for(&route, prices).and_then(|(in_p, out_p)| {
-                if tn == 0 {
+                if a.split_n == 0
+                    || !in_p.is_finite()
+                    || !out_p.is_finite()
+                    || *in_p < 0.0
+                    || *out_p < 0.0
+                {
                     return None;
                 }
                 let cost = (a.prompt as f64 / 1_000_000.0) * in_p
                     + (a.completion as f64 / 1_000_000.0) * out_p;
-                Some(cost / tn as f64)
+                let cost = cost / a.split_n as f64;
+                cost.is_finite().then_some(cost)
             });
             // pass^k reliability from repeated packages on this route.
             let repeated: Vec<&Vec<bool>> = a.packages.values().filter(|v| v.len() >= 2).collect();
@@ -526,17 +628,17 @@ pub fn aggregate(runs: Vec<RunMetrics>, prices: &BTreeMap<String, (f64, f64)>) -
                 )
             };
             a.wall.sort_unstable();
-            let avg_wall = if a.wall.is_empty() {
-                0
-            } else {
-                a.wall.iter().sum::<i64>() / a.wall.len() as i64
-            };
-            let p95_wall = percentile(&a.wall, 0.95);
+            let avg_wall =
+                (!a.wall.is_empty()).then(|| a.wall.iter().sum::<i64>() / a.wall.len() as i64);
+            let p95_wall = (!a.wall.is_empty()).then(|| percentile(&a.wall, 0.95));
 
             RouteEfficiency {
                 route,
                 harness: a.harness.clone(),
                 runs: a.runs,
+                verified_runs: a.verified,
+                measured_token_runs: tn,
+                measured_tokens: (tn > 0).then_some(a.tokens),
                 delivered: a.delivered,
                 success_rate: if a.runs > 0 {
                     a.delivered as f64 / a.runs as f64
@@ -549,37 +651,23 @@ pub fn aggregate(runs: Vec<RunMetrics>, prices: &BTreeMap<String, (f64, f64)>) -
                 } else {
                     0.0
                 },
-                avg_tokens: if tn > 0 { a.tokens / tn } else { 0 },
+                avg_tokens: tokens_per_outcome,
                 tokens_per_outcome,
-                avg_rounds: if d > 0 {
-                    a.rounds as f64 / d as f64
-                } else {
-                    0.0
-                },
-                avg_tool_calls: if d > 0 {
-                    a.tool_calls as f64 / d as f64
-                } else {
-                    0.0
-                },
-                avg_prompt_tokens: if tn > 0 { a.prompt / tn } else { 0 },
-                avg_completion_tokens: if tn > 0 { a.completion / tn } else { 0 },
-                tool_fail_rate: if a.tool_calls > 0 {
-                    a.tool_fail as f64 / a.tool_calls as f64
-                } else {
-                    0.0
-                },
+                avg_rounds: (a.rounds_n > 0).then(|| a.rounds as f64 / a.rounds_n as f64),
+                avg_tool_calls: (a.tools_n > 0).then(|| a.tool_calls as f64 / a.tools_n as f64),
+                avg_prompt_tokens: (a.split_n > 0).then(|| a.prompt / a.split_n),
+                avg_completion_tokens: (a.split_n > 0).then(|| a.completion / a.split_n),
+                tool_fail_rate: (a.assessed_calls > 0)
+                    .then(|| a.tool_fail as f64 / a.assessed_calls as f64),
                 avg_wall_ms: avg_wall,
                 p95_wall_ms: p95_wall,
-                avg_ttfa_ms: if a.ttfa_n > 0 { a.ttfa / a.ttfa_n } else { 0 },
+                avg_ttfa_ms: (a.ttfa_n > 0).then(|| a.ttfa / a.ttfa_n),
                 reliability_rate,
                 reliability_k,
                 reliability_samples,
                 usd_per_outcome,
-                cache_hit_rate: if a.prompt > 0 {
-                    (a.cached as f64 / a.prompt as f64).min(1.0)
-                } else {
-                    0.0
-                },
+                cache_hit_rate: (a.cache_prompt > 0)
+                    .then(|| a.cached as f64 / a.cache_prompt as f64),
                 top_fault: a
                     .faults
                     .iter()
@@ -606,59 +694,48 @@ pub fn aggregate(runs: Vec<RunMetrics>, prices: &BTreeMap<String, (f64, f64)>) -
                     .partial_cmp(&a.reliability_rate.unwrap_or(0.0))
                     .unwrap_or(std::cmp::Ordering::Equal),
             )
-            .then(a.tokens_per_outcome.cmp(&b.tokens_per_outcome))
+            .then(b.success_rate.total_cmp(&a.success_rate))
+            .then(
+                a.tokens_per_outcome
+                    .unwrap_or(i64::MAX)
+                    .cmp(&b.tokens_per_outcome.unwrap_or(i64::MAX)),
+            )
+            .then(a.route.cmp(&b.route))
+            .then(a.harness.cmp(&b.harness))
     });
 
-    // Recommend on the HONEST signal: acceptance dominates; reliability
-    // (pass^k) rewards consistency; cost-per-outcome penalizes. Fall back to
-    // delivery only when no route has any accepted run yet.
-    let max_cost = routes
-        .iter()
-        .filter(|r| r.delivered > 0)
-        .map(|r| r.tokens_per_outcome)
-        .max()
-        .unwrap_or(1)
-        .max(1);
-    let recommended_pick = routes
-        .iter()
-        .filter(|r| r.delivered > 0)
-        .map(|r| {
-            let cost_norm = r.tokens_per_outcome as f64 / max_cost as f64;
-            let reliability = r.reliability_rate.unwrap_or(0.0);
-            // Acceptance dominates; reliability and delivery reward; cost penalizes.
-            let score =
-                r.acceptance_rate + 0.3 * reliability + 0.2 * r.success_rate - 0.5 * cost_norm;
-            (r.route.clone(), r.harness.clone(), score)
-        })
-        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
-    let recommended = recommended_pick.as_ref().map(|(route, _, _)| route.clone());
+    // Use the same lexicographic order as the displayed frontier. Unknown
+    // costs never become cheap, and unverified history cannot select a route.
+    let recommended_pick = routes.iter().find(|r| {
+        r.delivered > 0
+            && r.verified_runs == r.runs
+            && r.route != "unknown"
+            && !r.harness.is_empty()
+            && r.measured_token_runs == r.delivered
+            && r.tokens_per_outcome.is_some()
+    });
+    let recommended = recommended_pick.map(|r| r.route.clone());
     // The harness of the winning route — so compose can propose BOTH the model
     // and the harness that actually won (not the model with a default harness).
     let recommended_harness = recommended_pick
-        .as_ref()
-        .map(|(_, h, _)| h.clone())
+        .map(|r| r.harness.clone())
         .filter(|h| !h.is_empty());
 
-    // Honest basis + confidence. The DEFENSIBLE reason is delivery success; the
-    // ideal signal (human acceptance) and pass^k reliability are often sparse
-    // early, so we state them with sample sizes and flag low confidence rather
-    // than star-recommending a route whose headline acceptance reads as 4%.
-    let (recommended_basis, recommended_low_confidence) = recommended
-        .as_ref()
-        .and_then(|route| routes.iter().find(|r| &r.route == route))
+    // The basis describes the actual ordering and the exact winning pair.
+    let (recommended_basis, recommended_low_confidence) = recommended_pick
         .map(|r| {
             let accepted = r.accepted;
             let rel_samples = r.reliability_samples;
-            let low_conf = accepted < 3 || rel_samples < 3;
+            let low_conf = accepted < 3 || rel_samples < 3 || r.acceptance_rate < 0.5;
             let mut basis = format!(
-                "Highest delivery success — {:.0}% ({}/{} runs delivered)",
-                r.success_rate * 100.0,
+                "Best available measured route by acceptance, repeated-package reliability, delivery, then token cost: {} on {} — {}/{} accepted, {}/{} delivered",
+                r.route, r.harness, r.accepted, r.runs,
                 r.delivered,
                 r.runs
             );
             if accepted < 3 {
                 basis.push_str(&format!(
-                    ". Human acceptance is still low-signal ({} of {} deliverables reviewed) — treat as best-available, not proven-best",
+                    ". Human acceptance is still low-signal ({} of {} deliverables approved) — treat as best-available, not proven-best",
                     accepted, r.delivered
                 ));
             }

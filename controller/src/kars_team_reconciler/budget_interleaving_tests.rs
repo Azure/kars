@@ -501,6 +501,7 @@ async fn governed_team_admission_interleavings_preserve_uids_funding_and_launch_
         task["spec"]["execution"] = json!({"launch":true});
     }
     cycle(&client, &store).await;
+    cycle(&client, &store).await;
     {
         let state = store.lock().unwrap();
         assert_eq!(
@@ -652,7 +653,9 @@ async fn governed_team_admission_interleavings_preserve_uids_funding_and_launch_
         assert_eq!(ledger.meters.settled.tokens, 8);
         crate::inference_budget::launch::capacity(ledger, &run.uid().unwrap()).unwrap();
     }
-    cycle(&client, &store).await; // Admission resumes, not a re-created principal/run.
+    cycle(&client, &store).await; // Enqueue the next cadence request after capacity returns.
+    assert_eq!(ids(&store), stable_ids);
+    cycle(&client, &store).await; // Admit without re-creating the principal or prior run.
     assert_eq!(store.lock().unwrap().tasks.len(), 4);
     for (name, uid) in stable_ids {
         assert_eq!(ids(&store)[&name], uid);

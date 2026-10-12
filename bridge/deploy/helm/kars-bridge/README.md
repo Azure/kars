@@ -32,8 +32,8 @@ Run the commands below from `bridge/`, entered from the repository root (`cd bri
 ## Build the images
 
 ```bash
-# BFF (Rust) — build context is bff/
-docker build -f bff/Dockerfile -t <registry>/kars-bridge-bff:<tag> bff
+# BFF (Rust) — repository-root context includes shared/; run from bridge/
+docker build -f bff/Dockerfile -t <registry>/kars-bridge-bff:<tag> ..
 # Web (Next.js standalone) — build context is web/
 docker build -f web/Dockerfile -t <registry>/kars-bridge-web:<tag> web
 docker push <registry>/kars-bridge-bff:<tag>
@@ -41,6 +41,66 @@ docker push <registry>/kars-bridge-web:<tag>
 ```
 
 ## Install modes
+
+### Sharing Dex with Core Headlamp
+
+The optional `idp.headlampClient` registers a separate confidential OIDC client
+in the existing Dex instance. Set its `clientID` and `callbackURL` to the same
+values as Core's `headlamp.oidc.clientID` and `headlamp.oidc.callbackURL`. Provision
+matching client-secret values in existing Secrets in the Bridge and `headlamp`
+namespaces; configure each chart's Secret reference. The chart does not copy or
+render the secret value and does not grant any Kubernetes permissions.
+
+This requires an HTTPS `idp.issuer`, reachable by the browser, Headlamp, and the
+Kubernetes API server. Either terminate TLS at an existing trusted ingress, or
+enable `idp.dex.tls.enabled` and reference an existing `kubernetes.io/tls` Secret
+with `idp.dex.tls.secretName`. Native Dex TLS listens on Service port **5557**;
+the existing HTTP **5556** Bridge proxy/backchannel remains unchanged. The
+certificate must cover the issuer hostname. Rotate the certificate or client
+Secret with a reviewed Dex restart; the chart does not inspect Secret contents.
+
+For a private CA, configure Core `headlamp.oidc.caConfigMap` and API-server OIDC
+trust explicitly. Local split-horizon DNS can use Core `headlamp.hostAliases`;
+the API server and browser must independently resolve that same issuer.
+For a Kind static API-server Pod, a node's `/etc/hosts` entry alone is not
+sufficient: configure the issuer mapping in the Pod's `hostAliases` as well
+(or provide DNS that resolves correctly inside that Pod). Keep the issuer CA
+and hostname verification enabled.
+
+With Cilium and a host-network API server on another node, namespace selectors
+do not grant that server access to Dex. Set
+`networkPolicy.dexApiServerIngress=true` for native Dex TLS. This adds a Cilium
+policy allowing the `kube-apiserver` identity and nodes labeled
+`node-role.kubernetes.io/control-plane=""` to Dex TCP **5557**, not the HTTP
+backchannel or arbitrary nodes. Kind's kube-proxy can SNAT API-server traffic
+to its node's Cilium address, losing the `kube-apiserver` identity; the
+control-plane-node rule preserves a narrow allow-list in that case. Enable
+Cilium `nodeSelectorLabels=true` to make this rule effective. For Cluster Mesh,
+also use `clustermesh.policyDefaultLocalCluster=true` to restrict node selection
+to the local cluster. Do not replace this with `remote-node` or `cluster` access.
+It requires the CiliumNetworkPolicy API,
+`networkPolicy.create`, and `idp.dex.tls.enabled`; it is off by default.
+Check actual API-server discovery/JWKS access and per-user resource access,
+not merely a successful browser login.
+
+Bridge also uses authenticated Kubernetes `pods/proxy` requests to sandbox
+routers. On a multi-node Cilium cluster, set
+`networkPolicy.routerApiServerIngress=true`. This requires
+`networkPolicy.create` and the CiliumClusterwideNetworkPolicy API. It permits
+only the same API-server/control-plane identities to TCP **8443** on sandbox
+Pods in sandbox-role namespaces, including future Mission and Team namespaces.
+The control-plane node-label and Cluster Mesh prerequisites above also apply.
+It does not expose runtime gateway ports, add RBAC privileges, or change egress
+isolation. It is off by default for other CNIs. Verify an actual authenticated
+`GET /api/v1/namespaces/<ns>/pods/<pod>:8443/proxy/healthz` request; a Ready router
+or controller-confirmed policy alone does not prove this distinct Bridge path.
+The separate router admin token is still required for `/internal/policy-status`;
+Kubernetes proxy access alone must not grant administrative router access.
+
+Browser trust can be confined to a dedicated development browser profile;
+never disable certificate verification. Neither chart installs a host CA,
+changes API-server authentication, or creates per-user RBAC bindings. Those
+operator prerequisites are separate from enabling the client and listener.
 
 The defaults join the existing `kars-system` namespace with
 `createNamespace: false`. New installs cannot claim `kars-system`; upgrades

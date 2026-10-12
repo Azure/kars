@@ -13,6 +13,7 @@ import {
   type V1NetworkPolicy,
   type V1Role,
   type V1RoleBinding,
+  type V1Service,
 } from "@kubernetes/client-node";
 import { describe, expect, it } from "vitest";
 
@@ -57,6 +58,15 @@ const scenarios = [
 ];
 
 describe("Bridge optional add-on boundary (offline Helm manifests)", () => {
+  it("allows an explicit Dex Service address without changing default allocation", () => {
+    const automatic = resource<V1Service>(render("--set", "idp.enabled=true"), "Service", "dex");
+    expect(automatic.spec?.clusterIP).toBeUndefined();
+    const fixed = resource<V1Service>(render("--set",
+      "idp.enabled=true,idp.dex.clusterIP=10.99.104.122"), "Service", "dex");
+    expect(fixed.spec?.clusterIP).toBe("10.99.104.122");
+    expect(fixed.spec?.selector).toEqual(automatic.spec?.selector);
+    expect(fixed.spec?.ports).toEqual(automatic.spec?.ports);
+  });
   it("opens observation egress only for explicitly reviewed existing isolation and targets", () => {
     expect(render().some((item) => item.metadata?.name === "kars-bridge-observation-egress")).toBe(false);
     expect(() => render("--set", "networkPolicy.observations.enabled=true")).toThrow(/already egress-isolated/);

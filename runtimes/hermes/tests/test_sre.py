@@ -239,3 +239,138 @@ def test_describe_state_handles_apiserver_errors_per_kind() -> None:
         assert isinstance(result[kind], dict)
         assert "error" in result[kind]
         assert "403" in result[kind]["error"]
+
+
+def test_diagnosis_preserves_failed_inventory_coverage() -> None:
+    from kars_runtime_hermes.plugin import sre
+
+    kube = MagicMock()
+    kube.get.side_effect = RuntimeError("403 Forbidden")
+    with patch.object(sre.sre_kube, "client", return_value=kube):
+        report = sre._impl_sre_diagnose()
+    assert report["coverage"] == "incomplete"
+    assert len(report["coverage_errors"]) == len(sre.KARS_CR_KINDS) + 2
+    assert report["crds_present"] == []
+    assert "coverage: incomplete" in report["summary"]
+    assert all("403" in error["error"] for error in report["coverage_errors"])
+
+
+def test_diagnosis_tracks_freshness_and_workload_read_failures() -> None:
+    from kars_runtime_hermes.plugin import sre
+
+    kube = MagicMock()
+
+    def get(path):
+        if path.endswith("/deployments/kars-controller"):
+            return {"spec": {"replicas": 1}, "status": {"readyReplicas": 1}}
+        if path.endswith("/customresourcedefinitions"):
+            return {"items": [{"metadata": {"name": plural + ".kars.azure.com"}}
+                              for plural, _ in sre.KARS_CR_KINDS]}
+        if path.endswith("/karssandboxes"):
+            return {"items": [
+                {"metadata": {"name": "stale", "namespace": "kars-system"},
+                 "status": {"phase": "Running", "lastReconciled": "2020-01-01T00:00:00Z"}},
+                {"metadata": {"name": "unknown", "namespace": "kars-system"},
+                 "status": {"phase": "Running"}},
+            ]}
+        if "/deployments/" in path:
+            raise RuntimeError("workload inventory unavailable")
+        return {"items": []}
+
+    kube.get.side_effect = get
+    with patch.object(sre.sre_kube, "client", return_value=kube):
+        report = sre._impl_sre_diagnose()
+    assert report["controller_status"] == "Ready"
+    assert [item["name"] for item in report["stale_reconciles"]] == ["stale"]
+    assert len(report["coverage_errors"]) == 3
+    assert report["coverage"] == "incomplete"
+    assert len(report["degraded_sandboxes"]) == 0  # not evidence of health
+
+
+def test_malformed_inventory_is_unknown_not_empty() -> None:
+    from kars_runtime_hermes.plugin import sre
+
+    kube = MagicMock()
+    kube.get.return_value = {}
+    with patch.object(sre.sre_kube, "client", return_value=kube):
+        state = sre._impl_sre_describe_state()
+    assert all("error" in result for result in state.values())
+
+
+def test_proposal_persists_pending_only_and_never_executes() -> None:
+    from kars_runtime_hermes.plugin import sre
+
+    kube = MagicMock()
+    kube.get.return_value = {"items": []}
+    kube.post.return_value = {"metadata": {"name": "sre-action-review"}}
+    with patch.object(sre.sre_kube, "client", return_value=kube):
+        result = sre._impl_sre_propose_fix(
+            diagnosis="Verified resource quota blocks admission",
+            target={"kind": "ResourceQuota", "namespace": "kars-example", "name": "quota"},
+        )
+    kube.post.assert_called_once()
+    assert kube.post.call_args.args == ("/apis/kars.azure.com/v1alpha1/namespaces/kars-sre/karssreactions",)
+    assert kube.post.call_args.kwargs["json"]["spec"]["approval"] == {"state": "Pending"}
+    assert result["action_id"] == "sre-action-review"
+    assert result["cr_created"] is True
+    assert not kube.patch.called
+    assert not kube.delete.called
+
+
+def test_failed_or_malformed_proposal_creation_never_claims_persistence() -> None:
+    from kars_runtime_hermes.plugin import sre
+
+    for response in (RuntimeError("SRE authority revoked"), {}):
+        kube = MagicMock()
+        kube.get.return_value = {"items": []}
+        if isinstance(response, Exception):
+            kube.post.side_effect = response
+        else:
+            kube.post.return_value = response
+        with patch.object(sre.sre_kube, "client", return_value=kube):
+            result = sre._impl_sre_propose_fix(
+                diagnosis="Unhealthy pod",
+                target={"kind": "Pod", "namespace": "kars-example", "name": "pod"},
+            )
+        assert result["cr_created"] is False
+        assert result["action_id"] is None
+        assert result["cr_error"]
+
+
+def test_repeated_remedy_reuses_pending_proposal_without_writes() -> None:
+    from kars_runtime_hermes.plugin import sre
+
+    kube = MagicMock()
+    kube.get.return_value = {"items": [{
+        "metadata": {"name": "sre-action-existing"},
+        "spec": {
+            "action": {"type": "DeletePod", "params": {"namespace": "kars-example", "name": "pod"}},
+            "approval": {"state": "Pending"},
+        },
+        "status": {"phase": "Proposed"},
+    }]}
+    with patch.object(sre.sre_kube, "client", return_value=kube):
+        result = sre._impl_sre_propose_fix(
+            diagnosis="Still unhealthy",
+            target={"kind": "Pod", "namespace": "kars-example", "name": "pod"},
+        )
+    assert result["action_id"] == "sre-action-existing"
+    assert result["cr_created"] is False
+    assert result["cr_reused"] is True
+    kube.post.assert_not_called()
+    assert not kube.patch.called
+
+
+def test_unknown_proposal_inventory_blocks_creation() -> None:
+    from kars_runtime_hermes.plugin import sre
+
+    kube = MagicMock()
+    kube.get.return_value = {}
+    with patch.object(sre.sre_kube, "client", return_value=kube):
+        result = sre._impl_sre_propose_fix(
+            diagnosis="Unhealthy",
+            target={"kind": "Pod", "namespace": "kars-example", "name": "pod"},
+        )
+    assert result["cr_created"] is False
+    assert "inventory is unknown" in result["cr_error"]
+    kube.post.assert_not_called()

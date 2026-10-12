@@ -9,6 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
+    "geist": "1.7.2",
     "jose": "^6.2.3",
     "mermaid": "11.16.1",
     "next": "16.3.6",
@@ -35,6 +36,6 @@
     "browserslist": "^4.28.9",
     "js-yaml@^4": "^4.3.1",
     "nanoid@^3": "^3.3.18",
-    "sharp": "^0.35.3"
+    "sharp": "^0.35.5"
   }
 }

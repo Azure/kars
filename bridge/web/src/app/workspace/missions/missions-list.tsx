@@ -11,6 +11,7 @@ import { useMemo, useState } from "react";
 import Link from "next/link";
 import { MissionStatusBadge, missionStatus, type MissionStatus } from "@/components/mission-status";
 import { TIER_LABELS, type TaskSummary } from "@/lib/types";
+import { formatEvidenceTime } from "@/lib/format";
 
 type Filter = "all" | "active" | "delivered" | "failed" | "drafts";
 type Sort = "newest" | "oldest" | "name";
@@ -122,7 +123,7 @@ export function MissionsList({ tasks }: { tasks: TaskSummary[] }) {
                   <p className="truncate text-sm font-medium">{t.display_name ?? t.objective}</p>
                   <p className="mt-0.5 line-clamp-1 text-xs text-foreground-muted">
                     Tier {t.tier} · {TIER_LABELS[t.tier] ?? "?"}
-                    {t.created_at ? ` · Started: ${new Date(t.created_at).toLocaleString()}` : ""}
+                    {t.created_at ? ` · Created: ${formatEvidenceTime(t.created_at)}` : ""}
                   </p>
                 </div>
                 <MissionStatusBadge status={statusOf(t)} />

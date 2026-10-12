@@ -201,11 +201,19 @@ pub(super) async fn check_models(
                                     &model.deployment,
                                     option,
                                 )
-                                .map(|qualified| (qualified, option))
+                                .and_then(|qualified| {
+                                    crate::routes::options::mcp_server_admitted_for_route(
+                                        runtime,
+                                        &model.provider,
+                                        &model.deployment,
+                                        option,
+                                    )
+                                    .map(|admitted| (qualified, admitted, option))
+                                })
                             })
                             .transpose();
                         checks.push(match qualification {
-                            Ok(Some((true, option))) => Check {
+                            Ok(Some((true, _, option))) => Check {
                                 id: format!("mcp_qualification:{server}"),
                                 label: format!(
                                     "Connected service “{server}” has retained resource qualification"
@@ -221,13 +229,15 @@ pub(super) async fn check_models(
                                     )
                                 ),
                             },
-                            Ok(Some((false, option))) => Check {
+                            Ok(Some((false, admitted, option))) => Check {
                                 id: format!("mcp_qualification:{server}"),
                                 label: format!(
                                     "Connected service “{server}” lacks retained resource qualification"
                                 ),
-                                status: CheckStatus::Fail,
-                                detail: format!(
+                                status: if admitted { CheckStatus::Warn } else { CheckStatus::Fail },
+                                detail: if admitted {
+                                    "Unqualified validation run: the current MCP schema is bound, but retained execution evidence is missing. This is not resource qualification.".into()
+                                } else { format!(
                                     "No retained resource-scoped qualification record matches the current tool schema digest {} on {}. Generic route records do not prove this MCP server.",
                                     option.tool_schema_digest.as_deref().unwrap_or("missing"),
                                     crate::routes::options::route_label(
@@ -235,7 +245,7 @@ pub(super) async fn check_models(
                                         &model.provider,
                                         &model.deployment
                                     )
-                                ),
+                                ) },
                             },
                             Ok(None) => Check {
                                 id: format!("mcp_qualification:{server}"),
@@ -268,11 +278,19 @@ pub(super) async fn check_models(
                                     &model.deployment,
                                     option,
                                 )
-                                .map(|qualified| (qualified, option))
+                                .and_then(|qualified| {
+                                    crate::routes::options::memory_binding_admitted_for_route(
+                                        runtime,
+                                        &model.provider,
+                                        &model.deployment,
+                                        option,
+                                    )
+                                    .map(|admitted| (qualified, admitted, option))
+                                })
                             })
                             .transpose();
                         checks.push(match qualification {
-                            Ok(Some((true, option))) => Check {
+                            Ok(Some((true, _, option))) => Check {
                                 id: "memory_qualification".into(),
                                 label: format!(
                                     "Shared memory “{memory}” has retained resource qualification"
@@ -289,13 +307,15 @@ pub(super) async fn check_models(
                                     )
                                 ),
                             },
-                            Ok(Some((false, option))) => Check {
+                            Ok(Some((false, admitted, option))) => Check {
                                 id: "memory_qualification".into(),
                                 label: format!(
                                     "Shared memory “{memory}” lacks retained resource qualification"
                                 ),
-                                status: CheckStatus::Fail,
-                                detail: format!(
+                                status: if admitted { CheckStatus::Warn } else { CheckStatus::Fail },
+                                detail: if admitted {
+                                    "Unqualified validation run: the current memory backend and digest are bound, but retained execution evidence is missing. This is not resource qualification.".into()
+                                } else { format!(
                                     "No retained resource-scoped qualification record matches backend {} and compiled digest {} on {}. Generic route records do not prove this memory binding.",
                                     option.backend.as_deref().unwrap_or("missing"),
                                     option.compiled_digest.as_deref().unwrap_or("missing"),
@@ -304,7 +324,7 @@ pub(super) async fn check_models(
                                         &model.provider,
                                         &model.deployment
                                     )
-                                ),
+                                ) },
                             },
                             Ok(None) => Check {
                                 id: "memory_qualification".into(),
@@ -337,11 +357,19 @@ pub(super) async fn check_models(
                                     &model.deployment,
                                     option,
                                 )
-                                .map(|qualified| (qualified, option))
+                                .and_then(|qualified| {
+                                    crate::routes::options::skill_version_admitted_for_route(
+                                        runtime,
+                                        &model.provider,
+                                        &model.deployment,
+                                        option,
+                                    )
+                                    .map(|admitted| (qualified, admitted, option))
+                                })
                             })
                             .transpose();
                         checks.push(match qualification {
-                            Ok(Some((true, option))) => Check {
+                            Ok(Some((true, _, option))) => Check {
                                 id: format!("skill_qualification:{skill}"),
                                 label: format!(
                                     "Skill “{skill}” has retained resource qualification"
@@ -357,13 +385,15 @@ pub(super) async fn check_models(
                                     )
                                 ),
                             },
-                            Ok(Some((false, option))) => Check {
+                            Ok(Some((false, admitted, option))) => Check {
                                 id: format!("skill_qualification:{skill}"),
                                 label: format!(
                                     "Skill “{skill}” lacks retained resource qualification"
                                 ),
-                                status: CheckStatus::Fail,
-                                detail: format!(
+                                status: if admitted { CheckStatus::Warn } else { CheckStatus::Fail },
+                                detail: if admitted {
+                                    "Unqualified validation run: the current approved Skill version is bound, but retained execution evidence is missing. This is not resource qualification.".into()
+                                } else { format!(
                                     "No retained resource-scoped qualification record matches the current approved version digest {} on {}. Generic route records do not prove this skill version.",
                                     option.version_digest.as_deref().unwrap_or("missing"),
                                     crate::routes::options::route_label(
@@ -371,7 +401,7 @@ pub(super) async fn check_models(
                                         &model.provider,
                                         &model.deployment
                                     )
-                                ),
+                                ) },
                             },
                             Ok(None) => Check {
                                 id: format!("skill_qualification:{skill}"),
@@ -477,6 +507,49 @@ pub(super) async fn check_models(
                     });
                     let qualified =
                         route_qualified && mcp_qualified && memory_qualified && skills_qualified;
+                    let resources_admitted: Result<bool, String> = bp
+                        .mcp_servers
+                        .iter()
+                        .map(|name| ("mcp", name, &options.mcp_servers))
+                        .chain(
+                            bp.memory
+                                .iter()
+                                .map(|name| ("memory", name, &options.memories)),
+                        )
+                        .chain(
+                            bp.skills
+                                .iter()
+                                .map(|name| ("skill", name, &options.skills)),
+                        )
+                        .try_fold(true, |admitted, (kind, name, catalogue)| {
+                            let Some(option) = catalogue.iter().find(|option| option.name == *name)
+                            else {
+                                return Ok(false);
+                            };
+                            let current = match kind {
+                                "mcp" => crate::routes::options::mcp_server_admitted_for_route(
+                                    runtime,
+                                    &fallback.provider,
+                                    &fallback.deployment,
+                                    option,
+                                ),
+                                "memory" => {
+                                    crate::routes::options::memory_binding_admitted_for_route(
+                                        runtime,
+                                        &fallback.provider,
+                                        &fallback.deployment,
+                                        option,
+                                    )
+                                }
+                                _ => crate::routes::options::skill_version_admitted_for_route(
+                                    runtime,
+                                    &fallback.provider,
+                                    &fallback.deployment,
+                                    option,
+                                ),
+                            }?;
+                            Ok(admitted && current)
+                        });
                     checks.push(Check {
                         id: format!("model_fallback:{index}"),
                         label: if qualified {
@@ -484,21 +557,26 @@ pub(super) async fn check_models(
                         } else {
                             format!("Fallback {route} is not qualified")
                         },
-                        status: if !known || !mcp_qualified || !memory_qualified || !skills_qualified {
+                        status: if !known || !resources_admitted.as_ref().copied().unwrap_or(false) {
                             CheckStatus::Fail
                         } else {
-                            route_check_status(&route_qualification, validation_note.is_some())
+                            route_check_status(
+                                &route_qualification.as_ref().map(|_| qualified).map_err(Clone::clone),
+                                validation_note.is_some(),
+                            )
                         },
                         detail: if let Err(error) = route_qualification {
                             format!("Route qualification configuration error: {error}")
+                        } else if let Err(error) = &resources_admitted {
+                            format!("Resource admission configuration error: {error}")
                         } else if !known {
                             "This fallback is absent from the live model catalogue.".into()
-                        } else if !mcp_qualified || !memory_qualified || !skills_qualified {
-                            "At least one selected MCP server, memory binding, or skill version lacks current resource-scoped evidence on this fallback.".into()
                         } else if qualified {
                             "Retained evidence proves the complete capability and selected-resource contract for this fallback route.".into()
-                        } else if let Some(note) = validation_note {
+                        } else if let (Ok(true), Some(note)) = (&resources_admitted, validation_note) {
                             note.into()
+                        } else if !mcp_qualified || !memory_qualified || !skills_qualified {
+                            "At least one selected MCP server, memory binding, or skill version lacks a current admissible resource binding or resource-scoped evidence on this fallback.".into()
                         } else {
                             "No atomic qualification record proves the complete capability contract for this fallback.".into()
                         },

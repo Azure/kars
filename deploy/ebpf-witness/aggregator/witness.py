@@ -44,14 +44,15 @@ def utc_now():
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
-def owned(obj):
+def owned(obj, release=RELEASE):
     metadata = obj.get("metadata", {})
     labels = metadata.get("labels", {})
     annotations = metadata.get("annotations", {})
     return (
-        labels.get("kars.azure.com/witness-addon") == "true"
+        release in ("kars", RELEASE)
+        and labels.get("kars.azure.com/witness-addon") == "true"
         and labels.get("app.kubernetes.io/managed-by") == "Helm"
-        and annotations.get("meta.helm.sh/release-name") == RELEASE
+        and annotations.get("meta.helm.sh/release-name") == release
         and annotations.get("meta.helm.sh/release-namespace") == "kars-system"
     )
 
@@ -179,9 +180,9 @@ def parse_events(raw):
     return events
 
 
-def ready_nodes(api):
+def ready_nodes(api, release=RELEASE):
     ds = api.request(f"/apis/apps/v1/namespaces/{NAMESPACE}/daemonsets/gadget")
-    if not owned(ds):
+    if not owned(ds, release):
         raise WitnessError("gadget_ownership_conflict")
     metadata, status = ds["metadata"], ds.get("status", {})
     desired = status.get("desiredNumberScheduled", 0)
@@ -325,8 +326,11 @@ def compute(records, dns, tcp, nodes):
 
 
 class Publisher:
-    def __init__(self, api):
+    def __init__(self, api, release=RELEASE):
+        if release not in ("kars", RELEASE):
+            raise WitnessError("unsupported_release_owner")
         self.api = api
+        self.release = release
         self.uid = None
 
     def publish(self, document):
@@ -334,7 +338,7 @@ class Publisher:
         md = current.get("metadata", {})
         uid = md.get("uid")
         if (
-            not owned(current) or not uid or (self.uid is not None and self.uid != uid)
+            not owned(current, self.release) or not uid or (self.uid is not None and self.uid != uid)
             or md.get("name") != RELEASE or md.get("namespace") != "kars-system"
         ):
             raise WitnessError("publisher_ownership_or_uid_conflict")
@@ -352,7 +356,8 @@ class Publisher:
 
 
 def sample(api, config):
-    before = ready_nodes(api)
+    release = config.get("release_name", RELEASE)
+    before = ready_nodes(api, release)
     declared = declarations(api, config["sandboxes"])
     started = time.monotonic()
     started_at = utc_now()
@@ -360,7 +365,7 @@ def sample(api, config):
         dns = pool.submit(capture, config["dns_image"], config["window_seconds"], sorted(before))
         tcp = pool.submit(capture, config["tcp_image"], config["window_seconds"], sorted(before))
         dns_events, tcp_events = dns.result(), tcp.result()
-    if ready_nodes(api) != before:
+    if ready_nodes(api, release) != before:
         raise WitnessError("gadget_nodes_changed_during_capture")
     if declarations(api, config["sandboxes"]) != declared:
         raise WitnessError("declaration_changed_during_capture")
@@ -424,7 +429,7 @@ def main():
     config = json.loads(raw)
     revision = int(os.environ["WITNESS_REVISION"])
     api = Kubernetes()
-    publisher = Publisher(api)
+    publisher = Publisher(api, config.get("release_name", RELEASE))
     signal.signal(signal.SIGTERM, stop)
     signal.signal(signal.SIGINT, stop)
     while not STOP:

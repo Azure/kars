@@ -25,7 +25,10 @@ vi.mock("../lib/deployment-target.js", async original => ({
   connectDeploymentTarget: async () => ({ execute: state.execute, subscription: "sub", kubeContext: "target" }),
   preparePushTarget: state.preparePushTarget,
 }));
-vi.mock("../lib/agt-bootstrap.js", () => ({ ensureAgtRepo: state.buildPreparation, ensureAgtWheels: vi.fn() }));
+vi.mock("../lib/agt-bootstrap.js", async original => ({
+  ...await original<typeof import("../lib/agt-bootstrap.js")>(),
+  ensureAgtRepo: state.buildPreparation, ensureAgtWheels: vi.fn(),
+}));
 vi.mock("../lib/stage-rust-bin.js", () => ({ stageRustBinaries: async () => {} }));
 vi.mock("../lib/core-helm-schemas.js", () => ({
   prepareCoreHelmSchemas: state.prepareSchemas, prepareCoreRollbackSchemas: state.rollbackSchemas,
@@ -73,7 +76,7 @@ beforeEach(() => {
   } });
   state.unavailable = false;
   state.stopAtEffect = false;
-  state.preflight.mockImplementation(async options => options.dryRun ? null : { rg: "rg" });
+  state.preflight.mockImplementation(async options => options.dryRun ? null : { rg: "rg", subscriptionId: "sub" });
   state.preparePushTarget.mockResolvedValue(state.execute);
   state.prepareSchemas.mockImplementation(async () => { state.effects.push("schemas"); });
   state.rollbackSchemas.mockImplementation(async () => { state.effects.push("rollback-schemas"); return 1; });
@@ -99,7 +102,7 @@ beforeEach(() => {
       return { stdout: "" };
     }
     if (file === "helm") {
-      if (args[0] === "list") return { stdout: '[{"name":"kars","revision":"2","app_version":"0.1.0"}]' };
+      if (args[0] === "list") return { stdout: '[{"name":"kars","revision":"2","app_version":"0.1.0","chart":"kars-0.1.0","status":"deployed"}]' };
       if (args[0] === "get") return { stdout: '{"karsRelease":"v1.2.2"}' };
       if (args.includes("--dry-run=server")) return { stdout: "" };
     }
@@ -168,6 +171,7 @@ describe("real controller-changing command preflights", () => {
   it("keeps fast-upgrade readonly preview non-mutating", async () => {
     await upCommand().parseAsync(["--upgrade", "--dry-run"], { from: "user" });
     expect(state.effects).toEqual([]);
+    expect(state.execute).not.toHaveBeenCalled();
     expect(state.prepareSchemas).not.toHaveBeenCalled();
   });
 
@@ -209,15 +213,17 @@ describe("real controller-changing command preflights", () => {
         return run(file, args);
       });
     }
-    await upCommand().parseAsync(["--cluster-name", "target-aks", "--region", "eastus2"], { from: "user" }).catch(() => {});
-    expect(state.effects).toEqual(["az group create"]);
+    const failure = await upCommand().parseAsync(["--cluster-name", "target-aks", "--region", "eastus2"], { from: "user" })
+      .catch(error => error);
+    const diagnostic = `${String(failure)} ${vi.mocked(console.error).mock.calls.flat().join(" ")}`;
+    expect(state.effects, diagnostic).toEqual(["az group create"]);
     expect(state.execute.mock.calls).toContainEqual(["az", [
-      "group", "create", "--name", "rg", "--location", "eastus2", "--output", "none",
+      "group", "create", "--name", "rg", "--location", "eastus2", "--output", "none", "--subscription", "sub",
     ], { stdio: "pipe" }]);
     if (kind === "fresh absent") expect(state.execute.mock.calls.some(([file]) => file === "kubectl")).toBe(false);
   });
 
-  it.each(["controller", "router", "sandbox", "runtime-openai-agents", "mcp-everything"])("stops push --only %s --apply before build preparation and ACR login", async name => {
+  it.each(["controller", "router", "sandbox", "runtime-openai-agents", "mcp-everything", "mcp-playwright"])("stops push --only %s --apply before build preparation and ACR login", async name => {
     await expect(pushCommand().parseAsync(["--only", name, "--apply"], { from: "user" }))
       .rejects.toThrow("KARS_PRIVATE_ROOT_UPGRADE_BLOCKED");
     expect(state.effects).toEqual([]);
@@ -278,6 +284,7 @@ describe("real controller-changing command preflights", () => {
   });
 
   it.each([{}, { release: true }, { build: true }])("rechecks protection before each acquisition publication for %j", async options => {
+    state.buildPreparation.mockResolvedValue("/agt");
     const protectedNamespace = state.namespace;
     state.namespace = JSON.stringify({ kind: "Namespace", metadata: { name: "kars-system", uid: "root-ns", resourceVersion: "1" } });
     const run = state.execute.getMockImplementation()!;

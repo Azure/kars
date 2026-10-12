@@ -55,10 +55,35 @@ the exact same wire protocol that the TS SDK speaks.
 | Trust-score gating | `MeshClient._accept_peer` | this package, queries registry |
 | Public façade | `MeshClient`, `MeshConfig`, `InboundMessage` | this package |
 
-The crypto comes from the upstream AGT Python `agentmesh-platform`
+The crypto comes from the upstream AGT 5 Python `agent-governance-toolkit-core`
 package (built locally via `runtimes/build-agt-wheels.sh`), so kars
 never re-implements primitives — we wire them into a client and add
 the transport / lifecycle.
+
+### Relay connection compatibility
+
+The declared dependency is `websockets>=12,<16`, including the 15.0.1
+version required by the selected Hermes refresh. The Hermes image uses
+the same range. This does not change the AGT pin or package ownership.
+Socket retirement uses `state is State.CLOSED`, shared by the legacy and
+new asyncio clients, rather than the legacy-only `.closed` attribute.
+
+Connections go directly to the configured relay URL. In Hermes this is
+`ws://127.0.0.1:8443/agt/relay`, through the inference router, regardless of
+process proxy environment variables. When a WebSocket client explicitly
+supports `proxy`, the transport passes `proxy=None`; older clients omit
+that keyword because they neither accept it nor auto-select proxies.
+This preserves the existing direct-connection behavior for other Python
+adapters too, without mutating global proxy settings.
+
+Reconnect still performs the existing authentication bootstrap, including
+fresh credentials and registry verification in required-Entra mode. Failed
+or ambiguous socket closure remains quarantined; this repair does not
+change the client's prekey-writer flock or the TypeScript/OpenClaw path.
+`tests/test_relay_transport.py` exercises real local sockets, PoP signatures,
+heartbeats, explicit reconnect, error-close recovery, and proxy isolation.
+It runs both client APIs where available; automatic-proxy control tests
+skip on older clients. These tests are not deployed or live-Entra acceptance.
 
 ## Wire-protocol compatibility with the TypeScript SDK
 

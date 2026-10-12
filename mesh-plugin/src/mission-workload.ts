@@ -26,7 +26,7 @@ interface Workload {
 }
 export interface MissionWorkloadResources {
   namespace: { metadata: MissionMetadata; status?: { phase?: string } };
-  sandbox: { metadata: MissionMetadata; spec?: { suspended?: boolean } };
+  sandbox: { metadata: MissionMetadata; spec?: { suspended?: boolean; runtime?: { kind?: string } } };
   deployment: Workload;
   replicaSet: Workload;
   pod: { metadata: MissionMetadata; status?: { phase?: string; conditions?: Array<{ type: string; status: string }> } };

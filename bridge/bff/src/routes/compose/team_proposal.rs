@@ -72,13 +72,13 @@ pub(super) fn parse_and_validate_team(
         .get("mcp_servers")
         .and_then(|v| v.as_array())
         .map(|servers| {
+            let mut seen = std::collections::BTreeSet::new();
             servers
                 .iter()
                 .filter_map(|server| server.as_str().map(str::trim))
                 .filter(|server| o.mcp_servers.iter().any(|option| option.name == *server))
-                .scan(std::collections::BTreeSet::new(), |seen, server| {
-                    seen.insert(server.to_string()).then(|| server.to_string())
-                })
+                .filter(|server| seen.insert(server.to_string()))
+                .map(str::to_string)
                 .take(8)
                 .collect::<Vec<_>>()
         })
@@ -107,7 +107,7 @@ pub(super) fn parse_and_validate_team(
     let selected_efficiency = eff
         .routes
         .iter()
-        .find(|route| route.route == selected_deployment);
+        .find(|route| route.route == selected_deployment && route.harness == "OpenClaw");
     let mut model_basis = if selected_deployment.is_empty() {
         Some("Team default — no explicit principal model was proposed.".to_string())
     } else if recommendation_is_actionable(
@@ -117,6 +117,8 @@ pub(super) fn parse_and_validate_team(
         .recommended
         .as_deref()
         .is_some_and(|recommended| recommended == selected_deployment)
+        && selected_efficiency
+            .is_some_and(|route| Some(route.harness.as_str()) == eff.recommended_harness.as_deref())
     {
         Some(efficiency_basis(eff, selected_deployment))
     } else if selected_efficiency.is_some() {
@@ -420,10 +422,11 @@ pub(super) fn parse_and_validate_team(
             .map(|(_, deployment)| deployment)
             .unwrap_or("");
         if should_strengthen_team_principal(roles.len(), current_deployment, &deployment) {
-            let current_evidence = eff
-                .routes
-                .iter()
-                .find(|route| route.route == current_deployment);
+            let current_evidence = eff.routes.iter().find(|route| {
+                route.route == current_deployment
+                    && route.harness == principal_runtime
+                    && route.verified_runs == route.runs
+            });
             let keep_efficient_members = current_evidence.is_some_and(|route| {
                 efficient_member_route_is_qualified(route.runs, route.acceptance_rate)
             });
@@ -495,16 +498,33 @@ pub(super) fn parse_and_validate_team(
         .get("engineering_auto_run")
         .and_then(serde_json::Value::as_bool)
         .unwrap_or(true);
+    let selected_efficiency = model.split_once("::").and_then(|(_, deployment)| {
+        eff.routes
+            .iter()
+            .find(|route| route.route == deployment && route.harness == principal_runtime)
+    });
     (
         ComposeTeamProposal {
             tier,
             cadence_minutes,
             instructions,
             model,
-            model_fallbacks: Vec::new(),
+            model_fallbacks: json
+                .get("model_fallbacks")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|value| value.as_str())
+                .filter(|route| {
+                    o.models
+                        .iter()
+                        .any(|model| *route == format!("{}::{}", model.provider, model.deployment))
+                })
+                .map(str::to_string)
+                .collect(),
             model_basis,
             expected_tokens_per_outcome: selected_efficiency
-                .map(|route| route.tokens_per_outcome)
+                .and_then(|route| route.tokens_per_outcome)
                 .filter(|tokens| *tokens > 0),
             efficiency_sample_runs: selected_efficiency.map(|route| route.runs).unwrap_or(0),
             mcp_servers,

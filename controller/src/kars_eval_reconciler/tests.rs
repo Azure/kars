@@ -42,6 +42,49 @@ fn cron_job_name_stable() {
 }
 
 #[test]
+fn generated_names_preserve_valid_names_and_bound_every_resource_kind() {
+    for name in [
+        "beta-egress-strict-r88-egress-known-bad".to_string(),
+        "a".repeat(63),
+        "a".repeat(253),
+    ] {
+        let run = run_now_job_name(&name, Some("request-one"));
+        assert!(run.len() <= 63);
+        assert_eq!(run, run_now_job_name(&name, Some("request-one")));
+        assert_ne!(run, run_now_job_name(&name, Some("request-two")));
+        assert!(cron_job_name(&name).len() <= 52);
+        assert!(corpus_configmap_name(&name).len() <= 253);
+        let eval = KarsEval::new(&name, Default::default());
+        assert!(evidence::name(&eval).len() <= 253);
+        assert_ne!(corpus_configmap_name(&name), evidence::name(&eval));
+        assert!(bounded_name(&name, 63).len() <= 63);
+    }
+    assert_eq!(corpus_configmap_name("eval"), "karseval-eval-corpus");
+    assert_eq!(bounded_name(&"a".repeat(63), 63), "a".repeat(63));
+    let exact = "a".repeat(63 - "karseval--runnow-".len() - 10);
+    assert_eq!(
+        run_now_job_name(&exact, Some("request")),
+        format!("karseval-{exact}-runnow-{}", short_hash("request"))
+    );
+    let exact_cron = "a".repeat(52 - "karseval-".len());
+    assert_eq!(cron_job_name(&exact_cron), format!("karseval-{exact_cron}"));
+}
+
+#[test]
+fn shortened_names_hash_the_entire_identity_and_keep_valid_boundaries() {
+    let prefix = "a".repeat(100);
+    assert_ne!(
+        bounded_name(&format!("{prefix}b"), 63),
+        bounded_name(&format!("{prefix}c"), 63)
+    );
+    for separator in ["-", "."] {
+        let name = format!("{}{separator}{}", "a".repeat(51), "b".repeat(30));
+        let result = bounded_name(&name, 63);
+        assert_eq!(result, format!("{}-{}", "a".repeat(51), short_hash(&name)));
+    }
+}
+
+#[test]
 fn sandbox_router_url_format() {
     assert_eq!(
         sandbox_router_url("agent-001"),

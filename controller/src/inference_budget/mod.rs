@@ -5,6 +5,7 @@ pub mod account;
 pub mod admission;
 pub mod auth;
 pub mod binding;
+pub mod calendar;
 pub mod claim;
 pub mod config;
 pub mod launch;

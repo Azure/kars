@@ -15,7 +15,7 @@ spec:
   strategy:
     type: Recreate
   selector:
-    matchLabels: {app.kubernetes.io/component: aggregator, app.kubernetes.io/instance: kars-datapath-witness}
+    matchLabels: {app.kubernetes.io/component: aggregator, app.kubernetes.io/instance: {{ .Release.Name | quote }}}
   template:
     metadata:
       labels:
@@ -45,6 +45,7 @@ spec:
             - {name: WITNESS_REVISION, value: {{ .Release.Revision | quote }}}
             - {name: WITNESS_CONFIG_DIGEST, value: {{ include "witness.config" . | sha256sum | quote }}}
             - {name: HOME, value: /tmp}
+            - {name: KUBECONFIG, value: /etc/witness/kubeconfig}
           securityContext:
             allowPrivilegeEscalation: false
             readOnlyRootFilesystem: true

@@ -51,7 +51,7 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> AppResult<Json<Di
     let mut issues: Vec<DiagnosticIssue> = Vec::new();
 
     // ── Pods: the ground truth for "won't start / not healthy". ──────────────
-    let pods = cluster.all_pods().await;
+    let pods = cluster.all_pods().await?;
     let scanned_pods = pods.len();
     for p in &pods {
         let ns = p.metadata.namespace.as_deref().unwrap_or("").to_string();
@@ -61,13 +61,19 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> AppResult<Json<Di
         let phase = status.and_then(|s| s.phase.as_deref()).unwrap_or("");
         let age_secs = status
             .and_then(|s| s.start_time.as_ref())
+            .or(p.metadata.creation_timestamp.as_ref())
             .map(|t| (chrono::Utc::now() - t.0).num_seconds().max(0))
             .unwrap_or(0);
 
         // Container-level waiting reasons (image pull, crashloop, config error).
         let mut container_flagged = false;
-        if let Some(cs) = status.and_then(|s| s.container_statuses.as_ref()) {
-            for c in cs {
+        if let Some(pod_status) = status {
+            for c in pod_status
+                .init_container_statuses
+                .iter()
+                .flatten()
+                .chain(pod_status.container_statuses.iter().flatten())
+            {
                 if let Some(w) = c.state.as_ref().and_then(|st| st.waiting.as_ref()) {
                     let reason = w.reason.clone().unwrap_or_default();
                     let bad = matches!(
@@ -137,13 +143,14 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> AppResult<Json<Di
         }
 
         // Running but not all containers Ready for > 120s (probes failing).
-        if phase == "Running"
-            && age_secs > 120
-            && !container_flagged
-            && let Some(cs) = status.and_then(|s| s.container_statuses.as_ref())
-        {
-            let total = cs.len();
-            let ready = cs.iter().filter(|s| s.ready).count();
+        if phase == "Running" && age_secs > 120 && !container_flagged {
+            let cs = status.and_then(|s| s.container_statuses.as_ref());
+            let total = p
+                .spec
+                .as_ref()
+                .map(|s| s.containers.len())
+                .unwrap_or_else(|| cs.map_or(0, Vec::len));
+            let ready = cs.map_or(0, |cs| cs.iter().filter(|s| s.ready).count());
             if total > 0 && ready < total {
                 issues.push(DiagnosticIssue {
                         severity: "warning".into(),
@@ -159,10 +166,7 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> AppResult<Json<Di
     }
 
     // ── Sandboxes the controller itself flagged Degraded/Failed. ─────────────
-    let sandboxes = cluster
-        .list_kind_all("KarsSandbox")
-        .await
-        .unwrap_or_default();
+    let sandboxes = cluster.list_kind_all("KarsSandbox").await?;
     let scanned_sandboxes = sandboxes.len();
     for sb in &sandboxes {
         let phase = sb
@@ -196,7 +200,10 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> AppResult<Json<Di
         if phase == "Running" {
             let name = sb.metadata.name.as_deref().unwrap_or("").to_string();
             if let Some(out) = cluster.read_mission_output(&name).await
-                && out.get("status").map(|s| s.as_str()) == Some("error")
+                && matches!(
+                    out.get("status").map(String::as_str),
+                    Some("error" | "failed" | "rejected")
+                )
             {
                 let detail = out
                     .get("output")
@@ -254,6 +261,8 @@ pub struct OrchestratorDto {
     pub sandbox_ready: Option<String>,
     pub sandbox_restarts: Option<i32>,
     pub sandbox_waiting_reason: Option<String>,
+    pub sandbox_node: Option<String>,
+    pub sandbox_uptime_seconds: Option<i64>,
     /// How many Running sandbox routers the composer can fall back through.
     pub router_candidates: usize,
     /// True when the operator should configure the direct endpoint (sandbox path
@@ -280,10 +289,7 @@ pub async fn get_orchestrator(State(state): State<AppState>) -> AppResult<Json<O
     });
 
     // Orchestrator sandbox presence + health.
-    let sandboxes = cluster
-        .list_kind_all("KarsSandbox")
-        .await
-        .unwrap_or_default();
+    let sandboxes = cluster.list_kind_all("KarsSandbox").await?;
     let orch = sandboxes.iter().find(|sb| {
         sb.metadata
             .labels
@@ -302,10 +308,27 @@ pub async fn get_orchestrator(State(state): State<AppState>) -> AppResult<Json<O
     });
     let health = if let Some(o) = orch {
         let name = o.metadata.name.clone().unwrap_or_default();
-        cluster.sandbox_pod_health(&name).await
+        cluster.sandbox_pod_health(&name).await?
     } else {
         None
     };
+    let router_candidates = cluster.running_sandbox_candidates().await?.len();
+    Ok(Json(orchestrator_observation(
+        direct_configured,
+        sandbox_present,
+        sandbox_phase,
+        health,
+        router_candidates,
+    )))
+}
+
+fn orchestrator_observation(
+    direct_configured: bool,
+    sandbox_present: bool,
+    sandbox_phase: Option<String>,
+    health: Option<crate::kars::cluster::PodHealth>,
+    router_candidates: usize,
+) -> OrchestratorDto {
     let (sandbox_ready, sandbox_restarts, sandbox_waiting_reason) = match &health {
         Some(h) => (
             Some(format!("{}/{}", h.ready_containers, h.total_containers)),
@@ -315,8 +338,6 @@ pub async fn get_orchestrator(State(state): State<AppState>) -> AppResult<Json<O
         None => (None, None, None),
     };
 
-    let router_candidates = cluster.running_sandbox_candidates().await.len();
-
     let sandbox_healthy = sandbox_phase.as_deref() == Some("Running")
         && health
             .as_ref()
@@ -325,31 +346,29 @@ pub async fn get_orchestrator(State(state): State<AppState>) -> AppResult<Json<O
 
     let mode = if direct_configured {
         "direct"
-    } else if sandbox_present && router_candidates > 0 {
+    } else if router_candidates > 0 {
         "sandbox"
     } else {
         "none"
     }
     .to_string();
 
-    // Recommend the direct endpoint when we're on the sandbox path and it's the
-    // only option while being unhealthy or thin on router capacity.
-    let recommend_direct = !direct_configured && !sandbox_healthy;
+    let recommend_direct = !direct_configured && router_candidates == 0;
 
     let note = if direct_configured {
-        "Composing via the direct inference endpoint — scales independently of any sandbox."
+        "Direct inference endpoint configured. Reachability, model credentials and successful composition are not verified by this health read."
             .to_string()
-    } else if !sandbox_present {
-        "No orchestrator sandbox and no direct endpoint — the composer can't run. Set BRIDGE_ORCHESTRATOR_{ENDPOINT,TOKEN,MODEL} or let the Bridge provision the orchestrator sandbox.".to_string()
     } else if recommend_direct {
-        "The orchestrator sandbox is present but not healthy enough to compose reliably. Repair it or configure BRIDGE_ORCHESTRATOR_{ENDPOINT,TOKEN,MODEL} for a direct inference path.".to_string()
-    } else if router_candidates <= 1 {
-        "Composing through the healthy orchestrator sandbox router. One router is sufficient for serial composition; configure BRIDGE_ORCHESTRATOR_{ENDPOINT,TOKEN,MODEL} only when you need independent capacity for many concurrent compose requests.".to_string()
+        "No ready sandbox router candidate or direct endpoint is configured. Check pod scheduling and router readiness, or configure BRIDGE_ORCHESTRATOR_{ENDPOINT,TOKEN,MODEL}.".to_string()
+    } else if !sandbox_present {
+        "The standing orchestrator is absent, but other ready sandbox routers are candidates for composition. Model credentials and successful composition remain unverified.".to_string()
+    } else if sandbox_healthy {
+        "The orchestrator pod reports all containers ready. Router candidates are available, but pod readiness does not verify model credentials, successful composition or tool execution.".to_string()
     } else {
-        "Composing via the orchestrator sandbox router — healthy. For many concurrent teams, a direct BRIDGE_ORCHESTRATOR endpoint scales better.".to_string()
+        "The orchestrator pod is not fully ready. A ready sandbox router candidate is still available, but successful composition remains unverified.".to_string()
     };
 
-    Ok(Json(OrchestratorDto {
+    OrchestratorDto {
         mode,
         direct_configured,
         sandbox_present,
@@ -357,10 +376,12 @@ pub async fn get_orchestrator(State(state): State<AppState>) -> AppResult<Json<O
         sandbox_ready,
         sandbox_restarts,
         sandbox_waiting_reason,
+        sandbox_node: health.as_ref().and_then(|h| h.node.clone()),
+        sandbox_uptime_seconds: health.as_ref().and_then(|h| h.uptime_seconds),
         router_candidates,
         recommend_direct,
         note,
-    }))
+    }
 }
 
 // ─── Integrations: kars-SRE agent + Headlamp plugin ──────────────────────────
@@ -383,7 +404,7 @@ pub struct IntegrationsDto {
     pub headlamp_url: Option<String>,
     /// Deep-link paths into the kars Headlamp plugin (appended to headlamp_url).
     pub headlamp_paths: Vec<HeadlampLink>,
-    /// How to install the plugin when Headlamp is present but the URL is unset.
+    /// How to activate the existing dashboard and its browser-reachable link.
     pub headlamp_install_hint: String,
 }
 
@@ -398,10 +419,7 @@ pub async fn get_integrations(State(state): State<AppState>) -> AppResult<Json<I
     let cluster = require_cluster(&state)?;
 
     // SRE agent: the `sre` KarsSandbox (deploy/helm/kars/templates/sre.yaml).
-    let sandboxes = cluster
-        .list_kind_all("KarsSandbox")
-        .await
-        .unwrap_or_default();
+    let sandboxes = cluster.list_kind_all("KarsSandbox").await?;
     let sre = sandboxes
         .iter()
         .find(|sb| sb.metadata.name.as_deref() == Some("sre"));
@@ -416,14 +434,14 @@ pub async fn get_integrations(State(state): State<AppState>) -> AppResult<Json<I
     let sre_ready = if sre_present {
         cluster
             .sandbox_pod_health("sre")
-            .await
+            .await?
             .map(|h| format!("{}/{}", h.ready_containers, h.total_containers))
     } else {
         None
     };
 
     // Headlamp: the `headlamp` Deployment in the `headlamp` namespace.
-    let headlamp_deployed = cluster.deployment_exists("headlamp", "headlamp").await;
+    let headlamp_deployed = cluster.deployment_exists("headlamp", "headlamp").await?;
 
     Ok(Json(IntegrationsDto {
         sre_present,
@@ -437,6 +455,10 @@ pub async fn get_integrations(State(state): State<AppState>) -> AppResult<Json<I
             HeadlampLink { label: "Sandboxes".into(), path: "/kars/karssandboxes".into() },
             HeadlampLink { label: "Agent mesh".into(), path: "/kars/mesh".into() },
         ],
-        headlamp_install_hint: "Build tools/headlamp-plugin (npm run build), kubectl cp dist into the headlamp pod at /headlamp/plugins/kars, then set BRIDGE_HEADLAMP_URL.".into(),
+        headlamp_install_hint: "Core Helm includes Headlamp with the packaged Kars plugin (headlamp.enabled). Set Bridge headlamp.url to its browser-reachable URL and sign in with your Kubernetes credential. For external Headlamp, disable Core headlamp.enabled and manage the plugin through that installation; do not copy into an immutable pod.".into(),
     }))
 }
+
+#[cfg(test)]
+#[path = "diagnostics_tests.rs"]
+mod tests;

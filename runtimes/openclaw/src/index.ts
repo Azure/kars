@@ -273,6 +273,7 @@ function pushInbox(entry: {
   id: string;
   message_type?: string;
 }): void {
+  if (requiredAuth && !requiredAuth.usable) return;
   agtInbox.push(entry);
   inboxStats.received_total += 1;
   inboxStats.last_received_at = entry.timestamp;
@@ -357,6 +358,7 @@ async function agtReconnect(log: { info: (m: string) => void; warn: (m: string) 
 // This is the key mechanism to keep conversations "lively" — the agent sees
 // pending messages in MEMORY.md without needing to manually call mesh_inbox.
 async function notifyInboxToMemory(log: { info: (m: string) => void; warn: (m: string) => void }) {
+  if (requiredAuth && !requiredAuth.usable) return;
   return _notifyInboxToMemory(agtInbox, log);
 }
 import { discoverFoundryProject, type FoundryProjectInfo } from "./core/foundry-discovery.js";
@@ -368,6 +370,33 @@ import { recordMeshSession as _recordMeshSession, agtReconnect as _agtReconnect,
 import { runOffloadTask as _runOffloadTask, startProactiveOffloadIfNeeded as _startProactiveOffloadIfNeeded } from "./core/agt-offload.js";
 import { processTaskWithTools as _processTaskWithTools, executeTaskWithEvidence, type TaskLoopDeps } from "./core/agt-task-loop.js";
 import { MissionReceiver } from "./core/mission-receiver.js";
+import { RequiredMeshAuth, meshAuthRequest, requiredMeshAuth, validateMeshVerification } from "./core/mesh-auth.js";
+let requiredAuth: RequiredMeshAuth<any> | undefined;
+
+function publishMesh(client: any, identity: any) {
+  agtMeshClient = client;
+  agtIdentity = identity;
+  agtConnected = client.isConnected;
+  (process as any)[Symbol.for("agt-mesh-client")] = client;
+  (process as any)[Symbol.for("agt-identity")] = identity;
+}
+
+function revokeRequiredMesh() {
+  agtConnected = false;
+  agtMeshClient = null;
+  delete (process as any)[Symbol.for("agt-mesh-client")];
+  delete (process as any)[Symbol.for("agt-identity")];
+}
+
+function stopRequiredMesh(log: { warn: (message: string) => void }) {
+  revokeRequiredMesh();
+  clearTimeout(agtReconnectTimer!);
+  clearInterval(agtInboxNotifyTimer!);
+  log.warn("Required Entra mesh authentication unavailable; stopping runtime (restart required)");
+  // A task may be executing in the native gateway, outside the tool-loop interrupt.
+  // Exit after bounded transport retirement; retain singleton and prekey custody until exit.
+  process.exit(1);
+}
 import { initializeMissionBinding } from "./core/mission-bootstrap.js";
 import { missionKnockHandler } from "./core/mission-admission.js";
 import { isMissionMessage } from "@kars/mesh/dist/mission-protocol.js";
@@ -398,10 +427,10 @@ async function processTaskWithTools(
 
 function taskLoopDeps(): TaskLoopDeps {
   return {
-    meshClient: () => agtMeshClient,
+    meshClient: () => requiredAuth && !requiredAuth.usable ? null : agtMeshClient,
     meshIdentity: () => agtIdentity,
-    isInterruptRequested: () => handoffInterruptRequested,
-    interruptReason: () => handoffInterruptReason,
+    isInterruptRequested: () => handoffInterruptRequested || (!!requiredAuth && !requiredAuth.usable),
+    interruptReason: () => requiredAuth && !requiredAuth.usable ? "Required Entra mesh authentication unavailable" : handoffInterruptReason,
     setInterrupt: (req, reason) => {
       handoffInterruptRequested = req;
       handoffInterruptReason = reason;
@@ -438,10 +467,10 @@ async function meshSend(
 // runOffloadTask + startProactiveOffloadIfNeeded extracted to core/agt-offload.ts in S15.f.5.
 function _offloadDeps() {
   return {
-    meshClient: agtMeshClient,
+    meshClient: requiredAuth && !requiredAuth.usable ? null : agtMeshClient,
     identity: agtIdentity,
     sandboxName: agtSandboxName,
-    isConnected: () => agtConnected,
+    isConnected: () => requiredAuth ? requiredAuth.usable : agtConnected,
     offloadInFlight,
     meshSend,
     processTaskWithTools,
@@ -458,17 +487,23 @@ async function runOffloadTask(
   },
   log: { info: (m: string) => void; warn: (m: string) => void },
 ): Promise<void> {
+  requiredAuth?.assertUsable();
   return _runOffloadTask(opts, _offloadDeps(), log);
 }
 async function startProactiveOffloadIfNeeded(
   log: { info: (m: string) => void; warn: (m: string) => void },
 ): Promise<void> {
+  requiredAuth?.assertUsable();
   return _startProactiveOffloadIfNeeded(_offloadDeps(), log);
 }
 
 async function initAGT(log: { info: (m: string) => void; warn: (m: string) => void }) {
-  // Node hosts don't participate in the mesh — skip entirely.
+  let required: boolean;
+  try { required = requiredMeshAuth(); }
+  catch { stopRequiredMesh(log); return; }
+  // Node hosts don't participate in the mesh unless Entra was explicitly required.
   if (process.env.AGT_SKIP_INIT === "1") return;
+  if (process.env.AGT_SKIP_ENTRA === "1") delete process.env.AGT_OAUTH_TOKEN;
 
   // Process-level singleton — the gateway loads this plugin in 5 parallel contexts.
   // Use a synchronous lock (set BEFORE any async work) to prevent race conditions.
@@ -480,8 +515,14 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
   // Fast path: already initialized in another context
   const existingClient = (process as any)[AGT_CLIENT_KEY];
   if (existingClient) {
+    requiredAuth = (process as any)[Symbol.for("agt-required-auth")];
+    if (required && (!requiredAuth || !requiredAuth.usable)) {
+      if (requiredAuth) await requiredAuth.fail(); else stopRequiredMesh(log);
+      return;
+    }
     agtMeshClient = existingClient;
     agtIdentity = (process as any)[AGT_IDENTITY_KEY];
+    agtConnected = existingClient.isConnected;
     agtInitialized = true;
     return;
   }
@@ -491,11 +532,26 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Another context is initializing — wait for it to finish
     const pending = (process as any)[AGT_PROMISE_KEY];
     if (pending) await pending;
-    const client = (process as any)[AGT_CLIENT_KEY];
+    let client = (process as any)[AGT_CLIENT_KEY];
+    requiredAuth = (process as any)[Symbol.for("agt-required-auth")];
+    // Publication is intentionally absent while the same lease renews. Join
+    // its serialized authentication rather than creating or failing a client.
+    if (required && !client && requiredAuth) {
+      try { await requiredAuth.connect(); client = (process as any)[AGT_CLIENT_KEY]; }
+      catch { await requiredAuth.fail(); return; }
+    }
     if (client) {
+      if (required && (!requiredAuth || !requiredAuth.usable)) {
+        if (requiredAuth) await requiredAuth.fail(); else stopRequiredMesh(log);
+        return;
+      }
       agtMeshClient = client;
       agtIdentity = (process as any)[AGT_IDENTITY_KEY];
+      agtConnected = client.isConnected;
       agtInitialized = true;
+    } else if (required) {
+      requiredAuth = (process as any)[Symbol.for("agt-required-auth")];
+      if (requiredAuth) await requiredAuth.fail(); else stopRequiredMesh(log);
     }
     return;
   }
@@ -518,7 +574,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     // Acquire process-external prekey writer custody before deriving keys or creating the SDK.
     const missionBinding = await initializeMissionBinding();
     const meshIdentity = missionBinding?.identity ?? await meshMod.generateIdentity();
-    agtIdentity = {
+    const agtIdentity = {
       amid: meshIdentity.amid,
       did: meshIdentity.did,
       signingPublicKey: meshIdentity.signingPublicKey,
@@ -533,63 +589,59 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     const registryUrl = routerUrl("/agt/registry");
     const relayUrl = routerWsUrl("/agt/relay");
 
-    try {
-      // When AGT_OAUTH_TOKEN is set (Entra-verified tier via /v1/mesh-token
-      // or WI direct exchange), inject it into the SDK's WebSocket connect
-      // frame so the relay's entra-verifier path picks it up.
-      //
-      // History (correcting an earlier wrong fix):
-      //  - I first tried attaching `Authorization: Bearer ${token}` on the
-      //    WebSocket Upgrade header. That works at the HTTP layer but the
-      //    AGT Python relay (agentmesh/relay/app.py) doesn't read it —
-      //    it reads `frame.get("token")` from the FIRST `{type:"connect"}`
-      //    frame the SDK sends after onopen. So Bearer-on-Upgrade was
-      //    cargo-culting from other Bearer protocols.
-      //  - The right fix: wrap the WS's send() to JSON-parse outgoing
-      //    frames and inject `token` into the "connect" type one. Then
-      //    pass-through everything else verbatim. Browser/node WS
-      //    constructors don't expose a frame hook, so a proxy is needed.
-      let wsFactory: ((url: string) => unknown) | undefined;
-      const meshToken = process.env.AGT_OAUTH_TOKEN || "";
-      if (meshToken) {
-        // @ts-expect-error — `ws` is a peer dep, no @types/ws to keep deps slim
-        const wsMod: any = await import("ws");
-        const WS = wsMod.default ?? wsMod;
-        wsFactory = (url: string) => {
-          const ws: any = new WS(url);
-          const origSend = ws.send.bind(ws);
-          ws.send = function patchedSend(data: any, ...rest: any[]) {
-            try {
-              if (typeof data === "string") {
-                const frame = JSON.parse(data);
-                if (frame?.type === "connect" && !frame.token) {
-                  frame.token = meshToken;
-                  return origSend(JSON.stringify(frame), ...rest);
-                }
-              }
-            } catch { /* not JSON or already mutated — pass through */ }
-            return origSend(data, ...rest);
-          };
-          return ws;
+    // The official relay authenticates connect.token, not the WS Upgrade header.
+    // Required mode never consumes a startup environment token.
+    const meshToken = required ? "" : process.env.AGT_OAUTH_TOKEN || "";
+    let auth: RequiredMeshAuth<any> | undefined;
+    let wsFactory: ((url: string) => unknown) | undefined;
+    if (required || meshToken) {
+      // @ts-expect-error — `ws` is a peer dep, no @types/ws to keep deps slim
+      const wsMod: any = await import("ws");
+      const WS = wsMod.default ?? wsMod;
+      wsFactory = (url: string) => {
+        const ws: any = new WS(url);
+        const origSend = ws.send.bind(ws);
+        ws.send = function patchedSend(data: any, ...rest: any[]) {
+          let frame: any;
+          try { if (typeof data === "string") frame = JSON.parse(data); }
+          catch { /* Non-JSON traffic passes through unchanged. */ }
+          if (frame?.type === "connect" && (required || !frame.token)) {
+            // Do not swallow a missing/expired required lease and send anonymously.
+            frame.token = required ? auth!.connectToken() : meshToken;
+            return origSend(JSON.stringify(frame), ...rest);
+          }
+          return origSend(data, ...rest);
         };
-      }
-      agtMeshClient = await meshMod.createMeshTransport({
-        relayUrl,
-        registryUrl,
-        identity: {
-          amid: meshIdentity.amid,
-          did: meshIdentity.did,
-          signingPublicKey: meshIdentity.signingPublicKey,
-          signingPrivateKey: meshIdentity.signingPrivateKey,
-        },
-        displayName: agtSandboxName,
-        wsFactory,
-      });
-      log.info(`AGT mesh provider: agt (Microsoft AGT MeshClient via @kars/mesh)${meshToken ? " + Entra-verified WS (connect.token)" : ""}`);
-    } catch (swapErr: any) {
-      log.warn?.(`mesh transport init failed: ${swapErr?.message ?? swapErr}`);
-      throw swapErr;
+        return required ? auth!.bindSocketMessages(ws) : ws;
+      };
     }
+    const rawClient = await meshMod.createMeshTransport({
+      relayUrl,
+      registryUrl,
+      identity: {
+        amid: meshIdentity.amid,
+        did: meshIdentity.did,
+        signingPublicKey: meshIdentity.signingPublicKey,
+        signingPrivateKey: meshIdentity.signingPrivateKey,
+      },
+      displayName: agtSandboxName,
+      wsFactory,
+    });
+    if (required) {
+      auth = new RequiredMeshAuth(rawClient, {
+        publish: () => publishMesh(auth!.client, agtIdentity),
+        revoke: revokeRequiredMesh,
+        fatal: () => stopRequiredMesh(log),
+      });
+      requiredAuth = auth;
+      (process as any)[Symbol.for("agt-required-auth")] = auth;
+      const close = () => { void auth!.close().then(() => process.exit(auth!.state === "quarantined" ? 1 : 0)); };
+      process.once("SIGTERM", close);
+      process.once("SIGINT", close);
+    }
+    // Private candidate: listeners are guarded until mint + connect + verify succeed.
+    const agtMeshClient = auth?.client ?? rawClient;
+    log.info("AGT mesh provider: agt (Microsoft AGT MeshClient via @kars/mesh)");
 
     // ── Pre-seed name-based trust BEFORE connect() ───────────────────────
     // The KNOCK handler (registered just below) must see the trust set
@@ -807,13 +859,21 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       target: missionBinding.target,
       expectedContract: missionBinding.contract,
       admission: missionBinding.admission,
-      authorize: (assignment) => authorizeTaskAction("task:execute", {
-        task_uid: assignment.taskUid, run_nonce: assignment.runNonce,
-        dispatcher_did: assignment.dispatcherDid, assignment_id: assignment.assignmentId,
-        ...(assignment.phaseDigest ? { phase_digest: assignment.phaseDigest, reviewed_phase: assignment.reviewedPhase } : {}),
-        ...(assignment.inputDigest ? { input_digest: assignment.inputDigest } : {}),
-      }),
-      execute: (content, onEvidence, artifactsEnabled, reviewedPhase, inputArtifacts) => executeTaskWithEvidence(content, { ...taskLoopDeps(), onEvidence }, log, artifactsEnabled, reviewedPhase, inputArtifacts),
+      authorize: async (assignment) => {
+        auth?.assertUsable();
+        const decision = await authorizeTaskAction("task:execute", {
+          task_uid: assignment.taskUid, run_nonce: assignment.runNonce,
+          dispatcher_did: assignment.dispatcherDid, assignment_id: assignment.assignmentId,
+          ...(assignment.phaseDigest ? { phase_digest: assignment.phaseDigest, reviewed_phase: assignment.reviewedPhase } : {}),
+          ...(assignment.inputDigest ? { input_digest: assignment.inputDigest } : {}),
+        });
+        auth?.assertUsable();
+        return decision;
+      },
+      execute: (content, onEvidence, artifactsEnabled, reviewedPhase, inputArtifacts, liveActivityEnabled, requiredOutputs) => {
+        auth?.assertUsable();
+        return executeTaskWithEvidence(content, { ...taskLoopDeps(), onEvidence, liveActivityEnabled }, log, artifactsEnabled, reviewedPhase, inputArtifacts, requiredOutputs);
+      },
       send: (to, reply) => agtMeshClient!.send(to, reply),
       warn: (message) => log.warn(message),
     }) : null;
@@ -2171,17 +2231,19 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     }
 
     let connected = false;
-    for (let attempt = 1; attempt <= 5; attempt++) {
+    for (let attempt = 1; attempt <= (required ? 1 : 5); attempt++) {
       try {
         await agtMeshClient.connect({
           displayName: agtSandboxName,
           capabilities: ["kars-agent", "task-execution", agtSandboxName],
         });
+        if (required && !agtMeshClient.isConnected) throw new Error("Required Entra connection lost before startup completed");
         log.info(`AGT mesh connected (relay: ${relayUrl}, registry: ${registryUrl})`);
-        connected = true;
-        agtConnected = true;
+        connected = agtMeshClient.isConnected;
+        agtConnected = connected;
         break;
       } catch (connErr: any) {
+        if (required) throw connErr;
         const delay = attempt * 2;
         if (attempt < 5) {
           log.warn(`AGT mesh connect attempt ${attempt}/5 failed: ${connErr.message} — retrying in ${delay}s`);
@@ -2192,9 +2254,8 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       }
     }
 
-    // Store on process for cross-context singleton access
-    (process as any)[Symbol.for("agt-mesh-client")] = agtMeshClient;
-    (process as any)[Symbol.for("agt-identity")] = agtIdentity;
+    // Required publication is owned by the verified lease, including reconnects.
+    if (!required) publishMesh(agtMeshClient, agtIdentity);
 
     // ── Push baseline trust scores for pre-seeded parent peers ──────────
     // The authoritative parse + parentTrustedNames seeding already happened
@@ -2231,52 +2292,24 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
       });
     }
 
-    // ── OAuth/Entra identity verification (opt-in) ────────────────────────
-    // If AGT_OAUTH_TOKEN is set (from Workload Identity token exchange or
-    // manual config), POST to /registry/verify to upgrade tier from anonymous
-    // to verified. Also sets up 12-hour periodic re-verification.
-    //
-    // Use `agtMeshClient.currentDid` (server-canonical `did:mesh:<hex32>`,
-    // exposed by the kars-patched AGT SDK) rather than the local
-    // `agtIdentity.did` (`did:agentmesh:<truncated>`), because the registry
-    // stores agents under the canonical DID. Calling /v1/registry/verify
-    // with the legacy form lands on the registry's lookup-by-pubkey
-    // fallback path which can stamp `verified_app_id` on the WRONG record
-    // — the kars-internal DID format collides with a 16-char prefix of
-    // the canonical hex, so two agents that happen to share that prefix
-    // get cross-stamped. Reading currentDid from the SDK is the only safe
-    // choice; fall back to the local hint only when the SDK build is too
-    // old to expose it (pre-2026-06-02 SDK had no currentDid getter).
-    const oauthToken = process.env.AGT_OAUTH_TOKEN || "";
-    if (oauthToken && connected) {
-      const verifyId = (agtMeshClient as unknown as { currentDid?: string })?.currentDid
-        || agtIdentity.did
-        || agtIdentity.amid;
-      try {
-        await _routerCall("POST", "/agt/registry/v1/registry/verify", {
-          amid: verifyId,
-          verification_token: oauthToken,
-        });
-        log.info(`AGT identity verified via OAuth — tier upgraded to 'verified' (id=${verifyId})`);
-      } catch (verifyErr: any) {
-        log.warn(`AGT OAuth verification failed: ${verifyErr.message} — running as anonymous tier`);
-      }
-
-      // Periodic re-verification every 12 hours (refreshes certificate expiry)
-      setInterval(async () => {
+    // Legacy optional OAuth consumers retain best-effort verification. Required
+    // mode uses the lease above and never re-verifies an environment credential.
+    if (!required && meshToken && connected && process.env.AGT_SKIP_VERIFY !== "1") {
+      const verifyOptional = async () => {
         const token = process.env.AGT_OAUTH_TOKEN || "";
-        if (!token || !agtIdentity) return;
-        const rid = (agtMeshClient as unknown as { currentDid?: string })?.currentDid
-          || agtIdentity.did
-          || agtIdentity.amid;
+        if (!token || !agtMeshClient.isConnected) return;
         try {
-          await _routerCall("POST", "/agt/registry/v1/registry/verify", {
-            amid: rid,
-            verification_token: token,
+          const did = agtMeshClient.currentDid;
+          const result = await meshAuthRequest("POST", "/agt/registry/v1/registry/verify", {
+            amid: did, verification_token: token,
           });
-          log.info("AGT identity re-verified (12hr cycle)");
-        } catch { /* fail-open — stays at current tier */ }
-      }, 12 * 60 * 60 * 1000);
+          validateMeshVerification(result, did);
+          log.info("AGT optional OAuth identity verified");
+        } catch { log.warn("AGT optional OAuth verification unavailable; anonymous development mode permitted"); }
+      };
+      await verifyOptional();
+      const optionalRefresh = setInterval(() => { void verifyOptional(); }, 12 * 60 * 60 * 1000);
+      optionalRefresh.unref?.();
     }
 
     // ── Disconnect handler + auto-reconnect ──────────────────────────────
@@ -2284,7 +2317,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     if (agtMeshClient.onDisconnect) {
       agtMeshClient.onDisconnect(() => {
         agtConnected = false;
-        log.warn("AGT mesh disconnected — will attempt reconnect in 15s");
+        log.warn(required ? "AGT mesh disconnected — renewing required Entra admission" : "AGT mesh disconnected — will attempt reconnect in 15s");
       });
     }
 
@@ -2294,7 +2327,7 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     const scheduleReconnect = () => {
       const delay = Math.min(30_000 * Math.pow(2, agtReconnectFailures), AGT_RECONNECT_MAX_BACKOFF);
       agtReconnectTimer = setTimeout(async () => {
-        if (!agtConnected && agtMeshClient) {
+        if (!required && !agtConnected && agtMeshClient) {
           await agtReconnect(log);
           if (!agtConnected) {
             agtReconnectFailures++;
@@ -2344,6 +2377,10 @@ async function initAGT(log: { info: (m: string) => void; warn: (m: string) => vo
     log.info(`AGT mesh loaded (provider=${_meshProvider}, identity=${agtIdentity.amid}) — ${connected ? "mesh ACTIVE" : "mesh OFFLINE (relay unreachable)"}`);
     log.info("AGT timers started: reconnect (30s), inbox notify (10s)");
   } catch (e: any) {
+    if (required) {
+      if (requiredAuth) await requiredAuth.fail(); else stopRequiredMesh(log);
+      return;
+    }
     // Distinguish module-not-found from other errors
     const isModuleError = e.code === 'MODULE_NOT_FOUND' || e.code === 'ERR_MODULE_NOT_FOUND';
     if (isModuleError) {
@@ -2373,7 +2410,7 @@ async function _runHandoffOrchestration(
   return _runHandoffOrchestrationCore(handoffToken, adminToken, direction, dirLabel, {
     progress: handoffState.current,
     inbox: agtInbox,
-    meshClient: () => agtMeshClient,
+    meshClient: () => requiredAuth && !requiredAuth.usable ? null : agtMeshClient,
     identity: () => agtIdentity,
     meshSend,
     log: _log,
@@ -2638,6 +2675,7 @@ interface OpenClawPluginApi {
   registerCli: (registrar: (ctx: PluginCliContext) => void, opts?: { commands?: string[] }) => void;
   registerProvider: (provider: ProviderPlugin) => void;
   registerTool: (tool: ToolDefinition) => void;
+  on?: (hookName: "before_prompt_build", handler: () => { systemPrompt: string }) => void;
   resolvePath: (input: string) => string;
   // OpenClaw 2026.4.x registration modes. register() is called once per mode
   // ("full" | "discovery" | "setup-only" | "setup-runtime" | "cli-metadata").
@@ -2656,20 +2694,26 @@ interface KarsConfig {
   endpoint: string;
   model: string;
   sandboxName: string;
+  systemPrompt: string;
 }
 
 const DEFAULT_CONFIG: KarsConfig = {
   endpoint: "",
   model: "gpt-4.1",
   sandboxName: "dev-agent",
+  systemPrompt: "",
 };
 
 function getPluginConfig(api: OpenClawPluginApi): KarsConfig {
   const raw = api.pluginConfig ?? {};
+  if (raw.systemPrompt !== undefined && typeof raw.systemPrompt !== "string") {
+    throw new Error("Kars plugin config.systemPrompt must be a string");
+  }
   return {
     endpoint: (raw.endpoint as string) || DEFAULT_CONFIG.endpoint,
     model: (raw.model as string) || DEFAULT_CONFIG.model,
     sandboxName: (raw.sandboxName as string) || DEFAULT_CONFIG.sandboxName,
+    systemPrompt: raw.systemPrompt ?? DEFAULT_CONFIG.systemPrompt,
   };
 }
 
@@ -2697,6 +2741,10 @@ const azureClawPlugin = definePluginEntry({
         type: "string",
         description: "Docker sandbox container name (default: dev-agent)",
       },
+      systemPrompt: {
+        type: "string",
+        description: "Authoritative Kars agent instructions supplied through before_prompt_build",
+      },
     },
   },
 
@@ -2716,6 +2764,13 @@ const azureClawPlugin = definePluginEntry({
     // Treat undefined as "full" for back-compat with older OpenClaw versions.
     const registrationMode = api.registrationMode ?? "full";
     const isFullRegistration = registrationMode === "full";
+
+    if (isFullRegistration && config.systemPrompt.trim()) {
+      if (typeof api.on !== "function") {
+        throw new Error("Kars system prompt requires the OpenClaw before_prompt_build hook API");
+      }
+      api.on("before_prompt_build", () => ({ systemPrompt: config.systemPrompt }));
+    }
 
     // ── Startup banner ─────────────────────────────────────────────────
     // The gateway may spawn many short-lived `openclaw agent --message`
@@ -2961,7 +3016,7 @@ const azureClawPlugin = definePluginEntry({
         else if (kind === "protocol_drain") inboxStats.consumed_by_protocol_drain += count;
         else if (kind === "progress_drain") inboxStats.consumed_by_progress_drain += count;
       },
-      meshClient: () => agtMeshClient,
+      meshClient: () => requiredAuth && !requiredAuth.usable ? null : agtMeshClient,
       identity: () => agtIdentity,
       sandboxName: () => agtSandboxName,
       meshSend,
@@ -3002,7 +3057,7 @@ const azureClawPlugin = definePluginEntry({
       log,
       config,
       getFoundryProject: () => foundryProject,
-      meshClient: () => agtMeshClient,
+      meshClient: () => requiredAuth && !requiredAuth.usable ? null : agtMeshClient,
       identity: () => agtIdentity,
       policy: () => null,
       trustStore: () => null,

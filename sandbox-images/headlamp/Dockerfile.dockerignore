@@ -1,0 +1,11 @@
+**
+!LICENSE
+!sandbox-images/headlamp/Dockerfile
+!sandbox-images/headlamp/Dockerfile.dockerignore
+!sandbox-images/headlamp/build-backend.sh
+!sandbox-images/headlamp/build-frontend.mjs
+!tools/headlamp-plugin/package.json
+!tools/headlamp-plugin/package-lock.json
+!tools/headlamp-plugin/tsconfig.json
+!tools/headlamp-plugin/src
+!tools/headlamp-plugin/src/**

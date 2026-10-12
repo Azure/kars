@@ -14,7 +14,7 @@ use crate::kars::cluster::Cluster;
 use crate::routes::github::{
     authorize_repo_set, connection_config_map_name, installation_token, mint_app_jwt,
 };
-use crate::routes::teams::read_task_list;
+use crate::routes::teams::read_tasks;
 use crate::state::AppState;
 
 use super::config::{is_due, next_poll_at, parse_source, sync_claim_active, verify_source_owner};
@@ -89,7 +89,9 @@ async fn perform_sync(
     let mut completed_attempts = 0;
     let mut signal_results = Vec::new();
     let client = reqwest::Client::new();
-    let existing_backlog = read_task_list(&cluster.read_team_tasks(&config.team_name).await);
+    let existing_backlog = read_tasks(cluster, &team)
+        .await
+        .map_err(|error| error.to_string())?;
     let mut known_tasks = existing_backlog
         .iter()
         .map(|task| (task.id.clone(), task.clone()))
@@ -305,12 +307,12 @@ async fn perform_sync(
     }
 
     let (review_items, review_followups, review_errors) =
-        collect_review_items(cluster, &client, &token, config, &now).await;
+        collect_review_items(cluster, &client, &token, config, &team, &now).await;
     tasks.extend(review_followups);
     errors.extend(review_errors);
     let discovered = tasks.len();
     revalidate_claimed_source(cluster, config, claim_id).await?;
-    let queued = merge_into_backlog(cluster, &config.team_name, tasks).await?;
+    let queued = merge_into_backlog(cluster, &team, tasks).await?;
     if let Err(error) = ensure_auto_run_for_backlog(cluster, config).await {
         errors.push(error);
     }

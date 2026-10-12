@@ -86,6 +86,11 @@ in-cluster web-to-BFF or Dex HTTP paths.
 - Logout uses a non-preserving redirect so the browser does not repeat the POST.
 - Unauthenticated protected routes redirect to login; they do not fall back to
   a privileged local persona.
+- Workspace, Console, and Auditor requests recheck the session before rendering,
+  including client navigation that reuses a layout. Expiry returns to sign-in
+  with the requested page and query preserved, rather than presenting an
+  unavailable runtime. Form requests redirect without replaying the POST;
+  API requests retain their authentication error responses.
 
 ## Production checklist
 

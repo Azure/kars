@@ -96,6 +96,10 @@ fn owner_annotations(sandbox: &KarsSandbox) -> Value {
 fn claim_patch(namespace: &Namespace, sandbox: &KarsSandbox) -> Result<Value, Error> {
     let (uid, rv) = identity(&namespace.metadata)?;
     let mut annotations = owner_annotations(sandbox);
+    if prestaged(namespace, sandbox) {
+        annotations[crate::inference_budget::calendar::INITIALIZATION_ANNOTATION] =
+            json!(sandbox.uid());
+    }
     annotations[PRESTAGE] = Value::Null;
     Ok(json!({"metadata": {
         "uid": uid, "resourceVersion": rv, "annotations": annotations,
@@ -294,11 +298,21 @@ async fn patch_sandbox(
 }
 
 fn new_namespace(sandbox: &KarsSandbox) -> Result<Namespace, Error> {
+    let mut annotations = owner_annotations(sandbox);
+    if sandbox
+        .status
+        .as_ref()
+        .and_then(|status| status.namespace.as_ref())
+        .is_none()
+    {
+        annotations[crate::inference_budget::calendar::INITIALIZATION_ANNOTATION] =
+            json!(sandbox.uid());
+    }
     Ok(serde_json::from_value(json!({
         "apiVersion": "v1", "kind": "Namespace",
         "metadata": {
             "name": format!("kars-{}", sandbox.name_any()),
-            "annotations": owner_annotations(sandbox),
+            "annotations": annotations,
             "labels": {
                 "app.kubernetes.io/name": "kars",
                 "app.kubernetes.io/component": "sandbox",

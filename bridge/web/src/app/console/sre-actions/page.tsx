@@ -12,9 +12,8 @@
 import { PageHeader, Section, Badge } from "@/components/ui";
 import { HonestState } from "@/components/honest-state";
 import { Icon } from "@/components/icon";
-import { listSreActions } from "@/lib/bff";
+import { listSandboxes, listSreActions } from "@/lib/bff";
 import { SreActionDecision } from "../sre-action-decision";
-import type { SreAction } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
 
@@ -39,15 +38,15 @@ function phaseTone(phase: string): Tone {
 }
 
 export default async function SreActionsPage() {
-  let actions: SreAction[] = [];
-  let error = false;
-  try {
-    actions = await listSreActions();
-  } catch {
-    error = true;
-  }
-
-  const pending = actions.filter((a) => a.actionable).length;
+  const [actionsResult, inventoryResult] = await Promise.allSettled([
+    listSreActions(),
+    listSandboxes(),
+  ]);
+  const actions = actionsResult.status === "fulfilled" ? actionsResult.value : null;
+  const sre = inventoryResult.status === "fulfilled"
+    ? inventoryResult.value.find((sandbox) => sandbox.name === "sre")
+    : undefined;
+  const pending = actions?.filter((a) => a.actionable).length ?? 0;
 
   return (
     <div className="space-y-6">
@@ -57,15 +56,29 @@ export default async function SreActionsPage() {
         lead="Self-remediation proposals from the kars-sre agent. Each is ONE typed, scoped fix (delete a stuck ResourceQuota, roll back an image, scale/restart a workload) with a rationale — you approve or reject. On approval the controller mints a one-shot, narrowly-scoped token, executes, tears it down, and records the real outcome."
       />
 
-      {error ? (
-        <HonestState variant="not_wired" title="Cluster unreachable" detail="The Bridge backend can't reach the cluster right now." />
-      ) : actions.length === 0 ? (
+      {inventoryResult.status === "rejected" ? (
+        <HonestState
+          variant="not_wired"
+          title="SRE status unavailable"
+          detail="Sandbox inventory could not be read. A proposal count does not confirm that the SRE agent is installed or diagnosing the cluster."
+        />
+      ) : !sre ? (
+        <HonestState
+          variant="not_wired"
+          title="SRE agent not installed"
+          detail="No sre sandbox was found. Install and enroll kars-SRE to enable diagnosis; retained proposals can still be reviewed below."
+        />
+      ) : null}
+
+      {actions === null ? (
+        <HonestState variant="not_wired" title="SRE proposal history unavailable" detail="Remediation proposals could not be read. Refresh to retry; this is not an empty history." />
+      ) : actions.length === 0 ? sre ? (
         <HonestState
           variant="empty"
           title="No SRE proposals"
-          detail="If the kars-sre agent (runtimes/hermes plugin) is deployed and diagnosing the cluster, its remediation proposals will appear here as KarsSREAction objects, Pending, until you approve or reject. None have been raised yet — this is a legitimate idle state, not a missing integration."
+          detail={`No remediation proposals have been recorded. The SRE sandbox reports ${sre.phase ?? "Unknown"}; this alone does not verify diagnostic tool access or successful model calls.`}
         />
-      ) : (
+      ) : null : (
         <Section
           title="Remediation proposals"
           action={

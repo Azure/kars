@@ -3,7 +3,7 @@
 
 // Sub-slice S15.d.2 of S15.d phase2-hotspot-up-cli.
 //
-// Preflight phase extracted verbatim from cli/src/commands/up.ts:
+// Preflight phase extracted from cli/src/commands/up.ts:
 // auto-detect dev mode, prefill from cached context, banner + tool
 // checks, Azure auth + subscription, interactive prompts
 // (region/name/isolation/backend), RBAC + provider preflight, SKU
@@ -13,8 +13,7 @@
 //   - Mutates `options` in place (cached context, interactive prompts).
 //   - Returns `null` when --dry-run was taken (caller must `return` and
 //     skip deploy).
-//   - Returns `{ rg }` when preflight passed and caller should proceed
-//     to the production-deploy section.
+//   - Returns `{ rg, subscriptionId }` for the production-deploy section.
 //
 // Symbol surface preserved verbatim:
 //   - banner / checkLine / Stepper from "../../stepper.js"
@@ -63,12 +62,13 @@ export interface UpOptionsForPreflight {
 export interface PreflightResult {
   /** Resolved resource group name; reused throughout the production deploy. */
   rg: string;
+  subscriptionId: string;
 }
 
 /**
  * Run all preflight checks. Returns null when --dry-run was taken (caller
- * must early-return), otherwise returns the derived `rg` for the production
- * deploy. May call `process.exit(1)` on hard failures.
+ * must early-return), otherwise returns the resource group and selected
+ * subscription for deployment. May call `process.exit(1)` on hard failures.
  */
 export async function runPreflight(options: UpOptionsForPreflight): Promise<PreflightResult | null> {
   const blue = chalk.hex("#0078D4");
@@ -171,6 +171,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
   }
 
   // ── 2. Azure auth + subscription ───────────────────────────────
+  let subscriptionId = "";
   {
     let isLoggedIn = false;
     try {
@@ -185,6 +186,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
       } else {
         console.log(chalk.yellow("\n  Not logged into Azure. Opening browser for login...\n"));
         await execa("az", ["login"], { stdio: "inherit" });
+        isLoggedIn = true;
       }
     }
 
@@ -194,6 +196,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
         "account", "show", "--output", "json",
       ], { stdio: "pipe" });
       const currentSub = JSON.parse(subJson);
+      subscriptionId = currentSub.id;
 
       if (options.dryRun) {
         checkLine(true, `Subscription — ${currentSub.name}`);
@@ -221,6 +224,7 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
 
           if (subId !== currentSub.id) {
             await execa("az", ["account", "set", "--subscription", subId], { stdio: "pipe" });
+            subscriptionId = subId;
             const selected = subs.find((s) => s.id === subId);
             checkLine(true, `Subscription — ${selected?.name || subId}`);
           } else {
@@ -468,5 +472,6 @@ export async function runPreflight(options: UpOptionsForPreflight): Promise<Pref
     return null;
   }
 
-  return { rg };
+  if (typeof subscriptionId !== "string" || !subscriptionId.trim()) throw new Error("Azure preflight did not resolve a subscription ID");
+  return { rg, subscriptionId: subscriptionId.trim() };
 }

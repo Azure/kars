@@ -10,6 +10,10 @@ use crate::providers::signing::sha256_hex;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{Api, Client, ResourceExt, api::ListParams};
 
+#[path = "../../../shared/team_run_names.rs"]
+mod run_names;
+pub(super) use run_names::prefix as run_prefix;
+
 #[derive(Default)]
 pub(super) struct RunStats {
     pub active: usize,
@@ -34,8 +38,11 @@ pub(super) fn cadence_name(team: &KarsTeam) -> Result<String, ReconcileError> {
             .as_ref()
             .and_then(|cadence| cadence.every_minutes),
     ))?;
-    let prefix: String = team.name_any().chars().take(180).collect();
-    Ok(format!("{prefix}-run-{}", &sha256_hex(&key)[..32]))
+    Ok(format!(
+        "{}{}",
+        run_prefix(&team.name_any()),
+        &sha256_hex(&key)[..32]
+    ))
 }
 
 fn current_output(cm: &ConfigMap, task: &KarsTask) -> bool {
@@ -111,6 +118,15 @@ pub(super) async fn harvest_and_retire_runs(
         let Some(cm) = cms.get_opt(&format!("kars-mission-output-{run}")).await? else {
             if launched {
                 stats.active += 1;
+            } else if let Some(current) = tasks_api.get_opt(&run).await?
+                && current.metadata.uid == task.metadata.uid
+                && current.metadata.namespace.as_deref() == Some(namespace)
+                && current
+                    .annotations()
+                    .get(ANNOT_TEAM_ROLE)
+                    .is_some_and(|role| role == "taskforce")
+            {
+                super::work::cancel_stopped(client, team, &current).await?;
             }
             continue;
         };
@@ -151,25 +167,56 @@ pub(super) async fn harvest_and_retire_runs(
         let artifacts = parse_count(data.get("artifactCount"), "artifactCount", &run)?;
         stats.tokens_total = stats.tokens_total.saturating_add(tokens);
         let output = data.get("output").map(String::as_str).unwrap_or_default();
-        if (tokens > 0 || artifacts > 0)
+        let successful = (tokens > 0 || artifacts > 0)
             && data.get("status").map(String::as_str) == Some("ok")
-            && !output.trim().is_empty()
-        {
+            && !output.trim().is_empty();
+        let id = format!(
+            "run-{}",
+            sha256_hex(&serde_json::to_vec(&(
+                task.metadata.uid.as_deref(),
+                task.annotations().get(ANNOT_RUN_REQUESTED),
+            ))?)
+        );
+        let archive = if successful {
+            match crate::team_commons::retained_archive(client, team, &id).await? {
+                Some(archive) => Some(archive),
+                None => crate::reviewed_execution::retained_team_run(client, team, task).await?,
+            }
+        } else {
+            None
+        };
+        if let Some(archive) = &archive {
+            let source = &archive.documents[0].source;
+            if source.task_uid != task.metadata.uid.as_deref().unwrap_or_default()
+                || Some(&source.run_nonce) != task.annotations().get(ANNOT_RUN_REQUESTED)
+                || archive.output != output
+            {
+                return Err(ReconcileError::Invalid(
+                    "retained archive differs from the completed run".into(),
+                ));
+            }
+        }
+        let may_harvest = super::work::harvest(client, team, task, &data, successful).await?;
+        if successful {
             let title = team
                 .spec
                 .charter
                 .lines()
                 .next()
                 .unwrap_or(&team.spec.charter);
-            // Distinct revisions of one Task must not share an idempotency key.
-            let id = format!(
-                "run-{}",
-                sha256_hex(&serde_json::to_vec(&(
-                    task.metadata.uid.as_deref(),
-                    task.annotations().get(ANNOT_RUN_REQUESTED),
-                ))?)
-            );
-            crate::team_commons::record_entry(client, team, &id, title, &run, &run, output).await?;
+            if may_harvest {
+                crate::team_commons::record_run(
+                    client,
+                    team,
+                    &id,
+                    title,
+                    &run,
+                    &run,
+                    output,
+                    archive.as_ref(),
+                )
+                .await?;
+            }
             stats.succeeded += 1;
             if let Some(finished) = data.get("finishedAt") {
                 if stats

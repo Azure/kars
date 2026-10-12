@@ -345,3 +345,42 @@ def test_edit_distance() -> None:
     assert sre_k8s._edit_distance("abc", "abc") == 0
     assert sre_k8s._edit_distance("abc", "abd") == 1
     assert sre_k8s._edit_distance("1.27.3", "1.27-typo") <= 5
+
+
+def test_events_failure_is_not_an_empty_event_history() -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    kube = MagicMock()
+    kube.get.side_effect = RuntimeError("Forbidden")
+    result = sre_k8s._events_for_object(kube, "kars-example", "Pod", "example")
+    assert result == [{"error": "Forbidden", "namespace": "kars-example", "kind": "Pod", "name": "example"}]
+
+
+def test_service_inventory_failure_never_claims_selector_mismatch() -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    kube = MagicMock()
+    kube.get.side_effect = [
+        {"metadata": {"name": "service"}, "spec": {"selector": {"app": "example"}}},
+        RuntimeError("Forbidden"), {"items": []},
+    ]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=kube):
+        result = sre_k8s._impl_sre_endpoints_inspect(namespace="kars-example", service="service")
+    assert result["coverage"] == "incomplete"
+    assert "unknown" in result["finding"]
+    assert result["matching_pods"] == {"error": "Forbidden"}
+
+
+def test_pod_without_ready_condition_is_not_ready() -> None:
+    from kars_runtime_hermes.plugin import sre_k8s
+
+    kube = MagicMock()
+    kube.get.side_effect = [
+        {"metadata": {"name": "service"}, "spec": {"selector": {"app": "example"}}},
+        {"items": [{"metadata": {"name": "pod"}, "status": {"phase": "Running"}}]},
+        {"items": []},
+    ]
+    with patch.object(sre_k8s.sre_kube, "client", return_value=kube):
+        result = sre_k8s._impl_sre_endpoints_inspect(namespace="kars-example", service="service")
+    assert result["matching_pods"][0]["ready"] is False
+    assert "none are Ready" in result["finding"]

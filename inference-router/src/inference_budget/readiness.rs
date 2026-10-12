@@ -3,7 +3,7 @@
 
 use crate::{proxy::UpstreamConfig, routes::AppState};
 
-pub async fn ready(state: &AppState, mut upstream: UpstreamConfig) -> anyhow::Result<()> {
+pub async fn ready(state: &AppState, upstream: UpstreamConfig) -> anyhow::Result<()> {
     let client = state
         .inference_budget
         .as_ref()
@@ -12,12 +12,7 @@ pub async fn ready(state: &AppState, mut upstream: UpstreamConfig) -> anyhow::Re
     if !policy.guardrails.is_empty() {
         anyhow::bail!("Mandatory standalone moderation needs a supported bounded contract");
     }
-    crate::routes::apply_provider_resolution(state, &mut upstream, &policy)?;
-    let candidates = crate::failover::candidates_for_request(&upstream, &policy, b"{}");
-    let candidate = candidates
-        .first()
-        .ok_or_else(|| anyhow::anyhow!("model route absent"))?;
-    let target = crate::failover::resolve_candidate(&upstream, &state.config, candidate)?;
+    let target = crate::routes::resolve_primary_upstream(state, &policy, upstream)?;
     client.ready_for(&target).await?;
     crate::proxy::credential_for_upstream(&state.auth, Some(&state.copilot), &target).await?;
     Ok(())

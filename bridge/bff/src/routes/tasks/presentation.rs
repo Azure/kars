@@ -4,9 +4,9 @@
 use super::{NO_CHANGE_SENTINEL, RunBlockedDto, looks_scaffolded};
 
 /// Recognise a reported budget stop, not independently verified accounting or
-/// a reset schedule. Already-`error` results are handled separately.
+/// a reset schedule. Failed or rejected results are handled separately.
 pub(crate) fn classify_blocked(status: Option<&str>, output: &str) -> Option<RunBlockedDto> {
-    if status == Some("error") {
+    if matches!(status, Some("error" | "failed" | "rejected")) {
         return None;
     }
     let low = output.to_ascii_lowercase();
@@ -259,7 +259,7 @@ pub(crate) fn is_no_change_output(output: &str) -> bool {
 /// hung / zero-output / no-op runs out of the deliverable index and the "latest
 /// deliverable" hero (audit f9/f13: a receipt/deliverable requires real work).
 pub(crate) fn is_real_deliverable(status: Option<&str>, deliverable: &str) -> bool {
-    if status == Some("error") {
+    if matches!(status, Some("error" | "failed" | "rejected")) {
         return false;
     }
     let t = deliverable.trim();

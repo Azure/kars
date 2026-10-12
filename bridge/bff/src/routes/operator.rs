@@ -47,6 +47,11 @@ fn require_cluster(state: &AppState) -> AppResult<&crate::kars::cluster::Cluster
 }
 
 fn upstream(e: kube::Error) -> AppError {
+    if matches!(&e, kube::Error::Api(status) if status.reason == "ProviderRegistrationRequired") {
+        return AppError::Rejected(
+            "Connect the current default as an additional provider before switching, so its endpoint, credentials and models remain available. The default was not changed.".into(),
+        );
+    }
     AppError::Upstream(e.to_string())
 }
 

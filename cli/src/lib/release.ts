@@ -31,6 +31,8 @@ export function releaseImagePlan(
   const G = RELEASE_GHCR;
   const images: ReleaseImage[] = [
     { src: `${G}/kars-controller:${version}`, target: "kars-controller:latest", required: true },
+    { src: `${G}/kars-metrics-server:${version}`, target: "kars-metrics-server:latest", required: true },
+    { src: `${G}/kars-headlamp:${version}`, target: "kars-headlamp:latest", required: true },
     { src: `${G}/kars-inference-router:${version}`, target: "kars-inference-router:latest", required: true },
     { src: `${G}/openclaw-sandbox:${version}`, target: "openclaw-sandbox:latest", required: true },
     // GHCR publishes `kars-agentmesh-*`; the manifest references

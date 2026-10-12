@@ -17,6 +17,8 @@
 
 import { useActionState, useState } from "react";
 import { applyGovernanceAction, type GovState } from "./governance-actions";
+import { useSpecEditor } from "./use-spec-editor";
+import { GovernanceDialog } from "./governance-dialog";
 import { Icon } from "@/components/icon";
 import type { RefOption } from "@/lib/types";
 
@@ -79,7 +81,6 @@ function buildSpec(f: FormShape): Record<string, unknown> {
   spec.defaultEnvelope = envelope;
 
   spec.roles = f.roles
-    .filter((r) => r.name.trim())
     .map((r) => ({
       name: r.name.trim(),
       ...(r.systemPrompt.trim() ? { systemPrompt: r.systemPrompt.trim() } : {}),
@@ -102,44 +103,50 @@ export function ProfileEditor({
 }) {
   const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState(applyGovernanceAction, init);
+  const [name, setName] = useState(initialName ?? "");
+  const [force, setForce] = useState(false);
   const editing = Boolean(initialName);
-  const [advanced, setAdvanced] = useState(false);
-  const [f, setF] = useState<FormShape>(() => parseSpec(initialSpec));
-  const [rawSpec, setRawSpec] = useState(() => JSON.stringify(initialSpec ?? {}, null, 2));
+  const { f, setF, advanced, rawSpec, setRawSpec, specJson, modeError, toggleMode } =
+    useSpecEditor(initialSpec, parseSpec, buildSpec);
 
-  if (!open) {
-    return (
+  const patch = (p: Partial<FormShape>) => setF((prev) => ({ ...prev, ...p }));
+  const patchRole = (i: number, p: Partial<Role>) => setF((prev) => ({ ...prev, roles: prev.roles.map((r, j) => (j === i ? { ...r, ...p } : r)) }));
+  const envelopeError = !advanced && f.authorityCeiling > f.tier
+    ? "Authority ceiling must not exceed tier. Review the envelope before saving."
+    : null;
+
+  return (
+    <>
       <button
         type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
         onClick={() => setOpen(true)}
         className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-foreground-muted hover:text-foreground"
       >
         {editing ? `Edit ${initialName}` : "+ Add team profile"}
       </button>
-    );
-  }
-
-  const specJson = advanced ? rawSpec : JSON.stringify(buildSpec(f));
-  const patch = (p: Partial<FormShape>) => setF((prev) => ({ ...prev, ...p }));
-  const patchRole = (i: number, p: Partial<Role>) => setF((prev) => ({ ...prev, roles: prev.roles.map((r, j) => (j === i ? { ...r, ...p } : r)) }));
-
-  return (
-    <form action={action} className="mt-2 space-y-4 rounded-lg border border-border bg-surface-muted p-4">
+      {open && <GovernanceDialog title={editing ? "Edit team profile" : "New team profile"} pending={pending} onClose={() => setOpen(false)}>
+    <form action={action} aria-busy={pending} className="w-full min-w-0 bg-surface-muted p-4 [&_fieldset]:min-w-0">
+      <fieldset disabled={pending} className="min-w-0 space-y-4">
       <input type="hidden" name="kind" value="KarsProfile" />
       <input type="hidden" name="spec" value={specJson} />
       <div className="flex items-center justify-between">
         <p className="text-xs font-medium">{editing ? "Edit team profile" : "New team profile"}</p>
         <div className="flex items-center gap-3">
-          <button type="button" onClick={() => setAdvanced((v) => !v)} className="text-xs text-foreground-muted hover:text-foreground">
+          <button type="button" onClick={toggleMode} className="text-xs text-foreground-muted hover:text-foreground">
             {advanced ? "Use visual form" : "Edit as JSON"}
           </button>
-          <button type="button" onClick={() => setOpen(false)} className="text-xs text-foreground-muted hover:text-foreground">Cancel</button>
+          <button type="button" disabled={pending} onClick={() => setOpen(false)} className="text-xs text-foreground-muted hover:text-foreground">Cancel</button>
         </div>
       </div>
 
+      {modeError && <p role="alert" className="text-xs text-danger">{modeError}</p>}
       <input
         name="name"
-        defaultValue={initialName}
+        aria-label="team profile name"
+        value={name}
+        onChange={(event) => setName(event.target.value)}
         readOnly={editing}
         placeholder="name (lowercase-with-hyphens)"
         required
@@ -148,6 +155,7 @@ export function ProfileEditor({
 
       {advanced ? (
         <textarea
+          aria-label="Team profile specification JSON"
           value={rawSpec}
           onChange={(e) => setRawSpec(e.target.value)}
           rows={16}
@@ -163,7 +171,7 @@ export function ProfileEditor({
                 <input value={f.displayName} onChange={(e) => patch({ displayName: e.target.value })} placeholder="e.g. Engineering maintainer" className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm" />
               </Field>
               <Field label="Domain">
-                <input value={f.domain} onChange={(e) => patch({ domain: e.target.value })} placeholder="e.g. eng, finance, docs, soc, legal" className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm" />
+                <input required value={f.domain} onChange={(e) => patch({ domain: e.target.value })} placeholder="e.g. eng, finance, docs, soc, legal" className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm" />
               </Field>
             </div>
           </fieldset>
@@ -171,6 +179,8 @@ export function ProfileEditor({
           <fieldset className="rounded-lg border border-border p-3">
             <legend className="flex items-center gap-1.5 px-1 text-xs font-medium text-foreground-muted"><Icon name="note" size={13} /> Charter</legend>
             <textarea
+              required
+              aria-label="Profile charter"
               value={f.charterTemplate}
               onChange={(e) => patch({ charterTemplate: e.target.value })}
               rows={3}
@@ -193,7 +203,7 @@ export function ProfileEditor({
                 </select>
               </Field>
               <Field label="Delegation depth">
-                <input type="number" min={0} value={f.delegationDepth} onChange={(e) => patch({ delegationDepth: Number(e.target.value) })} className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm tabular-nums" />
+                <input type="number" required min={0} max={2147483647} step={1} value={f.delegationDepth} onChange={(e) => patch({ delegationDepth: Number(e.target.value) })} className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm tabular-nums" />
               </Field>
             </div>
             <div className="mt-3">
@@ -204,7 +214,8 @@ export function ProfileEditor({
                 </select>
               </Field>
             </div>
-            <p className="mt-1.5 text-[11px] text-foreground-muted">Authority ceiling must be ≤ tier — the cluster validates this on save.</p>
+            <p className="mt-1.5 text-[11px] text-foreground-muted">Authority ceiling must be ≤ tier. Saving the profile does not confirm controller validation.</p>
+            {envelopeError && <p role="alert" className="mt-2 text-xs text-danger">{envelopeError}</p>}
           </fieldset>
 
           <fieldset className="rounded-lg border border-border p-3">
@@ -228,12 +239,13 @@ export function ProfileEditor({
               {f.roles.map((r, i) => (
                 <div key={i} className="rounded-lg border border-border bg-surface p-2.5">
                   <div className="flex items-center gap-2">
-                    <input value={r.name} onChange={(e) => patchRole(i, { name: e.target.value })} placeholder="role name (e.g. triager)" className="flex-1 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-sm font-medium" />
-                    <button type="button" onClick={() => patch({ roles: f.roles.filter((_, j) => j !== i) })} className="shrink-0 text-foreground-muted hover:text-danger">
+                    <input required aria-label={`Role ${i + 1} name`} value={r.name} onChange={(e) => patchRole(i, { name: e.target.value })} placeholder="role name (e.g. triager)" className="min-w-0 flex-1 rounded-lg border border-border bg-surface px-2.5 py-1.5 text-sm font-medium" />
+                    <button type="button" aria-label={`Remove role ${r.name || i + 1}`} onClick={() => patch({ roles: f.roles.filter((_, j) => j !== i) })} className="shrink-0 text-foreground-muted hover:text-danger">
                       <Icon name="cross" size={13} />
                     </button>
                   </div>
                   <textarea
+                    aria-label={`Role ${r.name || i + 1} instructions`}
                     value={r.systemPrompt}
                     onChange={(e) => patchRole(i, { systemPrompt: e.target.value })}
                     rows={2}
@@ -249,6 +261,7 @@ export function ProfileEditor({
                             key={sk.name}
                             type="button"
                             title={sk.summary ?? undefined}
+                            aria-pressed={on}
                             onClick={() => patchRole(i, { skills: on ? r.skills.filter((s) => s !== sk.name) : [...r.skills, sk.name] })}
                             className={`rounded-full border px-2 py-0.5 text-[11px] font-medium ${on ? "border-signal/40 bg-signal/10 text-signal" : "border-border text-foreground-muted hover:text-foreground"}`}
                           >
@@ -269,19 +282,22 @@ export function ProfileEditor({
       )}
 
       <p className="text-[11px] text-foreground-muted">
-        Applied with <span className="font-mono">kubectl apply</span> semantics (field manager <span className="font-mono">kars-bridge</span>). The cluster validates it — invalid specs are rejected with the API server&apos;s own message.
+        Saved with <span className="font-mono">kubectl apply</span> semantics (field manager <span className="font-mono">kars-bridge</span>). The API checks the schema; the controller validates the saved profile asynchronously. Check its status before creating a team.
       </p>
       <label className="flex items-center gap-2 text-[11px] text-foreground-muted">
-        <input type="checkbox" name="force" /> Force — take ownership of fields another manager owns (only on a conflict)
+        <input type="checkbox" name="force" checked={force} onChange={(event) => setForce(event.target.checked)} /> Force — take ownership of fields another manager owns (only on a conflict)
       </label>
-      <div className="flex items-center gap-3">
-        <button type="submit" disabled={pending} className="rounded-lg bg-signal px-4 py-2 text-sm font-semibold text-signal-fg disabled:opacity-50">
+      <div className="flex flex-wrap items-center gap-3">
+        <button type="submit" disabled={pending || envelopeError !== null} className="rounded-lg bg-signal px-4 py-2 text-sm font-semibold text-signal-fg disabled:opacity-50">
           {pending ? "Applying…" : editing ? "Save changes" : "Create team profile"}
         </button>
-        {state.error && <p className="text-xs text-danger">{state.error}</p>}
-        {state.ok && <p className="text-xs text-ok">{state.ok}</p>}
+        {state.error && <p role="alert" className="text-xs text-danger">{state.error}</p>}
+        {state.ok && <p role="status" className="text-xs text-foreground-muted">{state.ok}</p>}
       </div>
+      </fieldset>
     </form>
+      </GovernanceDialog>}
+    </>
   );
 }
 

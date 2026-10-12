@@ -5,18 +5,20 @@
 # runtime as the controller and inference router. The bookworm build's glibc
 # is older than the runtime's; no build tools or Debian packages are copied.
 #
-# Build from the bff/ directory as context:
-#   docker build -f bff/Dockerfile -t <registry>/kars-bridge-bff:<tag> bff
+# Build from the repository root so the shared execution-plan module is included:
+#   docker build -f bridge/bff/Dockerfile -t <registry>/kars-bridge-bff:latest .
 ARG AZURELINUX_DISTROLESS=mcr.microsoft.com/azurelinux/distroless/base:3.0
 FROM rust:1-bookworm AS build
 ARG CARGO_BUILD_JOBS=1
 WORKDIR /src
 # Compile only the real sources against the reviewed lockfile.
-COPY . .
+COPY bridge/bff/ bridge/bff/
+COPY shared/ shared/
+WORKDIR /src/bridge/bff
 RUN cargo build --release --locked && strip target/release/kars-bridge-bff
 
 FROM ${AZURELINUX_DISTROLESS} AS runtime
-COPY --from=build /src/target/release/kars-bridge-bff /usr/local/bin/kars-bridge-bff
+COPY --from=build /src/bridge/bff/target/release/kars-bridge-bff /usr/local/bin/kars-bridge-bff
 USER 10001:10001
 EXPOSE 8081
 # The BFF binds BRIDGE_BFF_HOST:BRIDGE_BFF_PORT; in-cluster it must listen on all

@@ -25,6 +25,7 @@
 
 mod cli;
 mod outcome;
+mod pod_proxy;
 mod report;
 mod scenarios;
 mod transport;
@@ -96,8 +97,15 @@ async fn run(cli: Cli) -> Result<u8> {
         .cases
         .iter()
         .any(|c| matches!(c.scenario, kars_eval_corpus::Scenario::EgressConnect { .. }));
+    if let Some(pod) = &cli.forward_proxy_pod {
+        let uid = cli
+            .forward_proxy_pod_uid
+            .as_deref()
+            .context("Pod proxy requires a target UID")?;
+        transport = transport.with_pod_proxy(pod_proxy::PodProxy::in_cluster(pod, uid)?);
+    }
     let forward_proxy_addr = cli.forward_proxy.clone().or_else(|| {
-        if needs_forward_proxy {
+        if needs_forward_proxy && cli.forward_proxy_pod.is_none() {
             derive_default_forward_proxy(&cli.router_base)
         } else {
             None
@@ -106,7 +114,7 @@ async fn run(cli: Cli) -> Result<u8> {
     if let Some(addr) = forward_proxy_addr {
         tracing::info!("EgressConnect forward proxy configured");
         transport = transport.with_forward_proxy(addr);
-    } else if needs_forward_proxy {
+    } else if needs_forward_proxy && cli.forward_proxy_pod.is_none() {
         anyhow::bail!(
             "corpus contains EgressConnect scenarios but no --forward-proxy was given and router_base ({}) could not be transformed into a proxy address",
             cli.router_base
@@ -217,11 +225,15 @@ async fn run(cli: Cli) -> Result<u8> {
         results,
     };
 
-    let json = serde_json::to_string_pretty(&report::wire_report(&report, format)?)
+    let json = serde_json::to_string(&report::wire_report(&report, format)?)
         .context("serialize report")?;
-    write_report(&cli.output, &json).with_context(|| format!("write {}", cli.output.display()))?;
+    let output_is_stdout = cli.output == PathBuf::from("/dev/stdout");
+    if !output_is_stdout {
+        write_report(&cli.output, &json)
+            .with_context(|| format!("write {}", cli.output.display()))?;
+    }
 
-    if !cli.no_stdout {
+    if output_is_stdout || !cli.no_stdout {
         println!("{json}");
     }
 

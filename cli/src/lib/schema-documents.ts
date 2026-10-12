@@ -40,8 +40,12 @@ export function schemaDocuments(text: string): ObjectMap[] {
 }
 
 export function normalizedCrd(object: ObjectMap): ObjectMap {
+  return normalizedCrdForGroup(object, "kars.azure.com");
+}
+
+export function normalizedCrdForGroup(object: ObjectMap, group: "kars.azure.com" | "monitoring.coreos.com"): ObjectMap {
   const spec = structuredClone(object.spec);
-  if (!spec?.names?.kind || !spec.names.plural || spec.group !== "kars.azure.com"
+  if (!spec?.names?.kind || !spec.names.plural || spec.group !== group
     || object.apiVersion !== "apiextensions.k8s.io/v1" || object.kind !== "CustomResourceDefinition"
     || object.metadata?.name !== `${spec.names.plural}.${spec.group}` || !Array.isArray(spec.versions)
     || !spec.versions.length || !["Namespaced", "Cluster"].includes(spec.scope)) {

@@ -1,0 +1,7 @@
+**
+!sandbox-images/
+!sandbox-images/node-exporter/
+!sandbox-images/node-exporter/Dockerfile
+!sandbox-images/node-exporter/build.sh
+!sandbox-images/node-exporter/node-exporter.go.mod
+!sandbox-images/node-exporter/node-exporter.go.sum

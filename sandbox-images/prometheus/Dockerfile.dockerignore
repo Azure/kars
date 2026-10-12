@@ -1,0 +1,9 @@
+**
+!sandbox-images/
+!sandbox-images/prometheus/
+!sandbox-images/prometheus/Dockerfile
+!sandbox-images/prometheus/Dockerfile.dockerignore
+!sandbox-images/prometheus/build-frontend.mjs
+!sandbox-images/prometheus/build-backend.sh
+!sandbox-images/prometheus/prometheus.go.mod
+!sandbox-images/prometheus/prometheus.go.sum

@@ -130,6 +130,43 @@ fn usage() -> Usage {
 }
 
 #[test]
+fn dormant_registration_preserves_inactive_ancestry_and_rejects_runtime_enrollment() {
+    let ledger = ledger(100).close_subtree("root").unwrap().next;
+    assert!(
+        ledger
+            .register_task(task("child", Some("root"), 50))
+            .is_err()
+    );
+    let ledger = ledger
+        .register_dormant_task(task("child", Some("root"), 50))
+        .unwrap()
+        .next;
+    assert!(!ledger.nodes["root"].active && !ledger.nodes["child"].active);
+    assert!(ledger.register_session(identity("child", "new")).is_err());
+    assert!(
+        ledger
+            .register_dormant_task(task("too-large", Some("root"), 101))
+            .is_err()
+    );
+    assert!(
+        !ledger
+            .register_dormant_task(task("child", Some("root"), 50))
+            .unwrap()
+            .changed
+    );
+    assert!(ledger.resume_task("child", &digest()).is_err());
+    let resumed = ledger
+        .resume_task("root", &digest())
+        .unwrap()
+        .next
+        .resume_task("child", &digest())
+        .unwrap()
+        .next;
+    assert!(resumed.register_session(identity("child", "new")).is_ok());
+    assert_eq!(resumed.meters, ledger.meters);
+}
+
+#[test]
 fn uncertain_tombstones_retain_contracts_and_freeze_on_late_over_bound_usage() {
     let request = request("root", "pod-a", 1);
     let mut ledger = ledger(100)

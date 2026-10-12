@@ -3,16 +3,20 @@
 
 import { createHash, randomUUID } from "node:crypto";
 import type { IMeshTransport } from "./transport-interface.js";
-import { missionContract, missionEvidenceAdvances, parseMissionMessage, sameMissionContract, sameMissionTarget, snapshotMissionData, type MissionAssignment, type MissionReply, type MissionTarget } from "./mission-protocol.js";
+import { MAX_MISSION_MESSAGE_BYTES, missionContract, missionEvidenceAdvances, parseMissionMessage, sameMissionContract, sameMissionTarget, snapshotMissionData, type MissionAssignment, type MissionReply, type MissionTarget } from "./mission-protocol.js";
 import type { FilesystemPhase } from "./mission-phase.js";
+import type { MissionRuntime } from "./mission-runtime.js";
 import { missionInputs, type MissionInput } from "./mission-inputs.js";
 
 export interface MissionCandidate extends MissionTarget {
   namespace: string;
   agentName: string;
   content: string;
+  /** Absent only on retained OpenClaw attempts from before runtime binding. */
+  runtime?: MissionRuntime;
   reviewedPhase?: FilesystemPhase;
   inputArtifacts?: readonly MissionInput[];
+  requiredOutputs?: readonly string[];
 }
 export interface MissionAttempt {
   version: 1;
@@ -42,6 +46,15 @@ export const missionAttemptName = (target: Pick<MissionTarget, "taskUid" | "runN
   `kars-mission-attempt-${createHash("sha256").update(JSON.stringify([target.taskUid, target.runNonce])).digest("hex").slice(0, 40)}`;
 const terminal = (phase: MissionAttempt["phase"]): boolean => ["succeeded", "failed", "rejected"].includes(phase);
 
+function parseRuntimeReply(payload: unknown, runtime: MissionRuntime) {
+  // Python MeshClient preserves its bytes API by JSON-wrapping UTF-8 payloads.
+  if (runtime === "Hermes" && typeof payload === "string") {
+    if (Buffer.byteLength(payload, "utf8") > MAX_MISSION_MESSAGE_BYTES) return null;
+    try { payload = JSON.parse(payload); } catch { return null; }
+  }
+  return parseMissionMessage(payload);
+}
+
 /** One durable claim precedes the only assignment send. An ambiguous send is never retried. */
 export class MissionDispatcher {
   constructor(
@@ -57,13 +70,15 @@ export class MissionDispatcher {
   async dispatch(candidate: MissionCandidate): Promise<DispatchOutcome> {
     candidate = snapshotMissionData(candidate) as MissionCandidate;
     const inputs = candidate.inputArtifacts === undefined ? undefined : missionInputs(candidate.inputArtifacts);
-    const contract = missionContract(candidate.reviewedPhase, inputs);
+    const contract = missionContract(candidate.reviewedPhase, inputs, candidate.requiredOutputs);
     if (contract.reviewedPhase) candidate = Object.freeze({ ...candidate, reviewedPhase: contract.reviewedPhase,
       ...(inputs ? { inputArtifacts: inputs } : {}) });
     const { taskName, taskUid, sandboxUid, podUid, runNonce, agentDid, dispatcherDid, content } = candidate;
     const target: MissionTarget = { taskName, taskUid, sandboxUid, podUid, runNonce, agentDid, dispatcherDid };
-    const probe = { ...target, ...contract, type: "mission:probe" as const, challenge: randomUUID() };
-    if (!parseMissionMessage(probe) || typeof content !== "string" || !content.trim()
+    const runtime = candidate.runtime === undefined ? "OpenClaw" : candidate.runtime;
+    const probe = { ...target, ...contract, type: "mission:probe" as const, challenge: randomUUID(),
+      activityFormat: "router-observations-v1" as const };
+    if ((runtime !== "OpenClaw" && runtime !== "Hermes") || !parseMissionMessage(probe) || typeof content !== "string" || !content.trim()
       || typeof candidate.agentName !== "string" || !candidate.agentName.trim()
       || typeof candidate.namespace !== "string" || !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(candidate.namespace)
       || agentDid === dispatcherDid) {
@@ -82,14 +97,16 @@ export class MissionDispatcher {
     }
     if (!await this.store.isCurrent(candidate)) return "stale";
     const ready = await this.mesh.sendWithAck(agentDid, probe, (payload, from, security) => {
-      const reply = parseMissionMessage(payload);
+      const reply = parseRuntimeReply(payload, runtime);
       return security === "encrypted" && from === agentDid && reply?.type === "mission:reply"
         && reply.status === "ready" && reply.challenge === probe.challenge && sameMissionTarget(target, reply)
-        && sameMissionContract(probe, reply) ? reply : null;
+        && sameMissionContract(probe, reply)
+        && (reply.activityFormat === undefined || reply.activityFormat === probe.activityFormat) ? reply : null;
     }, { retries: 0, timeoutMs: Math.min(this.timeoutMs, 15_000) });
     const assignment: MissionAssignment = {
       ...target, ...contract, type: "mission:assign", bootId: ready.bootId, assignmentId: randomUUID(), artifactFormat: "text-v1", content,
       ...(inputs ? { inputArtifacts: inputs } : {}),
+      ...(ready.activityFormat ? { activityFormat: ready.activityFormat } : {}),
     };
     if (!parseMissionMessage(assignment)) throw new Error("Mission assignment exceeds protocol bounds");
     if (!await this.store.isCurrent(candidate)) return "stale";
@@ -116,10 +133,11 @@ export class MissionDispatcher {
       } finally { clearTimeout(timer); }
       while (Date.now() < deadline) {
         const reply = await this.mesh.waitForMessage((payload, from, security) => {
-          const message = parseMissionMessage(payload);
+          const message = parseRuntimeReply(payload, runtime);
           return security === "encrypted" && from === agentDid && message?.type === "mission:reply"
             && message.status !== "ready" && sameMissionTarget(assignment, message) && sameMissionContract(assignment, message)
             && message.bootId === assignment.bootId && message.assignmentId === assignment.assignmentId
+            && message.activityFormat === assignment.activityFormat
             && (message.artifactFormat === undefined || message.artifactFormat === assignment.artifactFormat) ? message : null;
         }, Math.max(1, deadline - Date.now()), { consume: true });
         const previous = stored.attempt;

@@ -17,7 +17,7 @@ export async function setDefaultModelAction(_p: SetDefaultModelState, form: Form
   try {
     await setDefaultModel(deployment, provider);
     revalidatePath("/console/configuration");
-    return { error: null, ok: `${deployment} is now the cluster default.` };
+    return { error: null, ok: `Default selection saved for ${deployment}. The controller applies this asynchronously; refresh to check the current default.` };
   } catch (e) {
     return { error: e instanceof BffError ? e.message || e.code : "couldn't set default", ok: null };
   }

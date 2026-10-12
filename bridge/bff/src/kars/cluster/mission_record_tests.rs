@@ -184,6 +184,7 @@ struct Store {
     maps: Vec<Value>,
     reads: Vec<String>,
     fail_tasks: bool,
+    fail_maps: bool,
 }
 
 async fn handle(State(store): State<Arc<Mutex<Store>>>, uri: Uri) -> (StatusCode, Json<Value>) {
@@ -191,7 +192,9 @@ async fn handle(State(store): State<Arc<Mutex<Store>>>, uri: Uri) -> (StatusCode
     let path = uri.path();
     store.reads.push(path.into());
     let task_path = "/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karstasks";
-    if path.starts_with(task_path) && store.fail_tasks {
+    if (path.starts_with(task_path) && store.fail_tasks)
+        || (path.ends_with("/configmaps") && store.fail_maps)
+    {
         return (
             StatusCode::FORBIDDEN,
             Json(
@@ -199,6 +202,7 @@ async fn handle(State(store): State<Arc<Mutex<Store>>>, uri: Uri) -> (StatusCode
             ),
         );
     }
+
     let body = if path == task_path {
         json!({"apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTaskList", "metadata":{}, "items":[store.task]})
     } else if path == format!("{task_path}/briefing") {
@@ -220,6 +224,144 @@ async fn handle(State(store): State<Arc<Mutex<Store>>>, uri: Uri) -> (StatusCode
         );
     };
     (StatusCode::OK, Json(body))
+}
+
+#[tokio::test]
+async fn deliverable_index_joins_exact_ownership_and_revision_bound_files() {
+    let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+    let mut owned = task();
+    owned["metadata"]["annotations"]["kars.azure.com/owner-sub"] = json!("subject-a");
+    owned["spec"]["displayName"] = json!("Current mission title");
+    let canonical = |kind: &str, key: &str, nonce: &str| {
+        let mut cm = record(kind);
+        cm["metadata"]["name"] = json!(format!("kars-mission-{kind}-{key}"));
+        cm["metadata"]["labels"][format!("kars.azure.com/mission-{kind}")] = json!(key);
+        cm["metadata"]["annotations"]["kars.azure.com/mission-evidence-role"] = json!("canonical");
+        cm["metadata"]["annotations"]["kars.azure.com/mission-run-nonce"] = json!(nonce);
+        if kind == "output" {
+            cm["data"]["assignmentNonce"] = json!(nonce);
+            cm["data"]["ownerSub"] = json!("forged-owner");
+        }
+        cm
+    };
+    let maps = vec![
+        canonical("output", "evidence-key", "run-1"),
+        canonical("artifacts", "evidence-key", "run-1"),
+        record("output"),
+        {
+            let mut invalid_mirror = record("artifacts");
+            invalid_mirror["metadata"]["ownerReferences"][0]["uid"] = json!("wrong");
+            invalid_mirror
+        },
+        canonical("output", "old-evidence", "old-run"),
+        canonical("artifacts", "old-evidence", "old-run"),
+    ];
+    let state = Arc::new(Mutex::new(Store {
+        task: owned.clone(),
+        maps: maps.clone(),
+        ..Default::default()
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let client = kube::Client::try_from(kube::Config::new(
+        format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    ))
+    .unwrap();
+    let server = tokio::spawn(
+        axum::serve(
+            listener,
+            Router::new().fallback(handle).with_state(state.clone()),
+        )
+        .into_future(),
+    );
+    let cluster = Cluster { client };
+    let records = cluster.list_mission_deliverables().await.unwrap();
+    assert_eq!(
+        records.len(),
+        2,
+        "canonical and current mirrors must not duplicate a revision"
+    );
+    let current = records.iter().find(|record| record.current).unwrap();
+    assert_eq!(current.output.evidence_key, "evidence-key");
+    assert_eq!(current.output.data["ownerSub"], "subject-a");
+    assert_eq!(current.output.data["displayName"], "Current mission title");
+    assert_eq!(
+        current.artifacts.as_ref().unwrap().data.as_ref().unwrap()["response.md"],
+        "Useful briefing"
+    );
+    assert!(records.iter().any(|record| !record.current
+        && record.output.data["assignmentNonce"] == "old-run"
+        && record.artifacts.is_some()));
+    assert_eq!(
+        state.lock().unwrap().maps,
+        maps,
+        "projection must not rewrite retained evidence"
+    );
+    for (pointer, replacement) in [
+        ("/metadata/uid", json!("replacement-uid")),
+        ("/metadata/namespace", json!("different-namespace")),
+        ("/metadata/deletionTimestamp", json!("2026-10-02T20:00:00Z")),
+    ] {
+        {
+            let mut store = state.lock().unwrap();
+            store.task = owned.clone();
+            if pointer.ends_with("deletionTimestamp") {
+                store.task["metadata"]["deletionTimestamp"] = replacement;
+            } else {
+                *store.task.pointer_mut(pointer).unwrap() = replacement;
+            }
+        }
+        assert!(
+            cluster
+                .list_mission_deliverables()
+                .await
+                .unwrap()
+                .is_empty(),
+            "{pointer}"
+        );
+    }
+    {
+        let mut store = state.lock().unwrap();
+        store.task = owned.clone();
+        store.task["metadata"]["annotations"]["kars.azure.com/run-completed"] = json!("old-run");
+    }
+    let pending = cluster.list_mission_deliverables().await.unwrap();
+    assert_eq!(
+        pending.len(),
+        1,
+        "uncommitted current publication is not a deliverable"
+    );
+    assert_eq!(pending[0].output.evidence_key, "old-evidence");
+    {
+        let mut store = state.lock().unwrap();
+        store.task = owned;
+        store.task["metadata"]["annotations"]
+            .as_object_mut()
+            .unwrap()
+            .remove("kars.azure.com/owner-sub");
+    }
+    assert!(
+        cluster
+            .list_mission_deliverables()
+            .await
+            .unwrap()
+            .iter()
+            .all(|record| !record.output.data.contains_key("ownerSub"))
+    );
+    for map_failure in [false, true] {
+        {
+            let mut store = state.lock().unwrap();
+            store.fail_tasks = !map_failure;
+            store.fail_maps = map_failure;
+        }
+        assert!(
+            cluster.list_mission_deliverables().await.is_err(),
+            "API failures must not become a successful empty index"
+        );
+    }
+    server.abort();
+    let _ = server.await;
 }
 
 #[tokio::test]

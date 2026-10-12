@@ -14,6 +14,7 @@ pub(super) fn runner_pod_spec_json(
 ) -> Value {
     json!({
         "restartPolicy": "Never",
+        "automountServiceAccountToken": false,
         "securityContext": {
             "runAsNonRoot": true,
             "seccompProfile": {"type": "RuntimeDefault"},

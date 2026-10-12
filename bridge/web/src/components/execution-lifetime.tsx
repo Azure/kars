@@ -6,11 +6,16 @@
 import { useMemo, useState } from "react";
 import { Icon } from "@/components/icon";
 import { LivePulse } from "@/components/live-refresh";
+import { actionsFromRouter } from "@/components/agent-graph/activity";
+import type { BoundRouterActivity } from "@/lib/router-activity";
 import type { ActivityEvent, Approval, TaskAssignmentEvent } from "@/lib/types";
+import type { ReviewedExecution } from "@/lib/types/missions";
+import { reviewedPhaseRouterActivity } from "@/lib/team-run-evidence";
 
 type LifetimeEvent = {
   id: string;
-  at: string;
+  at: string | null;
+  seq?: number | null;
   kind: "lifecycle" | "round" | "tool" | "approval";
   title: string;
   summary: string;
@@ -31,16 +36,34 @@ export function ExecutionLifetime({
   assignmentEvents,
   approvals,
   focusQuery,
+  routerActivity = null,
+  phases = [],
 }: {
   running: boolean;
   activity: ActivityEvent[];
   assignmentEvents: TaskAssignmentEvent[];
   approvals: Approval[];
   focusQuery?: string;
+  routerActivity?: BoundRouterActivity | null;
+  phases?: ReviewedExecution["phases"];
 }) {
   const [query, setQuery] = useState(focusQuery ?? "");
   const events = useMemo<LifetimeEvent[]>(() => {
     const rows: LifetimeEvent[] = [];
+    for (const phase of phases) {
+      const terminal = phase.result?.run_evidence;
+      if (!terminal || terminal.task_uid !== phase.task_uid || terminal.run_nonce !== phase.run_nonce) continue;
+      for (const [stage, at] of [["started", terminal.started_at], [phase.state, terminal.finished_at]]) {
+        if (!at) continue;
+        rows.push({
+          id: `phase-${phase.task_uid}-${stage}`, at, kind: "lifecycle",
+          title: `${phase.role} / ${phase.phase}: ${stage}`,
+          summary: phase.task_name ?? phase.role,
+          detail: `Run: ${terminal.run_nonce}\nAssignment: ${terminal.assignment_id}\nProducer: ${terminal.agent_did}`,
+          ok: stage === "failed" ? false : stage === "completed" ? true : null,
+        });
+      }
+    }
     for (const event of assignmentEvents) {
       rows.push({
         id: `assignment-${event.event_id}`,
@@ -57,7 +80,7 @@ export function ExecutionLifetime({
         ok: event.state === "Failed" ? false : null,
       });
     }
-    for (const [index, event] of activity.entries()) {
+    for (const [index, event] of (routerActivity ? [] : activity).entries()) {
       if (event.kind === "round") {
         rows.push({
           id: `round-${event.round}-${index}`,
@@ -96,8 +119,44 @@ export function ExecutionLifetime({
         ok: approval.phase === "Approved" ? true : approval.phase === "Denied" || approval.phase === "Expired" ? false : null,
       });
     }
-    return rows.sort((a, b) => a.at.localeCompare(b.at));
-  }, [activity, approvals, assignmentEvents]);
+    rows.sort((a, b) => (a.at ?? "").localeCompare(b.at ?? ""));
+    for (const binding of [
+      ...(routerActivity ? [routerActivity] : []),
+      ...phases.flatMap(phase => {
+        const binding = reviewedPhaseRouterActivity(phase);
+        return binding ? [binding] : [];
+      }),
+    ]) {
+      const { producer } = binding;
+      for (const action of actionsFromRouter(binding)) {
+        rows.push({
+          id: action.id,
+          at: action.ts,
+          seq: action.seq,
+          kind: action.source === "router-upstream" ? "round" : "tool",
+          title: action.human,
+          summary: `${producer.agent_name} · ${action.result}`,
+          detail: [
+            `Source: ${action.source}`,
+            action.ts ? `Router observed at: ${action.ts}` : "Timestamp not retained by this recorder version",
+            `Router round: ${action.round}`,
+            action.args,
+            action.result,
+            `Run: ${producer.run_nonce}`,
+            `Assignment: ${producer.assignment_id}`,
+            `Producer: ${producer.agent_did}`,
+          ].join("\n"),
+          ok: action.ok,
+        });
+      }
+    }
+    return rows.sort((a, b) => {
+      if (a.at && b.at) return a.at.localeCompare(b.at);
+      if (a.at) return -1;
+      if (b.at) return 1;
+      return 0;
+    });
+  }, [activity, approvals, assignmentEvents, routerActivity, phases]);
 
   const visible = useMemo(() => {
     const needle = query.trim().toLowerCase();
@@ -117,7 +176,10 @@ export function ExecutionLifetime({
         <div>
           <h2 className="text-sm font-semibold">Recorded execution timeline</h2>
           <p className="mt-0.5 max-w-2xl text-xs text-foreground-muted">
-            Available assignment, model round, tool call and approval records in timestamp order. Missing records do not establish that no work occurred.
+            {routerActivity || phases.some(phase => reviewedPhaseRouterActivity(phase))
+              ? "Timestamped records appear in recorded time order. Router times identify observations, not exact tool start times. Older untimestamped records follow in each producer's sequence order; no ordering between producers is inferred for those records."
+              : "Available assignment, model round, tool call and approval records in timestamp order."}
+            {" "}Missing records do not establish that no work occurred.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -138,6 +200,26 @@ export function ExecutionLifetime({
           )}
         </div>
       </div>
+      {routerActivity && (
+        <div className="mt-3 space-y-1 text-xs text-foreground-muted">
+          <p>
+            {routerActivity.provisional ? "Live provisional observations" : "Retained revision observations"}
+            {" · "}{routerActivity.producer.agent_name}. Returned responses only; not independent proof of tool execution or mission completion.
+          </p>
+          <p className="break-all font-mono text-[10px]">
+            Run: {routerActivity.producer.run_nonce} · Assignment: {routerActivity.producer.assignment_id} · Producer: {routerActivity.producer.agent_did}
+          </p>
+          {routerActivity.observations.state === "unavailable" ? (
+            <p>Router observations unavailable: {routerActivity.observations.reason}</p>
+          ) : (
+            <p>
+              Coverage gaps — missing rounds: {routerActivity.observations.trace.missing_rounds.join(", ") || "none reported"}
+              {" · "}Recorder-wide dropped events: {routerActivity.observations.trace.dropped_events}
+              {" · "}Selection truncated: {routerActivity.observations.trace.truncated ? "yes" : "no"}
+            </p>
+          )}
+        </div>
+      )}
       <ol className="mt-4 space-y-2">
         {visible.map((event) => (
           <li key={event.id}>
@@ -146,7 +228,12 @@ export function ExecutionLifetime({
                 <span className={`mt-1.5 h-2 w-2 shrink-0 rounded-full ${
                   event.ok === false ? "bg-danger" : event.ok === true ? "bg-ok" : event.kind === "approval" ? "bg-warning" : "bg-signal"
                 }`} />
-                <span className="w-32 shrink-0 font-mono text-[10px] text-foreground-muted">{fmtAt(event.at)}</span>
+                <span className="w-32 shrink-0 font-mono text-[10px] text-foreground-muted">
+                  {event.at === null ? <>
+                    Sequence {event.seq}
+                    <span className="block">Timestamp unavailable</span>
+                  </> : fmtAt(event.at)}
+                </span>
                 <span className="min-w-0 flex-1">
                   <span className="flex flex-wrap items-center gap-2">
                     <span className="font-mono text-xs font-semibold">{event.title}</span>

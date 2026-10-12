@@ -190,6 +190,103 @@ async fn double_inventory_rechecks_the_verified_generation() {
 }
 
 #[tokio::test]
+async fn bounded_dispatch_inventory_recovers_from_status_resource_version_churn() {
+    let (server, client) = setup().await;
+    let leaf = task("leaf", None, true);
+    let snapshot = leaf.clone();
+    let calls = Arc::new(AtomicUsize::new(0));
+    let observed = calls.clone();
+    Mock::given(method("GET"))
+        .and(path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karstasks/leaf",
+        ))
+        .respond_with(move |_: &Request| {
+            let mut current = snapshot.clone();
+            if observed.fetch_add(1, Ordering::SeqCst) > 0 {
+                current.metadata.resource_version = Some("2".into());
+            }
+            ResponseTemplate::new(200).set_body_json(current)
+        })
+        .mount(&server)
+        .await;
+    let lineage = resolve_with_retry(&client, &leaf, LeafReadiness::RequireReady)
+        .await
+        .unwrap();
+    assert_eq!(calls.load(Ordering::SeqCst), 4);
+    assert_eq!(lineage.nodes[0].resource_version, "2");
+    assert_eq!(lineage.nodes[0].pin.task.uid, "leaf-uid");
+    assert_eq!(lineage.nodes[0].authorization_digest, leaf.envelope_digest());
+    assert!(
+        server.received_requests().await.unwrap().iter()
+            .all(|request| request.method == "GET")
+    );
+}
+
+#[tokio::test]
+async fn bounded_dispatch_inventory_never_accepts_continuous_churn_or_replaced_leaf() {
+    for drift in ["resourceVersion", "uid", "generation"] {
+        let (server, client) = setup().await;
+        let leaf = task("leaf", None, true);
+        let snapshot = leaf.clone();
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        Mock::given(method("GET"))
+            .and(path(
+                "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karstasks/leaf",
+            ))
+            .respond_with(move |_: &Request| {
+                let count = observed.fetch_add(1, Ordering::SeqCst);
+                let mut current = snapshot.clone();
+                match drift {
+                    "resourceVersion" => current.metadata.resource_version = Some(count.to_string()),
+                    "uid" => current.metadata.uid = Some("replacement".into()),
+                    "generation" => current.metadata.generation = Some(2),
+                    _ => unreachable!(),
+                }
+                ResponseTemplate::new(200).set_body_json(current)
+            })
+            .mount(&server)
+            .await;
+        assert!(matches!(
+            resolve_with_retry(&client, &leaf, LeafReadiness::RequireReady).await,
+            Err(Error::Changed)
+        ));
+        assert_eq!(calls.load(Ordering::SeqCst), if drift == "resourceVersion" { 6 } else { 3 });
+    }
+}
+
+#[tokio::test]
+async fn dispatch_inventory_does_not_retry_governance_or_api_denial() {
+    let (server, client) = setup().await;
+    let leaf = task("leaf", None, false);
+    serve_task(&server, &leaf).await;
+    assert!(matches!(
+        resolve_with_retry(&client, &leaf, LeafReadiness::RequireReady).await,
+        Err(Error::NotReady)
+    ));
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.iter().filter(|request| request.url.path().ends_with("/leaf")).count(), 1);
+
+    let (server, client) = setup().await;
+    let leaf = task("leaf", None, true);
+    Mock::given(method("GET"))
+        .and(path(
+            "/apis/kars.azure.com/v1alpha1/namespaces/workspace/karstasks/leaf",
+        ))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "kind":"Status", "apiVersion":"v1", "status":"Failure",
+            "code":403, "reason":"Forbidden", "message":"fixture"
+        })))
+        .expect(1)
+        .mount(&server)
+        .await;
+    assert!(matches!(
+        resolve_with_retry(&client, &leaf, LeafReadiness::RequireReady).await,
+        Err(Error::Api { code: Some(403), .. })
+    ));
+}
+
+#[tokio::test]
 async fn stale_leaf_generation_and_foreign_namespace_are_not_adopted() {
     let (server, client) = setup().await;
     let leaf = task("leaf", None, true);

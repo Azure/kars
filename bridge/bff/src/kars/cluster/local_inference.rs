@@ -8,6 +8,75 @@ use super::{
 use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams};
 use kube::core::ApiResource;
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::{
+        body::Body,
+        http::{Request, Response, StatusCode},
+    };
+    use std::convert::Infallible;
+
+    fn cluster(status: StatusCode) -> Cluster {
+        let service = tower::service_fn(move |request: Request<kube::client::Body>| async move {
+            assert_eq!(request.method(), "GET");
+            assert!(request.uri().path().ends_with("/modeldeployments"));
+            let body = if status == StatusCode::OK {
+                serde_json::json!({
+                    "apiVersion": "airunway.ai/v1alpha1",
+                    "kind": "ModelDeploymentList", "metadata": {}, "items": [],
+                })
+                .to_string()
+            } else if status == StatusCode::NOT_FOUND {
+                "404 page not found\n".into()
+            } else {
+                serde_json::json!({
+                    "apiVersion": "v1", "kind": "Status", "status": "Failure",
+                    "reason": "API failure", "message": "test response",
+                    "code": status.as_u16(),
+                })
+                .to_string()
+            };
+            Ok::<_, Infallible>(
+                Response::builder()
+                    .status(status)
+                    .body(Body::from(body))
+                    .unwrap(),
+            )
+        });
+        Cluster::for_test_client(kube::Client::new(service, LOCAL_INFERENCE_NAMESPACE))
+    }
+
+    #[tokio::test]
+    async fn local_inference_absent_api_is_not_an_outage() {
+        let cluster = cluster(StatusCode::NOT_FOUND);
+        assert!(!cluster.local_inference_available().await.unwrap());
+        assert!(cluster.list_model_deployments().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_inference_installed_empty_api_remains_available() {
+        let cluster = cluster(StatusCode::OK);
+        assert!(cluster.local_inference_available().await.unwrap());
+        assert!(cluster.list_model_deployments().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn local_inference_forbidden_and_failed_api_are_not_empty_state() {
+        for status in [
+            StatusCode::UNAUTHORIZED,
+            StatusCode::FORBIDDEN,
+            StatusCode::INTERNAL_SERVER_ERROR,
+        ] {
+            let cluster = cluster(status);
+            assert!(matches!(cluster.local_inference_available().await,
+                Err(kube::Error::Api(response)) if response.code == status.as_u16()));
+            assert!(matches!(cluster.list_model_deployments().await,
+                Err(kube::Error::Api(response)) if response.code == status.as_u16()));
+        }
+    }
+}
+
 /// Milestone-derived deploy percentage from real signals. Each milestone the
 /// deployment has genuinely reached sets a floor; nothing here advances on a
 /// timer alone (the client adds a small time-based ease WITHIN the current
@@ -58,12 +127,16 @@ impl Cluster {
     /// Bridge already holds `customresourcedefinitions: get/list` (used for
     /// CRD-schema introspection elsewhere), so this needs no new RBAC beyond
     /// the narrow `modeldeployments.airunway.ai` grant added alongside it.
-    pub async fn local_inference_available(&self) -> bool {
+    pub async fn local_inference_available(&self) -> Result<bool, kube::Error> {
         let gvk = GroupVersionKind::gvk("airunway.ai", "v1alpha1", "ModelDeployment");
         let ar = ApiResource::from_gvk(&gvk);
         let api: Api<DynamicObject> =
             Api::namespaced_with(self.client.clone(), LOCAL_INFERENCE_NAMESPACE, &ar);
-        api.list(&ListParams::default().limit(1)).await.is_ok()
+        match api.list(&ListParams::default().limit(1)).await {
+            Ok(_) => Ok(true),
+            Err(kube::Error::Api(response)) if response.code == 404 => Ok(false),
+            Err(error) => Err(error),
+        }
     }
 
     /// Server-Side Apply a `ModelDeployment` (create-or-update), namespaced to
@@ -132,7 +205,11 @@ impl Cluster {
         let gvk = GroupVersionKind::gvk("airunway.ai", "v1alpha1", "ModelDeployment");
         let ar = ApiResource::from_gvk(&gvk);
         let api: Api<DynamicObject> = Api::all_with(self.client.clone(), &ar);
-        Ok(api.list(&ListParams::default()).await?.items)
+        match api.list(&ListParams::default()).await {
+            Ok(list) => Ok(list.items),
+            Err(kube::Error::Api(response)) if response.code == 404 => Ok(Vec::new()),
+            Err(error) => Err(error),
+        }
     }
 
     /// Read one `ModelDeployment`'s current state (status included).

@@ -16,7 +16,44 @@ mod commons;
 mod lifecycle;
 mod mutations;
 mod queries;
+#[path = "../../../../shared/team_run_names.rs"]
+mod run_names;
 mod validation;
+#[path = "../../../../shared/team_work.rs"]
+pub(crate) mod work;
+
+pub(super) fn is_run_name(team: &str, run: &str) -> bool {
+    run.starts_with(&run_names::prefix(team)) || run.starts_with(&format!("{team}-run-"))
+}
+
+#[cfg(test)]
+mod run_naming_tests {
+    #[test]
+    fn team_run_names_retain_legacy_history_without_matching_structural_tasks() {
+        for team in [
+            "eng",
+            "clinic-operations-r463",
+            "volunteer-feedback-reviewed-team",
+            &"a".repeat(63),
+        ] {
+            assert!(super::is_run_name(
+                team,
+                &format!("{}{}", super::run_names::prefix(team), "a".repeat(32))
+            ));
+            assert!(super::is_run_name(team, &format!("{team}-run-legacy")));
+            assert!(!super::is_run_name(team, &format!("{team}-principal")));
+            assert!(!super::is_run_name(team, "foreign-run-legacy"));
+            assert!(!super::is_run_name(
+                team,
+                &format!(
+                    "{}{}",
+                    super::run_names::prefix(&format!("{team}-other")),
+                    "a".repeat(32)
+                )
+            ));
+        }
+    }
+}
 
 pub use backlog::*;
 pub use channels::*;
@@ -156,6 +193,7 @@ pub struct TeamDetailDto {
     pub execution_plan: Option<crate::routes::tasks::ExecutionPlanDto>,
     /// The team's assigned task backlog (pending/active/done), newest last.
     pub tasks: Vec<TeamTaskDto>,
+    pub work_reviews: Vec<WorkReviewDto>,
     /// Communication channels enabled on this team's envelope (telegram/slack/…).
     pub channels: Vec<String>,
 }
@@ -234,6 +272,10 @@ pub struct CreateTeamRequest {
     /// sandboxes are governed AND functional — an un-governed sandbox hangs
     /// because the agent's AGT engine fails closed on an empty policy set.
     pub tool_policy: Option<String>,
+    /// Also bind the selected policy in the authority envelope so descendants
+    /// cannot replace it with another policy.
+    #[serde(default)]
+    pub pin_tool_policy: bool,
     /// The harness every run this team mints executes on (OpenClaw / Hermes /
     /// BYO). Written onto the team's run blueprint; the controller inherits it
     /// for each minted run. A bootstrap-only (non-autonomous) harness is

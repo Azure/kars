@@ -27,10 +27,108 @@ unbounded. Token-only accounts require trustworthy token bounds, not an invented
 price. No Copilot, local model, or provider is assigned a guessed zero price.
 
 Legacy tasks without the new scope retain the foundation's planning-only
-interpretation of positive aggregate budgets. Ordinary standalone sandboxes
-without a governed Task binding keep their existing daily/monthly tracker,
-credentials, runtime environment, and inference behavior. Aggregate limits are
-never copied into a per-sandbox daily allowance.
+interpretation of positive aggregate budgets. Aggregate limits are never copied
+into a per-sandbox daily allowance.
+
+### Router calendar counters
+
+Daily/monthly `InferencePolicy` limits are enforced by the sandbox's router,
+not by the controller or the console launch-cap preflight. When the accounting
+service is enabled, newly materialized sandboxes receive a separate calendar
+account in its namespace. Its UID is sealed into the sandbox namespace.
+The same router-only projected token, workload verification and private TLS
+transport protect both calendar accounting and lifetime accounting. Agent
+containers do not receive that token.
+
+The broker admits at most 64 concurrent TLS handshakes, each with a ten-second
+deadline. An unfinished handshake does not serialize otherwise healthy
+connections. Rejected and timed-out handshakes release their slots and are logged
+separately; listener shutdown drops pending handshakes. This transport bound does
+not change certificate verification, reservation authority or fail-closed
+accounting, and does not introduce automatic inference or reservation retries.
+
+Governed router readiness uses `/readyz` with a ten-second timeout and a
+fifteen-second period. It checks live calendar accounting, the audience-bound
+broker authority, model contracts and provider credentials; Kubernetes' default
+one-second probe deadline is not an adequate budget for that multi-request
+path under load. Slow or failed checks still make the Pod unready. Local
+`/healthz` liveness and per-inference authorization checks are unchanged; no
+successful authority result is cached or substituted for the live check.
+
+Calendar ConfigMap names retain the full sandbox-UID hash (`calendar-` plus
+64 hexadecimal characters). Resource identity validation follows Kubernetes'
+253-byte resource-name limit; namespace labels and DNS hosts retain their
+63-byte label limits. Existing account names, sealed UIDs and counters are not
+renamed or reset.
+
+Calendar commits use checked arithmetic, UID/resource-version preconditions and
+idempotent per-router sequences. Reads do not treat missing, replaced or corrupt
+accounts as zero. Unavailable accounting returns 503 rather than a quota 429;
+telemetry reports an error rather than inventing an unused balance. Writer
+receipts are bounded at 256 per account and retained across month boundaries so
+a delayed retry cannot be counted twice. Exhausted receipt capacity blocks
+accounting; it never discards history to admit another writer.
+
+**Calendar rollout is not yet qualified.** Existing sandboxes without a sealed
+calendar account are refused rather than silently initialized to zero: migration
+needs a verified drain and final counter transfer. A telemetry snapshot alone,
+or the handoff drain flag without provider admission/in-flight tracking, is not
+that barrier. A missing Deployment is not proof that the sandbox has never run.
+Zero initialization requires a controller-owned, Sandbox-UID-bound fresh-namespace
+or explicit next-Sandbox prestage marker and no existing Deployment. The marker
+is consumed when the account is sealed, or retired before any legacy execution
+without the accounting service. Sealed accounts cannot fall back to volatile
+accounting when the service is disabled. Existing or ambiguous unsealed namespaces
+require reconciliation; their counters are not inferred or reset.
+Do not deploy this change over existing volatile counters without resolving
+that migration boundary.
+Legacy handoff is also refused for a bound calendar account: it cannot transfer
+the sealed account identity or its pending liability.
+
+The router acknowledges a durable Begin immediately before sending supported
+Chat Completions, Responses or Anthropic Messages requests. Finish records
+complete raw-provider usage, before returning a buffered result or forwarding a
+terminal SSE event. This also covers clients that stop reading on the terminal
+event rather than waiting for transport EOF. Route-level usage reporting does
+not count the same call again.
+
+An unfinished call retains pending liability in the account. Replacement writers
+are refused while another writer has pending work; terminating routers can still
+settle against their original workload identity. Unknown transport outcomes,
+cancelled streams and incomplete usage are never assigned zero tokens. Specific
+structured model/API rejections before inference can close a Begin with zero,
+preserving API negotiation without treating arbitrary provider failures as free.
+Unresolved liability needs trustworthy reconciliation, not deletion of the
+account or creation of a fresh balance. Automatic recovery is not implemented.
+
+This remains completed-usage calendar accounting, not the token-amount
+reservation protocol below: one call or concurrent calls can cross a calendar
+threshold before subsequent admission sees their completed usage. The new
+pending-liability and streaming behavior still requires installed qualification.
+Without an enabled accounting service, the retained local/file tracker does not
+claim pod-replacement durability.
+
+## Console daily launch caps
+
+Console **Policies → Inference budgets** also exposes the separate daily cluster,
+workspace and user launch caps. These use measured completed-run usage, not the
+root-lifetime accounting described below. A zero daily cap is uncapped. Passive
+mode alerts; buffer and strict modes can block new launches.
+
+Budget editors retain entered values and show an error when validation or a save
+fails. A timeout or connection failure is an unconfirmed outcome, not proof that
+the server rejected the write: check the current budget before retrying. Inline
+policy edits display the successfully saved amount rather than the previous
+value. Changing these daily caps does not change a mission's governed enrollment.
+
+A stopped Mission feedback revision with verified failed reviewed-phase evidence
+can explicitly prepare a retry from its Deliverable review panel. This creates a
+fresh request nonce while retaining the exact complete documents and feedback,
+review history, Task identity, authority, lifetime account and existing charges.
+It does not launch compute: the reviewer still reviews the normal launch checks
+in Overview. Pending, active or ambiguous work is not automatically retried;
+unavailable or changed failure evidence refuses the action. A write with an
+unconfirmed outcome must be refreshed, not automatically replayed.
 
 ## Bridge preflight
 
@@ -67,6 +165,12 @@ Bindings include cluster and workspace namespace UIDs, root kind/name/UID, Task
 and parent/root Task UIDs, full effective authorization and digest, Sandbox UID,
 runtime namespace UID, and Pod UID.
 
+Dispatch authentication retries a changing Task-lineage read inventory at most
+three times. Each attempt keeps the original leaf UID/generation and repeats the
+full readiness, attenuation and UID/resource-version checks. Persistent churn,
+replacement, revoked authority or API denial still prevents inference; this
+does not retry provider calls or increase the account allowance.
+
 Account bootstrap is metadata-first. A domain-separated note signed through the
 existing controller signing provider proves authorship even after a lost CREATE
 acknowledgement; labels alone cannot authorize adoption of a pre-existing ledger.
@@ -92,6 +196,14 @@ after collection. `VerifiedTaskLineage::verify_pins` compares a consumer's
 authoritative persisted references; traversal alone does not create immutable
 continuity. Budget enrollment owns persistence and financial state. Credential
 consumers can reuse identity checks without depending on the budget ledger.
+
+Paused Teams can prepare immutable account/Task bindings without activating their
+ledger nodes. New members register dormant, including beneath a dormant parent;
+ordinary reconciliation must not undo the recovery worker's subtree closure.
+Authority edits remain bounded and inactive while paused. Resuming reactivates
+the same ancestry in parent-first order without resetting spending or reopening
+closed Pod sessions; runtime enrollment and each provider send still require
+their separate live admission checks.
 
 ## Reserve, authorize one send, settle
 
@@ -197,6 +309,12 @@ Enable the optional Helm `inferenceBudget` section only after supplying:
   and `:latest` tag but pin that immutable digest. A floating legacy sidecar that
   ignores the new budget environment must not be mistaken for enforcement.
 
+When upgrading a digest-pinned router, update `inferenceRouter.image.tag`
+(`latest@sha256:...`) and `inferenceBudget.routerImageDigest` to the same qualified
+manifest digest in one Helm upgrade. The chart rejects conflicting explicit
+pins rather than silently running the previous image for finite-budget Missions.
+A floating `latest` tag still uses the separately qualified budget digest.
+
 The TLS Secret has type `kubernetes.io/tls`, `tls.crt`/`tls.key`, and annotation
 `kars.azure.com/inference-budget-tls: v1`. Choose either installation mode:
 
@@ -231,6 +349,12 @@ Finite accounts fail closed for missing/expired/unknown bounds, missing prices
 when any ancestor needs a currency cap, or unavailable admission/privacy proof.
 Adding a monetary cap after unpriced historical or InFlight work is rejected;
 that history is not retrospectively priced at zero.
+
+The broker logs rejected requests with the error code, HTTP status and sanitized
+contract error or fixed Kubernetes API stage/status. Tokens, request payloads
+and Kubernetes response bodies are not logged. Correlate these controller logs
+with a router's failed budget stage; a generic HTTP 503 alone does not establish
+exhaustion or authorize a retry, budget reset or provider fallback.
 
 The initial closed operation families are text Chat Completions, Anthropic
 Messages, and Responses. Contracts reject hosted tools, multimodal generation,

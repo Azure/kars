@@ -15,7 +15,7 @@ metadata:
     {{- include "witness.owner" . | nindent 4 }}
 spec:
   selector:
-    matchLabels: {k8s-app: gadget, app.kubernetes.io/instance: kars-datapath-witness}
+    matchLabels: {k8s-app: gadget, app.kubernetes.io/instance: {{ .Release.Name | quote }}}
   template:
     metadata:
       labels:

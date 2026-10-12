@@ -16,7 +16,7 @@ const root=fileURLToPath(new URL("../../",import.meta.url));
 const chart=join(root,"deploy/helm/kars-bridge");
 const oldValues=fileURLToPath(new URL("./fixtures/values-10505214.yaml",import.meta.url));
 
-async function legacyRender(args:string[],lookup=false):Promise<{objects:any[];calls:string[]}> {
+async function legacyRender(args:string[],lookup=false,protectedConsumer?:{name:string;epoch:boolean}):Promise<{objects:any[];calls:string[]}> {
   const directory=join(root,`.chart-upgrade-${randomUUID()}`);
   mkdirSync(directory);
   copyFileSync(join(chart,"Chart.yaml"),join(directory,"Chart.yaml"));
@@ -45,9 +45,13 @@ async function legacyRender(args:string[],lookup=false):Promise<{objects:any[];c
         versions:[{groupVersion:`${name}/v1`,version:"v1"}],preferredVersion:{groupVersion:`${name}/v1`,version:"v1"}}))}:
       discovery[path]?{apiVersion:"v1",kind:"APIResourceList",groupVersion:path==="/api/v1"?"v1":path.slice("/apis/".length),
         resources:resources(discovery[path]!)}:
+      protectedConsumer&&path===`/apis/apps/v1/namespaces/kars-system/deployments/${protectedConsumer.name}`?
+        {apiVersion:"apps/v1",kind:"Deployment",metadata:{name:protectedConsumer.name,namespace:"kars-system",uid:"private-consumer"},
+          spec:{template:{metadata:{annotations:protectedConsumer.epoch?{"kars.azure.com/private-epoch":"retained"}:{}}}}}:
       path==="/api/v1/namespaces/kars-system"?{apiVersion:"v1",kind:"Namespace",metadata:{name:"kars-system",uid:"existing",
         labels:{customer:"retained"},annotations:{"meta.helm.sh/release-name":"kars-bridge",
-          "meta.helm.sh/release-namespace":"kars-system",customer:"retained"}}}:null;
+          "meta.helm.sh/release-namespace":"kars-system",customer:"retained",
+          ...(protectedConsumer&&!protectedConsumer.epoch?{"kars.azure.com/private-parent-private-consumer":"retained"}:{})}}}:null;
     response.writeHead(value?200:404,{"content-type":"application/json"});
     response.end(JSON.stringify(value??{apiVersion:"v1",kind:"Status",code:404,reason:"NotFound"}));
   });
@@ -104,5 +108,13 @@ describe("BASE105 private release-value compatibility",()=>{
     expect(namespace.metadata.annotations.customer).toBe("retained");
     expect(namespace.metadata.labels.customer).toBe("retained");
     expect(objects.some(item=>item.metadata?.name==="kars-bridge-observation-egress")).toBe(false);
+  });
+  it.each([
+    {name:"kars-bridge-bff",epoch:true},
+    {name:"kars-bridge-bff",epoch:false},
+    {name:"kars-bridge-teams-gateway",epoch:true},
+    {name:"kars-bridge-teams-gateway",epoch:false},
+  ])("refuses a private-bound $name even without a template epoch (epoch present: $epoch)",async consumer=>{
+    await expect(legacyRender([],true,consumer)).rejects.toThrow("KARS_PRIVATE_CONSUMER_UPGRADE_BLOCKED");
   });
 });

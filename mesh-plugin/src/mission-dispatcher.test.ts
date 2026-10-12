@@ -4,7 +4,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { MissionDispatcher, missionAttemptName, missionContentDigest, type MissionAttemptStore, type MissionCandidate, type StoredMissionAttempt } from "./mission-dispatcher.js";
 import type { IMeshTransport, MessageSecurity } from "./transport-interface.js";
-import { missionContract, type MissionAssignment, type MissionProbe, type MissionReply } from "./mission-protocol.js";
+import { MAX_MISSION_MESSAGE_BYTES, missionContract, type MissionAssignment, type MissionProbe, type MissionReply } from "./mission-protocol.js";
 import { missionInputContentDigest, missionInputs, type MissionInput } from "./mission-inputs.js";
 
 const candidate: MissionCandidate = {
@@ -37,11 +37,12 @@ function harness() {
   const inbox: Array<{ payload: unknown; from: string; security: MessageSecurity }> = [];
   let statuses: MissionReply["status"][] = ["accepted", "running", "succeeded"];
   let alter = (reply: MissionReply): MissionReply => reply;
+  let encode = (reply: unknown): unknown => reply;
   const mesh = {
     currentDid: candidate.dispatcherDid, isConnected: true, isPlaintextPeer: vi.fn(() => false),
     sendWithAck: vi.fn(async (_to, probe: MissionProbe, predicate) => {
       const ready = { ...probe, type: "mission:reply", bootId: "boot-1", status: "ready" };
-      const match = predicate(ready, candidate.agentDid, "encrypted");
+      const match = predicate(encode(ready), candidate.agentDid, "encrypted");
       if (!match) throw new Error("No matching ready reply");
       return match;
     }),
@@ -58,7 +59,7 @@ function harness() {
             name: phase.name, attemptedToolCalls: 1, successfulToolCalls: 1, minToolCalls: phase.minToolCalls, maxToolCalls: phase.maxToolCalls,
           } } } : {}),
         };
-        inbox.push({ payload: alter(reply), from: candidate.agentDid, security: "encrypted" });
+        inbox.push({ payload: encode(alter(reply)), from: candidate.agentDid, security: "encrypted" });
       }
       return "message-id";
     }),
@@ -72,9 +73,144 @@ function harness() {
     }),
   } as unknown as IMeshTransport;
   return { store, mesh, inbox, state: () => stored, setStatuses: (next: typeof statuses) => { statuses = next; },
+    encodeReply: (f: typeof encode) => { encode = f; },
     alterReply: (f: typeof alter) => { alter = f; }, dispatcher: () => new MissionDispatcher(mesh, store, "dispatcher-process", 100),
   };
 }
+
+describe("provisional router activity dispatch", () => {
+  const routerObservations = JSON.stringify({ version: 1, source: "runtime-forwarded-router-observations", coverage: "returned-responses-only",
+    responses: 1, rounds: [1], state: "unavailable", reason: "Router observations unavailable after execution (reset, expiry or read failure)" });
+  it.each(["OpenClaw", "Hermes"] as const)("persists only the latest %s running snapshot without journal or terminal duplication", async runtime => {
+    const h = harness();
+    if (runtime === "Hermes") h.encodeReply(JSON.stringify);
+    h.alterReply(reply => reply.status === "running" ? { ...reply, evidence, routerObservations } : reply);
+    expect(await h.dispatcher().dispatch({ ...candidate, runtime })).toBe("succeeded");
+    const progress = vi.mocked(h.store.replace).mock.calls.map(call => call[1]).find(a => a.phase === "running");
+    expect(progress?.reply?.routerObservations).toBe(routerObservations);
+    expect(JSON.stringify(progress?.events)).not.toContain("routerObservations");
+    expect(h.state()?.attempt.reply).not.toHaveProperty("routerObservations");
+    expect(h.state()?.attempt.assignment.activityFormat).toBe("router-observations-v1");
+  });
+  it("keeps old peers without activity negotiation working", async () => {
+    const h = harness();
+    vi.mocked(h.mesh.sendWithAck).mockImplementationOnce(async (_to, payload, predicate) => {
+      const ready = { ...(payload as MissionProbe), type: "mission:reply", status: "ready", bootId: "boot-1" };
+      delete ready.activityFormat;
+      return predicate(ready, candidate.agentDid, "encrypted")!;
+    });
+    expect(await h.dispatcher().dispatch(candidate)).toBe("succeeded");
+    expect(h.state()?.attempt.assignment).not.toHaveProperty("activityFormat");
+  });
+  it("ignores replies that drop negotiated activity rather than granting completion", async () => {
+    const h = harness();
+    h.alterReply(reply => { delete reply.activityFormat; return reply; });
+    expect(await h.dispatcher().dispatch(candidate)).toBe("uncertain");
+    expect(h.state()?.attempt.events).toEqual([]);
+    expect(h.store.publish).not.toHaveBeenCalled();
+  });
+});
+
+describe("runtime-bound mission dispatch", () => {
+  it("accepts the Python MeshClient JSON-string wire format without changing the retained contract", async () => {
+    const h = harness();
+    h.encodeReply(JSON.stringify);
+    const artifacts = { "briefing.md": "# Review\nEvidence — 日本語\n" };
+    h.alterReply(reply => reply.status === "succeeded" ? { ...reply, artifacts } : reply);
+    const hermes: MissionCandidate = { ...phasedCandidate, runtime: "Hermes" };
+    expect(await h.dispatcher().dispatch(hermes)).toBe("succeeded");
+    const attempt = h.state()!.attempt;
+    expect(attempt.reply?.artifacts).toEqual(artifacts);
+    expect(attempt.reply?.evidence).toEqual(phaseEvidence);
+    expect(attempt.events.map(event => event.status)).toEqual(["accepted", "running", "succeeded"]);
+    expect(attempt.assignment.activityFormat).toBe("router-observations-v1");
+    expect(await h.dispatcher().dispatch(hermes)).toBe("already-claimed");
+    expect(h.mesh.send).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["malformed", "oversized", "nested", "wrong target", "plaintext", "unknown security"])(
+    "rejects %s encoded Hermes readiness before claiming", async variant => {
+      const h = harness();
+      vi.mocked(h.mesh.sendWithAck).mockImplementationOnce(async (_to, payload, predicate) => {
+        const ready = { ...(payload as MissionProbe), type: "mission:reply", status: "ready", bootId: "boot-1" };
+        if (variant === "wrong target") ready.podUid = "different-pod";
+        let encoded = JSON.stringify(ready);
+        if (variant === "malformed") encoded = "{";
+        if (variant === "oversized") encoded += " ".repeat(MAX_MISSION_MESSAGE_BYTES);
+        if (variant === "nested") encoded = JSON.stringify(encoded);
+        const security = variant === "plaintext" ? "plaintext" : variant === "unknown security" ? "unknown" : "encrypted";
+        expect(predicate(encoded, candidate.agentDid, security)).toBeNull();
+        throw new Error("No matching encoded readiness");
+      });
+      await expect(h.dispatcher().dispatch({ ...candidate, runtime: "Hermes" }))
+        .rejects.toThrow("No matching encoded readiness");
+      expect(h.store.create).not.toHaveBeenCalled();
+      expect(h.mesh.send).not.toHaveBeenCalled();
+    },
+  );
+
+  it("does not broaden the OpenClaw object-only wire contract", async () => {
+    const h = harness();
+    h.encodeReply(JSON.stringify);
+    await expect(h.dispatcher().dispatch(candidate)).rejects.toThrow("No matching ready reply");
+    expect(h.store.create).not.toHaveBeenCalled();
+  });
+
+  it("rejects encoded Hermes completion from a different boot", async () => {
+    const h = harness();
+    h.encodeReply(JSON.stringify);
+    h.alterReply(reply => ({ ...reply, bootId: "different-boot" }));
+    expect(await h.dispatcher().dispatch({ ...phasedCandidate, runtime: "Hermes" })).toBe("uncertain");
+    expect(h.state()?.attempt.events).toEqual([]);
+    expect(h.store.publish).not.toHaveBeenCalled();
+  });
+
+  it("keeps older Hermes peers without activity negotiation working and recovers without a resend", async () => {
+    const h = harness();
+    vi.mocked(h.mesh.sendWithAck).mockImplementationOnce(async (_to, payload, predicate) => {
+      const ready = { ...(payload as MissionProbe), type: "mission:reply", status: "ready", bootId: "boot-1" };
+      delete ready.activityFormat;
+      return predicate(ready, candidate.agentDid, "encrypted")!;
+    });
+    const hermes: MissionCandidate = { ...phasedCandidate, runtime: "Hermes" };
+    const artifacts = { "briefing.md": "# Approval checklist\nReviewed evidence — 日本語\n" };
+    h.alterReply(reply => reply.status === "succeeded" ? { ...reply, artifacts } : reply);
+    expect(await h.dispatcher().dispatch(hermes)).toBe("succeeded");
+    const probe = vi.mocked(h.mesh.sendWithAck).mock.calls[0][1];
+    expect(probe).toHaveProperty("activityFormat", "router-observations-v1");
+    expect(probe).not.toHaveProperty("runtime");
+    const attempt = h.state()!.attempt;
+    expect(attempt.candidate.runtime).toBe("Hermes");
+    expect(attempt.assignment).not.toHaveProperty("runtime");
+    expect(attempt.assignment).not.toHaveProperty("activityFormat");
+    expect(attempt.reply?.artifacts).toEqual(artifacts);
+    expect(attempt.reply?.evidence).toEqual(phaseEvidence);
+    expect(attempt.events.map(event => event.status)).toEqual(["accepted", "running", "succeeded"]);
+    expect(h.store.publish).toHaveBeenCalledWith(attempt);
+    expect(await h.dispatcher().dispatch(hermes)).toBe("already-claimed");
+    expect(h.mesh.send).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects Hermes readiness that introduces an unsupported activity format before claiming", async () => {
+    const h = harness();
+    vi.mocked(h.mesh.sendWithAck).mockImplementationOnce(async (_to, payload, predicate) => {
+      expect(predicate({ ...(payload as MissionProbe), type: "mission:reply", status: "ready", bootId: "boot-1",
+        activityFormat: "router-observations-v2" }, candidate.agentDid, "encrypted")).toBeNull();
+      throw new Error("No matching runtime readiness");
+    });
+    await expect(h.dispatcher().dispatch({ ...candidate, runtime: "Hermes" })).rejects.toThrow("No matching runtime readiness");
+    expect(h.store.create).not.toHaveBeenCalled();
+    expect(h.mesh.send).not.toHaveBeenCalled();
+  });
+
+  it.each([null, "", "MAF", "hermes", 7, {}])("rejects unsupported runtime %j before storage or transport", async runtime => {
+    const h = harness();
+    await expect(h.dispatcher().dispatch({ ...candidate, runtime } as MissionCandidate)).rejects.toThrow();
+    expect(h.store.get).not.toHaveBeenCalled();
+    expect(h.mesh.sendWithAck).not.toHaveBeenCalled();
+    expect(h.mesh.send).not.toHaveBeenCalled();
+  });
+});
 
 describe("immutable input dispatch", () => {
   const content = "# Upstream draft\r\nCafé — 日本語 🌍\n";

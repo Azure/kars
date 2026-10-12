@@ -15,6 +15,17 @@ The **kars OpenClaw plugin** is the agent-side runtime surface for kars. When a 
 
 For the conceptual split between plugin-owned mesh and router-owned governance/audit, see [Architecture → The mesh](architecture.md#the-mesh) and [AGT boundary](architecture/agt-boundary.md).
 
+Reviewed execution reads immutable peer handoffs and retained Team documents through
+the authorized filesystem tool before exporting findings. Each model round lists
+the inputs still unread and the next complete read, so already-consumed documents
+do not compete with required exports for the phase's fixed tool-call allowance.
+Reading `/sandbox/.kars-inputs` with `max_bytes: 65536` returns the complete
+bounded JSON bundle, including every document's content, source and SHA256, in
+one authorized tool call. Individual document reads remain supported. Only a
+complete bundle read satisfies all its input-consumption requirements.
+Repeated or partial reads still consume that allowance; insufficient remaining
+calls stop the phase rather than increasing limits or claiming successful recall.
+
 ---
 
 ## Registered tools (24 total)

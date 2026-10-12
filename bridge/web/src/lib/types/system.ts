@@ -83,6 +83,9 @@ export interface Orchestrator {
   sandbox_ready: string | null;
   sandbox_restarts: number | null;
   sandbox_waiting_reason: string | null;
+  /** Absent while a rolling upgrade still serves the older BFF response. */
+  sandbox_node?: string | null;
+  sandbox_uptime_seconds?: number | null;
   router_candidates: number;
   recommend_direct: boolean;
   note: string;

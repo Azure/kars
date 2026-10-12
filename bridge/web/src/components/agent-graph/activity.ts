@@ -3,6 +3,38 @@
 
 import type { ActivityEvent } from "@/lib/types";
 import type { AgentAction, AgentExecution, ToolEvent } from "./types";
+import { routerObservationKey, toolResultSummary, type BoundRouterActivity } from "@/lib/router-activity";
+
+export function actionRound(action: AgentAction): number {
+  return action.source === "legacy" ? action.round + 1 : action.round;
+}
+
+export function actionsFromRouter({ producer, observations }: BoundRouterActivity): AgentAction[] {
+  if (observations.state !== "observed") return [];
+  return observations.trace.events.map(event => ({
+    id: routerObservationKey(producer, event),
+    human: event.kind === "round" ? `Router response · round ${event.round}`
+      : `${event.kind === "tool_proposed" ? "Model proposed" : "Harness reported"}: ${event.name}`,
+    raw: event.kind === "round" ? "router.response" : event.name,
+    args: event.kind === "round" ? `${event.tool_calls_observed} tool proposals observed`
+      : `Call: ${event.call_id}. Raw arguments excluded from telemetry.`,
+    result: event.kind === "round"
+      ? `HTTP ${event.http_status ?? "unavailable"}; ${event.outcome}; ${event.model ?? "model unavailable"}; tokens: ${event.usage?.total_tokens ?? "unavailable"} (${event.usage_state})`
+      : event.kind === "tool_proposed" ? "Proposal only; execution not established"
+        : `Reported in router round ${event.reported_in_round}; outcome ${event.ok === null ? "unavailable" : event.ok ? "success" : "failure"}. ${toolResultSummary(event.result_summary)}`,
+    ok: event.kind === "tool_result" ? event.ok : null,
+    round: event.round,
+    ms: event.kind === "tool_proposed" ? null : event.ms ?? null,
+    ts: event.observed_at ?? null,
+    source: event.source,
+    seq: event.seq,
+    agentInstance: producer.pod_uid,
+  }));
+}
+
+export function observationQuery(actions: AgentAction[]): string {
+  return `observations:${new URLSearchParams({ ids: JSON.stringify(actions.map(action => action.id)) })}`;
+}
 
 export function normalize(value: string): string {
   return value.trim().toLowerCase();
@@ -93,6 +125,7 @@ export function actionFromEvent(event: ActivityEvent, index: number): AgentActio
       round: event.round,
       ms: event.ms,
       ts: event.ts,
+      source: "legacy",
       seq: event.seq ?? null,
       agentInstance: event.agentInstance ?? null,
     };
@@ -107,6 +140,7 @@ export function actionFromEvent(event: ActivityEvent, index: number): AgentActio
     round: event.round,
     ms: event.ms,
     ts: event.ts,
+    source: "legacy",
     seq: event.seq ?? null,
     agentInstance: event.agentInstance ?? null,
   };
@@ -123,10 +157,11 @@ function queryAgentIdentity(agent: AgentExecution): string {
 }
 
 export function exactActionQuery(agent: AgentExecution, action: AgentAction): string {
+  if (action.source !== "legacy") return observationQuery([action]);
   const parameters = new URLSearchParams({
     agent: queryAgentIdentity(agent),
     round: String(action.round),
-    ts: action.ts,
+    ts: action.ts ?? "",
     tool: action.raw,
     args: action.args,
     result: action.result,
@@ -137,6 +172,7 @@ export function exactActionQuery(agent: AgentExecution, action: AgentAction): st
 }
 
 export function exactActionsQuery(agent: AgentExecution, actions: AgentAction[]): string {
+  if (actions.length > 0 && actions.every(action => action.source !== "legacy")) return observationQuery(actions);
   const through = actions.at(-1)?.ts ?? "";
   const parameters = new URLSearchParams({
     agent: queryAgentIdentity(agent),

@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 
 # Off renders only the operator-intent ConfigMap. No privileged workload or capture.
+managed: true
 enabled: false
 
 aggregator:
@@ -17,8 +18,13 @@ aggregator:
 # Add/remove entries with the same Helm upgrade command.
 sandboxes: []
 
-# Verified upstream v0.53.2 multi-platform image index; not a Kars image.
+# The maintained runtime includes both client and daemon. Supply its reviewed
+# digest here as well as aggregator.image; the former Debian daemon is not a default.
+# OCI gadget artifacts remain independently pinned and signature-verified.
 gadget:
-  image: ghcr.io/inspektor-gadget/inspektor-gadget@sha256:39ebe601aff064f531aa0630194d9a7bbdb5060de4f290d7ec2fd678f1dd5c10
+  image: ""
+  # Explicit compatibility mode for kernels without FANOTIFY_ACCESS_PERMISSIONS:
+  # podinformer discovers containers asynchronously and can miss startup traffic.
+  hookMode: fanotify+ebpf
   dnsImage: ghcr.io/inspektor-gadget/gadget/trace_dns@sha256:751684c8bf45731ffb412e608d9fb71f9e896debe1d138d524f850cadf54a0f7
   tcpImage: ghcr.io/inspektor-gadget/gadget/trace_tcp@sha256:b6a4f4563430effa4ddde01898e628f082f2db4b638b18922eb55e4bd4aaab89

@@ -22,6 +22,45 @@ fn upstream(e: kube::Error) -> AppError {
     AppError::Upstream(e.to_string())
 }
 
+fn append_model(
+    models: &mut Vec<ModelOption>,
+    deployment: String,
+    provider: String,
+    is_default: bool,
+) {
+    if deployment.is_empty()
+        || models
+            .iter()
+            .any(|model| model.deployment == deployment && model.provider == provider)
+    {
+        return;
+    }
+    models.push(ModelOption {
+        provider,
+        deployment,
+        is_default,
+        detail: None,
+    });
+}
+
+#[test]
+fn model_catalogue_retains_the_same_deployment_on_distinct_providers() {
+    let mut models = Vec::new();
+    append_model(&mut models, "gpt-4.1".into(), "github-copilot".into(), true);
+    append_model(&mut models, "gpt-4.1".into(), "azure-foundry".into(), false);
+    append_model(
+        &mut models,
+        "gpt-4.1".into(),
+        "github-copilot".into(),
+        false,
+    );
+    append_model(&mut models, "".into(), "azure-foundry".into(), false);
+    assert_eq!(models.len(), 2);
+    assert!(models[0].is_default);
+    assert_eq!(models[1].provider, "azure-foundry");
+    assert!(!models[1].is_default);
+}
+
 /// Infer a provider tag from a deployment string when none is recorded — a
 /// `github-models`-style `openai/<model>` carries its vendor in the prefix. A
 /// bare deployment name (the Copilot/Foundry form) carries no vendor, so we tag
@@ -58,7 +97,8 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
     // Models: the controller-configured default + catalog, deduped against any
     // distinct models already pinned on existing InferencePolicies (real,
     // in-use facts). Order: default first, then catalog, then discovered.
-    let (default_model, catalog) = cluster.controller_models().await;
+    let (default_model, mut catalog) = cluster.controller_models().await;
+    let provider_keys = cluster.additional_provider_keys().await.map_err(upstream)?;
     // The cluster's inherited inference provider — the authoritative tag for any
     // catalog model that doesn't carry its own vendor prefix. Fetched up front
     // so every offered model is stamped with the provider the router actually
@@ -68,6 +108,19 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
         .await
         .map(|(id, label, note)| ProviderInfo { id, label, note });
     let cluster_provider_id: Option<String> = provider.as_ref().map(|p| p.id.clone());
+    if let Some(id) = cluster_provider_id.as_deref()
+        && let Some(selected) = provider_keys.get(&format!(
+            "KARS_PROVIDER_{}_MODELS",
+            id.to_ascii_uppercase().replace('-', "_")
+        ))
+    {
+        catalog = selected
+            .split(',')
+            .map(str::trim)
+            .filter(|model| !model.is_empty())
+            .map(str::to_string)
+            .collect();
+    }
     // The operator's declared, served set — the only models we trust enough to
     // offer. Discovered InferencePolicy models are surfaced ONLY if they are
     // also in this set, so a stale policy pinning an unserved model (e.g. a
@@ -78,22 +131,13 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
         .chain(default_model.clone())
         .collect();
     let mut models: Vec<ModelOption> = Vec::new();
-    let mut seen: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
     // Detail blurbs (deployment → "vendor · ctx · category") for models whose
     // provider exposes them; applied in a post-pass so push_model stays simple.
     let mut details: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     let cpid = cluster_provider_id.clone();
     let mut push_model = |deployment: String, provider: Option<&str>, is_default: bool| {
-        if deployment.is_empty() || !seen.insert(deployment.clone()) {
-            return;
-        }
         let provider = provider_for(&deployment, provider, cpid.as_deref());
-        models.push(ModelOption {
-            provider,
-            deployment,
-            is_default,
-            detail: None,
-        });
+        append_model(&mut models, deployment, provider, is_default);
     };
     if let Some(def) = default_model.clone() {
         push_model(def, None, true);
@@ -118,7 +162,11 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
             if let Some(d) = detail {
                 details.entry(dep.clone()).or_insert(d);
             }
-            push_model(dep, Some("github-copilot"), false);
+            if !provider_keys.contains_key("KARS_PROVIDER_GITHUB_COPILOT_MODELS")
+                || catalog_set.contains(&dep)
+            {
+                push_model(dep, Some("github-copilot"), false);
+            }
         }
     }
     for ip in cluster
@@ -152,7 +200,6 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
     // InferencePolicy's model picker offer "gpt-4.1 via Foundry" alongside
     // "opus-4.8 via GitHub Copilot" with no change to that editor — it
     // already keys options by `provider::deployment`.
-    let provider_keys = cluster.additional_provider_keys().await.map_err(upstream)?;
     let mut declared_models: std::collections::BTreeMap<String, Vec<String>> =
         std::collections::BTreeMap::new();
     for (key, value) in &provider_keys {
@@ -182,7 +229,8 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
     // Apply detail blurbs (only some providers expose them).
     if !details.is_empty() {
         for m in models.iter_mut() {
-            if m.detail.is_none()
+            if m.provider == "github-copilot"
+                && m.detail.is_none()
                 && let Some(d) = details.get(&m.deployment)
             {
                 m.detail = Some(d.clone());
@@ -221,12 +269,12 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
         mk(
             "OpenClaw",
             "OpenClaw",
-            "Autonomous — the default kars harness, exercised end-to-end (full mesh + spawn). Runs missions and standing teams.",
+            "Autonomous — the default kars harness for missions and standing teams. Image and pull configuration are available; this is not an execution or collaboration check.",
         ),
         mk(
             "Hermes",
             "Hermes (Nous Research)",
-            "Autonomous — executes a delivered objective in-process and replies (plugins, 20+ channels, native MCP). Verified end-to-end.",
+            "Autonomous — handles objectives with tools and router-mediated MCP. Image and pull configuration are available; this is not an execution or collaboration check.",
         ),
         mk(
             "Anthropic",
@@ -346,7 +394,7 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
         .collect();
 
     let skills = cluster
-        .list_kind_all("KarsSkill")
+        .list_kind("kars-system", "KarsSkill")
         .await
         .map_err(upstream)?
         .iter()
@@ -354,25 +402,7 @@ pub async fn build_options(cluster: &crate::kars::cluster::Cluster) -> AppResult
         // approved AND locked to the skill's current version digest. A pending,
         // never-approved, or changed-since-approval skill is withheld until
         // (re)approved — the same rule the operator console enforces.
-        .filter(|o| {
-            let review = o
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|a| a.get("kars.azure.com/skill-review"))
-                .map(String::as_str);
-            let locked = o
-                .metadata
-                .annotations
-                .as_ref()
-                .and_then(|a| a.get("kars.azure.com/skill-locked-digest"));
-            let digest = o
-                .data
-                .get("status")
-                .and_then(|s| s.get("versionDigest"))
-                .and_then(|d| d.as_str());
-            review == Some("approved") && locked.is_some() && locked.map(String::as_str) == digest
-        })
+        .filter(|o| crate::skill_package::approved_digest(&serde_json::json!(o)).is_ok())
         .map(skill_option)
         .collect();
 

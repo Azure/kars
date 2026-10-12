@@ -34,14 +34,14 @@ export default async function AuditorLayout({ children }: { children: React.Reac
   return (
     <div className="flex min-h-full flex-col">
       <header className="sticky top-0 z-10 border-b border-border bg-surface/90 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
-          <Link href="/audit" className="flex items-center gap-2.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 px-4 sm:px-6">
+          <Link href="/audit" aria-label="kars Auditor" className="flex items-center gap-2.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal">
             <span className="grid h-7 w-7 place-items-center rounded-md bg-foreground text-background text-sm font-bold">kb</span>
-            <span className="font-semibold tracking-tight">
+            <span className="hidden font-semibold tracking-tight sm:inline">
               kars <span className="text-foreground-muted">Auditor</span>
             </span>
           </Link>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             <span className="hidden items-center gap-1 rounded-full border border-ok/30 bg-ok/[0.08] px-2 py-0.5 text-[11px] font-medium text-ok sm:inline-flex" title="This surface is entirely read-only. Nothing here can change the platform — it only inspects and verifies the tamper-evident record.">
               <Icon name="eye" size={12} /> Read-only
             </span>

@@ -5,14 +5,23 @@
 
 // kars Bridge — team task backlog. A standing team is a persistent org you
 // assign discrete tasks to (a, b, c, d). Each run picks up the oldest pending
-// task, works it, and marks it done — so a "finance" or "marketing" team keeps a
-// visible, progressing worklist beyond its always-on charter.
+// task and retains its run history. Review-required work gates later intake.
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
-import type { TeamTask } from "@/lib/types";
+import type { TeamTask, TeamDetail } from "@/lib/types";
+import { formatEvidenceTime } from "@/lib/format";
+import { LiveRefresh } from "@/components/live-refresh";
 import { addTeamTask, deleteTeamTask, reviewTeamTask } from "./task-actions";
+
+const ATTEMPT_LABELS: Record<NonNullable<TeamTask["history"]>[number]["outcome"], string> = {
+  changes_requested: "Changes requested",
+  failed: "Not delivered",
+  approved: "Approved",
+  completed: "Completed",
+  cancelled: "Cancelled",
+};
 
 const STATUS_META: Record<string, { label: string; cls: string; glyph: string }> = {
   pending: {
@@ -21,7 +30,7 @@ const STATUS_META: Record<string, { label: string; cls: string; glyph: string }>
     glyph: "○",
   },
   active: {
-    label: "Running",
+    label: "Assigned",
     cls: "border-sky-500/40 bg-sky-500/10 text-sky-600",
     glyph: "◐",
   },
@@ -35,47 +44,69 @@ const STATUS_META: Record<string, { label: string; cls: string; glyph: string }>
     cls: "border-emerald-500/40 bg-emerald-500/10 text-emerald-600",
     glyph: "✓",
   },
+  retired: {
+    label: "Source retired",
+    cls: "border-border bg-surface-muted text-foreground-muted",
+    glyph: "—",
+  },
 };
+
+function finished(task: TeamTask) {
+  return task.status === "done" || task.status === "retired";
+}
 
 export function TeamTasks({
   team,
   tasks,
   paused,
+  reviews = [],
 }: {
   team: string;
   tasks: TeamTask[];
   paused: boolean;
+  reviews?: TeamDetail["work_reviews"];
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [title, setTitle] = useState("");
   const [description, setDescription] = useState("");
+  const [reviewRequired, setReviewRequired] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [reviewFeedback, setReviewFeedback] = useState<Record<string, string>>({});
   const [showCompleted, setShowCompleted] = useState(false);
+  const [submittedReviews, setSubmittedReviews] = useState<Record<string, string>>({});
+  const waitingForReview = tasks.some((task) => {
+    if (task.status !== "awaiting_review") return false;
+    const review = reviews.find((item) =>
+      item.task_id === task.id && item.assignment_nonce === task.assignment_nonce);
+    return review?.ready !== true || review.decision_pending
+      || (!!task.assignment_nonce && submittedReviews[task.id] === task.assignment_nonce);
+  });
 
   const pendingCount = tasks.filter((t) => t.status === "pending").length;
   const activeCount = tasks.filter((t) => t.status === "active").length;
-  const completedCount = tasks.filter((t) => t.status === "done").length;
-  const completedIds = new Set(tasks.filter((task) => task.status === "done").map((task) => task.id));
+  const reviewCount = tasks.filter((t) => t.status === "awaiting_review").length;
+  const completedCount = tasks.filter(finished).length;
+  const completedIds = new Set(tasks.filter(finished).map((task) => task.id));
   const visibleTasks = [
     ...tasks.filter((task) => task.status === "active"),
     ...tasks.filter((task) => task.status === "awaiting_review"),
     ...tasks.filter((task) => task.status === "pending"),
-    ...(showCompleted ? tasks.filter((task) => task.status === "done") : []),
+    ...(showCompleted ? tasks.filter(finished) : []),
   ];
 
   function submit() {
     if (!title.trim()) return;
     setError(null);
     startTransition(async () => {
-      const res = await addTeamTask(team, title.trim(), description.trim());
+      const res = await addTeamTask(team, title.trim(), description.trim(), reviewRequired);
       if (res.error) {
         setError(res.error);
         return;
       }
       setTitle("");
       setDescription("");
+      setReviewRequired(false);
       router.refresh();
     });
   }
@@ -94,29 +125,41 @@ export function TeamTasks({
 
   function review(id: string, decision: "approve" | "request_changes") {
     setError(null);
+    const item = tasks.find((task) => task.id === id);
+    const nonce = item?.assignment_nonce;
+    const runUid = item?.run_uid;
+    if (!nonce || !runUid) {
+      setError("This work has no current run binding. Refresh before reviewing.");
+      return;
+    }
     startTransition(async () => {
-      const result = await reviewTeamTask(team, id, decision, reviewFeedback[id]);
+      const result = await reviewTeamTask(team, id, decision,
+        { assignmentNonce: nonce, runUid }, reviewFeedback[id]);
       if (result.error) {
         setError(result.error);
         return;
       }
+      setSubmittedReviews((current) => ({ ...current, [id]: nonce }));
       router.refresh();
     });
   }
 
   return (
     <section className="rounded-xl border border-border bg-surface p-6">
+      <LiveRefresh active={waitingForReview} />
       <div className="flex items-start justify-between gap-3">
         <div>
           <h2 className="text-sm font-semibold">Task backlog</h2>
           <p className="mt-0.5 text-xs text-foreground-muted">
             Discrete tasks this team works through, one per run — beyond its always-on charter. The
-            team picks up the oldest queued task on its next run and marks it done when delivered.
+            team picks the oldest eligible task. Work requiring review stays gated until you approve
+            its current result; requested changes produce a fresh run with your feedback.
           </p>
         </div>
         {tasks.length > 0 && (
           <span className="shrink-0 rounded-full bg-surface-muted px-2.5 py-1 text-xs font-medium text-foreground-muted">
-            {activeCount > 0 ? `${activeCount} running · ` : ""}
+            {activeCount > 0 ? `${activeCount} assigned · ` : ""}
+            {reviewCount > 0 ? `${reviewCount} awaiting review · ` : ""}
             {pendingCount} queued
           </span>
         )}
@@ -126,6 +169,7 @@ export function TeamTasks({
       <div className="mt-4 rounded-lg border border-border bg-surface-muted/30 p-3">
         <input
           type="text"
+          aria-label="Task title"
           value={title}
           onChange={(e) => setTitle(e.target.value)}
           onKeyDown={(e) => {
@@ -138,16 +182,22 @@ export function TeamTasks({
           className="w-full rounded-md border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-signal"
         />
         <textarea
+          aria-label="Task details"
           value={description}
           onChange={(e) => setDescription(e.target.value)}
           placeholder="Optional details, constraints, links…"
           rows={2}
           className="mt-2 w-full resize-y rounded-md border border-border bg-surface px-3 py-2 text-xs outline-none focus:border-signal"
         />
+        <label className="mt-2 flex items-center gap-2 text-xs">
+          <input type="checkbox" checked={reviewRequired}
+            onChange={(event) => setReviewRequired(event.target.checked)} />
+          Require human review before completing this work
+        </label>
         <div className="mt-2 flex items-center justify-between gap-3">
           <p className="text-[11px] text-foreground-muted">
             {paused
-              ? "Team is paused — queued tasks run once you resume it."
+              ? "Resume the team, then use Run now or wait for its configured cadence."
               : "Runs on the next cadence tick, or immediately via Run now."}
           </p>
           <button
@@ -177,6 +227,10 @@ export function TeamTasks({
           {visibleTasks.map((t) => {
             const meta = STATUS_META[t.status] ?? STATUS_META.pending;
             const blockedBy = t.depends_on.filter((dependency) => !completedIds.has(dependency));
+            const removable = t.status === "pending" && !t.history?.length;
+            const reviewState = reviews.find((review) => review.task_id === t.id && review.assignment_nonce === t.assignment_nonce);
+            const reviewSubmitted = !!t.assignment_nonce && (submittedReviews[t.id] === t.assignment_nonce || reviewState?.decision_pending);
+            const reviewReady = !!t.assignment_nonce && !!t.run_uid && reviewState?.ready === true;
             return (
               <li
                 key={t.id}
@@ -189,11 +243,17 @@ export function TeamTasks({
                     >
                       <span aria-hidden>{meta.glyph}</span> {meta.label}
                     </span>
-                    <p className="truncate text-sm font-medium">{t.title}</p>
+                    <p className="truncate text-sm font-medium" title={t.title}>{t.title}</p>
                   </div>
                   {t.description && (
                     <p className="mt-0.5 line-clamp-2 text-xs text-foreground-muted">
                       {t.description}
+                    </p>
+                  )}
+                  {t.status === "retired" && (
+                    <p className="mt-1 text-[11px] text-foreground-muted">
+                      Intake retired this source item. This is not an executed or approved result.
+                      {" "}Source observed: {formatEvidenceTime(t.done_at)}.
                     </p>
                   )}
                   {blockedBy.length > 0 && (
@@ -204,6 +264,11 @@ export function TeamTasks({
                   {t.acceptance_criteria.length > 0 && (
                     <p className="mt-1 text-[11px] text-foreground-muted">
                       Acceptance: {t.acceptance_criteria.join(" · ")}
+                    </p>
+                  )}
+                  {t.feedback && (
+                    <p className="mt-1 whitespace-pre-wrap text-xs text-foreground-muted">
+                      Revision feedback: {t.feedback}
                     </p>
                   )}
                   {t.run && (
@@ -217,6 +282,7 @@ export function TeamTasks({
                   {t.status === "awaiting_review" && (
                     <div className="mt-2 space-y-2">
                       <textarea
+                        aria-label={`Review feedback for ${t.title}`}
                         value={reviewFeedback[t.id] ?? ""}
                         onChange={(event) =>
                           setReviewFeedback((current) => ({
@@ -231,7 +297,7 @@ export function TeamTasks({
                       <div className="flex flex-wrap gap-2">
                         <button
                           type="button"
-                          disabled={pending}
+                          disabled={pending || reviewSubmitted || !reviewReady}
                           onClick={() => review(t.id, "approve")}
                           className="rounded-md bg-signal px-2.5 py-1 text-[11px] font-semibold text-signal-fg disabled:opacity-50"
                         >
@@ -239,21 +305,52 @@ export function TeamTasks({
                         </button>
                         <button
                           type="button"
-                          disabled={pending || !(reviewFeedback[t.id] ?? "").trim()}
+                          disabled={pending || reviewSubmitted || !reviewReady || !(reviewFeedback[t.id] ?? "").trim()}
                           onClick={() => review(t.id, "request_changes")}
                           className="rounded-md border border-warning/50 px-2.5 py-1 text-[11px] font-semibold text-warning disabled:opacity-50"
                         >
                           Request changes
                         </button>
                       </div>
+                      {reviewSubmitted && (
+                        <p role="status" className="text-xs text-foreground-muted">
+                          Decision recorded. Waiting for the controller to update this work.
+                        </p>
+                      )}
+                      {!reviewSubmitted && !reviewReady && (
+                        <p role="status" className="text-xs text-foreground-muted">
+                          Waiting for the controller to bind this result for review.
+                        </p>
+                      )}
                     </div>
+                  )}
+                  {!!t.history?.length && (
+                    <details className="mt-2 text-xs">
+                      <summary className="cursor-pointer text-foreground-muted">
+                        Recorded attempts ({t.history.length})
+                      </summary>
+                      <ul className="mt-2 space-y-2">
+                        {t.history.map((attempt) => (
+                          <li key={`${attempt.run_uid}:${attempt.assignment_nonce}`}>
+                            <Link
+                              href={`/workspace/teams/${encodeURIComponent(team)}/runs/${encodeURIComponent(attempt.run)}`}
+                              className="text-signal hover:underline"
+                            >
+                              {ATTEMPT_LABELS[attempt.outcome]}
+                              {" · "}{formatEvidenceTime(attempt.finished_at)}
+                            </Link>
+                            {attempt.feedback && <p className="whitespace-pre-wrap text-foreground-muted">{attempt.feedback}</p>}
+                          </li>
+                        ))}
+                      </ul>
+                    </details>
                   )}
                 </div>
                 <button
                   type="button"
-                  disabled={pending}
+                  disabled={pending || !removable}
                   onClick={() => remove(t.id)}
-                  title="Remove from backlog"
+                  title={removable ? "Remove from backlog" : "Assigned work and its run history are retained"}
                   className="shrink-0 rounded-md border border-border px-2 py-1 text-[11px] text-foreground-muted transition hover:bg-surface-muted hover:text-rose-600 disabled:opacity-50"
                 >
                   Remove
@@ -269,8 +366,8 @@ export function TeamTasks({
             className="mt-3 text-[11px] font-medium text-signal hover:underline"
           >
             {showCompleted
-              ? "Hide completed work"
-              : `Show ${completedCount} completed item${completedCount === 1 ? "" : "s"}`}
+              ? "Hide finished work"
+              : `Show ${completedCount} finished item${completedCount === 1 ? "" : "s"}`}
           </button>
         )}
         </>

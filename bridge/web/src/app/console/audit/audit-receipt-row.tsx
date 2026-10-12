@@ -10,7 +10,7 @@
 // independently. This is the auditor's working unit — not an opaque hash.
 
 import { useState } from "react";
-import type { Receipt, VerifyResult, CompliancePack } from "@/lib/types";
+import type { Receipt, ReceiptSummary, VerifyResult, CompliancePack } from "@/lib/types";
 import { CompliancePackView } from "@/components/compliance-pack";
 
 function claimTone(status: string): { cls: string; label: string } {
@@ -27,6 +27,18 @@ const CLAIM_LABEL: Record<string, string> = {
   completeness: "Completeness — were all controls enforced & recorded?",
   regulatory: "Regulatory — how is it anchored & signed?",
 };
+
+export function receiptClaimVerdict(claims: Receipt["claims"]): ReceiptSummary["verdict"] {
+  if (claims.length === 0) return "none";
+  if (claims.some((c) => ["FAIL", "ERROR"].includes(c.status.toUpperCase()))) return "failed";
+  const core = claims.filter((c) => c.class.toLowerCase() !== "regulatory");
+  const requiredPresent = ["integrity", "conformance", "completeness"].every(
+    (required) => core.some((c) => c.class.toLowerCase() === required),
+  );
+  return requiredPresent && core.every((c) => ["PASS", "OK"].includes(c.status.toUpperCase()))
+    ? "verified"
+    : "partial";
+}
 
 export function AuditReceiptRow({
   ns,
@@ -119,29 +131,11 @@ export function AuditReceiptRow({
   // receipt's claim matrix — so the collapsed row is accurate without an eager
   // full-receipt fetch.
   const claims = receipt?.claims ?? [];
-  // Mirror the BFF verdict rule: the regulatory claim is a V0 maturity dimension
-  // (always PARTIAL/OMITTED until an external anchor lands — a named V1 item),
-  // and OMITTED is an honest disclosure, not a failure. Neither blocks a Verified
-  // verdict, so the badge reflects the cryptographic claims (integrity +
-  // conformance + completeness); the regulatory/omitted maturity is still shown
-  // in the expanded claim detail. Without this, every receipt read "Partial".
-  const isAdvisoryClaim = (c: { class?: string; status: string }) =>
-    (c.class ?? "").toLowerCase() === "regulatory" || c.status.toUpperCase() === "OMITTED";
-  const allStatuses = claims.map((c) => c.status.toUpperCase());
-  const coreStatuses = claims.filter((c) => !isAdvisoryClaim(c)).map((c) => c.status.toUpperCase());
-  const effectiveVerdict = receipt
-    ? allStatuses.includes("FAIL") || allStatuses.includes("ERROR")
-      ? "failed"
-      : coreStatuses.length > 0 && coreStatuses.every((s) => s === "PASS" || s === "OK")
-        ? "verified"
-        : claims.length > 0
-          ? "partial"
-          : "none"
-    : summaryVerdict;
+  const effectiveVerdict = receipt ? receiptClaimVerdict(claims) : summaryVerdict;
   const VERDICT: Record<string, { cls: string; label: string }> = {
-    verified: { cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600", label: "Verified" },
-    failed: { cls: "border-rose-500/30 bg-rose-500/10 text-rose-600", label: "Failed" },
-    partial: { cls: "border-amber-500/30 bg-amber-500/10 text-amber-600", label: "Partial" },
+    verified: { cls: "border-emerald-500/30 bg-emerald-500/10 text-emerald-600", label: "Claims pass" },
+    failed: { cls: "border-rose-500/30 bg-rose-500/10 text-rose-600", label: "Claims fail" },
+    partial: { cls: "border-amber-500/30 bg-amber-500/10 text-amber-600", label: "Claims partial" },
     none: { cls: "border-border bg-surface-muted text-foreground-muted", label: "No claims" },
   };
   const verdict = VERDICT[effectiveVerdict] ?? VERDICT.none;
@@ -241,10 +235,10 @@ export function AuditReceiptRow({
                             : "border-rose-500/30 bg-rose-500/10 text-rose-600"
                         }`}
                       >
-                        {result.verified ? "✓ Verified" : "✗ Not verified"}
+                        {result.verified ? "✓ Cryptographic checks passed" : "✗ Not verified"}
                       </span>
                       <span className="text-[11px] text-foreground-muted">
-                        {result.verified ? "authentic, unaltered, chained, and checkpoint-pinned" : "one or more checks failed"}
+                        {result.verified ? "See the trust-anchor and advisory limits below; this does not prove control enforcement." : "one or more checks failed"}
                       </span>
                     </div>
 

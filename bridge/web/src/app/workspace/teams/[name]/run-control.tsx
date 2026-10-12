@@ -10,21 +10,24 @@
 
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
+import { LiveRefresh } from "@/components/live-refresh";
 import { runTeamNow } from "./run-actions";
 
 export function RunNowControl({
   team,
   paused,
   inFlight,
+  runKey,
 }: {
   team: string;
   paused: boolean;
   inFlight: boolean;
+  runKey: string | null;
 }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
   const [error, setError] = useState<string | null>(null);
-  const [done, setDone] = useState(false);
+  const [requested, setRequested] = useState<{ runKey: string | null } | null>(null);
   // Run now mints a real, budget-spending run — require an explicit confirm so a
   // single stray click can't launch work (audit B30).
   const [confirming, setConfirming] = useState(false);
@@ -38,11 +41,8 @@ export function RunNowControl({
         setError(res.error);
         return;
       }
-      setDone(true);
+      setRequested({ runKey });
       router.refresh();
-      for (const delay of [2_000, 5_000, 10_000, 20_000]) {
-        setTimeout(() => router.refresh(), delay);
-      }
     });
   }
 
@@ -65,11 +65,14 @@ export function RunNowControl({
     );
   }
 
-  if (done) {
+  if (requested && requested.runKey === runKey) {
     return (
-      <span className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-1.5 text-xs text-emerald-600">
-        Run requested — launching…
-      </span>
+      <>
+        <LiveRefresh active intervalMs={5000} />
+        <span className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-3 py-1.5 text-xs text-emerald-600">
+          Run requested — launching…
+        </span>
+      </>
     );
   }
 

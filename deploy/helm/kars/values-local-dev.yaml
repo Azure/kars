@@ -26,6 +26,63 @@
 #
 # Production values.yaml stays untouched.
 
+headlamp:
+  image:
+    repository: kars-headlamp
+    tag: "latest"
+    pullPolicy: Never
+
+monitoring:
+  prometheusOperator:
+    image:
+      registry: docker.io
+      repository: library/kars-prometheus-operator
+      pullPolicy: Never
+    prometheusConfigReloader:
+      image:
+        registry: docker.io
+        repository: library/kars-prometheus-config-reloader
+    admissionWebhooks:
+      patch:
+        image:
+          registry: docker.io
+          repository: library/kars-webhook-certgen
+          pullPolicy: Never
+  prometheus:
+    prometheusSpec:
+      image:
+        registry: docker.io
+        repository: library/kars-prometheus
+        pullPolicy: Never
+  kube-state-metrics:
+    image:
+      registry: docker.io
+      repository: library/kars-kube-state-metrics
+      pullPolicy: Never
+  prometheus-node-exporter:
+    image:
+      registry: docker.io
+      repository: library/kars-node-exporter
+      pullPolicy: Never
+  jsonExporter:
+    image:
+      repository: kars-json-exporter
+      pullPolicy: Never
+
+metricsServer:
+  image:
+    repository: kars-metrics-server
+    tag: "latest"
+    pullPolicy: Never
+  kubelet:
+    # Kind's self-signed kubelet certificate has no trusted IP SAN. This
+    # exception is confined to the explicit local profile; aggregated API TLS
+    # remains verified using the release-owned serving certificate.
+    insecureTLS: true
+
+evals:
+  runnerImage: "kars-conformance-runner:latest"
+
 controller:
   image:
     repository: kars-controller
@@ -89,3 +146,9 @@ sandbox:
     repository: kars-sandbox
     tag: "dev"
     pullPolicy: Never
+
+runtimes:
+  hermes:
+    # Built/pulled and loaded by the same default image plan as OpenClaw.
+    # An explicit local name also avoids advertising a private ACR dependency.
+    image: "kars-runtime-hermes:latest"

@@ -12,6 +12,7 @@ import { AuthorResource } from "../author-resource";
 import { InferencePolicyEditor } from "../inference-policy-editor";
 import { DeleteResource } from "../delete-resource";
 import { McpCatalog } from "../mcp-catalog";
+import { mcpStatus } from "../mcp-status";
 import { PolicyBuilder } from "../policy-builder";
 import { InferenceBudgets, InferenceBudgetEdit } from "@/components/inference-budgets";
 import { RetentionPolicyPanel } from "@/components/retention-policy";
@@ -75,15 +76,18 @@ export default async function PoliciesPage() {
         title="Connected services (MCP)"
         action={<div className="flex items-center gap-2">{countBadge(mcp.length)}<AuthorResource kind="McpServer" /></div>}
       >
-        <div className="mb-3"><McpCatalog /></div>
+        {!mcpR.error && <div className="mb-3"><McpCatalog servers={mcp} /></div>}
         {mcpR.error ? (
           <HonestState variant="not_wired" compact title="Couldn't load MCP servers" detail="The operator API for MCP servers is unreachable — this isn't the same as none being registered." />
         ) : mcp.length === 0 ? (
           <HonestState variant="empty" compact title="No MCP servers registered" detail="Pick one from the catalog above, or register a custom MCP server." />
         ) : (
           <ul className="space-y-2">
-            {mcp.map((m) => (
-              <li key={`${m.namespace}/${m.name}`} className="rounded-lg border border-border bg-surface px-4 py-3">
+            {mcp.map((m) => {
+              const readiness = mcpStatus(m);
+              return (
+              <li key={`${m.namespace}/${m.name}`} id={`mcp-${m.namespace}-${m.name}`} tabIndex={-1}
+                className="scroll-mt-24 rounded-lg border border-border bg-surface px-4 py-3 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal">
                 <div className="flex items-center justify-between gap-3">
                   <span className="flex items-center gap-1.5">
                     <span aria-hidden><Icon name="plug" size={14} /></span>
@@ -91,10 +95,11 @@ export default async function PoliciesPage() {
                   </span>
                   <div className="flex items-center gap-2">
                     {m.production != null && <Badge tone={m.production ? "info" : "muted"}>{m.production ? "production" : "dev"}</Badge>}
-                    {m.phase && <span className="text-xs text-foreground-muted">{m.phase}</span>}
+                    <Badge tone={readiness.tone}>{readiness.label}</Badge>
                   </div>
                 </div>
                 {m.url && <p className="mt-1 font-mono text-xs text-foreground-muted">{m.url}</p>}
+                <p className="mt-1 text-xs text-foreground-muted">{readiness.detail}</p>
                 {m.allowed_tools.length > 0 && (
                   <div className="mt-2 flex flex-wrap gap-1">
                     {m.allowed_tools.map((t) => (
@@ -107,7 +112,7 @@ export default async function PoliciesPage() {
                   <DeleteResource kind="McpServer" name={m.name} label="MCP server" />
                 </div>
               </li>
-            ))}
+            ); })}
           </ul>
         )}
       </Section>
@@ -155,16 +160,16 @@ export default async function PoliciesPage() {
             <InferencePolicyEditor models={models} />
           </div>
           <p className="mt-1 text-[11px] text-foreground-muted">
-            Most are controller-generated from each mission&rsquo;s budget. You can also author a
-            standalone policy (a selector + token budget + content-safety floor), edit a policy&rsquo;s
-            daily budget in place, or remove an authored one.
+            The router enforces each policy&rsquo;s per-request, daily and monthly token limits.
+            Controller-generated policies also select each mission&rsquo;s model routes; a mission&rsquo;s
+            lifetime budget is separate. Author a policy, edit its limits, or remove an authored one.
           </p>
           {inferenceR.error ? (
             <HonestState variant="not_wired" compact title="Couldn't load inference policies" detail="The operator API for inference policies is unreachable." />
           ) : inference.length === 0 ? (
             <p className="mt-2 text-[11px] text-foreground-muted">No per-sandbox policies yet.</p>
           ) : (
-            <div className="mt-2 overflow-hidden rounded-lg border border-border">
+            <div role="region" aria-label="Per-sandbox inference policies" tabIndex={0} className="mt-2 overflow-x-auto rounded-lg border border-border">
               <table className="w-full text-sm">
                 <thead>
                   <tr className="border-b border-border bg-surface-muted/40 text-left text-xs text-foreground-muted">

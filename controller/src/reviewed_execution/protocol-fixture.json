@@ -1,0 +1,420 @@
+{
+  "phaseName": "rp-447d7d9f97f7fa25a6e2-r0-p0",
+  "phaseGrant": {
+    "contract": {
+      "version": 4,
+      "reviewedPhase": {
+        "name": "draft",
+        "objective": "Write the reviewed handoff.md document",
+        "capabilities": [
+          "filesystem-read",
+          "filesystem-write"
+        ],
+        "requiredToolCalls": [],
+        "minToolCalls": 1,
+        "maxToolCalls": 4,
+        "freshContext": true
+      },
+      "phaseDigest": "sha256:12c36b29b1f7f4d367409d50fdc573ba89478373779540033dc7c1802b46d4b6",
+      "requiredOutputs": [
+        "handoff.md"
+      ]
+    },
+    "inputs": [],
+    "authority": {
+      "rootName": "report",
+      "rootUid": "root-uid",
+      "stateName": "kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828",
+      "stateUid": "uid-kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828",
+      "slot": "r0-p0"
+    }
+  },
+  "synthesisGrant": {
+    "contract": {
+      "version": 4,
+      "reviewedPhase": {
+        "name": "synthesis",
+        "objective": "Write report.md from the handoff",
+        "capabilities": [
+          "filesystem-read",
+          "filesystem-write"
+        ],
+        "requiredToolCalls": [],
+        "minToolCalls": 0,
+        "maxToolCalls": 4,
+        "freshContext": true
+      },
+      "phaseDigest": "sha256:645ad6300daae2091691b45b45d1175935bc5d94011825a03e7a76a127d36893",
+      "requiredOutputs": [
+        "report.md"
+      ],
+      "inputDigest": "sha256:891b595c1744f18bdc10b827450d72e6b5ad392ae27eb9437d8f3bbb75a5c837"
+    },
+    "inputs": [
+      {
+        "name": "r0-p0.md",
+        "source": {
+          "namespace": "default",
+          "taskName": "rp-447d7d9f97f7fa25a6e2-r0-p0",
+          "taskUid": "uid-rp-447d7d9f97f7fa25a6e2-r0-p0",
+          "sandboxUid": "sandbox-uid",
+          "podUid": "pod-uid",
+          "runNonce": "plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0-p0",
+          "assignmentId": "assignment-1",
+          "agentDid": "did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "artifactName": "handoff.md"
+        },
+        "sha256": "sha256:9a89d315cb95cd87b7b78cd36fd5002846eec6206093ab58561645b308f6137e"
+      }
+    ],
+    "authority": {
+      "rootName": "report",
+      "rootUid": "root-uid",
+      "stateName": "kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828",
+      "stateUid": "uid-kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828",
+      "slot": "synthesis"
+    }
+  },
+  "resources": {
+    "/api/v1/namespaces/default/configmaps/kars-mission-artifacts-a27cb54859b05d06b144db4ec9290579efd7a130": {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "data": {
+        "handoff.md": "Reviewed handoff — 日本語",
+        "response.md": "Completed measured work"
+      },
+      "immutable": true,
+      "metadata": {
+        "annotations": {
+          "kars.azure.com/mission-evidence-key": "a27cb54859b05d06b144db4ec9290579efd7a130",
+          "kars.azure.com/mission-evidence-role": "canonical",
+          "kars.azure.com/mission-principal-name": "rp-447d7d9f97f7fa25a6e2-r0-p0",
+          "kars.azure.com/mission-run-nonce": "plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0-p0",
+          "kars.azure.com/mission-task-uid": "uid-rp-447d7d9f97f7fa25a6e2-r0-p0"
+        },
+        "labels": {
+          "kars.azure.com/mission-artifacts": "a27cb54859b05d06b144db4ec9290579efd7a130"
+        },
+        "name": "kars-mission-artifacts-a27cb54859b05d06b144db4ec9290579efd7a130",
+        "namespace": "default",
+        "ownerReferences": [
+          {
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "controller": true,
+            "kind": "KarsTask",
+            "name": "rp-447d7d9f97f7fa25a6e2-r0-p0",
+            "uid": "uid-rp-447d7d9f97f7fa25a6e2-r0-p0"
+          }
+        ],
+        "resourceVersion": "1",
+        "uid": "uid-kars-mission-artifacts-a27cb54859b05d06b144db4ec9290579efd7a130"
+      }
+    },
+    "/api/v1/namespaces/default/configmaps/kars-mission-attempt-a27cb54859b05d06b144db4ec9290579efd7a130": {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "data": {
+        "attempt.json": "{\"version\":1,\"phase\":\"succeeded\",\"ownerSession\":\"dispatcher-1\",\"candidate\":{\"namespace\":\"default\",\"taskName\":\"rp-447d7d9f97f7fa25a6e2-r0-p0\",\"taskUid\":\"uid-rp-447d7d9f97f7fa25a6e2-r0-p0\",\"runNonce\":\"plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"agentName\":\"writer / draft\",\"content\":\"Prepare the reviewed report\\n\\nRole: Draft a useful report\\n\\nPhase: Write the reviewed handoff.md document\",\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"requiredOutputs\":[\"handoff.md\"]},\"assignment\":{\"requiredOutputs\":[\"handoff.md\"],\"taskName\":\"rp-447d7d9f97f7fa25a6e2-r0-p0\",\"taskUid\":\"uid-rp-447d7d9f97f7fa25a6e2-r0-p0\",\"runNonce\":\"plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"content\":\"Prepare the reviewed report\\n\\nRole: Draft a useful report\\n\\nPhase: Write the reviewed handoff.md document\",\"version\":4,\"phaseDigest\":\"sha256:12c36b29b1f7f4d367409d50fdc573ba89478373779540033dc7c1802b46d4b6\",\"type\":\"mission:assign\",\"assignmentId\":\"assignment-1\",\"bootId\":\"boot-1\",\"artifactFormat\":\"text-v1\",\"activityFormat\":\"router-observations-v1\"},\"contentDigest\":\"sha256:a5ea751d2880c8df53868b28f1b23d2c35eac5b7130745d07a43d4ea993d4fcb\",\"startedAt\":\"2026-10-02T20:00:00.000Z\",\"updatedAt\":\"2026-10-02T20:00:00.000Z\",\"reply\":{\"requiredOutputs\":[\"handoff.md\"],\"taskName\":\"rp-447d7d9f97f7fa25a6e2-r0-p0\",\"taskUid\":\"uid-rp-447d7d9f97f7fa25a6e2-r0-p0\",\"runNonce\":\"plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"activityFormat\":\"router-observations-v1\",\"version\":4,\"phaseDigest\":\"sha256:12c36b29b1f7f4d367409d50fdc573ba89478373779540033dc7c1802b46d4b6\",\"type\":\"mission:reply\",\"assignmentId\":\"assignment-1\",\"bootId\":\"boot-1\",\"artifactFormat\":\"text-v1\",\"status\":\"succeeded\",\"output\":\"Completed measured work\",\"artifacts\":{\"handoff.md\":\"Reviewed handoff — 日本語\"},\"evidence\":{\"model\":\"fixture-model\",\"rounds\":1,\"usage\":{\"promptTokens\":20,\"completionTokens\":30,\"totalTokens\":50},\"phase\":{\"name\":\"draft\",\"minToolCalls\":1,\"maxToolCalls\":4,\"attemptedToolCalls\":1,\"successfulToolCalls\":1}}},\"events\":[{\"at\":\"2026-10-02T20:00:00.000Z\",\"status\":\"succeeded\",\"evidence\":{\"model\":\"fixture-model\",\"rounds\":1,\"usage\":{\"promptTokens\":20,\"completionTokens\":30,\"totalTokens\":50},\"phase\":{\"name\":\"draft\",\"minToolCalls\":1,\"maxToolCalls\":4,\"attemptedToolCalls\":1,\"successfulToolCalls\":1}}}]}"
+      },
+      "metadata": {
+        "name": "kars-mission-attempt-a27cb54859b05d06b144db4ec9290579efd7a130",
+        "namespace": "default",
+        "ownerReferences": [
+          {
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "controller": true,
+            "kind": "KarsTask",
+            "name": "rp-447d7d9f97f7fa25a6e2-r0-p0",
+            "uid": "uid-rp-447d7d9f97f7fa25a6e2-r0-p0"
+          }
+        ],
+        "resourceVersion": "1",
+        "uid": "uid-kars-mission-attempt-a27cb54859b05d06b144db4ec9290579efd7a130"
+      }
+    },
+    "/api/v1/namespaces/default/configmaps/kars-mission-output-a27cb54859b05d06b144db4ec9290579efd7a130": {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "data": {
+        "agentDid": "did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "agentName": "writer / draft",
+        "artifactCount": "2",
+        "assignmentId": "assignment-1",
+        "assignmentNonce": "plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0-p0",
+        "dispatcherDid": "did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "error": "",
+        "evidence.json": "{\"requiredOutputs\":[\"handoff.md\"],\"taskName\":\"rp-447d7d9f97f7fa25a6e2-r0-p0\",\"taskUid\":\"uid-rp-447d7d9f97f7fa25a6e2-r0-p0\",\"runNonce\":\"plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0-p0\",\"sandboxUid\":\"sandbox-uid\",\"podUid\":\"pod-uid\",\"agentDid\":\"did:mesh:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"dispatcherDid\":\"did:mesh:bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"reviewedPhase\":{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"requiredToolCalls\":[],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true},\"activityFormat\":\"router-observations-v1\",\"version\":4,\"phaseDigest\":\"sha256:12c36b29b1f7f4d367409d50fdc573ba89478373779540033dc7c1802b46d4b6\",\"type\":\"mission:reply\",\"assignmentId\":\"assignment-1\",\"bootId\":\"boot-1\",\"artifactFormat\":\"text-v1\",\"status\":\"succeeded\",\"output\":\"Completed measured work\",\"artifacts\":{\"handoff.md\":\"Reviewed handoff — 日本語\"},\"evidence\":{\"model\":\"fixture-model\",\"rounds\":1,\"usage\":{\"promptTokens\":20,\"completionTokens\":30,\"totalTokens\":50},\"phase\":{\"name\":\"draft\",\"minToolCalls\":1,\"maxToolCalls\":4,\"attemptedToolCalls\":1,\"successfulToolCalls\":1}}}",
+        "finishedAt": "2026-10-02T20:00:00.000Z",
+        "model": "fixture-model",
+        "output": "Completed measured work",
+        "podUid": "pod-uid",
+        "runtimeBootId": "boot-1",
+        "sandboxUid": "sandbox-uid",
+        "startedAt": "2026-10-02T20:00:00.000Z",
+        "status": "ok",
+        "taskName": "rp-447d7d9f97f7fa25a6e2-r0-p0",
+        "taskUid": "uid-rp-447d7d9f97f7fa25a6e2-r0-p0",
+        "totalTokens": "50",
+        "usageKnown": "true"
+      },
+      "immutable": true,
+      "metadata": {
+        "annotations": {
+          "kars.azure.com/mission-evidence-key": "a27cb54859b05d06b144db4ec9290579efd7a130",
+          "kars.azure.com/mission-evidence-role": "canonical",
+          "kars.azure.com/mission-principal-name": "rp-447d7d9f97f7fa25a6e2-r0-p0",
+          "kars.azure.com/mission-run-nonce": "plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0-p0",
+          "kars.azure.com/mission-task-uid": "uid-rp-447d7d9f97f7fa25a6e2-r0-p0"
+        },
+        "labels": {
+          "kars.azure.com/mission-output": "a27cb54859b05d06b144db4ec9290579efd7a130"
+        },
+        "name": "kars-mission-output-a27cb54859b05d06b144db4ec9290579efd7a130",
+        "namespace": "default",
+        "ownerReferences": [
+          {
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "controller": true,
+            "kind": "KarsTask",
+            "name": "rp-447d7d9f97f7fa25a6e2-r0-p0",
+            "uid": "uid-rp-447d7d9f97f7fa25a6e2-r0-p0"
+          }
+        ],
+        "resourceVersion": "1",
+        "uid": "uid-kars-mission-output-a27cb54859b05d06b144db4ec9290579efd7a130"
+      }
+    },
+    "/api/v1/namespaces/default/configmaps/kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828": {
+      "apiVersion": "v1",
+      "kind": "ConfigMap",
+      "data": {
+        "state.json": "{\"schema\":\"kars.reviewed-run/v1\",\"rootName\":\"report\",\"rootUid\":\"root-uid\",\"admission\":{\"version\":1,\"state\":\"run\",\"taskGeneration\":1,\"authorizationDigest\":\"sha256:ae2ed69f971e352fa39167e61c9309bcdc730dbd40b8680e835567febab5f1e4\",\"runNonce\":\"run-1\",\"objectiveDigest\":\"sha256:ee96bf86eb11d03269c493e55e83182877e718bc32bcb106fc38e7d179e0c874\"},\"planDigest\":\"sha256:3b39cd8c35d50655bc994c126035a62d605e2e61f1625b3db3532d0e72f4c28f\",\"plan\":{\"schema\":\"kars.execution-plan/v1\",\"roles\":[{\"name\":\"writer\",\"objective\":\"Draft a useful report\",\"dependsOn\":[],\"phases\":[{\"name\":\"draft\",\"objective\":\"Write the reviewed handoff.md document\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"minToolCalls\":1,\"maxToolCalls\":4,\"freshContext\":true}],\"budgetTokens\":5000}],\"maxParallel\":1,\"synthesis\":{\"objective\":\"Write report.md from the handoff\",\"capabilities\":[\"filesystem-read\",\"filesystem-write\"],\"maxToolCalls\":4},\"deliverables\":[{\"name\":\"report.md\"}]},\"children\":{\"r0\":{\"name\":\"rp-447d7d9f97f7fa25a6e2-r0\",\"uid\":\"uid-rp-447d7d9f97f7fa25a6e2-r0\",\"spec\":{\"objective\":\"Draft a useful report\",\"envelope\":{\"tier\":1,\"budget\":{\"scope\":\"GovernedInference\",\"tokens\":5000},\"delegationDepth\":1,\"authorityCeiling\":1},\"parentRef\":{\"name\":\"report\"},\"execution\":{\"launch\":false},\"blueprint\":{\"runtime\":\"OpenClaw\"},\"displayName\":\"writer\"}},\"r0-p0\":{\"name\":\"rp-447d7d9f97f7fa25a6e2-r0-p0\",\"uid\":\"uid-rp-447d7d9f97f7fa25a6e2-r0-p0\",\"spec\":{\"objective\":\"Prepare the reviewed report\\n\\nRole: Draft a useful report\\n\\nPhase: Write the reviewed handoff.md document\",\"envelope\":{\"tier\":1,\"budget\":{\"scope\":\"GovernedInference\",\"tokens\":5000},\"delegationDepth\":0,\"authorityCeiling\":1},\"parentRef\":{\"name\":\"rp-447d7d9f97f7fa25a6e2-r0\"},\"execution\":{\"launch\":true},\"blueprint\":{\"runtime\":\"OpenClaw\"},\"displayName\":\"writer / draft\"}}}}"
+      },
+      "metadata": {
+        "name": "kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828",
+        "namespace": "default",
+        "ownerReferences": [
+          {
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "controller": true,
+            "kind": "KarsTask",
+            "name": "report",
+            "uid": "root-uid"
+          }
+        ],
+        "resourceVersion": "3",
+        "uid": "uid-kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828"
+      }
+    },
+    "/apis/kars.azure.com/v1alpha1/namespaces/default/karstasks/report": {
+      "apiVersion": "kars.azure.com/v1alpha1",
+      "kind": "KarsTask",
+      "metadata": {
+        "annotations": {
+          "kars.azure.com/run-requested": "run-1",
+          "kars.azure.com/reviewed-state": "{\"name\":\"kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828\",\"uid\":\"uid-kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828\"}"
+        },
+        "generation": 1,
+        "name": "report",
+        "namespace": "default",
+        "resourceVersion": "2",
+        "uid": "root-uid"
+      },
+      "spec": {
+        "objective": "Prepare the reviewed report",
+        "envelope": {
+          "tier": 1,
+          "budget": {
+            "scope": "GovernedInference",
+            "tokens": 10000
+          },
+          "delegationDepth": 2,
+          "authorityCeiling": 1
+        },
+        "execution": {
+          "launch": true
+        },
+        "blueprint": {
+          "runtime": "OpenClaw",
+          "executionPlan": {
+            "schema": "kars.execution-plan/v1",
+            "roles": [
+              {
+                "name": "writer",
+                "objective": "Draft a useful report",
+                "dependsOn": [],
+                "phases": [
+                  {
+                    "name": "draft",
+                    "objective": "Write the reviewed handoff.md document",
+                    "capabilities": [
+                      "filesystem-read",
+                      "filesystem-write"
+                    ],
+                    "minToolCalls": 1,
+                    "maxToolCalls": 4,
+                    "freshContext": true
+                  }
+                ],
+                "budgetTokens": 5000
+              }
+            ],
+            "maxParallel": 1,
+            "synthesis": {
+              "objective": "Write report.md from the handoff",
+              "capabilities": [
+                "filesystem-read",
+                "filesystem-write"
+              ],
+              "maxToolCalls": 4
+            },
+            "deliverables": [
+              {
+                "name": "report.md"
+              }
+            ]
+          }
+        }
+      },
+      "status": {
+        "phase": "Ready",
+        "observedGeneration": 1,
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-10-02T20:00:00Z",
+            "message": "validated",
+            "reason": "Reconciled",
+            "status": "True",
+            "type": "Ready"
+          }
+        ],
+        "envelopeDigest": "sha256:ae2ed69f971e352fa39167e61c9309bcdc730dbd40b8680e835567febab5f1e4"
+      }
+    },
+    "/apis/kars.azure.com/v1alpha1/namespaces/default/karstasks/rp-447d7d9f97f7fa25a6e2-r0": {
+      "apiVersion": "kars.azure.com/v1alpha1",
+      "kind": "KarsTask",
+      "metadata": {
+        "annotations": {
+          "kars.azure.com/reviewed-root": "report",
+          "kars.azure.com/reviewed-slot": "r0",
+          "kars.azure.com/reviewed-state": "{\"name\":\"kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828\",\"uid\":\"uid-kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828\"}",
+          "kars.azure.com/run-requested": "plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0"
+        },
+        "generation": 1,
+        "name": "rp-447d7d9f97f7fa25a6e2-r0",
+        "namespace": "default",
+        "ownerReferences": [
+          {
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "controller": true,
+            "kind": "KarsTask",
+            "name": "report",
+            "uid": "root-uid"
+          }
+        ],
+        "resourceVersion": "1",
+        "uid": "uid-rp-447d7d9f97f7fa25a6e2-r0"
+      },
+      "spec": {
+        "objective": "Draft a useful report",
+        "envelope": {
+          "tier": 1,
+          "budget": {
+            "scope": "GovernedInference",
+            "tokens": 5000
+          },
+          "delegationDepth": 1,
+          "authorityCeiling": 1
+        },
+        "parentRef": {
+          "name": "report"
+        },
+        "execution": {
+          "launch": false
+        },
+        "blueprint": {
+          "runtime": "OpenClaw"
+        },
+        "displayName": "writer"
+      },
+      "status": {
+        "phase": "Ready",
+        "observedGeneration": 1,
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-10-02T20:00:00Z",
+            "message": "validated",
+            "reason": "Reconciled",
+            "status": "True",
+            "type": "Ready"
+          }
+        ],
+        "envelopeDigest": "sha256:ac0a6ace27d18f259c9368b2aa634fb8a113da1369f0366f31a31a178a6c92e4"
+      }
+    },
+    "/apis/kars.azure.com/v1alpha1/namespaces/default/karstasks/rp-447d7d9f97f7fa25a6e2-r0-p0": {
+      "apiVersion": "kars.azure.com/v1alpha1",
+      "kind": "KarsTask",
+      "metadata": {
+        "annotations": {
+          "kars.azure.com/reviewed-root": "report",
+          "kars.azure.com/reviewed-slot": "r0-p0",
+          "kars.azure.com/reviewed-state": "{\"name\":\"kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828\",\"uid\":\"uid-kars-reviewed-447d7d9f97f7fa25a6e26a1ea85f593de4906828\"}",
+          "kars.azure.com/run-completed": "plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0-p0",
+          "kars.azure.com/run-requested": "plan-447d7d9f97f7fa25a6e26a1ea85f593de4906828-r0-p0"
+        },
+        "generation": 2,
+        "name": "rp-447d7d9f97f7fa25a6e2-r0-p0",
+        "namespace": "default",
+        "ownerReferences": [
+          {
+            "apiVersion": "kars.azure.com/v1alpha1",
+            "controller": true,
+            "kind": "KarsTask",
+            "name": "rp-447d7d9f97f7fa25a6e2-r0",
+            "uid": "uid-rp-447d7d9f97f7fa25a6e2-r0"
+          }
+        ],
+        "resourceVersion": "2",
+        "uid": "uid-rp-447d7d9f97f7fa25a6e2-r0-p0"
+      },
+      "spec": {
+        "objective": "Prepare the reviewed report\n\nRole: Draft a useful report\n\nPhase: Write the reviewed handoff.md document",
+        "envelope": {
+          "tier": 1,
+          "budget": {
+            "scope": "GovernedInference",
+            "tokens": 5000
+          },
+          "delegationDepth": 0,
+          "authorityCeiling": 1
+        },
+        "parentRef": {
+          "name": "rp-447d7d9f97f7fa25a6e2-r0"
+        },
+        "execution": {
+          "launch": true
+        },
+        "blueprint": {
+          "runtime": "OpenClaw"
+        },
+        "displayName": "writer / draft"
+      },
+      "status": {
+        "phase": "Ready",
+        "observedGeneration": 2,
+        "conditions": [
+          {
+            "lastTransitionTime": "2026-10-02T20:00:00Z",
+            "message": "validated",
+            "reason": "Reconciled",
+            "status": "True",
+            "type": "Ready"
+          }
+        ],
+        "envelopeDigest": "sha256:ce4a9bdaeedca4a1c221e81943babbabc367ac8fe2c780fadba00a4b26cb127a"
+      }
+    }
+  }
+}

@@ -2,9 +2,10 @@
 // Licensed under the MIT License.
 
 import { Command } from "commander";
-import { readFileSync } from "node:fs";
+import { readFileSync, statSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { execa } from "execa";
+import { parseAllDocuments } from "yaml";
 import {
   previewPrivateActivation, stagePrivateActivation, validatePrivateActivation,
   validateQualifiedActivation, canonical, type PrivateActivation,
@@ -13,6 +14,9 @@ import {
 import { captureGuardRetirement, refreshGuardRetirement } from "../lib/private-activation-guard-retirement.js";
 import { captureWriterSettlement, observeWriterSettlement, settleWriterRetirement } from "../lib/private-activation-writer-settle.js";
 import { privateCommandFailure } from "../lib/private-activation-command-diagnostics.js";
+import { applyControllerProfileRecovery, previewControllerProfileRecovery } from "../lib/private-controller-profile-recovery.js";
+import { applyBudgetTlsRecovery, previewBudgetTlsRecovery } from "../lib/private-budget-tls-recovery.js";
+import { previewPrivateRootMigration } from "../lib/private-root-migration-review.js";
 
 type Execute=(args:string[],input?:string)=>Promise<string>;
 const resource="karscredentialgrants.kars.azure.com";
@@ -204,6 +208,42 @@ export function credentialGrantsCommand():Command {
     }
   };
   const repeat=(value:string,prior:string[])=>[...prior,value];
+  command.command("review-root-migration").argument("<rendered-release>")
+    .description("Read-only complete private-root inventory and exact Helm-render projection; does not authorize cutover")
+    .requiredOption("--private-root <namespace>").requiredOption("--release <name>").option("--context <context>")
+    .action(async(file,options)=>{
+      if(statSync(file).size>16*1024*1024)throw new Error("Rendered migration release exceeds 16 MiB");
+      const parsed=parseAllDocuments(readFileSync(file,"utf8"));
+      if(parsed.some(document=>document.errors.length))throw new Error("Rendered migration release contains invalid YAML");
+      const documents:unknown[]=parsed.map(document=>document.toJS({maxAliasCount:100})).filter(value=>value!=null);
+      const review=await previewPrivateRootMigration(execute(options.context),options.privateRoot,options.release,documents);
+      console.log(JSON.stringify(review,null,2));
+    });
+  const recovery=command.command("recover-controller-profile")
+    .description("Review a Pending certificate-to-ServiceAccount profile correction; never grants writer authority");
+  recovery.command("preview").argument("<original-grant-review>").option("--context <context>")
+    .action(async(file,options)=>{
+      const document=JSON.parse(readFileSync(file,"utf8"));
+      const review=await previewControllerProfileRecovery(execute(options.context),document.spec?.privateActivation);
+      console.log(JSON.stringify(review,null,2));
+    });
+  recovery.command("apply").argument("<reviewed-recovery>").option("--context <context>")
+    .action(async(file,options)=>{
+      await applyControllerProfileRecovery(execute(options.context),JSON.parse(readFileSync(file,"utf8")));
+      console.log("Controller profile corrected; Pending protection and retirement history remain. Re-preview the grant with service-accounts before continuing.");
+    });
+  const tlsRecovery=command.command("recover-budget-tls")
+    .description("Review and resume Helm-managed TLS rotation for an initially retired, paused private root");
+  tlsRecovery.command("preview").argument("<original-grant-review>").option("--context <context>")
+    .action(async(file,options)=>{
+      const document=JSON.parse(readFileSync(file,"utf8"));
+      console.log(JSON.stringify(await previewBudgetTlsRecovery(execute(options.context),document.spec?.privateActivation),null,2));
+    });
+  tlsRecovery.command("apply").argument("<reviewed-recovery>").option("--context <context>")
+    .action(async(file,options)=>{
+      await applyBudgetTlsRecovery(execute(options.context),JSON.parse(readFileSync(file,"utf8")));
+      console.log("Managed budget TLS checksum reconciled; root remains paused and Pending. Re-preview and apply the grant to qualify and restore it.");
+    });
   command.command("preview").requiredOption("--namespace <namespace>")
     .requiredOption("--writer <namespace/name>","Writer ServiceAccount",repeat,[])
     .option("--agent-key <key>","Explicit custom agent credential key",repeat,[])

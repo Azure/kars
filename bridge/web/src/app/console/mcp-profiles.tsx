@@ -75,32 +75,42 @@ function ProfileRow({ profile, servers }: { profile: McpProfileOption; servers: 
 function ProfileForm({ servers, initial, onClose }: { servers: RefOption[]; initial?: McpProfileOption; onClose: () => void }) {
   const [state, action, pending] = useActionState(saveMcpProfileAction, init);
   const [sel, setSel] = useState<string[]>(initial?.servers ?? []);
-  if (state.ok) return <p className="text-[11px] text-signal">{state.ok} refreshing…</p>;
+  const [name, setName] = useState(initial?.name ?? "");
+  const [summary, setSummary] = useState(initial?.summary ?? "");
+  if (state.ok) return (
+    <div className="flex items-center gap-2 text-[11px]">
+      <p role="status" className="text-signal">{state.ok}</p>
+      <button type="button" onClick={onClose} className="text-foreground-muted hover:text-foreground">Done</button>
+    </div>
+  );
   return (
-    <form action={action} className="rounded-lg border border-border bg-surface-muted/30 p-3 space-y-2">
-      <input type="hidden" name="name" value={initial?.name ?? ""} />
-      {!initial && (
-        <input name="name" required placeholder="profile name (e.g. research)" className="w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-sm" />
-      )}
-      <input name="summary" defaultValue={initial?.summary ?? ""} placeholder="short description (optional)" className="w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs" />
-      <div className="flex flex-wrap gap-1.5">
-        {servers.map((s) => {
-          const on = sel.includes(s.name);
-          return (
-            <label key={s.name} className={`cursor-pointer rounded-full border px-2 py-0.5 text-[11px] ${on ? "border-signal/40 bg-signal/10 text-signal" : "border-border text-foreground-muted"}`}>
-              <input type="checkbox" name="servers" value={s.name} checked={on} onChange={(e) => setSel((c) => e.target.checked ? [...c, s.name] : c.filter((x) => x !== s.name))} className="hidden" />
-              {on ? "✓ " : ""}{s.name}
-            </label>
-          );
-        })}
-      </div>
-      <div className="flex items-center gap-2">
-        <button type="submit" disabled={pending || sel.length === 0} className="rounded-md border border-signal/40 bg-signal/10 px-2.5 py-1 text-[11px] font-semibold text-signal disabled:opacity-50">
-          {pending ? "Saving…" : "Save profile"}
-        </button>
-        <button type="button" onClick={onClose} className="text-[11px] text-foreground-muted hover:text-foreground">Cancel</button>
-        {state.error && <span className="text-[11px] text-danger">{state.error}</span>}
-      </div>
+    <form action={action} aria-busy={pending} className="rounded-lg border border-border bg-surface-muted/30 p-3">
+      <fieldset disabled={pending} className="space-y-2">
+        {initial ? (
+          <input type="hidden" name="name" value={initial.name} />
+        ) : (
+          <input name="name" aria-label="MCP profile name" value={name} onChange={(e) => setName(e.target.value)} required placeholder="profile name (e.g. research)" className="w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-sm" />
+        )}
+        <input name="summary" aria-label="MCP profile description" value={summary} onChange={(e) => setSummary(e.target.value)} placeholder="short description (optional)" className="w-full rounded-md border border-border bg-surface px-2.5 py-1.5 text-xs" />
+        <div className="flex flex-wrap gap-1.5">
+          {servers.map((s) => {
+            const on = sel.includes(s.name);
+            return (
+              <label key={s.name} className={`cursor-pointer rounded-full border px-2 py-0.5 text-[11px] focus-within:ring-2 focus-within:ring-signal ${on ? "border-signal/40 bg-signal/10 text-signal" : "border-border text-foreground-muted"}`}>
+                <input type="checkbox" name="servers" value={s.name} checked={on} onChange={(e) => setSel((c) => e.target.checked ? [...c, s.name] : c.filter((x) => x !== s.name))} className="sr-only" />
+                {on && <span aria-hidden>✓ </span>}{s.name}
+              </label>
+            );
+          })}
+        </div>
+        <div className="flex items-center gap-2">
+          <button type="submit" disabled={pending || sel.length === 0} className="rounded-md border border-signal/40 bg-signal/10 px-2.5 py-1 text-[11px] font-semibold text-signal disabled:opacity-50">
+            {pending ? "Saving…" : "Save profile"}
+          </button>
+          <button type="button" disabled={pending} onClick={onClose} className="text-[11px] text-foreground-muted hover:text-foreground disabled:opacity-50">Cancel</button>
+          {state.error && <span role="alert" className="text-[11px] text-danger">{state.error}</span>}
+        </div>
+      </fieldset>
     </form>
   );
 }

@@ -9,6 +9,10 @@ use kube::api::{Api, DynamicObject, GroupVersionKind, ListParams};
 use kube::core::ApiResource;
 
 impl Cluster {
+    pub fn configmaps(&self, namespace: &str) -> Api<k8s_openapi::api::core::v1::ConfigMap> {
+        Api::namespaced(self.client.clone(), namespace)
+    }
+
     /// `KarsTask` API scoped to a namespace.
     pub fn tasks(&self, namespace: &str) -> Api<KarsTask> {
         Api::namespaced(self.client.clone(), namespace)
@@ -153,7 +157,10 @@ impl Cluster {
                 code: 400,
             })
         })?;
-        api.create(&kube::api::PostParams::default(), &obj).await
+        api.create(&kube::api::PostParams {
+            field_manager: (kind == "KarsSkill").then(|| "kars-bridge".into()),
+            ..Default::default()
+        }, &obj).await
     }
 
     /// Server-Side Apply a `kars.azure.com` CRD — the Kubernetes-native

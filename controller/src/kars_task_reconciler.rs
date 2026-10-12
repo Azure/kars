@@ -39,6 +39,7 @@ const FINALIZER: &str = "kars.azure.com/karstask-cleanup";
 const RECEIPT_FIELD_MANAGER: &str = "kars-controller/receipt";
 
 const REQUEUE_OK: Duration = Duration::from_secs(300);
+const REQUEUE_IDLE: Duration = Duration::from_secs(60);
 
 /// A child waiting on its parent requeues quickly so it converges to `Ready`
 /// promptly once the parent reconciles, rather than waiting a full cycle.
@@ -95,6 +96,9 @@ fn check_envelope(task: &KarsTask) -> EnvelopeCheck {
             .is_some_and(|execution| execution.launch),
     ) {
         return EnvelopeCheck::Invalid(why);
+    }
+    if let Err(error) = crate::reviewed_execution::validate(task) {
+        return EnvelopeCheck::Invalid(error.to_string());
     }
     let e = &task.spec.envelope;
     if e.tier < TIER_MIN || e.tier > TIER_MAX {
@@ -334,13 +338,15 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         },
         "status": new_status,
     });
-    tasks
-        .patch_status(
-            &name,
-            &PatchParams::apply(FIELD_MANAGER).force(),
-            &Patch::Apply(status_patch),
-        )
-        .await?;
+    if serde_json::to_value(&task.status)? != serde_json::to_value(&new_status)? {
+        tasks
+            .patch_status(
+                &name,
+                &PatchParams::apply(FIELD_MANAGER).force(),
+                &Patch::Apply(status_patch),
+            )
+            .await?;
+    }
 
     // Governance Receipt (Inc 3). A governance-`Ready` task — one whose
     // envelope validated and (if delegated) attenuated its parent — gets a
@@ -352,20 +358,31 @@ async fn reconcile(task: Arc<KarsTask>, ctx: Arc<Ctx>) -> Result<Action, Reconci
         tracing::warn!(karstask=%name,error=%error,"Credential runtime remains held");
     }
 
-    // A child still waiting on its parent requeues quickly to converge.
-    let requeue = if crate::credential_grants::readiness::selected(&task)
+    Ok(Action::requeue(requeue_delay(&task, &new_status)))
+}
+
+fn requeue_delay(task: &KarsTask, status: &KarsTaskStatus) -> Duration {
+    // Retained completed phases keep their finite funding bindings. They have
+    // no compute to revoke and must not poll every ancestor at active-run speed.
+    if status.phase.as_deref() == Some(PHASE_READY)
+        && status.execution_phase.as_deref() == Some("Idle")
+        && status.sandbox_ref.is_none()
+    {
+        return REQUEUE_IDLE;
+    }
+    if crate::credential_grants::readiness::selected(task)
         || crate::inference_budget::binding::has_finite(&task.spec.envelope)
-        || new_status.inference_budget.is_some()
-        || new_status.phase.as_deref() == Some(PHASE_PENDING)
+        || status.inference_budget.is_some()
+        || status.phase.as_deref() == Some(PHASE_PENDING)
         || matches!(
-            new_status.execution_phase.as_deref(),
-            Some("Stopping" | PHASE_DEGRADED)
-        ) {
+            status.execution_phase.as_deref(),
+            Some("Launching" | "Stopping" | PHASE_DEGRADED)
+        )
+    {
         REQUEUE_PENDING
     } else {
         REQUEUE_OK
-    };
-    Ok(Action::requeue(requeue))
+    }
 }
 
 /// Outcome of resolving a task's `parentRef`.
@@ -560,7 +577,7 @@ async fn reconcile_execution(
     task: &KarsTask,
     status: &mut KarsTaskStatus,
 ) {
-    let launched = task
+    let mut launched = task
         .spec
         .execution
         .as_ref()
@@ -568,7 +585,36 @@ async fn reconcile_execution(
         .unwrap_or(false);
     let governance_ready = status.phase.as_deref() == Some(PHASE_READY);
 
+    if launched {
+        match crate::reviewed_execution::phase_compute_retirable(client, task).await {
+            Ok(true) => launched = false,
+            Ok(false) => {}
+            Err(error) => {
+                status.sandbox_ref = task.status.as_ref().and_then(|s| s.sandbox_ref.clone());
+                status.execution_phase = Some(PHASE_DEGRADED.into());
+                status.execution_detail =
+                    Some(format!("reviewed lifecycle verification failed: {error}"));
+                return;
+            }
+        }
+    }
     if launched && governance_ready {
+        match crate::reviewed_execution::reconcile(client, task).await {
+            Ok(true) => {}
+            Ok(false) => {
+                status.sandbox_ref = task.status.as_ref().and_then(|s| s.sandbox_ref.clone());
+                status.execution_phase = Some("Launching".into());
+                status.execution_detail =
+                    Some("waiting for reserved reviewed phases and immutable handoffs".into());
+                return;
+            }
+            Err(error) => {
+                status.sandbox_ref = task.status.as_ref().and_then(|s| s.sandbox_ref.clone());
+                status.execution_phase = Some(PHASE_DEGRADED.into());
+                status.execution_detail = Some(format!("reviewed execution held: {error}"));
+                return;
+            }
+        }
         match crate::kars_task_execution::materialize(client, ns, task).await {
             Ok(outcome) => {
                 status.execution_phase = Some(outcome.phase);
@@ -856,6 +902,12 @@ fn error_policy(task: Arc<KarsTask>, error: &ReconcileError, _ctx: Arc<Ctx>) -> 
     Action::requeue(crate::backoff::requeue_secs_with_jitter(30))
 }
 
+fn reconciliation_config() -> kube::runtime::controller::Config {
+    // Startup and idle requeues must not fan out every retained funding lineage
+    // at once within the controller's fixed memory and API-server CPU limits.
+    kube::runtime::controller::Config::default().concurrency(4)
+}
+
 pub async fn run(client: Client) -> Result<()> {
     let tasks: Api<KarsTask> = Api::all(client.clone());
     loop {
@@ -885,6 +937,7 @@ pub async fn run(client: Client) -> Result<()> {
     };
     let ctx = Arc::new(Ctx { client, signer });
     Controller::new(tasks, crate::watch_config::bounded())
+        .with_config(reconciliation_config())
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("KarsTask", reconcile(x, ctx)).await

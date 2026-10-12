@@ -20,12 +20,11 @@ export interface IntentClassification {
 
 // Signals that the work is ongoing/standing rather than a single deliverable.
 const TEAM_PATTERNS: RegExp[] = [
-  /\bteams?\b/,
+  /^\s*team\s*$/,
   /\bmonitor(ing|s)?\b/,
   /\bwatch(ing|es)?\b/,
   /\bcontinuous(ly)?\b/,
   /\bongoing\b/,
-  /\bstanding\b/,
   /\bkeep an eye\b/,
   /\bover time\b/,
   /\bevery (day|week|hour|morning|month)\b/,
@@ -36,9 +35,6 @@ const TEAM_PATTERNS: RegExp[] = [
   /\bkeep .* (healthy|up to date|updated|current)\b/,
   /\btrack .* (over time|continuously)\b/,
   /\b(recurring|recurrent)\b/,
-  /\bmultiple (roles|agents|members)\b/,
-  /\borg chart\b/,
-  /\b(finance|marketing|support|ops|sales) team\b/,
 ];
 
 // Signals that the work is a discrete, bounded deliverable.
@@ -54,12 +50,34 @@ const MISSION_PATTERNS: RegExp[] = [
 ];
 
 export function classifyIntent(raw: string): IntentClassification {
-  const text = (raw ?? "").toLowerCase();
+  const text = (raw ?? "").toLowerCase().replace(/[\u2010-\u2015]/g, "-");
   if (text.trim().length === 0) {
     return { kind: "mission", confidence: "low", reason: "Describe the work to get a recommendation." };
   }
 
-  const teamHits = TEAM_PATTERNS.filter((re) => re.test(text)).length;
+  const affirmativeText = text.replace(
+    /\b(?:not|no|without)\s+(?:(?:a|an)\s+)?(?:(?:standing|ongoing|persistent|recurring|recurrent|continuous|one-off|one-time|single-run)\s+)*(?:teams?|missions?|tasks?|reports?|assignments?|work)\b/g,
+    "",
+  );
+  if (/\b(?:one[- ]off|one[- ]time|single[- ]run|bounded mission)\b/.test(affirmativeText)) {
+    return {
+      kind: "mission",
+      confidence: "high",
+      reason:
+        "You asked for bounded, one-off work. A mission can use multiple agents and tools without becoming a standing team.",
+    };
+  }
+  if (
+    /^\s*(?:(?:please\s+)?(?:maintain|run|operate|establish|form|start|create|build|set up|organize|organise|(?:i|we)\s+(?:want|need))\s+)?(?:(?:a|an|the|our|my)\s+)?(?:standing|persistent|ongoing|continuous|recurring|recurrent)\b(?:[\s,-]+[\w-]+){0,4}[\s,-]+teams?\b/.test(affirmativeText)
+  ) {
+    return {
+      kind: "team",
+      confidence: "high",
+      reason:
+        "You asked for a standing team. Its reports and other deliverables remain work under a persistent charter, rather than turning it into a one-off mission.",
+    };
+  }
+  const teamHits = TEAM_PATTERNS.filter((re) => re.test(affirmativeText)).length;
   const missionHits = MISSION_PATTERNS.filter((re) => re.test(text)).length;
 
   if (teamHits > 0 && teamHits >= missionHits) {
@@ -68,7 +86,7 @@ export function classifyIntent(raw: string): IntentClassification {
       kind: "team",
       confidence,
       reason:
-        "This reads as continuous, standing work (monitoring, a cadence, or multiple roles) — a team keeps running under a charter.",
+        "This reads as ongoing work or an explicit team request. A standing team keeps working under a charter; use Mission for a bounded assignment, even when it needs multiple agents.",
     };
   }
 

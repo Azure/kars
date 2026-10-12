@@ -224,8 +224,9 @@ pub async fn get_task(
         .map(deliverable_pull_requests)
         .unwrap_or_default();
 
+    let reviewed_execution = super::reviewed_execution::read(cluster, &task, &principal).await;
     let task = revision.recheck(cluster, &principal).await?;
-    Ok(Json(to_detail(
+    let mut detail = to_detail(
         &task,
         children,
         sub_agents,
@@ -238,5 +239,7 @@ pub async fn get_task(
         checkpoint,
         agent_identity,
         egress_mode,
-    )))
+    );
+    detail.reviewed_execution = reviewed_execution;
+    Ok(Json(detail))
 }

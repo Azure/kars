@@ -4,7 +4,7 @@
 import type * as React from "react";
 import { Icon } from "@/components/icon";
 import type { AgentIdentity, Receipt } from "@/lib/types";
-import { formatLastActivity, phaseKind, phaseTone } from "./activity";
+import { actionRound, formatLastActivity, phaseKind, phaseTone } from "./activity";
 import type { AgentExecution, GraphSelection } from "./types";
 
 export function SelectionInspector({ selection }: { selection: GraphSelection }) {
@@ -53,17 +53,19 @@ export function SelectionInspector({ selection }: { selection: GraphSelection })
   if (selection.kind === "action") {
     const action = selection.action;
     return (
-      <InspectorShell eyebrow="Recorded action" title={action.human}>
+      <InspectorShell eyebrow={action.source === "legacy" ? "Recorded action" : action.source} title={action.human}>
         <div className="flex flex-wrap gap-2 text-[10px] text-foreground-muted">
           <span className="rounded-full border border-border px-2 py-1">Agent {selection.agent.displayName}</span>
-          <span className="rounded-full border border-border px-2 py-1">Round {action.round + 1}</span>
-          <span className="rounded-full border border-border px-2 py-1">{action.ms} ms</span>
+          <span className="rounded-full border border-border px-2 py-1">{action.source === "legacy" ? "Round" : "Router round"} {actionRound(action)}</span>
+          <span className="rounded-full border border-border px-2 py-1">{action.ms === null ? "Duration unavailable" : `${action.ms} ms`}</span>
           <span className={`rounded-full border px-2 py-1 ${
             action.ok === false ? "border-danger/30 text-danger" : action.ok === true ? "border-signal/30 text-signal" : "border-border"
           }`}>
-            {action.ok === false ? "Failed" : action.ok === true ? "Succeeded" : "Model round"}
+            {action.source === "model-proposed" ? "Proposal only" : action.source === "router-upstream" ? "Router response"
+              : action.source === "legacy" ? action.ok === false ? "Failed" : action.ok === true ? "Succeeded" : "Model round"
+                : action.ok === false ? "Failure reported" : action.ok === true ? "Success reported" : "Outcome unavailable"}
           </span>
-          <span className="rounded-full border border-border px-2 py-1">{formatLastActivity(action.ts)}</span>
+          <span className="rounded-full border border-border px-2 py-1">{action.ts ? formatLastActivity(action.ts) : "Timestamp unavailable"}</span>
         </div>
         <p className="mt-3 break-all rounded-lg bg-surface-muted/45 px-3 py-2 font-mono text-[10px]">
           <span className="font-sans font-medium text-foreground-muted">Raw tool: </span>{action.raw}
@@ -81,7 +83,7 @@ export function SelectionInspector({ selection }: { selection: GraphSelection })
         <FoldedList
           items={selection.actions.map((action) => ({
             title: action.human,
-            detail: `${action.raw} · round ${action.round + 1} · ${action.ms} ms · ${formatLastActivity(action.ts)}`,
+            detail: `${action.raw} · round ${actionRound(action)} · ${action.ms === null ? "duration unavailable" : `${action.ms} ms`} · ${action.ts ? formatLastActivity(action.ts) : "timestamp unavailable"}`,
             failed: action.ok === false,
           }))}
         />
@@ -107,7 +109,7 @@ export function SelectionInspector({ selection }: { selection: GraphSelection })
 function AgentInspector({ agent }: { agent: AgentExecution }) {
   const latest = agent.actions.at(-1);
   return (
-    <InspectorShell eyebrow={agent.isPrincipal ? "Principal agent" : "Specialist agent"} title={agent.displayName}>
+    <InspectorShell eyebrow={agent.role === "Recorded producer" ? "Recorded producer" : agent.isPrincipal ? "Principal agent" : "Specialist agent"} title={agent.displayName}>
       <div className="flex flex-wrap items-center gap-2">
         <span className={`rounded-full border px-2 py-1 text-[10px] font-medium ${phaseTone(agent.phase)}`}>
           {agent.phase}
@@ -122,9 +124,9 @@ function AgentInspector({ agent }: { agent: AgentExecution }) {
       </dl>
       <div className="mt-2 grid gap-2 sm:grid-cols-2 lg:grid-cols-4">
         <Metric label="Retained rounds" value={agent.rounds} />
-        <Metric label="Tool calls" value={agent.toolCalls} />
+        <Metric label={agent.traceQuery.startsWith("observations:") ? "Reported results" : "Tool calls"} value={agent.toolCalls} />
         <Metric label="Failures" value={agent.failures} danger={agent.failures > 0} />
-        <Metric label="Latest activity" value={formatLastActivity(agent.lastActivity)} small />
+        <Metric label="Latest activity" value={latest && !agent.lastActivity ? "Timestamp unavailable" : formatLastActivity(agent.lastActivity)} small />
       </div>
       <div className="mt-2 rounded-lg border border-border bg-surface px-3 py-2">
         <p className="text-[9px] font-medium uppercase tracking-wide text-foreground-muted">Latest action</p>

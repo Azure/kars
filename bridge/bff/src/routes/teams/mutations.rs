@@ -16,9 +16,9 @@ use crate::routes::tasks::require_cluster;
 
 use super::validation::{
     apply_team_git_write, build_roster, normalize_autonomous_runtime, normalize_lifecycle_mode,
-    normalize_mcp_servers, normalize_model_fallback_routes, reject_reserved_role_names,
-    validate_mcp_servers, validate_team_budget, validate_team_model_routes,
-    validate_warm_idle_seconds,
+    normalize_mcp_servers, normalize_model_fallback_routes, normalize_role_runtime,
+    reject_reserved_role_names, validate_mcp_servers, validate_team_budget,
+    validate_team_model_routes, validate_warm_idle_seconds,
 };
 use super::{
     CreateRole, CreateTeamRequest, TeamModelRoutes, UpdateTeamRequest, require_owned_team,
@@ -57,6 +57,16 @@ pub async fn create_team(
         b.launch.unwrap_or(false),
     )
     .map_err(AppError::BadRequest)?;
+    let delegation_depth = b
+        .delegation_depth
+        .unwrap_or(crate::kars::task::execution_plan::REVIEWED_TEAM_DELEGATION_DEPTH);
+    if b.launch.unwrap_or(false) {
+        crate::kars::task::execution_plan::validate_reviewed_delegation_depth(
+            i64::from(delegation_depth),
+            crate::kars::task::execution_plan::REVIEWED_TEAM_DELEGATION_DEPTH,
+        )
+        .map_err(AppError::BadRequest)?;
+    }
     let roster_names = b
         .roles
         .iter()
@@ -76,7 +86,7 @@ pub async fn create_team(
     validate_mcp_servers(cluster, &ns, &b.mcp_servers).await?;
     normalize_autonomous_runtime(&mut b.runtime);
     for role in &mut b.roles {
-        normalize_autonomous_runtime(&mut role.runtime);
+        normalize_role_runtime(&mut role.runtime);
     }
     let options = build_options(cluster).await?;
     if b.model
@@ -128,7 +138,7 @@ pub async fn create_team(
     // — clicking Run now / Resume — not an automatic side-effect of Create.
     let paused = !b.launch.unwrap_or(false);
     let mut spec = serde_json::json!({
-        "charter": b.charter, "paused": paused, "envelope": { "tier": tier, "authorityCeiling": ceiling, "delegationDepth": b.delegation_depth.unwrap_or(1) },
+        "charter": b.charter, "paused": paused, "envelope": { "tier": tier, "authorityCeiling": ceiling, "delegationDepth": delegation_depth },
     });
     if let Some(budget) = budget {
         spec["envelope"]["budget"] = serde_json::json!(budget);
@@ -168,7 +178,27 @@ pub async fn create_team(
     // with an empty policy set and fails closed, and the run hangs until the
     // dispatch times out. Resolve the requested policy (or the cluster default
     // `kars-default`) and pin it on the team's run blueprint.
-    let tool_policy = resolve_team_tool_policy(cluster, &ns, b.tool_policy.as_deref()).await;
+    let tool_policy = if b.pin_tool_policy {
+        let name = b
+            .tool_policy
+            .as_deref()
+            .map(str::trim)
+            .filter(|name| !name.is_empty())
+            .unwrap_or(crate::routes::compose::DEFAULT_TOOL_POLICY);
+        cluster
+            .get_kind(&ns, "ToolPolicy", name)
+            .await
+            .map_err(|error| AppError::Upstream(error.to_string()))?
+            .ok_or_else(|| {
+                AppError::BadRequest(format!(
+                    "pinned tool policy {name} is unavailable in namespace {ns}; no replacement policy was selected"
+                ))
+            })?;
+        spec["envelope"]["toolPolicyRef"] = serde_json::json!({"name": name});
+        Some(name.to_owned())
+    } else {
+        resolve_team_tool_policy(cluster, &ns, b.tool_policy.as_deref()).await
+    };
     if let Some(tp) = &tool_policy {
         spec["blueprint"] = serde_json::json!({ "toolPolicy": tp });
     }
@@ -273,7 +303,13 @@ pub async fn create_team(
         );
     }
     if !b.roles.is_empty() {
-        spec["roster"] = serde_json::json!(build_roster(&b.roles));
+        let parent = serde_json::from_value(spec["blueprint"].clone())
+            .map_err(|error| AppError::Upstream(format!("invalid Team blueprint: {error}")))?;
+        spec["roster"] = serde_json::json!(build_roster(
+            &b.roles,
+            tool_policy.as_deref(),
+            Some(&parent)
+        ));
     }
     if let Some(ttl) = b.run_retention_ttl_seconds {
         spec["runRetentionTtlSeconds"] = serde_json::json!(ttl);
@@ -292,6 +328,11 @@ pub async fn create_team(
         serde_json::json!("execution-plan/v1");
     let active = !body["spec"]["paused"].as_bool().unwrap_or(false);
     crate::kars::execution_plans::validate(&body, active).map_err(AppError::BadRequest)?;
+    if active {
+        let reviewed: KarsTeam = serde_json::from_value(body.clone())
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        crate::routes::validate::require_team_budget_contracts(cluster, &reviewed).await?;
+    }
     body["spec"]["paused"] = serde_json::json!(true);
     let captured = cluster
         .create_kind(&ns, "KarsTeam", body.clone())
@@ -372,7 +413,7 @@ pub async fn update_team(
     normalize_autonomous_runtime(&mut b.runtime);
     if let Some(roles) = &mut b.roles {
         for role in roles {
-            normalize_autonomous_runtime(&mut role.runtime);
+            normalize_role_runtime(&mut role.runtime);
         }
     }
     let execution_plan_changed = b.execution_plan.is_some();
@@ -546,10 +587,6 @@ pub async fn update_team(
             spec.insert("cadence".into(), serde_json::Value::Null);
         }
     }
-    if let Some(roles) = &b.roles {
-        reject_reserved_role_names(&name, roles)?;
-        spec.insert("roster".into(), serde_json::json!(build_roster(roles)));
-    }
     let mut blueprint = serde_json::Map::new();
     if let Some(rt) = b
         .runtime
@@ -676,6 +713,27 @@ pub async fn update_team(
         // team's existing toolPolicy/model and can be changed together.
         spec.insert("blueprint".into(), serde_json::Value::Object(blueprint));
     }
+    if let Some(roles) = &b.roles {
+        reject_reserved_role_names(&name, roles)?;
+        let mut parent = serde_json::to_value(team.spec.blueprint.clone().unwrap_or_default())
+            .map_err(|error| AppError::Upstream(error.to_string()))?;
+        if let Some(changes) = spec.get("blueprint") {
+            json_patch::merge(&mut parent, changes);
+        }
+        let parent: crate::kars::task::TaskBlueprint = serde_json::from_value(parent)
+            .map_err(|error| AppError::Upstream(format!("invalid Team blueprint: {error}")))?;
+        let tool_policy = parent.tool_policy.as_deref().or_else(|| {
+            team.spec
+                .envelope
+                .tool_policy_ref
+                .as_ref()
+                .map(|policy| policy.name.as_str())
+        });
+        spec.insert(
+            "roster".into(),
+            serde_json::json!(build_roster(roles, tool_policy, Some(&parent))),
+        );
+    }
     if let Some(ttl) = b.run_retention_ttl_seconds {
         spec.insert("runRetentionTtlSeconds".into(), serde_json::json!(ttl));
     }
@@ -685,6 +743,11 @@ pub async fn update_team(
     let mut expected =
         serde_json::to_value(&team).map_err(|error| AppError::Upstream(error.to_string()))?;
     json_patch::merge(&mut expected, &patch);
+    if !expected["spec"]["paused"].as_bool().unwrap_or(false) {
+        let reviewed: KarsTeam = serde_json::from_value(expected.clone())
+            .map_err(|error| AppError::BadRequest(error.to_string()))?;
+        crate::routes::validate::require_team_budget_contracts(cluster, &reviewed).await?;
+    }
     let api: Api<KarsTeam> = cluster.teams(&ns);
     let captured = api
         .patch(

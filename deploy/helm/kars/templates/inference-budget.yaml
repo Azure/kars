@@ -17,6 +17,10 @@ identities are guessed. Old/reused values without this block render no broker.
 {{- if not (regexMatch "^sha256:[a-f0-9]{64}$" $routerDigest) -}}
 {{- fail "inferenceBudget.routerImageDigest must be a qualified sha256 manifest digest" -}}
 {{- end -}}
+{{- $routerTag := .Values.inferenceRouter.image.tag | toString -}}
+{{- if and (contains "@" $routerTag) (ne (last (splitList "@" $routerTag)) $routerDigest) -}}
+{{- fail "inferenceBudget.routerImageDigest must match the digest pinned in inferenceRouter.image.tag; update both when upgrading a governed router" -}}
+{{- end -}}
 {{- if contains "PRIVATE KEY" $ca -}}{{- fail "inferenceBudget.caBundle must contain public certificates only" -}}{{- end -}}
 {{- $identity := $budget.tls | default dict -}}
 {{- if $identity.certificate }}
@@ -79,8 +83,7 @@ rules:
     verbs: ["get", "list", "watch", "create", "update", "patch"]
   - apiGroups: [""]
     resources: ["configmaps"]
-    resourceNames: ["kars-inference-budget-contracts"]
-    verbs: ["get"]
+    verbs: ["get", "create", "patch"]
   - apiGroups: [""]
     resources: ["secrets"]
     resourceNames: [{{ $tls | quote }}]

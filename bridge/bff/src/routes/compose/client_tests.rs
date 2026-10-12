@@ -176,7 +176,7 @@ async fn router_candidates_exclude_terminating_pods_even_while_the_router_is_rea
     )
     .await;
     assert_eq!(
-        cluster.running_sandbox_candidates().await,
+        cluster.running_sandbox_candidates().await.unwrap(),
         vec![("work".into(), "new-router".into())]
     );
     assert_eq!(

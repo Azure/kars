@@ -65,6 +65,46 @@ describe("shared durable mission records", () => {
     expect(canonical.output.immutable).toBeUndefined();
   });
 
+  it.each([1, 2, 3] as const)("round-trips only the latest v%i provisional snapshot and keeps terminal custody separate", version => {
+    const h = harness(version);
+    h.attempt.assignment.activityFormat = "router-observations-v1";
+    const terminal: MissionReply = { ...h.attempt.reply!, activityFormat: "router-observations-v1" };
+    const snapshot = (responses: number) => JSON.stringify({ version: 1,
+      source: "runtime-forwarded-router-observations", coverage: "returned-responses-only",
+      responses, rounds: [1], state: "unavailable", reason: "Router observations unavailable after execution (reset, expiry or read failure)" });
+    h.attempt.phase = "running";
+    h.attempt.events[0].status = "running";
+    h.attempt.reply = { ...terminal, status: "running", output: undefined, artifacts: undefined, routerObservations: snapshot(1) };
+    h.saveAttempt();
+    expect(unpackMissionAttempt(h.record, h.candidate).attempt.reply?.routerObservations).toBe(snapshot(1));
+    h.attempt.reply.routerObservations = snapshot(2);
+    h.attempt.events.push({ ...h.attempt.events[0] });
+    h.saveAttempt();
+    const running = unpackMissionAttempt(h.record, h.candidate).attempt;
+    expect(running.reply?.routerObservations).toBe(snapshot(2));
+    expect(running.events).toHaveLength(2);
+    expect(JSON.stringify(running.events)).not.toContain("routerObservations");
+    expect(() => missionResultMaps(running)).toThrow("no valid terminal reply");
+    delete h.attempt.assignment.activityFormat;
+    h.saveAttempt();
+    expect(() => unpackMissionAttempt(h.record, h.candidate)).toThrow("Malformed durable mission attempt");
+    h.attempt.assignment.activityFormat = "router-observations-v1";
+    delete h.attempt.reply.activityFormat;
+    h.saveAttempt();
+    expect(() => unpackMissionAttempt(h.record, h.candidate)).toThrow("Malformed durable mission attempt");
+    h.attempt.reply = terminal;
+    h.attempt.phase = "succeeded";
+    h.attempt.events.push({ ...h.attempt.events[0], status: "succeeded" });
+    h.saveAttempt();
+    const completed = unpackMissionAttempt(h.record, h.candidate).attempt;
+    expect(completed.reply).not.toHaveProperty("routerObservations");
+    expect(JSON.stringify(missionResultMaps(completed))).not.toContain("routerObservations");
+    h.attempt.reply.routerObservations = snapshot(2);
+    h.saveAttempt();
+    expect(() => unpackMissionAttempt(h.record, h.candidate)).toThrow("Malformed durable mission attempt");
+    expect(() => missionResultMaps(h.attempt)).toThrow("no valid terminal reply");
+  });
+
   it("keeps failed terminal projections empty and rejects mismatched journals", () => {
     const h = harness();
     h.attempt.phase = "failed";

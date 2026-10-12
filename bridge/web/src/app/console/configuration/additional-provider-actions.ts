@@ -16,10 +16,10 @@ export async function addAdditionalProviderAction(_p: AdditionalProviderState, f
   if (!tag) return { error: "A provider tag is required (e.g. \"foundry\", \"github-models\").", ok: null };
   if (!models) return { error: "List at least one model deployment id (comma-separated).", ok: null };
   try {
-    const r = await putAdditionalProvider({ tag, endpoint: endpoint || undefined, api_key: apiKey || undefined, models });
+    await putAdditionalProvider({ tag, endpoint: endpoint || undefined, api_key: apiKey || undefined, models });
     revalidatePath("/console/configuration");
     revalidatePath("/console/policies");
-    return { error: null, ok: r.note };
+    return { error: null, ok: `Model selection saved for ${tag}. Use the model catalogue to change the cluster default.` };
   } catch (e) {
     return { error: e instanceof BffError ? e.message || e.code : "configure failed", ok: null };
   }

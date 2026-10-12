@@ -142,7 +142,6 @@ generating per-sandbox AGT ToolPolicy / TrustGraph CRs.
 
       const runtimeBlock = buildRuntimeBlock({
         kind: runtimeKind,
-        openclawVersion: "2026.3.13",
         model: options.model,
         image: options.image,
         byoImage: options.byoImage,

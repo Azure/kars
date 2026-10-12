@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { execFileSync } from "node:child_process";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { CANONICAL_SCHEMAS, EVALUATOR_V2 } from "./sre-migration-catalog.js";
 import { canonicalSchema, normalizedCrd, schemaDigest, schemaDocuments, schemaOwnerFields, type ObjectMap, type SchemaExecute } from "./schema-documents.js";
@@ -10,11 +11,36 @@ import { schemaFixture } from "./schema-stage.test-support.js";
 const BUDGET_RULE = "UnsupportedLaunchBudget: total/subtree token and usdMicros ceilings are not enforced; bounded tasks may be planned but cannot launch";
 const BUDGET_EXPRESSION = "!has(self.execution) || !self.execution.launch || !has(self.envelope.budget) || ((!has(self.envelope.budget.tokens) || self.envelope.budget.tokens == 0) && (!has(self.envelope.budget.usdMicros) || self.envelope.budget.usdMicros == 0))";
 
-export function canonicalMigrationSchemas(evalV2 = false): { before: ObjectMap[]; after: ObjectMap[] } {
+export function currentCoreSchemas(): ObjectMap[] {
   const chart = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
-  const after = schemaDocuments(execFileSync("helm", ["template", "kars", chart, "--namespace", "kars-system",
+  return schemaDocuments(execFileSync("helm", ["template", "kars", chart, "--namespace", "kars-system",
     "--set", "sre.enabled=false", "--dry-run=client"], { encoding: "utf8" }))
     .filter(object => object.kind === "CustomResourceDefinition");
+}
+
+export function canonicalMigrationSchemas(evalV2 = false): { before: ObjectMap[]; after: ObjectMap[] } {
+  // The closed migration predates credential, execution-plan and skill-package extensions.
+  // Reconstruct its exact pinned targets, not a permit for today's schemas.
+  const authBaseline = schemaDocuments(readFileSync(
+    new URL("../../../deploy/helm/kars/files/auth-config-schema-baseline.yaml", import.meta.url), "utf8",
+  ))[0];
+  const after = currentCoreSchemas().map(object => {
+    const kind = object.spec.names.kind;
+    if (kind === "KarsAuthConfig") return authBaseline;
+    const root = object.spec.versions[0].schema.openAPIV3Schema;
+    const spec = root.properties.spec;
+    if (kind === "KarsSkill") {
+      for (const key of ["package", "files", "packageDigest"]) delete spec.properties[key];
+    }
+    if (kind === "KarsTask" || kind === "KarsTeam") {
+      for (const key of ["skills", "executionPlan"]) delete spec.properties.blueprint.properties[key];
+    }
+    if (kind === "KarsTeam") {
+      for (const key of ["skills", "executionPlan"]) delete spec.properties.roster.items.properties.blueprint.properties[key];
+      delete root.properties.status.properties.runAdmission;
+    }
+    return object;
+  });
   const evalCrd = after.find(object => object.spec.names.kind === "KarsEval")!;
   if (!CANONICAL_SCHEMAS[evalCrd.metadata.name].after.includes(schemaDigest(normalizedCrd(evalCrd)))) {
     throw new Error("Current evaluator schema is not a qualified fixture input");

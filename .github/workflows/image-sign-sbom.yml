@@ -68,6 +68,12 @@ jobs:
           - name: controller
             dockerfile: controller/Dockerfile
             image: kars-controller
+          - name: metrics-server
+            dockerfile: sandbox-images/metrics-server/Dockerfile
+            image: kars-metrics-server
+          - name: headlamp
+            dockerfile: sandbox-images/headlamp/Dockerfile
+            image: kars-headlamp
           - name: inference-router
             dockerfile: inference-router/Dockerfile
             image: kars-inference-router

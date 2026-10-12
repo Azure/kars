@@ -43,7 +43,15 @@ recovery does **not** authorize a later root-template change. Do not clear proof
 delete grants or use force/rollback flags to bypass the refusal.
 
 Bridge-only and sandbox-only operations that do not touch the root remain
-available. In particular, `push --only sandbox --apply` is **not** root-unchanged:
+available only when they also preserve enrolled private consumers. The Bridge
+chart refuses an ordinary upgrade of an enrolled BFF or Teams gateway with
+`KARS_PRIVATE_CONSUMER_UPGRADE_BLOCKED`. It checks both the live template epoch
+and retained namespace parent-UID evidence. A non-consuming enrolled consumer
+has no required epoch but still has a sealed template binding; neither its
+absent epoch nor an epoch lost in an earlier upgrade is permission. Offline `helm template` does
+not query the cluster and is not upgrade authorization. Do not restamp an old
+epoch onto a changed template or rewrite its sealed proof to bypass this check.
+In particular, `push --only sandbox --apply` is **not** root-unchanged:
 it updates the controller's `SANDBOX_IMAGE` configuration and restarts it.
 Unrelated image publication, and publication of a tag from which the root is
 already digest-pinned, do not themselves authorize or trigger a root restart.
@@ -53,6 +61,48 @@ behavior; it is not proof that no other deployment consumes that registry.
 This is a client-side refusal guard, not the missing migration protocol or an
 atomic lock against concurrent operators. No root/grant metadata, controller
 policy or admission permissions are changed by the check.
+
+The controller also compares the actual live root Pod template with its
+reviewed qualification before accepting a private namespace epoch. Image,
+environment, label and rollout-annotation changes invalidate that qualification;
+only the separately managed private epoch annotation is excluded from the
+template digest. This fail-closed check does not authorize a root upgrade or
+provide a migration transaction.
+
+Writer authority validation also rechecks every explicitly reviewed consumer's
+live UID, template digest and retained parent binding. This includes enrolled
+consumers that do not consume private material and therefore need no epoch.
+Private-authority consumers additionally require their current template epoch.
+Missing, terminating, replaced or changed consumers make writer authority
+unavailable through the existing revocation path; delivery authority and the
+grant itself are not reset. Status-only resource-version changes remain valid.
+
+Private retirement checks root Deployment descendants by their actual
+ReplicaSet ownership throughout capture, draining and the final retirement
+barrier, including controller-profile and budget-TLS recovery, not just by
+their current ServiceAccount or mounted material.
+Newly observed or terminating old-root Pods cannot be skipped when those
+credentials differ; an unreviewed descendant preserves Pending protection
+without publishing a fresh epoch. An exactly reviewed root Pod that consumes
+no private authority is preserved without pausing or restarting its Deployment.
+
+Operators can prepare a read-only root migration inventory from an exact,
+locally rendered Helm release:
+
+```bash
+kars credentials grant review-root-migration rendered-release.yaml \
+  --private-root kars-system --release kars --context <context>
+```
+
+This checks the sealed qualification, all affiliated namespaces (including
+retained namespaces without grants), current grant identities and specs, and
+immutable old/target root images. Server-side dry-run projections check the
+target without persisting it. Changes to the root ServiceAccount, selector,
+replica intent, budget TLS identity or other reviewed private consumers are
+refused. A second complete inventory detects concurrent changes. Output contains
+identity and digest bindings, not Secret values or the rendered Pod template.
+The review is **not cutover authorization**: the existing upgrade refusal remains,
+and no apply/resume migration transaction is available yet.
 
 ---
 

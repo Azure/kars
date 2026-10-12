@@ -20,6 +20,7 @@ mod mission_records;
 mod mission_run_tests;
 mod mission_runs;
 pub use mission_runs::MissionRunError;
+pub(crate) use mission_runs::run_nonce;
 mod orchestrator;
 mod providers;
 mod resources;
@@ -30,6 +31,12 @@ pub struct MissionOutputRecord {
     pub task_name: String,
     pub evidence_key: String,
     pub data: std::collections::BTreeMap<String, String>,
+}
+
+pub struct MissionDeliverableRecord {
+    pub output: MissionOutputRecord,
+    pub current: bool,
+    pub artifacts: Option<k8s_openapi::api::core::v1::ConfigMap>,
 }
 
 /// A handle to the kars cluster, scoped per request to a namespace.

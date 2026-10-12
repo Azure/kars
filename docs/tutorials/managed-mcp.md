@@ -39,6 +39,12 @@ Reference `browser` in the Sandbox's `spec.governance.mcpServerRefs` and ensure
 its labels match the selector. Keep the existing `inferenceRef` and runtime
 configuration. The legacy singular `mcpServerRef` remains supported.
 
+The CLI accepts this manifest through `kars mcp apply browser --namespace
+kars-system --from-file browser.yaml`. Do not add `url` or endpoint
+authentication fields to a managed preset: the controller derives the endpoint.
+CLI validation rejects unsupported presets and workload overrides before
+submitting the resource; API admission and controller qualification still apply.
+
 Managed server names must be DNS labels because their names become tool-name
 prefixes. The `managed` object accepts only a reviewed `preset`; it cannot select
 arbitrary images, commands, volumes, privileges, URLs or authentication sources.
@@ -56,6 +62,15 @@ never invokes a tool. Empty `allowedTools` grants no tools.
 
 Unavailable images, invalid ownership, failed protocol negotiation and stale
 rollouts remain Pending/Degraded; they are not advertised as working resources.
+
+In the Operator Console, the catalog links existing services to their actual
+status instead of recording a local "installed" flag. Cancel never registers a
+service. A successful install submission means only that the request was
+accepted; watch the service's deployment and protocol probe result separately.
+While saving, the form and catalog navigation are disabled. A failed or
+unconfirmed request retains the entered settings for inspection and retry.
+The Capabilities and Policies views use the same current-generation readiness
+presentation.
 
 ## Invoke from either runtime
 
@@ -133,7 +148,40 @@ operator-level Helm values:
 - `managedMcp.imagePullSecret`: an existing dockerconfigjson Secret **in the
   claimed managed namespace**, not a credential copied from another namespace.
 
+The AL3 Playwright candidate is maintained in `sandbox-images/mcp-playwright`.
+It keeps MCP `0.0.78` and its exact Playwright browser revision, installs only at
+build time, and uses native Azure Linux 3 libraries with the vendor's Ubuntu 24
+Chromium binary. The architecture-specific download label is not a claim of
+upstream AL3 support: its image test must pass natively for each shipped CPU.
+That test checks UID 1000, Node 24, rendering, clicking, PNG capture and isolated
+contexts. The official default remains unchanged until the candidate passes
+container and routed installed qualification.
+CI runs this image test on native AMD64 and ARM64 runners with networking
+disabled, a read-only root, dropped capabilities and bounded scratch/resources.
+The existing guarded push/apply path also accepts
+`kars push --only mcp-playwright --apply`; it updates only the owning browser
+image value and verifies the matching managed preset, leaving Everything and
+MCP source specs unchanged.
+This changes the controller's owning image configuration and is refused while
+protected private-root qualification or retirement evidence exists. Preserve
+that evidence; do not bypass the guard by patching the managed Deployment.
+An OS/Node package scan does not establish vulnerability coverage for the
+downloaded Chromium executables or dependencies bundled inside compiled packages.
+
 The Everything image has a checked-in Dockerfile and complete npm lockfile.
+It uses the digest-pinned Azure Linux 3 Node.js 24 base for both ARM64 and AMD64,
+installs dependencies only during the build, and runs as UID 1000.
+The reference server remains at `2026.7.4`; its compatible MCP SDK dependency
+is pinned to `1.31.0`, addressing CVE-2026-104850 in the SDK's optional OAuth
+client code. This is not a claim that the server-only preset exposed that client
+path. Overrides also pin the audited fixes in fast-uri `3.1.8`, Hono `4.13.7`,
+ip-address `10.7.1`, and proxy-addr `2.0.8`.
+Run `npm ci --omit=dev --ignore-scripts && npm test` from
+`sandbox-images/mcp-everything` to exercise the real reference server and SDK:
+initialization, discovery, echo, HTTP 406 for JSON-only clients, and session
+termination/reuse rejection. The fixture binds only loopback. These host checks
+do not establish container isolation, a clean image scan, or routed Kind/AKS
+acceptance.
 Its default GHCR reference is not evidence that a new release was published.
 Build and publish it through an explicitly authorized operator workflow:
 

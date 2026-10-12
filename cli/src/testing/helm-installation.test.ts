@@ -84,6 +84,31 @@ afterEach(() => {
   }
 });
 
+describe("Helm seccomp installer image", () => {
+  function installerImages(args: string[] = [], path = chart) {
+    const pod = resource(render(path, args), "DaemonSet", "kars-seccomp-installer").spec?.template?.spec;
+    return [...(pod?.initContainers ?? []), ...(pod?.containers ?? [])].map((container) => container.image);
+  }
+
+  it("preserves the AL3 default for both containers", () => {
+    expect(installerImages()).toEqual(Array(2).fill("mcr.microsoft.com/azurelinux/base/core:3.0"));
+  });
+
+  it("uses the supplied immutable local image in both containers", () => {
+    const image = `localhost:5077/kars-seccomp-installer:latest@sha256:${"a".repeat(64)}`;
+    expect(installerImages([`--set-string=sandbox.seccompInstallerImage=${image}`])).toEqual([image, image]);
+  });
+
+  it("accepts saved values without the new image setting", () => {
+    const copied = reusedValuesChart();
+    const path = join(copied, "values.yaml");
+    const values = parse(readFileSync(path, "utf8"));
+    delete values.sandbox.seccompInstallerImage;
+    writeFileSync(path, stringify(values));
+    expect(installerImages([], copied)).toEqual(Array(2).fill("mcr.microsoft.com/azurelinux/base/core:3.0"));
+  }, 45_000);
+});
+
 describe("Bridge route qualification policy", () => {
   const bridgeChart = join(root, "bridge/deploy/helm/kars-bridge");
   const prefix = "bff.routeQualification";
@@ -224,6 +249,25 @@ describe("existing Helm installation compatibility", () => {
         .toBe(`ghcr.io/azure/kars-agentmesh-${component}:latest`);
     }
   }, 45_000);
+
+  it("uses Kars AL3-packaged official AGT defaults and preserves explicit operator image references", () => {
+    const defaults = render(chart, ["--set", "agentMesh.enabled=true"]);
+    const overrides = render(chart, ["--set", "agentMesh.enabled=true",
+      "--set", "agentMesh.registry.image.repository=registry.example/agt-registry",
+      "--set", "agentMesh.relay.image.repository=registry.example/agt-relay",
+      "--set-string", `agentMesh.registry.image.tag=latest@sha256:${"a".repeat(64)}`,
+      "--set-string", `agentMesh.relay.image.tag=latest@sha256:${"b".repeat(64)}`]);
+    for (const [component, digest] of [["registry", "a"], ["relay", "b"]]) {
+      const container = (manifests: Manifest[]) => resource(manifests, "Deployment", component)
+        .spec?.template?.spec?.containers?.[0];
+      expect(container(defaults)?.image)
+        .toBe(`ghcr.io/azure/kars-agentmesh-${component}:latest`);
+      expect(container(overrides)?.image)
+        .toBe(`registry.example/agt-${component}:latest@sha256:${digest.repeat(64)}`);
+      expect(container(defaults)?.env?.some((entry) => entry.name === "AGENTMESH_RELAY_ALLOW_UNAUTHED_DID"))
+        .toBe(false);
+    }
+  });
 
   it("treats removed/null new configuration as the compatible disabled/default state", () => {
     const manifests = render(chart, ["--set", "agentMesh=null,sandbox.nodeSelector=null"]);

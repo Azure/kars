@@ -456,7 +456,11 @@ pub async fn build_snapshot(
     };
 
     // Token budget
-    let usage = state.budget.get_usage(&state.sandbox_name).await;
+    let usage = state
+        .budget
+        .observed_usage(&state.sandbox_name)
+        .await
+        .map_err(|error| error.to_string())?;
     let token_budget_used = TokenUsage {
         prompt_tokens: usage.0,
         completion_tokens: usage.1,

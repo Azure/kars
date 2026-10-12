@@ -349,6 +349,10 @@ pub fn router(state: AppState) -> Router {
             "/api/operator/skills/{name}/revoke",
             post(operator::revoke_skill),
         )
+        .route(
+            "/api/operator/skills/{name}/package",
+            get(operator::get_skill_package),
+        )
         // User-side skills: submit a package (lands PENDING) + list to see review status.
         .route(
             "/api/skills",

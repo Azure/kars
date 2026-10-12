@@ -40,7 +40,7 @@ KIND_CLUSTER ?= kars-dev
 
 # Build both Bridge images (BFF + web). Override REGISTRY/TAG for your registry.
 images:
-	docker build -f bff/Dockerfile -t $(REGISTRY)/kars-bridge-bff:$(TAG) bff
+	docker build -f bff/Dockerfile -t $(REGISTRY)/kars-bridge-bff:$(TAG) ..
 	docker build -f web/Dockerfile -t $(REGISTRY)/kars-bridge-web:$(TAG) web
 
 image-gateway:
@@ -66,7 +66,7 @@ helm-install:
 
 # Local kind: build dev images, load them, install with the kind overlay.
 helm-install-kind:
-	docker build -f bff/Dockerfile -t kars-bridge-bff:dev bff
+	docker build -f bff/Dockerfile -t kars-bridge-bff:dev ..
 	docker build -f web/Dockerfile -t kars-bridge-web:dev web
 	kind load docker-image kars-bridge-bff:dev kars-bridge-web:dev --name $(KIND_CLUSTER)
 	helm upgrade --install kars-bridge deploy/helm/kars-bridge -n kars-system \

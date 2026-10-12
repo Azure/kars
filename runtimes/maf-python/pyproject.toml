@@ -45,7 +45,7 @@ dependencies = [
     # AGT-Python packages — built locally from upstream by
     # `runtimes/build-agt-wheels.sh`. See runtimes/openai-agents/README.md
     # for the install pattern.
-    "a2a_agentmesh>=3.3.0,<5",
+    "a2a_agentmesh==5.0.0",
 ]
 
 [project.optional-dependencies]

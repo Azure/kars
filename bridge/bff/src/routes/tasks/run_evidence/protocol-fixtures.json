@@ -1,5 +1,115 @@
 [
   {
+    "name": "required-outputs",
+    "reply": {
+      "type": "mission:reply",
+      "version": 4,
+      "reviewedPhase": {
+        "name": "draft",
+        "objective": "Write a useful briefing from the reviewed inputs.",
+        "capabilities": ["filesystem-write", "filesystem-read"],
+        "requiredToolCalls": [],
+        "minToolCalls": 1,
+        "maxToolCalls": 3,
+        "freshContext": true
+      },
+      "phaseDigest": "sha256:d5c9f098f584900ce3c864b0f20e75a75e053e4ca67b0e49d6aa85c8ffa06f83",
+      "requiredOutputs": ["briefing.md", "sources.json"],
+      "artifactFormat": "text-v1",
+      "artifacts": {"briefing.md": "# Briefing\nUseful findings — résumé.\n", "sources.json": "{\"sources\":[]}"},
+      "taskName": "briefing",
+      "taskUid": "task-uid",
+      "runNonce": "rev-2",
+      "assignmentId": "assignment-2",
+      "agentDid": "did:mesh:11111111111111111111111111111111",
+      "dispatcherDid": "did:mesh:22222222222222222222222222222222",
+      "sandboxUid": "sandbox-uid",
+      "podUid": "old-pod",
+      "bootId": "old-boot",
+      "status": "succeeded",
+      "output": "Useful briefing",
+      "evidence": {
+        "model": "recorded-model",
+        "rounds": 2,
+        "usage": {"promptTokens": 6940, "completionTokens": 485, "totalTokens": 7425},
+        "phase": {"name": "draft", "attemptedToolCalls": 1, "successfulToolCalls": 1, "minToolCalls": 1, "maxToolCalls": 3}
+      }
+    }
+  },
+  {
+    "name": "required-outputs-with-input",
+    "reply": {
+      "type": "mission:reply",
+      "version": 4,
+      "reviewedPhase": {
+        "name": "draft",
+        "objective": "Write a useful briefing from the reviewed inputs.",
+        "capabilities": ["filesystem-write", "filesystem-read"],
+        "requiredToolCalls": [],
+        "minToolCalls": 1,
+        "maxToolCalls": 3,
+        "freshContext": true
+      },
+      "phaseDigest": "sha256:d5c9f098f584900ce3c864b0f20e75a75e053e4ca67b0e49d6aa85c8ffa06f83",
+      "inputDigest": "sha256:86f78876e8632cf75884c60c32456d9bbfd838092af0015d5e209e1724acb1a2",
+      "requiredOutputs": ["handoff.md"],
+      "artifactFormat": "text-v1",
+      "artifacts": {"handoff.md": "Reviewed source findings for the next phase.\n"},
+      "taskName": "briefing",
+      "taskUid": "task-uid",
+      "runNonce": "rev-2",
+      "assignmentId": "assignment-2",
+      "agentDid": "did:mesh:11111111111111111111111111111111",
+      "dispatcherDid": "did:mesh:22222222222222222222222222222222",
+      "sandboxUid": "sandbox-uid",
+      "podUid": "old-pod",
+      "bootId": "old-boot",
+      "status": "succeeded",
+      "output": "Useful briefing",
+      "evidence": {
+        "model": "recorded-model",
+        "rounds": 2,
+        "usage": {"promptTokens": 6940, "completionTokens": 485, "totalTokens": 7425},
+        "phase": {"name": "draft", "attemptedToolCalls": 1, "successfulToolCalls": 1, "minToolCalls": 1, "maxToolCalls": 3}
+      }
+    }
+  },
+  {
+    "name": "empty-required-outputs",
+    "reply": {
+      "type": "mission:reply",
+      "version": 4,
+      "reviewedPhase": {
+        "name": "draft",
+        "objective": "Write a useful briefing from the reviewed inputs.",
+        "capabilities": ["filesystem-write", "filesystem-read"],
+        "requiredToolCalls": [],
+        "minToolCalls": 1,
+        "maxToolCalls": 3,
+        "freshContext": true
+      },
+      "phaseDigest": "sha256:d5c9f098f584900ce3c864b0f20e75a75e053e4ca67b0e49d6aa85c8ffa06f83",
+      "requiredOutputs": [],
+      "taskName": "briefing",
+      "taskUid": "task-uid",
+      "runNonce": "rev-2",
+      "assignmentId": "assignment-2",
+      "agentDid": "did:mesh:11111111111111111111111111111111",
+      "dispatcherDid": "did:mesh:22222222222222222222222222222222",
+      "sandboxUid": "sandbox-uid",
+      "podUid": "old-pod",
+      "bootId": "old-boot",
+      "status": "succeeded",
+      "output": "Useful briefing",
+      "evidence": {
+        "model": "recorded-model",
+        "rounds": 2,
+        "usage": {"promptTokens": 6940, "completionTokens": 485, "totalTokens": 7425},
+        "phase": {"name": "draft", "attemptedToolCalls": 1, "successfulToolCalls": 1, "minToolCalls": 1, "maxToolCalls": 3}
+      }
+    }
+  },
+  {
     "name": "legacy",
     "reply": {
       "type": "mission:reply",

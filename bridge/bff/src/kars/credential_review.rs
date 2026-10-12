@@ -88,7 +88,7 @@ fn digest(value: &impl Serialize) -> Result<String, kube::Error> {
     Ok(format!("sha256:{}", sha256_hex(bytes)))
 }
 
-fn intent(object: &DynamicObject) -> Result<String, kube::Error> {
+pub(super) fn intent(object: &DynamicObject) -> Result<String, kube::Error> {
     let mut value =
         serde_json::to_value(object).map_err(|_| failure("Credential intent encoding failed"))?;
     value

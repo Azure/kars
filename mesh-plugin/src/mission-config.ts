@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import type { MissionServiceConfig } from "./mission-service.js";
+import { guid } from "./mission-entra.js";
 
 export interface MissionProcessConfig {
   service: MissionServiceConfig;
@@ -30,12 +31,18 @@ export function missionProcessConfig(env: NodeJS.ProcessEnv): MissionProcessConf
     // The official SDK appends /ws to relay base URLs; URL adds a root slash.
     return parsed.toString().replace(/\/+$/, "");
   };
-  // Development transport is explicit. Entra cannot silently fall back to anonymous registration.
-  if (env.KARS_MISSION_AUTH_MODE !== "development") throw new Error("Mission dispatcher requires explicit development authentication; Entra is not supported yet");
+  const mode = env.KARS_MISSION_AUTH_MODE;
+  if (mode !== "development" && mode !== "entra") throw new Error("Mission dispatcher requires explicit development or entra authentication");
+  if (mode === "entra" && ["AGT_SKIP_INIT", "AGT_SKIP_ENTRA", "AGT_SKIP_VERIFY", "AGT_OAUTH_TOKEN"].some(key => env[key] !== undefined)) throw invalid();
+  const entra = mode === "entra" ? {
+    tenantId: required("KARS_MISSION_TENANT_ID", guid),
+    blueprintId: required("KARS_MISSION_BLUEPRINT_ID", guid),
+  } : undefined;
   const name = /^[a-z0-9](?:[a-z0-9.-]{0,251}[a-z0-9])?$/;
   const namespace = /^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/;
   return {
     service: {
+      ...(entra ? { entra } : {}),
       location: {
         namespace: required("POD_NAMESPACE", namespace),
         deployment: required("KARS_MISSION_DISPATCHER_DEPLOYMENT", name),

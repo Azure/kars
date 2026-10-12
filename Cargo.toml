@@ -30,7 +30,7 @@ version = "0.1.0"
 edition = "2024"
 license = "MIT"
 repository = "https://github.com/Azure/kars"
-rust-version = "1.88"
+rust-version = "1.89"
 
 [workspace.dependencies]
 # Kubernetes
@@ -108,39 +108,24 @@ futures-util = "0.3"
 # CI guard `ci/check-agt-released.sh` runs daily and opens a tracking
 # issue the moment a release containing the merged fix-commit appears
 # on crates.io, so we don't sit on the git pin longer than necessary.
-agentmesh = "4.0.0"
-agentmesh-mcp = "4.0.0"
+agentmesh = "=5.0.0"
+agentmesh-mcp = "=5.0.0"
 
 # Benchmarking (S16 — chaos tier perf baselines). Used by `controller/benches/`
 # and `inference-router/benches/`. Kept out of the binary builds via dev-deps.
 criterion = { version = "0.8", default-features = false, features = ["html_reports"] }
 
 [profile.release]
-lto = true
+lto = "thin"
 codegen-units = 1
 strip = true
 
-# ─── Temporary git override for AGT pre-release fixes ───
-# Pinned to microsoft/agent-governance-toolkit@3322175d on the
-# `kars-sdk-pop-signing` feature branch (upstream repo, not a fork).
-# This branch carries two pre-release fixes kars depends on:
-#   1. TypeScript SDK proof-of-possession registration + connect-frame
-#      signing (upstream PR #2772, in review).
-#   2. X3DH KDF spec-compliance per Signal §2.2 (F prefix in IKM,
-#      zero salt — separate upstream PR pending).
-#
-# The Rust agentmesh crate is unchanged between upstream main and our
-# pin (only the TypeScript SDK was touched); we still point the Rust
-# [patch.crates-io] override at the branch SHA so the workspace stays
-# at one consistent toolkit revision and `ci/check-agt-released.sh`
-# can track a single SHA.
-#
-# Remove this whole [patch.crates-io] block when:
-#   1. Both PRs merge to microsoft/agent-governance-toolkit main, AND
-#   2. AGT cuts a release containing them (track via the daily check).
-# At that point also drop the `vendor/agt/microsoft-agent-governance-sdk-*.tgz`
-# tarball + the file: dep in mesh-plugin/package.json and switch to the
-# published npm release.
+[profile.release.package.kars-controller]
+codegen-units = 16
+
+# Keep Rust, the TypeScript SDK, Python owners, native ACS and mesh servers
+# on the exact AGT 5 revision in vendor/agt/pin.json. Remove these patches
+# only after matching published artifacts pass the same runtime acceptance.
 [patch.crates-io]
-agentmesh = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "3322175d88baf61e8ceab8e392e29fa2bf9b580a", package = "agentmesh" }
-agentmesh-mcp = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "3322175d88baf61e8ceab8e392e29fa2bf9b580a", package = "agentmesh-mcp" }
+agentmesh = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "f68f2cf312c7e1366d6fd5654c51d8380c815222", package = "agentmesh" }
+agentmesh-mcp = { git = "https://github.com/microsoft/agent-governance-toolkit", rev = "f68f2cf312c7e1366d6fd5654c51d8380c815222", package = "agentmesh-mcp" }

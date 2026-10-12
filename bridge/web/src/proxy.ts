@@ -17,6 +17,8 @@
 
 import { NextResponse, type NextRequest } from "next/server";
 import { requestRoles } from "@/lib/request-roles";
+import { ssoConfigured } from "@/lib/oidc-config";
+import { loginPath } from "@/lib/auth-return";
 
 // (pathPrefix, methods) tuples that require the `admin` role.
 const ADMIN_ONLY: { prefix: string; methods: string[] }[] = [
@@ -27,6 +29,25 @@ const ADMIN_ONLY: { prefix: string; methods: string[] }[] = [
 export async function proxy(req: NextRequest) {
   const { pathname } = req.nextUrl;
   const method = req.method.toUpperCase();
+  // Layouts can survive client navigation; authenticate each surface request.
+  const surface = ["/workspace", "/console", "/audit"].some(
+    (prefix) => pathname === prefix || pathname.startsWith(`${prefix}/`),
+  );
+  if (surface && ssoConfigured()
+      && (await requestRoles((name) => req.cookies.get(name)?.value)).length === 0) {
+    // RSC fetches must not follow the document login redirect into the IdP.
+    // Next treats a non-Flight failure as a full-page navigation when needed.
+    if ((method === "GET" || method === "HEAD") && req.headers.get("rsc") === "1") {
+      return NextResponse.json(
+        { error: { code: "unauthorized", message: "A signed Bridge session is required." } },
+        { status: 401, headers: { "cache-control": "private, no-store", vary: "RSC" } },
+      );
+    }
+    return NextResponse.redirect(
+      new URL(loginPath(`${pathname}${req.nextUrl.search}`), req.url),
+      method === "GET" || method === "HEAD" ? 307 : 303,
+    );
+  }
   const gated = ADMIN_ONLY.find(
     (g) => (pathname === g.prefix || pathname.startsWith(`${g.prefix}/`)) && g.methods.includes(method),
   );

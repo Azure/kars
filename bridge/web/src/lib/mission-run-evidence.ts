@@ -4,6 +4,10 @@
 import type { ActivityEvent, MissionArtifact, MissionResult, TaskAssignmentStatus } from "./types";
 import { isSystemEvidenceArtifact, type RouterActivity } from "./router-activity";
 
+export function isStandaloneMission(task: { team: string | null; parent: string | null }): boolean {
+  return !task.team && !task.parent;
+}
+
 export function reviewKind(artifacts: MissionArtifact[] | undefined): string {
   const exts = (artifacts ?? []).filter(a => !isSystemEvidenceArtifact(a.name))
     .map(a => a.name.split(".").pop()?.toLowerCase() ?? "");
@@ -14,6 +18,12 @@ export function reviewKind(artifacts: MissionArtifact[] | undefined): string {
   if (exts.some(e => data.includes(e))) return "data";
   if (exts.some(e => docs.includes(e))) return "docs";
   return "output";
+}
+
+export function missionFailureMessage(result: MissionResult | null): string {
+  const messages = [result?.error?.trim(), result?.output.trim()]
+    .filter((message): message is string => Boolean(message));
+  return [...new Set(messages)].join("\n\n") || "No failure message was recorded for this revision.";
 }
 
 export function missionFailureAdvice(reason: string): { cause: string; remedy: string } {

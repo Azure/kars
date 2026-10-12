@@ -25,6 +25,11 @@ fn phase_of(task: &KarsTask) -> String {
 pub(super) fn to_summary(task: &KarsTask) -> TaskSummaryDto {
     TaskSummaryDto {
         name: task.name_any(),
+        parent: task
+            .spec
+            .parent_ref
+            .as_ref()
+            .map(|parent| parent.name.clone()),
         namespace: task.namespace().unwrap_or_default(),
         objective: clean_objective(&task.spec.objective),
         display_name: clean_display_name(&task.spec.display_name, &task.spec.objective),
@@ -37,10 +42,10 @@ pub(super) fn to_summary(task: &KarsTask) -> TaskSummaryDto {
         phase: phase_of(task),
         envelope_digest: task.status.as_ref().and_then(|s| s.envelope_digest.clone()),
         team: task
-            .metadata
-            .labels
-            .as_ref()
-            .and_then(|l| l.get("kars.azure.com/team").cloned()),
+            .labels()
+            .get("kars.azure.com/team")
+            .cloned()
+            .or_else(|| task.annotations().get("kars.azure.com/team").cloned()),
         delivered: false,
         failed: false,
         launched: task
@@ -96,6 +101,7 @@ pub(super) fn to_detail(
         .unwrap_or_default();
     canonicalize_assignment_event_roles(&mut assignment_events, &collaboration_events);
     TaskDetailDto {
+        reviewed_execution: None,
         name: task.name_any(),
         namespace: task.namespace().unwrap_or_default(),
         objective: clean_objective(&task.spec.objective),

@@ -16,6 +16,7 @@ import * as path from "node:path";
 import { execa } from "execa";
 import { banner, section, kvLine, checkLine } from "../stepper.js";
 import { loadContext, saveContext } from "../config.js";
+import { inspectMeshInstallation, MESH_NAMESPACE } from "../lib/mesh-release.js";
 import {
   IDENTITY_FILE,
   generateKeypair,
@@ -35,6 +36,24 @@ import {
 import { attachAuthSubcommand } from "./mesh/auth.js";
 import { attachPromoteSubcommand } from "./mesh/promote.js";
 import { attachSetupTrustSubcommand } from "./mesh/setup-trust.js";
+
+interface MeshSecurityContainer {
+  name?: string;
+  image?: string;
+  env?: Array<{ name?: string; value?: string; valueFrom?: unknown }>;
+  envFrom?: unknown[];
+}
+
+// Read declarations only; never resolve Secrets, ConfigMaps, or image defaults.
+function declaredSecurityEnv(container: MeshSecurityContainer, name: string): string | undefined {
+  const entries = container.env?.filter(entry => entry.name === name) ?? [];
+  if (entries.length > 1) return undefined;
+  const entry = entries[0];
+  if (!entry) return container.envFrom?.length ? undefined : "";
+  if (entry.valueFrom != null || (entry.value != null && typeof entry.value !== "string")) return undefined;
+  const value = entry.value ?? "";
+  return value.includes("$(") ? undefined : value;
+}
 
 export function meshCommand(): Command {
   const cmd = new Command("mesh");
@@ -219,148 +238,107 @@ export function meshCommand(): Command {
     });
 
   // -----------------------------------------------------------------------
-  // mesh security — toggle REQUIRE_REGISTRATION on the relay deployment
-  //
-  // Context: when REQUIRE_REGISTRATION=true, only agents that have been
-  // registered with the mesh registry can connect to the relay. This is
-  // the secure default. In transient states (registry DB wipe, fresh
-  // cluster bootstrap) the controller and NemoClaw instances may need a
-  // window to re-register. Use `mesh security open` temporarily to unblock.
+  // mesh security — read-only configuration, not authentication acceptance
   // -----------------------------------------------------------------------
   cmd
     .command("security <mode>")
-    .description(
-      "Toggle relay REQUIRE_REGISTRATION (mode: open | strict | status)"
-    )
-    .option("-n, --namespace <ns>", "AgentMesh namespace", "agentmesh")
-    .option("--deployment <name>", "Relay deployment name", "relay")
-    .action(async (mode: string, opts: { namespace: string; deployment: string }) => {
-      banner("kars · Mesh Security", "Relay registration enforcement");
+    .description("Inspect AgentMesh security configuration (status); open/strict are unsupported")
+    .option("-n, --namespace <ns>", "AgentMesh namespace", MESH_NAMESPACE)
+    .option("--deployment <name>", "Inspect only this relay deployment (default: discover Kars relay and registry)")
+    .action(async (mode: string, opts: { namespace: string; deployment?: string }) => {
+      banner("kars · Mesh Security", "Configuration only — runtime authentication is not verified");
 
       const normalized = mode.toLowerCase();
-      if (!["open", "strict", "status"].includes(normalized)) {
-        console.error(chalk.red(`  ✘ Unknown mode "${mode}". Use: open, strict, or status.`));
-        process.exit(1);
+      if (normalized === "open" || normalized === "strict") {
+        console.error(chalk.red(
+          `  ✘ '${normalized}' is unsupported: official Microsoft AGT ignores REQUIRE_REGISTRATION. ` +
+          "No changes made; existing proof-of-possession (PoP) settings are preserved. " +
+          "Use 'kars mesh security status' to inspect configuration."
+        ));
+        process.exitCode = 1;
+        return;
+      }
+      if (normalized !== "status") {
+        console.error(chalk.red(`  ✘ Unknown mode "${mode}". Use: status. open/strict are unsupported.`));
+        process.exitCode = 1;
+        return;
       }
 
-      // Read current value
-      let current = "(unknown)";
+      console.log(chalk.dim(
+        "  Deployment templates only: image defaults, referenced Secrets/ConfigMaps, and live processes are not inspected.\n" +
+        "  Configuration and healthy Pods do not prove JWT acceptance; real-token and rejection tests are still required."
+      ));
+      kvLine("REQUIRE_REGISTRATION", "ignored by official Microsoft AGT; not an enforcement signal");
+
       try {
-        const { stdout } = await execa(
-          "kubectl",
-          [
-            "get",
-            "deployment",
-            opts.deployment,
-            "-n",
-            opts.namespace,
-            "-o",
-            "jsonpath={.spec.template.spec.containers[?(@.name==\"relay\")].env[?(@.name==\"REQUIRE_REGISTRATION\")].value}",
-          ],
-          { stdio: "pipe" }
-        );
-        current = stdout.trim() || "(unset, defaults to true)";
-      } catch (e: unknown) {
-        console.error(
-          chalk.red(
-            `  ✘ Could not read relay deployment ${opts.namespace}/${opts.deployment}: ${
-              e instanceof Error ? e.message : String(e)
-            }`
-          )
-        );
-        process.exit(1);
-      }
-
-      kvLine("Namespace", opts.namespace);
-      kvLine("Deployment", opts.deployment);
-      kvLine("Current REQUIRE_REGISTRATION", current);
-
-      if (normalized === "status") {
-        const isStrict = current === "true" || current.startsWith("(unset");
-        console.log();
-        console.log(
-          isStrict
-            ? chalk.green("  🔒 strict — only registered agents may connect")
-            : chalk.yellow("  🔓 open — any signed agent may connect (insecure; use for bootstrap only)")
-        );
-        return;
-      }
-
-      const target = normalized === "strict" ? "true" : "false";
-      if (current === target) {
-        console.log(chalk.dim(`  Already ${normalized}. No change.`));
-        return;
-      }
-
-      if (normalized === "open") {
-        const { default: inquirer } = await import("inquirer");
-        const { confirm } = await inquirer.prompt([
-          {
-            type: "confirm",
-            name: "confirm",
-            message:
-              "Switching to OPEN mode lets any signed agent connect. This should only be used temporarily during bootstrap or recovery. Continue?",
-            default: false,
-          },
-        ]);
-        if (!confirm) {
-          console.log(chalk.dim("  Cancelled."));
-          return;
+        let targets: Array<{ component: "relay" | "registry"; name: string; container?: string }>;
+        if (opts.deployment) {
+          targets = [{ component: "relay", name: opts.deployment }];
+          kvLine("Scope", "explicit relay selection; ownership not inferred; registry not inspected");
+        } else {
+          if (opts.namespace !== MESH_NAMESPACE) {
+            throw new Error("Automatic discovery supports only agentmesh; use --deployment for a read-only relay inspection in another namespace.");
+          }
+          const installation = await inspectMeshInstallation(execa);
+          if (installation.kind === "absent") throw new Error("No AgentMesh installation found.");
+          if (installation.kind === "external") {
+            throw new Error("External or unrecognized AgentMesh ownership; use --deployment for an explicit read-only relay inspection.");
+          }
+          kvLine("Installation", installation.kind === "helm"
+            ? `Helm ${installation.releaseNamespace}/${installation.release}`
+            : "Kars standalone manifest");
+          targets = installation.deployments;
         }
-      }
 
-      section("Applying change");
-      try {
-        await execa(
-          "kubectl",
-          [
-            "set",
-            "env",
-            `deployment/${opts.deployment}`,
-            "-n",
-            opts.namespace,
-            `REQUIRE_REGISTRATION=${target}`,
-          ],
-          { stdio: "inherit" }
-        );
-        checkLine(true, `REQUIRE_REGISTRATION=${target}`);
+        for (const target of targets) {
+          const { stdout } = await execa("kubectl", [
+            "get", "deployment", target.name, "-n", opts.namespace, "-o", "json",
+          ], { stdio: "pipe" });
+          const resource = JSON.parse(stdout) as {
+            spec?: { template?: { spec?: { containers?: MeshSecurityContainer[] } } };
+          } | null;
+          const containers = resource?.spec?.template?.spec?.containers;
+          if (!Array.isArray(containers) || containers.some(container => !container || typeof container !== "object")) {
+            throw new Error(`Invalid deployment ${opts.namespace}/${target.name}: no container list.`);
+          }
+          const matches = containers.filter(container => target.container
+            ? container.name === target.container
+            : container.name === target.component || container.name === `agentmesh-${target.component}`);
+          const container = matches.length === 1 ? matches[0]
+            : (!target.container && matches.length === 0 && containers.length === 1 ? containers[0] : undefined);
+          if (!container?.name || !container.image) {
+            throw new Error(`Cannot identify ${target.component} container/image in ${opts.namespace}/${target.name}.`);
+          }
 
-        // Wait for rollout to complete so the setting is active before we return
-        await execa(
-          "kubectl",
-          [
-            "rollout",
-            "status",
-            `deployment/${opts.deployment}`,
-            "-n",
-            opts.namespace,
-            "--timeout=120s",
-          ],
-          { stdio: "inherit" }
-        );
-
-        console.log();
-        console.log(
-          normalized === "open"
-            ? chalk.yellow(
-                "  ⚠️  Mode: OPEN — revert with `kars mesh security strict` once bootstrap is complete."
-              )
-            : chalk.green(
-                "  🔒 Mode: STRICT — only registered agents may connect."
-              )
-        );
-        console.log(
-          chalk.dim(
-            "  Note: `kars up` re-applies deploy/agentmesh.yaml which resets this to the manifest default."
-          )
-        );
+          section(`${target.component}: ${opts.namespace}/${target.name}`);
+          kvLine("Container", container.name);
+          kvLine("Image (not verified)", container.image);
+          if (target.component === "relay") {
+            const bypass = declaredSecurityEnv(container, "AGENTMESH_RELAY_ALLOW_UNAUTHED_DID");
+            kvLine("PoP declaration", bypass === undefined
+              ? "unknown (indirect or ambiguous environment)"
+              : ["1", "true", "yes"].includes(bypass.toLowerCase())
+                ? "WARNING: bypass declared; official AGT would not require DID proof-of-possession"
+                : "no bypass declared; official AGT defaults to requiring DID proof-of-possession");
+          }
+          const audience = declaredSecurityEnv(container, "AGENTMESH_ENTRA_AUDIENCE");
+          const tenant = declaredSecurityEnv(container, "AGENTMESH_ENTRA_TENANT_ID");
+          const describeValue = (value: string | undefined) => value === undefined
+            ? "unknown (indirect or ambiguous environment)" : value.trim() ? "nonblank literal declared" : "no nonblank literal declared";
+          kvLine("AGENTMESH_ENTRA_AUDIENCE", describeValue(audience));
+          kvLine("AGENTMESH_ENTRA_TENANT_ID", describeValue(tenant));
+          kvLine("Entra configuration", audience === undefined || tenant === undefined
+            ? "unknown; both fields must be nonblank together"
+            : audience.trim() && tenant.trim()
+              ? "paired literals declared; JWT acceptance NOT verified"
+              : audience.trim() || tenant.trim()
+                ? "WARNING: incomplete pair; Entra verification may be disabled"
+                : "no pair declared in the deployment template");
+        }
+        console.log(chalk.dim("  No changes made. This is not an open/strict verdict or a live security test."));
       } catch (e: unknown) {
-        console.error(
-          chalk.red(
-            `  ✘ Failed to apply change: ${e instanceof Error ? e.message : String(e)}`
-          )
-        );
-        process.exit(1);
+        console.error(chalk.red(`  ✘ Could not inspect AgentMesh configuration: ${e instanceof Error ? e.message : String(e)}`));
+        process.exitCode = 1;
       }
     });
 

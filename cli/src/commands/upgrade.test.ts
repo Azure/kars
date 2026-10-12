@@ -93,6 +93,7 @@ describe("buildHelmUpgradeArgs", () => {
     // The crux of the rollback fix: tags are the version, not `latest`.
     expect(args).toContain("controller.image.tag=v0.1.20");
     expect(args).toContain("inferenceRouter.image.tag=v0.1.20");
+    expect(args).toContain("metricsServer.image.tag=v0.1.20");
     expect(args).toContain("sandbox.image.tag=v0.1.20");
     expect(args).not.toContain("image.tag=latest");
   });
@@ -297,9 +298,11 @@ describe("detectCurrentVersion — honest, un-spoofable version detection", () =
 });
 
 describe("rolloutRestartAll — refreshes every workload, mesh first", () => {
+  const core = JSON.stringify({ metadata: { name: "kars-controller", namespace: "kars-system" },
+    spec: { template: { spec: { containers: [{ name: "controller", image: "example/controller:latest" }] } } } });
   it("restarts agentmesh relay+registry, the controller, and every sandbox", async () => {
     const calls: string[][] = [];
-    const execa = fakeExeca((_bin, args) => args[0] === "get" && args[1] === "deployments"
+    const execa = fakeExeca((_bin, args) => args[0] === "get" && args[1] === "deployment" ? core : args[0] === "get" && args[1] === "deployments"
       ? JSON.stringify({ items: [{ metadata: { name: "agent", namespace: "kars-agent" } }] }) : "", calls);
     await rolloutRestartAll(execa, legacyMesh);
     const restarts = calls
@@ -316,7 +319,8 @@ describe("rolloutRestartAll — refreshes every workload, mesh first", () => {
 
   it("restarts the mesh BEFORE the controller (so deps come up against new mesh)", async () => {
     const calls: string[][] = [];
-    await rolloutRestartAll(fakeExeca((_bin, args) => args[0] === "get" && args[1] === "deployments" ? '{"items":[]}' : "", calls), legacyMesh);
+    await rolloutRestartAll(fakeExeca((_bin, args) => args[0] === "get" && args[1] === "deployment" ? core
+      : args[0] === "get" && args[1] === "deployments" ? '{"items":[]}' : "", calls), legacyMesh);
     const order = calls
       .filter((c) => c[0] === "kubectl" && c[1] === "rollout" && c[2] === "restart")
       .map((c) => c.join(" "));

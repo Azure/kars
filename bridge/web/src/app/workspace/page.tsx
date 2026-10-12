@@ -31,10 +31,12 @@ import {
   type MissionArtifacts,
 } from "@/lib/types";
 import { analyzeTeamRun } from "@/lib/team-run-evidence";
+import { isStandaloneMission } from "@/lib/mission-run-evidence";
 
 export const dynamic = "force-dynamic";
 
-function teamHealthDot(health: string | null, paused: boolean): string {
+function teamHealthDot(health: string | null, paused: boolean, phase: string): string {
+  if (phase === "Degraded") return "bg-rose-500";
   const h = paused ? "Hibernating" : (health ?? "");
   if (h === "Healthy") return "bg-emerald-500";
   if (h === "Stalled") return "bg-rose-500";
@@ -64,8 +66,7 @@ export default async function WorkspaceHome() {
       listTeams(ns).catch(() => []),
       getDigests().catch(() => []),
       getArtifacts()
-        .then((i) => i.missions)
-        .catch(() => []),
+        .then((i) => i.missions),
     ]);
   } catch (err) {
     backendError =
@@ -75,7 +76,7 @@ export default async function WorkspaceHome() {
   const waiting = approvals.filter((a) => a.actionable);
   // Standalone missions only — team machinery (principal/members/standing runs)
   // lives on the Team surface, not in the user's mission list.
-  const standaloneTasks = tasks.filter((t) => !t.team);
+  const standaloneTasks = tasks.filter(isStandaloneMission);
   // A run minted by a standing team's charter loop (`<team>-run-<epoch>`) is
   // autonomous — it must NOT appear in the user's personal review queue. Also
   // exclude anything whose task name is owned by a team (any `<team>-…` object),
@@ -88,6 +89,8 @@ export default async function WorkspaceHome() {
   // human decision (§16) — excludes autonomous standing-team output.
   const toReview = artifacts.filter(
     (m) =>
+      m.current &&
+      isStandaloneMission(m) &&
       m.summary &&
       m.status !== "error" &&
       m.review_status !== "approved" &&
@@ -110,7 +113,7 @@ export default async function WorkspaceHome() {
         ? teams.find((team) => team.name === mission.team)
         : teams.find((team) => mission.task.startsWith(`${team.name}-run-`));
   const completedCandidates = artifacts
-      .filter((m) => m.status !== "error" && m.finished_at != null)
+      .filter((m) => !m.parent && m.status !== "error" && m.finished_at != null)
       .sort(
         (a, b) =>
           (Number(Boolean(completedTeam(b))) * 2 +
@@ -157,7 +160,9 @@ export default async function WorkspaceHome() {
     .slice(0, 6);
   const completedHref = (mission: MissionArtifacts) => {
       const team = completedTeam(mission);
-      if (!team) return `/workspace/missions/${encodeURIComponent(mission.task)}`;
+      if (!team) return mission.current
+        ? `/workspace/missions/${encodeURIComponent(mission.task)}?tab=deliverable`
+        : `/workspace/artifacts?q=${encodeURIComponent(mission.task)}&view=all&limit=all`;
       return mission.evidence_key && mission.evidence_key !== mission.task
         ? `/workspace/teams/${encodeURIComponent(team.name)}?tab=runs`
         : `/workspace/teams/${encodeURIComponent(team.name)}/runs/${encodeURIComponent(mission.task)}`;
@@ -353,8 +358,8 @@ export default async function WorkspaceHome() {
                       {t.display_name ?? t.name}
                     </p>
                     <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full border border-border bg-surface-muted/60 px-2 py-0.5 text-[11px] font-medium text-foreground-muted">
-                      <span className={`h-1.5 w-1.5 rounded-full ${teamHealthDot(t.health, t.paused)}`} />
-                      {t.paused ? "Hibernating" : (t.health ?? t.phase)}
+                      <span className={`h-1.5 w-1.5 rounded-full ${teamHealthDot(t.health, t.paused, t.phase)}`} />
+                      {t.phase === "Degraded" ? "Degraded" : t.paused ? "Hibernating" : (t.health ?? t.phase)}
                     </span>
                   </div>
                   <p className="mt-1.5 line-clamp-1 text-xs text-foreground-muted">{t.charter}</p>

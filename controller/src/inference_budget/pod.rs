@@ -26,11 +26,19 @@ const CA_VOLUME: &str = "kars-inference-budget-ca";
 mod tests;
 
 pub fn egress(sandbox: &KarsSandbox) -> Result<Option<Value>, StoreError> {
-    let Some(reference) = &sandbox.spec.inference_budget_ref else {
-        return Ok(None);
+    let Some(settings) = Settings::from_env()? else {
+        return if sandbox.spec.inference_budget_ref.is_some() {
+            Err(BudgetError::Contract.into())
+        } else {
+            Ok(None)
+        };
     };
-    let settings = Settings::from_env()?.ok_or(BudgetError::Contract)?;
-    if reference.account.namespace != settings.accounting_namespace {
+    if sandbox
+        .spec
+        .inference_budget_ref
+        .as_ref()
+        .is_some_and(|reference| reference.account.namespace != settings.accounting_namespace)
+    {
         return Err(BudgetError::Identity.into());
     }
     Ok(Some(json!({
@@ -267,8 +275,43 @@ pub async fn decorate(
     pod: &mut Value,
 ) -> Result<std::collections::BTreeMap<String, String>, StoreError> {
     let mut annotations = std::collections::BTreeMap::new();
-    if let Some(plan) = prepare(client, sandbox, namespace).await? {
+    let governed = prepare(client, sandbox, namespace).await?;
+    if let Some(ref plan) = governed {
         plan.apply(pod, &mut annotations)?;
+    }
+    if let Some(settings) = Settings::from_env()? {
+        let binding = super::calendar::prepare(client, &settings, sandbox, namespace).await?;
+        if governed.is_none() {
+            let (ca, version) = settings.public_ca(client).await?;
+            mirror_public_ca(client, sandbox, namespace, ca).await?;
+            apply_transport(
+                pod,
+                &format!(
+                    "https://kars-inference-budget.{}.svc:9447",
+                    settings.accounting_namespace
+                ),
+                &settings.router_image_digest,
+                &version,
+                &mut annotations,
+            )?;
+        }
+        let router = pod["containers"]
+            .as_array_mut()
+            .and_then(|containers| {
+                containers
+                    .iter_mut()
+                    .find(|container| container["name"] == "inference-router")
+            })
+            .ok_or(BudgetError::Corrupt)?;
+        router["env"]
+            .as_array_mut()
+            .ok_or(BudgetError::Corrupt)?
+            .push(json!({
+                "name": crate::inference_budget_contract::calendar::BINDING_ENV,
+                "value": serde_json::to_string(&binding).map_err(|_| BudgetError::Corrupt)?
+            }));
+    } else {
+        super::calendar::prepare_legacy(client, sandbox, namespace).await?;
     }
     Ok(annotations)
 }
@@ -279,65 +322,25 @@ impl Plan {
         pod: &mut Value,
         annotations: &mut std::collections::BTreeMap<String, String>,
     ) -> Result<(), StoreError> {
-        let volumes = pod
-            .get_mut("volumes")
-            .and_then(Value::as_array_mut)
-            .ok_or(BudgetError::Corrupt)?;
-        if volumes.iter().any(|volume| {
-            matches!(
-                volume.get("name").and_then(Value::as_str),
-                Some(TOKEN_VOLUME | CA_VOLUME)
-            )
-        }) {
-            return Err(BudgetError::Corrupt.into());
-        }
-
-        volumes.push(json!({
-            "name": TOKEN_VOLUME,
-            "projected": {"sources": [{"serviceAccountToken": {"audience": AUDIENCE, "expirationSeconds": 600, "path": "token"}}]}
-        }));
-        volumes.push(json!({"name": CA_VOLUME, "configMap": {"name": CA_NAME}}));
-        let containers = pod
-            .get_mut("containers")
-            .and_then(Value::as_array_mut)
-            .ok_or(BudgetError::Corrupt)?;
-        let router = containers
-            .iter_mut()
-            .find(|container| {
-                container.get("name").and_then(Value::as_str) == Some("inference-router")
+        apply_transport(
+            pod,
+            &self.endpoint,
+            &self.router_image_digest,
+            &self.ca_version,
+            annotations,
+        )?;
+        let router = pod["containers"]
+            .as_array_mut()
+            .and_then(|containers| {
+                containers
+                    .iter_mut()
+                    .find(|container| container["name"] == "inference-router")
             })
             .ok_or(BudgetError::Corrupt)?;
-        let env = router
-            .get_mut("env")
-            .and_then(Value::as_array_mut)
-            .ok_or(BudgetError::Corrupt)?;
-        env.extend([
+        router["env"].as_array_mut().ok_or(BudgetError::Corrupt)?.extend([
             json!({"name": "KARS_INFERENCE_BUDGET_REQUIRED", "value": "true"}),
             json!({"name": "KARS_INFERENCE_BUDGET_BINDING", "value": serde_json::to_string(&self.binding).map_err(|_| BudgetError::Corrupt)?}),
-            json!({"name": "KARS_INFERENCE_BUDGET_ENDPOINT", "value": self.endpoint}),
-            json!({"name": "KARS_INFERENCE_BUDGET_CA", "value": "/etc/kars/inference-budget-ca/ca.crt"}),
-            json!({"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}),
-            json!({"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}),
         ]);
-        let mounts = router
-            .get_mut("volumeMounts")
-            .and_then(Value::as_array_mut)
-            .ok_or(BudgetError::Corrupt)?;
-        mounts.push(json!({"name": TOKEN_VOLUME, "mountPath": PRIVATE_MOUNT, "readOnly": true}));
-        mounts.push(json!({"name": CA_VOLUME, "mountPath": "/etc/kars/inference-budget-ca", "readOnly": true}));
-        router["readinessProbe"] = json!({
-            "httpGet": {"path": "/readyz", "port": "inference"}, "initialDelaySeconds": 3, "periodSeconds": 5
-        });
-        let image = router
-            .get("image")
-            .and_then(Value::as_str)
-            .ok_or(BudgetError::Contract)?;
-        let base = image.split('@').next().ok_or(BudgetError::Contract)?;
-        router["image"] = json!(format!("{base}@{}", self.router_image_digest));
-        annotations.insert(
-            "kars.azure.com/inference-budget-ca-version".into(),
-            self.ca_version.clone(),
-        );
         annotations.insert(
             "kars.azure.com/inference-budget-binding".into(),
             crate::providers::signing::sha256_hex(
@@ -346,4 +349,75 @@ impl Plan {
         );
         Ok(())
     }
+}
+
+fn apply_transport(
+    pod: &mut Value,
+    endpoint: &str,
+    router_image_digest: &str,
+    ca_version: &str,
+    annotations: &mut std::collections::BTreeMap<String, String>,
+) -> Result<(), StoreError> {
+    let volumes = pod
+        .get_mut("volumes")
+        .and_then(Value::as_array_mut)
+        .ok_or(BudgetError::Corrupt)?;
+    if volumes.iter().any(|volume| {
+        matches!(
+            volume.get("name").and_then(Value::as_str),
+            Some(TOKEN_VOLUME | CA_VOLUME)
+        )
+    }) {
+        return Err(BudgetError::Corrupt.into());
+    }
+
+    volumes.push(json!({
+            "name": TOKEN_VOLUME,
+            "projected": {"sources": [{"serviceAccountToken": {"audience": AUDIENCE, "expirationSeconds": 600, "path": "token"}}]}
+        }));
+    volumes.push(json!({"name": CA_VOLUME, "configMap": {"name": CA_NAME}}));
+    let containers = pod
+        .get_mut("containers")
+        .and_then(Value::as_array_mut)
+        .ok_or(BudgetError::Corrupt)?;
+    let router = containers
+        .iter_mut()
+        .find(|container| container.get("name").and_then(Value::as_str) == Some("inference-router"))
+        .ok_or(BudgetError::Corrupt)?;
+    let env = router
+        .get_mut("env")
+        .and_then(Value::as_array_mut)
+        .ok_or(BudgetError::Corrupt)?;
+    env.extend([
+            json!({"name": "KARS_INFERENCE_BUDGET_ENDPOINT", "value": endpoint}),
+            json!({"name": "KARS_INFERENCE_BUDGET_CA", "value": "/etc/kars/inference-budget-ca/ca.crt"}),
+            json!({"name": "POD_NAME", "valueFrom": {"fieldRef": {"fieldPath": "metadata.name"}}}),
+            json!({"name": "POD_UID", "valueFrom": {"fieldRef": {"fieldPath": "metadata.uid"}}}),
+        ]);
+    let mounts = router
+        .get_mut("volumeMounts")
+        .and_then(Value::as_array_mut)
+        .ok_or(BudgetError::Corrupt)?;
+    mounts.push(json!({"name": TOKEN_VOLUME, "mountPath": PRIVATE_MOUNT, "readOnly": true}));
+    mounts.push(
+        json!({"name": CA_VOLUME, "mountPath": "/etc/kars/inference-budget-ca", "readOnly": true}),
+    );
+    router["readinessProbe"] = json!({
+        "httpGet": {"path": "/readyz", "port": "inference"},
+        "initialDelaySeconds": 3,
+        // Readiness traverses live accounting and authority, not just local process health.
+        "timeoutSeconds": 10,
+        "periodSeconds": 15
+    });
+    let image = router
+        .get("image")
+        .and_then(Value::as_str)
+        .ok_or(BudgetError::Contract)?;
+    let base = image.split('@').next().ok_or(BudgetError::Contract)?;
+    router["image"] = json!(format!("{base}@{router_image_digest}"));
+    annotations.insert(
+        "kars.azure.com/inference-budget-ca-version".into(),
+        ca_version.into(),
+    );
+    Ok(())
 }

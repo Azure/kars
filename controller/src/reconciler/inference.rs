@@ -12,6 +12,21 @@ use std::collections::BTreeMap;
 
 const PROVIDERS_SECRET: &str = "kars-inference-providers";
 
+pub(super) fn model_deployment(
+    policy: &crate::inference_policy::InferencePolicySpec,
+    cluster_default: Option<&str>,
+) -> Result<String, &'static str> {
+    let deployment = match &policy.model_preference {
+        Some(preference) => preference.primary.deployment.as_str(),
+        None if policy.bundle_ref.is_none() => cluster_default.unwrap_or_default(),
+        None => return Err("requires the verified bundle model before sandbox initialization"),
+    };
+    if deployment.trim().is_empty() {
+        return Err("requires modelPreference.primary.deployment or a configured cluster default");
+    }
+    Ok(deployment.to_owned())
+}
+
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct LocalTarget {
@@ -134,6 +149,44 @@ pub(super) async fn mirror_providers(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn policy_model_inherits_configured_default_only_when_preference_is_absent() {
+        let mut policy = crate::inference_policy::InferencePolicySpec::default();
+        assert_eq!(
+            model_deployment(&policy, Some("configured-model")).unwrap(),
+            "configured-model"
+        );
+        assert!(model_deployment(&policy, None).is_err());
+        assert!(model_deployment(&policy, Some(" ")).is_err());
+        policy.bundle_ref = Some(crate::crd::OciArtifactRef {
+            registry: "registry.example".into(),
+            repository: "policy".into(),
+            digest: format!("sha256:{}", "a".repeat(64)),
+            artifact_type: "application/vnd.kars.inference-policy.v1+json".into(),
+        });
+        assert!(model_deployment(&policy, Some("configured-model")).is_err());
+        policy.bundle_ref = None;
+        policy.model_preference = Some(crate::inference_policy::ModelPreference {
+            primary: crate::inference_policy::ModelRef {
+                provider: "named-provider".into(),
+                deployment: "explicit-model".into(),
+            },
+            fallback: vec![],
+        });
+        assert_eq!(
+            model_deployment(&policy, Some("configured-model")).unwrap(),
+            "explicit-model"
+        );
+        policy
+            .model_preference
+            .as_mut()
+            .unwrap()
+            .primary
+            .deployment
+            .clear();
+        assert!(model_deployment(&policy, Some("configured-model")).is_err());
+    }
 
     #[test]
     fn local_inference_is_opt_in_and_precise_targets_replace_namespace_allowance() {

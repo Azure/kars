@@ -2,19 +2,14 @@
 # Licensed under the MIT License.
 
 # Toolchain only. The matching chart supplies its generated schema-hook.mjs.
-# Build from the repository root. ARM builds require the reviewed ARM tool hashes.
-FROM node:22-bookworm-slim AS tools
-ARG TARGETARCH
-ARG HELM_SHA256=86584a54def73570558f66f5111cc53dfed56689637ae32c1201205d494f54fb
-ARG KUBECTL_SHA256=3cfeaf80be482b435b0aa214aff6e0b2c312ee23c0ff20810c75517b6004c6eb
-RUN test "$TARGETARCH" = amd64 || test "$TARGETARCH" = arm64
-ADD --checksum=sha256:${HELM_SHA256} https://get.helm.sh/helm-v4.3.0-linux-${TARGETARCH}.tar.gz /download/helm.tar.gz
-ADD --checksum=sha256:${KUBECTL_SHA256} https://dl.k8s.io/release/v1.35.9/bin/linux/${TARGETARCH}/kubectl /download/kubectl
-ADD https://raw.githubusercontent.com/kubernetes/kubernetes/v1.35.9/LICENSE /download/kubectl.LICENSE
-RUN tar --no-same-owner -xzf /download/helm.tar.gz -C /download && \
-    cp /download/linux-${TARGETARCH}/helm /download/helm && \
-    cp /download/linux-${TARGETARCH}/LICENSE /download/helm.LICENSE && \
-    chmod 0555 /download/helm /download/kubectl
+# Build from the repository root on a native amd64 or arm64 builder.
+FROM node:22-bookworm-slim AS node
+FROM golang:1.27.2-bookworm AS tools
+ENV CGO_ENABLED=0 GOMAXPROCS=2 GOMEMLIMIT=3GiB GOTOOLCHAIN=local
+ADD --checksum=sha256:e113bad2e11b9920a2d1ad2c1ee8b1881796330ba02e2673f5312ba10990800e https://codeload.github.com/helm/helm/tar.gz/bec5b06ed841fe5269972d864d5177944fd5970f /download/helm.tar.gz
+ADD --checksum=sha256:3020026c65ea6701c42113ca092bb20bff71099028f0cf596354e95d53f7e0a6 https://codeload.github.com/kubernetes/kubernetes/tar.gz/329000efd0b26bd78155e51e4df449130f0fca00 /download/kubernetes.tar.gz
+COPY cli/schema-hook/build-tools.sh /usr/local/bin/build-schema-tools
+RUN sh /usr/local/bin/build-schema-tools /download
 
 FROM mcr.microsoft.com/azurelinux/distroless/base:3.0 AS runtime-base
 FROM mcr.microsoft.com/azurelinux/base/core:3.0 AS runtime-libs
@@ -44,12 +39,13 @@ RUN set -eu; \
       >> /runtime-libs/var/lib/rpmmanifest/container-manifest-2
 
 FROM runtime-base AS runtime
+LABEL org.kars.schema-toolchain.patch="go1.27.2-xnet0.60.0"
 ENV PATH=/usr/local/bin HOME=/tmp LD_BIND_NOW=1 NODE_OPTIONS=--max-old-space-size=160
 ENV NODE_EXTRA_CA_CERTS=/etc/pki/tls/certs/ca-bundle.crt SSL_CERT_FILE=/etc/pki/tls/certs/ca-bundle.crt
 WORKDIR /opt/kars-schema
 COPY --from=runtime-libs /runtime-libs/ /
-COPY --from=tools /usr/local/bin/node /usr/local/bin/node
-COPY --from=tools /usr/local/LICENSE /usr/local/share/licenses/node/LICENSE
+COPY --from=node /usr/local/bin/node /usr/local/bin/node
+COPY --from=node /usr/local/LICENSE /usr/local/share/licenses/node/LICENSE
 COPY --from=tools /download/helm /usr/local/bin/helm
 COPY --from=tools /download/helm.LICENSE /usr/local/share/licenses/helm/LICENSE
 COPY --from=tools /download/kubectl /usr/local/bin/kubectl

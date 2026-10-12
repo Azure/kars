@@ -3,8 +3,10 @@
   "$comment": "Copyright (c) Microsoft Corporation. Licensed under the MIT License.",
   "type": "object",
   "additionalProperties": false,
-  "required": ["enabled", "aggregator", "sandboxes", "gadget"],
+  "required": ["managed", "enabled", "aggregator", "sandboxes", "gadget"],
   "properties": {
+    "managed": { "type": "boolean" },
+    "global": { "type": "object" },
     "enabled": { "type": "boolean" },
     "aggregator": {
       "type": "object",
@@ -29,7 +31,8 @@
       "type": "object", "additionalProperties": false,
       "required": ["image", "dnsImage", "tcpImage"],
       "properties": {
-        "image": { "const": "ghcr.io/inspektor-gadget/inspektor-gadget@sha256:39ebe601aff064f531aa0630194d9a7bbdb5060de4f290d7ec2fd678f1dd5c10" },
+        "hookMode": { "type": "string", "enum": ["fanotify+ebpf", "podinformer"] },
+        "image": { "type": "string", "pattern": "^$|^[a-zA-Z0-9][a-zA-Z0-9._:/-]*@sha256:[a-f0-9]{64}$" },
         "dnsImage": { "const": "ghcr.io/inspektor-gadget/gadget/trace_dns@sha256:751684c8bf45731ffb412e608d9fb71f9e896debe1d138d524f850cadf54a0f7" },
         "tcpImage": { "const": "ghcr.io/inspektor-gadget/gadget/trace_tcp@sha256:b6a4f4563430effa4ddde01898e628f082f2db4b638b18922eb55e4bd4aaab89" }
       }
@@ -38,6 +41,7 @@
   "if": { "properties": { "enabled": { "const": true } } },
   "then": { "properties": {
     "aggregator": { "properties": { "image": { "minLength": 1 } } },
+    "gadget": { "properties": { "image": { "minLength": 1 } } },
     "sandboxes": { "minItems": 1 }
   } }
 }

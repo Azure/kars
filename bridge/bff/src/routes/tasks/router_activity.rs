@@ -6,12 +6,12 @@ use serde::{Deserialize, Serialize};
 use super::models::{MissionArtifactDto, MissionResultDto};
 use crate::kars::task::KarsTask;
 
-const ARTIFACT: &str = "kars-router-observations.json";
+pub(crate) const ARTIFACT: &str = "kars-router-observations.json";
 const SOURCE: &str = "runtime-forwarded-router-observations";
 const COVERAGE: &str = "returned-responses-only";
 const MAX_SAFE: u64 = 9_007_199_254_740_991;
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 pub struct RouterActivity {
     version: u8,
     source: String,
@@ -23,14 +23,14 @@ pub struct RouterActivity {
     observation: Observation,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "state", rename_all = "snake_case")]
 enum Observation {
     Observed { trace: Trace },
     Unavailable { reason: String },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct Trace {
     scope_id: String,
     rounds: Vec<u64>,
@@ -42,17 +42,19 @@ struct Trace {
     events: Vec<Event>,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct Event {
     scope_id: String,
     round: u64,
     seq: u64,
     source: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    observed_at: Option<String>,
     #[serde(flatten)]
     detail: EventDetail,
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 enum EventDetail {
     Round {
@@ -78,14 +80,92 @@ enum EventDetail {
         name: String,
         ok: Option<bool>,
         reported_in_round: u64,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        ms: Option<u64>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        result_summary: Option<ToolSummary>,
     },
 }
 
-#[derive(Debug, Deserialize, Serialize)]
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+enum ToolSummary {
+    FileRead {
+        bytes: u64,
+        returned_bytes: u64,
+        truncated: bool,
+    },
+    FileWrite {
+        bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact_name: Option<String>,
+    },
+    Failure {
+        reason: String,
+    },
+}
+
+impl ToolSummary {
+    fn valid(&self, name: &str, ok: Option<bool>) -> bool {
+        match self {
+            Self::FileRead {
+                bytes,
+                returned_bytes,
+                truncated,
+            } => {
+                ok == Some(true)
+                    && matches!(name, "file_read" | "kars_mission_read")
+                    && *bytes <= MAX_SAFE
+                    && *returned_bytes <= 16 * 1024 * 1024
+                    && returned_bytes <= bytes
+                    && *truncated == (returned_bytes < bytes)
+            }
+            Self::FileWrite {
+                bytes,
+                artifact_name,
+            } => {
+                ok == Some(true)
+                    && matches!(name, "file_write" | "kars_mission_write")
+                    && *bytes <= 16 * 1024 * 1024
+                    && artifact_name.as_ref().is_none_or(|name| {
+                        !name.is_empty()
+                            && name.len() <= 128
+                            && !name.starts_with('.')
+                            && name
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+                    })
+            }
+            Self::Failure { reason } => {
+                ok == Some(false)
+                    && [
+                        "filesystem_operation_failed",
+                        "invalid_arguments",
+                        "policy_denied",
+                        "reviewed_phase_denied",
+                        "tool_execution_failed",
+                    ]
+                    .contains(&reason.as_str())
+            }
+        }
+    }
+}
+
+#[derive(Debug, PartialEq, Eq, Deserialize, Serialize)]
 struct Usage {
     prompt_tokens: Option<u64>,
     completion_tokens: Option<u64>,
     total_tokens: Option<u64>,
+}
+
+impl RouterActivity {
+    pub(super) fn response_count(&self) -> u64 {
+        self.responses
+    }
+
+    pub(super) fn scope_id(&self) -> Option<&str> {
+        self.scope_id.as_deref()
+    }
 }
 
 fn text(value: &str, limit: usize) -> bool {
@@ -109,6 +189,14 @@ impl Event {
             || !selection.rounds.contains(&self.round)
             || self.seq == 0
             || self.seq > MAX_SAFE
+            || self.observed_at.as_ref().is_some_and(|value| {
+                value.len() != 24
+                    || chrono::DateTime::parse_from_rfc3339(value).map_or(true, |time| {
+                        time.with_timezone(&chrono::Utc)
+                            .to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+                            != *value
+                    })
+            })
         {
             return false;
         }
@@ -151,20 +239,26 @@ impl Event {
             EventDetail::ToolResult {
                 call_id,
                 name,
-                ok: _,
+                ok,
                 reported_in_round,
+                ms,
+                result_summary,
             } => {
                 self.source == "harness-reported"
                     && text(call_id, 256)
                     && text(name, 256)
                     && *reported_in_round > self.round
                     && selection.rounds.contains(reported_in_round)
+                    && ms.is_none_or(|value| value <= 3_600_000)
+                    && result_summary
+                        .as_ref()
+                        .is_none_or(|value| value.valid(name, *ok))
             }
         }
     }
 }
 
-fn parse(content: &str) -> Option<RouterActivity> {
+pub(super) fn parse(content: &str) -> Option<RouterActivity> {
     if content.len() > 32 * 1024 {
         return None;
     }
@@ -257,6 +351,50 @@ mod tests {
     use serde_json::{Value, json};
 
     #[test]
+    fn retains_valid_observed_times_and_safe_completion_details_only() {
+        let mut value = fixture();
+        value["trace"]["events"][0]["observed_at"] = json!("2026-10-08T20:00:00.123Z");
+        value["trace"]["events"].as_array_mut().unwrap().push(json!({
+            "kind":"tool_result","scope_id":"scope-a","round":1,"seq":2,"source":"harness-reported",
+            "name":"file_write","call_id":"write-1","ok":true,"reported_in_round":2,
+            "observed_at":"2026-10-08T20:00:00.456Z","ms":12,
+            "result_summary":{"kind":"file_write","bytes":17,"artifact_name":"briefing.md"}
+        }));
+        assert_eq!(
+            serde_json::to_value(parse(&value.to_string()).unwrap()).unwrap(),
+            value
+        );
+        for (field, bad) in [
+            ("observed_at", json!("2026-10-08T20:00:00")),
+            ("observed_at", json!("2026-02-30T20:00:00.000Z")),
+            ("observed_at", json!(13)),
+            ("ms", json!(-1)),
+            ("ms", json!(3_600_001)),
+            ("ok", json!(false)),
+            ("ok", Value::Null),
+            (
+                "result_summary",
+                json!({"kind":"file_write","bytes":17,"content":"secret"}),
+            ),
+            (
+                "result_summary",
+                json!({"kind":"file_write","bytes":17,"artifact_name":"../secret"}),
+            ),
+            (
+                "result_summary",
+                json!({"kind":"file_read","bytes":17,"returned_bytes":17,"truncated":false}),
+            ),
+        ] {
+            let mut bad_value = value.clone();
+            bad_value["trace"]["events"][1][field] = bad;
+            assert!(
+                parse(&bad_value.to_string()).is_none(),
+                "{field}: {bad_value}"
+            );
+        }
+    }
+
+    #[test]
     fn accepts_the_actual_router_and_runtime_contract_with_current_run_binding() {
         let content = include_str!(concat!(
             env!("CARGO_MANIFEST_DIR"),
@@ -287,6 +425,7 @@ mod tests {
         use super::super::run_evidence::MissionRunEvidenceDto;
         MissionResultDto {
             output: "Attached briefing.md".into(),
+            error: None,
             reviewable: true,
             usage_known: true,
             status: Some("ok".into()),

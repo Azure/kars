@@ -1,0 +1,17 @@
+**
+!LICENSE
+!vendor/
+!vendor/agt/
+!vendor/agt/pin.json
+!runtimes/
+!runtimes/install-agt-wheels.py
+!runtimes/wheels/
+!runtimes/wheels/**
+!sandbox-images/
+!sandbox-images/agentmesh/
+!sandbox-images/agentmesh/Dockerfile
+!sandbox-images/agentmesh/Dockerfile.dockerignore
+!sandbox-images/agentmesh/entrypoint.py
+!sandbox-images/agentmesh/install.py
+!sandbox-images/hermes/
+!sandbox-images/hermes/hermes-core-constraints.txt

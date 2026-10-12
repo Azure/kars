@@ -145,7 +145,10 @@ elif [ -n "${AZURE_OPENAI_API_KEY:-}" ]; then
   chmod 400 /tmp/azure-openai-key 2>/dev/null || true
 fi
 
-# ── Workload Identity → Entra token exchange (opt-in) ────────────────────
+# ── Required Entra preflight / optional Workload Identity exchange ───────
+# Required Entra uses the router's AgentIdentity token service. The plugin
+# acquires and verifies its own renewable credential before mesh admission.
+# The remaining exchange is only for legacy optional OAuth consumers.
 # If Azure Workload Identity is mounted (AZURE_FEDERATED_TOKEN_FILE set by
 # AKS WI webhook), exchange the Kubernetes service account token for an
 # Entra ID access token and set AGT_OAUTH_TOKEN for registry verification.
@@ -160,68 +163,66 @@ fi
 # falling back to anonymous tier — long enough to break parent→sub-agent
 # spawn-and-message workflows because the parent's tool-call timeout
 # fires before the sub-agent finishes booting.
-if [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
-  # Phase 6.b path: ask the router's /v1/mesh-token endpoint for a
-  # verified-tier mesh peer token from the shared auth-sidecar.
-  #
-  # Priority order: this branch deliberately wins over AGT_SKIP_ENTRA=1
-  # because the sidecar-mediated mint does NOT have the AADSTS500011
-  # tenant-config issue that AGT_SKIP_ENTRA was designed to skip — the
-  # sidecar uses the controller's MI + blueprint OBO, not a WI direct
-  # exchange against api://agentmesh. So when the operator opts in to
-  # MESH_AUTH_BACKEND=EntraAgentIdentity, they want the sidecar path,
-  # NOT the anonymous-tier fallback.
-  #
-  # The router listens on loopback :8443, which UID 1000 IS permitted
-  # to reach by the egress-guard baseline (it's how every mesh /
-  # inference call already flows).
-  echo "[entrypoint] MESH_AUTH_BACKEND=EntraAgentIdentity — acquiring mesh token via /v1/mesh-token"
-  _ROUTER_URL="${ROUTER_LOCAL_URL:-http://127.0.0.1:8443}"
-  _MESH_RESP=""
-  _MESH_STATUS=""
-  _ACCESS_TOKEN=""
-  # Retry loop — the openclaw entrypoint runs at pod startup BEFORE
-  # the inference-router has finished booting. The router takes
-  # ~5-15s on a cold pod (rust binary cold-start + cluster IP wiring
-  # + blocklist load). Without a retry, the first call fails with
-  # connect-refused (curl status 000) and the sandbox falls back to
-  # anonymous-tier even on a healthy cluster — exactly the bug
-  # observed on kars-aks 2026-05-29T10:21 first-boot.
-  _DELAY=1
-  _ELAPSED=0
+if [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ]; then
+  if [ "${AGT_SKIP_ENTRA:-0}" = "1" ] || [ "${AGT_SKIP_VERIFY:-0}" = "1" ] || [ "${AGT_SKIP_INIT:-0}" = "1" ]; then
+    echo "[entrypoint] Required Entra conflicts with AGT skip flags; refusing anonymous mesh startup" >&2
+    exit 1
+  fi
+  # Preflight router readiness only. The plugin owns its fresh, expiring lease;
+  # never hand a startup credential to parallel gateway/plugin processes.
+  unset AGT_OAUTH_TOKEN
+  echo "[entrypoint] Checking required mesh token service via /v1/mesh-token"
+  _ROUTER_URL="${KARS_ROUTER_URL:-${ROUTER_LOCAL_URL:-http://127.0.0.1:8443}}"
+  export KARS_ROUTER_URL="$_ROUTER_URL"
   _MAX_WAIT="${MESH_TOKEN_MAX_WAIT:-60}"
-  _ATTEMPT=0
-  while [ "$_ELAPSED" -lt "$_MAX_WAIT" ]; do
-    _ATTEMPT=$((_ATTEMPT + 1))
-    _MESH_RESP=$(curl -s -4 --connect-timeout 3 --max-time 8 \
-      -w "\n__HTTP_STATUS__%{http_code}" \
-      "${_ROUTER_URL}/v1/mesh-token" 2>/dev/null || echo "")
-    _MESH_STATUS=$(printf '%s\n' "$_MESH_RESP" | grep -E '^__HTTP_STATUS__' | sed 's/^__HTTP_STATUS__//')
-    _MESH_BODY=$(printf '%s\n' "$_MESH_RESP" | sed '/^__HTTP_STATUS__/d')
-    if [ "$_MESH_STATUS" = "200" ]; then
-      _ACCESS_TOKEN=$(printf '%s' "$_MESH_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
-      if [ -n "$_ACCESS_TOKEN" ]; then
-        echo "[entrypoint] Mesh token acquired via auth-sidecar after ${_ATTEMPT} attempt(s) (${_ELAPSED}s) — verified-tier registration"
-        export AGT_OAUTH_TOKEN="$_ACCESS_TOKEN"
+  case "$_MAX_WAIT" in
+    ''|*[!0-9]*) echo "[entrypoint] Invalid MESH_TOKEN_MAX_WAIT" >&2; exit 1 ;;
+  esac
+  if [ "$_MAX_WAIT" -lt 1 ] || [ "$_MAX_WAIT" -gt 300 ]; then
+    echo "[entrypoint] MESH_TOKEN_MAX_WAIT must be between 1 and 300 seconds" >&2
+    exit 1
+  fi
+  _DEADLINE=$((SECONDS + _MAX_WAIT))
+  _DELAY=1
+  _READY=0
+  while [ "$SECONDS" -lt "$_DEADLINE" ]; do
+    _REMAINING=$((_DEADLINE - SECONDS))
+    _REQUEST_WAIT=8
+    if [ "$_REMAINING" -lt "$_REQUEST_WAIT" ]; then _REQUEST_WAIT="$_REMAINING"; fi
+    if _MESH_RESP=$(curl -s -4 --connect-timeout 3 --max-time "$_REQUEST_WAIT" --max-filesize 65536 \
+      -w "\n__HTTP_STATUS__%{http_code}" "${_ROUTER_URL%/}/v1/mesh-token" 2>/dev/null); then
+      _MESH_STATUS=$(printf '%s\n' "$_MESH_RESP" | sed -n 's/^__HTTP_STATUS__//p')
+      if [ "$_MESH_STATUS" = "200" ] && printf '%s\n' "$_MESH_RESP" | sed '/^__HTTP_STATUS__/d' | python3 -c '
+import json, math, sys
+r = json.load(sys.stdin)
+t = r.get("access_token")
+e = r.get("expires_in")
+valid = (isinstance(t, str) and 0 < len(t) <= 8192 and not any(c.isspace() for c in t)
+         and isinstance(r.get("token_type"), str) and r["token_type"].lower() == "bearer"
+         and type(e) in (int, float) and math.isfinite(e) and 60 < e <= 86400
+         and not r.get("error") and r.get("success") is not False)
+sys.exit(0 if valid else 1)
+' 2>/dev/null; then
+        _READY=1
         break
       fi
+      if [ "$_MESH_STATUS" = "404" ]; then break; fi
     fi
-    # 404 means MESH_AUTH_BACKEND was set but the router image doesn't
-    # have the /v1/mesh-token route — no point retrying that.
-    if [ "$_MESH_STATUS" = "404" ]; then
-      echo "[entrypoint] /v1/mesh-token returned 404 — router image too old for Phase 6.b"
-      break
-    fi
+    _REMAINING=$((_DEADLINE - SECONDS))
+    if [ "$_REMAINING" -le 0 ]; then break; fi
+    if [ "$_DELAY" -gt "$_REMAINING" ]; then _DELAY="$_REMAINING"; fi
     sleep "$_DELAY"
-    _ELAPSED=$((_ELAPSED + _DELAY))
     if [ "$_DELAY" -lt 4 ]; then _DELAY=$((_DELAY * 2)); fi
   done
-  if [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
-    echo "[entrypoint] /v1/mesh-token failed after ${_ELAPSED}s (${_ATTEMPT} attempts, last status=${_MESH_STATUS:-network-error}); registering as anonymous tier"
-    export AGT_TRUST_THRESHOLD=0
+  unset _MESH_RESP
+  if [ "$_READY" != "1" ]; then
+    echo "[entrypoint] Required mesh token service unavailable; refusing anonymous mesh startup" >&2
+    exit 1
   fi
-  unset _MESH_RESP _MESH_STATUS _MESH_BODY _ROUTER_URL _ACCESS_TOKEN _DELAY _ELAPSED _MAX_WAIT _ATTEMPT
+  echo "[entrypoint] Mesh token service ready; plugin must mint and verify its own lease before mesh admission"
+  unset _MESH_STATUS _ROUTER_URL _MAX_WAIT _DEADLINE _DELAY _READY _REMAINING _REQUEST_WAIT
 elif [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
+  unset AGT_OAUTH_TOKEN
   echo "[entrypoint] AGT_SKIP_ENTRA=1 — Entra token exchange disabled by operator, registering as anonymous tier"
   # Trust scoring is meaningless without OAuth identity: every peer registers
   # as anonymous (registry score 0), so a non-zero AGT_TRUST_THRESHOLD would
@@ -393,17 +394,19 @@ fi
 # producing the "just says hey" symptom.
 #
 # The config is fully env-driven and deterministic, so regenerating every boot is
-# safe and cheap. The systemPromptOverride field below makes the welcome policy
-# authoritative even if OpenClaw later rewrites the workspace markdown files.
+# safe and cheap. The Kars plugin's before_prompt_build hook keeps the welcome
+# policy authoritative even if OpenClaw rewrites the workspace markdown files.
 if true; then
   # Create OpenClaw directories (owned by sandbox user)
   mkdir -p "$OPENCLAW_DIR" "$WORKSPACE_DIR"
   [ "$IS_ROOT" = "true" ] && chown -R sandbox:sandbox "$OPENCLAW_DIR"
 
-  # Build the kars system-prompt override. This is the AUTHORITATIVE source
-  # of agent identity + welcome policy: openclaw config takes precedence over
-  # workspace AGENTS.md, so even when OpenClaw's runtime workspace bootstrap
-  # rewrites AGENTS.md/SOUL.md with its default scaffold, this prompt remains.
+  # Image-owned external plugins retain their genuine install provenance. This
+  # initializes only fresh state; restarts never replace the live SQLite database.
+  $AS_SANDBOX python3 /usr/local/lib/kars-plugin-state.py initialize "$OPENCLAW_DIR"
+
+  # The trusted Kars plugin returns these instructions as the system prompt on
+  # every turn, independently of workspace AGENTS.md/SOUL.md bootstrap rewrites.
   if [ -n "${TELEGRAM_BOT_TOKEN:-}" ]; then
     TELEGRAM_PROMPT_BLOCK="A Telegram bot is connected to this sandbox. When the user explicitly asks for status updates on Telegram (or kicks off a long-running multi-agent workflow they want to watch on their phone), use the \`telegram_status\` tool to post short, terse milestone messages (≤240 chars each) — e.g. \"🔍 analyst: searching 2026 sources…\". Skip Telegram pings for ordinary single-turn requests; this is opt-in by user intent. Avoid posting sensitive data, secrets, or full document content to Telegram — milestone summaries only."
   else
@@ -696,10 +699,6 @@ PROMPTEOF
   fi
   chmod 600 "$SYSTEM_PROMPT_FILE" 2>/dev/null || true
 
-  # JSON-encode the prompt as a single string for embedding in openclaw.json.
-  # `jq -Rs .` reads raw input (-R) as a single string (-s) and emits JSON.
-  SYSTEM_PROMPT_JSON=$(jq -Rs . < "$SYSTEM_PROMPT_FILE")
-
   # Provider selection — when running on Copilot with a Claude model, route
   # Claude inference through the native Anthropic Messages API
   # (`/v1/messages`) instead of OpenAI chat completions. This preserves
@@ -797,7 +796,7 @@ ANTHEOF
 }
 MCPEOF
 
-  # Write openclaw.json (2026.4.x config format — routed through inference router)
+  # Write openclaw.json (2026.9.8 config format — routed through inference router)
   cat > "$OPENCLAW_CONFIG" << EOF
 {
   "models": {
@@ -815,7 +814,7 @@ MCPEOF
   "tools": {
     "deny": ["sessions_spawn", "sessions_send"],
     "exec": {
-      "security": "full"
+      "mode": "full"
     }
   },
   "commands": {
@@ -828,26 +827,29 @@ MCPEOF
   "channels": {
     CHANNELS_PLACEHOLDER
   },
-  "ui": {
-    "assistant": {
-      "name": "${KARS_DISPLAY_NAME:-kars}",
-      "avatar": "🐾"
-    }
-  },
   "agents": {
     "defaults": {
       "model": { "primary": "${_PRIMARY_MODEL_REF}" },
-      "imageGenerationModel": "azure-openai/gpt-image-1",
-      "timeoutSeconds": 1500,
-      "systemPromptOverride": ${SYSTEM_PROMPT_JSON},
-      "memorySearch": {
-        "enabled": true,
-        "provider": "azure-openai",
-        "model": "text-embedding-3-small",
-        "remote": {
-          "baseUrl": "http://127.0.0.1:8443/v1/",
-          "apiKey": "routed-via-inference-router"
+      "mediaModels": { "image": "azure-openai/gpt-image-1" },
+      "timeoutSeconds": 1500
+    },
+    "entries": {
+      "main": {
+        "identity": {
+          "name": "${KARS_DISPLAY_NAME:-kars}",
+          "emoji": "🐾"
         }
+      }
+    }
+  },
+  "memory": {
+    "search": {
+      "enabled": true,
+      "provider": "azure-openai",
+      "model": "text-embedding-3-small",
+      "remote": {
+        "baseUrl": "http://127.0.0.1:8443/v1/",
+        "apiKey": "routed-via-inference-router"
       }
     }
   },
@@ -864,8 +866,7 @@ MCPEOF
       }
     },
     "controlUi": {
-      "enabled": true,
-      "dangerouslyDisableDeviceAuth": true
+      "enabled": true
     }
   }${_MCP_BLOCK}
 }
@@ -981,7 +982,7 @@ AUTHPROFEOF
     "openai:OPENAI_API_KEY"; do
     plugin_id="${plugin_pair%%:*}"
     env_var="${plugin_pair##*:}"
-    eval env_val="\${${env_var}:-}"
+    env_val="$(printenv "$env_var" || true)"
     if [ -n "$env_val" ]; then
       PLUGINS_LIST="${PLUGINS_LIST}, \"${plugin_id}\""
       [ -n "${PLUGINS_ENTRIES}" ] && PLUGINS_ENTRIES="${PLUGINS_ENTRIES}, "
@@ -994,6 +995,21 @@ AUTHPROFEOF
   sed -i "s|CHANNELS_PLACEHOLDER|${CHANNELS_CONFIG}|" "$OPENCLAW_CONFIG"
   # Remove placeholder if no channels
   sed -i '/"_placeholder": false/d' "$OPENCLAW_CONFIG"
+
+  # Bind the authoritative prompt after text substitutions; never pass it through sed.
+  CONFIG_TMP=$(mktemp "${OPENCLAW_CONFIG}.XXXXXX")
+  if ! jq -e --rawfile prompt "$SYSTEM_PROMPT_FILE" '
+    if ($prompt | test("\\S")) then
+      .plugins.entries.kars.config.systemPrompt = $prompt |
+      .plugins.entries.kars.hooks.allowConversationAccess = true |
+      .plugins.entries.kars.hooks.allowPromptInjection = true
+    else error("Kars system prompt is empty") end
+  ' "$OPENCLAW_CONFIG" > "$CONFIG_TMP"; then
+    rm -f "$CONFIG_TMP"
+    echo "FATAL: unable to configure the Kars system prompt" >&2
+    exit 1
+  fi
+  mv -f "$CONFIG_TMP" "$OPENCLAW_CONFIG"
 
   # Set provider credentials via environment (OpenClaw reads these automatically)
   # Read from secret file at runtime — avoid leaking key value in process tree
@@ -1548,11 +1564,18 @@ HTTPS_PROXY="http://127.0.0.1:8444" HTTP_PROXY="http://127.0.0.1:8444" \
   NODE_OPTIONS="--require /usr/local/lib/proxy-bootstrap.js" \
   NODE_COMPILE_CACHE="/var/tmp/openclaw-compile-cache" \
   OPENCLAW_NO_RESPAWN=1 \
-  OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw gateway --port 18789 > /tmp/gateway.log 2>&1 &
+  OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw gateway --port 18789 > >(tee /tmp/gateway.log) 2>&1 &
 GATEWAY_PID=$!
 
 # Wait for gateway to be ready
 for i in $(seq 1 10); do
+  if ! kill -0 "$GATEWAY_PID" 2>/dev/null; then
+    GATEWAY_EXIT=0
+    wait "$GATEWAY_PID" || GATEWAY_EXIT=$?
+    echo "[kars] Gateway exited during startup (status: $GATEWAY_EXIT)" >&2
+    [ "$GATEWAY_EXIT" -ne 0 ] || GATEWAY_EXIT=1
+    exit "$GATEWAY_EXIT"
+  fi
   if curl -sf http://127.0.0.1:18789/healthz > /dev/null 2>&1; then
     echo "[kars] Gateway running (PID: $GATEWAY_PID)"
     break
@@ -1588,11 +1611,11 @@ NODECONF
 HOME=/tmp/node-host-home OPENCLAW_STATE_DIR=/tmp/node-host-home/.openclaw \
   AGT_SKIP_INIT=1 OPENCLAW_GATEWAY_TOKEN="$GATEWAY_TOKEN" $AS_SANDBOX openclaw node run \
   --host 127.0.0.1 --port 18789 \
-  --node-id "node-${NODE_HOSTNAME}" > /tmp/node-host.log 2>&1 &
+  --node-id "node-${NODE_HOSTNAME}" > >(tee /tmp/node-host.log) 2>&1 &
 NODE_PID=$!
 echo "[kars] Node host starting (PID: $NODE_PID)"
 
-# Exec approvals are disabled via openclaw.json config (tools.exec.security=full).
+# Exec approvals are disabled via openclaw.json config (tools.exec.mode=full).
 # AGT governance is the sole policy authority — no need for OpenClaw's exec approval layer.
 
 # The AGT relay listener is NOT needed as a separate process.

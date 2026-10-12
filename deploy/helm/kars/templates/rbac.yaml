@@ -24,11 +24,16 @@ metadata:
   labels:
     app.kubernetes.io/name: kars
 rules:
-  {{- if (.Values.missionDispatcher | default dict).enabled }}
   - apiGroups: ["apps"]
     resources: ["replicasets"]
     verbs: ["get", "list"]
-  {{- end }}
+  # Required to delegate exact-Pod proxy access without RBAC escalation.
+  - apiGroups: [""]
+    resources: ["pods/portforward"]
+    verbs: ["get", "create"]
+  - apiGroups: ["rbac.authorization.k8s.io"]
+    resources: ["roles", "rolebindings"]
+    verbs: ["get", "list", "create", "delete"]
   # Manage KarsSandbox CRDs
   - apiGroups: ["kars.azure.com"]
     resources: ["karssandboxes", "karssandboxes/status"]
@@ -123,7 +128,7 @@ rules:
   # enforced when minting a Governance Receipt (read-only; the chart, not the
   # controller, installs them).
   - apiGroups: ["admissionregistration.k8s.io"]
-    resources: ["validatingadmissionpolicies"]
+    resources: ["validatingadmissionpolicies", "validatingadmissionpolicybindings"]
     verbs: ["get", "list", "watch"]
   # Events — Kubernetes ships two Event APIs: the legacy core v1
   # Events ("" apiGroup) and the modern events.k8s.io/v1 Events.

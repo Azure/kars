@@ -13,7 +13,7 @@ meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
 {{- end -}}
 
 {{- define "witness.config" -}}
-{{ dict "sandboxes" .Values.sandboxes "window_seconds" .Values.aggregator.windowSeconds "interval_seconds" .Values.aggregator.intervalSeconds "dns_image" .Values.gadget.dnsImage "tcp_image" .Values.gadget.tcpImage | toJson }}
+{{ dict "release_name" .Release.Name "sandboxes" .Values.sandboxes "window_seconds" .Values.aggregator.windowSeconds "interval_seconds" .Values.aggregator.intervalSeconds "dns_image" .Values.gadget.dnsImage "tcp_image" .Values.gadget.tcpImage "hook_mode" (.Values.gadget.hookMode | default "fanotify+ebpf") | toJson }}
 {{- end -}}
 
 {{- define "witness.assertOwner" -}}
@@ -21,7 +21,11 @@ meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
 {{- if $obj -}}
   {{- $annotations := default dict $obj.metadata.annotations -}}
   {{- $labels := default dict $obj.metadata.labels -}}
-  {{- if or (ne (get $annotations "meta.helm.sh/release-name") .root.Release.Name) (ne (get $annotations "meta.helm.sh/release-namespace") .root.Release.Namespace) (ne (get $labels "app.kubernetes.io/managed-by") "Helm") (ne (get $labels "kars.azure.com/witness-addon") "true") -}}
+  {{- if not .root.Values.managed -}}
+    {{- if and (eq (get $annotations "meta.helm.sh/release-name") .root.Release.Name) (eq (get $annotations "meta.helm.sh/release-namespace") .root.Release.Namespace) -}}
+      {{- fail "cannot detach a Core-owned witness with managed=false; use the guarded enabled=false upgrade; ownership migration requires operator review" -}}
+    {{- end -}}
+  {{- else if or (ne (get $annotations "meta.helm.sh/release-name") .root.Release.Name) (ne (get $annotations "meta.helm.sh/release-namespace") .root.Release.Namespace) (ne (get $labels "app.kubernetes.io/managed-by") "Helm") (ne (get $labels "kars.azure.com/witness-addon") "true") -}}
     {{- fail (printf "witness ownership conflict: %s/%s; operator review required; never adopt or delete legacy/shared objects" (default "cluster" $obj.metadata.namespace) $obj.metadata.name) -}}
   {{- end -}}
 {{- end -}}

@@ -110,6 +110,27 @@ The agent calls a **namespaced** tool (`<server>.<tool>`, e.g.
 to the MCP, and returns the result. The agent has no ambient network reach and
 no credentials.
 
+### Runtime configuration and missing tools
+
+Both harnesses already route MCP through the inference router. The controller
+projects the sandbox's bound server names as `KARS_MCP_SERVERS`; OpenClaw's
+entrypoint writes its MCP and mcporter configuration, and Hermes' entrypoint
+writes `mcp_servers` in its configuration. External server entries use
+`http://127.0.0.1:8443/mcp` with an `x-kars-mcp-server` scope. The shared
+`kars_mcp_list` and `kars_mcp_call` tools also use this router endpoint.
+
+A cluster-level `McpServer` marked Ready is not automatically bound to every
+sandbox. If a server is absent from runtime discovery, check that sandbox's
+`spec.governance.mcpServerRefs` and its projected configuration before treating
+the upstream server as broken. Do not bypass the router or broaden the sandbox's
+permissions to make a probe pass.
+
+Router HTTP rejections can have plain-text bodies. The runtime bridges check
+HTTP status before decoding JSON, so a rejection is not misdiagnosed as malformed
+MCP JSON. Error bodies are not exposed, redirects are not followed, and failed
+tool calls are never automatically replayed. OpenClaw reports the HTTP status;
+Hermes retains its sanitized tool failure message.
+
 ### Tool result compatibility
 
 The forwarder preserves the typed

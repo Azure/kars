@@ -19,6 +19,7 @@ locally, so a single mint per (service, agentIdentity) ripples.
 Conditionally rendered: only when `.Values.entraSidecar.enabled`.
 */}}
 {{- if .Values.entraSidecar.enabled }}
+{{- $auth := include "kars.authConfig.spec" . | fromJson }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -44,11 +45,11 @@ spec:
       labels:
         app.kubernetes.io/name: kars
         app.kubernetes.io/component: entra-auth-sidecar
-        # `azure.workload.identity/use: "true"` is REQUIRED for the
-        # AKS azure-wi-webhook to mutate the pod and project the
-        # federated SA token. Without it the sidecar starts but the
-        # FIC-assertion mint fails with `SA token file not found`.
+        {{- if eq $auth.controller.credentialMode "WorkloadIdentity" }}
         azure.workload.identity/use: "true"
+        {{- end }}
+      annotations:
+        kars.azure.com/helm-auth-env-sha256: {{ include "kars.authConfig.env" . | sha256sum | quote }}
     spec:
       serviceAccountName: entra-auth-sidecar
       automountServiceAccountToken: true
@@ -64,13 +65,11 @@ spec:
             - name: auth-sdk
               containerPort: 5000
               protocol: TCP
-          # The sidecar's full Entra configuration (tenant, blueprint
-          # client id, credential source type, downstream API table)
-          # is rendered into a single ConfigMap by the
-          # auth_config_reconciler and projected as env vars.
+          # The exact immutable Helm revision prevents a rollout from reading
+          # an older, asynchronously projected controller ConfigMap.
           envFrom:
             - configMapRef:
-                name: kars-auth-sidecar-env
+                name: {{ include "kars.authConfig.configMapName" . }}
                 optional: false
           env:
             # Bind on ALL interfaces so the kubelet probe (which uses

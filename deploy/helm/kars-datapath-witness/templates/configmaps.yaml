@@ -1,5 +1,6 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
+{{- if .Values.managed }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -49,6 +50,25 @@ metadata:
     {{- include "witness.owner" . | nindent 4 }}
 data:
   config.json: {{ include "witness.config" . | quote }}
+  kubeconfig: |
+    apiVersion: v1
+    kind: Config
+    current-context: witness
+    clusters:
+      - name: cluster
+        cluster:
+          server: https://kubernetes.default.svc
+          certificate-authority: /var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+    contexts:
+      - name: witness
+        context:
+          cluster: cluster
+          user: aggregator
+          namespace: kars-witness-gadget
+    users:
+      - name: aggregator
+        user:
+          tokenFile: /var/run/secrets/kubernetes.io/serviceaccount/token
 ---
 apiVersion: v1
 kind: ConfigMap
@@ -67,7 +87,7 @@ data:
     containerd-socketpath: /run/containerd/containerd.sock
     operator:
       kubemanager:
-        hook-mode: fanotify+ebpf
+        hook-mode: {{ .Values.gadget.hookMode | default "fanotify+ebpf" | quote }}
         fallback-podinformer: false
       oci:
         verify-image: true
@@ -82,4 +102,5 @@ data:
             -----END PUBLIC KEY-----
       otel-metrics:
         otel-metrics-listen: false
+{{- end }}
 {{- end }}

@@ -346,10 +346,46 @@ The blocklist stays current through multiple refresh mechanisms:
 | Mechanism | Frequency | Source |
 |-----------|-----------|--------|
 | Router background task | Every 6 hours | Fetches latest feeds from [OISD](https://oisd.nl/) and [URLhaus](https://urlhaus.abuse.ch/) |
-| K8s CronJob | Every 6 hours | Updates the ConfigMap mounted at `/etc/kars/blocklist/domains.txt` |
 | GitHub Actions CI | Daily | Refreshes the seed file in the repository (≤ 24h old) |
 
-**Safe refresh:** If all upstream feeds fail, the previous entries are preserved — no wipe-on-failure. The router logs a warning and retries on the next cycle.
+The controller mounts the bundled seed at `/etc/kars/blocklist/domains.txt`.
+The router loads that seed at startup and refreshes feeds itself; no separate
+refresh image, shell, or sandbox ConfigMap-write permission is required. This
+shared router path applies to both OpenClaw and Hermes.
+
+**Refresh failure behavior:** Each cycle combines the mounted seed with domains
+from successful feed requests. A nonempty result replaces the previous list;
+the previous entries are preserved only when the combined result is empty.
+If both upstream requests fail but the seed contains domains, the router falls
+back to that seed-only list, which can remove previously fetched entries. Failed
+requests are logged and retried on a later cycle.
+
+### Legacy CronJob upgrades
+
+Controllers no longer create `<sandbox>-blocklist-refresh` CronJobs. The old
+Mariner 2 helper duplicated the router refresh and could not publish updates:
+its `sh -c` arguments did not form the intended command, and the sandbox
+ServiceAccount has no ConfigMap-write permission in the shipped RBAC.
+
+On reconciliation, the controller retires only the recognized legacy helper
+inside a namespace whose ownership is still bound to the current sandbox. It
+requires the original labels, controller-managed image/command/arguments,
+legacy image, exact historical command fingerprint and historical pod workload
+shape, allowing only known Kubernetes defaults. Both the original writable-root
+variant and the later read-only-root variant with its `/tmp` scratch volume are
+recognized. Added environment settings, lifecycle hooks, modified resources or
+mounts, and Job/Pod template metadata are not treated as the original helper.
+Deletion is fenced by the observed UID and resourceVersion, with foreground
+cascading cleanup of owned Jobs and Pods. It does not strip finalizers or relax
+admission policies.
+
+If ownership or the template is ambiguous, reconciliation reports a migration
+error and leaves the object unchanged. An administrator must review the named
+CronJob and its dependents before explicitly retiring a customized deployment;
+a name or label alone is not permission to delete it. Offline deployments must
+continue maintaining the bundled seed or arranging approved router feed access.
+The legacy-object recognizer remains until upgrades from controllers that
+created these CronJobs are no longer supported.
 
 ## Agent Integration
 

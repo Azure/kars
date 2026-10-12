@@ -4,6 +4,7 @@
 import { Command } from "commander";
 import chalk from "chalk";
 import { readFile } from "node:fs/promises";
+import { MANAGED_MCP_IMAGE_TARGETS } from "../lib/image-targets.js";
 import {
   formatAge,
   parseKVPairs,
@@ -57,6 +58,26 @@ export function buildMcpSpecFromFlags(o: McpApplyOptions): Record<string, unknow
 
 export function validateMcpSpec(spec: Record<string, unknown>): string[] {
   const errs: string[] = [];
+  const managed = spec.managed;
+  if (managed != null) {
+    if (typeof managed !== "object" || Array.isArray(managed)) {
+      errs.push("spec.managed must be an object containing a reviewed preset");
+    } else {
+      if (!("preset" in managed)
+        || !MANAGED_MCP_IMAGE_TARGETS.some(({ preset }) => preset === managed.preset)) {
+        errs.push("spec.managed.preset must be playwright or everything");
+      }
+      if (Object.keys(managed).some((key) => key !== "preset")) {
+        errs.push("spec.managed accepts only the preset field");
+      }
+    }
+    for (const field of ["url", "oauth", "productionMode", "scopes", "bearerFromEnv", "bundleRef"]) {
+      if (spec[field] != null) {
+        errs.push(`spec.managed is mutually exclusive with spec.${field}`);
+      }
+    }
+    return errs;
+  }
   const url = spec.url as string | undefined;
   if (!url || typeof url !== "string" || url.length === 0) {
     errs.push("missing required spec.url — pass --url or include in --from-file");

@@ -31,6 +31,15 @@ kars push --only runtime-hermes --apply
 
 The CLI auto-clones the pinned AGT toolkit (`vendor/agt/pin.json`) and builds the Python wheels (`runtimes/wheels/*.whl`) if either is missing — no manual `git clone` step required.
 
+New checkouts fetch the exact commit in the pin, not the current branch tip.
+Existing checkouts, including `--agt-repo` and `KARS_AGT_REPO` overrides, must
+be clean and at that same commit. If the CLI rejects a different revision or
+local changes, provide a separate clean pinned checkout; Kars never resets
+or switches your existing checkout.
+The wheel cache is reused only when its pin marker matches and every required
+AGT distribution has exactly one wheel. Missing or duplicate wheels trigger
+a rebuild; an incomplete build is never marked as a valid cache.
+
 ---
 
 ## `MeshClient` doesn't reach the "MeshClient connected" log line

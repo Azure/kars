@@ -8,19 +8,20 @@
 // runner Job that replays it and records a real verdict. Re-running the same
 // sandbox+corpus updates the existing eval in place.
 
-import { useState } from "react";
+import { useState, type FormEvent } from "react";
 import { useRouter } from "next/navigation";
 
 const BUILTIN_CORPORA = [
   "jailbreak-baseline",
-  "prompt-injection-baseline",
+  "prompt-injection-2026q1",
+  "banned-tools",
   "egress-known-bad",
-  "memory-isolation-baseline",
+  "memory-isolation",
 ];
 
 export function NewEvalForm({
   sandboxes,
-  defaultRunnerImage = "kars-conformance-runner:dev",
+  defaultRunnerImage = "",
 }: {
   sandboxes: { name: string; runtime: string | null }[];
   defaultRunnerImage?: string;
@@ -34,7 +35,9 @@ export function NewEvalForm({
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  async function submit() {
+  async function submit(event: FormEvent<HTMLFormElement>) {
+    event.preventDefault();
+    if (busy) return;
     setBusy(true);
     setError(null);
     try {
@@ -77,16 +80,17 @@ export function NewEvalForm({
   }
 
   return (
-    <div className="rounded-xl border border-border bg-surface p-5">
-      <p className="text-sm font-semibold">Configure a safety eval</p>
+    <form onSubmit={submit} aria-busy={busy} className="rounded-xl border border-border bg-surface p-5">
+      <h2 className="text-sm font-semibold">Configure a safety eval</h2>
       <p className="mt-0.5 text-xs text-foreground-muted">
         Replays an adversarial corpus against the sandbox&apos;s inference router and records a real
         pass/fail verdict.
       </p>
-      <div className="mt-3 grid gap-3 sm:grid-cols-2">
+      <fieldset disabled={busy} className="mt-3 grid gap-3 sm:grid-cols-2">
         <label className="block">
           <span className="text-xs font-medium text-foreground-muted">Target sandbox</span>
           <select
+            required
             value={target}
             onChange={(e) => setTarget(e.target.value)}
             className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm"
@@ -102,6 +106,7 @@ export function NewEvalForm({
           <span className="text-xs font-medium text-foreground-muted">Corpus</span>
           <input
             list="corpus-options"
+            required
             value={corpus}
             onChange={(e) => setCorpus(e.target.value)}
             className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm font-mono"
@@ -122,18 +127,21 @@ export function NewEvalForm({
           />
         </label>
         <label className="block">
-          <span className="text-xs font-medium text-foreground-muted">Runner image</span>
+          <span className="text-xs font-medium text-foreground-muted">Runner image override (optional)</span>
           <input
             value={runnerImage}
             onChange={(e) => setRunnerImage(e.target.value)}
+            placeholder="Use the Core-configured runner"
             className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm font-mono"
           />
+          <span className="mt-1 block text-xs text-foreground-muted">
+            Leave blank to use the runner configured by your Core installation.
+          </span>
         </label>
-      </div>
-      <div className="mt-3 flex items-center gap-2">
+      </fieldset>
+      <div className="mt-3 flex flex-wrap items-center gap-2">
         <button
-          type="button"
-          onClick={submit}
+          type="submit"
           disabled={busy || !target || !corpus.trim()}
           className="rounded-lg bg-signal px-3 py-1.5 text-xs font-semibold text-signal-fg transition hover:opacity-90 disabled:opacity-50"
         >
@@ -147,8 +155,8 @@ export function NewEvalForm({
         >
           Cancel
         </button>
-        {error && <span className="text-xs text-danger">{error}</span>}
+        {error && <span role="alert" className="text-xs text-danger">{error}</span>}
       </div>
-    </div>
+    </form>
   );
 }

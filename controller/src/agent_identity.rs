@@ -52,6 +52,8 @@
 //! - Display names follow `kars-<cluster>-<sandbox>` for human
 //!   diagnosis but are NOT used as primary keys.
 
+pub(crate) mod dispatcher;
+
 use crate::auth_config::KarsAuthConfigSpec;
 use serde::{Deserialize, Serialize};
 use std::sync::Arc;
@@ -62,7 +64,7 @@ use tokio::sync::RwLock;
 /// Built from env vars at controller startup (so the same instance can
 /// reconcile multiple sandboxes without re-reading the K8s CR every
 /// call) plus the `KarsAuthConfig` CR for tenant/blueprint anchors.
-#[derive(Clone)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct AgentIdentityConfig {
     /// Microsoft Entra tenant ID.
     pub tenant_id: String,
@@ -180,6 +182,10 @@ impl AgentIdentityClient {
             http: reqwest::Client::new(),
             cached_blueprint_token: Arc::new(RwLock::new(None)),
         }
+    }
+
+    pub(crate) fn matches_config(&self, config: &AgentIdentityConfig) -> bool {
+        self.config == *config
     }
 
     /// Acquire a Microsoft Graph access token authenticated as the

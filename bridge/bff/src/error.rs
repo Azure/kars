@@ -26,6 +26,10 @@ pub enum AppError {
     /// and a sanitized message is returned to the browser.
     #[error("upstream error: {0}")]
     Upstream(String),
+    #[error(
+        "credential authority is unavailable; an operator must enroll or repair the integration store before configuring it"
+    )]
+    CredentialAuthorityUnavailable,
     /// The request was rejected by the cluster's admission/validation rules
     /// (e.g. a CEL rule on the CRD). The message is safe to show the user —
     /// it is the API server's own validation message, not internal detail.
@@ -49,6 +53,19 @@ pub enum AppError {
     Internal(#[from] anyhow::Error),
 }
 
+impl From<kube::Error> for AppError {
+    fn from(error: kube::Error) -> Self {
+        if matches!(&error, kube::Error::Api(response)
+            if response.code == 409 && response.reason == "CredentialAuthorityUnavailable")
+        {
+            tracing::warn!(error = %error, "integration credential authority unavailable");
+            Self::CredentialAuthorityUnavailable
+        } else {
+            Self::Upstream(error.to_string())
+        }
+    }
+}
+
 impl From<crate::kars::cluster::MissionRunError> for AppError {
     fn from(error: crate::kars::cluster::MissionRunError) -> Self {
         use crate::kars::cluster::MissionRunError;
@@ -70,6 +87,7 @@ impl AppError {
             AppError::NotFound => StatusCode::NOT_FOUND,
             AppError::ClusterUnavailable => StatusCode::SERVICE_UNAVAILABLE,
             AppError::Upstream(_) => StatusCode::BAD_GATEWAY,
+            AppError::CredentialAuthorityUnavailable => StatusCode::CONFLICT,
             AppError::Rejected(_) => StatusCode::UNPROCESSABLE_ENTITY,
             AppError::BadRequest(_) => StatusCode::BAD_REQUEST,
             AppError::Conflict(_) => StatusCode::CONFLICT,
@@ -85,6 +103,7 @@ impl AppError {
             AppError::NotFound => "not_found",
             AppError::ClusterUnavailable => "cluster_unavailable",
             AppError::Upstream(_) => "upstream_error",
+            AppError::CredentialAuthorityUnavailable => "credential_authority_unavailable",
             AppError::Rejected(_) => "rejected",
             AppError::BadRequest(_) => "bad_request",
             AppError::Conflict(_) => "conflict",
@@ -147,3 +166,34 @@ impl IntoResponse for AppError {
 
 /// Convenience result alias for handlers.
 pub type AppResult<T> = Result<T, AppError>;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn integration_authority_error_is_actionable_without_leaking_internal_detail() {
+        for (code, reason, expected) in [
+            (409, "CredentialAuthorityUnavailable", StatusCode::CONFLICT),
+            (409, "Conflict", StatusCode::BAD_GATEWAY),
+            (403, "Forbidden", StatusCode::BAD_GATEWAY),
+        ] {
+            let error = AppError::from(kube::Error::Api(kube::core::ErrorResponse {
+                code,
+                reason: reason.into(),
+                status: "Failure".into(),
+                message: "private upstream detail".into(),
+            }));
+            assert_eq!(error.status(), expected);
+            assert!(!error.client_message().contains("private upstream detail"));
+            if expected == StatusCode::CONFLICT {
+                assert_eq!(error.code(), "credential_authority_unavailable");
+                assert!(
+                    error
+                        .client_message()
+                        .contains("operator must enroll or repair")
+                );
+            }
+        }
+    }
+}

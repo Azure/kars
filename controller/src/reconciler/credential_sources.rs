@@ -31,7 +31,10 @@ mod workloads;
 pub(super) fn refresh_interval(sandbox: &KarsSandbox) -> std::time::Duration {
     let governed = sandbox.spec.credentials_ref.is_some()
         || sandbox.spec.credential_bindings.is_some()
-        || sandbox.spec.github_binding.is_some();
+        || sandbox.spec.github_binding.is_some()
+        || sandbox
+            .annotations()
+            .contains_key(crate::skill_delivery::SELECTION);
     std::time::Duration::from_secs(if governed { 30 } else { 300 })
 }
 

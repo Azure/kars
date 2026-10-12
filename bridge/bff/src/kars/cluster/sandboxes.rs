@@ -38,32 +38,35 @@ impl Cluster {
     /// A task-materialized sandbox runs in namespace `kars-<sandbox>`; its pod
     /// carries `kars.azure.com/sandbox=<sandbox>`. Returns `None` if no Running
     /// pod is found.
-    /// Whether a Deployment matching `name` exists in `namespace` (best-effort;
-    /// false on any API error). Used to detect optional integrations like the
+    /// Whether a Deployment matching `name` exists in `namespace`.
+    /// API failures remain distinct from absence. Used for integrations like the
     /// Headlamp dashboard (`headlamp` deployment in the `headlamp` namespace).
-    pub async fn deployment_exists(&self, namespace: &str, name: &str) -> bool {
+    pub async fn deployment_exists(
+        &self,
+        namespace: &str,
+        name: &str,
+    ) -> Result<bool, kube::Error> {
         use k8s_openapi::api::apps::v1::Deployment;
         let api: Api<Deployment> = Api::namespaced(self.client.clone(), namespace);
-        matches!(api.get_opt(name).await, Ok(Some(_)))
+        api.get_opt(name)
+            .await
+            .map(|deployment| deployment.is_some())
     }
 
     /// Every pod in the kars-relevant namespaces (all `kars*` namespaces plus
     /// `agentmesh`), for the operator diagnostics scan. Uses a cluster-wide list
     /// then filters, so it's one API call regardless of sandbox count.
-    pub async fn all_pods(&self) -> Vec<k8s_openapi::api::core::v1::Pod> {
+    pub async fn all_pods(&self) -> Result<Vec<Pod>, kube::Error> {
         let pods: Api<Pod> = Api::all(self.client.clone());
-        pods.list(&ListParams::default())
-            .await
-            .map(|l| {
-                l.items
-                    .into_iter()
-                    .filter(|p| {
-                        let ns = p.metadata.namespace.as_deref().unwrap_or("");
-                        ns.starts_with("kars") || ns == "agentmesh"
-                    })
-                    .collect()
-            })
-            .unwrap_or_default()
+        pods.list(&ListParams::default()).await.map(|l| {
+            l.items
+                .into_iter()
+                .filter(|p| {
+                    let ns = p.metadata.namespace.as_deref().unwrap_or("");
+                    ns.starts_with("kars") || ns == "agentmesh"
+                })
+                .collect()
+        })
     }
 
     pub async fn running_pod_for_sandbox(&self, sandbox: &str) -> Option<String> {
@@ -83,29 +86,46 @@ impl Cluster {
         })
     }
 
-    /// Honest health of a sandbox's running pod: container readiness, restart
+    /// Health of a sandbox's newest non-terminating pod: readiness, restart
     /// count, uptime, and node. No metrics-server dependency (no CPU/mem) — these
     /// are status-derived signals that answer "is this agent healthy right now".
-    /// `None` when no pod is running for the sandbox.
-    pub async fn sandbox_pod_health(&self, sandbox: &str) -> Option<PodHealth> {
+    /// `None` means no current pod; API errors are returned to the caller.
+    pub async fn sandbox_pod_health(
+        &self,
+        sandbox: &str,
+    ) -> Result<Option<PodHealth>, kube::Error> {
         let ns = format!("kars-{sandbox}");
         let pods: Api<Pod> = Api::namespaced(self.client.clone(), &ns);
         let list = pods
             .list(&ListParams::default().labels(&format!("kars.azure.com/sandbox={sandbox}")))
-            .await
-            .ok()?;
-        let pod = list
+            .await?;
+        let Some(pod) = list
             .items
             .into_iter()
-            .find(|p| p.status.as_ref().and_then(|s| s.phase.as_deref()) == Some("Running"))?;
+            .filter(|p| p.metadata.deletion_timestamp.is_none())
+            .max_by_key(|p| p.metadata.creation_timestamp.as_ref().map(|t| t.0))
+        else {
+            return Ok(None);
+        };
         let status = pod.status.as_ref();
         let cs = status.and_then(|s| s.container_statuses.as_ref());
-        let total = cs.map(|c| c.len()).unwrap_or(0) as i32;
+        let total = pod
+            .spec
+            .as_ref()
+            .map(|s| s.containers.len())
+            .unwrap_or_else(|| cs.map_or(0, Vec::len)) as i32;
         let ready = cs
             .map(|c| c.iter().filter(|s| s.ready).count())
             .unwrap_or(0) as i32;
-        let restarts = cs
-            .map(|c| c.iter().map(|s| s.restart_count).sum())
+        let restarts = status
+            .map(|s| {
+                s.init_container_statuses
+                    .iter()
+                    .flatten()
+                    .chain(s.container_statuses.iter().flatten())
+                    .map(|c| c.restart_count)
+                    .sum()
+            })
             .unwrap_or(0);
         // Uptime from the pod start time.
         let uptime_seconds = status
@@ -113,22 +133,36 @@ impl Cluster {
             .map(|t| (chrono::Utc::now() - t.0).num_seconds().max(0));
         // A container stuck waiting (e.g. CrashLoopBackOff) is the honest
         // unhealthy signal — surface the reason.
-        let waiting_reason = cs.and_then(|c| {
-            c.iter().find_map(|s| {
-                s.state
-                    .as_ref()
-                    .and_then(|st| st.waiting.as_ref())
-                    .and_then(|w| w.reason.clone())
-            })
+        let waiting_reason = status.and_then(|status| {
+            status
+                .init_container_statuses
+                .iter()
+                .flatten()
+                .chain(status.container_statuses.iter().flatten())
+                .find_map(|s| {
+                    s.state
+                        .as_ref()
+                        .and_then(|st| st.waiting.as_ref())
+                        .and_then(|w| w.reason.clone())
+                })
+                .or_else(|| {
+                    status
+                        .conditions
+                        .as_ref()?
+                        .iter()
+                        .find(|c| c.type_ == "PodScheduled" && c.status == "False")?
+                        .reason
+                        .clone()
+                })
         });
-        Some(PodHealth {
+        Ok(Some(PodHealth {
             ready_containers: ready,
             total_containers: total,
             restarts,
             uptime_seconds,
             node: pod.spec.as_ref().and_then(|s| s.node_name.clone()),
             waiting_reason,
-        })
+        }))
     }
 
     /// Read recent logs from a sandbox pod container (best-effort). Powers the

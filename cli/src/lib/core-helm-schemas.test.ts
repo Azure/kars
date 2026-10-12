@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { describe, expect, it } from "vitest";
-import { planCoreHelmSchemas, prepareCoreHelmSchemas, prepareCoreRollbackSchemas, prepareCoreTemplateSchemas } from "./core-helm-schemas.js";
+import { planCoreHelmSchemas, prepareCoreHelmSchemas, prepareCoreRollbackSchemas, prepareCoreTemplateSchemas, renderCoreSchemaChart } from "./core-helm-schemas.js";
 import { crd, admission, schemaFixture } from "./schema-stage.test-support.js";
 import type { SchemaExecute } from "./schema-documents.js";
 import { serverSchemaRenderFlags } from "./schema-helm-safety.js";
@@ -43,7 +43,8 @@ describe("shared core schema entrypoints", () => {
     const result = prepareCoreHelmSchemas(f.execute, ["upgrade", "kars", "chart", "-n", "kars-system"], { checkOnly });
     if (checkOnly) {
       await expect(result).resolves.toEqual({ schemas: 1, published: true });
-      expect(f.requests.filter(request => request.file === "helm" && request.args[0] === "template")).toHaveLength(2);
+      expect(f.requests.filter(request => request.file === "helm" && request.args[0] === "template"
+        && request.args.includes("--dry-run=server"))).toHaveLength(2);
       expect(f.requests.some(request => request.args.includes("/openapi/v3"))).toBe(true);
     } else {
       await expect(result).rejects.toThrow("KARS_PRIVATE_ROOT_UPGRADE_BLOCKED");
@@ -160,6 +161,21 @@ describe("shared core schema entrypoints", () => {
       .rejects.toThrow("differ from the bootstrap");
     expect(f.writes).toHaveLength(1);
     expect(f.writes[0].spec).toEqual(crd().spec);
+  });
+
+  it("uses a client bootstrap for an existing Core release missing newly enabled dependency CRDs", async () => {
+    const dependency = crd("PodMonitor", "podmonitors");
+    dependency.metadata.name = "podmonitors.monitoring.coreos.com";
+    dependency.spec.group = "monitoring.coreos.com";
+    const f = schemaFixture([crd(), dependency]);
+    const result = await renderCoreSchemaChart(f.execute, ["upgrade", "kars", "chart", "-n", "kars-system"]);
+    expect(result.upgrading).toBe(true);
+    expect(result.documents).toContainEqual(dependency);
+    expect(f.requests.filter(request => request.args[0] === "template")).toHaveLength(1);
+    expect(f.requests.find(request => request.args[0] === "template")!.args).toContain("--dry-run=client");
+    expect(f.writes).toEqual([]);
+    await result.serverRender();
+    expect(f.requests.at(-1)!.args).toContain("--dry-run=server");
   });
 
   it("stages the exact previous Helm revision before returning an explicit rollback target", async () => {

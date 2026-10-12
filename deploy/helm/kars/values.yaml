@@ -5,6 +5,78 @@
 # NOTE: For production, replace "latest" tags with specific image digests
 #       (e.g., sha256:abc123...) and set pullPolicy to IfNotPresent.
 
+datapathWitness:
+  # Core owns the optional witness; no third Helm release.
+  # Set managed=false only to retain an independently owned existing witness.
+  managed: true
+  enabled: false
+
+headlamp:
+  # Core owns Headlamp and its packaged Kars plugin; no third Helm release.
+  # Disable when retaining an independently managed Headlamp installation.
+  enabled: true
+  image:
+    repository: ghcr.io/azure/kars-headlamp
+    tag: "latest"
+    pullPolicy: Always
+  # These Secrets must already exist in the headlamp namespace.
+  imagePullSecrets: []
+  # Optional issuer hostname mappings for split-horizon local development.
+  hostAliases: []
+  oidc:
+    enabled: false
+    issuerURL: ""
+    clientID: ""
+    callbackURL: ""
+    clientSecret:
+      name: ""
+      key: client-secret
+    scopes: "profile,email"
+    # Optional existing ConfigMap in headlamp, containing ca.crt.
+    caConfigMap: ""
+  nodeSelector:
+    kubernetes.io/os: linux
+  tolerations: []
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      cpu: 500m
+      memory: 256Mi
+
+metricsServer:
+  # Reuse an already registered external Metrics API rather than replacing it.
+  enabled: true
+  image:
+    repository: ghcr.io/azure/kars-metrics-server
+    tag: "latest"
+    pullPolicy: Always
+  imagePullSecrets: []
+  # Optional node hostname mappings when verified kubelet names lack DNS records.
+  hostAliases: []
+  tls:
+    # Change this value to renew the one-year serving certificate on an upgrade.
+    # Reusing the same revision preserves the certificate and its private key.
+    rotationRevision: ""
+  kubelet:
+    # Empty uses the cluster CA. Supply a different kubelet CA when necessary.
+    caBundle: ""
+    preferredAddressTypes: [InternalIP, ExternalIP, Hostname]
+    # Accepted only with the explicit local KARS_DEV_PROFILE=true profile.
+    insecureTLS: false
+  resources:
+    requests:
+      cpu: 100m
+      memory: 200Mi
+    limits:
+      cpu: 500m
+      memory: 512Mi
+
+evals:
+  # Jobs are created only for operator-requested or explicitly scheduled evals.
+  runnerImage: "ghcr.io/azure/kars-conformance-runner:latest"
+
 # First-install schema publication inside the Core Helm invocation. Opt-in until
 # the image and real Helm/admission/CNI lifecycle are qualified. Use --create-namespace.
 # No upgrade/replacement/rollback, automatic failure-uninstall or CLI staging.
@@ -21,7 +93,8 @@ schemaHook:
   apiDestinations: []
 
 # Durable encrypted dispatch is opt-in while live delivery is being qualified.
-# Development mode is explicit; this helper does not yet support Entra authentication.
+# Explicit authMode: development or entra. Entra requires the canonical sidecar
+# AuthConfig, EntraAgentIdentity mesh backend, sponsors and controller Entra opt-in.
 # Identity roots are generated/pinned by the controller, never supplied through values.
 missionDispatcher:
   enabled: false
@@ -147,6 +220,8 @@ sandbox:
     pullPolicy: Always
   isolation: "enhanced"  # standard | enhanced | confidential
   seccompProfile: "kars-strict"
+  # Optional registry-local or digest-pinned AL3 image for both installer containers.
+  seccompInstallerImage: ""
   # SELinux: empty = compatible with restricted PodSecurity (Approach C).
   # Set to "kars_sandbox_t" only if you install a custom SELinux policy module
   # on nodes and switch namespace enforcement to baseline (Approach A).
@@ -270,10 +345,164 @@ contentSafety:
 monitoring:
   enabled: true
   containerInsights: true
+  # The pinned kube-prometheus-stack dependency is owned by this Core release.
+  namespaceOverride: monitoring
+  fullnameOverride: kps-kube-prometheus-stack
+  querySubjects: []
+  crds:
+    enabled: true
+    upgradeJob:
+      enabled: false
+  alertmanager:
+    enabled: false
+  defaultRules:
+    create: false
+  kubeApiServer:
+    enabled: true
+  kubelet:
+    enabled: true
+  kubeControllerManager:
+    enabled: false
+  coreDns:
+    enabled: false
+  kubeEtcd:
+    enabled: false
+  kubeScheduler:
+    enabled: false
+  kubeProxy:
+    enabled: false
+  prometheusOperator:
+    image:
+      registry: ghcr.io
+      repository: azure/kars-prometheus-operator
+      tag: latest
+      pullPolicy: Always
+    resources:
+      requests: {cpu: 50m, memory: 64Mi}
+      limits: {cpu: 500m, memory: 256Mi}
+    prometheusConfigReloader:
+      image:
+        registry: ghcr.io
+        repository: azure/kars-prometheus-config-reloader
+        tag: latest
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {cpu: 100m, memory: 64Mi}
+    admissionWebhooks:
+      patch:
+        image:
+          registry: ghcr.io
+          repository: azure/kars-webhook-certgen
+          tag: latest
+          pullPolicy: Always
+        resources:
+          requests: {cpu: 10m, memory: 32Mi}
+          limits: {cpu: 250m, memory: 128Mi}
   prometheus:
     enabled: true
+    prometheusSpec:
+      image:
+        registry: ghcr.io
+        repository: azure/kars-prometheus
+        tag: latest
+        pullPolicy: Always
+      version: v3.11.3
+      retention: 2d
+      retentionSize: 512MB
+      podMonitorSelectorNilUsesHelmValues: false
+      serviceMonitorSelectorNilUsesHelmValues: false
+      probeSelectorNilUsesHelmValues: false
+      ruleSelectorNilUsesHelmValues: false
+      resources:
+        requests: {cpu: 100m, memory: 256Mi}
+        limits: {cpu: "1", memory: 1Gi}
+      securityContext:
+        runAsUser: 65534
+        runAsGroup: 65534
+        fsGroup: 65534
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      storageSpec:
+        emptyDir:
+          sizeLimit: 1Gi
+  kube-state-metrics:
+    namespaceOverride: monitoring
+    fullnameOverride: kps-kube-state-metrics
+    image:
+      registry: ghcr.io
+      repository: azure/kars-kube-state-metrics
+      tag: latest
+      pullPolicy: Always
+    resources:
+      requests: {cpu: 25m, memory: 32Mi}
+      limits: {cpu: 250m, memory: 128Mi}
+  prometheus-node-exporter:
+    namespaceOverride: monitoring
+    fullnameOverride: kps-prometheus-node-exporter
+    image:
+      registry: ghcr.io
+      repository: azure/kars-node-exporter
+      tag: latest
+      # This upstream flag appends "-distroless"; our AL3 image uses plain latest.
+      distroless: false
+      pullPolicy: Always
+    hostNetwork: false
+    hostPID: false
+    hostRootFsMount:
+      enabled: false
+    containerSecurityContext:
+      readOnlyRootFilesystem: true
+      allowPrivilegeEscalation: false
+      capabilities: {drop: [ALL]}
+      seccompProfile: {type: RuntimeDefault}
+    resources:
+      requests: {cpu: 10m, memory: 32Mi}
+      limits: {cpu: 250m, memory: 64Mi}
+  jsonExporter:
+    enabled: true
+    image:
+      repository: ghcr.io/azure/kars-json-exporter
+      tag: latest
+      pullPolicy: Always
   grafana:
     enabled: false   # Set to true if you want Grafana dashboards
+    prune: true
+    grafana.ini:
+      database:
+        wal: true
+    env:
+      GOGC: "50"
+    namespaceOverride: monitoring
+    fullnameOverride: kps-grafana
+    image:
+      registry: ghcr.io
+      repository: azure/kars-grafana
+      tag: latest
+      pullPolicy: Always
+    initChownData:
+      enabled: false
+    testFramework:
+      enabled: false
+    sidecar:
+      image:
+        registry: ghcr.io
+        repository: azure/kars-k8s-sidecar
+        tag: latest
+      imagePullPolicy: Always
+      resources:
+        requests: {cpu: 10m, memory: 32Mi}
+        limits: {cpu: 100m, memory: 128Mi}
+      dashboards:
+        resource: configmap
+        searchNamespace: monitoring
+      datasources:
+        resource: configmap
+        searchNamespace: monitoring
+        alertmanager:
+          enabled: false
+    resources:
+      requests: {cpu: 50m, memory: 128Mi}
+      limits: {cpu: 500m, memory: 512Mi}
   inspektorGadget:
     enabled: false   # Install separately: kubectl gadget deploy
     image:
@@ -508,15 +737,18 @@ egressApproval:
 # serving all sandboxes via `?AgentIdentity=<appId>`. Replaces the
 # earlier per-pod sidecar injection design.
 #
-# When `enabled=true`, the controller's reconciler stamps
-# AUTH_SIDECAR_URL=http://entra-auth-sidecar.<ns>.svc:5000 and
+# When `enabled=true`, install in kars-system. The controller stamps
+# AUTH_SIDECAR_URL=http://entra-auth-sidecar.kars-system.svc:5000 and
 # PINNED_AGENT_IDENTITY_APP_ID on every inference-router for sandboxes
 # in agent-id mesh-auth mode. The router then routes ALL downstream
 # token acquisitions through this shared sidecar (fail-closed; no
 # IMDS / WI fallback inside the pod).
 #
-# Set `blueprintClientId` + `tenantId` from your KarsAuthConfig CR
-# (or let `kars up` patch these via `--set` automatically).
+# authConfig is the canonical KarsAuthConfig/default spec. Helm owns the
+# singleton and a versioned immutable sidecar environment from that same spec.
+# Customer-provisioned blueprint/principal and credential trust are prerequisites;
+# this chart never creates tenant identities or grants Graph consent.
+# See README: Helm-owned Entra identity configuration.
 entraSidecar:
   enabled: false
   replicas: 2
@@ -524,12 +756,12 @@ entraSidecar:
   # registry mirror.
   image: "mcr.microsoft.com/entra-sdk/auth-sidecar:1.0.0-azurelinux3.0-distroless"
   imagePullPolicy: IfNotPresent
-  # Required when enabled=true. The blueprint app's appId — used as
-  # `AzureAd__ClientId` AND as the Workload Identity client-id
-  # annotation on the SA. Read from KarsAuthConfig/default.spec.agentId.blueprintClientId.
+  # Required when enabled. Explicit controller.credentialMode must be
+  # ManagedIdentityImds (with managedIdentityClientId) or WorkloadIdentity.
+  # The controller's own azure.workloadIdentity setting remains independent.
+  authConfig: null
+  # Deprecated duplicate anchors: blank or equal to authConfig only.
   blueprintClientId: ""
-  # Required when enabled=true. The Entra tenant ID. Read from
-  # KarsAuthConfig/default.spec.tenant.tenantId.
   tenantId: ""
   resources:
     requests:

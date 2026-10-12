@@ -12,7 +12,7 @@ use kube::{
     api::{DeleteParams, ListParams, PostParams, Preconditions},
 };
 
-pub(super) fn owner_ref(team: &KarsTeam) -> Result<OwnerReference, ReconcileError> {
+pub(crate) fn owner_ref(team: &KarsTeam) -> Result<OwnerReference, ReconcileError> {
     let uid = team
         .metadata
         .uid
@@ -124,6 +124,18 @@ pub(super) async fn reconcile_revocations(
     let principal = specs::principal_spec(team);
     let list = tasks.list(&ListParams::default()).await?;
     for task in list.items.iter().filter(|task| owned(&task.metadata, team)) {
+        let mut current = task.clone();
+        if current.metadata.deletion_timestamp.is_none()
+            && current
+                .inherit_user_owner(team)
+                .map_err(ReconcileError::Invalid)?
+        {
+            require_version(&current)?;
+            current = tasks
+                .replace(&current.name_any(), &PostParams::default(), &current)
+                .await?;
+        }
+        let task = &current;
         let role = task.annotations().get(ANNOT_TEAM_ROLE).map(String::as_str);
         let rebinding = crate::kars_task_reconciler::rebind::pending(task);
         let within = |desired: &KarsTaskSpec| {
@@ -209,8 +221,8 @@ pub(super) async fn apply_task(
             "UnsupportedLaunchBudget: finite total/subtree and monetary budgets are planning-only until durable enforcement is available".into(),
         ));
     }
-    let existing = tasks.get_opt(name).await?;
-    if let Some(old) = &existing {
+    let mut existing = tasks.get_opt(name).await?;
+    if let Some(old) = &mut existing {
         if !owned(&old.metadata, team)
             || old.annotations().get(ANNOT_TEAM_ROLE).map(String::as_str) != Some(role)
         {
@@ -223,6 +235,12 @@ pub(super) async fn apply_task(
             return Err(ReconcileError::Invalid(format!(
                 "task '{name}' is still terminating"
             )));
+        }
+        if old
+            .inherit_user_owner(team)
+            .map_err(ReconcileError::Invalid)?
+        {
+            *old = tasks.replace(name, &PostParams::default(), old).await?;
         }
         // A retry after a lost Team status write must not launch a completed run again.
         if role == "taskforce" {
@@ -279,6 +297,9 @@ pub(super) async fn apply_task(
     if existing.is_none() {
         updated.metadata.owner_references = Some(vec![owner_ref(team)?]);
     }
+    updated
+        .inherit_user_owner(team)
+        .map_err(ReconcileError::Invalid)?;
     let annotations = updated
         .metadata
         .annotations

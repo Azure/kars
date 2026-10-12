@@ -35,8 +35,46 @@ pub fn router(broker: Broker) -> Router {
         .route("/v1/reserve", post(reserve))
         .route("/v1/begin", post(begin))
         .route("/v1/settle", post(settle))
+        .route("/v1/calendar/read", post(calendar_read))
+        .route("/v1/calendar/commit", post(calendar_commit))
         .layer(DefaultBodyLimit::max(32_768))
         .with_state(Arc::new(broker))
+}
+
+async fn calendar_read(
+    State(broker): State<Arc<Broker>>,
+    headers: HeaderMap,
+    Json(request): Json<crate::inference_budget_contract::calendar::Read>,
+) -> Result<Json<crate::inference_budget_contract::calendar::Usage>, Failure> {
+    super::calendar::authenticate(
+        &broker.client,
+        &broker.settings,
+        &headers,
+        &request.identity,
+        true,
+    )
+    .await?;
+    Ok(Json(
+        super::calendar::read(&broker.client, &request.identity.binding, &request.writer).await?,
+    ))
+}
+
+async fn calendar_commit(
+    State(broker): State<Arc<Broker>>,
+    headers: HeaderMap,
+    Json(request): Json<crate::inference_budget_contract::calendar::Commit>,
+) -> Result<Json<crate::inference_budget_contract::calendar::Usage>, Failure> {
+    super::calendar::authenticate(
+        &broker.client,
+        &broker.settings,
+        &headers,
+        &request.identity,
+        request.event == crate::inference_budget_contract::calendar::Event::Begin,
+    )
+    .await?;
+    Ok(Json(
+        super::calendar::commit(&broker.client, &request).await?,
+    ))
 }
 
 struct Failure(StoreError);
@@ -82,12 +120,64 @@ impl IntoResponse for Failure {
                 "inference_budget_unavailable",
             ),
         };
+        // StoreError contains only contract errors or fixed API stages/statuses.
+        tracing::warn!(
+            code,
+            status = status.as_u16(),
+            error = %self.0,
+            "Governed inference budget request rejected"
+        );
         // Deliberately neither the token, wire request, nor API response body.
         (
             status,
             Json(json!({"error": {"code": code, "message": self.0.to_string()}})),
         )
             .into_response()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn broker_failures_preserve_status_and_sanitized_error_contracts() {
+        for (error, status, code) in [
+            (
+                StoreError::Contention,
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inference_budget_unavailable",
+            ),
+            (
+                StoreError::Api {
+                    stage: "verify budget Pod",
+                    code: Some(404),
+                },
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inference_budget_unavailable",
+            ),
+            (
+                StoreError::Ledger(BudgetError::Authorization),
+                StatusCode::FORBIDDEN,
+                "inference_budget_authority",
+            ),
+            (
+                StoreError::Ledger(BudgetError::Exhausted),
+                StatusCode::TOO_MANY_REQUESTS,
+                "inference_budget_exhausted",
+            ),
+        ] {
+            let message = error.to_string();
+            let response = Failure(error).into_response();
+            assert_eq!(response.status(), status);
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+                json!({"error": {"code": code, "message": message}})
+            );
+        }
     }
 }
 

@@ -96,7 +96,9 @@ async function consumers(
   for (const consumer of scope.consumers) {
     if (!kinds[consumer.kind]) throw new Error(failure);
     const current = await read(execute, kinds[consumer.kind]!, consumer.object.name, scope.namespace.name);
-    if (reviewed(current).uid !== consumer.object.uid || templateDigest(current) !== consumer.templateDigest) throw new Error(failure);
+    if (reviewed(current).uid !== consumer.object.uid || templateDigest(current) !== consumer.templateDigest) {
+      throw new Error(`${failure}: ${scope.namespace.name}/${consumer.kind}/${consumer.object.name} identity or template differs`);
+    }
     if (consumesPrivateAuthority(current, scope.namespace.name, activation)) {
       const epoch = at(template(current), "metadata", "annotations", `${PRIVATE_PREFIX}epoch`);
       if (!qualified && (["Pod", "Job"].includes(consumer.kind) || epoch !== undefined)) {

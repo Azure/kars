@@ -123,7 +123,10 @@ def _events_for_object(
             params={"fieldSelector": field_selector, "limit": limit},
         )
         events = []
-        for ev in doc.get("items", []):
+        items = doc.get("items")
+        if not isinstance(items, list):
+            raise ValueError("Event inventory omitted a valid items list")
+        for ev in items:
             events.append(
                 {
                     "type": ev.get("type"),
@@ -138,7 +141,7 @@ def _events_for_object(
         return events
     except Exception as exc:  # noqa: BLE001
         logger.debug("events fetch failed for %s/%s/%s: %s", namespace, kind, name, exc)
-        return []
+        return [{"error": str(exc), "namespace": namespace, "kind": kind, "name": name}]
 
 
 def _summarise_pod(item: dict[str, Any]) -> dict[str, Any]:
@@ -596,15 +599,16 @@ def _impl_sre_endpoints_inspect(
             f"/api/v1/namespaces/{namespace}/pods",
             params={"labelSelector": label_selector},
         )
+        if not isinstance(pod_doc.get("items"), list):
+            raise ValueError("Pod inventory omitted a valid items list")
         out["matching_pods"] = [
             {
                 "name": p.get("metadata", {}).get("name"),
                 "phase": (p.get("status") or {}).get("phase"),
                 "podIP": (p.get("status") or {}).get("podIP"),
-                "ready": all(
-                    c.get("status") == "True"
+                "ready": any(
+                    c.get("type") == "Ready" and c.get("status") == "True"
                     for c in ((p.get("status") or {}).get("conditions") or [])
-                    if c.get("type") == "Ready"
                 ),
             }
             for p in pod_doc.get("items", [])
@@ -618,6 +622,8 @@ def _impl_sre_endpoints_inspect(
             f"/apis/discovery.k8s.io/v1/namespaces/{namespace}/endpointslices",
             params={"labelSelector": f"kubernetes.io/service-name={service}"},
         )
+        if not isinstance(es_doc.get("items"), list):
+            raise ValueError("EndpointSlice inventory omitted a valid items list")
         slices = []
         for es in es_doc.get("items", []):
             endpoints = []
@@ -641,6 +647,12 @@ def _impl_sre_endpoints_inspect(
         out["endpoint_slices"] = {"error": str(exc)}
 
     # 4) Synthesise a finding
+    if not isinstance(out.get("matching_pods"), list) or not isinstance(out.get("endpoint_slices"), list):
+        out["coverage"] = "incomplete"
+        out["finding"] = (
+            "Service health is unknown: pod or EndpointSlice inventory failed; inspect the reported errors."
+        )
+        return out
     n_pods = len(out.get("matching_pods", [])) if isinstance(out.get("matching_pods"), list) else 0
     n_ready = sum(
         1 for p in (out.get("matching_pods") or []) if isinstance(p, dict) and p.get("ready")

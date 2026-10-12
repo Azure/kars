@@ -33,6 +33,8 @@ export interface GovernancePanelInput {
 export interface OrgPanelInput {
   name: string;
   tier: number;
+  authorityCeiling: string;
+  delegationDepth: string;
   roles: Role[];
   options: Options;
   addFromArchetype: (id: string) => void;

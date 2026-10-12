@@ -1,0 +1,7 @@
+**
+!sandbox-images/
+!sandbox-images/webhook-certgen/
+!sandbox-images/webhook-certgen/Dockerfile
+!sandbox-images/webhook-certgen/build.sh
+!sandbox-images/webhook-certgen/certgen.go.mod
+!sandbox-images/webhook-certgen/certgen.go.sum

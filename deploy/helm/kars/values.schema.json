@@ -1,0 +1,113 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "type": "object",
+  "properties": {
+    "monitoring": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "namespaceOverride": { "const": "monitoring" },
+        "fullnameOverride": { "const": "kps-kube-prometheus-stack" },
+        "querySubjects": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["kind", "name"],
+            "properties": {
+              "kind": { "enum": ["User", "Group"] },
+              "name": { "$ref": "#/definitions/text" }
+            }
+          }
+        },
+        "grafana": {
+          "type": "object",
+          "properties": { "namespaceOverride": { "const": "monitoring" } }
+        },
+        "kube-state-metrics": {
+          "type": "object",
+          "properties": { "namespaceOverride": { "const": "monitoring" } }
+        },
+        "prometheus-node-exporter": {
+          "type": "object",
+          "properties": { "namespaceOverride": { "const": "monitoring" } }
+        }
+      }
+    },
+    "entraSidecar": {
+      "type": "object",
+      "properties": {
+        "enabled": { "type": "boolean" },
+        "blueprintClientId": { "type": "string" },
+        "tenantId": { "type": "string" },
+        "authConfig": { "oneOf": [{ "type": "null" }, { "$ref": "#/definitions/authConfig" }] }
+      },
+      "if": { "properties": { "enabled": { "const": true } }, "required": ["enabled"] },
+      "then": { "properties": { "authConfig": { "$ref": "#/definitions/authConfig" } }, "required": ["authConfig"] }
+    }
+  },
+  "definitions": {
+    "guid": { "type": "string", "pattern": "^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$" },
+    "text": { "type": "string", "minLength": 1, "pattern": "^\\S(?:[^\\r\\n]*\\S)?$" },
+    "https": { "type": "string", "pattern": "^https://[A-Za-z0-9][A-Za-z0-9.-]*(?::[0-9]+)?(?:/[^\\s]*)?/?$" },
+    "authConfig": {
+      "type": "object", "additionalProperties": false,
+      "required": ["tenant", "agentId", "controller"],
+      "properties": {
+        "tenant": {
+          "type": "object", "additionalProperties": false, "required": ["tenantId"],
+          "properties": {
+            "tenantId": { "$ref": "#/definitions/guid" },
+            "authorityHost": { "$ref": "#/definitions/https" },
+            "serviceManagementReference": { "$ref": "#/definitions/guid" }
+          }
+        },
+        "agentId": {
+          "type": "object", "additionalProperties": false,
+          "required": ["blueprintClientId", "blueprintObjectId"],
+          "properties": {
+            "blueprintClientId": { "$ref": "#/definitions/guid" },
+            "blueprintObjectId": { "$ref": "#/definitions/guid" },
+            "sponsorUserObjectIds": { "type": "array", "uniqueItems": true, "items": { "$ref": "#/definitions/guid" } }
+          }
+        },
+        "controller": {
+          "type": "object", "additionalProperties": false, "required": ["credentialMode"],
+          "properties": {
+            "credentialMode": { "enum": ["ManagedIdentityImds", "WorkloadIdentity"] },
+            "managedIdentityClientId": { "$ref": "#/definitions/guid" },
+            "managedIdentityResourceId": { "type": "string", "pattern": "^/subscriptions/[^/\\s]+/resourceGroups/[^/\\s]+/providers/Microsoft\\.ManagedIdentity/userAssignedIdentities/[^/\\s]+$" },
+            "managedIdentityPrincipalId": { "$ref": "#/definitions/guid" }
+          },
+          "if": { "properties": { "credentialMode": { "const": "ManagedIdentityImds" } } },
+          "then": { "required": ["managedIdentityClientId"] }
+        },
+        "meshAuthBackend": { "enum": ["Anonymous", "EntraAgentIdentity"] },
+        "meshAuthAudience": { "type": "string" },
+        "downstreamApis": {
+          "type": "object", "additionalProperties": false,
+          "patternProperties": {
+            "^[A-Za-z][A-Za-z0-9]*$": {
+              "type": "object", "additionalProperties": false, "required": ["baseUrl", "scopes"],
+              "properties": {
+                "baseUrl": { "$ref": "#/definitions/https" },
+                "scopes": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/text" } },
+                "requestAppToken": { "type": "boolean" }
+              }
+            }
+          }
+        },
+        "foundryRbac": {
+          "type": "array", "uniqueItems": true,
+          "items": {
+            "type": "object", "additionalProperties": false, "required": ["scope", "roleDefinitionIds"],
+            "properties": {
+              "scope": { "type": "string", "pattern": "^/subscriptions/[^/\\s]+(?:/[^/\\s]+)*$" },
+              "roleDefinitionIds": { "type": "array", "minItems": 1, "uniqueItems": true, "items": { "$ref": "#/definitions/guid" } }
+            }
+          }
+        }
+      }
+    }
+  }
+}

@@ -16,7 +16,7 @@ type BufferedResult = (StatusCode, HeaderMap, Bytes, UpstreamConfig);
 type StreamingResult = (
     StatusCode,
     HeaderMap,
-    BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    BoxStream<'static, Result<Bytes, std::io::Error>>,
     UpstreamConfig,
 );
 

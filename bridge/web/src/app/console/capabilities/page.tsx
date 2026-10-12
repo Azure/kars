@@ -23,28 +23,27 @@ import { McpCatalog } from "../mcp-catalog";
 import { McpServerEditor } from "../mcp-server-editor";
 import { mcpStatus } from "../mcp-status";
 import { Icon } from "@/components/icon";
-import type { McpServer, Options, ProfileSummary, SkillSummary } from "@/lib/types";
+import { ConsoleLoadError } from "@/components/console-load-error";
+import { LiveRefresh } from "@/components/live-refresh";
 
 export const dynamic = "force-dynamic";
 
 export default async function CapabilitiesPage() {
-  let options: Options | null = null;
-  let skills: SkillSummary[] = [];
-  let profiles: ProfileSummary[] = [];
-  let mcp: McpServer[] = [];
+  let options, skills, profiles, mcp;
   try {
     [options, skills, profiles, mcp] = await Promise.all([
       getOptions(),
-      listSkills().catch(() => []),
-      listProfiles().catch(() => []),
-      listMcpServers().catch(() => []),
+      listSkills(),
+      listProfiles(),
+      listMcpServers(),
     ]);
-  } catch {
-    options = null;
+  } catch (error) {
+    return <ConsoleLoadError title="Agent capabilities" error={error} />;
   }
 
   return (
     <div className="space-y-6">
+      <LiveRefresh active={mcp.length > 0 || skills.some((s) => !s.validated && s.phase !== "Degraded") || profiles.some((p) => !p.phase || p.phase === "Pending")} />
       <PageHeader
         eyebrow="Operator Console"
         title="Agent capabilities"
@@ -53,7 +52,7 @@ export default async function CapabilitiesPage() {
 
       <Section
         title="Skills"
-        subtitle="Versioned capability bundles a team can acquire — the same guided upload used in the Workspace; attested + operator-approved before use."
+        subtitle="Versioned instructions and assets for missions and teams. Inspect the content and approve independently; approval is not a malware scan or cryptographic attestation."
       >
         <div className="mb-3">
           <SkillComposer toolPolicies={options?.tool_policies ?? []} submit={submitSkillConsoleAction} />
@@ -73,12 +72,8 @@ export default async function CapabilitiesPage() {
                     <span className="font-medium">{s.name}</span>
                     {s.version && <span className="text-xs text-foreground-muted">v{s.version}</span>}
                   </span>
-                  <Badge tone={s.attestation_verified === true ? "ok" : s.attestation_verified === false ? "warn" : "muted"}>
-                    {s.attestation_verified === true
-                      ? "attested"
-                      : s.attestation_verified === false
-                        ? "unverified"
-                        : s.phase ?? "attestation unknown"}
+                  <Badge tone={s.validated ? "ok" : s.phase === "Degraded" ? "warn" : "muted"}>
+                    {s.validated ? "content validated" : s.phase ?? "awaiting validation"}
                   </Badge>
                 </div>
                 <div className="mt-2 flex flex-wrap items-center gap-2">
@@ -95,7 +90,7 @@ export default async function CapabilitiesPage() {
 
       <Section
         title="Team profiles"
-        subtitle="Vetted org templates per domain — instantiate a whole standing team in one click."
+        subtitle="Reusable team templates. Review the controller status and the resulting draft before creating a team; saving a profile does not launch work."
         action={<ProfileEditor toolPolicies={options?.tool_policies ?? []} skills={options?.skills ?? []} />}
       >
         {profiles.length === 0 ? (
@@ -117,11 +112,16 @@ export default async function CapabilitiesPage() {
                   </span>
                   <span className="flex shrink-0 items-center gap-2 text-xs text-foreground-muted">
                     {p.domain && <Badge tone="muted">{p.domain}</Badge>}
-                    {p.phase ?? "ready"}
+                    <Badge tone={p.phase === "Degraded" ? "warn" : "muted"}>
+                      {p.phase ?? "Awaiting validation"}
+                    </Badge>
                   </span>
                 </div>
                 {p.charter_template && (
                   <p className="mt-1 line-clamp-2 text-xs text-foreground-muted">{p.charter_template}</p>
+                )}
+                {p.phase === "Degraded" && (
+                  <p className="mt-2 text-xs text-danger">Controller validation failed. Edit the profile before using it for a team.</p>
                 )}
                 <div className="mt-2 flex flex-wrap items-center gap-3">
                   <ProfileEditor initialName={p.name} initialSpec={p.spec} toolPolicies={options?.tool_policies ?? []} skills={options?.skills ?? []} />
@@ -153,7 +153,7 @@ export default async function CapabilitiesPage() {
             <li><span className="font-medium text-foreground">4. Brokered</span> — the sandbox router namespaces and governs every tool call, then forwards it. The agent gets neither the upstream endpoint nor its credentials.</li>
           </ol>
         </details>
-        <div className="mb-3"><McpCatalog /></div>
+        <div className="mb-3"><McpCatalog servers={mcp} /></div>
         {mcp.length === 0 ? (
           <HonestState
             variant="empty"
@@ -168,7 +168,9 @@ export default async function CapabilitiesPage() {
               return (
                 <li
                   key={`${m.namespace}/${m.name}`}
-                  className="rounded-lg border border-border bg-surface px-3 py-2.5 text-sm"
+                  id={`mcp-${m.namespace}-${m.name}`}
+                  tabIndex={-1}
+                  className="scroll-mt-24 rounded-lg border border-border bg-surface px-3 py-2.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
                 >
                   <div className="flex items-center justify-between gap-3">
                     <span className="flex items-center gap-1.5">
@@ -218,25 +220,25 @@ export default async function CapabilitiesPage() {
 
       <Section
         title="Secure credentials"
-        subtitle="Give an agent or team a repo or service token without baking it into an image. It is stored as a write-only secret that only that agent can read at runtime — never visible to the model or the UI."
+        subtitle="Store a repo or service token for a reviewed agent, mission, or team. The Console writes the value but does not return it."
       >
         {/* Make the security model explicit — the operator asked how these work. */}
         <ul className="mb-4 grid gap-2 sm:grid-cols-2">
           <li className="flex items-start gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.04] p-3 text-xs">
             <Icon name="lock" size={14} />
-            <span><span className="font-medium text-foreground">Write-only.</span> You set the value once; the API and this screen never return it again — there is no read path for the plaintext.</span>
+            <span><span className="font-medium text-foreground">Write-only in the Console.</span> Stored values are not returned by the credential API or displayed here. Kubernetes Secret access remains governed by cluster permissions.</span>
           </li>
           <li className="flex items-start gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.04] p-3 text-xs">
             <Icon name="box" size={14} />
-            <span><span className="font-medium text-foreground">Stored as a K8s Secret</span> (<code className="font-mono">&lt;name&gt;-credentials</code>) in that agent&rsquo;s own namespace — not in the image, not in the CRD, not in git.</span>
+            <span><span className="font-medium text-foreground">Stored as Kubernetes Secrets.</span> Reviewed credentials are projected into the authorized runtime namespace, not baked into images or saved in CRD specs.</span>
           </li>
           <li className="flex items-start gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.04] p-3 text-xs">
             <Icon name="cross" size={14} />
-            <span><span className="font-medium text-foreground">Never seen by the model.</span> It&rsquo;s injected into the agent container&rsquo;s env at runtime only; the LLM sees tool results, never the token.</span>
+            <span><span className="font-medium text-foreground">Runtime access is not model isolation.</span> Tools that can read the agent&rsquo;s environment can expose these values in their output. Grant only trusted tools and avoid printing credentials.</span>
           </li>
           <li className="flex items-start gap-2 rounded-lg border border-emerald-500/25 bg-emerald-500/[0.04] p-3 text-xs">
             <Icon name="target" size={14} />
-            <span><span className="font-medium text-foreground">Scoped to one agent/team.</span> Only the sandbox it&rsquo;s bound to can mount it; other namespaces&rsquo; pods cannot read it.</span>
+            <span><span className="font-medium text-foreground">Bound to a reviewed target.</span> UID-checked grants control which sandbox or mission/team descendants may consume the credential. This form does not grant access to other workloads.</span>
           </li>
         </ul>
         <CredentialForm />

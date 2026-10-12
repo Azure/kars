@@ -14,6 +14,7 @@ import { defaultNamespace } from "@/lib/config";
 import { currentPrincipal } from "@/lib/session";
 import { ApprovalDecision } from "@/components/approval-decision";
 import { ApprovalPhaseBadge, actionLabel } from "@/components/approval-phase-badge";
+import { ConsoleLoadError } from "@/components/console-load-error";
 import type { Approval, EgressApproval } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -35,14 +36,15 @@ export default async function ConsoleApprovals() {
   const principal = await currentPrincipal();
   let egress: EgressApproval[] = [];
   let steering: Approval[] = [];
-  let error = false;
   try {
-    egress = await listEgress();
-    steering = (await listApprovals(defaultNamespace(), { scopeAll: true })).filter(
-      (approval) => approval.action_kind !== "clarification",
-    );
-  } catch {
-    error = true;
+    [egress, steering] = await Promise.all([
+      listEgress(),
+      listApprovals(defaultNamespace(), { scopeAll: true }),
+    ]);
+    steering = steering.filter((approval) => approval.action_kind !== "clarification");
+  } catch (error) {
+    return <ConsoleLoadError title="Approvals" error={error}
+      detail="The approval queues could not be verified. This does not mean no requests are pending. Decisions are unavailable until the read succeeds." />;
   }
 
   const pending = egress.filter((e) => e.phase === "Pending").length;
@@ -52,31 +54,31 @@ export default async function ConsoleApprovals() {
       <PageHeader
         eyebrow="Operator Console"
         title="Approvals"
-        lead="Platform-side governance gates — the active temporary egress widenings on the fleet, each revocable here. Mission-level steering (tool-call gates, tier raises) lives in the Workspace inbox."
+        lead="Fleet-wide workload decisions and temporary egress grants. Review authority requests and checkpoints, or revoke an active network widening. Agent clarification questions remain in the owning user's Workspace inbox."
       />
 
       {/* Two approval planes — the operator asked how this relates to the inbox. */}
       <section className="grid gap-3 sm:grid-cols-2">
         <div className="rounded-xl border border-signal/25 bg-signal/[0.04] p-4">
-          <p className="flex items-center gap-2 text-sm font-semibold"><span aria-hidden><Icon name="seal" size={16} /></span> This page — platform plane</p>
+          <p className="flex items-center gap-2 text-sm font-semibold"><span aria-hidden><Icon name="seal" size={16} /></span> This page — operator decisions</p>
           <p className="mt-1 text-xs text-foreground-muted">
-            Fleet-wide policy changes: temporary <strong>egress widenings</strong> (EgressApproval) that
-            let a sandbox reach a domain outside its signed baseline. You grant/revoke them here; the
-            controller reconciles the allowlist. This is the only approval an <em>operator</em> owns.
+            Review workload authority requests and Team checkpoints across the fleet. Temporary
+            <strong> egress widenings</strong> (EgressApproval) are listed separately below; revoking
+            one asks the controller to restore that sandbox&rsquo;s baseline allowlist.
           </p>
         </div>
         <div className="rounded-xl border border-accent/25 bg-accent/[0.04] p-4">
           <p className="flex items-center gap-2 text-sm font-semibold"><span aria-hidden><Icon name="message" size={16} /></span> Workspace inbox — mission plane</p>
           <p className="mt-1 text-xs text-foreground-muted">
-            Per-mission steering the <em>task-giver</em> owns: answering an agent&rsquo;s clarification,
-            approving a tool-call gate or an autonomy (tier) raise. Those never appear here — they go to
-            the person who launched the work, in their <strong>Workspace inbox</strong>.
+            Task-givers see their own requests and answer agent clarification questions in the
+            <strong> Workspace inbox</strong>. Authority expansion and checkpoint decisions require
+            an operator or admin; clarification questions are excluded from this fleet view.
           </p>
         </div>
       </section>
 
       <Section
-        title="User workload authority requests"
+        title="Workload decisions"
         action={
           <Badge tone={steering.some((approval) => approval.actionable) ? "warn" : "muted"} dot={steering.some((approval) => approval.actionable)}>
             {steering.filter((approval) => approval.actionable).length} pending
@@ -86,8 +88,8 @@ export default async function ConsoleApprovals() {
         {steering.length === 0 ? (
           <HonestState
             variant="empty"
-            title="No authority requests"
-            detail="User-owned mission and team requests that require an operator decision appear here. Clarification questions remain exclusively in the owning user's Workspace inbox."
+            title="No workload decisions"
+            detail="Mission and Team authority requests and checkpoints appear here. Clarification questions remain in the owning user's Workspace inbox."
           />
         ) : (
           <ul className="divide-y divide-border overflow-hidden rounded-lg border border-border">
@@ -95,14 +97,19 @@ export default async function ConsoleApprovals() {
               <li key={approval.name} className="px-4 py-4">
                 <div className="flex items-start justify-between gap-4">
                   <div className="min-w-0">
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-wrap items-center gap-2">
                       <span className="rounded border border-border bg-surface-muted px-1.5 py-0.5 text-xs font-medium text-foreground-muted">
                         {actionLabel(approval.action_kind)}
                       </span>
-                      <span className="font-mono text-[11px] text-foreground-muted">{approval.task}</span>
+                      <span className="break-all font-mono text-[11px] text-foreground-muted">{approval.task}</span>
                     </div>
                     <p className="mt-1.5 text-sm font-medium">{approval.summary}</p>
-                    {approval.detail && <p className="mt-0.5 text-xs text-foreground-muted">{approval.detail}</p>}
+                    {approval.detail && (
+                      <details className="mt-1 text-xs text-foreground-muted">
+                        <summary className="cursor-pointer">Request details</summary>
+                        <p className="mt-2 whitespace-pre-wrap break-words">{approval.detail}</p>
+                      </details>
+                    )}
                   </div>
                   <ApprovalPhaseBadge phase={approval.phase} />
                 </div>
@@ -115,7 +122,7 @@ export default async function ConsoleApprovals() {
                       resourceVersion={approval.resource_version}
                       boundEnvelopeDigest={approval.bound_envelope_digest}
                       compact
-                      requireReason={approval.action_kind === "clarification"}
+                      requireDenyReason={approval.action_kind === "checkpoint" && !!approval.team && !!approval.milestone}
                     />
                   </div>
                 )}
@@ -146,9 +153,7 @@ export default async function ConsoleApprovals() {
           </Badge>
         }
       >
-        {error ? (
-          <HonestState variant="not_wired" title="Cluster unreachable" detail="The Bridge backend can't reach the cluster right now." />
-        ) : egress.length === 0 ? (
+        {egress.length === 0 ? (
           <div className="space-y-4">
             <HonestState
               variant="empty"
@@ -206,8 +211,8 @@ export default async function ConsoleApprovals() {
       </Section>
 
       <p className="px-1 text-xs text-foreground-muted">
-        Mission-level steering decisions (tool-call gates, tier raises) are handled by task-givers in
-        the Workspace inbox — operators see them here only when they require a platform policy change.
+        Decisions are bound to the exact request and envelope shown for review. A changed or already
+        decided request must be reloaded before another decision can be submitted.
       </p>
     </div>
   );

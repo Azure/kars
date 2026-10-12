@@ -4,8 +4,9 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import Link from "next/link";
 import type { TaskDetail } from "@/lib/types";
-import type { TeamRunEvidence } from "@/lib/team-run-evidence";
+import { teamRunMetrics, type TeamRunEvidence } from "@/lib/team-run-evidence";
 
 type FlowCategory = "team" | "tool" | "reasoning" | "outcome" | "system";
 
@@ -19,6 +20,7 @@ type FlowEvent = {
   status: "ok" | "working" | "error" | "neutral";
   count?: number;
   tokens?: number;
+  href?: string;
 };
 
 function assignmentTitle(event: TaskDetail["assignment_events"][number]): {
@@ -61,7 +63,10 @@ function assignmentTitle(event: TaskDetail["assignment_events"][number]): {
 }
 
 function buildEvents(task: TaskDetail, evidence: TeamRunEvidence): FlowEvent[] {
-  const events: FlowEvent[] = task.assignment_events.map((event) => {
+  const metrics = teamRunMetrics(task);
+  const result = metrics.currentResult;
+  const failed = result != null && ["error", "failed", "rejected"].includes(result.status ?? "");
+  const events: FlowEvent[] = metrics.assignmentEvents.map((event) => {
     const mapped = assignmentTitle(event);
     return {
       id: `assignment-${event.sequence}`,
@@ -75,7 +80,31 @@ function buildEvents(task: TaskDetail, evidence: TeamRunEvidence): FlowEvent[] {
   });
 
   const toolGroups = new Map<string, FlowEvent>();
-  for (const event of task.activity) {
+  for (const phase of metrics.phases ?? []) {
+    const run = phase.result?.run_evidence;
+    const href = phase.task_name
+      ? `/workspace/missions/${encodeURIComponent(phase.task_name)}?tab=artifacts` : undefined;
+    if (run) {
+      events.push({
+        id: `phase-${phase.task_uid}-start`, at: run.started_at, category: "team",
+        actor: phase.role, title: `${phase.phase} started`,
+        detail: `Recorded runtime: ${run.agent_name}`, status: "working", href,
+      });
+    }
+    events.push({
+      id: `phase-${phase.role}-${phase.phase}-result`,
+      at: run?.finished_at ?? null, category: "team", actor: phase.role,
+      title: `${phase.phase}: ${phase.state}`,
+      detail: phase.result
+        ? [phase.result.error, phase.result.output,
+          phase.result.usage_known ? `${phase.result.total_tokens?.toLocaleString()} tokens` : "Token usage unavailable"]
+          .filter(Boolean).join(" · ")
+        : "No current terminal record is available for this phase.",
+      status: phase.state === "completed" ? "ok" : phase.state === "failed" ? "error"
+        : phase.state === "active" ? "working" : "neutral", href,
+    });
+  }
+  for (const event of metrics.activity) {
     if (event.kind !== "tool") continue;
     const key = [
       event.agent ?? "principal",
@@ -102,7 +131,7 @@ function buildEvents(task: TaskDetail, evidence: TeamRunEvidence): FlowEvent[] {
   }
   events.push(...toolGroups.values());
 
-  const rounds = task.activity.filter((event) => event.kind === "round");
+  const rounds = metrics.activity.filter((event) => event.kind === "round");
   if (rounds.length > 0) {
     events.push({
       id: "reasoning-summary",
@@ -116,24 +145,25 @@ function buildEvents(task: TaskDetail, evidence: TeamRunEvidence): FlowEvent[] {
     });
   }
 
-  if (task.result) {
+  if (result) {
     events.push({
       id: "final-outcome",
-      at: task.result.finished_at,
+      at: result.finished_at,
       category: "outcome",
       actor: "truthfulness gate",
       title:
-        task.result.status === "error"
+        failed
           ? "Run rejected as failed"
           : evidence.outcome === "delivered"
             ? "Outcome delivered"
             : "Run completed with issues",
       detail:
-        task.result.status === "error"
-          ? `${evidence.roles.filter((role) => role.state === "delivered").length}/${evidence.roles.filter((role) => role.state !== "skipped").length} selected roles returned durable handbacks.`
+        failed
+          ? `${evidence.roles.filter((role) => role.state === "delivered").length}/${evidence.roles.filter((role) => role.state !== "skipped").length} selected roles have recorded completions.`
           : evidence.issues[0] ?? null,
-      status: task.result.status === "error" ? "error" : "ok",
-      tokens: task.result.total_tokens ?? undefined,
+      status: failed ? "error"
+        : result.reviewable === true && evidence.outcome === "delivered" ? "ok" : "neutral",
+      tokens: metrics.tokens ?? undefined,
     });
   }
 
@@ -166,22 +196,27 @@ function SignalPath({
   const roles = evidence.roles
     .filter((role) => role.state !== "skipped")
     .map((role) => role.role.name.replaceAll("-", " "));
-  const toolCount = task.activity.filter((event) => event.kind === "tool").length;
-  const failedTools = task.activity.filter((event) => event.kind === "tool" && !event.ok).length;
-  const resultStatus = task.result?.status ?? null;
-  const running = resultStatus == null;
+  const metrics = teamRunMetrics(task);
+  const toolCount = metrics.toolCalls;
+  const failedTools = metrics.failedToolCalls;
+  const result = metrics.currentResult;
+  const running = result == null;
   const nodes = [
     { label: "Controller", detail: "assignment", tone: "border-slate-400/40 bg-slate-500/[0.05]" },
     { label: "Principal", detail: "orchestration", tone: "border-sky-500/40 bg-sky-500/[0.06]" },
     {
       label:
-        roles.length === 0
+        metrics.selectedRoles == null
+          ? "Role selection unavailable"
+          : roles.length === 0
           ? "Principal only"
           : roles.length === 1
             ? roles[0]
             : `${roles.length} specialist roles`,
       detail:
-        roles.length > 1
+        metrics.selectedRoles == null
+          ? "no published selection record"
+          : roles.length > 1
           ? roles.join(" · ")
           : roles.length === 1
             ? "delegated work"
@@ -189,14 +224,17 @@ function SignalPath({
       tone: "border-violet-500/40 bg-violet-500/[0.06]",
     },
     {
-      label: `${toolCount} tool call${toolCount === 1 ? "" : "s"}`,
+      label: metrics.reportedToolResults != null ? `${metrics.reportedToolResults} retained reported tool results`
+        : toolCount == null ? "Tool detail unavailable" : `${toolCount} recorded tool call${toolCount === 1 ? "" : "s"}`,
       detail:
-        failedTools > 0
+        toolCount == null
+          ? metrics.reportedToolResults != null ? "inspect producer records in Drill-down" : "missing detail is not zero calls"
+          : failedTools != null && failedTools > 0
           ? `${failedTools} failed${running ? " · running" : ""}`
           : running
             ? "calls so far"
-            : "all returned",
-      tone: failedTools > 0
+            : "retained calls",
+      tone: failedTools != null && failedTools > 0
         ? "border-danger/40 bg-danger/[0.05]"
         : running
           ? "border-sky-500/40 bg-sky-500/[0.06]"
@@ -206,12 +244,14 @@ function SignalPath({
       label: "Truthfulness gate",
       detail: running
         ? "pending"
-        : resultStatus === "error"
+        : result.status === "error"
           ? "rejected"
-          : "verified",
+          : result.reviewable === true
+            ? "reviewable result"
+            : "evidence unavailable",
       tone: running
         ? "border-border bg-surface-muted/30"
-        : resultStatus === "error"
+        : result.status === "error"
           ? "border-danger/40 bg-danger/[0.05]"
           : "border-amber-500/40 bg-amber-500/[0.06]",
     },
@@ -267,8 +307,7 @@ export function TeamRunFlow({
       .filter(Boolean)
       .some((value) => value?.toLowerCase().includes(normalized));
   });
-  const failedTools = task.activity.filter((event) => event.kind === "tool" && !event.ok).length;
-  const rounds = task.activity.filter((event) => event.kind === "round").length;
+  const metrics = teamRunMetrics(task);
 
   return (
     <section className="rounded-xl border border-border bg-surface p-5">
@@ -281,15 +320,19 @@ export function TeamRunFlow({
           </p>
         </div>
         <div className="flex flex-wrap gap-2 text-[11px] text-foreground-muted">
-          <span>{task.assignment_events.length} lifecycle events</span>
-          <span>{task.activity.filter((event) => event.kind === "tool").length} tool calls</span>
-          <span className={failedTools > 0 ? "text-danger" : ""}>{failedTools} failed</span>
-          <span>{rounds} rounds</span>
-          <span>{(task.result?.total_tokens ?? 0).toLocaleString()} tokens</span>
+          <span>{metrics.phases?.length ? `${metrics.phases.length} reserved phases` : `${metrics.assignmentEvents.length} recorded lifecycle events`}</span>
+          <span>{metrics.reportedToolResults != null ? `${metrics.reportedToolResults} retained reported tool results`
+            : metrics.toolCalls == null ? "Tool detail unavailable" : `${metrics.toolCalls} recorded tool calls`}</span>
+          {metrics.failedToolCalls != null && <span className={metrics.failedToolCalls > 0 ? "text-danger" : ""}>{metrics.failedToolCalls} recorded failures</span>}
+          <span>{metrics.rounds == null ? "Round count unavailable" : `${metrics.rounds} recorded rounds`}</span>
+          <span>{metrics.tokens == null ? "Token usage unavailable" : `${metrics.tokens.toLocaleString()} recorded tokens`}</span>
         </div>
       </div>
 
       <SignalPath task={task} evidence={evidence} />
+      {task.reviewed_execution?.issue && (
+        <p className="mt-3 text-xs text-warning">{task.reviewed_execution.issue}</p>
+      )}
 
       <div className="mt-4 flex flex-wrap gap-2">
         <input
@@ -348,6 +391,7 @@ export function TeamRunFlow({
                     {event.actor}
                   </span>
                   <span className="text-xs font-semibold">{event.title}</span>
+                  {event.href && <Link href={event.href} prefetch={false} className="text-xs text-signal underline">Phase evidence and files</Link>}
                   {(event.count ?? 1) > 1 && (
                     <span className="rounded-full border border-border px-1.5 py-0.5 text-[9px]">
                       ×{event.count}
@@ -368,7 +412,11 @@ export function TeamRunFlow({
         })}
       </ol>
       {visible.length === 0 && (
-        <p className="mt-5 text-xs text-foreground-muted">No flow events match this search.</p>
+        <p className="mt-5 text-xs text-foreground-muted">
+          {events.length === 0
+            ? "Activity evidence is not yet available on this run. This does not establish that no work occurred."
+            : "No flow events match this search."}
+        </p>
       )}
     </section>
   );

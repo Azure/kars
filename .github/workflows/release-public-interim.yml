@@ -121,6 +121,8 @@ jobs:
     timeout-minutes: 90
     outputs:
       controller_digest: ${{ steps.digests.outputs.controller }}
+      metrics_digest: ${{ steps.digests.outputs.metrics }}
+      headlamp_digest: ${{ steps.digests.outputs.headlamp }}
       router_digest: ${{ steps.digests.outputs.router }}
       gateway_digest: ${{ steps.digests.outputs.gateway }}
       runner_digest: ${{ steps.digests.outputs.runner }}
@@ -131,6 +133,15 @@ jobs:
           - name: controller
             dockerfile: controller/Dockerfile
             ghcr: kars-controller
+            platforms: linux/amd64,linux/arm64
+          - name: metrics-server
+            dockerfile: sandbox-images/metrics-server/Dockerfile
+            ghcr: kars-metrics-server
+            platforms: linux/amd64,linux/arm64
+          - name: headlamp
+            dockerfile: sandbox-images/headlamp/Dockerfile
+            ghcr: kars-headlamp
+            no_binaries: true
             platforms: linux/amd64,linux/arm64
           - name: inference-router
             dockerfile: inference-router/Dockerfile
@@ -148,11 +159,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Download pre-built binaries (per-arch)
+        if: matrix.image.no_binaries != true
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
           name: kars-binaries-${{ env.VERSION }}
           path: ./bin/
       - name: chmod binaries
+        if: matrix.image.no_binaries != true
         run: find ./bin -type f -name 'kars-*' -exec chmod +x {} \;
 
       - name: Set up QEMU (for cross-arch buildx)
@@ -210,6 +223,8 @@ jobs:
         run: |
           case "${{ matrix.image.name }}" in
             controller)          echo "controller=${DIGEST}"   >> "$GITHUB_OUTPUT" ;;
+            metrics-server)      echo "metrics=${DIGEST}"      >> "$GITHUB_OUTPUT" ;;
+            headlamp)            echo "headlamp=${DIGEST}"     >> "$GITHUB_OUTPUT" ;;
             inference-router)    echo "router=${DIGEST}"       >> "$GITHUB_OUTPUT" ;;
             a2a-gateway)         echo "gateway=${DIGEST}"      >> "$GITHUB_OUTPUT" ;;
             conformance-runner)  echo "runner=${DIGEST}"       >> "$GITHUB_OUTPUT" ;;
@@ -361,8 +376,8 @@ jobs:
 
   # Merge the per-arch tags into multi-arch manifests + sign/attest/SBOM.
   merge-sandbox:
-    name: Merge + sign sandbox-base + openclaw-sandbox manifests
-    needs: [build-sandbox-base, build-sandbox]
+    name: Merge + sign default harness and sandbox-base manifests
+    needs: [build-sandbox-base, build-sandbox, build-runtimes]
     runs-on: ubuntu-22.04
     permissions:
       contents: read
@@ -373,6 +388,7 @@ jobs:
     outputs:
       sandbox_digest: ${{ steps.digests.outputs.openclaw }}
       sandbox_base_digest: ${{ steps.digests.outputs.base }}
+      hermes_digest: ${{ steps.digests.outputs.hermes }}
     steps:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -386,7 +402,7 @@ jobs:
       - name: Create multi-arch manifests (:VERSION + :latest)
         id: digests
         run: |
-          for name in kars-sandbox-base openclaw-sandbox; do
+          for name in kars-sandbox-base openclaw-sandbox kars-runtime-hermes; do
             docker buildx imagetools create \
               -t "${REGISTRY}/${name}:${VERSION}" \
               -t "${REGISTRY}/${name}:latest" \
@@ -396,6 +412,7 @@ jobs:
             case "$name" in
               kars-sandbox-base) echo "base=${DIGEST}" >> "$GITHUB_OUTPUT" ;;
               openclaw-sandbox)  echo "openclaw=${DIGEST}" >> "$GITHUB_OUTPUT" ;;
+              kars-runtime-hermes) echo "hermes=${DIGEST}" >> "$GITHUB_OUTPUT" ;;
             esac
           done
         env:
@@ -407,7 +424,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          for name in kars-sandbox-base openclaw-sandbox; do
+          for name in kars-sandbox-base openclaw-sandbox kars-runtime-hermes; do
             gh api -X PATCH -H "Accept: application/vnd.github+json" \
               "/orgs/azure/packages/container/${name}/visibility" -f visibility=public \
             || echo "::warning::Could not set ${name} public via API."
@@ -433,6 +450,13 @@ jobs:
           path: sbom-openclaw-sandbox.spdx.json
           retention-days: 90
 
+      - name: Attest Hermes manifest provenance
+        uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
+        with:
+          subject-name: ${{ env.REGISTRY }}/kars-runtime-hermes
+          subject-digest: ${{ steps.digests.outputs.hermes }}
+          push-to-registry: true
+
       - name: Install cosign
         uses: sigstore/cosign-installer@1aa8e0f2454b781fbf0fbf306a4c9533a0c57409 # v3.7.0
         with:
@@ -443,6 +467,7 @@ jobs:
         run: |
           cosign sign --yes ${{ env.REGISTRY }}/kars-sandbox-base@${{ steps.digests.outputs.base }}
           cosign sign --yes ${{ env.REGISTRY }}/openclaw-sandbox@${{ steps.digests.outputs.openclaw }}
+          cosign sign --yes ${{ env.REGISTRY }}/kars-runtime-hermes@${{ steps.digests.outputs.hermes }}
 
   # ─── Stage 2c: build AGT Python wheels (upstream governance pkgs) ──
   # The Python runtime images COPY runtimes/wheels/*.whl (upstream AGT
@@ -472,27 +497,28 @@ jobs:
           echo "Built wheels:" && ls -la runtimes/wheels/
       - name: Guard — wheels present
         run: |
-          count=$(find runtimes/wheels -maxdepth 1 -name '*.whl' | wc -l)
-          if [ "$count" -lt 1 ]; then
-            echo "::error::No AGT-Python wheels were produced — Python runtime" \
-                 "images would build without governance primitives. Aborting."
-            exit 1
-          fi
-          echo "::notice::Staged $count AGT-Python wheel(s)."
+          python3 - <<'PY'
+          import pathlib, runpy
+          select = runpy.run_path("runtimes/install-agt-wheels.py")["select_wheels"]
+          for machine in ("x86_64", "aarch64"):
+              select(pathlib.Path("runtimes/wheels"), machine)
+          print("Verified AGT 5 owners and both native ACS wheel receipts")
+          PY
       - name: Upload wheels
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
           name: agt-wheels-${{ env.VERSION }}
-          path: runtimes/wheels/*.whl
+          path: runtimes/wheels/
           retention-days: 90
 
   # ─── Stage 2d: build the Python runtime adapter images ─────────
   # Each bundles the upstream AGT wheels + kars-agt-mesh (in-repo) + the
-  # runtime adapter. amd64-only (manylinux wheels). FROM Azure Linux python.
+  # runtime adapter. Hermes uses native runners for both default Kind arches;
+  # other adapters retain their existing amd64 builds.
   build-runtimes:
-    name: Build + push ${{ matrix.runtime.ghcr }} (PUBLIC GHCR)
+    name: Build + push ${{ matrix.runtime.ghcr }} (${{ matrix.runtime.arch || 'amd64' }}, PUBLIC GHCR)
     needs: build-agt-wheels
-    runs-on: ubuntu-22.04
+    runs-on: ${{ matrix.runtime.runner || 'ubuntu-22.04' }}
     permissions:
       contents: read
       packages: write
@@ -509,7 +535,8 @@ jobs:
           # `Resource` / `addSpanProcessor`). The CLI lists it as an OPTIONAL
           # import (required:false) so its absence never breaks a deploy. Re-add
           # this matrix entry once the runtime builds again. Tracked in #474.
-          - { name: hermes,        ghcr: kars-runtime-hermes }
+          - { name: hermes, ghcr: kars-runtime-hermes, arch: amd64, runner: ubuntu-22.04, suffix: "-amd64" }
+          - { name: hermes, ghcr: kars-runtime-hermes, arch: arm64, runner: ubuntu-24.04-arm, suffix: "-arm64" }
           - { name: maf-python,    ghcr: kars-runtime-maf-python }
           - { name: anthropic,     ghcr: kars-runtime-anthropic }
           - { name: openai-agents, ghcr: kars-runtime-openai-agents }
@@ -525,8 +552,11 @@ jobs:
 
       - name: Guard — wheels staged + kars-agt-mesh present
         run: |
-          test -n "$(find runtimes/wheels -maxdepth 1 -name '*.whl')" \
-            || { echo "::error::AGT wheels missing in build context"; exit 1; }
+          python3 - <<'PY'
+          import pathlib, platform, runpy
+          select = runpy.run_path("runtimes/install-agt-wheels.py")["select_wheels"]
+          select(pathlib.Path("runtimes/wheels"), platform.machine())
+          PY
           test -f runtimes/agt-mesh-python/pyproject.toml \
             || { echo "::error::kars-agt-mesh source missing from checkout"; exit 1; }
 
@@ -547,10 +577,10 @@ jobs:
           context: .
           file: sandbox-images/${{ matrix.runtime.name }}/Dockerfile
           push: true
-          platforms: linux/amd64
+          platforms: linux/${{ matrix.runtime.arch || 'amd64' }}
           tags: |
-            ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.VERSION }}
-            ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:latest
+            ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.VERSION }}${{ matrix.runtime.suffix }}
+            ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:latest${{ matrix.runtime.suffix }}
           build-args: |
             VERSION=${{ env.VERSION }}
           sbom: true
@@ -577,15 +607,15 @@ jobs:
       - name: Generate SBOM (SPDX JSON)
         uses: anchore/sbom-action@e22c389904149dbc22b58101806040fa8d37a610 # v0.24.0
         with:
-          image: ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.VERSION }}
+          image: ${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.VERSION }}${{ matrix.runtime.suffix }}
           format: spdx-json
-          output-file: sbom-${{ matrix.runtime.ghcr }}.spdx.json
+          output-file: sbom-${{ matrix.runtime.ghcr }}${{ matrix.runtime.suffix }}.spdx.json
 
       - name: Upload SBOM
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v4
         with:
-          name: sbom-${{ matrix.runtime.ghcr }}-${{ env.VERSION }}
-          path: sbom-${{ matrix.runtime.ghcr }}.spdx.json
+          name: sbom-${{ matrix.runtime.ghcr }}-${{ env.VERSION }}${{ matrix.runtime.suffix }}
+          path: sbom-${{ matrix.runtime.ghcr }}${{ matrix.runtime.suffix }}.spdx.json
           retention-days: 90
 
       - name: Install cosign
@@ -601,7 +631,7 @@ jobs:
 
   # ─── Stage 2e: build the AGT mesh relay + registry images ──────
   # kars dev / up run the AGT relay + registry for the mesh. They are built
-  # from the pinned AGT checkout (agent-mesh/docker/Dockerfile, COMPONENT=*).
+  # from the pinned AGT owner wheels on the shared AL3 distroless recipe.
   # Publishing them lets `kars dev --release` pull everything — no AGT clone.
   # AGT relay + registry — built on NATIVE per-arch runners so they run
   # natively on arm64 kind nodes (Apple Silicon). The AGT Python image is
@@ -610,6 +640,7 @@ jobs:
   # --target local-k8s` on a Mac. merge-mesh fuses the per-arch tags below.
   build-mesh:
     name: Build agentmesh-${{ matrix.component }} (${{ matrix.arch }}, native)
+    needs: [build-agt-wheels]
     runs-on: ${{ matrix.runner }}
     permissions:
       contents: read
@@ -628,12 +659,11 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Clone pinned AGT
-        run: |
-          URL=$(jq -r .url vendor/agt/pin.json)
-          SHA=$(jq -r .sha vendor/agt/pin.json)
-          git clone --filter=blob:none "$URL" /tmp/agt
-          git -C /tmp/agt checkout "$SHA"
+      - name: Download pinned AGT owner and native ACS wheels
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: agt-wheels-${{ env.VERSION }}
+          path: runtimes/wheels/
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@37fe631027851001ddb9b187196cc803df7f5f0e # v4.3.0
@@ -648,8 +678,8 @@ jobs:
       - name: Build + push agentmesh-${{ matrix.component }}:${{ env.VERSION }}-${{ matrix.arch }}
         uses: docker/build-push-action@f9f3042f7e2789586610d6e8b85c8f03e5195baf # v6
         with:
-          context: /tmp/agt
-          file: /tmp/agt/agent-governance-python/agent-mesh/docker/Dockerfile
+          context: .
+          file: sandbox-images/agentmesh/Dockerfile
           push: true
           platforms: linux/${{ matrix.arch }}
           tags: ${{ env.REGISTRY }}/kars-agentmesh-${{ matrix.component }}:${{ env.VERSION }}-${{ matrix.arch }}
@@ -865,11 +895,14 @@ jobs:
             "publish_status": "Public, cosign-signed GHCR images + SPDX SBOM + GitHub build-provenance (SLSA) attestation on every image; release assets covered by a cosign-signed + provenance-attested SHA256SUMS; npm CLI provenance-attested.",
             "containers": [
               {"name": "kars-controller",        "ghcr": "${{ env.REGISTRY }}/kars-controller:${{ env.VERSION }}",        "digest": "${{ needs.build-images.outputs.controller_digest }}"},
+              {"name": "kars-metrics-server",    "ghcr": "${{ env.REGISTRY }}/kars-metrics-server:${{ env.VERSION }}",    "digest": "${{ needs.build-images.outputs.metrics_digest }}"},
+              {"name": "kars-headlamp",          "ghcr": "${{ env.REGISTRY }}/kars-headlamp:${{ env.VERSION }}",          "digest": "${{ needs.build-images.outputs.headlamp_digest }}"},
               {"name": "kars-inference-router",  "ghcr": "${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}",  "digest": "${{ needs.build-images.outputs.router_digest }}"},
               {"name": "kars-a2a-gateway",       "ghcr": "${{ env.REGISTRY }}/kars-a2a-gateway:${{ env.VERSION }}",       "digest": "${{ needs.build-images.outputs.gateway_digest }}"},
               {"name": "kars-conformance-runner","ghcr": "${{ env.REGISTRY }}/kars-conformance-runner:${{ env.VERSION }}","digest": "${{ needs.build-images.outputs.runner_digest }}"},
               {"name": "kars-sandbox-base",      "ghcr": "${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}",      "digest": "${{ needs.merge-sandbox.outputs.sandbox_base_digest }}"},
-              {"name": "openclaw-sandbox",       "ghcr": "${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}",       "digest": "${{ needs.merge-sandbox.outputs.sandbox_digest }}"}
+              {"name": "openclaw-sandbox",       "ghcr": "${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}",       "digest": "${{ needs.merge-sandbox.outputs.sandbox_digest }}"},
+              {"name": "kars-runtime-hermes",    "ghcr": "${{ env.REGISTRY }}/kars-runtime-hermes:${{ env.VERSION }}",    "digest": "${{ needs.merge-sandbox.outputs.hermes_digest }}"}
             ],
             "cli_install": "curl -fsSL https://raw.githubusercontent.com/${{ github.repository }}/main/install.sh | bash   (or: npm i -g @kars-runtime/cli)",
             "additional_registries_planned": "crates.io / npmjs / MCR publishing is in progress — see docs/PUBLISHING.md. The GHCR images + CLI tarball above are signed and usable today."
@@ -977,11 +1010,14 @@ jobs:
             Multi-arch `linux/amd64,linux/arm64` — runs natively on Apple Silicon:
             ```
             ${{ env.REGISTRY }}/kars-controller:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-metrics-server:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-headlamp:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-inference-router:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-a2a-gateway:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-conformance-runner:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-sandbox-base:${{ env.VERSION }}
             ${{ env.REGISTRY }}/openclaw-sandbox:${{ env.VERSION }}
+            ${{ env.REGISTRY }}/kars-runtime-hermes:${{ env.VERSION }}
             ```
 
             ### Runtime adapter images (PUBLIC GHCR, amd64)
@@ -990,7 +1026,6 @@ jobs:
             MeshClient):
             ```
             ${{ env.REGISTRY }}/kars-runtime-langgraph:${{ env.VERSION }}
-            ${{ env.REGISTRY }}/kars-runtime-hermes:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-runtime-maf-python:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-runtime-anthropic:${{ env.VERSION }}
             ${{ env.REGISTRY }}/kars-runtime-openai-agents:${{ env.VERSION }}

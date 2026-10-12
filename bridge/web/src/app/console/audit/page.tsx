@@ -15,11 +15,11 @@ export const dynamic = "force-dynamic";
 
 export default async function AuditPage() {
   let audit: Audit | null = null;
-  let error = false;
+  let error: unknown = null;
   try {
     audit = await getAudit();
-  } catch {
-    error = true;
+  } catch (caught) {
+    error = caught;
   }
 
   return (
@@ -27,7 +27,7 @@ export default async function AuditPage() {
       <PageHeader
         eyebrow="Operator Console"
         title="Auditor view"
-        lead="The tamper-evident record of everything the platform ran. Confirm the log is intact, inspect what each receipt attests, and verify any of it independently — no trust in this screen required."
+        lead="Inspect recorded governance claims, log integrity, and per-receipt verification separately. Check the supporting evidence and trust-anchor limits before relying on a verdict."
       />
       <AuditView audit={audit} error={error} />
     </div>

@@ -3,12 +3,8 @@
 
 // kars Bridge Operator Console — Safety evals (KarsEval).
 //
-// The quality/safety lifecycle: each KarsEval replays a curated adversarial
-// corpus (jailbreak / injection / egress) against a live sandbox's inference
-// router and records a real pass/fail verdict. This page surfaces the REAL
-// KarsEval status the controller captured — never fabricated. A failing eval
-// means the sandbox let an attack through (drift), which is exactly the signal
-// an operator needs. Honest empty when no evals exist.
+// A failed expectation need not be an allowed attack: policy attribution,
+// reason matching, or required observations can fail for a blocked request.
 
 import { PageHeader, Stat, Badge } from "@/components/ui";
 import { HonestState } from "@/components/honest-state";
@@ -41,6 +37,7 @@ function EvalCard({ e }: { e: Eval }) {
   const r = e.last_result;
   const passRate = r && r.total > 0 ? Math.round((r.passed / r.total) * 100) : null;
   const anyFailed = r != null && r.failed > 0;
+  const allPassed = r != null && r.total > 0 && r.passed === r.total && r.failed === 0 && r.errored === 0;
   return (
     <li className="rounded-xl border border-border bg-surface p-5">
       <div className="flex items-start justify-between gap-3">
@@ -79,20 +76,22 @@ function EvalCard({ e }: { e: Eval }) {
           </div>
           {passRate != null && (
             <div className="mt-3 h-2 w-full overflow-hidden rounded-full bg-surface-muted">
-              <div className={`h-full ${anyFailed ? "bg-danger" : "bg-ok"}`} style={{ width: `${Math.max(passRate, 2)}%` }} />
+              <div className={`h-full ${anyFailed ? "bg-danger" : allPassed ? "bg-ok" : "bg-warning"}`} style={{ width: `${Math.min(100, Math.max(passRate, 0))}%` }} />
             </div>
           )}
           <p className="mt-2 text-[11px] text-foreground-muted">
             {anyFailed
-              ? `${r.failed} attack${r.failed === 1 ? " was" : "s were"} NOT blocked — the sandbox drifted from its safety baseline.`
-              : r.errored > 0
-                ? "No safety failures detected."
-                : "Every adversarial case was correctly handled."}
+              ? `${r.failed} case${r.failed === 1 ? "" : "s"} did not match ${r.failed === 1 ? "its" : "their"} declared expectations. Inspect the case evidence to determine why.`
+              : r.total === 0
+                ? "No cases were evaluated; no safety verdict is available."
+                : allPassed
+                  ? "Every evaluated case matched its declared expectations."
+                  : "The run is inconclusive; not every case has a passing verdict."}
             {r.errored > 0 && (
               <>
                 {" "}
                 {r.errored} case{r.errored === 1 ? "" : "s"}
-                {" couldn\u2019t be evaluated (target unreachable) — inconclusive, not counted as a failure; re-run against a live sandbox."}
+                {" couldn\u2019t be evaluated — inspect the case evidence before re-running; errors are not passing verdicts."}
               </>
             )}{" "}
             Last run {ago(e.last_run_at)}.
@@ -112,18 +111,13 @@ function EvalCard({ e }: { e: Eval }) {
 }
 
 export default async function EvalsPage() {
-  let evals: Eval[] = [];
-  let sandboxes: { name: string; runtime: string | null }[] = [];
-  let error = false;
-  try {
-    const [ev, sb] = await Promise.all([listEvals(), listSandboxes().catch(() => [])]);
-    evals = ev;
-    sandboxes = sb
+  const [evalResult, sandboxResult] = await Promise.allSettled([listEvals(), listSandboxes()]);
+  const error = evalResult.status === "rejected";
+  const sandboxError = sandboxResult.status === "rejected";
+  const evals: Eval[] = evalResult.status === "fulfilled" ? evalResult.value : [];
+  const sandboxes = sandboxResult.status === "fulfilled" ? sandboxResult.value
       .filter((s) => s.phase === "Running" || s.phase === "Ready")
-      .map((s) => ({ name: s.name, runtime: s.runtime }));
-  } catch {
-    error = true;
-  }
+      .map((s) => ({ name: s.name, runtime: s.runtime })) : [];
 
   const withResult = evals.filter((e) => e.last_result);
   const drifting = withResult.filter((e) => (e.last_result?.failed ?? 0) > 0).length;
@@ -134,10 +128,15 @@ export default async function EvalsPage() {
       <PageHeader
         eyebrow="Operator Console"
         title="Safety evals"
-        lead="Each KarsEval replays a curated adversarial corpus (jailbreak / injection / egress) against a live sandbox's inference router and records a real pass/fail verdict. A failing case means an attack got through — the drift signal that matters."
+        lead="Each KarsEval replays curated jailbreak, injection, or egress probes against a live sandbox's inference router. Failures can reflect a mismatched decision, policy attribution, or reason, or a missing required observation — not necessarily a successful attack. Inspect the detailed report for the evidence."
       />
 
-      {!error && (
+      {sandboxError && (
+        <HonestState variant="not_wired" title="Sandbox inventory unavailable"
+          detail="Running targets could not be read. New evals are unavailable until inventory recovers; existing reports remain below." />
+      )}
+
+      {!error && !sandboxError && (
         <div className="flex items-center justify-between gap-3">
           <div />
           <NewEvalForm sandboxes={sandboxes} />
@@ -147,14 +146,14 @@ export default async function EvalsPage() {
       {!error && evals.length > 0 && (
         <div className="grid grid-cols-2 gap-3 sm:grid-cols-4">
           <Stat label="Evals" value={evals.length} />
-          <Stat label="With a verdict" value={withResult.length} />
+          <Stat label="With reports" value={withResult.length} />
           <Stat label="Drifting" value={drifting} accent={drifting > 0} />
           <Stat label="Cases replayed" value={cases} />
         </div>
       )}
 
       {error ? (
-        <HonestState variant="not_wired" title="Cluster unreachable" detail="The Bridge backend can't reach the Kubernetes API right now." />
+        <HonestState variant="not_wired" title="Evaluation history unavailable" detail="The evaluation records could not be read. No empty history or safety verdict is asserted." />
       ) : evals.length === 0 ? (
         <HonestState
           variant="empty"

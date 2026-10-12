@@ -9,6 +9,7 @@
 // finalizer enforced server-side); for an EgressApproval, delete IS the revoke.
 
 import { useActionState, useState } from "react";
+import { LiveRefresh } from "@/components/live-refresh";
 import { deleteGovernanceAction, type GovState } from "./governance-actions";
 
 const init: GovState = { error: null, ok: null };
@@ -30,8 +31,14 @@ export function DeleteResource({
   const [confirming, setConfirming] = useState(false);
 
   if (state.ok) {
-    // The list is revalidated server-side; show a brief tombstone until refresh.
-    return <span className="text-[11px] text-foreground-muted">{verb}d — refreshing…</span>;
+    return (
+      <>
+        <LiveRefresh active />
+        <span role="status" className="text-[11px] text-foreground-muted">
+          {verb === "Revoke" ? "Revocation" : "Removal"} requested — waiting for cluster cleanup…
+        </span>
+      </>
+    );
   }
 
   if (!confirming) {
@@ -63,6 +70,7 @@ export function DeleteResource({
       </button>
       <button
         type="button"
+        disabled={pending}
         onClick={() => setConfirming(false)}
         className="text-[11px] text-foreground-muted hover:text-foreground"
       >

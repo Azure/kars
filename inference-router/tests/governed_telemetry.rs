@@ -41,6 +41,106 @@ fn events(telemetry: &TaskTelemetry) -> Vec<Value> {
 }
 
 #[test]
+fn authorized_completion_survives_conversation_projection_without_raw_content() {
+    use kars_inference_router::task_telemetry::ToolSummary;
+    for (ok, contradictory) in [(true, false), (false, false), (true, true)] {
+        let telemetry = telemetry();
+        telemetry.begin("chat/completions", "provider", "model", b"{}").unwrap().buffered(
+            200, br#"{"choices":[{"finish_reason":"tool_calls","message":{"tool_calls":[{"id":"file-1","function":{"name":"file_write","arguments":"private-content"}}]}}]}"#,
+        );
+        let summary = if ok {
+            ToolSummary::FileWrite {
+                bytes: 12,
+                artifact_name: Some("briefing.md".into()),
+            }
+        } else {
+            serde_json::from_value(json!({"kind":"failure","reason":"filesystem_operation_failed"}))
+                .unwrap()
+        };
+        assert!(!telemetry.complete_harness_tool_with_summary(
+            "scope-a",
+            "file-1",
+            ok,
+            12,
+            Some(summary.clone())
+        ));
+        // A different model request must not change the proposed call's round.
+        telemetry
+            .begin("chat/completions", "provider", "model", b"{}")
+            .unwrap()
+            .buffered(200, b"{}");
+        assert!(telemetry.authorize_harness_tool("scope-a", "file-1", "file_write"));
+        assert!(!telemetry.complete_harness_tool_with_summary(
+            "wrong",
+            "file-1",
+            ok,
+            12,
+            Some(summary.clone())
+        ));
+        assert!(!telemetry.complete_harness_tool_with_summary(
+            "scope-a",
+            "file-1",
+            ok,
+            12,
+            Some(ToolSummary::FileRead {
+                bytes: 12,
+                returned_bytes: 12,
+                truncated: false
+            })
+        ));
+        assert!(telemetry.complete_harness_tool_with_summary(
+            "scope-a",
+            "file-1",
+            ok,
+            12,
+            Some(summary)
+        ));
+        assert!(!telemetry.complete_harness_tool("scope-a", "file-1", ok, 12));
+        let mut result = json!({"role":"tool","tool_call_id":"file-1","content":"private-content"});
+        if contradictory {
+            result["is_error"] = json!(true);
+        }
+        telemetry
+            .begin(
+                "chat/completions",
+                "provider",
+                "model",
+                &serde_json::to_vec(&json!({"messages":[result]})).unwrap(),
+            )
+            .unwrap()
+            .buffered(200, b"{}");
+        let snapshot = telemetry.selected_snapshot("scope-a", &[1, 3]).unwrap();
+        let results: Vec<_> = snapshot["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == "tool_result")
+            .collect();
+        assert_eq!(results.len(), 1);
+        assert_eq!(
+            results[0]["ok"],
+            if contradictory {
+                Value::Null
+            } else {
+                json!(ok)
+            }
+        );
+        assert_eq!(results[0]["ms"], 12);
+        assert_eq!(results[0]["reported_in_round"], 3);
+        assert_eq!(results[0].get("result_summary").is_some(), !contradictory);
+        for event in snapshot["events"].as_array().unwrap() {
+            assert!(
+                chrono::DateTime::parse_from_rfc3339(event["observed_at"].as_str().unwrap())
+                    .is_ok()
+            );
+        }
+        assert!(!snapshot.to_string().contains("private-content"));
+        telemetry.reset("scope-b".into());
+        assert!(!telemetry.complete_harness_tool("scope-a", "file-1", ok, 12));
+    }
+}
+
+#[test]
 fn selected_rounds_match_the_runtime_and_bridge_contract() {
     let telemetry = telemetry();
     let mut first = telemetry
@@ -55,6 +155,9 @@ fn selected_rounds_match_the_runtime_and_bridge_contract() {
     );
     let mut selected = telemetry.selected_snapshot("scope-a", &[1, 2]).unwrap();
     for event in selected["events"].as_array_mut().unwrap() {
+        let stamp = event["observed_at"].as_str().unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(stamp).is_ok());
+        event.as_object_mut().unwrap().remove("observed_at");
         if event["kind"] == "round" {
             event["ms"] = json!(0);
         }

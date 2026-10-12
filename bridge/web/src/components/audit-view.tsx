@@ -8,33 +8,36 @@
 // inspectable, independently-verifiable unit.
 
 import { Section, Stat, Badge } from "@/components/ui";
-import { HonestState } from "@/components/honest-state";
+import { BffError } from "@/lib/bff";
 import { Icon, type IconName } from "@/components/icon";
 import { AuditSearch } from "@/app/console/audit/audit-search";
 import type { Audit } from "@/lib/types";
 
 const CLAIMS: { icon: IconName; title: string; q: string; d: string }[] = [
-  { icon: "seal", title: "Integrity", q: "Authentic & unaltered?", d: "Each receipt is Ed25519-signed and its signing key checks against the cluster's published anchor." },
-  { icon: "target", title: "Conformance", q: "Stayed within authority?", d: "The run never exceeded its envelope — tier, tool policy, budget, and egress were enforced." },
-  { icon: "check-cycle", title: "Completeness", q: "All controls enforced & recorded?", d: "Every governance control that should have run did, and left a durable, re-derivable record." },
-  { icon: "scale", title: "Regulatory", q: "Anchored & witnessed?", d: "The receipt sits in a hash-chained inclusion log an independent checkpoint co-signs." },
+  { icon: "seal", title: "Integrity", q: "Authentic & unaltered?", d: "Verify the receipt's signature, payload binding, and signing key; recorded claims alone are not verification." },
+  { icon: "target", title: "Conformance", q: "Stayed within authority?", d: "Inspect the run's claims and supporting evidence for tier, tool policy, budget, and egress enforcement." },
+  { icon: "check-cycle", title: "Completeness", q: "All controls enforced & recorded?", d: "Check for every applicable control's evidence. Missing or omitted required claims cannot count as passing." },
+  { icon: "scale", title: "Regulatory", q: "Anchored & witnessed?", d: "Inspect the checkpoint's trust anchor and witness metadata. Witness presence alone is not independent verification." },
 ];
 
-export function AuditView({ audit, error }: { audit: Audit | null; error: boolean }) {
-  const haveCheckpoint = !!audit?.checkpoint;
+export function AuditView({ audit, error }: { audit: Audit | null; error: unknown }) {
+  const status = error instanceof BffError ? error.status : null;
+  const failureTitle = status === 401 ? "Sign in to view audit evidence"
+    : status === 403 ? "Audit access denied"
+    : "Audit evidence unavailable";
+  const failureDetail = status === 401
+    ? "Your session is missing or expired. Sign in again to view audit evidence."
+    : status === 403
+      ? "Your current account does not have audit access. Use an account with the auditor or admin role."
+      : "The audit records could not be loaded. This does not mean the log is empty or its integrity has failed. Refresh to retry.";
   const missingSeq = audit ? audit.receipts.filter((r) => r.inclusion_seq == null).length : 0;
-  const allIncluded = !!audit && missingSeq === 0;
-  // The REAL verdict comes from server-side cryptographic verification: the whole
-  // hash chain recomputed + the signed checkpoint verified against the published
-  // anchor. Field presence (inclusion_seq set, checkpoint CM exists) is NOT
-  // verification — a green banner must mean the crypto actually checked out.
+  // Whole-log verification does not bind the listed receipts to its entries.
   const integrity = audit?.integrity;
   const chainOk =
     !!integrity &&
     integrity.chain_consistent &&
     integrity.checkpoint_verified &&
-    allIncluded &&
-    (audit?.receipts.length ?? 0) > 0;
+    integrity.tree_size > 0;
   const witnessPresent = !!integrity?.witness_present;
   const anchorPinned = !!integrity?.anchor_pinned;
 
@@ -52,7 +55,7 @@ export function AuditView({ audit, error }: { audit: Audit | null; error: boolea
       </section>
 
       {/* Chain-integrity verdict — the auditor's first question, answered. */}
-      {audit && !error && (
+      {audit && !error ? (
         <section
           className={`kb-rise flex flex-wrap items-start justify-between gap-4 rounded-xl border p-5 ${
             chainOk ? "border-emerald-500/30 bg-emerald-500/[0.05]" : "border-amber-500/30 bg-amber-500/[0.05]"
@@ -72,25 +75,31 @@ export function AuditView({ audit, error }: { audit: Audit | null; error: boolea
               </p>
               <p className="mt-0.5 max-w-2xl text-sm text-foreground-muted">
                 {chainOk
-                  ? `All ${audit.receipts.length} receipts sit in a hash-chained inclusion log of ${audit.inclusion_log_size} entries that recomputes genesis → head, and the signed checkpoint's Ed25519 signature verifies${anchorPinned ? " against an out-of-band-pinned anchor — so no entry can be altered, removed, or forked without detection." : " against the cluster's published anchor key. Because that anchor lives in the same trust domain as the log, this proves consistency and authenticity for anyone outside that domain; for independent tamper-evidence, verify against an out-of-band-pinned key (kars receipt verify)."}${witnessPresent ? " An independent transparency-witness co-signature is present (shown, not re-verified in V0)." : ""}`
+                  ? `The inclusion log's ${integrity.tree_size} entries recompute genesis → head, and the checkpoint's Ed25519 signature verifies${anchorPinned ? " against an out-of-band-pinned anchor. This verifies the supplied snapshot, not its freshness or protection against replay of an older signed log." : " against the cluster's published key, in the same trust domain as the log. This is not an independent trust anchor."}${witnessPresent ? " Reported witness metadata is present; its identity and co-signature are not verified here." : ""}`
                   : integrity && !integrity.chain_consistent && integrity.tree_size > 0
                     ? "The inclusion log did NOT recompute cleanly — an entry hash, sequence, or prev-hash link does not check out. The history is not tamper-evident; investigate before trusting these receipts."
                     : integrity && integrity.chain_consistent && !integrity.checkpoint_verified
                       ? "The chain recomputes, but the signed checkpoint's signature did not verify against the published anchor (or no checkpoint is published). Until the log head is witnessed by a valid signed checkpoint, the history is not fully tamper-evident."
-                      : missingSeq > 0
-                        ? `${missingSeq} of ${audit.receipts.length} receipt(s) have no inclusion-log position yet${haveCheckpoint ? "" : " and no signed checkpoint is published"}. Until every receipt is chained${haveCheckpoint ? "" : " and a checkpoint is published"}, the history is not fully tamper-evident.`
-                        : "No signed checkpoint is published yet. Until the log head is witnessed by a signed checkpoint, the history is not fully tamper-evident."}
+                      : "No nonempty, cryptographically verified log snapshot is available."}
+              </p>
+              <p className="mt-2 max-w-2xl text-xs text-foreground-muted">
+                This log check does not verify each listed receipt&apos;s signature, payload binding, inclusion, or control enforcement. Expand a receipt and use Verify now for its cryptographic checks.
+                {missingSeq > 0 && ` ${missingSeq} receipt(s) lack a recorded inclusion-log position.`}
               </p>
             </div>
           </div>
           <Badge tone={chainOk ? "ok" : "warn"} dot>
-            {chainOk ? (anchorPinned ? "Tamper-evident" : "Consistent + signed") : "Not yet sealed"}
+            {chainOk ? (anchorPinned ? "Pinned signature verified" : "Consistent + signed") : "Not verified"}
           </Badge>
         </section>
-      )}
+      ) : null}
 
       {error || !audit ? (
-        <HonestState variant="not_wired" title="Audit substrate unreachable" detail="The Bridge backend can't reach the audit log right now." />
+        <div role="alert" className="rounded-xl border border-danger/40 bg-danger/10 p-5 text-sm">
+          <p className="font-semibold">{failureTitle}</p>
+          <p className="mt-2 text-foreground-muted">{failureDetail}</p>
+          <a href="/audit" className="mt-3 inline-block text-signal underline">Reopen audit view</a>
+        </div>
       ) : (
         <>
           <div className="grid grid-cols-1 gap-3 sm:grid-cols-3">
@@ -100,7 +109,7 @@ export function AuditView({ audit, error }: { audit: Audit | null; error: boolea
               {audit.checkpoint ? (
                 <>
                   <p className="inline-flex items-center gap-1.5 text-sm font-semibold text-signal">
-                    <Icon name="shield" /> Signed checkpoint
+                    <Icon name="shield" /> Recorded checkpoint
                   </p>
                   <p className="mt-1 font-mono text-xs text-foreground-muted">
                     tree size {audit.checkpoint.tree_size} · root {audit.checkpoint.root_hash.slice(0, 16)}…
@@ -114,7 +123,7 @@ export function AuditView({ audit, error }: { audit: Audit | null; error: boolea
 
           <Section
             title="Governance receipts"
-            subtitle="Search a run or agent to pull its receipts and chain of custody, or filter by verdict. Expand any row to see exactly what was checked and how to verify it yourself."
+            subtitle="Search recorded receipts or filter their claims. Claim statuses and log positions are recorded metadata, not per-receipt cryptographic verdicts. Expand a row to verify its evidence."
             action={<Badge tone="muted">{audit.receipts.length}</Badge>}
           >
             <AuditSearch receipts={audit.receipts} />
@@ -125,11 +134,11 @@ export function AuditView({ audit, error }: { audit: Audit | null; error: boolea
             <ul className="space-y-2 text-sm text-foreground-muted">
               <li className="flex gap-2">
                 <span aria-hidden>①</span>
-                <span><strong className="text-foreground">Verdict</strong> — the required verification classes are <em>integrity</em> (authentic &amp; unaltered), <em>conformance</em> (stayed within authority), and <em>completeness</em> (all applicable controls enforced &amp; recorded). <em>Regulatory</em> reports platform anchoring maturity separately and is advisory until the external-KMS roadmap lands.</span>
+                <span><strong className="text-foreground">Recorded claims</strong> — &ldquo;Claims pass&rdquo; requires passing <em>integrity</em>, <em>conformance</em>, and <em>completeness</em> claims. It does not mean their assertions have been independently verified. <em>Regulatory</em> maturity is advisory and shown separately.</span>
               </li>
               <li className="flex gap-2">
                 <span aria-hidden>②</span>
-                <span><strong className="text-foreground">Inclusion log</strong> — the position number proves the receipt is chained into history. Removing or altering one breaks the chain.</span>
+                <span><strong className="text-foreground">Inclusion log</strong> — a position number is a recorded pointer, not proof of membership. Per-receipt verification must bind the signed payload to the corresponding log entry and checkpoint.</span>
               </li>
               <li className="flex gap-2">
                 <span aria-hidden>③</span>
@@ -137,7 +146,7 @@ export function AuditView({ audit, error }: { audit: Audit | null; error: boolea
               </li>
               <li className="flex gap-2">
                 <span aria-hidden>④</span>
-                <span><strong className="text-foreground">Why a receipt reads &ldquo;Partial&rdquo;</strong> — one or more required per-run evidence axes were not bound when that receipt was signed, such as a retained eBPF datapath verdict for a sandbox that has already been retired. The detail names the missing axis. The regulatory/KMS roadmap disclosure does <em>not</em> by itself prevent a &ldquo;Verified&rdquo; verdict.</span>
+                <span><strong className="text-foreground">Why claims are partial</strong> — a required claim is missing, omitted, unknown, or reports incomplete evidence. Inspect the claim details and retained evidence; do not infer enforcement from a passing signature check. Regulatory maturity alone does not prevent &ldquo;Claims pass&rdquo;.</span>
               </li>
             </ul>
           </Section>

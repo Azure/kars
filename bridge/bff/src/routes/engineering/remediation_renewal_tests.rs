@@ -205,7 +205,8 @@ fn full_empty_snapshot_retires_unassigned_source_without_claiming_delivery_or_er
     assert_eq!(snapshot(&partial[0]), snapshot(&pending));
     let (retired, queued, slots) = sync_poll(vec![pending], Vec::new(), true);
     assert_eq!((queued, slots, retired.len()), (0, 0, 1));
-    assert_eq!(retired[0].status, "done");
+    assert_eq!(retired[0].status, "retired");
+    crate::routes::teams::work::validate(&retired).unwrap();
     assert!(retired[0].run.is_none());
     assert!(
         retired[0]
@@ -242,7 +243,7 @@ fn refreshed_followup_preserves_original_history_and_withdrawn_findings_are_not_
     assert_eq!(alert_numbers(&merged[1]), vec![18]);
     let (merged, queued, slots) = sync_poll(merged, vec![first_finding()], true);
     assert_eq!((queued, slots), (0, 0));
-    assert_eq!(merged[1].status, "done");
+    assert_eq!(merged[1].status, "retired");
     assert!(alert_numbers(&merged[1]).is_empty());
 }
 

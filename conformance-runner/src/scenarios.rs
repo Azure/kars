@@ -35,10 +35,7 @@ use serde_json::{Value, json};
 use std::time::{Duration, Instant};
 
 use crate::outcome::ReplayError;
-use crate::transport::{
-    CASE_ID_HEADER, Transport, egress_connect_via_proxy, mcp_response_to_decision,
-    response_to_decision,
-};
+use crate::transport::{CASE_ID_HEADER, Transport, mcp_response_to_decision, response_to_decision};
 
 /// Replay one [`Scenario`] against the router. `case_id` is echoed via
 /// header on every request so the router can correlate.
@@ -50,16 +47,7 @@ pub async fn replay(
 ) -> Result<ActualDecision> {
     match scenario {
         Scenario::EgressConnect { host, port } => {
-            let proxy_addr = transport.forward_proxy_addr().ok_or_else(|| {
-                anyhow::anyhow!(
-                    "EgressConnect scenario {case_id} requires --forward-proxy <host:port>; \
-                     the inference router exposes no HTTP egress-decision endpoint, only \
-                     the forward proxy on :8444 (run with --forward-proxy router-svc:8444)"
-                )
-            })?;
-            let parts =
-                egress_connect_via_proxy(proxy_addr, host, *port, case_id, transport.timeout())
-                    .await?;
+            let parts = transport.egress_connect(host, *port, case_id).await?;
             Ok(ActualDecision {
                 decision: parts.decision,
                 by_policy_kind: parts.by_policy_kind,
@@ -394,10 +382,14 @@ mod tests {
             port: 443,
         };
         let err = replay(&t, &scen, "case-egress", None).await.unwrap_err();
+        assert_eq!(
+            err.downcast_ref::<ReplayError>(),
+            Some(&ReplayError::Transport)
+        );
         let msg = format!("{err:#}");
         assert!(
-            msg.contains("--forward-proxy"),
-            "error must call out --forward-proxy: {msg}"
+            msg.contains("--forward-proxy") && msg.contains("--forward-proxy-pod"),
+            "error must call out both proxy configuration modes: {msg}"
         );
     }
 

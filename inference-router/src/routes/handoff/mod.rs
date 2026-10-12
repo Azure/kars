@@ -151,6 +151,10 @@ async fn handoff_init_handler(
         return errors::flat(StatusCode::FORBIDDEN,
             "Governed inference account lineage is not transferable by handoff; retry the same Task UID through the controller").into_response();
     }
+    if state.budget.calendar_client().is_some() {
+        return errors::flat(StatusCode::FORBIDDEN,
+            "Durable calendar accounting cannot be transferred by legacy handoff; a verified counter and pending-liability migration is required").into_response();
+    }
     // ── Registry mode guard ──────────────────────────────────────────────────
     // Handoff requires a global registry — both agents must be in the same
     // registry for identity succession to work.

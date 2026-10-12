@@ -149,7 +149,7 @@ fn mission_resource_qualification(
     for server in &proposal.mcp_servers {
         let option = option_named(&options.mcp_servers, server)
             .ok_or_else(|| format!("MCP server `{server}` is not in the live options catalogue"))?;
-        if !crate::routes::options::mcp_server_qualified_for_route(
+        if !crate::routes::options::mcp_server_admitted_for_route(
             &proposal.runtime,
             &model.provider,
             &model.deployment,
@@ -164,7 +164,7 @@ fn mission_resource_qualification(
     if let Some(memory) = proposal.memory.as_deref() {
         let option = option_named(&options.memories, memory)
             .ok_or_else(|| format!("memory `{memory}` is not in the live options catalogue"))?;
-        if !crate::routes::options::memory_binding_qualified_for_route(
+        if !crate::routes::options::memory_binding_admitted_for_route(
             &proposal.runtime,
             &model.provider,
             &model.deployment,
@@ -180,7 +180,7 @@ fn mission_resource_qualification(
     for skill in &proposal.skills {
         let option = option_named(&options.skills, skill)
             .ok_or_else(|| format!("skill `{skill}` is not in the approved live catalogue"))?;
-        if !crate::routes::options::skill_version_qualified_for_route(
+        if !crate::routes::options::skill_version_admitted_for_route(
             &proposal.runtime,
             &model.provider,
             &model.deployment,
@@ -199,6 +199,9 @@ fn mission_proposal_launchability(
     proposal: &ComposeProposal,
     options: &crate::routes::options::Options,
 ) -> Result<(), String> {
+    if let Some(plan) = &proposal.execution_plan {
+        super::validate_execution_plan_for_launch(plan)?;
+    }
     mission_proposal_qualification(proposal)?;
     mission_resource_qualification(proposal, options)
 }
@@ -333,9 +336,12 @@ pub async fn compose(
             "{user}\n\nYour previous proposal was not launchable: {error}\n\
              Recompose it so the complete runtime/model/capability/max_parallel requirement meets \
              the configured route qualification policy below. Never claim missing evidence. If a \
-             selected MCP server, memory binding, or approved skill is used, it MUST have a \
-             retained resource-scoped qualification record at the CURRENT digest on the chosen \
-             route — generic route records do not count. If a requested binary or file-writing \
+             selected MCP server, memory binding, or approved skill is used in required mode, \
+             it MUST have retained resource-scoped evidence at the CURRENT digest on the chosen \
+             route. In explicit validation mode, label missing route/resource evidence as \
+             unqualified testing; do not omit requested resources merely to hide that gap. \
+             Approval, authorization, budgets, tool policy and installed execution limits \
+             still apply. If a requested binary or file-writing \
              deliverable needs an unqualified capability, choose a launchable text/JSON \
              alternative and represent diagrams inline with quoted Mermaid flowchart labels \
              whenever they contain parser-sensitive punctuation.\n\n\
@@ -389,7 +395,7 @@ pub async fn compose(
     }))
 }
 
-fn admitted_mission_fallbacks(
+pub(super) fn admitted_mission_fallbacks(
     proposal: &ComposeProposal,
     options: &crate::routes::options::Options,
 ) -> Vec<ComposeModel> {
@@ -397,17 +403,18 @@ fn admitted_mission_fallbacks(
         .model
         .as_ref()
         .map(|model| format!("{}::{}", model.provider, model.deployment));
-    let mut candidates = options
-        .models
+    let mut seen = std::collections::HashSet::new();
+    proposal
+        .model_fallbacks
         .iter()
         .map(|model| (model.provider.clone(), model.deployment.clone()))
-        .collect::<Vec<_>>();
-    candidates.sort();
-    candidates.dedup();
-    candidates
-        .into_iter()
         .filter(|(provider, deployment)| {
             primary.as_deref() != Some(format!("{provider}::{deployment}").as_str())
+                && options
+                    .models
+                    .iter()
+                    .any(|model| model.provider == *provider && model.deployment == *deployment)
+                && seen.insert((provider.clone(), deployment.clone()))
         })
         .filter_map(|(provider, deployment)| {
             let mut trial = proposal.clone();

@@ -1,0 +1,91 @@
+{
+  "provenance": "Unmodified published files corroborated against identical jsDelivr and UNPKG SHA256/size inventories, then repacked with npm pack --ignore-scripts. These are not the original registry tarballs. Licenses and the complete published file sets are retained.",
+  "packages": [
+    {
+      "name": "@modelcontextprotocol/sdk",
+      "version": "1.31.0",
+      "archive": "modelcontextprotocol-sdk-1.31.0.tgz",
+      "sha256": "597d6165b91b329129758e3a964221a319e797a7e19b9df655f8b69163a4bb3e",
+      "files": 701,
+      "publishedBytes": 4373210,
+      "jsdelivrInventory": "https://data.jsdelivr.com/v1/package/npm/@modelcontextprotocol/sdk@1.31.0/flat",
+      "jsdelivrInventorySha256": "a1d3395d9b6450f799e6f2812b4befdbaa1bb791d8953d3eb993c2a3d1e0d9f4",
+      "unpkgInventory": "https://unpkg.com/@modelcontextprotocol/sdk@1.31.0/?meta",
+      "unpkgInventorySha256": "0e14220e2c29fe491a5edd086048499992793ded415fcb25dbe9c326ec717601",
+      "targets": [
+        {
+          "path": "openclaw/node_modules/@modelcontextprotocol/sdk",
+          "parent": "openclaw",
+          "from": "1.30.0"
+        }
+      ]
+    },
+    {
+      "name": "brace-expansion",
+      "version": "5.0.11",
+      "archive": "brace-expansion-5.0.11.tgz",
+      "sha256": "734d87320fd0167352f8df77ac58bb5cfd2f7b97911b892669485189b00d10f8",
+      "files": 13,
+      "publishedBytes": 79853,
+      "jsdelivrInventory": "https://data.jsdelivr.com/v1/package/npm/brace-expansion@5.0.11/flat",
+      "jsdelivrInventorySha256": "172a3e4c8b7229a63f4381af0ab2602e79f63e77fea7812d480a870237c32e42",
+      "unpkgInventory": "https://unpkg.com/brace-expansion@5.0.11/?meta",
+      "unpkgInventorySha256": "0c7d2f3cadf830737a59076faca8c44f97bf8d73efbb453e147ca3ff5dfa7f3b",
+      "targets": [
+        {
+          "path": "npm/node_modules/brace-expansion",
+          "owner": "npm",
+          "from": "5.0.9"
+        },
+        {
+          "path": "openclaw/node_modules/npm/node_modules/brace-expansion",
+          "owner": "openclaw/node_modules/npm",
+          "from": "5.0.9"
+        }
+      ]
+    },
+    {
+      "name": "undici",
+      "version": "6.28.1",
+      "archive": "undici-6.28.1.tgz",
+      "sha256": "fb35960ae623b112ffb2fe98d8e2b8b1a392b4bbf4c1fdd1ab346695cd4b0064",
+      "files": 176,
+      "publishedBytes": 1197257,
+      "jsdelivrInventory": "https://data.jsdelivr.com/v1/package/npm/undici@6.28.1/flat",
+      "jsdelivrInventorySha256": "21ee83fc12cdb844be1c31a4a27bcfb9d35925f9204f9ac144e053bfece4d18a",
+      "unpkgInventory": "https://unpkg.com/undici@6.28.1/?meta",
+      "unpkgInventorySha256": "f3e841a847b2e8a98c278335d1c7eb17c0cf3b920f94d0b49284bdbffcee9680",
+      "targets": [
+        {
+          "path": "npm/node_modules/undici",
+          "owner": "npm",
+          "from": "6.28.0"
+        },
+        {
+          "path": "openclaw/node_modules/npm/node_modules/undici",
+          "owner": "openclaw/node_modules/npm",
+          "from": "6.28.0"
+        }
+      ]
+    },
+    {
+      "name": "undici",
+      "version": "7.29.1",
+      "archive": "undici-7.29.1.tgz",
+      "sha256": "cb963eaea97ae500599d54b53f73febe2a31326d85ed38173ee0420fbbefe509",
+      "files": 210,
+      "publishedBytes": 1652058,
+      "jsdelivrInventory": "https://data.jsdelivr.com/v1/package/npm/undici@7.29.1/flat",
+      "jsdelivrInventorySha256": "be9bc520a822c3b0c6c3f5760266420a44f65b104400d9a62fca12b42ce7e07b",
+      "unpkgInventory": "https://unpkg.com/undici@7.29.1/?meta",
+      "unpkgInventorySha256": "66f03f9687474eb9210ce146bcca939c1a4a908d59632d621350c4d62a971b92",
+      "targets": [
+        {
+          "path": "clawhub/node_modules/undici",
+          "parent": "clawhub",
+          "from": "7.29.0"
+        }
+      ]
+    }
+  ]
+}

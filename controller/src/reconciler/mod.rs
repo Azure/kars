@@ -41,9 +41,11 @@ mod github_services;
 pub(crate) mod governance_mounts;
 pub(crate) mod governed_services;
 mod inference;
+mod legacy_blocklist;
 mod mcp_binding;
 mod mcp_egress;
 pub(crate) mod namespace_ownership;
+mod skills;
 mod sre_writer;
 pub(crate) mod trustgraph_mount;
 
@@ -339,6 +341,36 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         &ctx.sandbox_image,
     )
     .await?;
+    let skill_catalog = match skills::project(
+        client,
+        &sandbox,
+        owned_namespace
+            .as_ref()
+            .ok_or_else(|| ReconcileError::Configuration("Sandbox namespace is absent".into()))?,
+    )
+    .await
+    {
+        Ok(catalog) => catalog,
+        Err(detail) => {
+            credential_sources::pause_owned(
+                client,
+                &sandbox,
+                owned_namespace.as_ref().ok_or_else(|| {
+                    ReconcileError::Configuration("Sandbox namespace is absent".into())
+                })?,
+            )
+            .await?;
+            crate::status::stamp_degraded(
+                client,
+                &sandbox,
+                &name,
+                "SkillApprovalUnavailable",
+                &detail,
+            )
+            .await;
+            return Ok(Action::requeue(Duration::from_secs(15)));
+        }
+    };
     let spec = sandbox.spec.clone();
     let sandbox_config = spec.sandbox.unwrap_or_default();
     let sandbox_self_ns = sandbox.namespace().unwrap_or_default();
@@ -492,28 +524,20 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         }
     };
     let inference_policy_spec = inference_policy.spec.clone();
-    // Model is required: it's plumbed into AZURE_OPENAI_DEPLOYMENT and (for
-    // OpenClaw) OPENCLAW_MODEL. Without it the agent container has no
-    // Foundry deployment to call.
-    let inference_model = inference_policy_spec
-        .model_preference
-        .as_ref()
-        .map(|mp| mp.primary.deployment.clone())
-        .unwrap_or_default();
-    if inference_model.is_empty() {
-        tracing::error!(
-            sandbox = %name,
-            ref = %inference_ref_name,
-            "InferencePolicy.modelPreference.primary.deployment is empty",
-        );
-        degrade!(
-            SPEC_INVALID,
-            format!(
-                "InferencePolicy `{inference_ref_name}` is missing \
-                 spec.modelPreference.primary.deployment"
-            )
-        );
-    }
+    let inference_model = match inference::model_deployment(
+        &inference_policy_spec,
+        pod_spec::cluster_default_model().as_deref(),
+    ) {
+        Ok(model) => model,
+        Err(reason) => {
+            tracing::error!(sandbox = %name, ref = %inference_ref_name, %reason,
+                "InferencePolicy has no usable model deployment");
+            degrade!(
+                SPEC_INVALID,
+                format!("InferencePolicy `{inference_ref_name}` {reason}")
+            );
+        }
+    };
     // Prompt Shields default-on; opt-out via require_prompt_shields=false.
     let prompt_shields_enabled = inference_policy_spec
         .content_safety
@@ -592,13 +616,13 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         tracing::info!(
             sandbox = %name,
             upstream = %overlay_target.as_deref().unwrap_or("?"),
-            "OverlayMode active — skipping Deployment/Service/blocklist-CronJob \
+            "OverlayMode active — skipping Deployment/Service/blocklist seed \
              (upstream Sandbox CR owns the Pod)"
         );
     }
 
     // Hoisted out of the deployment block so Step 4c (governance
-    // ConfigMap) and the blocklist CronJob (Step 4d) can reach them.
+    // ConfigMap) and the blocklist seed (Step 4d) can reach them.
     // In overlay mode the Pod is upstream-owned, but the governance
     // overlay still relies on these.
     let governance_config = spec.governance.clone().unwrap_or_default();
@@ -2043,6 +2067,16 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                         }],
                         "nodeSelector": node_selector
         });
+        if let Some(digest) = &skill_catalog {
+            governance_mounts::inject_configmap_mount(
+                &mut pod_spec,
+                "openclaw",
+                crate::skill_delivery::CATALOG_NAME,
+                "approved-skills",
+                crate::skill_delivery::CATALOG_PATH,
+                Some((crate::skill_delivery::CATALOG_DIGEST_ENV, digest)),
+            );
+        }
 
         service_identity.mount(&mut pod_spec);
         crate::credential_grants::mount_observations(&mut pod_spec, &sandbox);
@@ -2873,17 +2907,9 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
         );
     }
 
-    // ── Step 4d: Blocklist seed ConfigMap + CronJob ──────────────────────
-    // Create ConfigMap with seed blocklist (immediate protection from day 0).
-    // Create CronJob that fetches fresh lists from OISD + URLhaus every 6h
-    // and patches the ConfigMap — so even if the router can't reach feeds
-    // directly, the mounted file stays fresh.
-    //
-    // **OverlayMode (S8):** skipped. The blocklist is mounted into the
-    // kars-managed router container; in overlay mode the upstream
-    // Sandbox CR owns the Pod and there is no kars router to consume
-    // the ConfigMap. Recreating it would be dead overhead (CronJob would
-    // run every 6h with nothing reading the output).
+    // ── Step 4d: Blocklist seed ConfigMap ────────────────────────────────
+    // The seed protects startup; the router already refreshes both feeds.
+    // OverlayMode has no kars-managed router to consume this ConfigMap.
     if !overlay_mode {
         let full_seed = include_str!("../../../cli/blocklists/seed-domains.txt");
         // Truncate to stay under 1MB ConfigMap limit (K8s rejects >1048576 bytes)
@@ -2926,105 +2952,20 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             )
             .await?;
 
-        // CronJob: fetch OISD + URLhaus → patch ConfigMap every 6h
-        // Uses kubectl to patch the ConfigMap in-place. The router's background
-        // task also fetches feeds directly, so this is defense-in-depth.
-        let cronjob_name = format!("{}-blocklist-refresh", name);
-        let cronjob: serde_json::Value = json!({
-            "apiVersion": "batch/v1",
-            "kind": "CronJob",
-            "metadata": {
-                "name": &cronjob_name,
-                "namespace": &sandbox_ns,
-                "labels": {
-                    "kars.azure.com/sandbox": &name,
-                    "kars.azure.com/component": "blocklist-refresh"
-                }
-            },
-            "spec": {
-                "schedule": "0 */6 * * *",
-                "successfulJobsHistoryLimit": 1,
-                "failedJobsHistoryLimit": 1,
-                "jobTemplate": {
-                    "spec": {
-                        "backoffLimit": 2,
-                        "template": {
-                            "spec": {
-                                "serviceAccountName": "sandbox",
-                                "restartPolicy": "OnFailure",
-                                "containers": [{
-                                    "name": "refresh",
-                                    "image": "mcr.microsoft.com/cbl-mariner/base/core:2.0",
-                                    "command": ["sh", "-c", concat!(
-                                        "set -e; ",
-                                        "echo '# Auto-refreshed blocklist' > /tmp/domains.txt; ",
-                                        "echo '# Updated: '$(date -u +%Y-%m-%dT%H:%M:%SZ) >> /tmp/domains.txt; ",
-                                        // Fetch OISD small list
-                                        "curl -sfL --max-time 60 --max-filesize 52428800 ",
-                                        "'https://small.oisd.nl/domainswild' >> /tmp/domains.txt 2>/dev/null || ",
-                                        "echo '# OISD fetch failed' >> /tmp/domains.txt; ",
-                                        // Fetch URLhaus hostfile
-                                        "curl -sfL --max-time 60 --max-filesize 52428800 ",
-                                        "'https://urlhaus.abuse.ch/downloads/hostfile/' >> /tmp/urlhaus.txt 2>/dev/null && ",
-                                        "grep '^127\\.0\\.0\\.1' /tmp/urlhaus.txt | awk '{print $2}' >> /tmp/domains.txt || ",
-                                        "echo '# URLhaus fetch failed' >> /tmp/domains.txt; ",
-                                        // Patch the ConfigMap via kubectl
-                                        "kubectl create configmap ", // Continued in args
-                                    )],
-                                    "args": [
-                                        format!("{} --from-file=domains.txt=/tmp/domains.txt -n {} --dry-run=client -o yaml | kubectl apply -f -",
-                                            &blocklist_cm_name, &sandbox_ns)
-                                    ],
-                                    "resources": {
-                                        "requests": {"cpu": "50m", "memory": "64Mi"},
-                                        "limits": {"cpu": "200m", "memory": "256Mi"}
-                                    },
-                                    // readOnlyRootFilesystem MUST be true so the
-                                    // posture-lock VAP doesn't block finalizer
-                                    // removal on completion — without this,
-                                    // every reaped cronjob pod gets stuck on
-                                    // its `batch.kubernetes.io/job-tracking`
-                                    // finalizer and the sandbox namespace
-                                    // can never fully Terminate. /tmp is
-                                    // covered by the emptyDir below for the
-                                    // curl + kubectl scratch writes.
-                                    "securityContext": {
-                                        "runAsNonRoot": true,
-                                        "runAsUser": 65534,
-                                        "readOnlyRootFilesystem": true,
-                                        "allowPrivilegeEscalation": false
-                                    },
-                                    "volumeMounts": [{"name": "scratch", "mountPath": "/tmp"}]
-                                }],
-                                "volumes": [{"name": "scratch", "emptyDir": {"sizeLimit": "128Mi"}}]
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        // Use dynamic API for CronJob (batch/v1)
-        let cj_gvk = kube::api::GroupVersionKind::gvk("batch", "v1", "CronJob");
-        let (cj_ar, _caps) = kube::discovery::pinned_kind(client, &cj_gvk).await?;
-        let cj_api: Api<kube::api::DynamicObject> =
-            Api::namespaced_with(client.clone(), &sandbox_ns, &cj_ar);
-        let cj_obj: kube::api::DynamicObject = serde_json::from_value(cronjob)?;
-        let _ = cj_api
-            .patch(
-                &cronjob_name,
-                &PatchParams::apply(crate::field_managers::CLAWSANDBOX).force(),
-                &Patch::Apply(cj_obj),
-            )
-            .await;
-
         tracing::info!(
             sandbox = %name,
             configmap = %blocklist_cm_name,
-            cronjob = %cronjob_name,
-            "Blocklist infrastructure created (seed ConfigMap + 6h refresh CronJob)"
+            "Blocklist seed configured; the router owns feed refresh"
         );
     }
+    legacy_blocklist::retire(
+        client,
+        &sandbox,
+        owned_namespace
+            .as_ref()
+            .ok_or_else(|| ReconcileError::Configuration("Sandbox namespace is absent".into()))?,
+    )
+    .await?;
 
     if let Some(projection) = service_projection.as_ref()
         && !projection
@@ -3477,7 +3418,11 @@ fn deployment_to_sandbox_ref(d: Deployment) -> Option<ObjectRef<KarsSandbox>> {
 // Annotation-only run requests must refresh the installed admission without waiting for a spec change.
 fn task_to_sandbox_ref(task: crate::kars_task::KarsTask) -> Option<ObjectRef<KarsSandbox>> {
     let name = task.metadata.name.as_deref().filter(|v| !v.is_empty())?;
-    let namespace = task.metadata.namespace.as_deref().filter(|v| !v.is_empty())?;
+    let namespace = task
+        .metadata
+        .namespace
+        .as_deref()
+        .filter(|v| !v.is_empty())?;
     Some(ObjectRef::<KarsSandbox>::new(name).within(namespace))
 }
 

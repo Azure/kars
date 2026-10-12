@@ -46,9 +46,8 @@ export interface NodeCapacity {
 export interface ClusterCapacity {
   metrics_available: boolean;
   metrics_error: string | null;
-  team_max_concurrent_runs: number;
-  global_active_runs_limit: number;
-  active_team_runs: number;
+  active_team_runs: number | null;
+  activity_error?: string | null;
   pod_metrics_available: boolean;
   pod_metrics_error: string | null;
   nodes: NodeCapacity[];

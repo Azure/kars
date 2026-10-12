@@ -74,13 +74,15 @@ struct Tool {
     call_id: String,
     ok: bool,
     latency_ms: u64,
+    result_summary: Option<crate::task_telemetry::ToolSummary>,
 }
 async fn tool(State(state): State<AppState>, Json(body): Json<Tool>) -> Response {
-    if state.services.telemetry.complete_harness_tool(
+    if state.services.telemetry.complete_harness_tool_with_summary(
         &body.scope_id,
         &body.call_id,
         body.ok,
         body.latency_ms,
+        body.result_summary,
     ) {
         Json(json!({"recorded":true,"source":"harness-reported","enforcement_changed":false}))
             .into_response()
@@ -96,7 +98,17 @@ async fn budget(State(state): State<AppState>, headers: HeaderMap) -> Response {
     if state.services.telemetry.cursor().0 != scope {
         return error(Error::StaleScope);
     }
-    let (daily, monthly) = state.budget.get_usage(&state.sandbox_name).await;
+    let (daily, monthly) = match state.budget.observed_usage(&state.sandbox_name).await {
+        Ok(usage) => usage,
+        Err(error) => {
+            tracing::warn!(error = %error, "Calendar usage telemetry is unavailable");
+            return (
+                error.status(),
+                Json(json!({"error":{"code":error.code(),"message":error.to_string()}})),
+            )
+                .into_response();
+        }
+    };
     let policy = crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
     let daily_limit = policy
         .daily_tokens

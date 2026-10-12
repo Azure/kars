@@ -32,7 +32,22 @@ pub struct Cli {
     #[arg(long, value_name = "HOST:PORT")]
     pub forward_proxy: Option<String>,
 
+    /// Reach the loopback-only proxy through a Kubernetes Pod port-forward.
+    /// Requires an in-cluster, Pod-scoped service account; never uses exec.
+    #[arg(
+        long,
+        value_name = "NAMESPACE/NAME",
+        requires = "forward_proxy_pod_uid",
+        conflicts_with = "forward_proxy"
+    )]
+    pub forward_proxy_pod: Option<String>,
+
+    /// Expected target Pod UID, checked before sending any CONNECT request.
+    #[arg(long, value_name = "UID", requires = "forward_proxy_pod")]
+    pub forward_proxy_pod_uid: Option<String>,
+
     /// Path to write the [`crate::report::RunReport`] JSON to.
+    /// `/dev/stdout` emits exactly one report directly to stdout.
     #[arg(long, value_name = "FILE")]
     pub output: PathBuf,
 
@@ -53,9 +68,9 @@ pub struct Cli {
     #[arg(long, value_name = "TAG")]
     pub only_tag: Option<String>,
 
-    /// Suppress printing the JSON report to stdout. By default the
+    /// Suppress the extra stdout copy when `--output` is a file. By default the
     /// report is written to `--output` AND echoed to stdout so it
-    /// shows up in `kubectl logs`.
+    /// shows up in `kubectl logs`. An explicit `/dev/stdout` output still emits once.
     #[arg(long, default_value_t = false)]
     pub no_stdout: bool,
 }
@@ -88,6 +103,29 @@ mod tests {
     use super::*;
 
     #[test]
+    fn pod_proxy_requires_uid_and_excludes_a_direct_proxy() {
+        let base = [
+            "runner",
+            "--corpus",
+            "builtin:egress-known-bad",
+            "--router-base",
+            "http://router:8443",
+            "--output",
+            "/dev/stdout",
+        ];
+        let mut args = base.to_vec();
+        args.extend(["--forward-proxy-pod", "target/router"]);
+        assert!(Cli::try_parse_from(&args).is_err());
+        args.extend(["--forward-proxy-pod-uid", "bound"]);
+        assert!(Cli::try_parse_from(&args).is_ok());
+        args.extend(["--forward-proxy", "external:8444"]);
+        assert!(Cli::try_parse_from(&args).is_err());
+        let mut args = base.to_vec();
+        args.extend(["--forward-proxy-pod-uid", "bound"]);
+        assert!(Cli::try_parse_from(&args).is_err());
+    }
+
+    #[test]
     fn corpus_source_recognises_builtin_prefix() {
         assert_eq!(
             CorpusSource::parse("builtin:egress-known-bad"),
@@ -117,6 +155,8 @@ mod tests {
             corpus: "builtin:x".into(),
             router_base: "http://x".into(),
             forward_proxy: None,
+            forward_proxy_pod: None,
+            forward_proxy_pod_uid: None,
             output: PathBuf::from("/tmp/out.json"),
             timeout_ms: 2500,
             auth_header: None,

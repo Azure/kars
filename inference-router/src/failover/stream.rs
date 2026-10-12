@@ -7,7 +7,7 @@ use futures::{StreamExt, TryStreamExt, stream::BoxStream};
 type StreamingResult = (
     StatusCode,
     HeaderMap,
-    BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    BoxStream<'static, Result<Bytes, std::io::Error>>,
     UpstreamConfig,
 );
 

@@ -1,0 +1,7 @@
+**
+!sandbox-images/
+!sandbox-images/prometheus-operator/
+!sandbox-images/prometheus-operator/Dockerfile
+!sandbox-images/prometheus-operator/build.sh
+!sandbox-images/prometheus-operator/operator.go.mod
+!sandbox-images/prometheus-operator/operator.go.sum

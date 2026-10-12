@@ -1,0 +1,13 @@
+{
+  "openclawVersion": "2026.9.8",
+  "plugins": [
+    {"id": "discord", "package": "@openclaw/discord", "integrity": "sha512-MzRp4+jqEVOGRIMD3cUYGFvgxQOxQK41b01EOdLS8cFLFR5NE/Pq7YAPdDXOMtXA50A08p1KzFHk9qZk2bi5PQ=="},
+    {"id": "slack", "package": "@openclaw/slack", "integrity": "sha512-ZsBCISCxQZ9AJHD02dTk03krg3iO3y3PmVZusjl1Qwtz9CWLevNwFV1DrSisJw8d2/NbkMxV60FYNwFMdRJyLQ=="},
+    {"id": "whatsapp", "package": "@openclaw/whatsapp", "integrity": "sha512-AWfnJvYATTbi9KTGyPd3ZtoKfUW5nmgK+Pd0Gw5dSV6FX4T74GCDF2INnPDFJCpc13iPsBYO8RTSQv3PXRM6WQ=="},
+    {"id": "brave", "package": "@openclaw/brave-plugin", "integrity": "sha512-QHG1EGYN52uv9ayhNGRobql3M1ojqohc36Fa/U+UpYK2bR6BndueWWHdgNcsbsF+nkg++/AKJLf/elethqhJKQ=="},
+    {"id": "tavily", "package": "@openclaw/tavily-plugin", "integrity": "sha512-/RqvbPFUr6kaIVngj16hRW2x97ojiCvzOYyjRtxQZz0ZHlDulegThgD+RnwaKmYjgMprabnzs1f7xtZ9sQ7QMg=="},
+    {"id": "exa", "package": "@openclaw/exa-plugin", "integrity": "sha512-ev5qmx8prNGK31g7MP8a7m1SyKA5LUiY2EdOfaO7OKHPZZ4UMkRTRTPRb+rDoTbQX5A0UpE+lk0JulJoU5jipA=="},
+    {"id": "firecrawl", "package": "@openclaw/firecrawl-plugin", "integrity": "sha512-7ZsK3eRB95pekcDQ/CoXPiXr66bebn2JD5OqM1cHn8AEMWmZylClyqgbvRG5FPPAyKPnQHOFdDRsQpsxb+8FRQ=="},
+    {"id": "perplexity", "package": "@openclaw/perplexity-plugin", "integrity": "sha512-cIMgxl7QAnjdTS0djIcrZM65cRXVwLE/M8W59T7AvhjPh5B5LeYuHGRCd46AC6o0R0aIa8/prTPEkDl1yMYnDw=="}
+  ]
+}

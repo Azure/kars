@@ -1,0 +1,37 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- if .Values.entraSidecar.enabled -}}
+{{- $spec := include "kars.authConfig.spec" . | fromJson -}}
+{{- include "kars.authConfig.bootstrap" . -}}
+apiVersion: kars.azure.com/v1alpha1
+kind: KarsAuthConfig
+metadata:
+  name: default
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+  annotations:
+    helm.sh/resource-policy: keep
+    meta.helm.sh/release-name: {{ .Release.Name | quote }}
+    meta.helm.sh/release-namespace: {{ .Release.Namespace | quote }}
+    kars.azure.com/helm-auth-spec-sha256: {{ mustToJson $spec | sha256sum | quote }}
+spec:
+  {{- toYaml $spec | nindent 2 }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "kars.authConfig.configMapName" . }}
+  namespace: {{ .Release.Namespace }}
+  labels:
+    app.kubernetes.io/name: kars
+    app.kubernetes.io/component: entra-auth-sidecar
+    app.kubernetes.io/managed-by: {{ .Release.Service | quote }}
+  annotations:
+    # Keep old revisions available to draining pods and explicit Helm rollbacks.
+    helm.sh/resource-policy: keep
+    kars.azure.com/helm-auth-env-sha256: {{ include "kars.authConfig.env" . | sha256sum | quote }}
+immutable: true
+data:
+  {{- include "kars.authConfig.env" . | fromJson | toYaml | nindent 2 }}
+{{- end }}

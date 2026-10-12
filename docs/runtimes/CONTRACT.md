@@ -151,7 +151,7 @@ The runtime plugin talks to the inference-router via `http://127.0.0.1:8443`. **
 | Endpoint | Method | Purpose |
 |---|---|---|
 | `/healthz` | GET | Router liveness |
-| `/readyz` | GET | Router readiness (after policy load) |
+| `/readyz` | GET | Calendar accounting and policy-selected primary-provider credential acquisition; governed-inference bindings additionally require broker authority and current model contracts. Uses the same credential selection as inference (including Copilot exchange/direct OAuth compatibility), without a model request. Not proof that the upstream accepted a credential or that a model/tool call succeeded. |
 | `/metrics` | GET | Prometheus scrape (router-side counters) |
 | `/v1/chat/completions` | POST | Inference (governance applied: InferencePolicy + Content Safety + token budget + audit) |
 | `/v1/completions` | POST | Legacy completions |

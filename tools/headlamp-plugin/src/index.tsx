@@ -51,6 +51,7 @@ import {
   Stack,
 } from "@mui/material";
 import * as React from "react";
+import { promQuery, usePromPoll } from "./prometheus";
 
 const GROUP = "kars.azure.com";
 const VERSION = "v1alpha1";
@@ -1507,35 +1508,17 @@ interface MeshNodeData {
   meshRecvLife: number;   // mesh messages received (lifetime counter value)
 }
 
-async function promQuery(base: string, q: string): Promise<{metric: Record<string,string>, value: number}[]> {
-  const url = `${base}/api/v1/query?query=${encodeURIComponent(q)}`;
-  const r = await fetch(url);
-  if (!r.ok) throw new Error(`prom ${r.status}`);
-  const j = await r.json();
-  return (j?.data?.result || []).map((row: {metric: Record<string,string>, value: [number, string]}) => ({
-    metric: row.metric || {},
-    value: Number(row.value?.[1] || 0),
-  }));
-}
-
-function usePromBase(): string {
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  return (typeof window !== "undefined" && (window as any).KARS_PROMETHEUS_URL) || "http://127.0.0.1:19091";
-}
-
-function usePromPoll<T>(initial: T, loader: (base: string) => Promise<T>, intervalMs = 5000): { data: T; err: string } {
-  const base = usePromBase();
-  const [data, setData] = React.useState<T>(initial);
-  const [err, setErr] = React.useState("");
-  const [tick, setTick] = React.useState(0);
-  React.useEffect(() => {
-    let cancelled = false;
-    loader(base).then((d) => { if (!cancelled) { setData(d); setErr(""); } }).catch((e) => { if (!cancelled) setErr(String(e)); });
-    const id = setInterval(() => setTick((t) => t + 1), intervalMs);
-    return () => { cancelled = true; clearInterval(id); };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base, tick]);
-  return { data, err };
+function PrometheusStatus({ title, err, empty = false }: { title: string; err: string; empty?: boolean }) {
+  return (
+    <SectionBox title={title}>
+      <div role={err ? "alert" : "status"}>
+        {err ? `Telemetry unavailable: ${err}. Check the Prometheus endpoint and connection.`
+          : empty ? "No Prometheus samples for this query. Consumption and utilization are unknown, not zero."
+          : "Loading Prometheus telemetry..."}
+        {" "}These panels are observational; token policies are enforced by the inference router.
+      </div>
+    </SectionBox>
+  );
 }
 
 function MeshTopology() {
@@ -1548,7 +1531,7 @@ function MeshTopology() {
 
   const [sandboxes] = (KarsSandboxClass as any).useList() as [KubeObject[] | null];
 
-  const { data: live, err } = usePromPoll(
+  const { data: live, err, ready } = usePromPoll(
     { peers: [] as { metric: Record<string,string>; value: number }[],
       sentLife: [] as { metric: Record<string,string>; value: number }[],
       recvLife: [] as { metric: Record<string,string>; value: number }[],
@@ -1582,6 +1565,8 @@ function MeshTopology() {
       };
     }
   );
+
+  if (!ready) return <PrometheusStatus title="🕸️ Mesh Topology (live)" err={err} />;
 
   // Index Prometheus results by sandbox name.
   const peerByName = Object.fromEntries(live.peers.map((p) => [p.metric.sandbox || "", p.value]));
@@ -1680,7 +1665,6 @@ function MeshTopology() {
         in/out (5m). Node size ∝ lifetime mesh-message volume. <b>children</b> = sub-agent
         CRs labeled <code>kars.azure.com/parent=&lt;name&gt;</code>; <b>trust</b> = peers in
         this router's local AGT trust graph (only populated after live traffic; resets on pod restart).
-        {err && <div style={{ color: "#ef5350", marginTop: 6 }}>Prometheus unreachable: {err} (configure window.KARS_PROMETHEUS_URL)</div>}
       </div>
       <div style={{ display: "flex", gap: 16, marginBottom: 12, flexWrap: "wrap" }}>
         <StatusLabel status="">🔗 Relay connected: <b>{live.relayConn}</b></StatusLabel>
@@ -1865,7 +1849,7 @@ function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
   const theme = useTheme();
   const grafanaTheme = theme.palette.mode === "dark" ? "dark" : "light";
   const muted = theme.palette.text.secondary;
-  const { data, err } = usePromPoll(
+  const { data, err, ready } = usePromPoll(
     { byModel: [] as { metric: Record<string,string>; value: number }[],
       bySandbox: [] as { metric: Record<string,string>; value: number }[],
       reqRate: [] as { metric: Record<string,string>; value: number }[],
@@ -1880,6 +1864,7 @@ function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
       return { byModel, bySandbox, reqRate, latency: latency[0]?.value || 0 };
     }
   );
+  if (!ready) return <PrometheusStatus title={`📊 Inference Metrics (policy: ${policyName})`} err={err} />;
   const url = `${grafanaBaseUrl()}/d/kars-ops?kiosk=tv&refresh=10s&theme=${grafanaTheme}`;
   const modelRows = data.byModel.map((r) => ({
     model: r.metric.model || "?",
@@ -1893,7 +1878,7 @@ function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
   return (
     <SectionBox title={`📊 Inference Metrics (policy: ${policyName})`}>
       <div style={{ marginBottom: 8, fontSize: 13, color: muted }}>
-        Live aggregates across all sandboxes routed through this policy class. {err && <span style={{color:"#ef5350"}}>{err}</span>}
+        Live aggregates across all sandboxes routed through this policy class.
       </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
         <StatusLabel status="">⏱ p95 latency (5m): <b>{(data.latency * 1000).toFixed(0)} ms</b></StatusLabel>
@@ -1927,7 +1912,7 @@ function InferencePolicyMetricsCard({ policyName }: { policyName: string }) {
 function ToolPolicyMetricsCard({ policyName }: { policyName: string }) {
   const theme = useTheme();
   const muted = theme.palette.text.secondary;
-  const { data, err } = usePromPoll(
+  const { data, err, ready } = usePromPoll(
     { decisions: [] as { metric: Record<string,string>; value: number }[],
       bySandbox: [] as { metric: Record<string,string>; value: number }[],
       latencyP95: 0 },
@@ -1940,6 +1925,7 @@ function ToolPolicyMetricsCard({ policyName }: { policyName: string }) {
       return { decisions, bySandbox, latencyP95: latP95[0]?.value || 0 };
     }
   );
+  if (!ready) return <PrometheusStatus title={`🛡️ Policy Evaluations (policy: ${policyName})`} err={err} />;
   const total = data.decisions.reduce((s, r) => s + r.value, 0) || 1;
   const decisionRows = data.decisions.map((r) => ({
     decision: r.metric.decision || "?",
@@ -1954,7 +1940,7 @@ function ToolPolicyMetricsCard({ policyName }: { policyName: string }) {
   return (
     <SectionBox title={`🛡️ Policy Evaluations (policy: ${policyName})`}>
       <div style={{ marginBottom: 8, fontSize: 13, color: muted }}>
-        AGT policy evaluation counters scoped to all sandboxes referencing this policy. {err && <span style={{color:"#ef5350"}}>{err}</span>}
+        AGT policy evaluation counters scoped to all sandboxes referencing this policy.
       </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
         <StatusLabel status="">⏱ p95 eval latency (5m): <b>{(data.latencyP95 * 1e6).toFixed(0)} µs</b></StatusLabel>
@@ -1985,7 +1971,7 @@ function ToolPolicyMetricsCard({ policyName }: { policyName: string }) {
 function TrustGraphMetricsCard() {
   const theme = useTheme();
   const muted = theme.palette.text.secondary;
-  const { data, err } = usePromPoll(
+  const { data, err, ready } = usePromPoll(
     { peers: [] as { metric: Record<string,string>; value: number }[],
       auditEntries: [] as { metric: Record<string,string>; value: number }[],
       bundleHealth: [] as { metric: Record<string,string>; value: number }[] },
@@ -1998,6 +1984,7 @@ function TrustGraphMetricsCard() {
       return { peers, auditEntries: audit, bundleHealth: bundle };
     }
   );
+  if (!ready) return <PrometheusStatus title="🔐 Trust Graph Metrics" err={err} />;
   const peerRows = data.peers.map((r) => ({
     sandbox: r.metric.sandbox || "?",
     knownPeers: r.value,
@@ -2007,7 +1994,7 @@ function TrustGraphMetricsCard() {
   return (
     <SectionBox title="🔐 Trust Graph Metrics">
       <div style={{ marginBottom: 8, fontSize: 13, color: muted }}>
-        AGT trust graph: peers known per sandbox + tamper-evident audit log size. {err && <span style={{color:"#ef5350"}}>{err}</span>}
+        AGT trust graph: peers known per sandbox + tamper-evident audit log size.
       </div>
       <div style={{ display: "flex", gap: 12, marginBottom: 12, flexWrap: "wrap" }}>
         <StatusLabel status="">🤝 Total known peers: <b>{totalPeers}</b></StatusLabel>
@@ -2060,15 +2047,18 @@ function BudgetBar({ used, total, height = 14 }: { used: number; total: number; 
   );
 }
 
-function TokenBudgetOverview({ sandboxes, inferencePolicies }: { sandboxes: KubeObject[]; inferencePolicies: KubeObject[] }) {
+export function TokenBudgetOverview({ sandboxes, inferencePolicies }: { sandboxes: KubeObject[]; inferencePolicies: KubeObject[] }) {
   const theme = useTheme();
   const muted = theme.palette.text.secondary;
-  // Per-sandbox consumption from Prometheus (24h window aligns with dailyTokens budget).
-  const { data, err } = usePromPoll(
+  // This rolling-window estimate is not the router's calendar-budget accounting.
+  const { data, err, ready } = usePromPoll(
     [] as { metric: Record<string,string>; value: number }[],
     async (base) => promQuery(base, 'sum by (sandbox) (increase(kars_tokens_total[24h]))'),
     10000
   );
+  if (!ready || data.length === 0) {
+    return <PrometheusStatus title="💰 Token Budget (24h)" err={err} empty={ready} />;
+  }
   const consumedBySandbox: Record<string, number> = {};
   for (const row of data) consumedBySandbox[row.metric.sandbox || "?"] = row.value;
 
@@ -2100,8 +2090,8 @@ function TokenBudgetOverview({ sandboxes, inferencePolicies }: { sandboxes: Kube
   return (
     <SectionBox title="💰 Token Budget (24h)">
       <div style={{ marginBottom: 12, fontSize: 13, color: muted }}>
-        Aggregate daily budget across all InferencePolicy CRs vs. actual consumption pulled from
-        Prometheus. {err && <span style={{ color: "#ef5350" }}>{err}</span>}
+        Configured daily budgets vs. rolling 24-hour Prometheus consumption estimates.
+        Token policies and calendar accounting are enforced by the inference router, not this chart.
       </div>
       <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(220px, 1fr))", gap: "1rem", marginBottom: 16 }}>
         <Stat label="Fleet budget (24h)" value={formatTokens(fleetBudget)} />
@@ -2136,7 +2126,7 @@ function TokenBudgetOverview({ sandboxes, inferencePolicies }: { sandboxes: Kube
   );
 }
 
-function SandboxBudgetCard({ sandboxName, inferenceRefName }: { sandboxName: string; inferenceRefName?: string }) {
+export function SandboxBudgetCard({ sandboxName, inferenceRefName }: { sandboxName: string; inferenceRefName?: string }) {
   const theme = useTheme();
   const muted = theme.palette.text.secondary;
   // Pull both the bound InferencePolicy CR (for the budget) and the live counter.
@@ -2146,19 +2136,26 @@ function SandboxBudgetCard({ sandboxName, inferenceRefName }: { sandboxName: str
   const dailyBudget = spec?.tokenBudget?.dailyTokens || 0;
   const perRequestCap = spec?.tokenBudget?.perRequestTokens || 0;
 
-  const { data: used24h } = usePromPoll(
-    0,
+  const { data: used24h, err: usageError, ready: usageReady } = usePromPoll<number | undefined>(
+    undefined,
     async (base) => {
       const r = await promQuery(base, `sum(increase(kars_tokens_total{sandbox="${sandboxName}"}[24h]))`);
-      return r[0]?.value || 0;
+      return r[0]?.value;
     },
-    10000
+    10000,
+    sandboxName
   );
-  const { data: split } = usePromPoll(
+  const { data: split, err: splitError, ready: splitReady } = usePromPoll(
     [] as { metric: Record<string,string>; value: number }[],
     async (base) => promQuery(base, `sum by (direction) (increase(kars_tokens_total{sandbox="${sandboxName}"}[24h]))`),
-    10000
+    10000,
+    sandboxName
   );
+
+  if (!usageReady || !splitReady || used24h === undefined || split.length === 0) {
+    return <PrometheusStatus title={`💰 Token Budget — ${sandboxName}`}
+      err={usageError || splitError} empty={usageReady && splitReady} />;
+  }
 
   const pct = dailyBudget > 0 ? (used24h / dailyBudget) * 100 : 0;
   const remaining = Math.max(0, dailyBudget - used24h);

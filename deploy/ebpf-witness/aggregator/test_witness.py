@@ -1,12 +1,12 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 import copy
-import io
 import json
 import os
 from pathlib import Path
 import struct
 import runpy
+import re
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -116,6 +116,25 @@ class ComputationTests(unittest.TestCase):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_core_owner_is_explicit_and_cannot_adopt_standalone_objects(self):
+        for release in ("kars", witness.RELEASE):
+            api = Api()
+            for obj in (api.cm, api.ds):
+                obj["metadata"]["annotations"]["meta.helm.sh/release-name"] = release
+            self.assertEqual(witness.ready_nodes(api, release), {"node-1": "gadget-pod-uid"})
+            publisher = witness.Publisher(api, release)
+            publisher.publish({"status": "unavailable"})
+            foreign = witness.RELEASE if release == "kars" else "kars"
+            api.cm["metadata"]["annotations"]["meta.helm.sh/release-name"] = foreign
+            api.ds["metadata"]["annotations"]["meta.helm.sh/release-name"] = foreign
+            with self.assertRaisesRegex(witness.WitnessError, "ownership"):
+                publisher.publish({"status": "unavailable"})
+            with self.assertRaisesRegex(witness.WitnessError, "ownership"):
+                witness.ready_nodes(api, release)
+            self.assertEqual(sum(method == "PUT" for _, method, _ in api.calls), 1)
+        with self.assertRaisesRegex(witness.WitnessError, "unsupported_release_owner"):
+            witness.Publisher(Api(), "foreign")
+
     def test_reader_scope_and_readiness_identity(self):
         api = Api()
         self.assertEqual(witness.declarations(api, ["demo"]), [record()])
@@ -247,18 +266,91 @@ class RuntimeTests(unittest.TestCase):
                     with self.assertRaisesRegex(witness.WitnessError, "capture_timeout"):
                         witness.capture("verified-image", 0, ["node-1"])
 
-    def test_image_build_requires_provenance_and_verifies_client_before_extracting(self):
-        script = Path(__file__).with_name("fetch-client.py")
+    def test_image_build_requires_provenance_and_verifies_source_before_extracting(self):
+        script = runpy.run_path(str(Path(__file__).with_name("build-runtime.py")))
         environment = {"TARGETARCH": "amd64", "SOURCE_REVISION": "a" * 40,
-                       "PYTHON_BASE": "python@sha256:" + "b" * 64}
-        with patch.dict(os.environ, environment), patch("urllib.request.urlopen", return_value=io.BytesIO(b"untrusted archive")):
-            with self.assertRaisesRegex(SystemExit, "checksum mismatch"):
-                runpy.run_path(str(script))
-        with patch.dict(os.environ, dict(environment, PYTHON_BASE="python:mutable")), patch(
-            "urllib.request.urlopen", side_effect=AssertionError("must fail before network")
-        ):
-            with self.assertRaisesRegex(SystemExit, "reviewed image digest"):
-                runpy.run_path(str(script))
+                       "PYTHON_BASE": "mcr.microsoft.com/azurelinux/distroless/python:3.12@sha256:" + "b" * 64,
+                       "PYTHON_BUILD_BASE": "mcr.microsoft.com/azurelinux/base/python:3.12@sha256:" + "c" * 64}
+        with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, environment):
+            Path(directory, "source.tar.gz").write_bytes(b"untrusted archive")
+            with patch("subprocess.check_output", side_effect=AssertionError("must fail before compilation")):
+                with self.assertRaisesRegex(SystemExit, "checksum mismatch"):
+                    script["build"](directory)
+            self.assertFalse(Path(directory, "source").exists())
+        for variable in ["PYTHON_BASE", "PYTHON_BUILD_BASE"]:
+            for invalid in ["python:mutable", "python:3.12-alpine@sha256:" + "b" * 64,
+                            environment[variable].split("@")[0],
+                            environment["PYTHON_BUILD_BASE" if variable == "PYTHON_BASE" else "PYTHON_BASE"]]:
+                with self.subTest(variable=variable, image=invalid), patch.dict(
+                    os.environ, dict(environment, **{variable: invalid})
+                ):
+                    with self.assertRaisesRegex(SystemExit, "reviewed image digest"):
+                        script["configuration"]()
+        for name, value in [("TARGETARCH", "386"), ("SOURCE_REVISION", "latest")]:
+            with self.subTest(name=name), patch.dict(os.environ, dict(environment, **{name: value})):
+                with self.assertRaises(SystemExit):
+                    script["configuration"]()
+
+    def test_client_build_uses_reviewed_locks_and_upstream_signature_tests(self):
+        script = Path(__file__).with_name("build-runtime.py").read_text()
+        self.assertIn('"-mod=readonly"', script)
+        self.assertIn('"./cmd/kubectl-gadget", "./pkg/oci"', script)
+        self.assertIn('"./gadget-container/gadgettracermanager", "./pkg/gadget-service/api-helpers"', script)
+        self.assertIn('subprocess.run([str(daemon), "-h"], env=env, check=True)', script)
+        self.assertIn('source.extractall(unpacked, filter="data")', script)
+        self.assertIn('raise SystemExit(f"reviewed client.{name} changed during build")', script)
+        self.assertIn("client_source_archive_sha256=SOURCE_SHA256", script)
+        self.assertNotIn('"client_archive_sha256"', script)
+        self.assertFalse(Path(__file__).with_name("fetch-client.py").exists())
+        module = Path(__file__).with_name("client.go.mod").read_text()
+        for name, version in [("golang.org/x/net", "v0.60.0"), ("golang.org/x/crypto", "v0.57.0"),
+                              ("google.golang.org/grpc", "v1.83.2"), ("oras.land/oras-go/v2", "v2.6.2"),
+                              ("github.com/containerd/containerd", "v1.7.33")]:
+            self.assertRegex(module, rf"{re.escape(name)}\s+{re.escape(version)}\b")
+
+    def test_runtime_payload_has_searchable_directories_under_private_umask(self):
+        script = runpy.run_path(str(Path(__file__).with_name("build-runtime.py")))
+        with tempfile.TemporaryDirectory() as directory:
+            build = Path(directory)
+            for name in ("kubectl-gadget", "build.json", "witness.py", "kubectl-gadget.buildinfo",
+                         "gadgettracermanager", "gadgettracermanager.buildinfo",
+                         "client.go.mod", "client.go.sum", "LICENSE", "THIRD_PARTY_NOTICES.md"):
+                (build / name).write_text(name)
+            mask = os.umask(0o077)
+            try:
+                script["package"](build)
+            finally:
+                os.umask(mask)
+            root = build / "runtime-root"
+            self.assertFalse((root / "bin").exists())
+            self.assertEqual((root / "usr/bin/gadgettracermanager").read_text(),
+                             "gadgettracermanager")
+            for path in [root, *root.rglob("*")]:
+                expected = 0o755 if path.is_dir() else 0o555 if path.name in ("kubectl-gadget", "gadgettracermanager") else 0o444
+                self.assertEqual(path.stat().st_mode & 0o777, expected, str(path))
+            self.assertEqual((root / "opt/witness/witness.py").read_text(), "witness.py")
+            self.assertEqual((root / "usr/share/licenses/inspektor-gadget/NOTICE").read_text(),
+                             "THIRD_PARTY_NOTICES.md")
+
+    def test_image_uses_separate_pinned_al3_builder_and_distroless_runtime(self):
+        dockerfile = Path(__file__).with_name("Dockerfile").read_text()
+        bases = dict(re.findall(r"^ARG (PYTHON(?:_BUILD)?_BASE)=(.+)$", dockerfile, re.MULTILINE))
+        for variable, family in [("PYTHON_BASE", "distroless"), ("PYTHON_BUILD_BASE", "base")]:
+            self.assertRegex(bases[variable],
+                             rf"^mcr\.microsoft\.com/azurelinux/{family}/python:3\.12@sha256:[0-9a-f]{{64}}$")
+        stages = re.findall(r"^FROM (.+)$", dockerfile, re.MULTILINE)
+        self.assertEqual(stages, ["golang:1.27.2-bookworm AS toolchain",
+                                 "${PYTHON_BUILD_BASE} AS client", "${PYTHON_BASE}"])
+        self.assertIn("COPY --from=toolchain /usr/local/go /usr/local/go", dockerfile)
+        self.assertNotRegex(dockerfile.split("FROM ${PYTHON_BUILD_BASE}", 1)[0], r"(?m)^RUN ")
+        self.assertIn("RUN python3 /build/build-runtime.py /build", dockerfile)
+        self.assertIn("ADD --checksum=sha256:934060feae4ecab32644704c4e272e06b7c0da5a4f67429ba04b0113751946e4", dockerfile)
+        runtime = dockerfile.split("FROM ${PYTHON_BASE}\n", 1)[1]
+        self.assertNotRegex(runtime, r"(?m)^RUN ")
+        self.assertIn("COPY --from=client /build/runtime-root/ /", runtime)
+        self.assertNotIn("--chmod=", runtime)
+        self.assertIn("USER 10001:10001", runtime)
+        self.assertIn('ENTRYPOINT ["/usr/bin/python3", "/opt/witness/witness.py"]', runtime)
 
 
 if __name__ == "__main__":

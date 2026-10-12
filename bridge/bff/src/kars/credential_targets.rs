@@ -301,9 +301,47 @@ impl Cluster {
                 "Created target resourceVersion is missing before activation",
             ));
         }
-        api.patch(&target.name, &PatchParams::default(), &Patch::Merge(json!({
-            "metadata":{"uid":target.uid,"resourceVersion":object.metadata.resource_version},"spec":spec,
-        }))).await.map_err(|e| safe("Activate captured credential target", e))?;
-        Ok(())
+        let activation_intent = super::credential_review::intent(&object)?;
+        let mut status_retries = 0;
+        loop {
+            let metadata = super::execution_plans::activation_fence(&object, active)
+                .map_err(|error| failure(&error))?;
+            let error = match api
+                .patch(
+                    &target.name,
+                    &PatchParams::default(),
+                    &Patch::Merge(json!({
+                        "metadata":metadata,"spec":spec,
+                    })),
+                )
+                .await
+            {
+                Ok(_) => return Ok(()),
+                Err(error) => error,
+            };
+            if status_retries == 2
+                || !matches!(&error, kube::Error::Api(response) if response.code == 409)
+            {
+                return Err(safe("Activate captured credential target", error));
+            }
+            let refreshed = api
+                .get(&target.name)
+                .await
+                .map_err(|error| safe("Refresh conflicted credential target", error))?;
+            // Controller status writes advance resourceVersion without changing
+            // the reviewed authority. Never retry a spec or metadata transition.
+            if refreshed.metadata.resource_version == object.metadata.resource_version
+                || super::credential_review::intent(&refreshed)? != activation_intent
+            {
+                return Err(safe("Activate captured credential target", error));
+            }
+            object = refreshed;
+            status_retries += 1;
+            tracing::debug!(
+                target = %target.name,
+                status_retries,
+                "Retrying credential activation after a status-only conflict"
+            );
+        }
     }
 }

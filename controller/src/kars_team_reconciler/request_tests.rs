@@ -6,22 +6,25 @@ use crate::kars_team_reconciler::requests::{self, Prepared, REQUEST};
 
 const STATE: &str = "kars.azure.com/team-request-state";
 
-fn request(sequence: u64) -> String {
+pub(super) fn request(sequence: u64) -> String {
     format!("manual-{sequence}-{}", "a".repeat(64))
 }
 
-fn requested_team() -> KarsTeam {
+pub(super) fn requested_team() -> KarsTeam {
     let mut team = team();
     team.spec.envelope.budget = None;
     team.annotations_mut().insert(REQUEST.into(), request(1));
     team
 }
 
-fn latest(store: &Arc<Mutex<Store>>) -> KarsTeam {
+pub(super) fn latest(store: &Arc<Mutex<Store>>) -> KarsTeam {
     serde_json::from_value(store.lock().unwrap().team.clone()).unwrap()
 }
 
-async fn cycle(client: &Client, store: &Arc<Mutex<Store>>) -> Result<Action, ReconcileError> {
+pub(super) async fn cycle(
+    client: &Client,
+    store: &Arc<Mutex<Store>>,
+) -> Result<Action, ReconcileError> {
     reconcile(
         Arc::new(latest(store)),
         Arc::new(Ctx {
@@ -31,7 +34,7 @@ async fn cycle(client: &Client, store: &Arc<Mutex<Store>>) -> Result<Action, Rec
     .await
 }
 
-async fn stage(client: &Client, store: &Arc<Mutex<Store>>) -> Prepared {
+pub(super) async fn stage(client: &Client, store: &Arc<Mutex<Store>>) -> Prepared {
     let team = latest(store);
     crate::team_commons::ensure_commons(client, &team)
         .await
@@ -47,7 +50,11 @@ async fn stage(client: &Client, store: &Arc<Mutex<Store>>) -> Prepared {
     .unwrap()
 }
 
-async fn reserve(client: &Client, store: &Arc<Mutex<Store>>, prepared: &Prepared) -> KarsTeam {
+pub(super) async fn reserve(
+    client: &Client,
+    store: &Arc<Mutex<Store>>,
+    prepared: &Prepared,
+) -> KarsTeam {
     let team = latest(store);
     let mut status = team.status.clone().unwrap_or_default();
     status.run_admission = Some(prepared.record.clone());
@@ -59,7 +66,7 @@ async fn reserve(client: &Client, store: &Arc<Mutex<Store>>, prepared: &Prepared
         .unwrap()
 }
 
-async fn finish(
+pub(super) async fn finish(
     client: &Client,
     team: &KarsTeam,
     prepared: &Prepared,
@@ -76,6 +83,27 @@ async fn finish(
 
 fn launched(store: &Arc<Mutex<Store>>, prepared: &Prepared) -> bool {
     store.lock().unwrap().tasks[&prepared.record.task_name]["spec"]["execution"]["launch"] == true
+}
+
+#[tokio::test]
+async fn manual_run_reservations_fit_sandbox_namespaces() {
+    for name in [
+        "eng".to_owned(),
+        "a".repeat(21),
+        "clinic-operations-r463".to_owned(),
+        "a".repeat(63),
+    ] {
+        let mut team = requested_team();
+        team.metadata.name = Some(name.clone());
+        let (_server, client, store) = setup(&team).await;
+        let prepared = stage(&client, &store).await;
+        let run = &prepared.record.task_name;
+        assert!(run.starts_with(&super::runs::run_prefix(&name)));
+        assert!(format!("kars-{run}").len() <= 63, "{name}: {run}");
+        let reserved = reserve(&client, &store, &prepared).await;
+        finish(&client, &reserved, &prepared).await.unwrap();
+        assert!(launched(&store, &prepared));
+    }
 }
 
 #[tokio::test]
@@ -110,6 +138,65 @@ async fn stage_cannot_activate_without_its_persisted_reservation() {
     let persisted = reserve(&client, &store, &prepared).await;
     finish(&client, &persisted, &prepared).await.unwrap();
     assert!(launched(&store, &prepared));
+}
+
+#[tokio::test]
+async fn staged_reviewed_run_seals_roster_routes_in_its_reserved_digest() {
+    let mut team = requested_team();
+    team.spec.envelope.delegation_depth = 3;
+    team.spec.blueprint = Some(crate::kars_task::TaskBlueprint {
+        runtime: Some("OpenClaw".into()),
+        execution_plan: Some(crate::task_execution_plan::test_plan()),
+        ..Default::default()
+    });
+    let names = team
+        .spec
+        .blueprint
+        .as_ref()
+        .unwrap()
+        .execution_plan
+        .as_ref()
+        .unwrap()
+        .roles
+        .iter()
+        .map(|role| role.name.clone())
+        .collect::<Vec<_>>();
+    team.spec.roster = names
+        .into_iter()
+        .map(|name| crate::kars_team::TeamRole {
+            name,
+            blueprint: Some(crate::kars_task::TaskBlueprint {
+                runtime: Some("Hermes".into()),
+                ..Default::default()
+            }),
+            ..Default::default()
+        })
+        .collect();
+    let (_server, client, store) = setup(&team).await;
+    let prepared = stage(&client, &store).await;
+    let mut state = store.lock().unwrap();
+    let task = state.tasks.get_mut(&prepared.record.task_name).unwrap();
+    let key = crate::reviewed_execution::TEAM_ROLES;
+    let routes: Value =
+        serde_json::from_str(task["metadata"]["annotations"][key].as_str().unwrap()).unwrap();
+    assert!(
+        routes
+            .as_object()
+            .unwrap()
+            .values()
+            .all(|route| route["blueprint"]["runtime"] == "Hermes")
+    );
+    let original: KarsTask = serde_json::from_value(task.clone()).unwrap();
+    assert_eq!(
+        requests::task_digest(&original).unwrap(),
+        prepared.record.task_spec_digest
+    );
+    task["metadata"]["annotations"][key] = json!("{}");
+    let altered: KarsTask = serde_json::from_value(task.clone()).unwrap();
+    assert_ne!(
+        requests::task_digest(&altered).unwrap(),
+        prepared.record.task_spec_digest
+    );
 }
 
 #[tokio::test]

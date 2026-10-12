@@ -115,6 +115,13 @@ web:
   #     and the header's dev role-switch remains the way to preview roles.
   extraEnv: []
 
+# Browser-reachable URL of the Core-managed or external Headlamp. Empty keeps
+# the honest "not linked" state; never send a cluster-internal URL to a browser.
+# Plugin links use the Core-managed /c/main context by default. An external
+# instance can select another context with a URL ending in /c/<cluster>.
+headlamp:
+  url: ""
+
 # ── Ingress (optional) ───────────────────────────────────────────────────────
 # Off by default so a bare install just exposes ClusterIP Services (reach them via
 # `kubectl port-forward`). Enable + set className/host per cloud:
@@ -139,6 +146,13 @@ rbac:
 # or no default-deny (they are harmless there, but off by request is supported).
 networkPolicy:
   create: true
+  # Cilium identifies host-network API servers separately from namespace pods.
+  # Native Dex HTTPS from API-server/control-plane identities, on 5557 only.
+  # SNATed control-plane traffic requires Cilium nodeSelectorLabels=true.
+  dexApiServerIngress: false
+  # Bridge uses authenticated pods/proxy for sandbox routers across namespaces.
+  # Cilium API-server/control-plane ingress on 8443 only; same node-label prerequisite.
+  routerApiServerIngress: false
   observations:
     enabled: false
     # Explicit opt-in only: this additive policy must not accidentally become
@@ -178,8 +192,26 @@ idp:
   secretName: "kars-bridge-oidc"
   clientSecret: ""
   sessionSecret: ""
+  # Separate confidential client for Core Headlamp; no Kubernetes RBAC grant.
+  # Match Core headlamp.oidc and provision the same client secret in both namespaces.
+  headlampClient:
+    enabled: false
+    clientID: "kars-headlamp"
+    callbackURL: ""
+    clientSecret:
+      name: ""
+      key: client-secret
   dex:
+    # Optional unused address in the cluster's Service CIDR. Fixing this address
+    # lets a local API server resolve its TLS OIDC issuer before Bridge installs.
+    # Leave empty for normal dynamic allocation; immutable after installation.
+    clusterIP: ""
     image: "ghcr.io/dexidp/dex:v2.45.1"
+    # Optional native HTTPS listener on 5557. HTTP 5556 remains the Bridge backchannel.
+    # The existing kubernetes.io/tls Secret must contain tls.crt and tls.key.
+    tls:
+      enabled: false
+      secretName: ""
     enablePasswordDB: true
     # Private-alpha seed users (bcrypt hash below = "password"). Replace with
     # real per-colleague accounts, or drop these and wire `connectors` to a real

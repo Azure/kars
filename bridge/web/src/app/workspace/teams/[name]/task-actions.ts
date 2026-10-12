@@ -2,8 +2,7 @@
 // Licensed under the MIT License.
 
 // kars Bridge — team task backlog server actions. Add/remove discrete tasks on a
-// standing team; the controller drains the oldest `pending` task on its next run
-// (cadence or Run now) and marks it `done` when that run delivers.
+// standing team. Review-required work advances only after its bound result is approved.
 "use server";
 
 import { revalidatePath } from "next/cache";
@@ -14,6 +13,7 @@ export async function addTeamTask(
   team: string,
   title: string,
   description: string,
+  reviewRequired = false,
 ): Promise<{ error: string | null }> {
   const ns = defaultNamespace();
   try {
@@ -23,7 +23,7 @@ export async function addTeamTask(
         method: "POST",
         cache: "no-store",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ title, description }),
+        body: JSON.stringify({ title, description, review_required: reviewRequired }),
       },
     );
     if (!res.ok) {
@@ -67,6 +67,7 @@ export async function reviewTeamTask(
   team: string,
   taskId: string,
   decision: "approve" | "request_changes",
+  binding: { assignmentNonce: string; runUid: string },
   feedback?: string,
 ): Promise<{ error: string | null }> {
   const ns = defaultNamespace();
@@ -77,7 +78,10 @@ export async function reviewTeamTask(
         method: "POST",
         cache: "no-store",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify({ decision, feedback: feedback?.trim() || null }),
+        body: JSON.stringify({
+          decision, feedback: feedback?.trim() || null,
+          assignment_nonce: binding.assignmentNonce, run_uid: binding.runUid,
+        }),
       },
     );
     if (!response.ok) {

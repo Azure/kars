@@ -10,6 +10,7 @@ import { HonestState } from "@/components/honest-state";
 import { LiveRefresh } from "@/components/live-refresh";
 import { getArtifacts, getEfficiency, getInsights, getInferenceBudgets } from "@/lib/bff";
 import type { Efficiency, Insights, MissionArtifacts, InferenceBudgets } from "@/lib/types";
+import { lowerWins, measuredDeliveredTokens, measuredRoutes, metric } from "@/lib/efficiency";
 
 export const dynamic = "force-dynamic";
 
@@ -53,12 +54,7 @@ export default async function InsightsPage() {
   }
 
   const totalMissions = insights.missions_by_phase.reduce((s, p) => s + p.count, 0);
-  // Real economics from the efficiency frontier (per-route telemetry).
-  // avg_tokens is tokens-per-delivered-outcome, so the true spend on a route is
-  // avg_tokens × delivered (NOT × runs, which would overcount failed runs).
-  const totalTokens = efficiency
-    ? efficiency.routes.reduce((s, r) => s + r.avg_tokens * r.delivered, 0)
-    : null;
+  const totalTokens = measuredDeliveredTokens(efficiency);
   const accepted = efficiency ? efficiency.routes.reduce((s, r) => s + r.accepted, 0) : 0;
   const delivered = deliverables.filter((m) => m.summary && m.status !== "error").length;
   const reviewed = deliverables.filter((m) => m.review_status === "approved").length;
@@ -98,13 +94,13 @@ export default async function InsightsPage() {
         <Kpi label="Deliverables" value={funnelPop.delivered} />
         <Kpi label="Accepted" value={funnelPop.accepted} />
         <Kpi label="Signed receipts" value={insights.receipts_issued} />
-        <Kpi label="Tokens on delivered" value={totalTokens == null ? null : Math.round(totalTokens)} />
+        <Kpi label="Measured delivered tokens" value={totalTokens} />
       </div>
       <p className="-mt-3 text-xs text-foreground-muted">
         <span className="font-medium text-foreground">Missions</span> counts unique tasks;{" "}
         <span className="font-medium text-foreground">Deliverables</span> and{" "}
         <span className="font-medium text-foreground">Accepted</span> are counted per run — a mission can be re-run, so run totals can exceed the mission count.{" "}
-        <span className="font-medium text-foreground">Tokens on delivered</span> sums the token cost of delivered outcomes only; tokens burned by failed or blocked runs are not included.
+        <span className="font-medium text-foreground">Measured delivered tokens</span> sums recorded usage only; missing measurements and failed or blocked runs are not included.
       </p>
 
       {/* Deliverable funnel — outcome, not activity. Uses the run-level
@@ -172,8 +168,8 @@ export default async function InsightsPage() {
   );
 }
 
-function pct(x: number): string {
-  return `${Math.round(x * 100)}%`;
+function pct(x: number | null): string {
+  return x === null ? "—" : `${Math.round(x * 100)}%`;
 }
 
 /** A real efficiency frontier: a scatter of routes by cost (tokens per
@@ -182,7 +178,7 @@ function pct(x: number): string {
  *  (cheaper AND higher-quality than any other) are connected as the frontier.
  *  Renders as SVG — not a table row. */
 function FrontierChart({ efficiency }: { efficiency: Efficiency }) {
-  const pts = efficiency.routes.filter((r) => r.delivered > 0 && r.tokens_per_outcome > 0);
+  const pts = measuredRoutes(efficiency);
   if (pts.length === 0) {
     return (
       <p className="mt-4 rounded-lg border border-dashed border-border bg-surface-muted/30 px-4 py-3 text-xs text-foreground-muted">
@@ -287,6 +283,7 @@ function EfficiencyPanel({ efficiency, insights }: { efficiency: Efficiency; ins
             <strong>Accepted</strong> = a human approved the deliverable (the honest outcome
             signal), not merely that tokens were spent. Computed from {efficiency.total_runs} run
             {efficiency.total_runs === 1 ? "" : "s"}.
+            {" "}Missing measurements are shown as —, not zero. Verified counts identify durable terminal evidence; historical rows are not routing authority.
           </p>
           {!insights.runtime_metrics_available && insights.runtime_metrics_note && (
             <p className="mt-1 text-[11px] text-foreground-muted">{insights.runtime_metrics_note}</p>
@@ -304,6 +301,7 @@ function EfficiencyPanel({ efficiency, insights }: { efficiency: Efficiency; ins
             >
               {efficiency.recommended_low_confidence ? "Best available: " : "Recommended: "}
               {efficiency.recommended}
+              {efficiency.recommended_harness ? ` · ${efficiency.recommended_harness}` : ""}
             </span>
             {efficiency.recommended_basis && (
               <p className="mt-1 max-w-xs text-right text-[11px] leading-snug text-foreground-muted">
@@ -324,7 +322,7 @@ function EfficiencyPanel({ efficiency, insights }: { efficiency: Efficiency; ins
             <tr className="border-b border-border">
               <th className="py-2 pr-4 font-medium">Route</th>
               <th className="py-2 pr-4 font-medium">Harness</th>
-              <th className="py-2 pr-4 font-medium">Runs</th>
+              <th className="py-2 pr-4 font-medium">Runs / verified</th>
               <th className="py-2 pr-4 font-medium">Delivered</th>
               <th className="py-2 pr-4 font-medium">Accepted</th>
               <th className="py-2 pr-4 font-medium" title="Most common fault among this route's unaccepted runs">Top fault</th>
@@ -357,18 +355,18 @@ function EfficiencyPanel({ efficiency, insights }: { efficiency: Efficiency; ins
                     <span className="text-foreground-muted">—</span>
                   )}
                 </td>
-                <td className="py-2 pr-4 tabular-nums">{r.runs}</td>
+                <td className="py-2 pr-4 tabular-nums">{r.runs} / {r.verified_runs}</td>
                 <td className="py-2 pr-4 tabular-nums">{r.delivered}</td>
                 <td className="py-2 pr-4 tabular-nums">{r.accepted} <span className="text-foreground-muted">({pct(r.acceptance_rate)})</span></td>
                 <td className="py-2 pr-4">{r.top_fault ? <span className="rounded bg-danger/10 px-1.5 py-0.5 text-[10px] font-medium text-danger">{r.top_fault}</span> : <span className="text-foreground-muted">—</span>}</td>
                 <td className="py-2 pr-4 tabular-nums">{r.reliability_rate === null ? <span className="text-foreground-muted">—</span> : <span title={`pass^${r.reliability_k}: accepted on every one of ${r.reliability_k} repeated attempts, measured over ${r.reliability_samples} sample${r.reliability_samples === 1 ? "" : "s"}`}>{pct(r.reliability_rate)} <span className="text-foreground-muted">(n={r.reliability_samples})</span></span>}</td>
-                <td className="py-2 pr-4 tabular-nums">{r.tokens_per_outcome.toLocaleString()}</td>
+                <td className="py-2 pr-4 tabular-nums" title={`${r.measured_token_runs} delivered runs with measured tokens`}>{metric(r.tokens_per_outcome)} <span className="text-foreground-muted">(n={r.measured_token_runs})</span></td>
                 {efficiency.priced && <td className="py-2 pr-4 tabular-nums">{r.usd_per_outcome === null ? <span className="text-foreground-muted">—</span> : `$${r.usd_per_outcome.toFixed(3)}`}</td>}
-                <td className="py-2 pr-4 tabular-nums">{r.avg_wall_ms > 0 ? <>{(r.avg_wall_ms / 1000).toFixed(1)}s <span className="text-foreground-muted">(p95 {(r.p95_wall_ms / 1000).toFixed(0)}s)</span></> : <span className="text-foreground-muted">—</span>}</td>
-                <td className="py-2 pr-4 tabular-nums">{r.avg_tool_calls > 0 ? pct(r.tool_fail_rate) : <span className="text-foreground-muted">—</span>}</td>
-                <td className="py-2 pr-4 tabular-nums">{r.cache_hit_rate > 0 ? pct(r.cache_hit_rate) : <span className="text-foreground-muted">—</span>}</td>
-                <td className="py-2 pr-4 tabular-nums">{r.avg_rounds.toFixed(1)}</td>
-                <td className="py-2 pr-4 tabular-nums">{r.avg_tool_calls.toFixed(1)}</td>
+                <td className="py-2 pr-4 tabular-nums">{r.avg_wall_ms !== null && r.p95_wall_ms !== null ? <>{(r.avg_wall_ms / 1000).toFixed(1)}s <span className="text-foreground-muted">(p95 {(r.p95_wall_ms / 1000).toFixed(0)}s)</span></> : <span className="text-foreground-muted">—</span>}</td>
+                <td className="py-2 pr-4 tabular-nums">{pct(r.tool_fail_rate)}</td>
+                <td className="py-2 pr-4 tabular-nums">{pct(r.cache_hit_rate)}</td>
+                <td className="py-2 pr-4 tabular-nums">{metric(r.avg_rounds, 1)}</td>
+                <td className="py-2 pr-4 tabular-nums">{metric(r.avg_tool_calls, 1)}</td>
               </tr>
             ))}
           </tbody>
@@ -403,17 +401,17 @@ function AbCompare({ a, b, recommended, recommendedHarness }: { a: import("@/lib
     r.harness ? `${r.route} · ${r.harness}` : r.route;
   const rows: { label: string; av: string; bv: string; aWins: boolean | null }[] = [
     { label: "Acceptance", av: pct(a.acceptance_rate), bv: pct(b.acceptance_rate), aWins: a.acceptance_rate === b.acceptance_rate ? null : a.acceptance_rate > b.acceptance_rate },
-    { label: "Reliability (pass^k)", av: a.reliability_rate === null ? "—" : pct(a.reliability_rate), bv: b.reliability_rate === null ? "—" : pct(b.reliability_rate), aWins: (a.reliability_rate ?? -1) === (b.reliability_rate ?? -1) ? null : (a.reliability_rate ?? -1) > (b.reliability_rate ?? -1) },
-    { label: "Tokens / outcome", av: a.tokens_per_outcome.toLocaleString(), bv: b.tokens_per_outcome.toLocaleString(), aWins: a.tokens_per_outcome === b.tokens_per_outcome ? null : a.tokens_per_outcome < b.tokens_per_outcome },
-    { label: "Latency (wall)", av: a.avg_wall_ms > 0 ? `${(a.avg_wall_ms / 1000).toFixed(1)}s` : "—", bv: b.avg_wall_ms > 0 ? `${(b.avg_wall_ms / 1000).toFixed(1)}s` : "—", aWins: a.avg_wall_ms === b.avg_wall_ms || a.avg_wall_ms === 0 || b.avg_wall_ms === 0 ? null : a.avg_wall_ms < b.avg_wall_ms },
-    { label: "Tool-fail rate", av: pct(a.tool_fail_rate), bv: pct(b.tool_fail_rate), aWins: a.tool_fail_rate === b.tool_fail_rate ? null : a.tool_fail_rate < b.tool_fail_rate },
-    { label: "Avg rounds", av: a.avg_rounds.toFixed(1), bv: b.avg_rounds.toFixed(1), aWins: a.avg_rounds === b.avg_rounds ? null : a.avg_rounds < b.avg_rounds },
-    { label: "Avg tool calls", av: a.avg_tool_calls.toFixed(1), bv: b.avg_tool_calls.toFixed(1), aWins: a.avg_tool_calls === b.avg_tool_calls ? null : a.avg_tool_calls < b.avg_tool_calls },
+    { label: "Reliability (pass^k)", av: pct(a.reliability_rate), bv: pct(b.reliability_rate), aWins: lowerWins(b.reliability_rate, a.reliability_rate) },
+    { label: "Tokens / measured delivered outcome", av: metric(a.tokens_per_outcome), bv: metric(b.tokens_per_outcome), aWins: lowerWins(a.tokens_per_outcome, b.tokens_per_outcome) },
+    { label: "Latency (wall)", av: a.avg_wall_ms !== null ? `${(a.avg_wall_ms / 1000).toFixed(1)}s` : "—", bv: b.avg_wall_ms !== null ? `${(b.avg_wall_ms / 1000).toFixed(1)}s` : "—", aWins: lowerWins(a.avg_wall_ms, b.avg_wall_ms) },
+    { label: "Tool-fail rate", av: pct(a.tool_fail_rate), bv: pct(b.tool_fail_rate), aWins: lowerWins(a.tool_fail_rate, b.tool_fail_rate) },
+    { label: "Avg rounds", av: metric(a.avg_rounds, 1), bv: metric(b.avg_rounds, 1), aWins: lowerWins(a.avg_rounds, b.avg_rounds) },
+    { label: "Avg tool calls", av: metric(a.avg_tool_calls, 1), bv: metric(b.avg_tool_calls, 1), aWins: lowerWins(a.avg_tool_calls, b.avg_tool_calls) },
   ];
   return (
     <div className="mt-6 rounded-lg border border-border bg-background/40 p-4">
       <h3 className="text-xs font-semibold">A/B head-to-head — top two routes</h3>
-      <p className="mt-0.5 text-[11px] text-foreground-muted">Side-by-side on the same outcome metrics. The winner is the cheaper-per-accepted-outcome route, not the cheaper-per-token one.</p>
+      <p className="mt-0.5 text-[11px] text-foreground-muted">Descriptive history, not a controlled experiment. Costs are per measured delivered run, not per human acceptance; missing measurements cannot win a comparison.</p>
       <div className="mt-3 grid grid-cols-[1fr_auto_auto] gap-x-4 gap-y-1.5 text-xs">
         <div className="text-foreground-muted">Route</div>
         <div className="font-mono text-right">{routeLabel(a)}{isRec(a) ? " ★" : ""}</div>

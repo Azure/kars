@@ -19,7 +19,7 @@ use crate::routes::tasks::{
 
 use super::{
     TeamDetailDto, TeamRoleDto, TeamSummaryDto, channels_from_keys, effective_lifecycle_mode,
-    is_team_owner, phase_of, read_task_list, require_owned_team, runtime_state,
+    is_team_owner, phase_of, read_work_for_detail, require_owned_team, runtime_state,
 };
 
 #[derive(Debug, Serialize)]
@@ -86,7 +86,9 @@ fn outcome_from_output(
     let objective = outcome_work_item(data.get("objective").map(String::as_str).unwrap_or(""));
     let pull_requests = extract_pull_requests(&output);
     let no_action = is_no_change_output(&output);
-    let disposition = if status == Some("error") || is_failure_shaped_output(&output) {
+    let disposition = if matches!(status, Some("error" | "failed" | "rejected"))
+        || is_failure_shaped_output(&output)
+    {
         "failed"
     } else if !pull_requests.is_empty() {
         "change_proposed"
@@ -262,7 +264,7 @@ pub async fn list_teams(
             .or_else(|| {
                 visible_team_names
                     .iter()
-                    .find(|team_name| run.starts_with(&format!("{team_name}-run-")))
+                    .find(|team_name| super::is_run_name(team_name, &run))
             });
         let Some(team_name) = team_name else {
             continue;
@@ -270,7 +272,9 @@ pub async fn list_teams(
         let counts = retained_outcomes.entry(team_name.clone()).or_default();
         let status = data.get("status").map(String::as_str);
         let output = data.get("output").map(String::as_str).unwrap_or("");
-        if status == Some("error") || is_failure_shaped_output(output) {
+        if matches!(status, Some("error" | "failed" | "rejected"))
+            || is_failure_shaped_output(output)
+        {
             counts.2 += 1;
         } else if is_no_change_output(output) {
             counts.1 += 1;
@@ -311,6 +315,27 @@ pub async fn list_teams(
     Ok(Json(summaries))
 }
 
+pub(super) fn generated_runs_newest_first(
+    team: &KarsTeam,
+    mut tasks: Vec<crate::kars::task::KarsTask>,
+) -> Vec<String> {
+    tasks.retain(|task| {
+        super::lifecycle::owned_run(&task.metadata, team)
+            && task
+                .annotations()
+                .get("kars.azure.com/team-role")
+                .is_some_and(|role| role == "taskforce")
+    });
+    tasks.sort_by(|left, right| {
+        right
+            .metadata
+            .creation_timestamp
+            .cmp(&left.metadata.creation_timestamp)
+            .then_with(|| right.metadata.name.cmp(&left.metadata.name))
+    });
+    tasks.iter().map(kube::ResourceExt::name_any).collect()
+}
+
 pub async fn get_team(
     State(state): State<crate::state::AppState>,
     Extension(principal): Extension<Principal>,
@@ -319,23 +344,13 @@ pub async fn get_team(
     let cluster = require_cluster(&state)?;
     let team = require_owned_team(cluster, &ns, &name, &principal).await?;
 
-    // Resolve generated task-force tasks: KarsTasks in the namespace owned by
-    // this team whose name carries the `<team>-run-` standing-operation prefix.
+    // Names may be bounded; exact Team custody and taskforce role identify runs.
     let tasks: Api<crate::kars::task::KarsTask> = cluster.tasks(&ns);
-    let run_prefix = format!("{name}-run-");
-    let mut generated_tasks: Vec<String> = tasks
+    let generated_tasks = tasks
         .list(&ListParams::default())
         .await
-        .map(|l| {
-            l.items
-                .iter()
-                .map(kube::ResourceExt::name_any)
-                .filter(|n| n.starts_with(&run_prefix))
-                .collect()
-        })
-        .unwrap_or_default();
-    generated_tasks.sort();
-    generated_tasks.reverse();
+        .map(|list| generated_runs_newest_first(&team, list.items))
+        .map_err(|error| AppError::Upstream(error.to_string()))?;
     let retained_run_count = generated_tasks.len() as i64;
     let newest_retained_run = generated_tasks.first().cloned();
     let retained_run_names = generated_tasks
@@ -469,6 +484,7 @@ pub async fn get_team(
         learned_egress = seen.into_iter().collect();
     }
 
+    let (work_items, work_reviews) = read_work_for_detail(cluster, &team).await?;
     Ok(Json(TeamDetailDto {
         name: team.name_any(),
         display_name: team.spec.display_name.clone(),
@@ -559,7 +575,8 @@ pub async fn get_team(
         execution_plan: bp
             .and_then(|blueprint| blueprint.execution_plan.as_ref())
             .map(crate::routes::tasks::ExecutionPlanDto::from_crd),
-        tasks: read_task_list(&cluster.read_team_tasks(&name).await),
+        tasks: work_items,
+        work_reviews,
         channels: channels_from_keys(&cluster.team_channel_keys(&ns,&name).await.map_err(|e|AppError::Upstream(e.to_string()))?),
     }))
 }
@@ -610,6 +627,13 @@ mod tests {
             &output("error", "Parser failed before a handback was produced."),
         );
         assert_eq!(failed.disposition, "failed");
+        for status in ["failed", "rejected"] {
+            for text in ["", "A useful-looking partial draft"] {
+                let terminal =
+                    outcome_from_output("team-run-1784750586".into(), &output(status, text));
+                assert_eq!(terminal.disposition, "failed");
+            }
+        }
     }
 
     #[test]

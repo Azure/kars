@@ -14,6 +14,18 @@ function input(content = "Draft\r\n✓ 日本語 🌍", name = "draft.md") {
 const path = `${TASK_INPUT_ROOT}/draft.md`;
 
 describe("execution-local immutable input files", () => {
+  it("counts only complete successful reads, independently for each execution", () => {
+    const files = new TaskInputFiles([input("Complete input")]);
+    expect(files.unreadPaths()).toEqual([path]);
+    files.read(path, 3);
+    expect(files.unreadPaths()).toEqual([path]);
+    expect(() => files.read(path, 0)).toThrow();
+    expect(files.unreadPaths()).toEqual([path]);
+    files.read(path, 65536);
+    expect(files.unreadPaths()).toEqual([]);
+    expect(new TaskInputFiles([input("Complete input")]).unreadPaths()).toEqual([path]);
+  });
+
   it("reads exact supplied bytes and bound metadata without writing them to disk", async () => {
     const original = input();
     const files = new TaskInputFiles([original]);
@@ -23,6 +35,25 @@ describe("execution-local immutable input files", () => {
     expect(files.instructions()).toContain(path);
     expect(files.instructions()).toContain(original.sha256);
     expect(files.instructions()).not.toContain(original.content);
+  });
+
+  it("reads all bounded inputs with full provenance atomically in one virtual bundle", async () => {
+    const original = Array.from({ length: 16 }, (_, i) => input(`Complete ${i}\r\n✓ 日本語 🌍`, `file-${i}.md`));
+    const expected = structuredClone(original).sort((a, b) => a.name.localeCompare(b.name));
+    const files = new TaskInputFiles(original);
+    original[0].content = "Changed after admission";
+    original[0].source.runNonce = "changed";
+    const partial = await readTaskFile(TASK_INPUT_ROOT, 100, files);
+    expect(partial.truncated).toBe(true);
+    expect(files.unreadPaths()).toHaveLength(16);
+    const complete = await readTaskFile(TASK_INPUT_ROOT, 65536, files);
+    expect(complete.truncated).toBe(false);
+    expect(complete.returned_bytes).toBe(Buffer.byteLength(complete.content));
+    expect(complete.bytes).toBeLessThanOrEqual(65536);
+    expect(JSON.parse(complete.content)).toEqual(expected);
+    expect(files.unreadPaths()).toEqual([]);
+    await expect(writeTaskFile(TASK_INPUT_ROOT, "overwrite")).rejects.toThrow("read-only");
+    await expect(readTaskFile(TASK_INPUT_ROOT, 65536)).rejects.toThrow("not supplied");
   });
 
   it("freezes a private snapshot and cannot leak across executions or reads", async () => {
@@ -60,7 +91,7 @@ describe("execution-local immutable input files", () => {
     await expect(readTaskFile(path, limit, new TaskInputFiles([input()]))).rejects.toThrow("bound");
   });
 
-  it.each([TASK_INPUT_ROOT, `${TASK_INPUT_ROOT}/`, `${TASK_INPUT_ROOT}/../escape`, `${TASK_INPUT_ROOT}/draft.md/..`,
+  it.each([`${TASK_INPUT_ROOT}/`, `${TASK_INPUT_ROOT}/../escape`, `${TASK_INPUT_ROOT}/draft.md/..`,
     `${TASK_INPUT_ROOT}//draft.md`, "/sandbox//.kars-inputs/draft.md", "/sandbox/./.kars-inputs/draft.md",
     "/sandbox/.kars-inputs/./draft.md", "/tmp/../sandbox/.kars-inputs/draft.md", "/tmp/.kars-inputs/draft.md",
     "/sandbox/.kars-inputs/../../tmp/out", "/sandbox//.kars-inputs/../out", ".kars-inputs/draft.md"])("denies reserved path alias or traversal %s without disk fallback", async alias => {

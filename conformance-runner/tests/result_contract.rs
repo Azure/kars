@@ -106,8 +106,7 @@ async fn actual_builder_negotiates_v2_without_a_new_cli_argument() {
         kars_eval_corpus::builtin_bytes("jailbreak-baseline").unwrap(),
     )
     .unwrap();
-    // The separate controller_contract test parses the exact mount-path argv.
-    // Here the real binary receives that same option shape with its fixture file.
+    // Only substitute the corpus mount; preserve the Job's actual output destination.
     let mut args: Vec<String> = spec["containers"][0]["args"]
         .as_array()
         .unwrap()
@@ -115,11 +114,6 @@ async fn actual_builder_negotiates_v2_without_a_new_cli_argument() {
         .map(|value| value.as_str().unwrap().into())
         .collect();
     args[1] = corpus_path.to_string_lossy().into_owned();
-    args[5] = directory
-        .path()
-        .join("report.json")
-        .to_string_lossy()
-        .into_owned();
     let output = Command::new(env!("CARGO_BIN_EXE_kars-conformance-runner"))
         .args(args)
         .env(FORMAT_ENV, format)
@@ -127,6 +121,7 @@ async fn actual_builder_negotiates_v2_without_a_new_cli_argument() {
         .await
         .unwrap();
     assert_eq!(output.status.code(), Some(0));
+    assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 1);
     let report: Value = serde_json::from_slice(&output.stdout).unwrap();
     assert_eq!(report["schemaVersion"], "v2");
     assert!(consume(&report, &server.uri()).ready());
@@ -136,6 +131,42 @@ async fn actual_builder_negotiates_v2_without_a_new_cli_argument() {
             .contains("--report")
     );
     assert!(spec["securityContext"].get("runAsUser").is_none());
+}
+
+#[tokio::test]
+async fn stdout_destination_emits_one_inconclusive_report_with_or_without_extra_copy() {
+    for no_stdout in [false, true] {
+        for empty in [false, true] {
+            let mut command = Command::new(env!("CARGO_BIN_EXE_kars-conformance-runner"));
+            command
+                .args([
+                    "--corpus",
+                    "builtin:jailbreak-baseline",
+                    "--router-base",
+                    "http://127.0.0.1:1",
+                    "--output",
+                    "/dev/stdout",
+                    "--timeout-ms",
+                    "100",
+                ])
+                .env(FORMAT_ENV, "v2");
+            if no_stdout {
+                command.arg("--no-stdout");
+            }
+            if empty {
+                command.args(["--only-case", "nonexistent-case"]);
+            }
+            let output = command.output().await.unwrap();
+            assert_eq!(output.status.code(), Some(2));
+            assert_eq!(String::from_utf8_lossy(&output.stdout).lines().count(), 1);
+            let report: Value = serde_json::from_slice(&output.stdout).unwrap();
+            assert_eq!(report["schemaVersion"], "v2");
+            assert_eq!(report["total"], if empty { 0 } else { 6 });
+            assert_eq!(report["errored"], if empty { 0 } else { 6 });
+            assert_eq!(report["passed"], 0);
+            assert_eq!(report["failed"], 0);
+        }
+    }
 }
 
 #[tokio::test]

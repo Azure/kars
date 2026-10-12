@@ -43,8 +43,11 @@ pub async fn local_inference_status(
     State(state): State<AppState>,
 ) -> AppResult<Json<LocalInferenceStatusDto>> {
     let cluster = require_cluster(&state)?;
-    let available = cluster.local_inference_available().await;
-    let gpu = cluster.gpu_node_summary().await.unwrap_or_default();
+    let available = cluster
+        .local_inference_available()
+        .await
+        .map_err(upstream)?;
+    let gpu = cluster.gpu_node_summary().await.map_err(upstream)?;
     Ok(Json(LocalInferenceStatusDto {
         available,
         gpu_node_count: gpu.gpu_node_count,

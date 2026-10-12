@@ -35,7 +35,10 @@ pub struct ResourceIdentity {
 
 impl ResourceIdentity {
     pub fn validate(&self) -> Result<(), BudgetError> {
-        if !valid_label(&self.namespace) || !valid_name(&self.name) || !valid_uid(&self.uid) {
+        if !valid_label(&self.namespace)
+            || !valid_resource_name(&self.name)
+            || !valid_uid(&self.uid)
+        {
             return Err(BudgetError::Identity);
         }
         Ok(())
@@ -341,8 +344,12 @@ pub fn valid_uid(value: &str) -> bool {
 }
 
 pub fn valid_label(value: &str) -> bool {
+    valid_label_with_limit(value, 63)
+}
+
+fn valid_label_with_limit(value: &str, limit: usize) -> bool {
     !value.is_empty()
-        && value.len() <= 63
+        && value.len() <= limit
         && value
             .bytes()
             .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
@@ -352,6 +359,15 @@ pub fn valid_label(value: &str) -> bool {
 
 pub fn valid_name(value: &str) -> bool {
     !value.is_empty() && value.len() <= 253 && value.split('.').all(valid_label)
+}
+
+fn valid_resource_name(value: &str) -> bool {
+    // Kubernetes resource names have a total 253-byte limit, not DNS's per-label limit.
+    !value.is_empty()
+        && value.len() <= 253
+        && value
+            .split('.')
+            .all(|label| valid_label_with_limit(label, 253))
 }
 
 pub fn valid_digest(value: &str) -> bool {

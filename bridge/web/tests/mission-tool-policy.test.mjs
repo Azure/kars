@@ -31,6 +31,7 @@ const noToolsClaim = /None — model only|none — model only|No tools — pure 
 test("Home labels omission as a tool-permitting default without changing selection values", () => {
   const imports = {};
   for (const name of ["@/components/segmented-tier", "@/components/orchestration-cube",
+    "@/components/validation-checks",
     "@/components/icon", "@/components/journey-rail", "@/lib/format", "@/components/repo-access",
     "../envelope-reveal", "./controls", "./helpers"]) imports[name] = {};
   const { renderReview } = load("app/workspace/new/intake-flow/review.tsx", imports);
@@ -74,7 +75,8 @@ test("proposal reveal distinguishes omitted and explicit policies without claimi
 
 const { CompositionPanel } = load("app/workspace/missions/[name]/mission-detail-panels.tsx", {
   "next/link": {}, "@/components/deliverable-view": {}, "@/components/provenance-story": {},
-  "@/lib/format": {}, "@/components/icon": {},
+  "@/lib/format": {}, "@/components/icon": {}, "@/lib/mission-run-evidence": {},
+  "@/lib/router-activity": {},
 });
 function policyPanel(tool_policy, envelopeToolPolicy, launched) {
   const tree = CompositionPanel({ composition: { tool_policy, mcp_servers: [], egress: [] },

@@ -57,7 +57,7 @@ pub async fn list_additional_providers(
     let keys = cluster
         .read_secret_all(INFERENCE_PROVIDERS_NS, INFERENCE_PROVIDERS_SECRET)
         .await
-        .map_err(upstream)?;
+        .map_err(AppError::from)?;
     let mut providers: std::collections::BTreeMap<String, AdditionalProviderDto> =
         std::collections::BTreeMap::new();
     for key in keys.keys() {
@@ -377,6 +377,15 @@ pub async fn set_default_model(
     if deployment.is_empty() {
         return Err(AppError::BadRequest(
             "a model deployment id is required".into(),
+        ));
+    }
+    if cluster
+        .try_set_inherited_model(&provider, &deployment)
+        .await
+        .map_err(upstream)?
+    {
+        return Ok(Json(
+            serde_json::json!({"ok": true, "default": deployment, "provider": provider}),
         ));
     }
     let keys = cluster

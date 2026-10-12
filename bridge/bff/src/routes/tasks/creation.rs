@@ -73,7 +73,7 @@ fn validate_mission_fallback_route(
                     "MCP server `{server}` is not present in the live options catalogue"
                 ))
             })?;
-        if !crate::routes::options::mcp_server_qualified_for_route(
+        if !crate::routes::options::mcp_server_admitted_for_route(
             runtime,
             &model.provider,
             &model.deployment,
@@ -103,7 +103,7 @@ fn validate_mission_fallback_route(
                     "memory `{memory}` is not present in the live options catalogue"
                 ))
             })?;
-        if !crate::routes::options::memory_binding_qualified_for_route(
+        if !crate::routes::options::memory_binding_admitted_for_route(
             runtime,
             &model.provider,
             &model.deployment,
@@ -129,7 +129,7 @@ fn validate_mission_fallback_route(
                     "skill `{skill}` is not present in the approved live catalogue"
                 ))
             })?;
-        if !crate::routes::options::skill_version_qualified_for_route(
+        if !crate::routes::options::skill_version_admitted_for_route(
             runtime,
             &model.provider,
             &model.deployment,
@@ -172,7 +172,13 @@ pub async fn create_task(
         .and_then(|blueprint| blueprint.execution_plan.as_ref())
     {
         crate::routes::compose::validate_execution_plan(plan).map_err(AppError::BadRequest)?;
-        req.envelope.delegation_depth = 1;
+        if req.launch {
+            crate::kars::task::execution_plan::validate_reviewed_delegation_depth(
+                i64::from(req.envelope.delegation_depth),
+                crate::kars::task::execution_plan::REVIEWED_TASK_DELEGATION_DEPTH,
+            )
+            .map_err(AppError::BadRequest)?;
+        }
     } else if let Some(delegation) = req.delegation.as_ref() {
         crate::routes::compose::validate_delegation(delegation).map_err(AppError::BadRequest)?;
         req.envelope.delegation_depth = i32::from(delegation.mode == "principal-specialists");
@@ -296,7 +302,7 @@ pub async fn create_task(
                     "MCP server `{server}` is not present in the live options catalogue"
                 )));
             };
-            match crate::routes::options::mcp_server_qualified_for_route(
+            match crate::routes::options::mcp_server_admitted_for_route(
                 runtime,
                 &model.provider,
                 &model.deployment,
@@ -331,7 +337,7 @@ pub async fn create_task(
                     "memory `{memory}` is not present in the live options catalogue"
                 )));
             };
-            match crate::routes::options::memory_binding_qualified_for_route(
+            match crate::routes::options::memory_binding_admitted_for_route(
                 runtime,
                 &model.provider,
                 &model.deployment,
@@ -363,7 +369,7 @@ pub async fn create_task(
                     "skill `{skill}` is not present in the approved live catalogue"
                 )));
             };
-            match crate::routes::options::skill_version_qualified_for_route(
+            match crate::routes::options::skill_version_admitted_for_route(
                 runtime,
                 &model.provider,
                 &model.deployment,
@@ -561,6 +567,9 @@ pub async fn create_task(
         .as_ref()
         .is_some_and(|execution| execution.launch);
     crate::kars::execution_plans::validate(&task, launch).map_err(AppError::BadRequest)?;
+    if launch {
+        crate::routes::validate::require_budget_contracts(cluster, &task).await?;
+    }
     if let Some(execution) = task.spec.execution.as_mut() {
         execution.launch = false;
     }

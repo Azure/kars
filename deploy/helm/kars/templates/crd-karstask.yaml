@@ -94,6 +94,11 @@ spec:
                       `KarsSandbox.spec.sandbox.isolation`. Defaults to `standard`.
                     nullable: true
                     type: string
+                  skills:
+                    description: Same-namespace, independently approved skills pinned at runtime creation.
+                    type: array
+                    items:
+                      type: string
                   mcpServers:
                     description: |-
                       Connected services (MCP server names, same namespace) the mission may

@@ -80,10 +80,31 @@ impl Respond for Server {
         let mut store = self.0.lock().unwrap();
         let path = request.url.path();
         let method = request.method.as_str();
-        if method == "GET" && path == format!("{PREFIX}/karsevals/eval") {
+        let eval_path = format!(
+            "{PREFIX}/karsevals/{}",
+            store.eval["metadata"]["name"].as_str().unwrap()
+        );
+        if method == "GET" {
+            for (resource, kind) in [("roles", "RoleList"), ("rolebindings", "RoleBindingList")] {
+                if path == format!("/apis/rbac.authorization.k8s.io/v1/{resource}") {
+                    assert!(
+                        request
+                            .url
+                            .query_pairs()
+                            .any(|(key, value)| key == "labelSelector"
+                                && value.starts_with("kars.azure.com/eval-proxy-owner="))
+                    );
+                    return ResponseTemplate::new(200).set_body_json(json!({
+                        "apiVersion": "rbac.authorization.k8s.io/v1",
+                        "kind": kind, "metadata": {}, "items": []
+                    }));
+                }
+            }
+        }
+        if method == "GET" && path == eval_path {
             return ResponseTemplate::new(200).set_body_json(&store.eval);
         }
-        if method == "PATCH" && path == format!("{PREFIX}/karsevals/eval/status") {
+        if method == "PATCH" && path == format!("{eval_path}/status") {
             store.eval_status_writes += 1;
             return status_patch(&mut store.eval, request);
         }
@@ -97,7 +118,7 @@ impl Respond for Server {
             store.target_status_writes += 1;
             return status_patch(&mut store.target, request);
         }
-        if method == "PATCH" && path == format!("{PREFIX}/karsevals/eval") {
+        if method == "PATCH" && path == eval_path {
             let patch: Value = serde_json::from_slice(&request.body).unwrap();
             if patch["metadata"]["uid"] != store.eval["metadata"]["uid"]
                 || patch["metadata"]["resourceVersion"] != store.eval["metadata"]["resourceVersion"]
@@ -236,6 +257,27 @@ impl Respond for Server {
         let mut value: Value = serde_json::from_slice(&request.body).unwrap();
         let name = value["metadata"]["name"].as_str().unwrap().to_owned();
         if method == "POST" {
+            let limit = if base == JOBS {
+                63
+            } else if base == CRONS {
+                52
+            } else {
+                253
+            };
+            if name.len() > limit
+                || [
+                    "/metadata/labels",
+                    "/spec/template/metadata/labels",
+                    "/spec/jobTemplate/metadata/labels",
+                    "/spec/jobTemplate/spec/template/metadata/labels",
+                ]
+                .iter()
+                .filter_map(|path| value.pointer(path).and_then(Value::as_object))
+                .flat_map(|labels| labels.values())
+                .any(|label| label.as_str().unwrap().len() > 63)
+            {
+                return failure(422);
+            }
             if if is_report {
                 store.cms.contains_key(&name)
             } else if base == CRONS {
@@ -329,7 +371,7 @@ impl Fixture {
             .insert(ANNOTATION_RUN_NOW.into(), "true".into());
         self.store.lock().unwrap().eval = json!(self.eval);
         assert!(workloads::claim_trigger(&api, &self.eval).await.unwrap());
-        self.eval = api.get("eval").await.unwrap();
+        self.eval = api.get(&self.eval.name_any()).await.unwrap();
         self.refresh_intent().await;
         let name = self.intent.request_job.clone().unwrap();
         ensure_run_now_job(
@@ -337,14 +379,6 @@ impl Fixture {
             &name,
             &self.eval,
             &self.intent,
-            "karseval-eval-corpus",
-            self.eval
-                .spec
-                .runner_image
-                .as_deref()
-                .unwrap_or("custom-numeric-user:latest"),
-            &self.intent.router,
-            &self.corpus.label,
         )
         .await
         .unwrap();
@@ -450,10 +484,6 @@ pub async fn setup() -> Fixture {
         &job_name,
         &eval,
         &intent,
-        "karseval-eval-corpus",
-        image,
-        &router,
-        &corpus.label,
     )
     .await
     .unwrap();

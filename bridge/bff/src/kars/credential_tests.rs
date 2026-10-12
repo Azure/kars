@@ -53,7 +53,7 @@ struct TestApi {
     bind_source_owner: bool,
     publish_ownership_receipt: bool,
     ownership_from_override: Option<String>,
-    gate_patch_conflict: bool,
+    gate_patch_conflicts: usize,
     target_read_mutation: Option<(String, usize, Value)>,
 }
 
@@ -229,10 +229,15 @@ async fn handle(
         return (axum::http::StatusCode::CREATED, axum::Json(value)).into_response();
     }
     if method == Method::PATCH && state.objects.contains_key(uri.path()) {
-        if state.gate_patch_conflict {
-            state.gate_patch_conflict = false;
+        if state.gate_patch_conflicts > 0 {
+            state.gate_patch_conflicts -= 1;
             let object = state.objects.get_mut(uri.path()).unwrap();
-            object["metadata"]["resourceVersion"] = "3".into();
+            let version = object["metadata"]["resourceVersion"]
+                .as_str()
+                .unwrap()
+                .parse::<u64>()
+                .unwrap();
+            object["metadata"]["resourceVersion"] = (version + 1).to_string().into();
             object["status"]["phase"] = "Ready".into();
         }
         let mut value = state.objects[uri.path()].clone();
@@ -313,7 +318,7 @@ async fn fixture() -> (Cluster, Arc<Mutex<TestApi>>, tokio::task::JoinHandle<()>
         bind_source_owner: false,
         publish_ownership_receipt: false,
         ownership_from_override: None,
-        gate_patch_conflict: false,
+        gate_patch_conflicts: 0,
         target_read_mutation: None,
         secret: json!({
         "apiVersion":"v1","kind":"Secret","type":"Opaque","metadata":{"name":"test-teams","namespace":"work","uid":"secret","resourceVersion":"2"},
@@ -363,9 +368,8 @@ fn reviewed_plan_changes(kind: &str) -> Vec<Value> {
         json!({"metadata":{"annotations":{"kars.azure.com/mission-decomposition":"execution-plan/v1"}}}),
     ];
     if kind == "KarsTeam" {
-        changes.push(
-            json!({"spec":{"roster":[{"name":"writer","blueprint":{"executionPlan":plan}}]}}),
-        );
+        changes.push(json!({"spec":{"envelope":{"delegationDepth":3},
+                "roster":[{"name":"writer","blueprint":{"executionPlan":plan}}]}}));
     }
     changes
 }
@@ -625,32 +629,89 @@ async fn credential_finish_task_without_execution_uses_inactive_default() {
 }
 
 #[tokio::test]
+async fn credential_finish_status_conflict_retains_fences_and_bounded_retries() {
+    for kind in ["KarsTask", "KarsTeam"] {
+        for active in [false, true] {
+            for conflicts in [1, 2, 3] {
+                let (cluster, state, server) = fixture().await;
+                let (target, path, object) = created_target(kind, !active);
+                {
+                    let mut s = state.lock().unwrap();
+                    s.objects.insert(path.clone(), object.clone());
+                    s.gate_patch_conflicts = conflicts;
+                }
+                let result = cluster.finish_created_credentials(&target, active).await;
+                if conflicts < 3 {
+                    result.unwrap();
+                } else {
+                    assert!(
+                        matches!(result, Err(kube::Error::Api(response)) if response.code == 409)
+                    );
+                }
+                {
+                    let s = state.lock().unwrap();
+                    let writes: Vec<_> = s.calls.iter().filter(|(m, _, _)| m == "PATCH").collect();
+                    assert_eq!(writes.len(), (conflicts + 1).min(3));
+                    for (index, (_, written_path, body)) in writes.iter().enumerate() {
+                        assert_eq!(written_path, &path);
+                        assert_eq!(body["metadata"]["uid"], "draft-uid");
+                        assert_eq!(body["metadata"]["resourceVersion"], (index + 2).to_string());
+                    }
+                    let expected = if conflicts == 3 { !active } else { active };
+                    if kind == "KarsTask" {
+                        assert_eq!(s.objects[&path]["spec"]["execution"]["launch"], expected);
+                    } else {
+                        assert_eq!(s.objects[&path]["spec"]["paused"], !expected);
+                    }
+                }
+                server.abort();
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn credential_finish_real_transition_conflict_is_not_retried_or_adopted() {
     for kind in ["KarsTask", "KarsTeam"] {
-        let (cluster, state, server) = fixture().await;
-        let (target, path, object) = created_target(kind, false);
-        {
-            let mut s = state.lock().unwrap();
-            s.objects.insert(path.clone(), object.clone());
-            s.gate_patch_conflict = true;
+        for change in [
+            json!({"metadata":{"uid":"replacement"}}),
+            json!({"metadata":{"deletionTimestamp":"2026-10-09T07:00:00Z"}}),
+            json!({"metadata":{"annotations":{"kars.azure.com/run-requested":"other-run"}}}),
+            json!({"metadata":{"labels":{"owner":"other"}}}),
+            json!({"metadata":{"finalizers":["other-finalizer"]}}),
+            json!({"metadata":{"generation":2}}),
+            json!({"spec":{"blueprint":{"model":{"deployment":"other-model"}}}}),
+            json!({"spec":{"blueprint":{"credentialBindings":{"grant":{"uid":"other"}}}}}),
+            json!({"spec":{"execution":{"launch":true},"paused":false}}),
+        ] {
+            let (cluster, state, server) = fixture().await;
+            let (target, path, object) = created_target(kind, false);
+            {
+                let mut s = state.lock().unwrap();
+                s.objects.insert(path.clone(), object.clone());
+                s.gate_patch_conflicts = 1;
+                s.target_read_mutation = Some((path.clone(), 3, change.clone()));
+            }
+            let error = cluster
+                .finish_created_credentials(&target, true)
+                .await
+                .unwrap_err();
+            assert!(matches!(error, kube::Error::Api(ref response) if response.code == 409));
+            {
+                let s = state.lock().unwrap();
+                let mut expected = object.clone();
+                json_patch::merge(&mut expected, &change);
+                assert_eq!(s.objects[&path]["spec"], expected["spec"]);
+                assert_eq!(
+                    s.calls
+                        .iter()
+                        .filter(|(method, _, _)| method == "PATCH")
+                        .count(),
+                    1
+                );
+            }
+            server.abort();
         }
-        let error = cluster
-            .finish_created_credentials(&target, true)
-            .await
-            .unwrap_err();
-        assert!(matches!(error, kube::Error::Api(ref response) if response.code == 409));
-        {
-            let s = state.lock().unwrap();
-            assert_eq!(s.objects[&path]["spec"], object["spec"]);
-            assert_eq!(
-                s.calls
-                    .iter()
-                    .filter(|(method, _, _)| method == "PATCH")
-                    .count(),
-                1
-            );
-        }
-        server.abort();
     }
 }
 

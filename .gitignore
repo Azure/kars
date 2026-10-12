@@ -481,3 +481,10 @@ tools/e2e-harness/out/
 
 # Local diagram/screenshot scratch images at repo root (blog/diagram iteration)
 /*.png
+
+# Local delivery qualification, browser captures and Node diagnostic reports
+/.artifacts/
+/.azure/deployment-plan.md
+/board-r*-dom.json
+/deliverables-rsc-*.txt
+/report.*.json

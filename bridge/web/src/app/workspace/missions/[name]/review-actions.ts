@@ -12,7 +12,7 @@ import { authenticatedBffFetch } from "@/lib/bff";
 export async function submitReview(
   task: string,
   assignmentNonce: string,
-  decision: "approve" | "request_changes",
+  decision: "approve" | "request_changes" | "retry_revision",
   comment?: string,
 ): Promise<{ error: string | null }> {
   const ns = defaultNamespace();

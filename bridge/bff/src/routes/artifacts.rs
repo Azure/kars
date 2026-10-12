@@ -25,7 +25,7 @@ use crate::routes::ownership::output_is_owned_by;
 use crate::state::AppState;
 
 /// Existing 16-byte short content address used by artifact and lineage DIDs.
-fn content_address(bytes: &[u8]) -> String {
+pub(crate) fn content_address(bytes: &[u8]) -> String {
     let full = sha256(bytes);
     let mut out = String::from("sha256:");
     for b in &full[..16] {
@@ -53,6 +53,9 @@ pub struct MissionArtifactsDto {
     pub task: String,
     /// Exact nonce-scoped evidence archive backing this row.
     pub evidence_key: Option<String>,
+    /// True only for the live Task UID's committed current revision.
+    pub current: bool,
+    pub parent: Option<String>,
     /// Standing team that produced this task-force run, when applicable.
     pub team: Option<String>,
     /// True when the disposable run was GC'd and this row comes from durable
@@ -91,6 +94,50 @@ pub struct MissionArtifactsDto {
 #[derive(Debug, Serialize)]
 pub struct ArtifactsIndexDto {
     pub missions: Vec<MissionArtifactsDto>,
+}
+
+fn deliverable_identity(files: &[ArtifactFileDto], summary: Option<&str>) -> Option<String> {
+    let mut lineage = String::new();
+    for file in files {
+        if let Some(address) = &file.content_address {
+            lineage.push_str(address);
+            lineage.push('\n');
+        }
+    }
+    if let Some(summary) = summary {
+        lineage.push_str(&content_address(summary.as_bytes()));
+    }
+    (!lineage.is_empty()).then(|| {
+        format!(
+            "did:kars:{}",
+            content_address(lineage.as_bytes()).trim_start_matches("sha256:")
+        )
+    })
+}
+
+fn archived_files(archive: &crate::team_memory::RunArchive) -> Vec<ArtifactFileDto> {
+    let mut contents: std::collections::BTreeMap<_, _> = archive
+        .documents
+        .iter()
+        .map(|document| (document.name.as_str(), document.content.as_str()))
+        .collect();
+    contents.insert("response.md", &archive.output);
+    contents
+        .into_iter()
+        .map(|(name, content)| {
+            let address = content_address(content.as_bytes());
+            ArtifactFileDto {
+                name: name.into(),
+                size_bytes: Some(content.len() as i64),
+                has_content: true,
+                did: Some(format!(
+                    "did:kars:{}",
+                    address.trim_start_matches("sha256:")
+                )),
+                content_address: Some(address),
+            }
+        })
+        .collect()
 }
 
 #[derive(Debug, Deserialize)]
@@ -152,6 +199,68 @@ fn pull_requests_with_repo_hint(
     pull_requests
 }
 
+fn artifact_files(
+    data: &std::collections::BTreeMap<String, String>,
+    contents: Option<&k8s_openapi::api::core::v1::ConfigMap>,
+) -> Vec<ArtifactFileDto> {
+    let mut entries = data
+        .get("artifacts")
+        .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(raw).ok())
+        .unwrap_or_default();
+    if let Some(contents) = contents {
+        entries.extend(
+            contents
+                .data
+                .iter()
+                .flat_map(|data| data.keys())
+                .chain(contents.binary_data.iter().flat_map(|data| data.keys()))
+                .map(|name| serde_json::json!({"name": name})),
+        );
+    }
+    let mut seen = HashSet::new();
+    entries
+        .into_iter()
+        .filter_map(|entry| {
+            let name = entry.get("name")?.as_str()?.to_string();
+            let key = crate::routes::tasks::artifact_key(&name);
+            if !seen.insert(key.clone()) {
+                return None;
+            }
+            let bytes = contents.and_then(|contents| {
+                contents
+                    .data
+                    .as_ref()
+                    .and_then(|data| data.get(&key))
+                    .map(|text| text.as_bytes())
+                    .or_else(|| {
+                        contents
+                            .binary_data
+                            .as_ref()
+                            .and_then(|data| data.get(&key))
+                            .map(|bytes| bytes.0.as_slice())
+                    })
+            });
+            let address = bytes.map(content_address).or_else(|| {
+                entry
+                    .get("sha256")
+                    .and_then(|v| v.as_str())
+                    .map(str::to_string)
+            });
+            Some(ArtifactFileDto {
+                name,
+                size_bytes: bytes
+                    .map(|bytes| bytes.len() as i64)
+                    .or_else(|| entry.get("size_bytes").and_then(|value| value.as_i64())),
+                has_content: bytes.is_some(),
+                did: address
+                    .as_ref()
+                    .map(|address| format!("did:kars:{}", address.trim_start_matches("sha256:"))),
+                content_address: address,
+            })
+        })
+        .collect()
+}
+
 /// `GET /api/artifacts` — the cross-mission deliverable index, built from the
 /// real persisted mission-output records.
 pub async fn list_artifacts(
@@ -160,64 +269,28 @@ pub async fn list_artifacts(
 ) -> AppResult<Json<ArtifactsIndexDto>> {
     let cluster = state.cluster().ok_or(AppError::ClusterUnavailable)?;
 
-    let outputs = cluster.list_mission_output_evidence().await;
+    let outputs = cluster
+        .list_mission_deliverables()
+        .await
+        .map_err(|error| AppError::Upstream(error.to_string()))?;
     let mut missions = Vec::with_capacity(outputs.len());
     let mut live_tasks = HashSet::new();
     let mut live_evidence = HashSet::new();
     for record in outputs {
-        let task = record.task_name;
-        let evidence_key = record.evidence_key;
-        let data = record.data;
+        let task = record.output.task_name;
+        let evidence_key = record.output.evidence_key;
+        let data = record.output.data;
         if !output_is_owned_by(&data, &principal) {
             continue;
         }
         live_tasks.insert(task.clone());
         live_evidence.insert(evidence_key.clone());
-        // Read the real artifact content so each file can be content-addressed.
-        let contents = cluster
-            .read_mission_artifacts(&evidence_key)
-            .await
-            .unwrap_or_default();
-        // The artifact manifest (names + sizes) is recorded on the output CM by
-        // the controller; parse it for the file list. Absent → no files (the
-        // single-turn run path produces only a text summary, no file set).
-        let files: Vec<ArtifactFileDto> = data
-            .get("artifacts")
-            .and_then(|raw| serde_json::from_str::<Vec<serde_json::Value>>(raw).ok())
-            .map(|entries| {
-                entries
-                    .into_iter()
-                    .filter_map(|e| {
-                        let name = e.get("name")?.as_str()?.to_string();
-                        let size_bytes = e.get("size_bytes").and_then(|v| v.as_i64());
-                        // Inline text content lets us content-address; binary
-                        // artifacts may carry a manifest digest instead.
-                        let inline = contents.get(&name);
-                        let content_address = inline
-                            .map(|c| content_address(c.as_bytes()))
-                            .or_else(|| e.get("sha256").and_then(|v| v.as_str()).map(String::from));
-                        let did = content_address
-                            .as_ref()
-                            .map(|ca| format!("did:kars:{}", ca.trim_start_matches("sha256:")));
-                        Some(ArtifactFileDto {
-                            name,
-                            size_bytes,
-                            // Honest downloadability: the Bridge can only serve a
-                            // file whose bytes are inlined in the artifacts CM.
-                            // A manifest-digest-only (binary) entry is listed with
-                            // its provenance but NOT marked downloadable — else the
-                            // download link would 404.
-                            has_content: inline.is_some(),
-                            content_address,
-                            did,
-                        })
-                    })
-                    .collect()
-            })
-            .unwrap_or_default();
+        let files = artifact_files(&data, record.artifacts.as_ref());
 
         let task_review = cluster.read_review(&task).await.unwrap_or_default();
-        let review = if crate::routes::review::review_matches_output(&data, &task_review) {
+        let review = if record.current
+            && crate::routes::review::review_matches_output(&data, &task_review)
+        {
             task_review
         } else {
             Default::default()
@@ -243,24 +316,11 @@ pub async fn list_artifacts(
             .map(|o| crate::routes::tasks::deliverable_excerpt(o))
             .filter(|s| !s.is_empty());
         // Deliverable DID: ordered file addresses + summary digest → one identity.
-        let mut lineage = String::new();
-        for f in &files {
-            if let Some(ca) = &f.content_address {
-                lineage.push_str(ca);
-                lineage.push('\n');
-            }
-        }
-        if let Some(s) = &summary {
-            lineage.push_str(&content_address(s.as_bytes()));
-        }
-        let deliverable_did = (!lineage.is_empty()).then(|| {
-            format!(
-                "did:kars:{}",
-                content_address(lineage.as_bytes()).trim_start_matches("sha256:")
-            )
-        });
+        let deliverable_did = deliverable_identity(&files, summary.as_deref());
         missions.push(MissionArtifactsDto {
             evidence_key: Some(evidence_key),
+            current: record.current,
+            parent: data.get("parent").cloned(),
             team: data.get("team").cloned(),
             archived: false,
             display_name: crate::routes::tasks::clean_display_name(
@@ -297,7 +357,7 @@ pub async fn list_artifacts(
         .roles
         .iter()
         .any(|role| matches!(role.as_str(), "admin" | "operator"));
-    for team in cluster.list_kind_all("KarsTeam").await.unwrap_or_default() {
+    for team in cluster.list_kind_all("KarsTeam").await? {
         let owned = team
             .metadata
             .annotations
@@ -314,13 +374,11 @@ pub async fn list_artifacts(
             .and_then(serde_json::Value::as_str)
             .filter(|name| !name.trim().is_empty())
             .unwrap_or(&team_name);
-        let Some(commons) = cluster.read_commons(commons_name).await else {
+        let Some(commons) = cluster.read_commons(&team.metadata, commons_name).await? else {
             continue;
         };
-        let entries = commons
-            .get("index.json")
-            .and_then(|raw| serde_json::from_str::<Vec<ArchivedCommonsEntry>>(raw).ok())
-            .unwrap_or_default();
+        let entries: Vec<ArchivedCommonsEntry> =
+            serde_json::from_str(&commons["index.json"]).map_err(anyhow::Error::from)?;
         let repos = team
             .data
             .pointer("/spec/blueprint/gitWrite/repos")
@@ -339,7 +397,7 @@ pub async fn list_artifacts(
             .and_then(serde_json::Value::as_str)
             .unwrap_or_default();
         for entry in entries {
-            let taskforce = entry.source_task.starts_with(&format!("{team_name}-run-"));
+            let taskforce = crate::routes::teams::is_run_name(&team_name, &entry.source_task);
             let persistent = entry
                 .source_task
                 .starts_with(&format!("{team_name}-principal-assign-"));
@@ -361,9 +419,26 @@ pub async fn list_artifacts(
             } else {
                 entry.source_task.clone()
             };
+            let archive: Option<crate::team_memory::RunArchive> = commons
+                .get(&crate::team_memory::archive_key(&entry.id))
+                .map(|raw| serde_json::from_str(raw))
+                .transpose()
+                .map_err(anyhow::Error::from)?;
+            let files = archive.as_ref().map(archived_files).unwrap_or_default();
+            let summary = crate::routes::tasks::deliverable_text(
+                archive
+                    .as_ref()
+                    .map(|archive| archive.output.as_str())
+                    .unwrap_or(&content),
+            );
+            let archive_did = archive
+                .as_ref()
+                .and_then(|_| deliverable_identity(&files, Some(&summary)));
             missions.push(MissionArtifactsDto {
                 task: task_name,
                 evidence_key: Some(entry.source_task),
+                current: false,
+                parent: None,
                 team: Some(team_name.clone()),
                 archived: true,
                 display_name: Some(entry.title),
@@ -373,14 +448,16 @@ pub async fn list_artifacts(
                 status: Some("ok".into()),
                 review_status: "none".into(),
                 review_revision: 0,
-                files: Vec::new(),
-                summary: Some(crate::routes::tasks::deliverable_text(&content)),
+                files,
+                summary: Some(summary),
                 excerpt: Some(crate::routes::tasks::deliverable_excerpt(&content)),
                 pull_requests: pull_requests_with_repo_hint(&content, &repos),
-                deliverable_did: Some(format!(
-                    "did:kars:{}",
-                    entry.digest.trim_start_matches("sha256:")
-                )),
+                deliverable_did: archive_did.or_else(|| {
+                    Some(format!(
+                        "did:kars:{}",
+                        entry.digest.trim_start_matches("sha256:")
+                    ))
+                }),
             });
         }
     }
@@ -397,6 +474,59 @@ mod digest_tests {
     use super::*;
 
     #[test]
+    fn retained_files_preserve_live_deliverable_addresses_after_task_collection() {
+        use crate::team_memory::{Document, RunArchive, Source, digest};
+
+        let content = "Full decision\r\n日本語\n";
+        let output = "Completed and attached: decision-log.md";
+        let archive = RunArchive {
+            version: 1,
+            output: output.into(),
+            output_sha256: digest(output),
+            documents: vec![Document {
+                name: "decision-log.md".into(),
+                content: content.into(),
+                sha256: digest(content),
+                source: Source {
+                    namespace: "kars-system".into(),
+                    task_name: "clinic-run".into(),
+                    task_uid: "collected-task".into(),
+                    sandbox_uid: "sandbox".into(),
+                    pod_uid: "pod".into(),
+                    run_nonce: "nonce".into(),
+                    assignment_id: "assignment".into(),
+                    agent_did: format!("did:mesh:{}", "a".repeat(32)),
+                    artifact_name: "decision-log.md".into(),
+                },
+            }],
+            handoffs: vec![],
+        };
+        let canonical = serde_json::from_value(serde_json::json!({
+            "metadata": {},
+            "data": {"decision-log.md": content, "response.md": output}
+        }))
+        .unwrap();
+        let live_files = artifact_files(&Default::default(), Some(&canonical));
+        let retained_files = archived_files(&archive);
+        assert_eq!(
+            serde_json::to_value(&live_files).unwrap(),
+            serde_json::to_value(&retained_files).unwrap()
+        );
+        let summary = crate::routes::tasks::deliverable_text(output);
+        let identity = deliverable_identity(&live_files, Some(&summary));
+        assert_eq!(
+            identity,
+            deliverable_identity(&retained_files, Some(&summary))
+        );
+        let mut revised = archive;
+        revised.documents[0].content.push('\n');
+        assert_ne!(
+            identity,
+            deliverable_identity(&archived_files(&revised), Some(&summary))
+        );
+    }
+
+    #[test]
     fn artifact_addresses_keep_the_existing_sixteen_byte_short_form() {
         assert_eq!(
             content_address(b"abc"),
@@ -407,5 +537,51 @@ mod digest_tests {
             "sha256:e3b0c44298fc1c149afbf4c8996fb924"
         );
         assert_ne!(content_address(b"abc"), content_address(b"abc\n"));
+    }
+
+    #[test]
+    fn file_index_uses_real_text_binary_and_legacy_manifest_without_duplicates() {
+        let contents = serde_json::from_value(serde_json::json!({
+            "metadata": {},
+            "data": {"report.md": "A report", "folder_note.md": "note"},
+            "binaryData": {"image.bin": "AAH/"}
+        }))
+        .unwrap();
+        let files = artifact_files(&Default::default(), Some(&contents));
+        assert_eq!(files.len(), 3);
+        assert!(
+            files
+                .iter()
+                .all(|file| file.has_content && file.content_address.is_some())
+        );
+        assert_eq!(
+            files
+                .iter()
+                .find(|file| file.name == "image.bin")
+                .unwrap()
+                .size_bytes,
+            Some(3)
+        );
+        let data = std::collections::BTreeMap::from([(
+            "artifacts".into(),
+            serde_json::json!([
+                {"name":"folder/note.md", "size_bytes":900},
+                {"name":"folder/note.md"},
+                {"name":"missing.pdf", "size_bytes":23, "sha256":"sha256:legacy"}
+            ])
+            .to_string(),
+        )]);
+        let files = artifact_files(&data, Some(&contents));
+        assert_eq!(files.len(), 4);
+        assert_eq!(files[0].name, "folder/note.md");
+        assert_eq!(files[0].size_bytes, Some(4));
+        assert!(!files[1].has_content);
+        assert_eq!(files[1].content_address.as_deref(), Some("sha256:legacy"));
+        assert_eq!(artifact_files(&data, None).len(), 2);
+        assert!(
+            artifact_files(&data, None)
+                .iter()
+                .all(|file| !file.has_content)
+        );
     }
 }

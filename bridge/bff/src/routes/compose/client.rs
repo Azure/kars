@@ -47,7 +47,7 @@ pub(super) async fn orchestrator_complete(
     //    warming router is skipped rather than failing the whole compose.
     //    Claude models use the native Anthropic `/v1/messages` path (the
     //    OpenAI-compat path returns empty content for Claude).
-    let candidates = cluster.running_sandbox_candidates().await;
+    let candidates = cluster.running_sandbox_candidates().await?;
     if candidates.is_empty() {
         anyhow::bail!(
             "orchestrator has no inference path yet — the standing `bridge-orchestrator` sandbox is still starting (retry shortly), or set BRIDGE_ORCHESTRATOR_{{ENDPOINT,TOKEN,MODEL}} to route directly at Azure AI Foundry / Azure OpenAI (scales better for many teams)"

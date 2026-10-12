@@ -6,6 +6,7 @@
 import { useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { RepoAccess } from "@/components/repo-access";
+import { loginPath } from "@/lib/auth-return";
 import type { ExecutionPlan, TeamLifecycleMode } from "@/lib/types";
 
 type McpOption = { name: string; summary?: string | null };
@@ -102,17 +103,24 @@ export function TeamEdit({
   );
   const [pending, start] = useTransition();
   const [error, setError] = useState<string | null>(null);
+  const [signInRequired, setSignInRequired] = useState(false);
   const router = useRouter();
   // PATCH with EXACTLY the given body — so Pause/Resume never smuggles an
   // unsaved charter/cadence edit into the request (that was a silent commit).
   const patch = (body: object) => start(async () => {
     setError(null);
+    setSignInRequired(false);
     try {
       const res = await fetch(`/api/namespaces/${ns}/teams/${name}`, {
         method: "PATCH",
         headers: { "content-type": "application/json" },
         body: JSON.stringify(body),
       });
+      if (res.status === 401) {
+        setSignInRequired(true);
+        setError("Your session could not be authenticated. Sign in again, then retry this change.");
+        return;
+      }
       if (!res.ok) {
         const b = await res.json().catch(() => null);
         throw new Error(b?.error?.message ?? `Save failed (${res.status})`);
@@ -129,7 +137,16 @@ export function TeamEdit({
         <button onClick={() => patch({ paused: !paused })} disabled={pending} className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted">{paused ? "Resume" : "Pause"}</button>
         <button onClick={() => setOpen(!open)} className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted">Edit</button>
       </div>
-      {error && <p className="mt-2 text-xs text-danger">{error}</p>}
+      {error && (
+        <div role="alert" className="mt-2 text-xs text-danger">
+          <p>{error}</p>
+          {signInRequired && (
+            <a href={loginPath(`/workspace/teams/${encodeURIComponent(name)}`)} className="mt-1 inline-block underline">
+              Sign in again
+            </a>
+          )}
+        </div>
+      )}
       {open && (
         <div className="mt-3 space-y-3 rounded-lg border border-border bg-surface-muted/40 p-4">
           <label className="block text-xs text-foreground-muted">Charter / standing prompt

@@ -277,19 +277,7 @@ pub(super) async fn anthropic_messages(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name: String = headers
-        .get("x-kars-sandbox")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| {
-            !v.is_empty()
-                && v.len() <= 63
-                && v.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-                && v.as_bytes()[0].is_ascii_alphanumeric()
-        })
-        .unwrap_or("unknown")
-        .to_string();
-    let sandbox_name = sandbox_name.as_str();
+    let sandbox_name = state.sandbox_name.as_str();
 
     let req_json: Value = match serde_json::from_slice(&body) {
         Ok(v) => v,
@@ -331,7 +319,15 @@ pub(super) async fn anthropic_messages(
         .await
     {
         tracing::warn!(sandbox = %sandbox_name, "Token budget exceeded (anthropic): {msg}");
-        return deny_response(StatusCode::TOO_MANY_REQUESTS, &msg, "rate_limit_error");
+        return deny_response(
+            msg.status(),
+            &msg,
+            if msg.status() == StatusCode::SERVICE_UNAVAILABLE {
+                "api_error"
+            } else {
+                "rate_limit_error"
+            },
+        );
     }
 
     let requested_model = req_json
@@ -435,7 +431,7 @@ pub(super) async fn anthropic_messages(
         || proxy::is_copilot_endpoint(&upstream.endpoint)
     {
         return forward_anthropic_passthrough(
-            state,
+            &state,
             sandbox_name,
             headers,
             body,
@@ -760,7 +756,7 @@ where
 /// supports SSE streaming and returns response bytes 1:1. Tool use,
 /// multi-modal content, and prompt caching all flow through unchanged.
 async fn forward_anthropic_passthrough(
-    state: AppState,
+    state: &AppState,
     sandbox_name: &str,
     headers: HeaderMap,
     body: Bytes,

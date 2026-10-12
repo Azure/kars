@@ -19,7 +19,7 @@ mod tests;
 
 /// Sanitize a filename to the ConfigMap key form the controller uses (alnum,
 /// '-', '_', '.') so the manifest name can look up its stored content.
-fn artifact_key(name: &str) -> String {
+pub(crate) fn artifact_key(name: &str) -> String {
     let k: String = name
         .chars()
         .map(|c| {

@@ -4,7 +4,7 @@
 import { randomBytes } from "node:crypto";
 import {
   at, canonical, consumesPrivateAuthority, digest, patchNamespace, PRIVATE_PREFIX,
-  read, record, reviewed, templateDigest,
+  read, record, requiresPrivatePodReview, reviewed, templateDigest,
   type Execute, type NamespaceReview, type PrivateActivation,
 } from "./private-activation.js";
 
@@ -154,8 +154,12 @@ export async function assertRetiredRoot(execute: Execute, activation: PrivateAct
     if (reviewed(await read(execute, "namespace", scope.namespace.name)).uid !== scope.namespace.uid) throw new Error(failure);
     const inventory = record(JSON.parse(await execute(["get", "pods", "-n", scope.namespace.name, "--chunk-size=0", "-o", "json"])));
     if (at(inventory, "metadata", "continue") || !Array.isArray(inventory.items)) throw new Error("Private retirement inventory is incomplete");
-    if (inventory.items.some(pod => state.captured[scope.namespace.uid]?.includes(reviewed(pod, true).uid)
-      || consumesPrivateAuthority(pod, scope.namespace.name, activation))) throw new Error("Private authority remains after retirement; no fresh key was requested or accepted");
+    for (const pod of inventory.items) {
+      if (state.captured[scope.namespace.uid]?.includes(reviewed(pod, true).uid)
+        || await requiresPrivatePodReview(execute, pod, scope, activation)) {
+        throw new Error("Private authority remains after retirement; no fresh key was requested or accepted");
+      }
+    }
   }
 }
 

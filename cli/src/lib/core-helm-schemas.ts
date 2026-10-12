@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 import { listSreHelmReleases as listHelmReleases } from "./sre-helm.js";
-import { schemaDocuments, type ObjectMap, type SchemaExecute } from "./schema-documents.js";
+import { readSchemaObject, schemaDocuments, type ObjectMap, type SchemaExecute } from "./schema-documents.js";
 import { planCoreSchemaDocuments, stageCoreSchemaDocuments, type SchemaStageOptions } from "./schema-stage.js";
 import { canonicalSchema, normalizedCrd } from "./schema-documents.js";
 import { assertNoCrdRemoval, assertRollbackCompatibility } from "./schema-compatibility.js";
@@ -10,6 +10,7 @@ import { enabledHelmFlag, prepareHelmFailureSafety, serverSchemaRenderFlags } fr
 import { qualifySreSchemaMigration, sreMigrationSummary } from "./sre-schema-migration.js";
 import { schemaStep } from "./sre-schema-diagnostics.js";
 import { assertRenderedControllersMutable } from "./private-root-upgrade-guard.js";
+import { coreSchemaDocuments, isMonitoringCrd, monitoringSchemaFingerprint, planMonitoringSchemas } from "./monitoring-schemas.js";
 
 export interface CoreSchemaPreparation extends Partial<SchemaStageOptions> { base365SreMigration?: boolean }
 
@@ -79,9 +80,19 @@ export async function renderCoreSchemaChart(execute: SchemaExecute, args: readon
       ...(server ? serverFlags : ["--dry-run=client"]),
       ...(upgrading ? ["--is-upgrade"] : []), ...(input ? ["-f", "-"] : []), ...values],
     { stdio: "pipe", ...(input ? { input } : {}) })).stdout);
-  // A cold cluster cannot server-validate chart CR instances until the CRDs
-  // exist. Its client render is only a bootstrap plan, never final proof.
-  return { run, documents: await render(upgrading), release, namespace, upgrading, serverRender: () => render(true) };
+  // An existing Core release can also lack a newly enabled dependency's CRDs.
+  // Client rendering is only a bootstrap plan; server verification still follows.
+  const client = await render(false);
+  let bootstrap = !upgrading;
+  if (upgrading) {
+    for (const object of client.filter(isMonitoringCrd)) {
+      if (!await readSchemaObject(run, "customresourcedefinition", object.metadata.name)) {
+        bootstrap = true;
+        break;
+      }
+    }
+  }
+  return { run, documents: bootstrap ? client : await render(true), release, namespace, upgrading, serverRender: () => render(true) };
 }
 
 export async function planCoreHelmSchemas(
@@ -91,7 +102,8 @@ export async function planCoreHelmSchemas(
     throw new Error("The reviewed BASE365 SRE schema migration is explicitly non-atomic; no rollback flag may be dropped");
   }
   schemaStep("helm-render");
-  const { run, documents, release, namespace, upgrading, serverRender } = await renderCoreSchemaChart(execute, args);
+  const { run, documents: rendered, release, namespace, upgrading, serverRender } = await renderCoreSchemaChart(execute, args);
+  const documents = coreSchemaDocuments(rendered);
   schemaStep("helm-rollback-review");
   const safety = await prepareHelmFailureSafety(run, args, documents, release, namespace, upgrading);
   schemaStep("schema-qualification");
@@ -99,6 +111,7 @@ export async function planCoreHelmSchemas(
     ? await qualifySreSchemaMigration(run, documents, { release, namespace, ownership: "helm" }) : undefined;
   const stageOptions = { ...options, release, namespace, ownership: options.ownership ?? "helm",
     rollbackDocuments: safety.rollbackDocuments, beforeWrite: safety.recheck, reviewedSreMigration };
+  const applyMonitoring = await planMonitoringSchemas(run, rendered, stageOptions);
   schemaStep("schema-plan");
   const applySchemas = await planCoreSchemaDocuments(run, documents, stageOptions);
   schemaStep("helm-history-recheck");
@@ -109,12 +122,17 @@ export async function planCoreHelmSchemas(
       await assertRenderedControllersMutable(run,
         [...documents, ...(safety.activeDocuments ?? []), ...(safety.rollbackDocuments ?? [])], namespace);
     }
+    await applyMonitoring();
     const prepared = await applySchemas();
     // Render/apply is not a Helm install: Helm's server-side ownership import
     // check would reject the deliberately template-owned CRDs.
     if (stageOptions.ownership === "template") return prepared;
     schemaStep("helm-render");
-    const actual = await serverRender();
+    const actualRendered = await serverRender();
+    if (monitoringSchemaFingerprint(actualRendered) !== monitoringSchemaFingerprint(rendered)) {
+      throw new Error("Monitoring dependency changed after its schema plan");
+    }
+    const actual = coreSchemaDocuments(actualRendered);
     if (!options.checkOnly) await assertRenderedControllersMutable(run, actual, namespace);
     const crds = (items: ObjectMap[]) => items.filter(object => object.kind === "CustomResourceDefinition")
       .map(object => ({ name: object.metadata.name, spec: normalizedCrd(object), metadata: object.metadata }))
@@ -143,7 +161,10 @@ export async function prepareCoreTemplateSchemas(
 ): Promise<string> {
   const documents = schemaDocuments(rendered);
   await assertRenderedControllersMutable(execute, documents, options.namespace);
-  await stageCoreSchemaDocuments(execute, documents, options);
+  const applyMonitoring = await planMonitoringSchemas(execute, documents, options);
+  const applyCore = await planCoreSchemaDocuments(execute, coreSchemaDocuments(documents), options);
+  await applyMonitoring();
+  await applyCore();
   return documents.filter((object: ObjectMap) => object.kind !== "CustomResourceDefinition").map(object => JSON.stringify(object)).join("\n---\n");
 }
 

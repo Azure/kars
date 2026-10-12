@@ -1,0 +1,7 @@
+**
+!sandbox-images/
+!sandbox-images/kube-state-metrics/
+!sandbox-images/kube-state-metrics/Dockerfile
+!sandbox-images/kube-state-metrics/build.sh
+!sandbox-images/kube-state-metrics/metrics.go.mod
+!sandbox-images/kube-state-metrics/metrics.go.sum

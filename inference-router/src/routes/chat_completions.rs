@@ -288,19 +288,8 @@ pub(super) async fn chat_completions(
     headers: HeaderMap,
     mut body: Bytes,
 ) -> impl IntoResponse {
-    // Extract sandbox identity from header (set by controller)
-    let sandbox_name = headers
-        .get("x-kars-sandbox")
-        .and_then(|v| v.to_str().ok())
-        .filter(|v| {
-            // Validate against K8s name rules: lowercase alphanumeric + hyphens, max 63 chars
-            !v.is_empty()
-                && v.len() <= 63
-                && v.bytes()
-                    .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-                && v.as_bytes()[0].is_ascii_alphanumeric()
-        })
-        .unwrap_or("unknown");
+    // The sidecar owns one sandbox; request headers cannot select another budget.
+    let sandbox_name = state.sandbox_name.as_str();
 
     // Slice 2 DoD #7 — `inference_policy_digest` on the audit log
     // surface. Snapshot the loaded `InferencePolicy` first so every
@@ -375,12 +364,12 @@ pub(super) async fn chat_completions(
             "Token budget exceeded: {msg}"
         );
         return (
-            StatusCode::TOO_MANY_REQUESTS,
+            msg.status(),
             Json(serde_json::json!({
                 "error": {
                     "message": msg,
                     "type": "token_budget_exceeded",
-                    "code": "budget_exceeded"
+                    "code": msg.code()
                 }
             })),
         )
@@ -957,7 +946,7 @@ pub(super) async fn chat_completions(
                     chunk
                 });
                 // Streaming output scan; skipped when no output stages.
-                let guarded: futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>> =
+                let guarded: futures::stream::BoxStream<'static, Result<Bytes, std::io::Error>> =
                     match guardrail_pipeline
                         .as_ref()
                         .filter(|p| p.covers(Direction::Output))

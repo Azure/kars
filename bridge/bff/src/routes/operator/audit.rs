@@ -32,11 +32,9 @@ pub struct ReceiptSummaryDto {
 }
 
 /// Reduce a receipt's `(class, status)` claim pairs to an overall verdict.
-/// Any FAIL/ERROR ⇒ "failed". Otherwise the badge reflects the CRYPTOGRAPHIC
-/// claims (integrity + conformance + completeness) — the "regulatory" claim and
-/// any "OMITTED" status are advisory V0-maturity disclosures that must NOT block
-/// a "verified" verdict (else every receipt reads "partial" forever). `class`
-/// is expected lowercased, `status` uppercased.
+/// This summarizes recorded claims, not cryptographic verification. All three
+/// required classes must be present and passing; only regulatory maturity is
+/// advisory. `class` is expected lowercased, `status` uppercased.
 fn receipt_verdict(claims: &[(String, String)]) -> &'static str {
     if claims.is_empty() {
         return "none";
@@ -46,9 +44,12 @@ fn receipt_verdict(claims: &[(String, String)]) -> &'static str {
     }
     let core: Vec<&(String, String)> = claims
         .iter()
-        .filter(|(class, status)| class != "regulatory" && status != "OMITTED")
+        .filter(|(class, _)| class != "regulatory")
         .collect();
-    if !core.is_empty() && core.iter().all(|(_, s)| s == "PASS" || s == "OK") {
+    let required_present = ["integrity", "conformance", "completeness"]
+        .iter()
+        .all(|required| core.iter().any(|(class, _)| class == required));
+    if required_present && core.iter().all(|(_, s)| s == "PASS" || s == "OK") {
         "verified"
     } else {
         "partial"
@@ -57,29 +58,23 @@ fn receipt_verdict(claims: &[(String, String)]) -> &'static str {
 
 fn to_receipt_summary(o: &DynamicObject) -> ReceiptSummaryDto {
     let sp = spec(o);
-    // The regulatory claim is a V0 maturity dimension — it is ALWAYS "PARTIAL"
-    // or "OMITTED" until an external KMS/transparency anchor lands (a named V1
-    // follow-up), and "OMITTED" is an honest disclosure, not a verification
-    // failure. Treating either as blocking meant NO receipt could ever read
-    // "Verified" (every one showed "Partial"), making the verdict useless. So
-    // the badge reflects the CRYPTOGRAPHIC claims (integrity + conformance +
-    // completeness); the regulatory/omitted maturity is still shown in detail.
     let claims: Vec<(String, String)> = sp
         .get("claims")
         .and_then(|c| c.as_array())
         .map(|arr| {
             arr.iter()
-                .filter_map(|c| {
+                .map(|c| {
                     let status = c
                         .get("status")
-                        .and_then(|s| s.as_str())?
+                        .and_then(|s| s.as_str())
+                        .unwrap_or("")
                         .to_ascii_uppercase();
                     let class = c
                         .get("class")
                         .and_then(|s| s.as_str())
                         .unwrap_or("")
                         .to_ascii_lowercase();
-                    Some((class, status))
+                    (class, status)
                 })
                 .collect()
         })
@@ -168,7 +163,7 @@ mod tests {
     }
 
     #[test]
-    fn receipt_verdict_regulatory_and_omitted_are_advisory() {
+    fn receipt_verdict_regulatory_maturity_is_advisory() {
         // The real V0 shape: crypto claims PASS, regulatory OMITTED. Must be
         // "verified" (regression: it used to read "partial" for every receipt).
         let v0 = vec![
@@ -203,5 +198,62 @@ mod tests {
 
         // No claims ⇒ "none".
         assert_eq!(receipt_verdict(&[]), "none");
+    }
+
+    #[test]
+    fn receipt_verdict_requires_every_core_claim() {
+        let classes = ["integrity", "conformance", "completeness"];
+        for missing in classes {
+            let claims: Vec<_> = classes
+                .iter()
+                .filter(|class| **class != missing)
+                .map(|class| claim(class, "PASS"))
+                .chain([claim("regulatory", "PASS")])
+                .collect();
+            assert_eq!(receipt_verdict(&claims), "partial", "{missing}");
+        }
+        assert_eq!(receipt_verdict(&[claim("integrity", "PASS")]), "partial");
+        assert_eq!(receipt_verdict(&[claim("unknown", "PASS")]), "partial");
+    }
+
+    #[test]
+    fn receipt_verdict_never_discards_incomplete_core_claims() {
+        let classes = ["integrity", "conformance", "completeness"];
+        for incomplete in classes {
+            for status in ["OMITTED", "PARTIAL", "", "UNKNOWN"] {
+                let claims: Vec<_> = classes
+                    .iter()
+                    .map(|class| claim(class, if *class == incomplete { status } else { "OK" }))
+                    .collect();
+                assert_eq!(receipt_verdict(&claims), "partial", "{incomplete}: {status}");
+            }
+        }
+        let mut claims: Vec<_> = classes.iter().map(|class| claim(class, "OK")).collect();
+        assert_eq!(receipt_verdict(&claims), "verified");
+        claims.push(claim("completeness", "OMITTED"));
+        assert_eq!(receipt_verdict(&claims), "partial");
+        claims.push(claim("regulatory", "ERROR"));
+        assert_eq!(receipt_verdict(&claims), "failed");
+    }
+
+    #[test]
+    fn receipt_summary_preserves_incomplete_claims_and_normalizes_case() {
+        let mut object: kube::core::DynamicObject = serde_json::from_value(serde_json::json!({
+            "apiVersion": "kars.io/v1alpha1",
+            "kind": "KarsReceipt",
+            "metadata": {"name": "receipt-run", "namespace": "test"},
+            "spec": {"claims": [
+                {"class": "INTEGRITY", "status": "pass"},
+                {"class": "conformance", "status": "ok"},
+                {"class": "completeness", "status": "PASS"}
+            ]}
+        }))
+        .unwrap();
+        assert_eq!(super::to_receipt_summary(&object).verdict, "verified");
+        object.data["spec"]["claims"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({"class": "completeness"}));
+        assert_eq!(super::to_receipt_summary(&object).verdict, "partial");
     }
 }

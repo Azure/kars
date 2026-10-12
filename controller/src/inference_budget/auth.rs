@@ -65,7 +65,7 @@ fn token_extra<'a>(
     values.first().map(String::as_str)
 }
 
-fn has_router_only_projection(pod: &Pod) -> bool {
+pub(super) fn has_router_only_projection(pod: &Pod) -> bool {
     let Some(spec) = &pod.spec else { return false };
     let private = spec
         .volumes
@@ -176,35 +176,15 @@ pub async fn authenticate(
     if dispatch && ledger.phase != crate::inference_budget_contract::AccountPhase::Active {
         return Err(denied());
     }
-    let reviews: Api<TokenReview> = Api::all(client.clone());
-    let review = reviews
-        .create(
-            &PostParams::default(),
-            &TokenReview {
-                spec: TokenReviewSpec {
-                    audiences: Some(vec![AUDIENCE.into()]),
-                    token: Some(bearer(headers)?.into()),
-                },
-                ..Default::default()
-            },
-        )
-        .await
-        .map_err(|error| api_error("verify budget audience identity", error))?;
-    let status = review.status.ok_or_else(denied)?;
-    let user = status.user.ok_or_else(denied)?;
     let runtime_namespace = format!("kars-{}", identity.sandbox.name);
-    if status.authenticated != Some(true)
-        || status.error.is_some()
-        || status.audiences.as_deref() != Some([AUDIENCE.to_string()].as_slice())
-        || user.username.as_deref()
-            != Some(format!("system:serviceaccount:{runtime_namespace}:sandbox").as_str())
-        || token_extra(&user.extra, "authentication.kubernetes.io/pod-uid")
-            != Some(identity.pod_uid.as_str())
-        || token_extra(&user.extra, "authentication.kubernetes.io/pod-name")
-            != Some(identity.pod_name.as_str())
-    {
-        return Err(denied());
-    }
+    let user = review_router_token(
+        client,
+        headers,
+        &runtime_namespace,
+        &identity.pod_name,
+        &identity.pod_uid,
+    )
+    .await?;
 
     let namespaces: Api<Namespace> = Api::all(client.clone());
     let workspace = namespaces
@@ -263,38 +243,7 @@ pub async fn authenticate(
         return Err(denied());
     }
     verify_workload_owner(client, &pod, &sandbox, &runtime_namespace, dispatch).await?;
-
-    // The ordinary agent credential must not be able to mint a replacement
-    // budget-audience token for its shared Pod service account.
-    let access: Api<SubjectAccessReview> = Api::all(client.clone());
-    for (resource, subresource, name) in [
-        ("serviceaccounts", "token", "sandbox"),
-        ("pods", "exec", identity.pod_name.as_str()),
-        ("pods", "attach", identity.pod_name.as_str()),
-    ] {
-        let request: SubjectAccessReview = serde_json::from_value(json!({
-            "apiVersion": "authorization.k8s.io/v1", "kind": "SubjectAccessReview",
-            "spec": {
-                "user": user.username, "groups": user.groups,
-                "resourceAttributes": {"namespace": runtime_namespace, "verb": "create",
-                    "group": "", "resource": resource, "subresource": subresource, "name": name}
-            }
-        }))
-        .map_err(|_| denied())?;
-        let result = access
-            .create(&PostParams::default(), &request)
-            .await
-            .map_err(|e| api_error("verify agent cannot access budget token", e))?;
-        let status = result.status.ok_or_else(denied)?;
-        if status.allowed
-            || status
-                .evaluation_error
-                .as_ref()
-                .is_some_and(|error| !error.is_empty())
-        {
-            return Err(denied());
-        }
-    }
+    verify_agent_privileges(client, &user, &runtime_namespace, &identity.pod_name).await?;
 
     // This is the combined-privacy prerequisite, not an agent-admin-token
     // fallback. It performs real shared Secret GET/LIST/WATCH denial checks and
@@ -332,7 +281,83 @@ pub async fn authenticate(
     verify_task_binding(client, account, ledger, identity, &sandbox, dispatch).await
 }
 
-async fn verify_workload_owner(
+pub(super) async fn review_router_token(
+    client: &Client,
+    headers: &HeaderMap,
+    runtime_namespace: &str,
+    pod_name: &str,
+    pod_uid: &str,
+) -> Result<k8s_openapi::api::authentication::v1::UserInfo, StoreError> {
+    let reviews: Api<TokenReview> = Api::all(client.clone());
+    let review = reviews
+        .create(
+            &PostParams::default(),
+            &TokenReview {
+                spec: TokenReviewSpec {
+                    audiences: Some(vec![AUDIENCE.into()]),
+                    token: Some(bearer(headers)?.into()),
+                },
+                ..Default::default()
+            },
+        )
+        .await
+        .map_err(|error| api_error("verify budget audience identity", error))?;
+    let status = review.status.ok_or_else(denied)?;
+    let user = status.user.ok_or_else(denied)?;
+    if status.authenticated != Some(true)
+        || status.error.is_some()
+        || status.audiences.as_deref() != Some([AUDIENCE.to_string()].as_slice())
+        || user.username.as_deref()
+            != Some(format!("system:serviceaccount:{runtime_namespace}:sandbox").as_str())
+        || token_extra(&user.extra, "authentication.kubernetes.io/pod-uid") != Some(pod_uid)
+        || token_extra(&user.extra, "authentication.kubernetes.io/pod-name") != Some(pod_name)
+    {
+        return Err(denied());
+    }
+
+    Ok(user)
+}
+
+pub(super) async fn verify_agent_privileges(
+    client: &Client,
+    user: &k8s_openapi::api::authentication::v1::UserInfo,
+    runtime_namespace: &str,
+    pod_name: &str,
+) -> Result<(), StoreError> {
+    let access: Api<SubjectAccessReview> = Api::all(client.clone());
+    for (resource, subresource, name) in [
+        ("serviceaccounts", "token", "sandbox"),
+        ("pods", "exec", pod_name),
+        ("pods", "attach", pod_name),
+    ] {
+        let request: SubjectAccessReview = serde_json::from_value(json!({
+            "apiVersion": "authorization.k8s.io/v1", "kind": "SubjectAccessReview",
+            "spec": {
+                "user": user.username, "groups": user.groups,
+                "resourceAttributes": {"namespace": runtime_namespace, "verb": "create",
+                    "group": "", "resource": resource, "subresource": subresource, "name": name}
+            }
+        }))
+        .map_err(|_| denied())?;
+        let result = access
+            .create(&PostParams::default(), &request)
+            .await
+            .map_err(|e| api_error("verify agent cannot access budget token", e))?;
+        let status = result.status.ok_or_else(denied)?;
+        if status.allowed
+            || status
+                .evaluation_error
+                .as_ref()
+                .is_some_and(|error| !error.is_empty())
+        {
+            return Err(denied());
+        }
+    }
+
+    Ok(())
+}
+
+pub(super) async fn verify_workload_owner(
     client: &Client,
     pod: &Pod,
     sandbox: &KarsSandbox,
@@ -523,7 +548,7 @@ async fn verify_task_binding(
         .get(&node.authority.task.name)
         .await
         .map_err(|error| api_error("verify current task authority", error))?;
-    let lineage = crate::task_identity::resolve(
+    let lineage = crate::task_identity::resolve_with_retry(
         client,
         &leaf,
         crate::task_identity::LeafReadiness::RequireReady,

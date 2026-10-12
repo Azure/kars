@@ -468,6 +468,7 @@ mod tests {
         UpstreamConfig {
             telemetry: None,
             inference_budget: None,
+            calendar_budget: None,
             endpoint: "https://example.openai.azure.com".into(),
             deployment: dep.to_string(),
             sandbox_name: "sbx".into(),

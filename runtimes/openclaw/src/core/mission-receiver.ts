@@ -15,7 +15,7 @@ export interface MissionReceiverOptions {
   expectedContract?: MissionContract;
   admission: MissionAdmission;
   authorize: (assignment: MissionAssignment) => Promise<boolean>;
-  execute: (content: string, progress: (evidence: TaskExecutionEvidence) => void, artifactsEnabled: boolean, reviewedPhase?: FilesystemPhase, inputArtifacts?: readonly MissionInput[]) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
+  execute: (content: string, progress: (evidence: TaskExecutionEvidence, routerObservations?: string) => void, artifactsEnabled: boolean, reviewedPhase?: FilesystemPhase, inputArtifacts?: readonly MissionInput[], liveActivityEnabled?: boolean, requiredOutputs?: readonly string[]) => Promise<TaskExecutionEvidence & Pick<MissionReply, "artifacts"> & { output: string }>;
   send: (to: string, reply: MissionReply) => Promise<unknown>;
   warn: (message: string) => void;
   bootId?: string;
@@ -80,6 +80,8 @@ export class MissionReceiver {
         dispatcherDid: message.dispatcherDid, challenge: message.challenge, bootId: this.bootId,
         ...(message.reviewedPhase ? { reviewedPhase: message.reviewedPhase, phaseDigest: message.phaseDigest } : {}),
         ...(message.inputDigest ? { inputDigest: message.inputDigest } : {}),
+        ...(message.requiredOutputs ? { requiredOutputs: message.requiredOutputs } : {}),
+        ...(message.activityFormat ? { activityFormat: message.activityFormat } : {}),
       });
       if (ready?.type === "mission:reply") await this.send(ready);
       else this.options.warn("Invalid bounded mission readiness reply");
@@ -111,8 +113,10 @@ export class MissionReceiver {
       podUid: assignment.podUid, runNonce: assignment.runNonce, agentDid: assignment.agentDid,
       dispatcherDid: assignment.dispatcherDid, bootId: assignment.bootId, assignmentId: assignment.assignmentId,
       ...(assignment.artifactFormat ? { artifactFormat: assignment.artifactFormat } : {}),
+      ...(assignment.activityFormat ? { activityFormat: assignment.activityFormat } : {}),
       ...(assignment.reviewedPhase ? { reviewedPhase: assignment.reviewedPhase, phaseDigest: assignment.phaseDigest } : {}),
       ...(assignment.inputDigest ? { inputDigest: assignment.inputDigest } : {}),
+      ...(assignment.requiredOutputs ? { requiredOutputs: assignment.requiredOutputs } : {}),
       ...extra,
     };
   }
@@ -125,6 +129,7 @@ export class MissionReceiver {
   private async run(execution: Execution): Promise<void> {
     let progressSends = Promise.resolve();
     let latest: MissionReply["evidence"];
+    let latestObservations: string | undefined;
     let progressCount = 0;
     let finished = false;
     let progressError: Error | undefined;
@@ -141,10 +146,15 @@ export class MissionReceiver {
       if (!await this.options.authorize(execution.assignment)) throw new Error("Mission policy denied or evaluation unavailable");
       execution.reply = this.reply(execution.assignment, "accepted");
       await this.send(execution.reply);
-      const result = await this.options.execute(execution.assignment.content, (evidence) => {
+      const required = this.options.expectedContract.requiredOutputs;
+      const result = await this.options.execute(execution.assignment.content, (evidence, routerObservations) => {
         try {
           if (finished || progressError || progressCount >= 126) throw new Error("Mission progress is closed or exceeds the journal bound");
-          const progress = validateEvidence(evidence, "running");
+          const progress = parseMissionMessage({ ...validateEvidence(evidence, "running"),
+            ...(routerObservations !== undefined || latestObservations !== undefined
+              ? { routerObservations: routerObservations ?? latestObservations } : {}) });
+          if (!progress || progress.type !== "mission:reply") throw new Error("Invalid or unnegotiated mission activity");
+          latestObservations = progress.routerObservations;
           progressCount++;
           execution.reply = progress;
           progressSends = progressSends.then(() => this.send(progress));
@@ -152,7 +162,8 @@ export class MissionReceiver {
           progressError = error instanceof Error ? error : new Error("Invalid mission progress");
           throw progressError;
         }
-      }, execution.assignment.artifactFormat === "text-v1", this.options.expectedContract.reviewedPhase, execution.assignment.inputArtifacts);
+      }, execution.assignment.artifactFormat === "text-v1", this.options.expectedContract.reviewedPhase, execution.assignment.inputArtifacts,
+      execution.assignment.activityFormat === "router-observations-v1", required);
       finished = true;
       if (progressError) throw progressError;
       const descriptors = Object.getOwnPropertyDescriptors(result);
@@ -165,6 +176,9 @@ export class MissionReceiver {
       validateEvidence(measured as unknown as TaskExecutionEvidence, "failed");
       if (result.artifacts !== undefined && (execution.assignment.artifactFormat !== "text-v1" || !validMissionArtifacts(result.artifacts))) {
         throw new TaskExecutionError("Invalid or unnegotiated mission artifacts", latest!);
+      }
+      if (required?.some(name => !Object.hasOwn(result.artifacts ?? {}, name))) {
+        throw new TaskExecutionError("Missing required named mission output", latest!);
       }
       const reply = parseMissionMessage(this.reply(execution.assignment, "succeeded", {
         output: result.output, ...(result.artifacts ? { artifacts: result.artifacts } : {}), evidence: latest,

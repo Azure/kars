@@ -4,3 +4,4 @@
 **
 !cli/schema-hook/Dockerfile
 !cli/schema-hook/Dockerfile.dockerignore
+!cli/schema-hook/build-tools.sh

@@ -23,6 +23,19 @@ let RID = 1;
 
 export function PolicyBuilder() {
   const [open, setOpen] = useState(false);
+  if (open) return <PolicyBuilderForm onClose={() => setOpen(false)} />;
+  return (
+    <button
+      type="button"
+      onClick={() => setOpen(true)}
+      className="rounded-lg border border-signal/40 bg-signal/10 px-3 py-1.5 text-xs font-medium text-signal hover:bg-signal/15"
+    >
+      <Icon name="wrench" size={14} className="inline mr-1" /> Build a policy
+    </button>
+  );
+}
+
+function PolicyBuilderForm({ onClose }: { onClose: () => void }) {
   const [state, action, pending] = useActionState(applyGovernanceAction, init);
 
   const [name, setName] = useState("");
@@ -65,24 +78,12 @@ export function PolicyBuilder() {
       return next;
     });
 
-  if (!open) {
-    return (
-      <button
-        type="button"
-        onClick={() => setOpen(true)}
-        className="rounded-lg border border-signal/40 bg-signal/10 px-3 py-1.5 text-xs font-medium text-signal hover:bg-signal/15"
-      >
-        <Icon name="wrench" size={14} className="inline mr-1" /> Build a policy
-      </button>
-    );
-  }
-
   if (state.ok) {
     return (
       <div className="mt-2 rounded-xl border border-ok/30 bg-ok/5 p-4 text-sm">
         <p className="font-medium text-ok">Policy created.</p>
         <p className="mt-0.5 text-xs text-foreground-muted">{state.ok}</p>
-        <button type="button" onClick={() => setOpen(false)} className="mt-2 rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-muted">Done</button>
+        <button type="button" onClick={onClose} className="mt-2 rounded-md border border-border px-2 py-1 text-xs hover:bg-surface-muted">Done</button>
       </div>
     );
   }
@@ -98,7 +99,7 @@ export function PolicyBuilder() {
           <p className="text-sm font-semibold">Build a tool policy</p>
           <p className="text-xs text-foreground-muted">Pick what agents may do — no YAML. The cluster compiles and enforces it.</p>
         </div>
-        <button type="button" onClick={() => setOpen(false)} className="text-xs text-foreground-muted hover:text-foreground">Close</button>
+        <button type="button" onClick={onClose} disabled={pending} className="text-xs text-foreground-muted hover:text-foreground disabled:opacity-50">Close</button>
       </div>
 
       {/* Identity + scope */}

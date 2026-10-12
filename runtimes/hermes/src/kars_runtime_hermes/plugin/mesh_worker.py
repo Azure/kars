@@ -28,7 +28,10 @@ KARS_RUNTIME_KIND is Hermes); the parent never sets it for itself
 because the parent IS the LLM-driver and would otherwise infinite-loop
 on its own outbound messages.
 
-Security: the inbound message body is fed VERBATIM to the LLM as a
+Reserved ``mission:*`` envelopes are discarded before the generic responder;
+encrypted peer messaging does not authorize installed mission execution.
+
+Security: an ordinary inbound message body is fed VERBATIM to the LLM as a
 prompt. Trust gating happens upstream in the AGT pre_tool_call hook
 and the AGT KNOCK trust-threshold check — by the time the message is
 in the inbox, it has already cleared both layers.
@@ -37,6 +40,7 @@ in the inbox, it has already cleared both layers.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import os
 from typing import Any
@@ -183,11 +187,16 @@ def _maybe_save_file_transfer(
             "size_bytes": len(file_bytes),
         }
         try:
-            asyncio.create_task(
+            task = asyncio.create_task(
                 client.send_by_name(
                     to=sender, payload=_json.dumps(ack).encode("utf-8")
                 )
             )
+            from .mesh_auth import RequiredEntraLease
+
+            auth = getattr(client, "connection_auth", None)
+            if isinstance(auth, RequiredEntraLease):
+                auth.track(task)
         except Exception as exc:  # noqa: BLE001
             logger.debug(
                 "mesh_worker: file_transfer_ack send scheduling failed: %s",
@@ -207,8 +216,66 @@ def _maybe_save_file_transfer(
     return summary
 
 
-async def _handle_message(client: Any, msg: Any) -> None:
+def _is_reserved_mission(payload_text: str) -> bool:
+    """Reserve mission envelopes, including the supported task_request wrapper.
+
+    Inspect pairs before dict construction so duplicate type keys cannot hide a
+    mission behind a legacy envelope. This is a deny-only classifier, not mission
+    protocol validation or an execution adapter.
+    """
+    class ReservedMission(Exception):
+        pass
+
+    def inspect(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+        types = [value for key, value in pairs if key == "type"]
+        if any(isinstance(value, str) and value.startswith("mission:") for value in types):
+            raise ReservedMission
+        if "task_request" in types:
+            for key, value in pairs:
+                if key == "content" and isinstance(value, str) and _is_reserved_mission(value):
+                    raise ReservedMission
+        return dict(pairs)
+
+    try:
+        json.loads(payload_text, object_pairs_hook=inspect)
+    except (ReservedMission, RecursionError):
+        return True
+    except ValueError:
+        return False
+    return False
+
+
+async def _handle_message(client: Any, msg: Any, generation=None) -> None:
+    from .mesh_auth import RequiredEntraLease
+
+    auth = getattr(client, "connection_auth", None)
+    if isinstance(auth, RequiredEntraLease):
+        if generation is not None and generation != auth.generation:
+            return
+        auth.track(asyncio.current_task())
+        generation = auth.generation
+
+    def check():
+        if isinstance(auth, RequiredEntraLease):
+            from kars_agt_mesh import MeshTransportError
+
+            if client.connection_auth is not auth or auth.generation != generation:
+                raise MeshTransportError("Mesh message belongs to a superseded authorization")
+            auth.check()
+
+    await _handle_authorized_message(client, msg, check)
+
+
+async def _handle_authorized_message(client: Any, msg: Any, check) -> None:
+    check()
     payload_text = msg.payload.decode("utf-8", errors="replace")
+    if _is_reserved_mission(payload_text):
+        receiver = getattr(client, "_kars_mission_receiver", None)
+        if receiver is not None:
+            await receiver.receive(msg)
+        else:
+            logger.warning("mesh_worker: reserved mission envelope discarded; receiver disabled")
+        return
     logger.info(
         "mesh_worker: handling inbound msg (from=%s bytes=%d payload[:200]=%r)",
         msg.from_did,
@@ -243,6 +310,7 @@ async def _handle_message(client: Any, msg: Any) -> None:
         from . import telemetry as _telemetry  # noqa: PLC0415
 
         sender_name_for_trust = await _resolve_sender_name(client, msg.from_did)
+        check()
         _telemetry.submit_trust(
             agent_id=sender_name_for_trust or msg.from_did,
             score=0.5,
@@ -251,6 +319,7 @@ async def _handle_message(client: Any, msg: Any) -> None:
     except Exception as exc:  # noqa: BLE001
         logger.debug("mesh_worker: trust publish failed (non-fatal): %s", exc)
 
+    check()
     # LLM-spawning is opt-in via KARS_MESH_AUTO_RESPONDER. A top-level
     # (channel-driven) Hermes agent must NOT auto-spawn hermes -z on
     # every inbound or it would infinite-loop on its own replies. The
@@ -278,12 +347,11 @@ async def _handle_message(client: Any, msg: Any) -> None:
         stderr=asyncio.subprocess.PIPE,
     )
     try:
+        check()
         stdout_b, stderr_b = await asyncio.wait_for(
             proc.communicate(), timeout=timeout_seconds
         )
     except asyncio.TimeoutError:
-        proc.kill()
-        await proc.wait()
         reply = f"WORKER_TIMEOUT after {timeout_seconds:.0f}s"
         logger.warning("mesh_worker: %s for inbound from %s", reply, msg.from_did)
     else:
@@ -293,10 +361,16 @@ async def _handle_message(client: Any, msg: Any) -> None:
                 f"WORKER_ERROR rc={proc.returncode}\nstdout:\n{reply}"
                 f"\nstderr:\n{stderr_b.decode(errors='replace').strip()}"
             )
+    finally:
+        if proc.returncode is None:
+            proc.kill()
+        await proc.wait()
 
     # Reply via the same MeshClient. Try the friendly name first
     # (lets the sender match by display name), fall back to DID.
+    check()
     sender_name = await _resolve_sender_name(client, msg.from_did)
+    check()
     try:
         if sender_name:
             await client.send_by_name(to=sender_name, payload=reply.encode("utf-8"))
@@ -317,6 +391,11 @@ async def _handle_message(client: Any, msg: Any) -> None:
 
 async def _worker_loop(get_client: Any) -> None:
     client = get_client()
+    from .mesh_auth import RequiredEntraLease
+
+    auth = getattr(client, "connection_auth", None)
+    if isinstance(auth, RequiredEntraLease):
+        auth.track(asyncio.current_task(), listener=True)
     logger.info(
         "mesh_worker: loop started for did=%s (auto-respond mode)",
         client._identity.did,  # noqa: SLF001 — internal but stable
@@ -326,7 +405,10 @@ async def _worker_loop(get_client: Any) -> None:
         # -z burning minutes on real work) doesn't block the inbox
         # drain — sibling messages can arrive concurrently when the
         # parent fans out to multiple children at once.
-        asyncio.create_task(_handle_message(client, msg))
+        generation = auth.generation if isinstance(auth, RequiredEntraLease) else None
+        task = asyncio.create_task(_handle_message(client, msg, generation))
+        if isinstance(auth, RequiredEntraLease):
+            auth.track(task)
 
 
 def start_worker(get_client: Any) -> None:

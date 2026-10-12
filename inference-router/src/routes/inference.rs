@@ -35,48 +35,6 @@ fn strip_project_prefix(endpoint: &str) -> &str {
     }
 }
 
-/// Resolve the calling sandbox name from `x-kars-sandbox` if present and
-/// DNS-label-shaped, otherwise fall back to the `SANDBOX_NAME` env var
-/// (the per-sandbox router sidecar always knows its own identity). The
-/// `"unknown"` final fallback is reserved for legitimately
-/// cross-sandbox callers that don't set the header AND for tests that
-/// don't set SANDBOX_NAME — both cases never happen in production
-/// reconciler-managed pods.
-///
-/// Without this, every Hermes (and pydantic-ai / langgraph / …) chat
-/// completion was being labelled `sandbox="unknown"` in Prometheus —
-/// breaking the operator dashboard's "Inference by sandbox" panel and
-/// hiding the request/token mix per agent.
-fn resolve_sandbox_name(headers: &HeaderMap) -> &'static str {
-    if let Some(hdr) = headers.get("x-kars-sandbox").and_then(|v| v.to_str().ok()) {
-        let trimmed = hdr.trim();
-        if !trimmed.is_empty()
-            && trimmed.len() <= 63
-            && trimmed
-                .bytes()
-                .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
-            && trimmed
-                .bytes()
-                .next()
-                .is_some_and(|b| b.is_ascii_alphanumeric())
-        {
-            // Cache leak: only header-supplied names are leaked, and they
-            // come from a finite set (the cluster's sandbox names). The
-            // header is policy-validated above so this is safe.
-            return Box::leak(trimmed.to_string().into_boxed_str());
-        }
-    }
-    static FALLBACK: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
-    FALLBACK.get_or_init(|| {
-        let env_name = std::env::var("SANDBOX_NAME").unwrap_or_default();
-        if env_name.is_empty() {
-            "unknown"
-        } else {
-            Box::leak(env_name.into_boxed_str())
-        }
-    })
-}
-
 /// Inference API routes — proxied to Azure AI Foundry.
 pub fn inference_routes() -> Router<AppState> {
     Router::new()
@@ -248,7 +206,7 @@ async fn completions(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name = resolve_sandbox_name(&headers);
+    let sandbox_name = state.sandbox_name.as_str();
 
     if let Some(resp) =
         super::chat_completions::guard_unenforced_route(&state, sandbox_name, "completions").await
@@ -287,8 +245,7 @@ async fn responses(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name_owned = resolve_sandbox_name(&headers).to_string();
-    let sandbox_name = sandbox_name_owned.as_str();
+    let sandbox_name = state.sandbox_name.as_str();
 
     if let Some(resp) =
         super::chat_completions::guard_unenforced_route(&state, sandbox_name, "responses").await
@@ -350,9 +307,13 @@ async fn responses(
             "Token budget exceeded: {msg}"
         );
         return errors::openai(
-            StatusCode::TOO_MANY_REQUESTS,
-            msg,
-            errors::TOKEN_BUDGET_EXCEEDED,
+            msg.status(),
+            msg.to_string(),
+            if msg.status() == StatusCode::SERVICE_UNAVAILABLE {
+                msg.code()
+            } else {
+                errors::TOKEN_BUDGET_EXCEEDED
+            },
         )
         .into_response();
     }
@@ -436,7 +397,7 @@ async fn embeddings(
     headers: HeaderMap,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name = resolve_sandbox_name(&headers);
+    let sandbox_name = state.sandbox_name.as_str();
 
     if let Some(resp) =
         super::chat_completions::guard_unenforced_route(&state, sandbox_name, "embeddings").await
@@ -488,7 +449,7 @@ async fn images_generations(
     _query: axum::extract::RawQuery,
     body: Bytes,
 ) -> impl IntoResponse {
-    let sandbox_name = resolve_sandbox_name(&headers);
+    let sandbox_name = state.sandbox_name.as_str();
 
     if let Some(resp) =
         super::chat_completions::guard_unenforced_route(&state, sandbox_name, "images/generations")
@@ -822,7 +783,7 @@ async fn foundry_proxy(
             "unsupported_budget_operation",
         ).into_response();
     }
-    let sandbox_name = resolve_sandbox_name(&headers);
+    let sandbox_name = state.sandbox_name.as_str();
 
     // The raw path is concatenated into the upstream URL below, and
     // URL parsing resolves `.`/`..` segments (including

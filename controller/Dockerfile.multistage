@@ -25,6 +25,8 @@ COPY a2a-gateway/ a2a-gateway/
 COPY kars-a2a-core/ kars-a2a-core/
 COPY eval-corpus/ eval-corpus/
 COPY conformance-runner/ conformance-runner/
+COPY shared/ shared/
+COPY deploy/helm/kars/ deploy/helm/kars/
 COPY tests/ tests/
 COPY cli/blocklists/ cli/blocklists/
 COPY cli/profiles/agt/ cli/profiles/agt/

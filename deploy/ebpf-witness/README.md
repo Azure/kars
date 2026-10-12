@@ -10,8 +10,10 @@ and compares explicitly selected sandboxes with the controller's compiled
 egress baselines. It observes; it does not enforce policy, sign attestations,
 or establish complete kernel coverage.
 
-The supported switch is `enabled=true` / `enabled=false` in the standalone
-`deploy/helm/kars-datapath-witness` chart. **A real cluster operator runs Helm.**
+Core includes the maintained witness chart as its local `datapathWitness`
+dependency: use `datapathWitness.enabled=true` / `false`, without a third release.
+The standalone `kars-datapath-witness` release remains supported for existing
+operators. **A real cluster operator runs Helm.**
 Bridge only reads two fixed ConfigMaps and offers admin-only copy controls. A
 copied command has not run, created a release, or enabled observation. There is
 no privileged BFF actuator or web-request shell execution.
@@ -24,7 +26,8 @@ no privileged BFF actuator or web-request shell execution.
   of the public source; it is not a supported installation path.
 - Helm 3.18+ or Helm 4, an **explicit reviewed kube context**, existing
   `kars-system`, and existing `KarsSandbox` resources and `kars-<name>` namespaces.
-  The fixed release name is `kars-datapath-witness`, stored in `kars-system`.
+  The fixed release name is `kars` (Core) or `kars-datapath-witness` (standalone),
+  stored in `kars-system`.
   Do not use `--create-namespace`, `--take-ownership`, `--force`, `--force-replace`,
   client-only dry runs as preflight, or another release name.
 - An operator with Helm lifecycle authority for this release's resources,
@@ -33,8 +36,25 @@ no privileged BFF actuator or web-request shell execution.
   DaemonSet/Deployment lists to detect known observers. A denied read fails
   preflight; it is not treated as absence. This is the operator's authority,
   **not an additional Bridge permission**.
+  The native capture client uses a read-only kubeconfig referencing its existing
+  projected service-account token file and cluster CA; no token is copied into
+  a ConfigMap or accepted without TLS verification. The observer has GET-only
+  access to standard apps/batch workload owners for pod attribution, not workload
+  writes or Secret access.
 - Linux amd64/arm64 nodes with readable, nonempty `/sys/kernel/btf/vmlinux`
   (BTF v1), compatible eBPF/fanotify support, and a supported containerd setup.
+  The default `gadget.hookMode=fanotify+ebpf` requires
+  `CONFIG_FANOTIFY_ACCESS_PERMISSIONS=y`; additional capabilities cannot enable
+  a compiled-out kernel feature. On a reviewed kernel without permission
+  events (including some Docker Desktop Kind hosts), explicitly select
+  `datapathWitness.gadget.hookMode=podinformer` in Core, or
+  `gadget.hookMode=podinformer` for the standalone chart. This reuses upstream
+  Kubernetes container discovery without installing host hooks or changing
+  the kernel. DNS/TCP capture still uses the same signed eBPF gadgets.
+  Container discovery is asynchronous and may miss startup/short-lived traffic:
+  coverage remains **partial**, never complete. Automatic fallback remains
+  disabled. The selected mode is bound into the runtime configuration digest;
+  changing it rolls the observer and invalidates old report/config matching.
   Every scheduled IG pod checks the mounted host BTF header in an unprivileged
   init container. Node readiness/list access is not a BTF test. BTF presence
   alone does not prove that either gadget can load or cover all traffic.
@@ -48,27 +68,34 @@ no privileged BFF actuator or web-request shell execution.
   access. In particular, host proc symlinks/runtime sockets remain sensitive.
   No changes to core PSS, CNI, model resources, node pools, VM/VMSS or AKS are
   made by this chart. It never automatically opts in GPU/H100 nodes.
-- A **built and published aggregator image by digest**, pullable by all selected
+- A **built and published AL3 witness runtime image by digest**, pullable by all selected
   node architectures. There is no implied prepublished Kars aggregator image,
   `:dev` fallback, or automatic ACR build/push. Private pull secrets, if needed,
   must already exist in the dedicated namespace; provision that namespace with
   this chart's exact ownership metadata only after operator review, not by
   adopting an unrelated namespace. Otherwise use a registry accessible through
   the cluster's existing registry integration or a public operator image.
+  Set both `aggregator.image` and `gadget.image` to the qualified runtime digest.
+  Both are required when enabled; there is no automatic Debian-daemon fallback.
   The chart neither reads nor creates Secrets for registry credentials.
 
 ## Build / image and package provenance
 
 Run from a reviewed public source revision in an environment with a functioning
 container builder and network access. **These commands are operator actions;
-they are not executed by Bridge.** Pin an approved Python 3.12+ Linux base index,
-record the source revision, and publish to your own authorized registry:
+they are not executed by Bridge.** The maintained recipe uses separate
+digest-pinned Azure Linux 3 Python 3.12 build and distroless runtime bases,
+matching Kars's AgentMesh packaging. The Go 1.27.2 SDK is copied from the official
+toolchain image, but compilation and upstream CLI/OCI/API-helper tests execute in the AL3
+builder. No Debian runtime files, shell or package manager enter the final
+image. The builder prepares a runtime tree with searchable directories,
+read-only source/provenance and both static executables; the final stage
+copies that tree without a runtime shell or permission-changing command.
+Record the source revision and publish to your own authorized registry:
 
 ```sh
-export WITNESS_PYTHON_BASE='python:3.12-alpine3.22@sha256:a190708a2dec1bd18b1decb539f8e8f5407abaa9bf39cacda583f7f8c11db322'
 export WITNESS_IMAGE='YOUR_REGISTRY/kars-datapath-witness-aggregator:latest'
 docker buildx build --platform linux/amd64,linux/arm64 \
-  --build-arg PYTHON_BASE="$WITNESS_PYTHON_BASE" \
   --build-arg SOURCE_REVISION="$(git rev-parse HEAD)" \
   --file deploy/ebpf-witness/aggregator/Dockerfile \
   --tag "$WITNESS_IMAGE" --provenance=mode=max --sbom=true \
@@ -81,9 +108,30 @@ Retain the metadata, SBOM and source revision; apply your registry's image
 signing/review policy before installation. A Dockerfile/chart reference is not
 evidence that this image was built, pushed, or qualified.
 
-The Dockerfile embeds the real upstream `kubectl-gadget` v0.53.2 client, checks
-the release archive's SHA-256 **before** extracting its one binary, and installs
-it only in the image. No kubectl/Python packages are downloaded at runtime.
+If refreshing bases, override `PYTHON_BUILD_BASE` and `PYTHON_BASE` with reviewed
+digest-pinned Azure Linux `base/python` and `distroless/python` indexes,
+respectively; mutable tags and other distributions are refused before source
+extraction and compilation. Both base references are retained in `/opt/witness/build.json`.
+The same runtime contains the upstream daemon at `/usr/bin/gadgettracermanager`,
+also accessible through AL3's `/bin` symlink. Packaging preserves this usrmerge layout.
+It is built without the client's `withoutebpf` tag and retains upstream embedded
+BPF objects from the checksum-verified source archive. No host-hook installers
+or global cleanup executable are added. The chart explicitly selects this
+daemon entrypoint; the image default remains the unprivileged aggregator.
+The daemon's elevated host access and the separately pinned OCI gadget artifacts
+still require operator review and actual kernel-capture qualification.
+
+The Dockerfile builds the real upstream `kubectl-gadget` v0.53.2 source at
+commit `7a314380ff61534ea70df9fb086505f958b2dff9`, rather than embedding its
+vulnerable release binary. It verifies the source archive before extraction,
+uses reviewed `client.go.mod`/`client.go.sum` locks with read-only module
+resolution, and retains upstream `withoutebpf` client and OCI verification tests.
+The security rebuild identifies itself as `v0.53.2-kars-security`.
+`/opt/witness/build.json` records the source archive/commit, architecture, Go
+version and binary/build-info/module-lock/license hashes; the actual Go build
+information for both binaries and module locks are retained under `/opt/witness/provenance`.
+This is source-build provenance, not the checksum of the superseded stock
+binary archive. No kubectl/Python packages are downloaded at runtime.
 Upstream image indexes and gadget artifacts are digest-pinned in `values.yaml`;
 IG verifies the two OCI gadgets with the upstream public key and restricts the
 server to those two artifacts. The artifacts were resolved from the official
@@ -91,11 +139,9 @@ v0.53.2 release, not inferred from aliases:
 
 | Artifact | SHA-256 |
 | --- | --- |
-| IG image index | `39ebe601aff064f531aa0630194d9a7bbdb5060de4f290d7ec2fd678f1dd5c10` |
 | `gadget/trace_dns` | `751684c8bf45731ffb412e608d9fb71f9e896debe1d138d524f850cadf54a0f7` |
 | `gadget/trace_tcp` | `b6a4f4563430effa4ddde01898e628f082f2db4b638b18922eb55e4bd4aaab89` |
-| Linux amd64 client archive | `701d9e118e01dc0e5447aa2342460e8f5ac5fda0ff9ab42ae7656c81dcc81deb` |
-| Linux arm64 client archive | `2a43de24d41ea32ea8c8be3474fb64d68e0265d3ffe9780dc9c2f81d7aaa3845` |
+| Client source archive (both architectures) | `934060feae4ecab32644704c4e272e06b7c0da5a4f67429ba04b0113751946e4` |
 
 To package without publication:
 
@@ -105,7 +151,10 @@ helm package deploy/helm/kars-datapath-witness --destination ./dist/charts
 shasum -a 256 ./dist/charts/kars-datapath-witness-0.1.0.tgz
 ```
 
-There are no chart dependencies or network downloads during rendering. The
+The standalone chart has no dependencies. Core vendors this local dependency;
+after changing its maintained sources, regenerate the Core dependency with
+`helm dependency update deploy/helm/kars --skip-refresh` and retain `Chart.lock`
+and the generated chart archive together. Rendering performs no network downloads. The
 daemon template is adapted from the official v0.53.2 chart, not the entire
 general-purpose upstream RBAC bundle; see `THIRD_PARTY_NOTICES.md`. The reduced
 integration grants no IG Secret, trace-CRD, seccomp-profile, or workload writes.
@@ -114,7 +163,33 @@ CRI-O/NRI host hooks, and does not run the upstream global `/cleanup` that could
 remove shared hooks/pins. Bounded foreground RPCs end their probes; no headless
 instances or persistent event buffer is created/recreated.
 
-## Enable: one Helm command after reviewing prerequisites
+## Core switch: no third Helm release
+
+For Core, nest the image, timing and sandbox values shown below under
+`datapathWitness` in `WITNESS_VALUES`. Preserve all unrelated Core values and
+review the entire upgrade against the intended cluster:
+
+```sh
+helm upgrade kars ./deploy/helm/kars --namespace kars-system --kube-context "${KARS_CONTEXT:?Set the reviewed kube context}" --reuse-values --values "${WITNESS_VALUES:?Set the reviewed Core witness values file}" --set datapathWitness.enabled=true --wait --timeout 10m
+helm upgrade kars ./deploy/helm/kars --namespace kars-system --kube-context "${KARS_CONTEXT:?Set the reviewed kube context}" --reuse-values --set datapathWitness.enabled=false --wait --timeout 10m
+```
+
+Never uninstall Core to stop capture. Default off retains intent metadata;
+it does not establish that a legacy observer has stopped. Core refuses to adopt
+standalone resources automatically. When deliberately retaining an existing
+standalone release, set Core's `datapathWitness.managed=false` and
+`datapathWitness.enabled=false`. This renders no Core witness resources and
+leaves external ownership intact. It cannot detach already Core-owned objects;
+use the guarded off upgrade instead. Ownership migration needs explicit operator
+review and is not automated.
+
+The producer verifies its configured release against both the DaemonSet and
+report object. Older standalone runtime configurations without `release_name`
+retain their standalone owner. Bridge accepts Core or standalone reports only
+when intent and report have the same verified owner; its copy controls select
+the corresponding chart rather than proposing a second observer.
+
+## Standalone enable: existing-owner compatibility
 
 Create an operator-owned values file outside source control if it contains
 environment-specific registry details:
@@ -124,11 +199,13 @@ aggregator:
   image: YOUR_REGISTRY/kars-datapath-witness-aggregator@sha256:YOUR_PUBLISHED_INDEX_DIGEST
   windowSeconds: 15
   intervalSeconds: 30
+gadget:
+  image: YOUR_REGISTRY/kars-datapath-witness-aggregator@sha256:YOUR_PUBLISHED_INDEX_DIGEST
 sandboxes:
   - demo
 ```
 
-The schema rejects empty scope, missing images, mutable tags, and unknown values
+The schema rejects empty scope, either missing runtime image, mutable tags, and unknown values
 when enabled. This does not prove registry reachability; image pull failures,
 missing BTF, failed capture or missing/invalid baselines keep the aggregator
 unready and `--wait` fails instead of reporting successful enablement.

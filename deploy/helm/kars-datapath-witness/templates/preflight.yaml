@@ -1,7 +1,10 @@
 {{/* Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. */}}
-{{- if or (ne .Release.Name "kars-datapath-witness") (ne .Release.Namespace "kars-system") -}}
-{{- fail "use release kars-datapath-witness in the existing kars-system namespace; this chart must not own a core namespace" -}}
+{{- if or (not (has .Release.Name (list "kars" "kars-datapath-witness"))) (ne .Release.Namespace "kars-system") -}}
+{{- fail "use the kars Core release or standalone kars-datapath-witness in kars-system; the witness must not own a core namespace" -}}
+{{- end -}}
+{{- if and (not .Values.managed) (or (ne .Release.Name "kars") .Values.enabled) -}}
+{{- fail "managed=false is only for Core retaining an external witness and requires enabled=false" -}}
 {{- end -}}
 {{- $root := . -}}
 {{- $ns := "kars-witness-gadget" -}}
@@ -34,6 +37,7 @@ Licensed under the MIT License. */}}
 {{- $previous := lookup "v1" "ConfigMap" "kars-system" "kars-datapath-witness-settings" -}}
 {{- if $previous -}}
   {{- include "witness.assertOwner" (dict "root" $root "object" $previous) -}}
+  {{- if .Values.managed -}}
   {{- $settings := mustFromJson (get (default dict $previous.data) "settings.json") -}}
   {{- if not (kindIs "slice" $settings.sandboxes) -}}
     {{- fail "previous witness scope is invalid; operator review required before any removal" -}}
@@ -44,6 +48,7 @@ Licensed under the MIT License. */}}
     {{- end -}}
     {{- $targets = append $targets (list "rbac.authorization.k8s.io/v1" "Role" (printf "kars-%s" $name) "kars-datapath-witness") -}}
     {{- $targets = append $targets (list "rbac.authorization.k8s.io/v1" "RoleBinding" (printf "kars-%s" $name) "kars-datapath-witness") -}}
+  {{- end -}}
   {{- end -}}
 {{- end -}}
 {{- range $target := $targets -}}

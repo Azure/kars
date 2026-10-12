@@ -21,12 +21,13 @@ import { DeployTimeline } from "./deploy-timeline";
 import { NetworkMode } from "./network-mode";
 import { MissionBlockers } from "./mission-blockers";
 import { MissionScorecard } from "@/components/mission-scorecard";
-import { MissionStatusBadge, missionStatus } from "@/components/mission-status";
+import { MissionStatusBadge, missionStatus, missionBlockReason } from "@/components/mission-status";
 import { JourneyRail, missionBeat } from "@/components/journey-rail";
 import { ReceiptPanel } from "@/components/receipt-panel";
 import { CompliancePackView } from "@/components/compliance-pack";
 import { ReceiptVerifyButton } from "@/components/receipt-verify";
 import { missionRunState } from "@/lib/mission-run-evidence";
+import { reviewedPhases } from "@/lib/team-run-evidence";
 import { ReliabilityRunner } from "./reliability-runner";
 import { BudgetRecovery } from "./budget-recovery";
 import { PromoteMission } from "./promote-mission";
@@ -43,7 +44,6 @@ import { egressScope } from "@/lib/format";
 import { Icon } from "@/components/icon";
 import { HaltButton } from "./halt-button";
 import { TIER_LABELS } from "@/lib/types";
-import { RouterActivityPanel } from "@/components/router-activity-panel";
 import { reviewKind } from "@/lib/mission-run-evidence";
 import { MissionServerTabs, EnvelopeFact, ObjectiveBlock, NextStep, AgentIdentityCard, RecordedRunPanel, ArtifactsPanel, ResultPanel, FailureDiagnostic, CompositionPanel } from "./mission-detail-panels";
 
@@ -113,6 +113,7 @@ export default async function MissionDetail({
 
   const needsYou = approvals.some((a) => a.actionable);
   const { currentResult, realDelivery, failed, routerActivity } = missionRunState(task);
+  const phases = reviewedPhases(task) ?? [];
   const displayTask = { ...task, result: currentResult };
   const blocked = currentResult?.blocked ?? null;
   const producer = currentResult?.run_evidence;
@@ -214,7 +215,7 @@ export default async function MissionDetail({
           </div>
           <div className="flex shrink-0 items-center gap-2">
             {(live) && <LivePulse label={status === "deploying" ? "Deploying" : status === "needs_you" ? "Waiting on you" : "Live"} />}
-            {live && !task.halted && <HaltButton ns={ns} task={name} />}
+            {live && <HaltButton ns={ns} task={name} />}
             {/* While live, the animated pulse already names the phase (Deploying/
                 Live/Waiting) — a second static status badge beside it just
                 duplicates the word. Show the badge only when NOT live (delivered,
@@ -257,12 +258,12 @@ export default async function MissionDetail({
             value={budget?.tokens != null ? `${budget.tokens.toLocaleString()} tokens` : "No cap"}
           />
           <EnvelopeFact
-            label="External reach"
+            label="Connected access"
             value={(() => {
               const ext = (task.composition?.egress ?? []).filter((e) => egressScope(e) === "external");
-              if (ext.length === 0) return "Local only — no external services";
-              const gated = task.envelope.tier <= 3;
-              return `${ext.length} external ${ext.length === 1 ? "service" : "services"} — ${gated ? "gated, asks you first" : "autonomous"}`;
+              const mcp = task.composition?.mcp_servers?.length ?? 0;
+              const services = mcp ? `${mcp} governed MCP ${mcp === 1 ? "service" : "services"} · ` : "";
+              return `${services}${ext.length ? `${ext.length} direct external ${ext.length === 1 ? "destination" : "destinations"}` : "No extra direct egress"}`;
             })()}
           />
           {task.phase === "Degraded" && task.status_message && (
@@ -297,11 +298,11 @@ export default async function MissionDetail({
       )}
 
       {/* Blocked banner */}
-      {status === "blocked" && task.status_message && (
+      {status === "blocked" && (
         <div role="alert" className="flex items-start gap-3 rounded-xl border border-danger/30 bg-danger/10 px-4 py-3">
           <div>
             <p className="text-sm font-medium text-danger">This mission is blocked</p>
-            <p className="mt-0.5 text-sm text-foreground-muted">{task.status_message}</p>
+            <p className="mt-0.5 text-sm text-foreground-muted">{missionBlockReason(task)}</p>
           </div>
         </div>
       )}
@@ -310,9 +311,10 @@ export default async function MissionDetail({
         <div className="flex items-start gap-2 rounded-xl border border-danger/40 bg-danger/[0.06] px-4 py-3">
           <span aria-hidden className="text-danger">⏹</span>
           <div>
-            <p className="text-sm font-medium">Mission halted</p>
+            <p className="text-sm font-medium">{task.launched || realDelivery ? "Previous halt" : "Mission halted"}</p>
             <p className="mt-0.5 text-xs text-foreground-muted">
-              {task.halted}. A halt is recorded. This does not by itself verify runtime teardown,
+              {task.halted}{" "}This is retained halt history; current execution status is shown above.
+              A halt record does not by itself verify runtime teardown,
               mesh removal, or retention of the deliverable, trace, and receipt.
             </p>
           </div>
@@ -440,9 +442,16 @@ export default async function MissionDetail({
               <div className="space-y-4">
                 {task.launched && currentResult == null && <DeployTimeline task={displayTask} />}
                 {currentResult && <RecordedRunPanel result={currentResult} />}
-                {routerActivity && currentRunNonce && <RouterActivityPanel activity={routerActivity} producer={producer?.agent_name ?? name} ns={ns} name={name} runNonce={currentRunNonce} />}
+                {task.reviewed_execution?.issue && (
+                  <HonestState
+                    variant="not_wired"
+                    title="Reviewed phase evidence unavailable"
+                    detail={task.reviewed_execution.issue}
+                  />
+                )}
                 <ExecutionExplorer
-                  routerActivityPresented={routerActivity != null && currentRunNonce != null}
+                  routerActivity={routerActivity && producer ? { observations: routerActivity, producer, provisional: false } : null}
+                  phases={phases}
                   running={running}
                   activity={task.activity}
                   telemetry={task.telemetry}
@@ -516,9 +525,20 @@ export default async function MissionDetail({
                 ) : (
                   <ResultPanel result={currentResult} />
                 )}
-                {currentRunNonce && <ReviewPanel key={currentRunNonce} task={name} assignmentNonce={currentRunNonce} eligible={realDelivery} kind={reviewKind(task.artifacts)} initial={review} sandboxLive={task.launched && task.execution_phase === "Running"} />}
+                {currentRunNonce && <ReviewPanel key={currentRunNonce} task={name} assignmentNonce={currentRunNonce} eligible={realDelivery} launched={task.launched} kind={reviewKind(task.artifacts)} initial={review} sandboxLive={task.launched && task.execution_phase === "Running"} />}
               </div>
-            ) : null,
+            ) : review?.redrive_pending && currentRunNonce && review.requested_revision_nonce === currentRunNonce ? (
+              <ReviewPanel key={currentRunNonce} task={name} assignmentNonce={currentRunNonce} launched={task.launched} kind={reviewKind(task.artifacts)} initial={review} />
+            ) : (
+              <HonestState
+                variant="empty"
+                compact
+                title="No deliverable for this revision yet"
+                detail={task.launched
+                  ? "A new result has not been recorded for this revision. Check Activity for its execution status."
+                  : "The runtime is stopped. Review the execution checks in Overview before launching this revision."}
+              />
+            ),
           },
           {
             id: "artifacts",
@@ -533,7 +553,14 @@ export default async function MissionDetail({
                 title="No separate files"
                 detail="This mission produced a text deliverable — read it in the Deliverable tab. No discrete file artifacts were captured for this run."
               />
-            ) : null,
+            ) : (
+              <HonestState
+                variant="empty"
+                compact
+                title="No files for this revision yet"
+                detail="Files appear here after they are captured for this revision. Check Activity for its execution status."
+              />
+            ),
           },
           {
             id: "receipt",

@@ -64,14 +64,23 @@ pub(super) async fn effective_team(
         .as_ref()
         .map(|r| r.name.as_str());
     for role in &mut effective.spec.roster {
-        if role.skills.is_empty() {
-            continue;
-        }
         let mut blueprint = role
             .blueprint
             .clone()
             .or_else(|| inherited.clone())
             .unwrap_or_default();
+        for selection in [&blueprint.skills, &role.skills] {
+            crate::skill_delivery::validate_selection(selection)
+                .map_err(ReconcileError::Invalid)?;
+        }
+        for name in &role.skills {
+            if !blueprint.skills.contains(name) {
+                blueprint.skills.push(name.clone());
+            }
+        }
+        if blueprint.skills.is_empty() {
+            continue;
+        }
         let mut bound = blueprint.tool_policy.clone();
         for policy in [
             inherited.as_ref().and_then(|b| b.tool_policy.as_deref()),
@@ -86,24 +95,22 @@ pub(super) async fn effective_team(
         {
             require_same_policy(&mut bound, policy, &role.name)?;
         }
-        for name in &role.skills {
+        for name in &blueprint.skills {
             let skill = skills
                 .get_opt(name)
                 .await?
                 .ok_or_else(|| ReconcileError::Invalid(format!("skill '{name}' is missing")))?;
-            let ready = skill.metadata.deletion_timestamp.is_none()
-                && skill.metadata.generation.is_some()
-                && skill.status.as_ref().is_some_and(|status| {
-                    status.phase.as_deref() == Some(PHASE_READY)
-                        && status.observed_generation == skill.metadata.generation
-                        && status.version_digest.as_deref() == Some(skill.version_digest().as_str())
-                });
-            if !ready || !skill.validation_errors().is_empty() {
-                return Err(ReconcileError::Invalid(format!(
-                    "skill '{name}' is not currently Ready"
-                )));
-            }
+            crate::skill_package::approved_digest(&serde_json::json!(skill))
+                .map_err(|e| ReconcileError::Invalid(format!("skill '{name}': {e}")))?;
             require_same_policy(&mut bound, &skill.spec.bounding_policy, &role.name)?;
+            if skill.spec.package {
+                let packages =
+                    Api::<k8s_openapi::api::core::v1::ConfigMap>::namespaced(client.clone(), ns);
+                let package = packages.get(&format!("karsskill-{name}")).await?;
+                skill
+                    .validate_package(&package)
+                    .map_err(ReconcileError::Invalid)?;
+            }
             for server in skill.spec.mcp_servers {
                 if !blueprint.mcp_servers.contains(&server) {
                     blueprint.mcp_servers.push(server);

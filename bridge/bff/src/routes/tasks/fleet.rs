@@ -141,7 +141,7 @@ pub async fn list_agents(
         let live = !delivered && cluster.running_pod_for_sandbox(&name).await.is_some();
         // Honest pod health for a live agent (readiness/restarts/uptime/node).
         let health = if live {
-            cluster.sandbox_pod_health(&name).await
+            cluster.sandbox_pod_health(&name).await?
         } else {
             None
         };

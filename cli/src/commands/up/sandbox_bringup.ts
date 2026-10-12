@@ -3,7 +3,7 @@
 
 // Sub-slice S15.d.4 of S15.d phase2-hotspot-up-cli.
 //
-// Sandbox bring-up phase extracted verbatim from cli/src/commands/up.ts:
+// Sandbox bring-up phase extracted from cli/src/commands/up.ts:
 //   - federated credential creation (sandbox + controller SA)
 //   - MI Contributor self-scoped role assignment
 //   - Foundry RBAC via Bicep (sandbox WI, project MI, kubelet MI)
@@ -16,6 +16,8 @@ import chalk from "chalk";
 import type { Stepper } from "../../stepper.js";
 import { section, kvLine, checkLine } from "../../stepper.js";
 import { saveContext } from "../../config.js";
+import { createSubscriptionPinnedExeca } from "../../lib/azure-subscription.js";
+import { ensureWorkloadIdentity, type WorkloadIdentityConfig } from "../../lib/workload-identity.js";
 import {
   buildInferencePolicy,
   buildToolPolicy,
@@ -42,6 +44,7 @@ export interface SandboxBringUpContext {
   imdsClientId: string;
   repoRoot: string;
   stepper: Stepper;
+  federation: WorkloadIdentityConfig;
   registryMode: "local" | "global";
   globalRegistryUrl?: string;
   globalRelayUrl?: string;
@@ -52,10 +55,11 @@ export interface SandboxBringUpContext {
  * (wait for Running + WebUI port-forward), and the deployment summary +
  * saveContext() at end-of-deploy.
  *
- * Body moved verbatim from up.ts; identical side effects and exit codes.
+ * Federation must pass ARM readback before sandbox creation can proceed.
  */
 export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> {
-  const { execa } = await import("execa");
+  const { execa: execute } = await import("execa");
+  const execa = createSubscriptionPinnedExeca(execute, ctx.federation.subscriptionId);
   const {
     options, baseName, rg,
     acrLoginServer, foundryEndpoint, openAiEndpoint, kvName,
@@ -67,73 +71,9 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   stepper.step(`Creating sandbox '${options.name}'...`);
   const sandboxNs = `kars-${options.name}`;
 
-  // Create federated identity credential for this sandbox's namespace
-  stepper.update(`Setting up Workload Identity for ${sandboxNs}...`);
-  const { stdout: oidcIssuer } = await execa("az", [
-    "aks", "show",
-    "--name", `${baseName}-aks`,
-    "--resource-group", rg,
-    "--query", "oidcIssuerProfile.issuerUrl",
-    "--output", "tsv",
-  ], { stdio: "pipe" });
-
-  await execa("az", [
-    "identity", "federated-credential", "create",
-    "--identity-name", `${baseName}-aks-sandbox-wi`,
-    "--resource-group", rg,
-    "--name", `kars-${options.name}`,
-    "--issuer", oidcIssuer.trim(),
-    "--subject", `system:serviceaccount:${sandboxNs}:sandbox`,
-    "--audiences", "api://AzureADTokenExchange",
-    "--output", "none",
-  ], { stdio: "pipe" }).then(() => {
-    stepper.detail("new", `Federated credential — ${sandboxNs}:sandbox`);
-  }).catch(() => {
-    stepper.detail("ok", `Federated credential — already exists`);
-  });
-
-  // Ensure controller SA has a fedcred too (so it can get ARM tokens via WI to create sandbox fedcreds)
-  await execa("az", [
-    "identity", "federated-credential", "create",
-    "--identity-name", `${baseName}-aks-sandbox-wi`,
-    "--resource-group", rg,
-    "--name", `kars-controller-sa`,
-    "--issuer", oidcIssuer.trim(),
-    "--subject", `system:serviceaccount:kars-system:kars-controller`,
-    "--audiences", "api://AzureADTokenExchange",
-    "--output", "none",
-  ], { stdio: "pipe" }).then(() => {
-    stepper.detail("new", `Federated credential — controller SA`);
-  }).catch(() => {
-    // Already exists — fine
-  });
-
-  // Grant the sandbox MI "Managed Identity Contributor" on itself so the controller
-  // can create/delete fedcreds for dynamically spawned sandboxes
-  try {
-    const { stdout: subIdForMi } = await execa("az", [
-      "account", "show", "--query", "id", "--output", "tsv",
-    ], { stdio: "pipe", timeout: 10000 });
-    const miScope = `/subscriptions/${subIdForMi.trim()}/resourceGroups/${rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${baseName}-aks-sandbox-wi`;
-    const { stdout: miPid } = await execa("az", [
-      "identity", "show",
-      "--name", `${baseName}-aks-sandbox-wi`,
-      "--resource-group", rg,
-      "--query", "principalId",
-      "--output", "tsv",
-    ], { stdio: "pipe" });
-    await execa("az", [
-      "role", "assignment", "create",
-      "--assignee-object-id", miPid.trim(),
-      "--assignee-principal-type", "ServicePrincipal",
-      "--role", "Managed Identity Contributor",
-      "--scope", miScope,
-      "--output", "none",
-    ], { stdio: "pipe" });
-    stepper.detail("new", `MI Contributor — self-scoped for fedcred management`);
-  } catch {
-    // Already exists or user lacks Owner — non-fatal
-  }
+  stepper.update(`Verifying Workload Identity for ${sandboxNs} and the controller...`);
+  await ensureWorkloadIdentity(execa, ctx.federation, [options.name]);
+  stepper.detail("ok", "Workload Identity configuration verified; token exchange not tested");
 
   // Grant RBAC roles on Foundry resource via Bicep (if --foundry-endpoint provided)
   // Two assignments needed:
@@ -680,9 +620,10 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       imdsClientId: imdsClientId || undefined,
       foundryEndpoint: openAiEndpoint,
       foundryProjectEndpoint: foundryEndpoint || undefined,
-      identityName: `${baseName}-aks-sandbox-wi`,
-      identityResourceGroup: rg,
-      oidcIssuerUrl: oidcIssuer?.trim() || undefined,
+      subscription: ctx.federation.subscriptionId,
+      identityName: ctx.federation.identityName,
+      identityResourceGroup: ctx.federation.resourceGroup,
+      oidcIssuerUrl: ctx.federation.issuer,
       registryMode,
       globalRegistryUrl,
       globalRelayUrl,

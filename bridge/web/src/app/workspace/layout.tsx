@@ -55,18 +55,19 @@ export default async function WorkspaceLayout({
   return (
     <div className="flex min-h-full flex-col">
       <header className="sticky top-0 z-10 border-b border-border bg-surface/80 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between px-6">
+        <div className="mx-auto flex h-14 max-w-6xl items-center justify-between gap-2 px-4 sm:px-6">
           <Link
             href="/workspace"
+            aria-label="kars Bridge"
             prefetch={false}
             className="flex items-center gap-2.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
           >
             <span className="grid h-7 w-7 place-items-center rounded-md bg-signal text-signal-fg text-sm font-bold">
               kb
             </span>
-            <span className="font-semibold tracking-tight">kars Bridge</span>
+            <span className="hidden font-semibold tracking-tight sm:inline">kars Bridge</span>
           </Link>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             <span
               className="hidden items-center gap-1.5 text-xs text-foreground-muted sm:inline-flex"
               title={auth ? undefined : "No authenticated session yet — identity is the configured operator."}

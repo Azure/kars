@@ -42,9 +42,8 @@ LABEL org.kars.runtime.language="python"
 
 # ---- Install AGT-Python wheels and the kars adapter ----------------
 COPY runtimes/wheels/ /tmp/agt-wheels/
-RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
-        pip install --no-cache-dir /tmp/agt-wheels/*.whl ; \
-    fi
+COPY runtimes/install-agt-wheels.py /tmp/install-agt-wheels.py
+RUN python3 /tmp/install-agt-wheels.py
 
 COPY runtimes/pydantic-ai/ /opt/kars-runtime-pydantic-ai/
 RUN pip install --no-cache-dir /opt/kars-runtime-pydantic-ai

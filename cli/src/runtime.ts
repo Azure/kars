@@ -15,6 +15,8 @@
  * from the controller. Keep the two enums in lockstep.
  */
 
+export const DEFAULT_OPENCLAW_VERSION = "2026.9.8";
+
 /** PascalCase wire-format kinds matching `controller/src/crd.rs::RuntimeKind`. */
 export type RuntimeKind =
   | "OpenClaw"
@@ -179,7 +181,7 @@ export function runtimeKindFromCr(cr: unknown): RuntimeKind {
  */
 export interface BuildRuntimeBlockOpts {
   kind: RuntimeKind;
-  /** OpenClaw only — version pin from the legacy CLI default. */
+  /** OpenClaw only — defaults to the packaged runtime baseline. */
   openclawVersion?: string;
   /** OpenClaw only — model name (becomes `azure/<model>`). */
   model?: string;
@@ -201,7 +203,7 @@ export function buildRuntimeBlock(
       return {
         kind: "OpenClaw",
         openclaw: {
-          version: opts.openclawVersion ?? "2026.3.13",
+          version: opts.openclawVersion ?? DEFAULT_OPENCLAW_VERSION,
           ...(opts.image ? { image: opts.image } : {}),
           config: {
             agent: {

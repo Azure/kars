@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { validMissionArtifacts, type MissionArtifacts } from "@kars/mesh/dist/mission-protocol.js";
+import { missionRequiredOutputs, validMissionArtifacts, type MissionArtifacts } from "@kars/mesh/dist/mission-protocol.js";
 import type { TaskPhaseEvidence } from "./task-phase.js";
 import { ROUTER_OBSERVATIONS_ARTIFACT } from "./router-observations.js";
 
@@ -44,7 +44,16 @@ export class TaskCompletionLedger {
 
   private artifacts: MissionArtifacts = {};
 
-  constructor(private readonly model: string, readonly artifactsEnabled = false) {}
+  readonly requiredOutputs: readonly string[];
+
+  constructor(private readonly model: string, readonly artifactsEnabled = false, requiredOutputs: readonly string[] = []) {
+    this.requiredOutputs = missionRequiredOutputs(requiredOutputs);
+    if (this.requiredOutputs.length && !artifactsEnabled) throw new Error("Required named outputs need negotiated artifact delivery");
+  }
+
+  missingRequiredOutputs(): readonly string[] {
+    return this.requiredOutputs.filter(name => !Object.hasOwn(this.artifacts, name));
+  }
 
   prepareArtifact(name: unknown, content: unknown): MissionArtifacts {
     if (!this.artifactsEnabled) throw new Error("Dispatcher does not support named artifacts; return the full content inline");
@@ -110,6 +119,8 @@ export class TaskCompletionLedger {
     const content = choice.message?.content;
     if (typeof content !== "string" || !content.trim()) this.fail("Model returned no final deliverable");
     if (!this.usage || this.usage.totalTokens === 0) this.fail("Provider usage is unavailable or invalid");
+    const missing = this.missingRequiredOutputs();
+    if (missing.length) this.fail(`Missing required named mission output: ${missing.join(", ")}`);
     return content;
   }
 }

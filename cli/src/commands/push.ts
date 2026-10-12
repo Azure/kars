@@ -11,11 +11,11 @@ import { loadContext } from "../config.js";
 import { preparePushTarget } from "../lib/deployment-target.js";
 import { inspectMeshInstallation } from "../lib/mesh-release.js";
 import { applyPushedImages } from "./push-apply.js";
-import { controllerEnv, dockerPushDigest, MANAGED_MCP_IMAGE_TARGET, PUSH_COMPONENTS, RUNTIME_IMAGE_TARGETS, pushImageTag } from "../lib/image-targets.js";
+import { controllerEnv, dockerPushDigest, MANAGED_MCP_IMAGE_TARGETS, METRICS_SERVER_IMAGE_TARGET, PUSH_COMPONENTS, RUNTIME_IMAGE_TARGETS, pushImageTag } from "../lib/image-targets.js";
 import { assertControllerMutationAllowed, PrivateRootUpgradeBlocked } from "../lib/private-root-upgrade-guard.js";
 import { stageRustBinaries } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
-import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
+import { AGT_CORE_MANIFEST, AGT_MESH_DOCKERFILE, ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
 
 const DEFAULT_AGT_REPO = path.join(os.homedir(), "agent-governance-toolkit");
 
@@ -26,7 +26,7 @@ export function pushCommand(): Command {
     .description("Build and push images to ACR (uses cached context from last deploy)")
     .option("--acr <name>", "ACR name (default: from last deploy)")
     .option("--subscription <id>", "Azure subscription (must match saved deployment when present)")
-    .option("--only <image>", "Build one image: controller, router, sandbox, sandbox-base, relay, registry, mcp-everything, or runtime-*")
+    .option("--only <image>", "Build one image: controller, router, sandbox, sandbox-base, relay, registry, metrics-server, mcp-everything, mcp-playwright, or runtime-*")
     .option("--include-base", "Include sandbox-base in a full push (skipped by default — rebuild only when upgrading OpenClaw/Python/Go)")
     .option("--apply", "Apply selected image configuration and verify the resulting rollouts")
     .option(
@@ -102,7 +102,6 @@ export function pushCommand(): Command {
       }
 
       let agtRepo: string;
-      const agtDockerfileRel = "agent-governance-python/agent-mesh/docker/Dockerfile";
       // Auto-clone the pinned AGT fork (vendor/agt/pin.json) when no
       // local clone is available. Lets fresh-machine `kars push --apply`
       // / `kars dev` work without the user having to know about the
@@ -118,10 +117,10 @@ export function pushCommand(): Command {
           process.exit(1);
         }
       }
-      const agtRepoMissing = !fs.existsSync(path.join(agtRepo, agtDockerfileRel));
+      const agtRepoMissing = !fs.existsSync(path.join(agtRepo, AGT_CORE_MANIFEST));
       if (agtRepoMissing && (!options.only || options.only === "relay" || options.only === "registry")) {
         console.error(chalk.red(`\n  Building relay/registry requires the AGT repo.`));
-        console.error(chalk.red(`  Looked for: ${path.join(agtRepo, agtDockerfileRel)}`));
+        console.error(chalk.red(`  Looked for: ${path.join(agtRepo, AGT_CORE_MANIFEST)}`));
         console.error(chalk.red(`  Pass --agt-repo <path> or set $KARS_AGT_REPO, or pass --only <image> to skip mesh.\n`));
         process.exit(1);
       }
@@ -148,16 +147,14 @@ export function pushCommand(): Command {
             {
               name: "relay",
               tag: pushImageTag("relay"),
-              dockerfile: path.join(agtRepo, agtDockerfileRel),
-              absoluteContext: agtRepo,
-              buildArgs: ["--build-arg", "COMPONENT=relay", "--build-arg", `CACHE_BUST=${Date.now()}`],
+              dockerfile: AGT_MESH_DOCKERFILE,
+              buildArgs: ["--build-arg", "COMPONENT=relay"],
             },
             {
               name: "registry",
               tag: pushImageTag("registry"),
-              dockerfile: path.join(agtRepo, agtDockerfileRel),
-              absoluteContext: agtRepo,
-              buildArgs: ["--build-arg", "COMPONENT=registry", "--build-arg", `CACHE_BUST=${Date.now()}`],
+              dockerfile: AGT_MESH_DOCKERFILE,
+              buildArgs: ["--build-arg", "COMPONENT=registry"],
             },
           ];
 
@@ -253,10 +250,11 @@ export function pushCommand(): Command {
         tag: string;
         dockerfile: string;
         context?: string;
-        absoluteContext?: string;
         buildArgs?: string[];
       }> = [
         { name: "controller", tag: pushImageTag("controller"), dockerfile: controllerDf },
+        { name: METRICS_SERVER_IMAGE_TARGET.name, tag: pushImageTag(METRICS_SERVER_IMAGE_TARGET.name),
+          dockerfile: METRICS_SERVER_IMAGE_TARGET.dockerfile },
         { name: "router", tag: pushImageTag("router"), dockerfile: routerDf,
           buildArgs: ["--build-arg", `ROUTER_CACHE_BUST=${Date.now()}`] },
         { name: "sandbox-base", tag: pushImageTag("sandbox-base"), dockerfile: "sandbox-images/openclaw/Dockerfile.base",
@@ -264,8 +262,10 @@ export function pushCommand(): Command {
         { name: "sandbox", tag: pushImageTag("sandbox"), dockerfile: "sandbox-images/openclaw/Dockerfile",
           buildArgs: sandboxBuildArgs },
         ...meshImages,
-        { name: MANAGED_MCP_IMAGE_TARGET.name, tag: pushImageTag(MANAGED_MCP_IMAGE_TARGET.name),
-          dockerfile: "sandbox-images/mcp-everything/Dockerfile", context: "sandbox-images/mcp-everything" },
+        ...MANAGED_MCP_IMAGE_TARGETS.map(target => ({
+          name: target.name, tag: pushImageTag(target.name),
+          dockerfile: `sandbox-images/${target.repo}/Dockerfile`, context: `sandbox-images/${target.repo}`,
+        })),
         // Shared with release imports, upgrade values, and push application.
         ...RUNTIME_IMAGE_TARGETS.map(runtime => ({
           name: runtime.name, tag: pushImageTag(runtime.name),
@@ -309,7 +309,7 @@ export function pushCommand(): Command {
       }
 
       if (targets.length === 0) {
-        console.error(chalk.red(`\n  Unknown image: ${options.only}. Options: controller, router, sandbox-base, sandbox, relay, registry\n`));
+        console.error(chalk.red(`\n  Unknown image: ${options.only}. Options: ${PUSH_COMPONENTS.join(", ")}\n`));
         process.exit(1);
       }
 
@@ -336,26 +336,18 @@ export function pushCommand(): Command {
             spin.text = `Building mesh-plugin (TypeScript) for ${img.tag}...`;
             await stageMeshPlugin(repoRoot);
           }
-          // Python runtime sandbox images COPY runtimes/wheels/*.whl
+          // Python runtimes and mesh servers COPY runtimes/wheels/*.whl
           // into their build context. The wheel directory is .gitignored
           // and only this auto-build keeps `kars push --only runtime-<X>`
           // working on a fresh checkout. ensureAgtWheels() is a no-op
           // when the cache stamp matches the current AGT pin SHA.
-          if (PYTHON_RUNTIMES.has(img.name) && !agtRepoMissing) {
+          if ((PYTHON_RUNTIMES.has(img.name) || img.name === "relay" || img.name === "registry") && !agtRepoMissing) {
             spin.text = `Building AGT Python wheels for ${img.tag}...`;
             await ensureAgtWheels(agtRepo, repoRoot);
           }
           spin.text = `Building ${img.tag}...`;
-          // Dockerfile path: absolute if provided absolute (AGT case), else relative to repoRoot
-          const dockerfilePath = path.isAbsolute(img.dockerfile)
-            ? img.dockerfile
-            : path.join(repoRoot, img.dockerfile);
-          // Build context: absolute override > relative > repoRoot
-          const buildContext = img.absoluteContext
-            ? img.absoluteContext
-            : img.context
-              ? path.join(repoRoot, img.context)
-              : repoRoot;
+          const dockerfilePath = path.join(repoRoot, img.dockerfile);
+          const buildContext = img.context ? path.join(repoRoot, img.context) : repoRoot;
           const args = [
             "build", "--platform", "linux/amd64",
             "--provenance=false", "--sbom=false",

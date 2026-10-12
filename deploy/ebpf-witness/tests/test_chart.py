@@ -2,6 +2,7 @@
 # Licensed under the MIT License.
 """Render and server-side Helm lookup tests. The only API is loopback fake data."""
 import copy
+import hashlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 from pathlib import Path
@@ -19,8 +20,8 @@ IMAGE = "example.invalid/witness@sha256:" + "a" * 64
 NS = "kars-witness-gadget"
 
 
-def render(*extra, kubeconfig=None):
-    command = ["helm", "template", "kars-datapath-witness", str(CHART),
+def render(*extra, kubeconfig=None, release="kars-datapath-witness", chart=CHART):
+    command = ["helm", "template", release, str(chart),
                "--namespace", "kars-system"]
     if kubeconfig:
         # The fake serves lookup data, not Kubernetes' OpenAPI schema. Production
@@ -34,7 +35,8 @@ def render(*extra, kubeconfig=None):
 
 def enabled(*extra, **kwargs):
     return render("--set", "enabled=true", "--set", "sandboxes={demo}",
-                  "--set", "aggregator.image=" + IMAGE, *extra, **kwargs)
+                  "--set", "aggregator.image=" + IMAGE,
+                  "--set", "gadget.image=" + IMAGE, *extra, **kwargs)
 
 
 def documents(result):
@@ -135,6 +137,49 @@ class FakeApi:
 
 
 class ChartTests(unittest.TestCase):
+    def test_core_contains_same_witness_without_a_third_release(self):
+        core = ROOT / "deploy/helm/kars"
+        off = documents(render(release="kars", chart=core))
+        owned = [o for o in off if o["metadata"].get("labels", {}).get("kars.azure.com/witness-addon") == "true"]
+        self.assertEqual([o["metadata"]["name"] for o in owned], ["kars-datapath-witness-settings"])
+        self.assertEqual(owned[0]["metadata"]["annotations"]["meta.helm.sh/release-name"], "kars")
+        on = documents(render(
+            "--set", "datapathWitness.enabled=true",
+            "--set", "datapathWitness.sandboxes={demo}",
+            "--set", "datapathWitness.aggregator.image=" + IMAGE,
+            "--set", "datapathWitness.gadget.image=" + IMAGE,
+            release="kars", chart=core))
+        owned = [o for o in on if o["metadata"].get("labels", {}).get("kars.azure.com/witness-addon") == "true"]
+        expected = documents(enabled(release="kars"))
+        self.assertEqual(owned, expected)
+        for obj in owned:
+            self.assertEqual(obj["metadata"]["annotations"]["meta.helm.sh/release-name"], "kars")
+            if obj["kind"] in ("DaemonSet", "Deployment"):
+                self.assertEqual(obj["spec"]["selector"]["matchLabels"]["app.kubernetes.io/instance"], "kars")
+        runtime = next(o for o in owned if o["metadata"]["name"] == "witness-runtime")
+        self.assertEqual(json.loads(runtime["data"]["config.json"])["release_name"], "kars")
+
+    def test_core_refuses_adoption_and_keeps_explicit_external_ownership(self):
+        standalone = documents(enabled())
+        with FakeApi(standalone) as api:
+            result = enabled(release="kars", kubeconfig=api.kubeconfig)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("ownership conflict", result.stderr)
+            result = render("--set", "managed=false", release="kars", kubeconfig=api.kubeconfig)
+            self.assertEqual(documents(result), [])
+        core = documents(enabled(release="kars"))
+        with FakeApi(core) as api:
+            result = render("--set", "managed=false", release="kars", kubeconfig=api.kubeconfig)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("cannot detach", result.stderr)
+            off = documents(render("--set", "enabled=false", release="kars", kubeconfig=api.kubeconfig))
+            self.assertEqual(len(off), 1)
+            self.assertFalse(json.loads(off[0]["data"]["settings.json"])["enabled"])
+        for result in (render("--set", "managed=false"),
+                       enabled("--set", "managed=false", release="kars"),
+                       render(release="foreign")):
+            self.assertNotEqual(result.returncode, 0)
+
     def test_package_is_renderable_without_external_chart_dependencies(self):
         with tempfile.TemporaryDirectory() as directory:
             subprocess.run(["helm", "package", str(CHART), "--destination", directory], check=True, capture_output=True)
@@ -159,6 +204,9 @@ class ChartTests(unittest.TestCase):
         self.assertEqual(namespace["metadata"]["labels"]["pod-security.kubernetes.io/enforce"], "privileged")
         self.assertEqual(namespace["metadata"]["annotations"]["helm.sh/resource-policy"], "keep")
         ds = next(o for o in objects if o["kind"] == "DaemonSet")["spec"]["template"]["spec"]
+        self.assertEqual(ds["containers"][0]["image"], IMAGE)
+        self.assertEqual(ds["containers"][0]["command"], ["/bin/gadgettracermanager", "-serve"])
+        self.assertEqual(ds["initContainers"][0]["image"], IMAGE)
         self.assertIn("SYS_ADMIN", ds["containers"][0]["securityContext"]["capabilities"]["add"])
         self.assertIn("--check-btf", ds["initContainers"][0]["command"])
         self.assertFalse(ds["hostNetwork"])
@@ -180,17 +228,86 @@ class ChartTests(unittest.TestCase):
         reader = next(o for o in objects if o["kind"] == "Role" and o["metadata"]["namespace"] == "kars-demo")
         self.assertEqual(reader["rules"][0]["resourceNames"], ["karssandbox-demo-egress-allowlist"])
         self.assertEqual(reader["rules"][0]["verbs"], ["get"])
+        runtime = next(o for o in objects if o["metadata"]["name"] == "witness-runtime")
+        kubeconfig = yaml.safe_load(runtime["data"]["kubeconfig"])
+        self.assertEqual(kubeconfig["clusters"], [{
+            "name": "cluster", "cluster": {
+                "server": "https://kubernetes.default.svc",
+                "certificate-authority": "/var/run/secrets/kubernetes.io/serviceaccount/ca.crt"}}])
+        self.assertEqual(kubeconfig["users"], [{
+            "name": "aggregator", "user": {
+                "tokenFile": "/var/run/secrets/kubernetes.io/serviceaccount/token"}}])
+        aggregator = next(o for o in objects if o["kind"] == "Deployment")["spec"]["template"]["spec"]
+        self.assertIn({"name": "KUBECONFIG", "value": "/etc/witness/kubeconfig"},
+                      aggregator["containers"][0]["env"])
+        gadget_role = next(o for o in objects if o["kind"] == "ClusterRole"
+                           and o["metadata"]["name"] == "kars-datapath-witness-gadget")
+        for group, resources in (("apps", ["deployments", "replicasets", "daemonsets", "statefulsets"]),
+                                 ("batch", ["jobs", "cronjobs"])):
+            self.assertIn({"apiGroups": [group], "resources": resources, "verbs": ["get"]},
+                          gadget_role["rules"])
 
     def test_schema_no_dev_fallback_or_ambiguous_release(self):
         for args in [
             ("--set", "enabled=true"),
             ("--set", "enabled=true", "--set", "aggregator.image=repo:dev"),
+            ("--set", "enabled=true", "--set", "sandboxes={demo}", "--set", "aggregator.image=" + IMAGE),
+            ("--set", "enabled=true", "--set", "sandboxes={demo}", "--set", "gadget.image=" + IMAGE),
             ("--set", "enabled=true", "--set", "sandboxes={../evil}"),
             ("--set", "gadget.image=unreviewed:latest"),
+            ("--set", "gadget.hookMode=auto"),
+            ("--set", "gadget.hookMode=none"),
+            ("--set", "gadget.hookMode=nri"),
+            ("--set", "gadget.hookMode=crio"),
             ("--set", "aggregator.windowSeconds=0"),
             ("--namespace", "gadget"),
         ]:
             self.assertNotEqual(render(*args).returncode, 0, args)
+
+    def test_explicit_podinformer_preserves_capture_security_and_binds_discovery_mode(self):
+        default = documents(enabled())
+        alternate = documents(enabled("--set", "gadget.hookMode=podinformer"))
+        digests = []
+        for objects, mode in ((default, "fanotify+ebpf"), (alternate, "podinformer")):
+            gadget = next(o for o in objects if o["kind"] == "ConfigMap" and o["metadata"]["name"] == "gadget")
+            operators = yaml.safe_load(gadget["data"]["config.yaml"])["operator"]
+            self.assertEqual(operators["kubemanager"], {"hook-mode": mode, "fallback-podinformer": False})
+            self.assertTrue(operators["oci"]["verify-image"])
+            runtime = next(o for o in objects if o["metadata"]["name"] == "witness-runtime")
+            config = runtime["data"]["config.json"]
+            self.assertEqual(json.loads(config)["hook_mode"], mode)
+            settings = next(o for o in objects if o["metadata"]["name"] == "kars-datapath-witness-settings")
+            digest = json.loads(settings["data"]["settings.json"])["config_digest"]
+            self.assertEqual(digest, hashlib.sha256(config.encode()).hexdigest())
+            digests.append(digest)
+        self.assertNotEqual(*digests)
+        for kind in ("DaemonSet", "Deployment"):
+            first = copy.deepcopy(next(o for o in default if o["kind"] == kind)["spec"]["template"])
+            second = copy.deepcopy(next(o for o in alternate if o["kind"] == kind)["spec"]["template"])
+            if kind == "Deployment":
+                for template, digest in zip((first, second), digests):
+                    env = template["spec"]["containers"][0]["env"]
+                    bound = next(item for item in env if item["name"] == "WITNESS_CONFIG_DIGEST")
+                    self.assertEqual(bound["value"], digest)
+                    env.remove(bound)
+            self.assertEqual(first["spec"], second["spec"])
+            self.assertNotEqual(first["metadata"]["annotations"], second["metadata"]["annotations"])
+        roles = lambda objects: [o for o in objects if o["kind"] in
+                                 ("Role", "RoleBinding", "ClusterRole", "ClusterRoleBinding")]
+        self.assertEqual(roles(default), roles(alternate))
+        core = documents(render(
+            "--set", "datapathWitness.enabled=true", "--set", "datapathWitness.sandboxes={demo}",
+            "--set", "datapathWitness.aggregator.image=" + IMAGE,
+            "--set", "datapathWitness.gadget.image=" + IMAGE,
+            "--set", "datapathWitness.gadget.hookMode=podinformer",
+            release="kars", chart=ROOT / "deploy/helm/kars"))
+        owned = [o for o in core if o["metadata"].get("labels", {}).get("kars.azure.com/witness-addon") == "true"]
+        self.assertEqual(owned, documents(enabled("--set", "gadget.hookMode=podinformer", release="kars")))
+
+    def test_signed_gadget_artifacts_cannot_be_replaced_with_operator_images(self):
+        for name in ("dnsImage", "tcpImage"):
+            result = enabled("--set", f"gadget.{name}={IMAGE}")
+            self.assertNotEqual(result.returncode, 0)
 
     def test_real_helm_lookups_refuse_legacy_even_without_report(self):
         for kind, name, namespace, image in [

@@ -1,6 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+const REVIEWED_EXECUTION_CONTRACT: &str = "INSTALLED REVIEWED EXECUTOR: typed plans currently execute only fresh filesystem phases. Every phase MUST set fresh_context=true; every phase AND synthesis MUST declare exactly filesystem-read and filesystem-write with a positive max_tool_calls. Reserve one tool call for each complete immutable input read and each explicit output export: a role's first phase needs at least depends_on.length + 1 calls, each later phase needs at least 2, and synthesis needs at least roles.length + deliverables.length. Allow bounded headroom for useful analysis and retries rather than consuming the entire ceiling with mandatory reads and exports. Read all supplied handoffs before writing outputs; filenames alone are not their contents. required_tool_calls must be empty. Objectives must contain at least 20 trimmed UTF-8 bytes. Deliverables must be UTF-8 text/plain, text/markdown or application/json. This is an activation requirement, separate from route qualification. Do not omit required network, MCP, shell or other capabilities merely to pass this contract, and never claim external work happened through filesystem tools. If those capabilities are necessary in a typed plan, retain them and explain that the installed reviewed executor cannot launch that plan. Use execution_plan=null for a small single-agent Mission that does not need decomposition; do not invent a role just to write one file.";
+
 /// Build the system prompt enumerating the real building blocks + the strict
 /// JSON contract. The model is told it may ONLY use these exact identifiers,
 /// and is given the learned efficiency frontier so its model choice is grounded
@@ -177,16 +179,10 @@ pub(super) fn build_system_prompt(
                     }
                     _ => String::new(),
                 };
-                let latency = if r.avg_wall_ms > 0 {
-                    format!(", ~{:.0}s wall (p95 {:.0}s)", r.avg_wall_ms as f64 / 1000.0, r.p95_wall_ms as f64 / 1000.0)
-                } else {
-                    String::new()
-                };
-                let toolfail = if r.avg_tool_calls > 0.0 {
-                    format!(", {:.0}% tool-fail", r.tool_fail_rate * 100.0)
-                } else {
-                    String::new()
-                };
+                let latency = r.avg_wall_ms.zip(r.p95_wall_ms).map(|(mean, p95)|
+                    format!(", ~{:.0}s wall (p95 {:.0}s)", mean as f64 / 1000.0, p95 as f64 / 1000.0)
+                ).unwrap_or_default();
+                let toolfail = r.tool_fail_rate.map(|rate| format!(", {:.0}% tool-fail", rate * 100.0)).unwrap_or_default();
                 let usd = match r.usd_per_outcome {
                     Some(u) => format!(", ${:.3}/outcome", u),
                     None => String::new(),
@@ -197,18 +193,20 @@ pub(super) fn build_system_prompt(
                     format!(", top miss: {}", r.top_fault)
                 };
                 format!(
-                    "  - route \"{}\": {:.0}% accepted, {:.0}% delivered, {} tokens/outcome{usd}{reliability}{latency}{toolfail}{fault} over {} run(s){}",
-                    r.route,
+                    "  - route \"{}\" on \"{}\" ({} verified runs): {:.0}% accepted, {:.0}% delivered, {} tokens/measured delivered outcome{usd}{reliability}{latency}{toolfail}{fault} over {} run(s){}",
+                    r.route, r.harness, r.verified_runs,
                     r.acceptance_rate * 100.0,
                     r.success_rate * 100.0,
-                    r.tokens_per_outcome,
+                    r.tokens_per_outcome.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into()),
                     r.runs,
                     if !eff.recommended_low_confidence
                         && eff.recommended.as_deref() == Some(r.route.as_str())
+                        && eff.recommended_harness.as_deref() == Some(r.harness.as_str())
                     {
                         "  ← recommended"
                     } else if eff.recommended_low_confidence
                         && eff.recommended.as_deref() == Some(r.route.as_str())
+                        && eff.recommended_harness.as_deref() == Some(r.harness.as_str())
                     {
                         "  ← best observed, insufficient evidence"
                     } else {
@@ -246,7 +244,7 @@ EFFICIENCY FRONTIER (learned from completed runs on THIS cluster — the honest 
 ROUTE QUALIFICATION POLICY AND RECORDS (follow the configured policy; never claim missing evidence):
 {qualification_constraints}
 
-RESOURCE QUALIFICATION RECORDS (selected MCP servers, memory bindings, and skills MUST match one current-digest record on the chosen route; generic route records do not count):
+RESOURCE QUALIFICATION RECORDS (required mode demands current-digest evidence; explicit validation mode permits labeled unqualified tests of currently bound resources, never fabricated evidence):
 {resource_qualification_constraints}
 
 MODEL ROUTING: the model running this composer is not automatically the model that should execute the mission. For routine, bounded, low-risk work, prefer the cluster default or a proven efficient route. Reserve the strongest model for objectives with substantial ambiguity, synthesis, security impact, long context, or difficult tool orchestration. Sparse history with few or zero accepted outcomes is not a recommendation.
@@ -262,7 +260,7 @@ TOOL POLICIES (optional; pick one name or null):
 
 MCP SERVERS (optional; pick zero or more names; if you pick any, you MUST also set a tool_policy):
 {mcp}
-Foundry-native web search, file search, memory, and code execution are Kars plugin tools and do not require MCP. If the customer explicitly requests an installed MCP server, select it and declare `mcp`; the complete capability combination must meet the configured route policy, and the selected server still needs current resource-specific evidence.
+Foundry-native web search, file search, memory, and code execution are Kars plugin tools and do not require MCP. If the customer explicitly requests an installed MCP server, select it and declare `mcp`; the complete capability combination and resource selection must meet the configured qualification policy.
 
 APPROVED SKILLS (optional; pick zero or more names):
 {skills}
@@ -282,18 +280,23 @@ EGRESS: list the external network hosts the agent legitimately needs (e.g. an AP
 
 INSTRUCTIONS: write a concise, specific system prompt (2–5 sentences) framing the agent's role and standards for THIS objective.
 
-EXECUTION PLAN: when the objective benefits from decomposition, propose a workload-neutral typed execution plan. Choose arbitrary role names from the objective — never use a fixed role template. Each role has dependency-aware phases. Each phase declares only the generic capabilities it needs: filesystem-read, filesystem-write, shell, network, web-search, mcp, memory. `min_tool_calls` is the minimum successful evidence-producing calls required; set it to at least 1 whenever the phase outcome depends on tools or external evidence. `max_tool_calls` is the explicit upper bound. Set `fresh_context=true` when a phase should consume only prior handbacks instead of the full earlier transcript. Use null for a small single-agent objective.
+EXECUTION PLAN: when the objective benefits from decomposition, propose a workload-neutral typed execution plan. Choose arbitrary role names from the objective — never use a fixed role template. Each role has dependency-aware phases. `min_tool_calls` is the minimum successful evidence-producing calls required; set it to at least 1 whenever the phase outcome depends on tools or external evidence. `max_tool_calls` is the explicit upper bound.
 
-LAUNCHABILITY: follow the configured route qualification policy above for the complete capability/runtime/model/max_parallel contract. Required mode demands ONE record; never merge records. Explicit validation mode permits unqualified routes, not claims of qualification. If you select an MCP server, memory binding, or approved skill, state in the rationale which current-digest resource qualification record makes it launchable; this is mandatory in both modes. Generic route records do not prove a specific server, backend, or skill version. If the requested output format cannot meet the configured policy, propose a supported alternative (for example a Markdown report with inline diagrams instead of generated binary images) and explain that choice. When you emit Mermaid flowcharts, quote every label that contains parser-sensitive punctuation such as :, (), [], {{}}, or /.
+{REVIEWED_EXECUTION_CONTRACT}
+
+LAUNCHABILITY: follow the configured route qualification policy above for the complete capability/runtime/model/max_parallel contract. Required mode demands ONE record; never merge records. If you select an MCP server, memory binding, or approved skill in required mode, name the current-digest resource qualification record in the rationale. Explicit validation mode permits unqualified route and resource tests: state the missing evidence and label the proposal an unqualified validation run, not qualification. Approval, current bindings, authorization, budgets, tool policy and installed execution limits apply in both modes. Generic route records do not prove a specific server, backend, or skill version. If the requested output format cannot meet the configured policy, propose a supported alternative (for example a Markdown report with inline diagrams instead of generated binary images) and explain that choice. When you emit Mermaid flowcharts, quote every label that contains parser-sensitive punctuation such as :, (), [], {{}}, or /.
 
 RESEARCH EVIDENCE: for current-events, incident, or authoritative-source research, declare `web-search` on the source-discovery phase and `network` on the exact-URL fetch phase (or declare both on one combined phase). The first fetch-capable phase must discover exact source URLs with an available search tool (`foundry_web_search` or `web_search`) before fetching pages. Never invent article paths. A timeout, non-success response, blocked page, or search snippet is not evidence for a factual claim. Later phases and synthesis may cite only URLs and facts retained from successful source-discovery/fetch tool results; if authoritative evidence is unavailable, report the gap instead of reconstructing unsupported details.
 
 BUDGET: optionally propose a token budget (integer) appropriate to the scope, or null for no cap.
 
+MODEL FALLBACKS: leave model_fallbacks empty unless the user requests fallback routes. Preserve the requested order, use only the listed models, and never add alternatives merely because they are available.
+
 Respond with ONLY a JSON object (no prose, no code fences) of exactly this shape:
 {{
   "tier": <int 1-5>,
   "model": {{"provider": "<provider>", "deployment": "<deployment>"}},
+  "model_fallbacks": [],
   "runtime": "<harness>",
   "instructions": "<system prompt>",
   "tool_policy": "<name or null>",
@@ -322,8 +325,8 @@ Respond with ONLY a JSON object (no prose, no code fences) of exactly this shape
     "max_parallel": <int 1-8>,
     "synthesis": {{
       "objective": "<how the principal should reconcile handbacks>",
-      "capabilities": [],
-      "max_tool_calls": 0
+      "capabilities": ["<required capability>", ...],
+      "max_tool_calls": <positive int <=32 covering all handoff reads and deliverable exports>
     }},
     "deliverables": [{{"name":"<safe filename>","media_type":"<optional MIME>"}}]
   }} | null,
@@ -475,17 +478,19 @@ pub(super) fn build_team_system_prompt(
             .take(6)
             .map(|r| {
                 format!(
-                    "  - route \"{}\": {:.0}% accepted, {} tokens/outcome over {} run(s){}",
-                    r.route,
+                    "  - route \"{}\" on \"{}\" ({} verified runs): {:.0}% accepted, {} tokens/measured delivered outcome over {} run(s){}",
+                    r.route, r.harness, r.verified_runs,
                     r.acceptance_rate * 100.0,
-                    r.tokens_per_outcome,
+                    r.tokens_per_outcome.map(|n| n.to_string()).unwrap_or_else(|| "unknown".into()),
                     r.runs,
                     if !eff.recommended_low_confidence
                         && eff.recommended.as_deref() == Some(r.route.as_str())
+                        && eff.recommended_harness.as_deref() == Some(r.harness.as_str())
                     {
                         "  ← recommended"
                     } else if eff.recommended_low_confidence
                         && eff.recommended.as_deref() == Some(r.route.as_str())
+                        && eff.recommended_harness.as_deref() == Some(r.harness.as_str())
                     {
                         "  ← best observed, insufficient evidence"
                     } else {
@@ -516,7 +521,7 @@ MODELS (pick per role as "provider::deployment", or "" for the team default):
 
 CONNECTED SERVICES / MCP (select only services the charter genuinely needs):
 {mcp_servers}
-Foundry-native web search, file search, memory, and code execution are Kars plugin tools and do not require MCP. If the customer explicitly requests an installed MCP server, select it and declare `mcp`; the complete capability combination must meet the configured route policy, and the selected server still needs current resource-specific evidence.
+Foundry-native web search, file search, memory, and code execution are Kars plugin tools and do not require MCP. If the customer explicitly requests an installed MCP server, select it and declare `mcp`; the complete capability combination and resource selection must meet the configured qualification policy.
 
 SHARED MEMORY STORES (optional; default to a qualified Foundry-backed store when one is already configured and useful for continuity):
 {memories}
@@ -530,19 +535,22 @@ EFFICIENCY FRONTIER (learned from completed runs; honest signal is human ACCEPTA
 ROUTE QUALIFICATION POLICY AND RECORDS (follow the configured policy; never claim missing evidence):
 {qualification_constraints}
 
-RESOURCE QUALIFICATION RECORDS (selected MCP servers, memory bindings, and skills MUST match one current-digest record on the chosen route; generic route records do not count):
+RESOURCE QUALIFICATION RECORDS (required mode demands current-digest evidence; explicit validation mode permits labeled unqualified tests of currently bound resources, never fabricated evidence):
 {resource_qualification_constraints}
 
 GUIDANCE:
 - Propose 2–4 focused roles (rarely more). Each role does ONE clear part of the charter.
 - Produce one typed `execution_plan` whose role names exactly match the proposed roster. Define explicit dependencies, one or more bounded phases per role, and only the generic capabilities each phase requires: filesystem-read, filesystem-write, shell, network, web-search, mcp, memory. Set `min_tool_calls` to at least 1 when a phase must produce tool-backed evidence. Do not infer capabilities from role names.
-- The principal owns orchestration and the final synthesis. Never propose a coordinator, editor, integrator, or synthesis-only member whose job is merely to reconcile other roles' handbacks or write the final report. Every member must collect, inspect, test, or verify independent evidence.
+- {REVIEWED_EXECUTION_CONTRACT} Teams require a typed plan; the null-plan exception applies only to single-agent Missions.
+- The principal owns orchestration and the final synthesis. It is NOT a roster or execution_plan.roles entry; express its final work in execution_plan.synthesis. Never propose a coordinator, editor, integrator, or synthesis-only member whose job is merely to reconcile other roles' handbacks or write the final report. Every member must collect, inspect, test, or verify independent evidence.
+- Declare every requested output file by its exact name in execution_plan.deliverables and make synthesis export those files. Mentioning filenames only in objectives or milestones does not declare an output contract. Use an empty deliverables list only when no output files are requested.
 - Give each role a short, specific system prompt (1–2 sentences).
 - Assign harness + model per role deliberately: a research/analysis role may warrant a stronger model; a routine triage/watch role should use an efficient one. Leave model/runtime "" to inherit the team default when no strong reason exists.
 - For research charters, declare `web-search` on source-discovery phases and `network` on exact-URL fetch phases (or both on one combined phase) so the retained qualification stays atomic on one route.
 - Select the smallest `mcp_servers` set needed by the whole team. Use the discovered tool names and schema digests above to choose the right server. A browser/UX investigator needs a browser MCP when one is installed.
-- If you assign a skill, use the recipe and version digest above to justify it. If you select MCP, memory, or skills, the rationale must name the current-digest resource qualification record that makes the choice launchable.
+- If you assign a skill, use the recipe and version digest above to justify it. In required mode, name the current-digest resource qualification record for selected MCP, memory, and skills. In explicit validation mode, identify missing evidence and label the proposal an unqualified validation run. Approval, current bindings, authorization, budgets, tool policy and installed execution limits still apply.
 - Select a team-default `model` for the principal; roles may override it only when their work needs a different route.
+- Leave `model_fallbacks` empty unless the user requests fallback routes. Use ordered provider::deployment strings from the catalogue, not every available model.
 - Propose only the external `egress` hosts genuinely required by the charter. Do not invent internal/private hosts. Use `learning` for a reviewed discovery run or `strict` when the host list is complete.
 - AUTONOMY TIER for the team: 1=Manual .. 5=Full. Default 3 unless the charter warrants otherwise.
 - CADENCE minutes: how often the team wakes to act (0 = passive/on-demand). Pick a sensible value for the charter (e.g. 60 for hourly monitoring), else 0.
@@ -556,6 +564,7 @@ Respond with ONLY a JSON object (no prose, no code fences) of exactly this shape
   "cadence_minutes": <int>,
   "instructions": "<1-2 sentence team-level mandate>",
   "model": "<provider::deployment or empty for cluster default>",
+  "model_fallbacks": [],
   "mcp_servers": ["<installed MCP server name>"],
   "memory": "<qualified memory name or null>",
   "egress": [{{"host":"<public DNS host>","port":443}}],
@@ -586,10 +595,10 @@ Respond with ONLY a JSON object (no prose, no code fences) of exactly this shape
     "max_parallel": <int 1-8>,
     "synthesis": {{
       "objective": "<principal synthesis outcome>",
-      "capabilities": [],
-      "max_tool_calls": 0
+      "capabilities": ["<required capability>", ...],
+      "max_tool_calls": <positive int <=32 covering all handoff reads and deliverable exports>
     }},
-    "deliverables": []
+    "deliverables": [{{"name":"<exact requested safe filename>","media_type":"<optional MIME>"}}]
   }},
   "milestones": [
     {{"id":"<stable-kebab-id>","title":"<milestone>","description":"<work and expected artifact>","owner_role":"<roster role or empty>","depends_on":["<earlier-id>"],"acceptance_criteria":["<verifiable condition>"],"review_required":<bool>}}

@@ -1,11 +1,11 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-//! Manual requests reserve an unlaunched Task UID before enabling execution.
+//! Manual and cadence requests reserve an unlaunched Task UID before execution.
 
 use super::{
     ANNOT_RUN_REQUESTED, ANNOT_TEAM, ANNOT_TEAM_ROLE, MAX_CONCURRENT_RUNS, ReconcileError,
-    capabilities, namespace, resource_version, specs, tasks,
+    capabilities, namespace, resource_version, specs, tasks, work,
 };
 use crate::kars_task::KarsTask;
 use crate::kars_team::{KarsTeam, TeamRunAdmission};
@@ -38,6 +38,7 @@ pub(super) fn pending(team: &KarsTeam) -> Result<Option<&str>, ReconcileError> {
 fn sequence(request: &str) -> Result<u64, ReconcileError> {
     let parsed = request
         .strip_prefix("manual-")
+        .or_else(|| request.strip_prefix("cadence-"))
         .and_then(|value| value.split_once('-'));
     if let Some((number, identity)) = parsed
         && let Ok(sequence) = number.parse::<u64>()
@@ -52,7 +53,7 @@ fn sequence(request: &str) -> Result<u64, ReconcileError> {
         return Ok(sequence);
     }
     Err(invalid(
-        "request must have canonical manual-<sequence>-<sha256> identity",
+        "request must have canonical manual-<sequence>-<sha256> or cadence-<sequence>-<sha256> identity",
     ))
 }
 
@@ -60,21 +61,49 @@ fn digest(value: &impl Serialize) -> Result<String, ReconcileError> {
     Ok(hex::encode(Sha256::digest(serde_json::to_vec(value)?)))
 }
 
-fn task_digest(task: &KarsTask) -> Result<String, ReconcileError> {
+pub(crate) fn task_digest(task: &KarsTask) -> Result<String, ReconcileError> {
     let mut spec = task.spec.clone();
     if let Some(execution) = &mut spec.execution {
         execution.launch = false;
     }
-    digest(&spec)
+    let sealed = match task.annotations().get(work::contract::ANNOTATION) {
+        Some(binding) => digest(&(spec, binding)),
+        None => digest(&spec),
+    }?;
+    let sealed = match task
+        .annotations()
+        .get(crate::reviewed_execution::TEAM_ROLES)
+    {
+        Some(roles) => digest(&(sealed, roles)),
+        None => Ok(sealed),
+    }?;
+    match task
+        .annotations()
+        .get(crate::reviewed_execution::TEAM_MEMORY)
+    {
+        Some(memory) => digest(&(sealed, memory)),
+        None => Ok(sealed),
+    }
+}
+
+pub(crate) fn validate_work_run(task: &KarsTask) -> Result<(), ReconcileError> {
+    if task.annotations().get(STATE).map(String::as_str) != Some("admitted")
+        || task.annotations().get(SPEC) != Some(&task_digest(task)?)
+        || task.annotations().get(ANNOT_RUN_REQUESTED) != task.metadata.name.as_ref()
+    {
+        return Err(invalid(
+            "assigned run changed after its work request was sealed",
+        ));
+    }
+    Ok(())
 }
 
 fn task_name(team: &KarsTeam, request: &str) -> Result<String, ReconcileError> {
     let owner = tasks::owner_ref(team)?;
     let key = digest(&("manual-team-run-v1", namespace(team)?, owner.uid, request))?;
-    let prefix: String = team.name_any().chars().take(180).collect();
     Ok(format!(
-        "{}-run-{}",
-        prefix.trim_end_matches('-'),
+        "{}{}",
+        super::runs::run_prefix(&team.name_any()),
         &key[..32]
     ))
 }
@@ -144,6 +173,43 @@ pub(super) struct Prepared {
     pub newly_reserved: bool,
 }
 
+pub(super) async fn enqueue_cadence(
+    teams: &Api<KarsTeam>,
+    team: &KarsTeam,
+) -> Result<(), ReconcileError> {
+    if pending(team)?.is_some() || team.spec.paused {
+        return Err(invalid(
+            "cadence cannot replace a pending request or resume a paused Team",
+        ));
+    }
+    let previous = reservation(team)
+        .map(|record| sequence(&record.request))
+        .transpose()?
+        .unwrap_or(0);
+    let next = previous
+        .checked_add(1)
+        .filter(|next| *next <= i64::MAX as u64)
+        .ok_or_else(|| invalid("admission sequence exhausted"))?;
+    let request = format!(
+        "cadence-{next}-{}",
+        digest(&super::runs::cadence_name(team)?)?
+    );
+    teams
+        .patch(
+            &team.name_any(),
+            &PatchParams::default(),
+            &Patch::Merge(json!({
+                "metadata": {
+                    "uid": tasks::owner_ref(team)?.uid,
+                    "resourceVersion": resource_version(team)?,
+                    "annotations": { (REQUEST): request }
+                }
+            })),
+        )
+        .await?;
+    Ok(())
+}
+
 pub(super) async fn prepare(
     client: &Client,
     tasks_api: &Api<KarsTask>,
@@ -177,6 +243,9 @@ pub(super) async fn prepare(
         if task.annotations().get(STATE).map(String::as_str) != Some("admitted") && !can_admit {
             return Ok(None);
         }
+        if task.annotations().get(STATE).map(String::as_str) == Some("staged") {
+            work::claim(client, team, &task, true).await?;
+        }
         return Ok(Some(Prepared {
             record: record.clone(),
             newly_reserved: false,
@@ -189,8 +258,20 @@ pub(super) async fn prepare(
     let task = match existing {
         Some(task) => task,
         None => {
+            let selection = work::select(client, team).await?;
+            if matches!(
+                selection,
+                work::Selection::Blocked | work::Selection::AwaitingReview
+            ) {
+                return Ok(None);
+            }
+            let assigned = work::fragment(&selection)?;
             let allowance = specs::run_knowledge_budget(team).map_err(ReconcileError::Invalid)?;
-            let knowledge = crate::team_commons::prior_knowledge(client, team, allowance).await?;
+            let remaining = allowance
+                .checked_sub(assigned.chars().count())
+                .ok_or_else(|| invalid("queued work exceeds the bounded objective allowance"))?;
+            let history = crate::team_commons::prior_knowledge(client, team, remaining).await?;
+            let knowledge = format!("{assigned}{history}");
             let mut spec = specs::run_spec(team, &knowledge).map_err(ReconcileError::Invalid)?;
             spec.execution
                 .as_mut()
@@ -208,10 +289,32 @@ pub(super) async fn prepare(
                     (SOURCE.into(), request.into()),
                     (STATE.into(), "staged".into()),
                     (AUTHORITY.into(), authority_digest.clone()),
-                    (SPEC.into(), task_digest(&task)?),
                 ]
                 .into(),
             );
+            if let work::Selection::Item(binding, _) = selection {
+                task.annotations_mut().insert(
+                    work::contract::ANNOTATION.into(),
+                    serde_json::to_string(&binding)?,
+                );
+            }
+            crate::reviewed_execution::seal_team_roles(team, &mut task)?;
+            if task
+                .spec
+                .blueprint
+                .as_ref()
+                .is_some_and(|blueprint| blueprint.execution_plan.is_some())
+            {
+                let memory = crate::team_commons::prior_documents(client, team).await?;
+                if !memory.is_empty() {
+                    task.annotations_mut().insert(
+                        crate::reviewed_execution::TEAM_MEMORY.into(),
+                        serde_json::to_string(&memory)?,
+                    );
+                }
+            }
+            let spec_digest = task_digest(&task)?;
+            task.annotations_mut().insert(SPEC.into(), spec_digest);
             tasks_api.create(&PostParams::default(), &task).await?
         }
     };
@@ -232,6 +335,7 @@ pub(super) async fn prepare(
             "already-admitted Task lacks its matching reservation; refusing replay",
         ));
     }
+    work::claim(client, team, &task, true).await?;
     Ok(Some(Prepared {
         record,
         newly_reserved: true,
@@ -312,6 +416,7 @@ pub(super) async fn finish(
     validate_task(&task, &fresh, record)?;
     if task.annotations().get(STATE).map(String::as_str) == Some("staged") {
         ready_to_activate(client, tasks_api, &fresh, record).await?;
+        work::claim(client, &fresh, &task, false).await?;
         current_team(teams, &fresh, record).await?;
         task.spec
             .execution
@@ -326,6 +431,10 @@ pub(super) async fn finish(
         // Kubernetes has no cross-object transaction. Compensate if the Team fence
         // changed during activation; never overwrite a changed/replaced Task.
         if let Err(error) = current_team(teams, &fresh, record).await {
+            tasks::idle(tasks_api, &admitted).await?;
+            return Err(error);
+        }
+        if let Err(error) = work::claim(client, &fresh, &admitted, false).await {
             tasks::idle(tasks_api, &admitted).await?;
             return Err(error);
         }

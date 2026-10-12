@@ -71,7 +71,7 @@ pub(super) async fn observe(
         .list(&ListParams::default().labels(&format!(
             "{}={}",
             super::LABEL_KEY_CLAW_EVAL,
-            eval.name_any()
+            super::bounded_name(&eval.name_any(), 63)
         )))
         .await
         .context("list evaluator Jobs")?;

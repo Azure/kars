@@ -65,10 +65,26 @@ export async function setLaunch(
       },
     );
     if (!res.ok) {
+      let body: unknown;
+      try {
+        body = await res.json();
+      } catch {
+        return { error: res.status === 422
+          ? "The mission package has invalid fields. Review its execution plan before launching."
+          : `Launch request failed (${res.status}). Refresh the mission and recheck launch.` };
+      }
+      if ([400, 409, 422].includes(res.status) && body && typeof body === "object" && "error" in body) {
+        const error = body.error;
+        if (error && typeof error === "object" && "code" in error && "message" in error
+          && typeof error.code === "string" && ["bad_request", "rejected", "conflict"].includes(error.code)
+          && typeof error.message === "string" && error.message.trim()) {
+          return { error: error.message };
+        }
+      }
       return { error: `Launch request failed (${res.status}).` };
     }
-  } catch (err) {
-    return { error: err instanceof Error ? err.message : "unknown error" };
+  } catch {
+    return { error: "The launch response could not be confirmed. Refresh the mission before trying again." };
   }
   return { error: null };
 }

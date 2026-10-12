@@ -22,6 +22,8 @@ on:
     branches: [dev, main]
     paths:
       - 'sandbox-images/openclaw/Dockerfile.base'
+      - 'sandbox-images/openclaw/build-go-tools.sh'
+      - 'sandbox-images/openclaw/link-plugin-host.py'
       - 'vendor/sandbox-wheels/**'
       - 'inference-router/**'
       - 'controller/**'
@@ -92,6 +94,14 @@ jobs:
             suffix: -controller
             dockerfile: controller/Dockerfile
             needs_binaries: true
+          - name: metrics-server
+            suffix: -metrics-server
+            dockerfile: sandbox-images/metrics-server/Dockerfile
+            needs_binaries: false
+          - name: headlamp
+            suffix: -headlamp
+            dockerfile: sandbox-images/headlamp/Dockerfile
+            needs_binaries: false
           - name: a2a-gateway
             suffix: -a2a-gateway
             dockerfile: a2a-gateway/Dockerfile

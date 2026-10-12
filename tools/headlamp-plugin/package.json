@@ -7,7 +7,7 @@
   "scripts": {
     "build": "headlamp-plugin build",
     "start": "headlamp-plugin start",
-    "test": "headlamp-plugin test",
+    "test": "vitest run --config vitest.config.mts",
     "lint": "headlamp-plugin lint",
     "format": "headlamp-plugin format"
   },

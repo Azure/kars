@@ -155,6 +155,7 @@ mod tests {
                     instructions: Some("Follow the review policy".into()),
                     tool_policy: Some("review-tools".into()),
                     mcp_servers: vec!["review-mcp".into()],
+                    skills: Vec::new(),
                     egress: vec![TaskEgress {
                         host: "api.example.test".into(),
                         port: Some(443),

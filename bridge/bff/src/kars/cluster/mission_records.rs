@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::{Cluster, MissionOutputRecord};
+use super::{Cluster, MissionDeliverableRecord, MissionOutputRecord};
 use crate::kars::task::KarsTask;
 use crate::providers::signing::sha256_hex;
 use k8s_openapi::api::core::v1::ConfigMap;
@@ -55,6 +55,22 @@ fn mission_principal_name(cm: &ConfigMap) -> Option<String> {
 // Read ConfigMaps before the Task: a projection alone is not a commit marker.
 // Unbound legacy records remain history, never evidence of the current run.
 pub(super) fn current_mission_record(cm: &ConfigMap, task: &KarsTask, output: bool) -> bool {
+    let Some(annotations) = task.metadata.annotations.as_ref() else {
+        return false;
+    };
+    let Some(nonce) = annotations.get("kars.azure.com/run-requested") else {
+        return false;
+    };
+    annotations.get("kars.azure.com/run-completed") == Some(nonce)
+        && mission_record_matches(cm, task, nonce, output)
+}
+
+pub(super) fn mission_record_matches(
+    cm: &ConfigMap,
+    task: &KarsTask,
+    nonce: &str,
+    output: bool,
+) -> bool {
     let (Some(name), Some(namespace), Some(uid)) = (
         task.metadata.name.as_deref(),
         task.metadata.namespace.as_deref(),
@@ -62,27 +78,23 @@ pub(super) fn current_mission_record(cm: &ConfigMap, task: &KarsTask, output: bo
     ) else {
         return false;
     };
-    let Some(task_annotations) = task.metadata.annotations.as_ref() else {
+    if nonce.is_empty() {
         return false;
-    };
-    let Some(nonce) = task_annotations
-        .get("kars.azure.com/run-requested")
-        .filter(|nonce| !nonce.is_empty())
-    else {
-        return false;
-    };
+    }
     let Some(annotations) = cm.metadata.annotations.as_ref() else {
         return false;
     };
     task.metadata.deletion_timestamp.is_none()
         && cm.metadata.deletion_timestamp.is_none()
         && cm.metadata.namespace.as_deref() == Some(namespace)
-        && task_annotations.get("kars.azure.com/run-completed") == Some(nonce)
         && annotations
             .get("kars.azure.com/mission-task-uid")
             .map(String::as_str)
             == Some(uid)
-        && annotations.get("kars.azure.com/mission-run-nonce") == Some(nonce)
+        && annotations
+            .get("kars.azure.com/mission-run-nonce")
+            .map(String::as_str)
+            == Some(nonce)
         && annotations
             .get("kars.azure.com/mission-principal-name")
             .map(String::as_str)
@@ -100,7 +112,7 @@ pub(super) fn current_mission_record(cm: &ConfigMap, task: &KarsTask, output: bo
             || cm.data.as_ref().is_some_and(|data| {
                 data.get("taskName").map(String::as_str) == Some(name)
                     && data.get("taskUid").map(String::as_str) == Some(uid)
-                    && data.get("assignmentNonce") == Some(nonce)
+                    && data.get("assignmentNonce").map(String::as_str) == Some(nonce)
             }))
 }
 
@@ -169,6 +181,20 @@ pub(super) fn select_mission_output_records(
         .collect()
 }
 
+fn mission_evidence_priority(
+    key: &str,
+    role: Option<&str>,
+    data: &std::collections::BTreeMap<String, String>,
+) -> u8 {
+    match role {
+        Some("archive" | "canonical") => 3,
+        Some("current") => 1,
+        Some(_) => 0,
+        None if data.get("assignmentNonce").map(String::as_str) == Some(key) => 2,
+        None => 1,
+    }
+}
+
 pub(super) fn select_mission_evidence_records(
     records: Vec<(
         String,
@@ -199,12 +225,8 @@ pub(super) fn select_mission_evidence_records(
         .filter_map(|group| {
             group
                 .into_iter()
-                .max_by_key(|(key, role, data)| match role.as_deref() {
-                    Some("archive" | "canonical") => 3,
-                    Some("current") => 1,
-                    Some(_) => 0,
-                    None if data.get("assignmentNonce") == Some(key) => 2,
-                    None => 1,
+                .max_by_key(|(key, role, data)| {
+                    mission_evidence_priority(key, role.as_deref(), data)
                 })
                 .map(|(key, _, data)| (key, data))
         })
@@ -251,6 +273,140 @@ pub(super) fn trace_record_identity(cm: &ConfigMap) -> Option<String> {
 }
 
 impl Cluster {
+    /// Join retained records to their exact live Task identity. Ownership and
+    /// presentation metadata come from the Task, never agent-supplied fields.
+    /// Historical revisions remain distinct; only committed current revisions
+    /// link to the current Mission download/review surface.
+    pub async fn list_mission_deliverables(
+        &self,
+    ) -> Result<Vec<MissionDeliverableRecord>, kube::Error> {
+        use kube::api::ListParams;
+        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");
+        let output_params = ListParams::default().labels("kars.azure.com/mission-output");
+        let artifact_params = ListParams::default().labels("kars.azure.com/mission-artifacts");
+        let (outputs, artifacts) =
+            tokio::try_join!(cms.list(&output_params), cms.list(&artifact_params),)?;
+        let tasks = self
+            .tasks("kars-system")
+            .list(&ListParams::default())
+            .await?;
+        let tasks = tasks
+            .items
+            .into_iter()
+            .filter_map(|task| task.metadata.name.clone().map(|name| (name, task)))
+            .collect::<std::collections::HashMap<_, _>>();
+        let artifacts = artifacts
+            .items
+            .into_iter()
+            .filter_map(|cm| cm.metadata.name.clone().map(|name| (name, cm)))
+            .collect::<std::collections::HashMap<_, _>>();
+        let mut grouped =
+            std::collections::BTreeMap::<_, Vec<(u8, MissionDeliverableRecord)>>::new();
+        for cm in outputs.items {
+            let Some((key, role, mut data)) = mission_output_candidate(cm.clone()) else {
+                continue;
+            };
+            let modern = data.contains_key("taskUid")
+                || cm
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .is_some_and(|a| a.contains_key("kars.azure.com/mission-task-uid"));
+            let mut current = false;
+            let mut companion = None;
+            if modern {
+                let Some(task) = data.get("taskName").and_then(|name| tasks.get(name)) else {
+                    continue;
+                };
+                let Some(nonce) = data.get("assignmentNonce").cloned() else {
+                    continue;
+                };
+                if !mission_record_matches(&cm, task, &nonce, true) {
+                    continue;
+                }
+                current = current_mission_record(&cm, task, true);
+                if !current
+                    && task
+                        .metadata
+                        .annotations
+                        .as_ref()
+                        .and_then(|a| a.get("kars.azure.com/run-requested"))
+                        == Some(&nonce)
+                {
+                    continue;
+                }
+                data.remove("ownerSub");
+                if let Some(owner) = task
+                    .metadata
+                    .annotations
+                    .as_ref()
+                    .and_then(|a| a.get("kars.azure.com/owner-sub"))
+                {
+                    data.insert("ownerSub".into(), owner.clone());
+                }
+                data.insert("objective".into(), task.spec.objective.clone());
+                if let Some(title) = &task.spec.display_name {
+                    data.insert("displayName".into(), title.clone());
+                }
+                if let Some(parent) = &task.spec.parent_ref {
+                    data.insert("parent".into(), parent.name.clone());
+                }
+                if let Some(team) = task
+                    .metadata
+                    .labels
+                    .as_ref()
+                    .and_then(|a| a.get("kars.azure.com/team"))
+                    .or_else(|| {
+                        task.metadata
+                            .annotations
+                            .as_ref()
+                            .and_then(|a| a.get("kars.azure.com/team"))
+                    })
+                {
+                    data.insert("team".into(), team.clone());
+                }
+                companion = cm
+                    .metadata
+                    .name
+                    .as_deref()
+                    .and_then(|name| name.strip_prefix("kars-mission-output-"))
+                    .and_then(|suffix| artifacts.get(&format!("kars-mission-artifacts-{suffix}")))
+                    .filter(|artifact| {
+                        mission_record_matches(artifact, task, &nonce, false)
+                            && mission_evidence_key(artifact, "kars.azure.com/mission-artifacts")
+                                .as_ref()
+                                == Some(&key)
+                            && mission_evidence_role(artifact) == role
+                    })
+                    .cloned();
+            }
+            let identity = (
+                data.get("taskUid").cloned(),
+                data.get("taskName").cloned(),
+                data.get("assignmentNonce")
+                    .cloned()
+                    .unwrap_or_else(|| key.clone()),
+            );
+            grouped.entry(identity).or_default().push((
+                mission_evidence_priority(&key, role.as_deref(), &data),
+                MissionDeliverableRecord {
+                    output: project_mission_output_record(key, data),
+                    current,
+                    artifacts: companion,
+                },
+            ));
+        }
+        Ok(grouped
+            .into_values()
+            .filter_map(|group| {
+                group
+                    .into_iter()
+                    .max_by_key(|(priority, _)| *priority)
+                    .map(|(_, record)| record)
+            })
+            .collect())
+    }
+
     /// Persist a mission's run output into a namespaced ConfigMap
     /// `kars-mission-output-<task>` in `kars-system`, so the deliverable is a
     /// durable, readable cluster object (the §16 artifact record, minimal form).
@@ -276,6 +432,20 @@ impl Cluster {
         )
         .await?;
         Ok(())
+    }
+
+    pub(crate) fn mission_attempt_name(uid: &str, nonce: &str) -> String {
+        let key = sha256_hex(serde_json::to_vec(&[uid, nonce]).expect("string pair"));
+        format!("kars-mission-attempt-{}", &key[..40])
+    }
+
+    /// Untrusted snapshot: the caller must validate custody against a fresh owned Task.
+    pub(crate) async fn read_mission_attempt(&self, uid: &str, nonce: &str) -> Option<ConfigMap> {
+        let cms: Api<ConfigMap> = Api::namespaced(self.client.clone(), "kars-system");
+        cms.get_opt(&Self::mission_attempt_name(uid, nonce))
+            .await
+            .ok()
+            .flatten()
     }
 
     async fn current_mission_configmap(&self, task: &str, kind: &str) -> Option<ConfigMap> {

@@ -8,6 +8,7 @@ import type { Execute } from "../lib/deployment-target.js";
 import type { DeploymentRecord } from "../lib/core-image-apply.js";
 import { releaseImagePlan } from "../lib/release.js";
 import { planSandboxImages } from "../lib/sandbox-image-apply.js";
+import { restartOwnedMetrics } from "../lib/metrics-image-apply.js";
 vi.mock("../lib/core-helm-schemas.js", () => ({ prepareCoreHelmSchemas: vi.fn(async () => {}) }));
 
 const digest = `sha256:${"a".repeat(64)}`;
@@ -33,7 +34,7 @@ function getPath(object: Record<string, unknown>, path: string): string {
   return path.split(".").reduce<unknown>((current, key) => (current as Record<string, unknown>)[key], object) as string;
 }
 
-function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "external"; fail?: string; mismatch?: boolean; privateRoot?: boolean } = {}) {
+function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "external"; metrics?: "owned" | "external" | "disabled"; fail?: string; mismatch?: boolean; privateRoot?: boolean } = {}) {
   const values: Record<string, unknown> = {
     controller: { image: { repository: "ghcr.io/azure/kars-controller", tag: "v1.0.0", pullPolicy: "IfNotPresent" } },
     inferenceRouter: { image: { repository: "ghcr.io/azure/kars-inference-router", tag: "v1.0.0" } },
@@ -54,6 +55,18 @@ function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "ex
       ],
     }] } } }, status: healthy(),
   };
+  if (options.metrics === "disabled") values.metricsServer = { enabled: false };
+  let metricsPresent = options.metrics === "owned" || options.metrics === "external";
+  const metrics: DeploymentRecord = {
+    metadata: { name: "kars-metrics-server", namespace: "kars-system", resourceVersion: "7", generation: 1,
+      annotations: { "kars.azure.com/metrics-owner": "kars-system/kars", ...(options.legacyCore ? {} : helmMetadata().annotations) } },
+    spec: { replicas: 1, template: { spec: { containers: [{ name: "metrics-server", image: "old.example/metrics:latest" }] } } },
+    status: healthy(),
+  };
+  const metricsApi = { metadata: { name: "v1beta1.metrics.k8s.io",
+    annotations: options.metrics === "external" ? {} : { ...metrics.metadata.annotations } },
+  spec: { service: options.metrics === "external" ? { name: "platform-metrics", namespace: "kube-system" }
+    : { name: "kars-metrics-server", namespace: "kars-system" } } };
   const crs: Array<{ metadata: { name: string; namespace: string }; spec: { runtime: Record<string, unknown> } }> = [];
   const sandboxes: DeploymentRecord[] = [];
   const meshResources = options.mesh && options.mesh !== "absent" ? ["registry", "relay"].flatMap(component => {
@@ -109,6 +122,10 @@ function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "ex
         setPath(values, arg.slice(0, at), arg.slice(at + 1));
       }
       const c = controller.spec.template.spec.containers[0];
+      if (values.metricsServer && options.metrics !== "external" && options.metrics !== "disabled") {
+        metricsPresent = true;
+        metrics.spec.template.spec.containers[0].image = `${getPath(values, "metricsServer.image.repository")}:${getPath(values, "metricsServer.image.tag")}`;
+      }
       if (!options.mismatch) c.image = `${getPath(values, "controller.image.repository")}:${getPath(values, "controller.image.tag")}`;
       for (const name of ["router", "sandbox", ...RUNTIME_IMAGE_TARGETS.map(item => item.name)]) {
         const target = RUNTIME_IMAGE_TARGETS.find(item => item.name === name);
@@ -125,7 +142,7 @@ function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "ex
     if (bin === "kubectl" && args[0] === "patch") {
       const ops = JSON.parse(args[args.indexOf("-p") + 1]) as Array<{ op: string; path: string; value: unknown }>;
       for (const op of ops.filter(item => item.op !== "test")) {
-        const c = controller.spec.template.spec.containers[0];
+        const c = (args[1] === "deployment/kars-metrics-server" ? metrics : controller).spec.template.spec.containers[0];
         if (op.path.endsWith("/env")) c.env = op.value as typeof c.env;
         if (op.path.endsWith("/image")) c.image = op.value as string;
         if (op.path.endsWith("/imagePullPolicy")) c.imagePullPolicy = op.value as string;
@@ -133,6 +150,7 @@ function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "ex
     }
     if (bin === "kubectl" && args[0] === "annotate") materialize(args[2]);
     if (bin === "kubectl" && args[0] === "get") {
+      if (args[1] === "apiservice") return { stdout: metricsPresent ? JSON.stringify(metricsApi) : "" };
       if (args[1] === "namespace" && options.privateRoot) return { stdout: JSON.stringify({
         kind: "Namespace", metadata: { name: "kars-system", uid: "root-ns", resourceVersion: "1",
           annotations: { "kars.azure.com/private-root-retirement": '{"version":1,"phase":"restoring"}' } },
@@ -142,16 +160,77 @@ function fixture(options: { legacyCore?: boolean; mesh?: "absent" | "helm" | "ex
       if (args[1] === "karssandboxes") return { stdout: JSON.stringify({ items: crs }) };
       if (args[1] === "karssandbox") return { stdout: JSON.stringify(crs.find(cr => cr.metadata.name === args[2])) };
       if (args[1] === "deployment") return { stdout: JSON.stringify(args[2] === "kars-controller" ? controller
-        : sandboxes.find(item => item.metadata.name === args[2]) ?? meshResources.find(item => item.kind === "Deployment" && item.metadata.name === args[2])) };
+        : args[2] === "kars-metrics-server" ? metrics
+          : sandboxes.find(item => item.metadata.name === args[2]) ?? meshResources.find(item => item.kind === "Deployment" && item.metadata.name === args[2])) };
     }
     return { stdout: "" };
   }) as unknown as Execute;
   const calls = () => vi.mocked(execute).mock.calls as unknown as Array<[string, string[]]>;
-  return { execute, values, controller, addSandbox, calls, meshResources };
+  return { execute, values, controller, addSandbox, calls, meshResources, metrics, metricsApi };
 }
 
+describe("metrics image lifecycle", () => {
+  it.each([false, true])("updates only owned metrics through its actual installation (legacy=%s)", async legacyCore => {
+    const f = fixture({ metrics: "owned", legacyCore });
+    const original = structuredClone(f.controller);
+    const result = await applyPushedImages(f.execute, [pushed("metrics-server")], "chart");
+    expect(result.applied).toEqual(["metrics-server"]);
+    expect(f.metrics.spec.template.spec.containers[0].image).toBe(reference("metrics-server"));
+    expect(f.controller).toEqual(original);
+    expect(f.calls().some(([, args]) => args[0] === "rollout" && args.includes("deployment/kars-controller"))).toBe(false);
+    expect(f.calls().some(([, args]) => args[0] === "wait" && args.includes("apiservice/v1beta1.metrics.k8s.io"))).toBe(true);
+    if (legacyCore) {
+      expect(f.calls().some(([bin]) => bin === "helm")).toBe(false);
+      expect(f.calls().find(([, args]) => args[0] === "patch")?.[1].at(-1)).toContain('"path":"/metadata/resourceVersion","value":"7"');
+    }
+  });
+
+  it("installs the missing Helm-owned prerequisite with its selected immutable image", async () => {
+    const f = fixture();
+    await applyPushedImages(f.execute, [pushed("metrics-server")], "chart");
+    expect(f.metrics.spec.template.spec.containers[0].image).toBe(reference("metrics-server"));
+  });
+
+  it.each(["external", "disabled"] as const)("refuses explicit %s metrics apply before mutations", async metrics => {
+    const f = fixture({ metrics });
+    await expect(applyPushedImages(f.execute, [pushed("metrics-server")], "chart")).rejects.toThrow("Metrics image not applied");
+    expect(f.calls().some(([bin, args]) => bin === "az" || ["upgrade", "patch", "rollout"].includes(args[0]))).toBe(false);
+  });
+
+  it("reports external metrics as build-only while applying an independently selected controller", async () => {
+    const f = fixture({ metrics: "external" });
+    const result = await applyPushedImages(f.execute, [pushed("metrics-server"), pushed("controller")], "chart");
+    expect(result.applied).toEqual(["controller"]);
+    expect(result.buildOnly).toEqual(["metrics-server"]);
+    expect(f.metrics.spec.template.spec.containers[0].image).toBe("old.example/metrics:latest");
+  });
+
+  it("refuses an absent template-owned prerequisite instead of claiming an image was deployed", async () => {
+    const f = fixture({ legacyCore: true });
+    await expect(applyPushedImages(f.execute, [pushed("metrics-server")], "chart")).rejects.toThrow("prerequisite is not installed");
+  });
+
+  it("rejects conflicting ownership and unhealthy rollouts", async () => {
+    const foreign = fixture({ metrics: "owned" });
+    foreign.metrics.metadata.annotations!["meta.helm.sh/release-name"] = "foreign";
+    await expect(applyPushedImages(foreign.execute, [pushed("metrics-server")], "chart")).rejects.toThrow("conflicting Helm ownership");
+    const unhealthy = fixture({ metrics: "owned", fail: "wait" });
+    await expect(applyPushedImages(unhealthy.execute, [pushed("metrics-server")], "chart")).rejects.toThrow("failed wait");
+  });
+
+  it("refreshes floating metrics tags on upgrade without restarting controller or external metrics", async () => {
+    const f = fixture({ metrics: "owned" });
+    await restartOwnedMetrics(f.execute);
+    expect(f.calls().filter(([, args]) => args[0] === "rollout" && args[1] === "restart").map(([, args]) => args[2]))
+      .toEqual(["deployment/kars-metrics-server"]);
+    const external = fixture({ metrics: "external" });
+    await restartOwnedMetrics(external.execute);
+    expect(external.calls().some(([, args]) => args[0] === "rollout")).toBe(false);
+  });
+});
+
 describe("selected core push artifacts", () => {
-  it.each(["controller", "router", "sandbox", "runtime-openai-agents", "mcp-everything", "relay"])(
+  it.each(["controller", "router", "sandbox", "runtime-openai-agents", "mcp-everything", "mcp-playwright", "relay"])(
     "refuses private-root-affecting %s apply before artifacts, schemas or any mutation", async name => {
       const f = fixture({ privateRoot: true, mesh: name === "relay" ? "helm" : "absent" });
       await expect(applyPushedImages(f.execute, [pushed(name)], "chart")).rejects.toThrow("KARS_PRIVATE_ROOT_UPGRADE_BLOCKED");

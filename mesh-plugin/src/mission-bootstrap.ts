@@ -4,6 +4,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { KubernetesJson } from "./kubernetes-json.js";
+import { dispatcherEntraName, dispatcherEntraPin, guid, type DispatcherEntraBinding, type DispatcherEntraConfig } from "./mission-entra.js";
 import { singleControllerOwner, type MissionMetadata, type MissionWorkloadResources } from "./mission-workload.js";
 
 export const dispatcherRootName = "kars-mission-dispatcher-identity";
@@ -12,7 +13,7 @@ const pin = `${prefix}mission-root-uid`;
 const hash = "pod-template-hash";
 const revision = "deployment.kubernetes.io/revision";
 export interface DispatcherLocation { namespace: string; deployment: string; release: string; podName: string; podUid: string }
-export interface DispatcherCustody { deploymentUid: string; podUid: string; namespaceUid: string; rootUid: string }
+export interface DispatcherCustody { deploymentUid: string; podUid: string; namespaceUid: string; rootUid: string; entra?: DispatcherEntraBinding }
 type Workload = MissionWorkloadResources["deployment"] & { spec?: { strategy?: { type?: string } } };
 type Pod = MissionWorkloadResources["pod"] & { spec?: NonNullable<NonNullable<Workload["spec"]>["template"]>["spec"] };
 interface Secret { metadata: MissionMetadata; type?: string; immutable?: boolean; data?: Record<string, string> }
@@ -41,7 +42,7 @@ function withoutHash(template: NonNullable<NonNullable<Workload["spec"]>["templa
 }
 
 /** Does not require this Pod's Ready condition: connecting the SDK precedes readiness. */
-export async function dispatcherCustody(api: KubernetesJson, location: DispatcherLocation, mountedRoot: string): Promise<DispatcherCustody> {
+export async function dispatcherCustody(api: KubernetesJson, location: DispatcherLocation, mountedRoot: string, entra?: DispatcherEntraConfig): Promise<DispatcherCustody> {
   const { namespace, deployment: deploymentName, release, podName, podUid } = location;
   requireCondition([namespace, deploymentName, release].every(label) && name(podName) && podUid);
   const nsPath = `/api/v1/namespaces/${namespace}`;
@@ -108,10 +109,32 @@ export async function dispatcherCustody(api: KubernetesJson, location: Dispatche
   const bytes = Buffer.from(secret.data.root, "base64");
   requireCondition(bytes.toString("base64") === secret.data.root && /^[a-fA-F0-9]{64}$/.test(bytes.toString("utf8"))
     && bytes.length === 64 && timingSafeEqual(bytes, Buffer.from(mountedRoot)));
-  for (const [path, prior] of [[secretPath, secret], [rsPath, rs], [podPath, pod], [deploymentPath, deployment], [nsPath, ns]] as const) {
+  let binding: DispatcherEntraBinding | undefined;
+  const rechecks: Array<readonly [string, { metadata: MissionMetadata }]> = [];
+  if (entra) {
+    requireCondition(dm.annotations?.[dispatcherEntraPin]);
+    const bindingPath = `${nsPath}/secrets/${dispatcherEntraName}`;
+    const owned = await api.request<Secret>("GET", bindingPath);
+    identified(owned.metadata, dispatcherEntraName, namespace);
+    requireCondition(owned.metadata.uid === dm.annotations[dispatcherEntraPin] && owned.metadata.ownerReferences?.length === 1
+      && singleControllerOwner(owned.metadata, "apps/v1", "Deployment", deploymentName, dm.uid!)
+      && (owned.metadata.ownerReferences[0] as { blockOwnerDeletion?: boolean }).blockOwnerDeletion === true
+      && owned.immutable === true && owned.type === "Opaque" && Object.keys(owned.data ?? {}).length === 1
+      && typeof owned.data?.binding === "string");
+    const value = Buffer.from(owned.data.binding, "base64");
+    requireCondition(value.toString("base64") === owned.data.binding);
+    try { binding = JSON.parse(value.toString("utf8")); } catch { throw new Error("Invalid dispatcher Entra binding"); }
+    requireCondition(binding && Object.keys(binding).length === 10 && binding.version === "v1" && binding.state === "ready"
+      && binding.journalUid === owned.metadata.uid && binding.namespaceUid === ns.metadata.uid
+      && binding.deploymentUid === dm.uid && binding.rootUid === sm.uid
+      && binding.tenantId === entra.tenantId && binding.blueprintId === entra.blueprintId
+      && [binding.tenantId, binding.blueprintId, binding.appId, binding.objectId].every(v => typeof v === "string" && guid.test(v)));
+    rechecks.push([bindingPath, owned]);
+  }
+  for (const [path, prior] of [...rechecks, [secretPath, secret], [rsPath, rs], [podPath, pod], [deploymentPath, deployment], [nsPath, ns]] as const) {
     const fresh = await api.request<{ metadata: MissionMetadata }>("GET", path);
     identified(fresh.metadata, prior.metadata.name, prior.metadata.namespace);
     requireCondition(fresh.metadata.uid === prior.metadata.uid && fresh.metadata.resourceVersion === prior.metadata.resourceVersion);
   }
-  return { deploymentUid: dm.uid!, podUid, namespaceUid: ns.metadata.uid!, rootUid: sm.uid! };
+  return { deploymentUid: dm.uid!, podUid, namespaceUid: ns.metadata.uid!, rootUid: sm.uid!, ...(binding ? { entra: binding } : {}) };
 }

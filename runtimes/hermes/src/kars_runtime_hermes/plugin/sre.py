@@ -73,6 +73,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 import httpx
@@ -250,7 +251,9 @@ def _impl_sre_describe_state(**_kwargs: Any) -> dict[str, Any]:
         path = f"/apis/{KARS_GROUP}/{KARS_VERSION}/{plural}"
         try:
             doc = kube.get(path)
-            items = doc.get("items", [])
+            items = doc.get("items")
+            if not isinstance(items, list) or any(not isinstance(item, dict) for item in items):
+                raise ValueError("Resource inventory omitted a valid items list")
             out[kind] = [_summarise_cr(it, kind) for it in items]
         except httpx.HTTPStatusError as exc:
             # 404 = the CRD isn't installed; common during early-cluster.
@@ -326,8 +329,14 @@ def _impl_sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
         "crds_missing": [],
         "degraded_sandboxes": [],
         "degraded_policies": [],
+        "stale_reconciles": [],
+        "coverage_errors": [],
+        "coverage": "unknown",
         "summary": "",
     }
+
+    def unknown(scope: str, error: Any) -> None:
+        report["coverage_errors"].append({"scope": scope, "error": str(error)})
 
     # 1) Controller deployment status
     try:
@@ -340,11 +349,15 @@ def _impl_sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
             report["controller_status"] = f"Degraded ({ready_replicas}/{spec_replicas} ready)"
     except Exception as exc:  # noqa: BLE001
         report["controller_status"] = f"Unknown: {exc}"
+        unknown("controller", exc)
 
     # 2) CRD inventory check
     try:
         doc = kube.get("/apis/apiextensions.k8s.io/v1/customresourcedefinitions")
-        installed = {c.get("metadata", {}).get("name") for c in doc.get("items", [])}
+        items = doc.get("items")
+        if not isinstance(items, list):
+            raise ValueError("CRD inventory omitted a valid items list")
+        installed = {c["metadata"]["name"] for c in items}
         for plural, _kind in KARS_CR_KINDS:
             full = f"{plural}.{KARS_GROUP}"
             if full in installed:
@@ -352,20 +365,34 @@ def _impl_sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
             else:
                 report["crds_missing"].append(full)
     except Exception as exc:  # noqa: BLE001
-        report["crds_present"] = f"error: {exc}"
+        unknown("crds", exc)
 
     # 3) Sandbox/policy phase scan — reuse describe_state results
     state = sre_describe_state()
+    now = datetime.now(timezone.utc)
     for kind, items in state.items():
         if isinstance(items, dict) and "error" in items:
+            unknown(kind, items["error"])
             continue
         for it in items:
             phase = it.get("phase")
+            scope = f"{kind}/{it.get('namespace')}/{it.get('name')}"
+            if not phase:
+                unknown(scope, "Resource phase is absent")
             if phase and phase not in {"Ready", "Running", "Compiled", "Active"}:
                 bucket = (
                     "degraded_sandboxes" if kind == "KarsSandbox" else "degraded_policies"
                 )
                 report[bucket].append(it)
+            reconciled = it.get("lastReconciled")
+            try:
+                observed = datetime.fromisoformat(str(reconciled).replace("Z", "+00:00"))
+                if observed.tzinfo is None or observed > now:
+                    raise ValueError("Timestamp must have a timezone and cannot be in the future")
+                if (now - observed).total_seconds() > 300:
+                    report["stale_reconciles"].append(it)
+            except (TypeError, ValueError):
+                unknown(scope, "Reconcile freshness unknown: absent or invalid lastReconciled")
 
     # 3b) Workload-availability cross-check — KarsSandbox.status.phase
     # reflects controller reconcile state, not actual pod readiness.
@@ -379,15 +406,23 @@ def _impl_sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
         for sb in sandbox_items:
             name = sb.get("name")
             if not name:
+                unknown("KarsSandbox", "Sandbox name is absent")
                 continue
             try:
                 d = kube.get(
                     f"/apis/apps/v1/namespaces/kars-{name}/deployments/{name}"
                 )
-            except Exception:  # noqa: BLE001 — best-effort
+            except Exception as exc:  # noqa: BLE001
+                unknown(f"Deployment/kars-{name}/{name}", exc)
                 continue
-            desired = (d.get("spec") or {}).get("replicas") or 0
+            desired = (d.get("spec") or {}).get("replicas")
+            if not isinstance(desired, int) or isinstance(desired, bool) or desired < 0:
+                unknown(f"Deployment/kars-{name}/{name}", "Desired replica count is absent or invalid")
+                continue
             available = ((d.get("status") or {}).get("availableReplicas") or 0)
+            if not isinstance(available, int) or isinstance(available, bool) or available < 0:
+                unknown(f"Deployment/kars-{name}/{name}", "Available replica count is invalid")
+                continue
             if desired > 0 and available < desired:
                 synthetic = dict(sb)
                 synthetic["phase"] = f"WorkloadDown({available}/{desired})"
@@ -404,6 +439,9 @@ def _impl_sre_diagnose(**_kwargs: Any) -> dict[str, Any]:
     bits.append(f"CRDs missing: {n_missing}")
     bits.append(f"sandboxes degraded: {n_deg_sb}")
     bits.append(f"governance CRs degraded: {n_deg_pol}")
+    bits.append(f"stale reconciles: {len(report['stale_reconciles'])}")
+    report["coverage"] = "incomplete" if report["coverage_errors"] else "complete"
+    bits.append(f"coverage: {report['coverage']} ({len(report['coverage_errors'])} unknown checks)")
     report["summary"] = "; ".join(bits)
     return report
 
@@ -609,14 +647,15 @@ def _impl_sre_propose_fix(
     # operator can fall back to the manual runbook.
     if proposal["action"] is not None:
         try:
-            action_id = _create_karssreaction_cr(
+            action_id, created = _create_karssreaction_cr(
                 action=proposal["action"],
                 diagnosis=diagnosis,
                 rationale=proposal["rationale"],
                 ttl_minutes=ttl_minutes,
             )
             proposal["action_id"] = action_id
-            proposal["cr_created"] = True
+            proposal["cr_created"] = created
+            proposal["cr_reused"] = not created
             proposal["approve_command"] = f"kars sre approve {action_id}"
             proposal["reject_command"] = f"kars sre reject {action_id}"
         except Exception as e:  # noqa: BLE001 — surface the error in the envelope
@@ -633,12 +672,12 @@ def _create_karssreaction_cr(
     diagnosis: str,
     rationale: str | None,
     ttl_minutes: int | None,
-) -> str:
-    """POST a KarsSREAction CR to ``kars-sre`` and return its name.
+) -> tuple[str, bool]:
+    """Reuse a Pending action or POST one; return its name and whether created.
 
     The CR is generated with the K8s-side ``generateName`` mechanism so
     the apiserver picks a unique name (``sre-action-<5-char-suffix>``)
-    on every call — no agent-side name collision risk.
+    for new proposals — no agent-side name collision risk.
 
     Schema is per ``controller/src/kars_sre_action.rs``: flat action
     payload from the proposal is reshaped into
@@ -673,12 +712,30 @@ def _create_karssreaction_cr(
         body["spec"]["ttlMinutes"] = max(1, min(60, int(ttl_minutes)))
     # Drop None spec fields — the CRD treats them as unset, not null.
     body["spec"] = {k: v for k, v in body["spec"].items() if v is not None}
-
+    path = "/apis/kars.azure.com/v1alpha1/namespaces/kars-sre/karssreactions"
+    inventory = kube.get(path)
+    items = inventory.get("items")
+    if not isinstance(items, list):
+        raise ValueError("Cannot check existing proposals: inventory is unknown")
+    for item in items:
+        spec = item.get("spec") or {}
+        metadata = item.get("metadata") or {}
+        if (spec.get("action") == body["spec"]["action"]
+                and (spec.get("approval") or {}).get("state") == "Pending"
+                and (item.get("status") or {}).get("phase") in {None, "", "Proposed"}
+                and not metadata.get("deletionTimestamp")):
+            name = metadata.get("name")
+            if not isinstance(name, str) or not name:
+                raise ValueError("Existing proposal omitted its persisted action name")
+            return name, False
     created = kube.post(
-        "/apis/kars.azure.com/v1alpha1/namespaces/kars-sre/karssreactions",
+        path,
         json=body,
     )
-    return str(created.get("metadata", {}).get("name", "<unknown>"))
+    name = created.get("metadata", {}).get("name")
+    if not isinstance(name, str) or not name:
+        raise ValueError("Proposal CREATE response omitted its persisted action name")
+    return name, True
 
 
 # --------------------------------------------------------------------------

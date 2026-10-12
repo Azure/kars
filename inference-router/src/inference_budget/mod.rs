@@ -3,6 +3,7 @@
 
 #[cfg(test)]
 mod anthropic_cases;
+pub mod calendar;
 pub mod client;
 pub mod dispatch;
 pub mod egress;

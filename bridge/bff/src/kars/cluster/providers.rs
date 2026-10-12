@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use super::Cluster;
+use k8s_openapi::api::core::v1::EnvVar;
 use kube::api::Api;
 
 pub(super) fn normalize_registry_host(value: &str) -> String {
@@ -103,7 +104,163 @@ pub(super) fn parse_model_catalog(value: &str) -> Vec<String> {
         .collect()
 }
 
+fn configured_models(envs: &[EnvVar]) -> (Option<String>, Vec<String>) {
+    let mut default = None;
+    let mut catalog = Vec::new();
+    let mut legacy_catalog = Vec::new();
+    for e in envs {
+        let Some(val) = &e.value else { continue };
+        match e.name.as_str() {
+            "KARS_TASK_DEFAULT_MODEL" | "AZURE_OPENAI_DEPLOYMENT" if default.is_none() => {
+                default = Some(val.clone());
+            }
+            "KARS_MODEL_CATALOG" => {
+                catalog.extend(parse_model_catalog(val));
+            }
+            "FOUNDRY_DEPLOYMENTS" => legacy_catalog.extend(parse_model_catalog(val)),
+            _ => {}
+        }
+    }
+    if !envs
+        .iter()
+        .any(|env| env.name == "KARS_MODEL_CATALOG" && env.value.is_some())
+    {
+        catalog = legacy_catalog;
+    }
+    (default, catalog)
+}
+
+pub(super) fn inherited_provider_registered(
+    envs: &[EnvVar],
+    keys: &std::collections::BTreeMap<String, String>,
+) -> bool {
+    let Some((provider, _, _)) = configured_provider(envs) else {
+        return true;
+    };
+    if provider == "github-copilot" {
+        return keys
+            .get("COPILOT_GITHUB_TOKEN")
+            .is_some_and(|value| !value.trim().is_empty());
+    }
+    configured_endpoint(envs).is_some_and(|endpoint| {
+        keys.iter().any(|(key, value)| {
+            key.starts_with("KARS_PROVIDER_")
+                && key.ends_with("_ENDPOINT")
+                && value.trim_end_matches('/') == endpoint.trim_end_matches('/')
+        })
+    })
+}
+
+fn configured_endpoint(envs: &[EnvVar]) -> Option<&str> {
+    envs.iter()
+        .find_map(|env| {
+            (env.name == "FOUNDRY_ENDPOINT")
+                .then(|| {
+                    env.value
+                        .as_deref()
+                        .filter(|value| !value.trim().is_empty())
+                })
+                .flatten()
+        })
+        .or_else(|| {
+            envs.iter().find_map(|env| {
+                (env.name == "AZURE_OPENAI_ENDPOINT")
+                    .then(|| {
+                        env.value
+                            .as_deref()
+                            .filter(|value| !value.trim().is_empty())
+                    })
+                    .flatten()
+            })
+        })
+}
+
+fn configured_provider(envs: &[EnvVar]) -> Option<(String, String, String)> {
+    let mut provider_override = None;
+    let mut endpoints = Vec::new();
+    let mut token_hint = None;
+    for e in envs {
+        let Some(val) = &e.value else { continue };
+        match e.name.as_str() {
+            "KARS_PROVIDER" | "KARS_INFERENCE_PROVIDER" if !val.is_empty() => {
+                provider_override = Some(val.clone());
+            }
+            "FOUNDRY_ENDPOINT" | "FOUNDRY_PROJECT_ENDPOINT" | "AZURE_OPENAI_ENDPOINT"
+                if !val.trim().is_empty() =>
+            {
+                endpoints.push(val.clone());
+            }
+            "AZURE_OPENAI_API_KEY" | "GITHUB_TOKEN" | "COPILOT_GITHUB_TOKEN"
+                if token_hint.is_none() && !val.is_empty() =>
+            {
+                token_hint = Some(val.chars().take(4).collect::<String>());
+            }
+            _ => {}
+        }
+    }
+    classify_provider(
+        provider_override.as_deref(),
+        &endpoints,
+        token_hint.as_deref(),
+    )
+}
+
+pub(super) fn inherited_model_settings(
+    envs: &[EnvVar],
+    provider: &str,
+    deployment: &str,
+) -> Option<Vec<serde_json::Value>> {
+    let (configured, _, _) = configured_provider(envs)?;
+    let (default, catalog) = configured_models(envs);
+    if configured != provider
+        || deployment.is_empty()
+        || !catalog
+            .iter()
+            .chain(default.iter())
+            .any(|model| model == deployment)
+    {
+        return None;
+    }
+    Some(vec![
+        serde_json::json!({"name":"KARS_TASK_DEFAULT_MODEL","value":deployment}),
+        serde_json::json!({"name":"AZURE_OPENAI_DEPLOYMENT","value":deployment}),
+    ])
+}
+
 impl Cluster {
+    async fn require_registered_default_before_switch(
+        &self,
+        next_endpoint: Option<&str>,
+    ) -> Result<(), kube::Error> {
+        use k8s_openapi::api::apps::v1::Deployment;
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), &self.core_namespace());
+        let current = api.get("kars-controller").await?;
+        let envs: Vec<_> = current
+            .spec
+            .and_then(|spec| spec.template.spec)
+            .into_iter()
+            .flat_map(|spec| spec.containers)
+            .flat_map(|container| container.env.unwrap_or_default())
+            .collect();
+        if next_endpoint.is_some_and(|next| {
+            configured_endpoint(&envs)
+                .is_some_and(|current| current.trim_end_matches('/') == next.trim_end_matches('/'))
+        }) && configured_provider(&envs).is_some_and(|(id, _, _)| id != "github-copilot")
+        {
+            return Ok(());
+        }
+        let keys = self.additional_provider_keys().await?;
+        if !inherited_provider_registered(&envs, &keys) {
+            return Err(kube::Error::Api(kube::error::ErrorResponse {
+                status: "Failure".into(),
+                message: "Connect the current default as an additional provider before switching, so its endpoint, credentials and models remain available.".into(),
+                reason: "ProviderRegistrationRequired".into(),
+                code: 409,
+            }));
+        }
+        Ok(())
+    }
+
     /// The model deployments this cluster is configured to serve, read from the
     /// controller Deployment's environment (`KARS_TASK_DEFAULT_MODEL`,
     /// `AZURE_OPENAI_DEPLOYMENT`, JSON-array `FOUNDRY_DEPLOYMENTS`, or legacy CSV).
@@ -117,28 +274,15 @@ impl Cluster {
         let Ok(Some(d)) = deploys.get_opt("kars-controller").await else {
             return (None, Vec::new());
         };
-        let mut default: Option<String> = None;
-        let mut catalog: Vec<String> = Vec::new();
-        let envs = d
+        let envs: Vec<_> = d
             .spec
             .and_then(|s| s.template.spec)
             .map(|ps| ps.containers)
             .unwrap_or_default()
             .into_iter()
-            .flat_map(|c| c.env.unwrap_or_default());
-        for e in envs {
-            let Some(val) = e.value else { continue };
-            match e.name.as_str() {
-                "KARS_TASK_DEFAULT_MODEL" | "AZURE_OPENAI_DEPLOYMENT" if default.is_none() => {
-                    default = Some(val);
-                }
-                "FOUNDRY_DEPLOYMENTS" | "KARS_MODEL_CATALOG" => {
-                    catalog.extend(parse_model_catalog(&val));
-                }
-                _ => {}
-            }
-        }
-        (default, catalog)
+            .flat_map(|c| c.env.unwrap_or_default())
+            .collect();
+        configured_models(&envs)
     }
 
     /// The GitHub token wired for GitHub Copilot — checked in BOTH places
@@ -181,43 +325,39 @@ impl Cluster {
         use k8s_openapi::api::apps::v1::Deployment;
         let deploys: Api<Deployment> = Api::namespaced(self.client.clone(), &self.core_namespace());
         let d = deploys.get_opt("kars-controller").await.ok().flatten()?;
-        let mut provider_override: Option<String> = None;
-        let mut endpoints: Vec<String> = Vec::new();
-        let mut token_hint: Option<String> = None;
-        let envs = d
+        let envs: Vec<_> = d
             .spec
             .and_then(|s| s.template.spec)
             .map(|ps| ps.containers)
             .unwrap_or_default()
             .into_iter()
-            .flat_map(|c| c.env.unwrap_or_default());
-        for e in envs {
-            let Some(val) = e.value else { continue };
-            match e.name.as_str() {
-                // Explicit operator declaration — the authoritative brand signal.
-                "KARS_PROVIDER" | "KARS_INFERENCE_PROVIDER" if !val.is_empty() => {
-                    provider_override = Some(val)
-                }
-                "FOUNDRY_ENDPOINT" | "FOUNDRY_PROJECT_ENDPOINT" | "AZURE_OPENAI_ENDPOINT" => {
-                    endpoints.push(val)
-                }
-                // Auth token KIND disambiguates the GitHub endpoint: a GitHub
-                // OAuth/user token (`gho_`/`ghu_`) is a Copilot login; a classic
-                // PAT (`ghp_`) is free GitHub Models. We only inspect the prefix,
-                // never the secret, and only when provided inline (dev profile).
-                "AZURE_OPENAI_API_KEY" | "GITHUB_TOKEN" | "COPILOT_GITHUB_TOKEN"
-                    if token_hint.is_none() && !val.is_empty() =>
-                {
-                    token_hint = Some(val.chars().take(4).collect());
-                }
-                _ => {}
-            }
-        }
-        classify_provider(
-            provider_override.as_deref(),
-            &endpoints,
-            token_hint.as_deref(),
-        )
+            .flat_map(|c| c.env.unwrap_or_default())
+            .collect();
+        configured_provider(&envs)
+    }
+
+    /// Select an already configured model without promoting a provider or
+    /// replacing its Helm/Workload Identity/Secret-backed authentication.
+    pub async fn try_set_inherited_model(
+        &self,
+        provider: &str,
+        deployment: &str,
+    ) -> Result<bool, kube::Error> {
+        use k8s_openapi::api::apps::v1::Deployment;
+        let api: Api<Deployment> = Api::namespaced(self.client.clone(), &self.core_namespace());
+        let current = api.get("kars-controller").await?;
+        let envs: Vec<_> = current
+            .spec
+            .and_then(|spec| spec.template.spec)
+            .into_iter()
+            .flat_map(|spec| spec.containers)
+            .flat_map(|container| container.env.unwrap_or_default())
+            .collect();
+        let Some(settings) = inherited_model_settings(&envs, provider, deployment) else {
+            return Ok(false);
+        };
+        self.write_controller_environment(settings).await?;
+        Ok(true)
     }
 
     /// The orchestrator inference config this cluster already provides — read
@@ -268,10 +408,9 @@ impl Cluster {
         Some((endpoint, token?, model?))
     }
 
-    /// Which agent harnesses are actually runnable on this cluster. A configured
-    /// image is insufficient: private images also need a controller pull secret
-    /// whose Docker auth covers that image registry. This keeps the composer and
-    /// preflight from advertising a runtime that will immediately ImagePullBackOff.
+    /// Harnesses with declared image/registry coverage, not execution qualification.
+    /// Private registries need explicit coverage; access may use credentials,
+    /// node identity or anonymous mirrors. No actual image pull is performed.
     pub async fn runnable_runtimes(&self) -> std::collections::BTreeSet<String> {
         use k8s_openapi::api::apps::v1::Deployment;
         let mut runnable: std::collections::BTreeSet<String> = std::collections::BTreeSet::new();
@@ -297,8 +436,8 @@ impl Cluster {
             })
             .collect();
         // The BFF deliberately has no Secret RBAC. The controller exposes only
-        // the non-sensitive registry hostnames covered by its pull credentials.
-        let authenticated_registries = configured
+        // the non-sensitive registry hostnames covered by its declared access.
+        let covered_registries = configured
             .get("IMAGE_PULL_REGISTRIES")
             .into_iter()
             .flat_map(|value| value.split(','))
@@ -307,7 +446,7 @@ impl Cluster {
             .collect::<std::collections::BTreeSet<_>>();
         let image_is_pullable = |image: &str| {
             let registry = image_registry_host(image);
-            public_registry(&registry) || authenticated_registries.contains(&registry)
+            public_registry(&registry) || covered_registries.contains(&registry)
         };
         if configured
             .get("SANDBOX_IMAGE")
@@ -350,6 +489,8 @@ impl Cluster {
         endpoint: Option<&str>,
         key_secret: Option<(&str, &str)>,
     ) -> Result<(), kube::Error> {
+        self.require_registered_default_before_switch(endpoint)
+            .await?;
         // Strategic merge on `env` (merge-key `name`) upserts these entries and
         // preserves every other existing env var on the container.
         let mut env = vec![serde_json::json!({"name": "KARS_MODEL_CATALOG", "value": catalog})];
@@ -366,34 +507,12 @@ impl Cluster {
                 serde_json::json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": default_model}),
             );
         }
-        // `controller_provider()` (the "what's the current default provider"
-        // read used by the Configuration page's status card) checks THREE
-        // things it treats as stale-able: an explicit `KARS_PROVIDER` /
-        // `KARS_INFERENCE_PROVIDER` override (checked FIRST, absolute
-        // priority over everything else — typically set once at cluster
-        // bootstrap, e.g. `KARS_PROVIDER=github-copilot`), then
-        // FOUNDRY_ENDPOINT / FOUNDRY_PROJECT_ENDPOINT / AZURE_OPENAI_ENDPOINT
-        // as interchangeable endpoint aliases (picks whichever it finds
-        // FIRST). Every caller of this function is switching the cluster
-        // default to a NEW provider, so ALL of these must be cleared here —
-        // confirmed live this was a real, pre-existing bug affecting the
-        // ORIGINAL "Add or switch a provider" flow too, not just the new
-        // local-inference promote action: switching the default endpoint
-        // correctly patched FOUNDRY_ENDPOINT, but the Configuration page
-        // kept showing "GitHub Copilot" forever after, because the
-        // bootstrap-time `KARS_PROVIDER=github-copilot` override (checked
-        // before any endpoint) was never cleared by anything. Neither
-        // caller of this function ever wants to declare copilot/models as
-        // default (both explicitly reject that combination before calling
-        // in), so unconditionally clearing the override is correct here.
-        // `$patch: delete` is the standard strategic-merge-patch mechanism
-        // for removing one named entry from a mergeKey'd list without
-        // touching the rest — a no-op if the name was never present.
+        // Replace default-route aliases, preserving independently configured
+        // Foundry project services and the registered previous inference route.
         for stale in [
             "KARS_PROVIDER",
             "KARS_INFERENCE_PROVIDER",
             "AZURE_OPENAI_ENDPOINT",
-            "FOUNDRY_PROJECT_ENDPOINT",
         ] {
             env.push(serde_json::json!({"name": stale, "$patch": "delete"}));
         }
@@ -435,6 +554,7 @@ impl Cluster {
     /// from a prior default. Returns an error if no Copilot token is stored yet
     /// (the operator must sign in first).
     pub async fn set_copilot_as_default(&self, models: &str) -> Result<(), kube::Error> {
+        self.require_registered_default_before_switch(None).await?;
         let token = self
             .read_secret_all("kars-system", "kars-inference-providers")
             .await?
@@ -468,37 +588,17 @@ impl Cluster {
                 serde_json::json!({"name": "AZURE_OPENAI_DEPLOYMENT", "value": default_model}),
             );
         }
-        // Clear anything a prior (Azure/Foundry) default left behind so the
-        // router doesn't keep a stale endpoint/key alongside Copilot.
+        // The previous inference route is retained in the provider registry.
+        // Clear only its default-route aliases, not the independent Foundry
+        // project connection used for memory, evaluation and other services.
         for stale in [
             "FOUNDRY_ENDPOINT",
-            "FOUNDRY_PROJECT_ENDPOINT",
             "AZURE_OPENAI_API_KEY",
             "KARS_INFERENCE_PROVIDER",
         ] {
             env.push(serde_json::json!({"name": stale, "$patch": "delete"}));
         }
         self.write_controller_environment(env).await
-    }
-
-    pub async fn controller_env_value(&self, name: &str) -> Option<String> {
-        use k8s_openapi::api::apps::v1::Deployment;
-        let deployment = Api::<Deployment>::namespaced(self.client.clone(), "kars-system")
-            .get_opt("kars-controller")
-            .await
-            .ok()
-            .flatten()?;
-        deployment
-            .spec?
-            .template
-            .spec?
-            .containers
-            .first()?
-            .env
-            .as_ref()?
-            .iter()
-            .find(|entry| entry.name == name)
-            .and_then(|entry| entry.value.clone())
     }
 
     /// The current Foundry connection, read live from the `kars-controller`

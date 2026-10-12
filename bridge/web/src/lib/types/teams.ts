@@ -113,6 +113,7 @@ export interface TeamDetail {
   isolation: string | null;
   execution_plan: ExecutionPlan | null;
   tasks: TeamTask[];
+  work_reviews?: { task_id: string; assignment_nonce: string; ready: boolean; decision_pending: boolean }[];
   channels: string[];
 }
 
@@ -154,12 +155,23 @@ export interface TeamTask {
   depends_on: string[];
   acceptance_criteria: string[];
   review_required: boolean;
-  status: string; // pending | active | done
+  status: string; // pending | active | awaiting_review | done | retired
   run: string | null;
   created_at: string | null;
   done_at: string | null;
   stuck_since?: string | null;
   assignment_nonce?: string | null;
+  run_uid?: string | null;
+  feedback?: string | null;
+  history?: {
+    run: string;
+    run_uid: string;
+    assignment_nonce: string;
+    outcome: "failed" | "changes_requested" | "approved" | "completed" | "cancelled";
+    finished_at: string;
+    output_sha256?: string | null;
+    feedback?: string | null;
+  }[];
 }
 
 export type EngineeringSignal =
@@ -255,7 +267,35 @@ export interface CommonsEntry {
   created_at: string;
   digest: string;
   size_bytes: number;
+  stored_digest?: string;
+  stored_size_bytes?: number;
   content: string | null;
+  archive?: TeamRunArchive | null;
+}
+
+export interface RetainedTeamDocument {
+  name: string;
+  sha256: string;
+  content: string;
+  source: {
+    namespace: string;
+    taskName: string;
+    taskUid: string;
+    sandboxUid: string;
+    podUid: string;
+    runNonce: string;
+    assignmentId: string;
+    agentDid: string;
+    artifactName: string;
+  };
+}
+
+export interface TeamRunArchive {
+  version: 1;
+  output: string;
+  output_sha256: string;
+  documents: RetainedTeamDocument[];
+  handoffs: RetainedTeamDocument[];
 }
 
 export interface CommonsResponse {
@@ -284,6 +324,8 @@ export interface ReviewState {
   history: ReviewEntry[];
   redrive_pending: boolean;
   assignment_nonce: string | null;
+  requested_revision_nonce: string | null;
+  retryable_revision_nonce?: string | null;
 }
 
 // ─── Team digests (§20) ──────────────────────────────────────────────────────

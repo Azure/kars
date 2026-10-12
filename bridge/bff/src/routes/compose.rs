@@ -39,6 +39,7 @@ mod capability_tests;
 
 pub(crate) use execution::{
     delegation_budget_allocation, validate_delegation, validate_execution_plan,
+    validate_execution_plan_for_launch,
 };
 pub use loops::{ProposeLoopRequest, ProposeLoopResponse, propose_loop};
 pub use mission::compose;

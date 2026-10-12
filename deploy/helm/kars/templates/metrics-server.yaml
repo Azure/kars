@@ -1,0 +1,327 @@
+{{- define "kars.metricsOwned" -}}
+{{- $marker := get .annotations "kars.azure.com/metrics-owner" -}}
+{{- $ownerID := printf "%s/%s" .namespace .release -}}
+{{- $name := get .annotations "meta.helm.sh/release-name" -}}
+{{- $namespace := get .annotations "meta.helm.sh/release-namespace" -}}
+{{- $helmOwned := and (eq $name .release) (eq $namespace .namespace) -}}
+{{- if and (or (eq $marker $ownerID) $helmOwned) (or (not $marker) (eq $marker $ownerID)) (or (not (or $name $namespace)) $helmOwned) -}}
+true
+{{- else -}}
+false
+{{- end -}}
+{{- end -}}
+{{- $metrics := .Values.metricsServer | default dict -}}
+{{- $enabled := true -}}
+{{- if hasKey $metrics "enabled" -}}
+{{- $enabled = $metrics.enabled -}}
+{{- end -}}
+{{- if $enabled -}}
+{{- $api := lookup "apiregistration.k8s.io/v1" "APIService" "" "v1beta1.metrics.k8s.io" -}}
+{{- $annotations := dict -}}
+{{- if $api -}}
+{{- $annotations = $api.metadata.annotations | default dict -}}
+{{- end -}}
+{{- $ownerID := printf "%s/%s" .Release.Namespace .Release.Name -}}
+{{- $owned := eq (include "kars.metricsOwned" (dict "annotations" $annotations "namespace" .Release.Namespace "release" .Release.Name)) "true" -}}
+{{- if or (not $api) $owned -}}
+{{- $image := $metrics.image | default dict -}}
+{{- $kubelet := $metrics.kubelet | default dict -}}
+{{- $dev := false -}}
+{{- range .Values.controller.extraEnv -}}
+{{- if and (eq .name "KARS_DEV_PROFILE") (eq (.value | toString) "true") -}}
+{{- $dev = true -}}
+{{- end -}}
+{{- end -}}
+{{- if and $kubelet.insecureTLS (not $dev) -}}
+{{- fail "metricsServer.kubelet.insecureTLS requires the explicit KARS_DEV_PROFILE=true local-development profile" -}}
+{{- end -}}
+{{- $secret := lookup "v1" "Secret" .Release.Namespace "kars-metrics-server-tls" -}}
+{{- $tls := dict -}}
+{{- $revision := ($metrics.tls | default dict).rotationRevision | default "" | toString -}}
+{{- $reuse := false -}}
+{{- if $secret -}}
+{{- $owner := $secret.metadata.annotations | default dict -}}
+{{- if ne (include "kars.metricsOwned" (dict "annotations" $owner "namespace" .Release.Namespace "release" .Release.Name)) "true" -}}
+{{- fail "kars-metrics-server-tls exists without this Helm release's ownership; refusing to adopt it" -}}
+{{- end -}}
+{{- $reuse = eq (get $owner "kars.azure.com/metrics-certificate-revision" | default "") $revision -}}
+{{- end -}}
+{{- if $reuse -}}
+{{- range $key := list "ca.crt" "tls.crt" "tls.key" -}}
+{{- $_ := set $tls $key (required (printf "kars-metrics-server-tls is missing %s" $key) (get $secret.data $key)) -}}
+{{- end -}}
+{{- else -}}
+{{- $ca := genCA "kars-metrics-server-ca" 365 -}}
+{{- $cert := genSignedCert "kars-metrics-server" nil (list (printf "kars-metrics-server.%s.svc" .Release.Namespace)) 365 $ca -}}
+{{- $_ := set $tls "ca.crt" ($ca.Cert | b64enc) -}}
+{{- $_ := set $tls "tls.crt" ($cert.Cert | b64enc) -}}
+{{- $_ := set $tls "tls.key" ($cert.Key | b64enc) -}}
+{{- end }}
+apiVersion: v1
+kind: Secret
+metadata:
+  name: kars-metrics-server-tls
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    kars.azure.com/metrics-owner: {{ $ownerID | quote }}
+    kars.azure.com/metrics-certificate-revision: {{ $revision | quote }}
+type: kubernetes.io/tls
+data:
+  {{- toYaml $tls | nindent 2 }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: kars-metrics-server
+  namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-metrics-server
+rules:
+  - apiGroups: [""]
+    resources: ["nodes/metrics"]
+    verbs: ["get"]
+  - apiGroups: [""]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kars-metrics-server
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: kars-metrics-server
+subjects:
+  - kind: ServiceAccount
+    name: kars-metrics-server
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: kars-metrics-server-auth-delegator
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: system:auth-delegator
+subjects:
+  - kind: ServiceAccount
+    name: kars-metrics-server
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kars-metrics-server-auth-reader
+  namespace: kube-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: extension-apiserver-authentication-reader
+subjects:
+  - kind: ServiceAccount
+    name: kars-metrics-server
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: kars-metrics-reader
+  labels:
+    rbac.authorization.k8s.io/aggregate-to-admin: "true"
+    rbac.authorization.k8s.io/aggregate-to-edit: "true"
+    rbac.authorization.k8s.io/aggregate-to-view: "true"
+rules:
+  - apiGroups: ["metrics.k8s.io"]
+    resources: ["nodes", "pods"]
+    verbs: ["get", "list", "watch"]
+{{- if $kubelet.caBundle }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kars-metrics-server-kubelet-ca
+  namespace: {{ .Release.Namespace }}
+data:
+  ca.crt: {{ $kubelet.caBundle | quote }}
+{{- end }}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: kars-metrics-server
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    kars.azure.com/metrics-owner: {{ $ownerID | quote }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: kars-metrics-server
+  template:
+    metadata:
+      labels:
+        app: kars-metrics-server
+        kars.azure.com/metrics-managed: "true"
+      annotations:
+        checksum/serving-certificate: {{ get $tls "tls.crt" | sha256sum | quote }}
+        checksum/kubelet-ca: {{ $kubelet.caBundle | default "" | sha256sum | quote }}
+    spec:
+      serviceAccountName: kars-metrics-server
+      {{- with $metrics.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with $metrics.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: metrics-server
+          image: "{{ $image.repository | default "ghcr.io/azure/kars-metrics-server" }}:{{ $image.tag | default "latest" }}"
+          imagePullPolicy: {{ $image.pullPolicy | default "Always" }}
+          args:
+            - --secure-port=10250
+            - --cert-dir=/tmp
+            - --tls-cert-file=/var/run/metrics-server/tls.crt
+            - --tls-private-key-file=/var/run/metrics-server/tls.key
+            - --kubelet-preferred-address-types={{ $kubelet.preferredAddressTypes | default (list "InternalIP" "ExternalIP" "Hostname") | join "," }}
+            - --kubelet-use-node-status-port
+            - --metric-resolution=15s
+            {{- if $kubelet.insecureTLS }}
+            - --kubelet-insecure-tls
+            {{- else if $kubelet.caBundle }}
+            - --kubelet-certificate-authority=/var/run/kubelet-ca/ca.crt
+            {{- else }}
+            - --kubelet-certificate-authority=/var/run/secrets/kubernetes.io/serviceaccount/ca.crt
+            {{- end }}
+          ports:
+            - name: https
+              containerPort: 10250
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: https
+              scheme: HTTPS
+            periodSeconds: 10
+          livenessProbe:
+            httpGet:
+              path: /livez
+              port: https
+              scheme: HTTPS
+            initialDelaySeconds: 10
+            periodSeconds: 10
+          resources:
+            {{- toYaml ($metrics.resources | default (dict "requests" (dict "cpu" "100m" "memory" "200Mi") "limits" (dict "cpu" "500m" "memory" "512Mi"))) | nindent 12 }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            - name: serving-certificate
+              mountPath: /var/run/metrics-server
+              readOnly: true
+            {{- if $kubelet.caBundle }}
+            - name: kubelet-ca
+              mountPath: /var/run/kubelet-ca
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        - name: serving-certificate
+          secret:
+            secretName: kars-metrics-server-tls
+            defaultMode: 0444
+        {{- if $kubelet.caBundle }}
+        - name: kubelet-ca
+          configMap:
+            name: kars-metrics-server-kubelet-ca
+        {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kars-metrics-server
+  namespace: {{ .Release.Namespace }}
+spec:
+  selector:
+    app: kars-metrics-server
+  ports:
+    - name: https
+      port: 443
+      targetPort: https
+---
+apiVersion: apiregistration.k8s.io/v1
+kind: APIService
+metadata:
+  name: v1beta1.metrics.k8s.io
+  annotations:
+    kars.azure.com/metrics-owner: {{ $ownerID | quote }}
+spec:
+  group: metrics.k8s.io
+  version: v1beta1
+  groupPriorityMinimum: 100
+  versionPriority: 100
+  caBundle: {{ get $tls "ca.crt" | quote }}
+  service:
+    name: kars-metrics-server
+    namespace: {{ .Release.Namespace }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kars-metrics-server
+  namespace: {{ .Release.Namespace }}
+spec:
+  podSelector:
+    matchLabels:
+      app: kars-metrics-server
+      kars.azure.com/metrics-managed: "true"
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 10250
+  egress:
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+        - protocol: TCP
+          port: 10250
+    - to:
+        - namespaceSelector: {}
+          podSelector:
+            matchLabels:
+              k8s-app: kube-dns
+      ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+{{- else -}}
+{{- $priorSecret := lookup "v1" "Secret" .Release.Namespace "kars-metrics-server-tls" -}}
+{{- if $priorSecret -}}
+{{- $priorOwner := $priorSecret.metadata.annotations | default dict -}}
+{{- if or (eq (get $priorOwner "kars.azure.com/metrics-owner") $ownerID) (and (eq (get $priorOwner "meta.helm.sh/release-name") .Release.Name) (eq (get $priorOwner "meta.helm.sh/release-namespace") .Release.Namespace)) -}}
+{{- fail "Metrics API ownership changed while this release still owns its serving certificate; resolve ownership before upgrading" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}

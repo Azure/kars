@@ -167,6 +167,33 @@ spec:
           port: {{ int .port }}
     {{- end }}
 ---
+{{- if .Capabilities.APIVersions.Has "cilium.io/v2/CiliumNetworkPolicy" }}
+# Cilium CIDR selectors exclude cluster nodes; API backends use the kube-apiserver identity.
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ $identity }}
+  namespace: {{ .Release.Namespace }}
+  annotations:
+    {{- toYaml $annotations | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      kars.azure.com/schema-hook: {{ $identity }}
+  egress:
+    - toEntities: ["kube-apiserver"]
+      toPorts:
+        - ports:
+            {{- $ports := list -}}
+            {{- range $destinations -}}
+            {{- $ports = append $ports (toString .port) -}}
+            {{- end -}}
+            {{- range ($ports | uniq) }}
+            - port: {{ . | quote }}
+              protocol: TCP
+            {{- end }}
+---
+{{- end }}
 apiVersion: batch/v1
 kind: Job
 metadata:

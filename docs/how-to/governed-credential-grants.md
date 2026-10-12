@@ -9,6 +9,28 @@ selected for migration.
 
 ## Authority
 
+Bridge operators can select an already configured provider's model through
+Configuration → Model catalogue. This uses the enrolled controller-settings
+store and preserves the existing endpoint, identity and credential references;
+a Helm-configured provider does not need to be reconnected as an additional
+provider to change its model. Switching to a different default requires the
+previous provider to be registered separately first; otherwise Kars rejects the
+switch rather than discarding its only endpoint/credential binding. Bridge does
+not read an unenrolled bootstrap Secret to bypass that requirement. A cluster
+administrator can connect that provider through the normal additional-provider
+flow, using its existing credentials or Workload Identity as appropriate.
+
+Copilot sign-in stores its authentication; **Save model selection** then publishes
+the chosen models and closes the wizard. **Edit models** reuses that stored
+sign-in. Saving a selection does not promote the provider. The catalogue retains
+identical deployment names on different providers as separate choices, and a
+default-provider switch preserves the registered previous provider and any
+independent Foundry project connection.
+
+Inference-budget and
+retention-policy mutations require Admin. Role membership is managed through
+the identity provider and deployment role map, not edited in Bridge.
+
 Private activation compares each live consumer against its reviewed owner
 template. Kubernetes' two standard, admission-injected 300-second
 `NoExecute` tolerations do not make that execution different. The exact
@@ -56,6 +78,10 @@ Core creates source-only writer Roles behind fail-closed admission. The
 parameter-independent source boundary continues to restrict Secret creation
 even while a grant is being deleted. Native `resourceNames` entries are exact
 names, never wildcard patterns. Values remain Opaque Kubernetes Secrets.
+Credential-writer match conditions split authorization checks across ANDed
+expressions to stay within Kubernetes' two-check-per-expression CEL cost limit.
+This preserves the writer, projector and manager predicates; it does not grant
+additional authority or disable admission when a settings store is empty.
 
 When core attaches a source's ownership metadata, it records
 `status.sources[].ownershipFromResourceVersion`. Together with that entry's
@@ -354,6 +380,42 @@ Only the required child-creation stage is permitted; controller UPDATE
 bookkeeping requires unchanged execution templates and ownership. Explicit
 registrar authority retains its existing SRE-runtime scope.
 
+Choose the profile from the cluster's actual controller identity configuration,
+not from whether the cluster is Kind or AKS. For a visible kube-controller-manager,
+`--use-service-account-credentials=true` requires `service-accounts`; selecting
+`kcm-certificate` can prevent its Deployment controller from retiring ReplicaSets.
+The profile and controller UIDs are bound into the retirement attempt. Do not
+switch profiles, discard Pending protection, or rewrite that binding after
+staging has begun; a mismatched attempt needs explicit operator recovery.
+
+The CLI checks visible static controller-manager credential flags during preview
+and again before staging, rejecting a contradictory profile before any mutation.
+The operator must be able to list the selected controller-manager Pods in
+`kube-system`. A managed control plane with no visible static Pods still requires
+the explicit, independently verified profile; absence does not infer a mode.
+
+For an initial, single-root certificate-profile mistake only, the maintained
+recovery command can review a correction to actual controller ServiceAccount UIDs:
+
+```sh
+kars credentials grant recover-controller-profile preview original-grant-review.json > reviewed-recovery.json
+kars credentials grant recover-controller-profile apply reviewed-recovery.json
+```
+
+This requires cluster-scoped credential-operator authority, observed static
+controller-manager ServiceAccount credential use, the original root replica
+intent restored, unchanged reviewed identities/templates, and a version-1
+`pausing` attempt. No budget rotation baseline, qualified epoch, existing private
+grant or writer authority is allowed. New consuming Pod UIDs, incomplete
+inventories, drift since review and replay are refused. The single UID/version-
+fenced namespace update keeps protection Pending and preserves the attempt,
+captured Pod UIDs, replica intent and exposed-key history; it grants no authority.
+Keep both reviews as operator evidence, then make a **fresh** normal grant preview
+with `--private-controller-profile service-accounts` and apply it. Normal retirement,
+post-retirement budget-key rotation and qualification still apply. Completed,
+shared, partially advanced or otherwise different attempts require separate
+operator investigation, not this correction.
+
 Preview is read-only and exports metadata/digests, never private values or raw
 templates. Review the referenced root and consumer templates before applying.
 Additional `--private-consumer namespace/Kind/name` entries can protect an
@@ -567,6 +629,38 @@ broker cannot silently keep its old startup-cached TLS identity. No budget
 ledger, cancellation, settlement, pricing, or dispatch logic is changed by this
 private-capability activation check. Budget operation without this capability
 still has no additional activation/bootstrap requirement.
+
+For a **Helm-managed** budget identity, rotating the supplied certificate/key also
+changes `checksum/inference-budget-tls` on the controller template. The initial
+retirement pins that template, so use the explicit checksum recovery rather than
+removing the retirement annotation or keeping stale Helm key values:
+
+1. After normal apply reports the post-retirement rotation requirement, run
+   `kars credentials grant recover-budget-tls preview reviewed-grant.json > tls-recovery.json`.
+   This is read-only and requires the root to be retired and paused with its
+   baseline recorded; it exports no key, certificate or execution template.
+2. Issue a fresh identity and use the normal core Helm upgrade with the reviewed
+   certificate/key and public CA inputs. Keep `controller.replicas=0` in this
+   maintenance upgrade. Preserve all other values, images, chart settings and
+   templates. Do not roll or recreate the paused root.
+3. Run `kars credentials grant recover-budget-tls apply tls-recovery.json`.
+   It verifies that substituting the **old checksum alone** reconstructs the
+   originally reviewed full template digest, that the same Secret now has a
+   previously unexposed public key, and that no consuming Pod or writer authority
+   appeared. The UID/version-fenced update changes only Pending namespace
+   bindings; all captured UIDs, baseline, exposed keys and original replica
+   intent are retained.
+4. Make a fresh normal grant preview and apply it to qualify and restore the
+   original intent. Then persist that same original `controller.replicas` value
+   in Helm through an otherwise unchanged upgrade, so subsequent upgrades do
+   not restore the temporary maintenance zero.
+
+This checksum recovery is limited to initial single-root retirement, not a
+general template migration, completed/shared-root upgrade, certificate issuer or
+authority bypass. Any other template change, replaced identity, stale review,
+old key, live consumer or existing private grant/writer is refused. Externally
+managed Secret rotation with an unchanged controller template continues through
+the normal preview/apply flow without this checksum recovery.
 
 ### Shared roots and multiple workspaces
 

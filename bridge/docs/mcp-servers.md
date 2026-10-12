@@ -66,6 +66,13 @@ blocks launch rather than silently dropping tools.
 
 Tools are namespaced as `<server>.<tool>`.
 
+OpenClaw exposes `kars_mcp_list` and `kars_mcp_call` in both the host plugin and
+the Mission/Team task loop, using the same bounded loopback bridge. List the
+catalog before calling its exact returned tool name. Calls still pass through
+the router's resource binding, policy and server allow-list checks; failed calls
+are not automatically replayed. Filesystem-only reviewed phases do not gain MCP
+access merely because the runtime includes these tools.
+
 ## Security
 
 - Agents do not receive MCP credentials.

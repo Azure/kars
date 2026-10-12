@@ -1,6 +1,17 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+{{- $headlamp := .Values.headlamp | default dict }}
+{{- if $headlamp.url }}
+{{- if not (regexMatch "^https?://[^[:space:]]+$" $headlamp.url) }}
+{{- fail "headlamp.url must be a browser-reachable http:// or https:// URL" }}
+{{- end }}
+{{- range .Values.web.extraEnv }}
+{{- if eq .name "BRIDGE_HEADLAMP_URL" }}
+{{- fail "headlamp.url conflicts with web.extraEnv BRIDGE_HEADLAMP_URL" }}
+{{- end }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -47,6 +58,10 @@ spec:
               value: "http://kars-bridge-bff.{{ include "kars-bridge.namespace" . }}.svc.cluster.local:{{ .Values.bff.port }}"
             - name: BRIDGE_DEFAULT_NAMESPACE
               value: {{ include "kars-bridge.coreNamespace" . | quote }}
+            {{- if $headlamp.url }}
+            - name: BRIDGE_HEADLAMP_URL
+              value: {{ $headlamp.url | quote }}
+            {{- end }}
             {{- if .Values.idp.enabled }}
             # ── In-cluster IdP (Dex) SSO wiring ──────────────────────────────
             # Keep the public issuer for browser redirects and token validation;

@@ -2,7 +2,7 @@
 // Licensed under the MIT License.
 
 /**
- * Auto-clone the pinned AGT toolkit fork into ~/agent-governance-toolkit
+ * Auto-clone the pinned official AGT toolkit into ~/agent-governance-toolkit
  * (or `$KARS_AGT_REPO` if set) so `kars dev` / `kars up` / `kars push`
  * work out-of-the-box on a fresh machine without the user having to know
  * about the AGT-main-vs-released schema gap.
@@ -10,32 +10,16 @@
  * The pin lives in `vendor/agt/pin.json` (single source of truth, also
  * referenced from `Cargo.toml [patch.crates-io]` and the `file:` deps
  * in `mesh-plugin/package.json` and `runtimes/openclaw/package.json`).
- * When upstream AGT cuts a release containing PR
- * https://github.com/microsoft/agent-governance-toolkit/pull/2772, the
- * pin file is deleted and the CLI no longer auto-clones — `kars push`
- * then refuses to build relay/registry from source because the
- * published `ghcr.io/microsoft/agentmesh/{relay,registry}:X.Y.Z`
- * images are usable directly.
- *
- * Why we ship a fork pin instead of just published packages right now:
- *
- *   1. AGT v4.0.0 server-side has hard POP enforcement (server PR
- *      #2533 + #2632) that the published `npm
- *      @microsoft/agent-governance-sdk@4.0.0` does NOT yet sign.
- *      Mismatch is documented; #2772 is the SDK-side fix.
- *
- *   2. Our kars-built relay/registry images (`kars push --only
- *      relay/registry`) are now built from the same SHA as the SDK
- *      tarball under `vendor/agt/`, so the wire protocol is
- *      consistent edge-to-edge.
- *
- *   3. Setting `KARS_AGT_REPO=/path/to/your/clone` still wins — the
- *      auto-clone is purely a fresh-machine convenience.
+ * The selected AGT 5 revision binds SDKs, native ACS and mesh servers
+ * together. Matching published artifacts must pass the same installed
+ * acceptance before replacing that source pin. An explicit KARS_AGT_REPO
+ * remains supported, but must be an exact clean checkout.
  */
 
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { createHash } from "node:crypto";
 import { execa } from "execa";
 
 interface AgtPin {
@@ -46,15 +30,58 @@ interface AgtPin {
 }
 
 const DEFAULT_AGT_REPO = path.join(os.homedir(), "agent-governance-toolkit");
+export const AGT_MESH_DOCKERFILE = "sandbox-images/agentmesh/Dockerfile";
+export const AGT_CORE_MANIFEST = "agent-governance-python/agent-governance-toolkit-core/pyproject.toml";
+const AGT_WHEEL_PACKAGES = [
+  "agent_governance_toolkit_core",
+  "agent_governance_toolkit_cli",
+  "a2a_agentmesh",
+];
+const AGT_WHEEL_BUILD_INPUTS = [
+  "build-agt-wheels.sh", "Dockerfile.agt-native",
+  "build-native-agt-wheel.py", "install-agt-wheels.py",
+];
+
+function hasCompleteWheelSet(directory: string): boolean {
+  if (!fs.existsSync(directory)) return false;
+  const entries = fs.readdirSync(directory, { withFileTypes: true })
+    .filter(entry => entry.name.endsWith(".whl"));
+  if (entries.some(entry => !entry.isFile())) return false;
+  const wheels = entries.map(entry => entry.name);
+  const pureComplete = wheels.length === AGT_WHEEL_PACKAGES.length && AGT_WHEEL_PACKAGES.every(
+    name => wheels.includes(`${name}-5.0.0-py3-none-any.whl`),
+  );
+  if (!pureComplete) return false;
+  for (const [architecture, platform, machine] of [
+    ["amd64", "x86_64", 62],
+    ["arm64", "aarch64", 183],
+  ] as const) {
+    const native = path.join(directory, architecture);
+    if (!fs.existsSync(native) || !fs.lstatSync(native).isDirectory()) return false;
+    const wheel = `agent_control_specification-0.4.0b0-cp311-abi3-linux_${platform}.whl`;
+    const files = fs.readdirSync(native, { withFileTypes: true });
+    if (files.length !== 2 || files.some(file => !file.isFile()) ||
+        !files.some(file => file.name === wheel) || !files.some(file => file.name === "build.json")) return false;
+    const receipt: unknown = JSON.parse(fs.readFileSync(path.join(native, "build.json"), "utf8"));
+    if (typeof receipt !== "object" || receipt === null ||
+        !("wheel" in receipt) || receipt.wheel !== wheel ||
+        !("elf_machine" in receipt) || receipt.elf_machine !== machine ||
+        !("target" in receipt) || receipt.target !== `${platform}-unknown-linux-gnu` ||
+        !("rust" in receipt) || receipt.rust !== "1.95.0" ||
+        !("maturin" in receipt) || receipt.maturin !== "1.8.7" ||
+        !("sha256" in receipt) || receipt.sha256 !== createHash("sha256")
+          .update(fs.readFileSync(path.join(native, wheel))).digest("hex")) return false;
+  }
+  return true;
+}
 
 /**
- * Return the path to the AGT clone, auto-cloning the pinned fork
+ * Return the path to the AGT clone, auto-cloning the pinned
  * SHA when it doesn't exist. Honors `KARS_AGT_REPO` and an explicit
  * caller-supplied `agtRepo` argument (--agt-repo flag) over auto-clone.
  *
- * Returns the path; throws if auto-clone fails. The caller can `try`
- * around it and fall back to "skip mesh image build" semantics if
- * desired.
+ * Existing checkouts must match the pin and have no local changes. Never
+ * reset, switch, or otherwise modify a caller's existing checkout.
  */
 export async function ensureAgtRepo(
   callerSupplied?: string,
@@ -62,55 +89,76 @@ export async function ensureAgtRepo(
 ): Promise<string> {
   const agtRepo =
     callerSupplied || process.env.KARS_AGT_REPO || DEFAULT_AGT_REPO;
-  if (fs.existsSync(path.join(agtRepo, ".git"))) {
-    return agtRepo;
-  }
-
   const root = repoRoot || process.cwd();
   const pinPath = path.join(root, "vendor", "agt", "pin.json");
   if (!fs.existsSync(pinPath)) {
     throw new Error(
       `vendor/agt/pin.json not found at ${pinPath}; can't auto-clone AGT.\n` +
-        `  Either run from the kars repo root, or set KARS_AGT_REPO to an ` +
-        `existing AGT toolkit checkout.`,
+        `  Run from the kars repo root or provide its asset directory.`,
     );
   }
-  const pin = JSON.parse(fs.readFileSync(pinPath, "utf-8")) as AgtPin;
+  const pin: unknown = JSON.parse(fs.readFileSync(pinPath, "utf-8"));
+  if (
+    typeof pin !== "object" || pin === null ||
+    !("sha" in pin) || typeof pin.sha !== "string" || !/^[a-f0-9]{40}$/.test(pin.sha) ||
+    !("url" in pin) || typeof pin.url !== "string" || !pin.url.trim()
+  ) {
+    throw new Error(`Invalid AGT source pin at ${pinPath}; expected a URL and full commit SHA.`);
+  }
+  const { sha, url } = pin;
+
+  async function verifyCheckout(directory: string): Promise<void> {
+    const { stdout: top } = await execa("git", ["rev-parse", "--show-toplevel"], { cwd: directory });
+    if (fs.realpathSync(top.trim()) !== fs.realpathSync(directory)) {
+      throw new Error(`AGT path ${directory} is not the root of its checkout.`);
+    }
+    const { stdout: head } = await execa("git", ["rev-parse", "HEAD"], { cwd: directory });
+    if (head.trim() !== sha) {
+      throw new Error(
+        `AGT checkout ${directory} is at ${head.trim()}, but Kars requires ${sha}. ` +
+        `Use a separate checkout at the required revision; the existing checkout was not changed.`,
+      );
+    }
+    const { stdout: status } = await execa("git", ["status", "--porcelain", "--untracked-files=normal"], {
+      cwd: directory,
+    });
+    if (status.trim()) {
+      throw new Error(`AGT checkout ${directory} has local changes; use a clean pinned checkout. No files were changed.`);
+    }
+  }
+
+  if (fs.lstatSync(agtRepo, { throwIfNoEntry: false })) {
+    await verifyCheckout(agtRepo);
+    return agtRepo;
+  }
 
   process.stderr.write(
-    `[kars] AGT clone missing at ${agtRepo} — auto-cloning ${pin.url}@${pin.shortSha}\n`,
+    `[kars] AGT clone missing at ${agtRepo} — fetching ${url}@${sha.slice(0, 8)}\n`,
   );
-  // Shallow clone of the pinned SHA. Use `--filter=tree:0` so the
-  // clone is < 50 MB even though we only need the relay/registry
-  // Dockerfile + the TS SDK source.
-  await execa(
-    "git",
-    [
-      "clone",
-      "--branch",
-      pin.branch,
-      "--depth",
-      "1",
-      "--filter=tree:0",
-      pin.url,
-      agtRepo,
-    ],
-    { stdio: "inherit" },
-  );
-  // The SDK build step (`cd agent-governance-typescript && npm run build`)
-  // needs the dependency tree, but it isn't required for the relay/
-  // registry Dockerfile build. The vendored `.tgz` under `vendor/agt/`
-  // is already pre-built so the sandbox image doesn't have to invoke
-  // npm against the AGT clone at all. We only ensure the path
-  // exists here.
+  const parent = path.dirname(path.resolve(agtRepo));
+  fs.mkdirSync(parent, { recursive: true });
+  const staging = fs.mkdtempSync(path.join(parent, ".kars-agt-"));
+  try {
+    await execa("git", ["init", "--quiet", staging]);
+    await execa("git", ["remote", "add", "origin", url], { cwd: staging });
+    await execa("git", ["fetch", "--depth", "1", "origin", sha], { cwd: staging, stdio: "inherit" });
+    await execa("git", ["checkout", "--detach", "--quiet", sha], { cwd: staging });
+    await verifyCheckout(staging);
+    if (fs.lstatSync(agtRepo, { throwIfNoEntry: false })) {
+      throw new Error(`AGT destination ${agtRepo} appeared during preparation; it was not changed.`);
+    }
+    fs.renameSync(staging, agtRepo);
+  } finally {
+    fs.rmSync(staging, { recursive: true, force: true });
+  }
   return agtRepo;
 }
 
 /**
- * Build the AGT Python wheels into `runtimes/wheels/` so the seven
+ * Build the AGT Python wheels into `runtimes/wheels/` so the six
  * Python sandbox-image Dockerfiles (anthropic, hermes, langgraph,
- * maf-python, openai-agents, pydantic-ai, plus any future Python
- * runtime) can `COPY runtimes/wheels/` into their build context.
+ * maf-python, openai-agents, pydantic-ai) can `COPY runtimes/wheels/`
+ * into their build context.
  *
  * Why this exists: `runtimes/wheels/` is `.gitignored` and the
  * Dockerfiles assume the wheels already exist on the host. Without
@@ -121,7 +169,8 @@ export async function ensureAgtRepo(
  * gap.
  *
  * Caching: skips the build if `runtimes/wheels/.agt-sha` matches the
- * current pin SHA AND at least one `.whl` is present. Delete the
+ * current pin SHA and build-input digest AND all three AGT 5 owner wheels
+ * plus both checksum-verified native ACS wheels are present. Delete the
  * sentinel or pass `force: true` to rebuild.
  *
  * @param agtRepo  Path returned by {@link ensureAgtRepo}.
@@ -145,23 +194,24 @@ export async function ensureAgtWheels(
     );
   }
 
-  // Cache check: skip if the pin SHA matches what produced the
-  // current wheels.
-  const pinSha = fs.existsSync(pinPath)
-    ? (JSON.parse(fs.readFileSync(pinPath, "utf-8")) as AgtPin).sha
-    : "no-pin";
+  await ensureAgtRepo(agtRepo, repoRoot);
+  const pinSha = (JSON.parse(fs.readFileSync(pinPath, "utf-8")) as AgtPin).sha;
+  const recipe = createHash("sha256");
+  for (const input of AGT_WHEEL_BUILD_INPUTS) {
+    recipe.update(input).update("\0")
+      .update(fs.readFileSync(path.join(repoRoot, "runtimes", input))).update("\0");
+  }
+  const stampValue = `${pinSha}\n${recipe.digest("hex")}`;
   if (!force && fs.existsSync(cacheStamp) && fs.existsSync(wheelDir)) {
     const stamp = fs.readFileSync(cacheStamp, "utf-8").trim();
-    const hasWheels = fs
-      .readdirSync(wheelDir)
-      .some((f) => f.endsWith(".whl"));
-    if (stamp === pinSha && hasWheels) {
+    if (stamp === stampValue && hasCompleteWheelSet(wheelDir)) {
       return;
     }
   }
 
   const agtPython = path.join(agtRepo, "agent-governance-python");
-  if (!fs.existsSync(path.join(agtPython, "agent-mesh", "pyproject.toml"))) {
+  if (!fs.existsSync(path.join(agtPython, "agent-governance-toolkit-core", "pyproject.toml")) ||
+      !fs.existsSync(path.join(agtRepo, "policy-engine", "sdk", "python", "pyproject.toml"))) {
     throw new Error(
       `AGT Python tree not found at ${agtPython}. Re-run after ` +
         `ensureAgtRepo(), or check the agent-governance-toolkit clone.`,
@@ -172,12 +222,19 @@ export async function ensureAgtWheels(
     `[kars] Building AGT Python wheels (pin: ${pinSha.slice(0, 8)})...\n`,
   );
   fs.mkdirSync(wheelDir, { recursive: true });
+  fs.rmSync(cacheStamp, { force: true });
   await execa("bash", [buildScript], {
     cwd: repoRoot,
     env: { ...process.env, AGT_PYTHON_DIR: agtPython },
     stdio: "inherit",
   });
-  fs.writeFileSync(cacheStamp, pinSha + "\n");
+  if (!hasCompleteWheelSet(wheelDir)) {
+    throw new Error(
+      `AGT wheel build did not produce exactly one wheel for each required distribution: ` +
+      AGT_WHEEL_PACKAGES.join(", ") + ", and validated amd64/arm64 native ACS wheels",
+    );
+  }
+  fs.writeFileSync(cacheStamp, stampValue + "\n");
 }
 
 export { DEFAULT_AGT_REPO };

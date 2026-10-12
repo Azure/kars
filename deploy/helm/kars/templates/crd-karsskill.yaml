@@ -72,6 +72,18 @@ spec:
                 items:
                   type: string
                 type: array
+              package:
+                description: Package bytes live in the same-namespace `karsskill-<name>` ConfigMap.
+                type: boolean
+              files:
+                description: Exact relative paths. ConfigMap keys encode `/` as `__`.
+                type: array
+                items:
+                  type: string
+              packageDigest:
+                description: Full SHA256 of the canonical encoded ConfigMap file map.
+                type: string
+                nullable: true
               recipe:
                 description: |-
                   The **recipe** — standing instructions for using the capability well,

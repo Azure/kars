@@ -10,6 +10,51 @@ mod server;
 use server::*;
 
 #[test]
+fn deployment_custody_accepts_controller_atomic_create_and_server_side_apply() {
+    for operation in ["Apply", "Update"] {
+        let mut deployment = deployment();
+        deployment.metadata.managed_fields.as_mut().unwrap()[0].operation = Some(operation.into());
+        assert!(
+            validate_owned_deployment(&deployment, &sandbox(), &namespace()).is_ok(),
+            "{operation}"
+        );
+    }
+}
+
+#[test]
+fn deployment_custody_requires_known_controller_operation_and_spec_ownership() {
+    for operation in [Some("Apply"), Some("Update"), Some("Unknown"), None] {
+        for manager in [
+            Some(crate::field_managers::CLAWSANDBOX),
+            Some("foreign"),
+            None,
+        ] {
+            for spec_owned in [true, false] {
+                let mut deployment = deployment();
+                let entry = &mut deployment.metadata.managed_fields.as_mut().unwrap()[0];
+                entry.operation = operation.map(str::to_owned);
+                entry.manager = manager.map(str::to_owned);
+                entry.fields_v1 = Some(
+                    serde_json::from_value(if spec_owned {
+                        json!({"f:spec": {}})
+                    } else {
+                        json!({"f:metadata": {}})
+                    })
+                    .unwrap(),
+                );
+                assert_eq!(
+                    validate_owned_deployment(&deployment, &sandbox(), &namespace()).is_ok(),
+                    matches!(operation, Some("Apply" | "Update"))
+                        && manager == Some(crate::field_managers::CLAWSANDBOX)
+                        && spec_owned,
+                    "operation={operation:?}, manager={manager:?}, spec_owned={spec_owned}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn credential_refresh_bounds_v1_v2_and_github_without_speeding_up_legacy_sandboxes() {
     let original = sandbox();
     let bindings = serde_json::from_value::<crate::credential_grant::CredentialBindings>(json!({

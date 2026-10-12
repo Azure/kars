@@ -64,11 +64,6 @@ pub fn enroll(data: &mut Data) -> String {
         "routerServiceAccountUid":"sre-router"})).unwrap());
     data.objects
         .insert(REG.into(), serde_json::to_value(registration).unwrap());
-    data.objects.insert("/apis/apps/v1/namespaces/kars-system/deployments/kars-controller".into(),json!({
-        "metadata":{"name":"kars-controller","namespace":"kars-system","uid":"controller-deploy","resourceVersion":"1"},
-        "spec":{"template":{"spec":{"serviceAccountName":"kars-controller",
-            "containers":[{"name":"controller","image":"fixture"}]}}}
-    }));
     data.objects.insert("/apis/kars.azure.com/v1alpha1/namespaces/kars-system/karssandboxes/sre".into(),json!({
         "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsSandbox",
         "metadata":{"name":"sre","namespace":"kars-system","uid":"sre-source","resourceVersion":"1",

@@ -6,16 +6,115 @@
 use super::{CONTRACT, ERROR, PREFIX, bundle, field, hash, inspect_namespace, live};
 use crate::{
     crd::KarsSandbox,
-    credential_grant::{KarsCredentialGrant, activation::ControllerProfile},
+    credential_grant::{
+        KarsCredentialGrant,
+        activation::{ControllerProfile, NamespaceReview},
+    },
 };
 use k8s_openapi::api::{
     admissionregistration::v1::{ValidatingAdmissionPolicy, ValidatingAdmissionPolicyBinding},
     apps::v1::Deployment,
-    core::v1::{Namespace, ServiceAccount},
+    core::v1::{Namespace, Pod, ServiceAccount},
 };
-use kube::{Api, Client, ResourceExt};
+use kube::{
+    Api, Client, ResourceExt,
+    core::{ApiResource, DynamicObject, GroupVersionKind},
+};
 use serde_json::json;
 use std::collections::BTreeSet;
+
+fn template_digest(mut template: serde_json::Value) -> Result<String, String> {
+    if !template.is_object() {
+        return Err(ERROR.into());
+    }
+    // Match the CLI's reviewed JSON, including nulls and fields that typed
+    // Kubernetes deserialization would discard. Only the epoch is restamped.
+    if let Some(metadata) = template
+        .get_mut("metadata")
+        .and_then(serde_json::Value::as_object_mut)
+        && let Some(annotations) = metadata
+            .get_mut("annotations")
+            .and_then(serde_json::Value::as_object_mut)
+    {
+        annotations.remove(super::EPOCH);
+        if annotations.is_empty() {
+            metadata.remove("annotations");
+        }
+    }
+    Ok(hash(&template))
+}
+
+async fn reviewed_consumers(
+    client: &Client,
+    namespace: &Namespace,
+    scope: &NamespaceReview,
+    epoch: &str,
+) -> Result<(), String> {
+    let mut identities = BTreeSet::new();
+    let mut names = BTreeSet::new();
+    for consumer in &scope.consumers {
+        let (group, plural) = match consumer.kind.as_str() {
+            "Deployment" => ("apps", "deployments"),
+            "ReplicaSet" => ("apps", "replicasets"),
+            "StatefulSet" => ("apps", "statefulsets"),
+            "DaemonSet" => ("apps", "daemonsets"),
+            "ReplicationController" => ("", "replicationcontrollers"),
+            "Job" => ("batch", "jobs"),
+            "CronJob" => ("batch", "cronjobs"),
+            "Pod" => ("", "pods"),
+            _ => return Err(ERROR.into()),
+        };
+        if consumer.object.name.is_empty()
+            || consumer.object.uid.is_empty()
+            || consumer.object.resource_version.is_empty()
+            || !identities.insert(&consumer.object.uid)
+            || !names.insert((&consumer.kind, &consumer.object.name))
+            || field(namespace, &format!("parent-{}", consumer.object.uid))? != epoch
+        {
+            return Err(ERROR.into());
+        }
+        let resource = ApiResource::from_gvk_with_plural(
+            &GroupVersionKind::gvk(group, "v1", &consumer.kind),
+            plural,
+        );
+        let current =
+            Api::<DynamicObject>::namespaced_with(client.clone(), &scope.namespace.name, &resource)
+                .get(&consumer.object.name)
+                .await
+                .map_err(|_| ERROR)?;
+        let template = match consumer.kind.as_str() {
+            "Pod" => json!({
+                "metadata": {
+                    "labels": current.metadata.labels.clone().unwrap_or_default(),
+                    "annotations": current.metadata.annotations.clone().unwrap_or_default(),
+                },
+                "spec": current.data["spec"],
+            }),
+            "CronJob" => current.data["spec"]["jobTemplate"]["spec"]["template"].clone(),
+            _ => current.data["spec"]["template"].clone(),
+        };
+        if current.metadata.name.as_deref() != Some(consumer.object.name.as_str())
+            || current.metadata.namespace.as_deref() != Some(scope.namespace.name.as_str())
+            || current.types.as_ref().is_none_or(|types| {
+                types.kind != consumer.kind || types.api_version != resource.api_version
+            })
+            || live(&current.metadata)?.0 != consumer.object.uid
+            || template_digest(template.clone())? != consumer.template_digest
+        {
+            return Err(
+                "Private capability reviewed consumer identity or template differs from its qualification"
+                    .into(),
+            );
+        }
+        let pod: Pod = serde_json::from_value(template.clone()).map_err(|_| ERROR)?;
+        if super::consumers::consumes_private_authority(&pod, namespace)?
+            && template["metadata"]["annotations"][super::EPOCH] != epoch
+        {
+            return Err("Private capability reviewed consumer lacks its qualified epoch".into());
+        }
+    }
+    Ok(())
+}
 
 fn root_environment<'a>(deployment: &'a Deployment, name: &str) -> Result<Option<&'a str>, String> {
     let containers = &deployment
@@ -172,10 +271,24 @@ pub(crate) async fn namespace_epoch(
         .get(&root_account)
         .await
         .map_err(|_| ERROR)?;
-    let deployment = Api::<Deployment>::namespaced(client.clone(), &root_namespace)
-        .get(&field(namespace, "root-deployment")?)
-        .await
-        .map_err(|_| ERROR)?;
+    let root = Api::<DynamicObject>::namespaced_with(
+        client.clone(),
+        &root_namespace,
+        &ApiResource::erase::<Deployment>(&()),
+    )
+    .get(&field(namespace, "root-deployment")?)
+    .await
+    .map_err(|_| ERROR)?;
+    if template_digest(root.data["spec"]["template"].clone())?
+        != field(namespace, "root-template-digest")?
+    {
+        return Err(
+            "Private capability root template differs from its reviewed qualification".into(),
+        );
+    }
+    let deployment: Deployment =
+        serde_json::from_value(serde_json::to_value(root).map_err(|_| ERROR)?)
+            .map_err(|_| ERROR)?;
     if live(&account.metadata)?.0 != field(namespace, "root-uid")?
         || live(&deployment.metadata)?.0 != field(namespace, "root-deployment-uid")?
         || deployment
@@ -371,10 +484,155 @@ pub(crate) async fn verify(client: &Client, grant: &KarsCredentialGrant) -> Resu
         {
             return Err(ERROR.into());
         }
+        reviewed_consumers(client, &ns, scope, &epoch).await?;
         inspect_namespace(client, &ns, &epoch).await?;
     }
     if !required.is_subset(&seen) {
         return Err(ERROR.into());
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::credential_grant::activation::{ReviewedConsumer, ReviewedObject};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[tokio::test]
+    async fn reviewed_consumer_kinds_preserve_raw_templates_and_conditional_epochs() {
+        let server = MockServer::start().await;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        let epoch = "a".repeat(64);
+        let namespace: Namespace = serde_json::from_value(json!({
+            "metadata":{"name":"bridge","uid":"bridge-uid","resourceVersion":"1",
+                "annotations":{
+                    "kars.azure.com/private-root-namespace":"core",
+                    "kars.azure.com/private-root-account":"kars-controller",
+                    "kars.azure.com/private-parent-consumer":epoch
+                }}
+        }))
+        .unwrap();
+        for (kind, version, prefix, plural) in [
+            ("Deployment", "apps/v1", "/apis/apps/v1", "deployments"),
+            ("ReplicaSet", "apps/v1", "/apis/apps/v1", "replicasets"),
+            ("StatefulSet", "apps/v1", "/apis/apps/v1", "statefulsets"),
+            ("DaemonSet", "apps/v1", "/apis/apps/v1", "daemonsets"),
+            (
+                "ReplicationController",
+                "v1",
+                "/api/v1",
+                "replicationcontrollers",
+            ),
+            ("Job", "batch/v1", "/apis/batch/v1", "jobs"),
+            ("CronJob", "batch/v1", "/apis/batch/v1", "cronjobs"),
+            ("Pod", "v1", "/api/v1", "pods"),
+        ] {
+            for consuming in [false, true] {
+                let mut template = json!({
+                    "metadata":{"labels":{}},
+                    "spec":{"containers":[{"name":"app","image":"reviewed"}],
+                        "futureAdmissionField":{"preserve":null}}
+                });
+                if consuming {
+                    template["spec"]["volumes"] = json!([{
+                        "name":"private","secret":{"secretName":"router-services-observer-identity"}
+                    }]);
+                }
+                let scope = NamespaceReview {
+                    namespace: ReviewedObject {
+                        name: "bridge".into(),
+                        uid: "bridge-uid".into(),
+                        resource_version: "1".into(),
+                    },
+                    epoch: Some(epoch.clone()),
+                    consumers: vec![ReviewedConsumer {
+                        kind: kind.into(),
+                        object: ReviewedObject {
+                            name: "app".into(),
+                            uid: "consumer".into(),
+                            resource_version: "1".into(),
+                        },
+                        template_digest: template_digest(template.clone()).unwrap(),
+                    }],
+                };
+                for variant in [
+                    "unchanged",
+                    "image",
+                    "raw-null",
+                    "terminating",
+                    "replaced",
+                    "namespace",
+                    "epoch",
+                ] {
+                    server.reset().await;
+                    let mut candidate = template.clone();
+                    if variant == "epoch" {
+                        candidate["metadata"]["annotations"] = json!({super::super::EPOCH:epoch});
+                    } else if variant == "image" {
+                        candidate["spec"]["containers"][0]["image"] = json!("changed");
+                    } else if variant == "raw-null" {
+                        candidate["spec"]["futureAdmissionField"]
+                            .as_object_mut()
+                            .unwrap()
+                            .remove("preserve");
+                    }
+                    let mut object = json!({
+                        "apiVersion":version,"kind":kind,
+                        "metadata":{"name":"app","namespace":"bridge","uid":"consumer","resourceVersion":"2"}
+                    });
+                    match kind {
+                        "Pod" => {
+                            object["metadata"]["labels"] = candidate["metadata"]["labels"].clone();
+                            if let Some(annotations) = candidate["metadata"].get("annotations") {
+                                object["metadata"]["annotations"] = annotations.clone();
+                            }
+                            object["spec"] = candidate["spec"].clone();
+                        }
+                        "CronJob" => object["spec"]["jobTemplate"]["spec"]["template"] = candidate,
+                        _ => object["spec"]["template"] = candidate,
+                    }
+                    match variant {
+                        "terminating" => {
+                            object["metadata"]["deletionTimestamp"] = json!("2026-10-11T12:00:00Z")
+                        }
+                        "replaced" => object["metadata"]["uid"] = json!("replacement"),
+                        "namespace" => object["metadata"]["namespace"] = json!("elsewhere"),
+                        _ => {}
+                    }
+                    Mock::given(wiremock::matchers::method("GET"))
+                        .and(wiremock::matchers::path(format!(
+                            "{prefix}/namespaces/bridge/{plural}/app"
+                        )))
+                        .respond_with(ResponseTemplate::new(200).set_body_json(object))
+                        .mount(&server)
+                        .await;
+                    let result = reviewed_consumers(&client, &namespace, &scope, &epoch).await;
+                    let valid = variant == "epoch" || (variant == "unchanged" && !consuming);
+                    assert_eq!(
+                        result.is_ok(),
+                        valid,
+                        "{kind} {consuming} {variant}: {result:?}"
+                    );
+                }
+                for invalid in ["duplicate", "kind", "marker", "empty-version"] {
+                    let mut scope = scope.clone();
+                    let mut namespace = namespace.clone();
+                    match invalid {
+                        "duplicate" => scope.consumers.push(scope.consumers[0].clone()),
+                        "kind" => scope.consumers[0].kind = "Secret".into(),
+                        "marker" => namespace.metadata.annotations.as_mut().unwrap().clear(),
+                        "empty-version" => scope.consumers[0].object.resource_version.clear(),
+                        _ => unreachable!(),
+                    }
+                    assert!(
+                        reviewed_consumers(&client, &namespace, &scope, &epoch)
+                            .await
+                            .is_err()
+                    );
+                }
+            }
+        }
+    }
 }
