@@ -39,13 +39,14 @@ export function SurfaceSwitcher({
         <Link
           key={t.href}
           href={t.href}
+          aria-label={t.label}
           prefetch={false}
           className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-surface px-2.5 py-1 text-xs font-medium text-foreground-muted transition hover:bg-surface-muted hover:text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
         >
-          <svg viewBox="0 0 16 16" className="h-3.5 w-3.5" fill="currentColor" aria-hidden>
+          <svg viewBox="0 0 16 16" className="hidden h-3.5 w-3.5 sm:block" fill="currentColor" aria-hidden>
             <path d="M5 3 1.5 6.5 5 10V7.5h6V5.5H5V3Zm6 3v2.5H5v2L8.5 13 12 9.5 11 8.5V6h-1Z" />
           </svg>
-          {t.label}
+          {t.href === "/console" ? <><span className="sm:hidden">Console</span><span className="hidden sm:inline">{t.label}</span></> : t.label}
         </Link>
       ))}
     </div>

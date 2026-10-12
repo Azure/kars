@@ -163,6 +163,15 @@ plaintext. Encrypted sends establish an SDK session first and propagate handshak
 failure without falling back to plaintext. This evidence describes transport,
 not permission to execute an instruction or proof that work was completed.
 
+`npm test -- src/agt-transport.integration.test.ts` exercises the installed,
+pinned SDK through two real Kars transports, using loopback HTTP/WebSocket
+registry-storage and relay-routing fixtures. It verifies registration and relay
+signatures, authenticated prekey publication, six alternating encrypted messages
+with per-message encryption evidence, and rejection of an invalid signed
+prekey without sending a message. Cryptography and SDK loading are not mocked.
+This is a local SDK compatibility check, not live relay, Entra or sandbox
+acceptance.
+
 ## Gated mission receiver (not yet a complete dispatch path)
 
 `dist/mission-protocol.js` defines the version-1 `mission:` protocol used by the
@@ -266,6 +275,15 @@ request/response size limits and an overall request deadline.
 - Authenticated replies append to a bounded, resourceVersion-CAS event journal.
   Acceptance precedes ACK; terminal evidence is persisted before publication.
   Lost write responses preserve the durable state rather than authorizing resend.
+  Reviewed input comparisons revalidate the canonical content and producer pins
+  after JSON storage, so restored object prototypes do not block publication.
+  Recovery publishes the saved reply without repeating the assignment; changed
+  source custody, content, or reviewed authority still blocks publication.
+- Negotiated `router-observations-v1` activity is retained and validated for both
+  OpenClaw and Hermes through durable recovery and reviewed-phase handoff.
+  Older Hermes attempts without activity remain readable. Unsupported formats
+  or assignment/reply negotiation mismatches are rejected; activity never grants
+  execution authority or permits a second assignment.
 - Actual output and `response.md` are archived in immutable per-run ConfigMaps,
   with Task UID/run/assignment/agent attribution and measured usage. Unknown usage
   is omitted, never manufactured as zero. Failed runs do not produce an artifact.
@@ -348,13 +366,30 @@ updates, replacements or disappearance fail rather than adopting a newer object.
 A runtime that does not exist waits without creating a paused placeholder. First
 creation uses CREATE, never forced apply over a competing create. Suspension,
 Task authorization, credential-rebind and private-activation checks still apply.
-The feature is not wired into the installed Core release yet; source tests do not
-qualify Kubernetes defaulting, useful delivery, Entra identity or either beta gate.
+The Core chart packages this opt-in path; source tests do not qualify Kubernetes
+defaulting, useful delivery, installed Entra identity or either beta gate.
 
-### Core dispatcher process (development qualification)
+### Core dispatcher process
 
 `mesh-plugin/Dockerfile.dispatcher` builds the actual Node 22 process from the
-pinned official AGT SDK. `npm run start:dispatcher` runs the compiled executable.
+pinned official AGT SDK. Its final image uses Microsoft Azure Linux 3 distroless,
+retains the Microsoft CA trust store and RPM inventory, and adds the complete
+Microsoft `libstdc++` package payload. Only the Node binary/license, compiled
+application and production dependencies cross from the Debian build stage;
+Debian libraries, shells, npm and Yarn do not ship. The dispatcher still runs as
+UID/GID `1000:1000` with `node dist/mission-main.js`, and missing authentication
+configuration still fails closed. The image build checks native Node/CA loading,
+AGT imports and the configuration refusal in the final runtime.
+
+`npm run start:dispatcher` runs the compiled executable outside the image.
+Focused packaging contracts run without building an image:
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ci -p test_bridge_image_contract.py
+```
+
+Source contracts do not replace an exact-image native startup check or a fresh
+HIGH/CRITICAL OS and Node package scan before promotion.
 For installations using a private npm mirror, pass the existing configuration as
 an optional BuildKit secret, not a build argument or copied file:
 
@@ -365,15 +400,19 @@ docker build --secret id=npmrc,src="$HOME/.npmrc" \
 
 The configuration is mounted only for dependency installation and is not copied
 into image layers. The lockfile and official SDK checksum remain authoritative.
-Core Helm's `missionDispatcher.enabled` defaults to false; enabling it also
-requires explicit `missionDispatcher.authMode=development`. Unsupported Entra
-configuration fails closed rather than silently selecting anonymous transport.
-This is a Kind qualification path, **not** an Entra-authenticated AKS dispatcher.
+Core Helm's `missionDispatcher.enabled` defaults to false; enabling it requires
+explicit `missionDispatcher.authMode=development` or `entra`. Development is only
+the no-Entra qualification path. Entra reuses the controller-provisioned distinct
+Agent Identity, canonical AuthConfig and official sidecar/AGT authentication;
+incomplete configuration fails closed without anonymous fallback. Follow the
+[Core identity activation and dispatcher prerequisites](../deploy/helm/kars/README.md#entra-mission-dispatcher).
+Packaging and local tests are **not** installed Entra-authenticated AKS acceptance.
 
 The Core chart includes the singleton Recreate Deployment, service account,
 read-only workload discovery, Task run annotation updates, and durable ConfigMap
-writes. Secret access is only GET of the helper's named root in Core's namespace;
-it cannot read runtime identity roots. Kubernetes administrators must protect
+writes. Secret access is only GET of the helper's named root in Core's namespace
+and, in Entra mode, its pinned `kars-mission-dispatcher-entra` binding; it cannot
+list Secrets or read runtime identity roots. Kubernetes administrators must protect
 these accounts and workload objects: cluster-scoped Task and ConfigMap access is
 not a per-tenant RBAC boundary. Do not run multiple Core dispatchers against the
 same Task population. No extra Helm release, Service or Ingress is required.

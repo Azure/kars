@@ -75,6 +75,8 @@ jobs:
       - name: Require standalone core checkout
         working-directory: .
         run: test ! -e bridge
+      - name: Check multi-stage Rust image build inputs
+        run: python3 -m unittest ci.test_rust_image_context
       - if: needs.changes.outputs.code == 'true'
         uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
         with:
@@ -339,6 +341,46 @@ jobs:
       - name: npm audit (Mesh Plugin dependencies)
         working-directory: mesh-plugin
         run: node ../ci/npm-audit-bulk.mjs package-lock.json
+
+  managed-mcp:
+    name: Managed MCP Dependencies & Protocol
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    defaults:
+      run:
+        working-directory: sandbox-images/mcp-everything
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "24"
+          cache: npm
+          cache-dependency-path: sandbox-images/mcp-everything/package-lock.json
+      - run: npm ci --omit=dev --ignore-scripts --no-audit --no-fund
+      - run: npm test
+      - name: Audit managed MCP dependencies
+        run: node ../../ci/npm-audit-bulk.mjs package-lock.json
+
+  managed-playwright:
+    name: Managed Playwright AL3 (${{ matrix.runner }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 25
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04, ubuntu-24.04-arm]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Build the native AL3 browser image
+        run: docker build -t kars-mcp-playwright:latest sandbox-images/mcp-playwright
+      - name: Verify the immutable offline browser
+        run: |
+          docker run --rm --pull=never --network=none --read-only \
+            --user=1000:1000 --cap-drop=ALL --security-opt=no-new-privileges \
+            --memory=4g --memory-swap=4g --cpus=2 --pids-limit=256 \
+            --tmpfs=/tmp:rw,nosuid,nodev,noexec,size=1g \
+            --entrypoint=sh kars-mcp-playwright:latest \
+            /app/browser-platform.sh npm test
 
   python-sidecar:
     name: Python Lint & Test (AGT Sidecar)
@@ -666,6 +708,7 @@ jobs:
           hadolint $IGNORE sandbox-images/conformance-runner/Dockerfile
           hadolint $IGNORE sandbox-images/openclaw/Dockerfile.base
           hadolint $IGNORE sandbox-images/openclaw/Dockerfile
+          hadolint $IGNORE sandbox-images/mcp-playwright/Dockerfile
 
   chaos-tier:
     name: Chaos Tier (fault injection)

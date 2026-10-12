@@ -38,6 +38,7 @@ import type {
 } from "@/lib/types";
 
 import { modelKey } from "./intake-flow/helpers";
+import { recommendedStats as selectRecommendedStats } from "@/lib/efficiency";
 import { renderReview } from "./intake-flow/review";
 
 const EXAMPLES = [
@@ -64,11 +65,9 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
   // back to a real model option and surface its stats at the point of choice.
   const recommendedRouteRaw = efficiency?.recommended ?? null;
   const recommendedModel = recommendedRouteRaw
-    ? options.models.find((m) => recommendedRouteRaw.includes(m.deployment)) ?? null
+    ? options.models.find((m) => recommendedRouteRaw === m.deployment) ?? null
     : null;
-  const recommendedStats = recommendedRouteRaw
-    ? efficiency?.routes.find((r) => r.route === recommendedRouteRaw) ?? null
-    : null;
+  const recommendedStats = selectRecommendedStats(efficiency);
   const actionableRecommendedModel =
     efficiency?.recommended_low_confidence ? null : recommendedModel;
 
@@ -346,8 +345,8 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
         <div className="kb-card kb-canvas p-6">
           <h2 className="text-sm font-semibold">Review the loop</h2>
           <p className="mt-1 text-xs text-foreground-muted">
-            The orchestrator turned your intent into a feedback loop (2026 loop engineering). Review
-            the pattern and success criteria — change anything — then continue; the loop becomes what
+            Review the suggested feedback-loop pattern and success criteria — change anything —
+            then continue; the loop becomes what
             the harness runs and is inherited by any sub-agents.
           </p>
           {loopLoading ? (
@@ -363,6 +362,7 @@ export function IntakeFlow({ options, efficiency, initialObjective }: { options:
                 initialPatternId={loopProposal?.pattern}
                 initialCriteria={loopProposal?.criteria ?? ""}
                 rationale={loopProposal?.rationale}
+                proposalSource={loopProposal?.source}
                 applyLabel="Continue with this loop →"
                 onApply={applyLoopAndCompose}
               />

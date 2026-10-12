@@ -26,6 +26,7 @@ export function LoopDesigner({
   initialPatternId,
   initialCriteria = "",
   rationale,
+  proposalSource,
   defaultOpen = false,
   applyLabel = "Use this loop",
   onApply,
@@ -38,6 +39,7 @@ export function LoopDesigner({
   initialCriteria?: string;
   /** The orchestrator's one-line why-this-pattern note, shown in review mode. */
   rationale?: string;
+  proposalSource?: "orchestrator" | "heuristic";
   /** Open expanded immediately (review-step mode) vs the collapsed button. */
   defaultOpen?: boolean;
   applyLabel?: string;
@@ -105,8 +107,14 @@ export function LoopDesigner({
       {rationale && (
         <div className="flex items-start gap-2 rounded-lg border border-accent/25 bg-accent/[0.05] p-2.5 text-xs">
           <span aria-hidden><Icon name="compass" size={14} /></span>
-          <p className="text-foreground-muted"><span className="font-medium text-foreground">Orchestrator picked this loop:</span> {rationale} You can change the pattern or details below before running.</p>
+          <p className="text-foreground-muted"><span className="font-medium text-foreground">{proposalSource === "orchestrator" ? "Orchestrator's initial proposal:" : "Suggested starting point:"}</span> {rationale} You can change the pattern or details below before running.</p>
         </div>
+      )}
+
+      {initialPatternId && !patterns.some((pattern) => pattern.id === initialPatternId) && !selected && (
+        <p role="alert" className="text-xs text-foreground-muted">
+          The proposed loop is not available for this {surface}. Choose a compatible pattern below before continuing.
+        </p>
       )}
 
       {/* Pattern catalog */}

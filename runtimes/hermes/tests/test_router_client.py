@@ -50,3 +50,16 @@ def test_call_without_headers_passes_none() -> None:
         router_client.call("GET", "/healthz")
 
     assert captured["headers"] is None
+
+
+def test_loopback_auth_client_never_uses_environment_proxy(monkeypatch):
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.invalid:8080")
+    monkeypatch.setenv("HTTPS_PROXY", "http://proxy.invalid:8080")
+    router_client.clear_token_cache()
+    try:
+        with mock.patch.object(router_client.httpx, "Client") as client:
+            router_client._client()
+            assert client.call_args.kwargs["trust_env"] is False
+            assert client.call_args.kwargs["base_url"] == "http://127.0.0.1:8443"
+    finally:
+        router_client.clear_token_cache()

@@ -16,6 +16,21 @@ export type MissionStatus =
   | "failed"
   | "blocked";
 
+export function missionBlockReason(task: {
+  phase: string | null;
+  execution_phase?: string | null;
+  status_message?: string | null;
+  execution_detail?: string | null;
+}): string | null {
+  if (task.execution_phase === "Degraded") {
+    return task.execution_detail?.trim() || "Execution is blocked; no diagnostic detail has been recorded.";
+  }
+  if (task.phase === "Degraded") {
+    return task.status_message?.trim() || "Mission admission is blocked; no diagnostic detail has been recorded.";
+  }
+  return null;
+}
+
 /** Map a governance phase (+ optional execution phase) to user language.
  *  ONE projection, used by every surface (page badge, execution panel, fleet
  *  card) so the mission never shows two different states at once.

@@ -9,6 +9,7 @@
 
 use anyhow::Result;
 use futures::StreamExt;
+use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{
     Api, Client, ResourceExt,
     api::{ListParams, Patch, PatchParams},
@@ -49,15 +50,39 @@ async fn reconcile(skill: Arc<KarsSkill>, ctx: Arc<Ctx>) -> Result<Action, Recon
     let ns = skill.namespace().unwrap_or_else(|| "default".into());
     let api: Api<KarsSkill> = Api::namespaced(ctx.client.clone(), &ns);
 
-    let errors = skill.validation_errors();
-    let status = if errors.is_empty() {
+    let mut errors = skill.validation_errors();
+    if errors.is_empty() {
+        let policies: Api<crate::tool_policy::ToolPolicy> =
+            Api::namespaced(ctx.client.clone(), &ns);
+        if policies
+            .get_opt(&skill.spec.bounding_policy)
+            .await?
+            .is_none_or(|policy| policy.metadata.deletion_timestamp.is_some())
+        {
+            errors
+                .push("The bounding ToolPolicy is missing or terminating in this namespace".into());
+        }
+    }
+    if errors.is_empty() && skill.spec.package {
+        let packages: Api<ConfigMap> = Api::namespaced(ctx.client.clone(), &ns);
+        match packages.get_opt(&format!("karsskill-{name}")).await? {
+            Some(package) => {
+                if let Err(error) = skill.validate_package(&package) {
+                    errors.push(error);
+                }
+            }
+            None => errors.push("Waiting for the owned skill package ConfigMap".into()),
+        }
+    }
+    let valid = errors.is_empty();
+    let status = if valid {
         KarsSkillStatus {
             phase: Some(PHASE_READY.into()),
             observed_generation: skill.metadata.generation,
             version_digest: Some(skill.version_digest()),
             attestation_ref: skill.spec.attestation_ref.clone(),
             detail: Some(format!(
-                "Skill v{} validated and grantable.",
+                "Skill v{} content validated; independent operator approval is required before use. Attestation references are unverified provenance claims.",
                 skill.spec.version
             )),
             conditions: None,
@@ -84,7 +109,11 @@ async fn reconcile(skill: Arc<KarsSkill>, ctx: Arc<Ctx>) -> Result<Action, Recon
         &Patch::Apply(patch),
     )
     .await?;
-    Ok(Action::requeue(REQUEUE_OK))
+    Ok(Action::requeue(if valid {
+        REQUEUE_OK
+    } else {
+        REQUEUE_PENDING
+    }))
 }
 
 fn error_policy(_skill: Arc<KarsSkill>, error: &ReconcileError, _ctx: Arc<Ctx>) -> Action {
@@ -103,8 +132,10 @@ pub async fn run(client: Client) -> Result<()> {
             return Ok(());
         }
     }
+    let packages: Api<ConfigMap> = Api::all(client.clone());
     let ctx = Arc::new(Ctx { client });
     Controller::new(skills, crate::watch_config::bounded())
+        .owns(packages, crate::watch_config::bounded())
         .run(
             |x, ctx| async move {
                 crate::metrics::observe_reconcile("KarsSkill", reconcile(x, ctx)).await

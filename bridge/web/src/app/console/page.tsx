@@ -10,7 +10,7 @@ import { HonestState } from "@/components/honest-state";
 import { Icon } from "@/components/icon";
 import { listSandboxes, getInsights, listEgress, getOrchestrator, listSreActions } from "@/lib/bff";
 import { headlampUrl } from "@/lib/config";
-import type { Sandbox, Insights, EgressApproval, Orchestrator, SreAction } from "@/lib/types";
+import { formatUptime } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 
@@ -31,22 +31,17 @@ function phaseClass(phase: string | null): string {
 }
 
 export default async function FleetHealth() {
-  let sandboxes: Sandbox[] = [];
-  let insights: Insights | null = null;
-  let egress: EgressApproval[] = [];
-  let orchestrator: Orchestrator | null = null;
-  let error = false;
-  try {
-    [sandboxes, insights, egress] = await Promise.all([
-      listSandboxes(),
-      getInsights().catch(() => null),
-      listEgress().catch(() => [] as EgressApproval[]),
-    ]);
-  } catch {
-    error = true;
-  }
-  orchestrator = await getOrchestrator().catch(() => null);
-  const sreActions: SreAction[] = await listSreActions().catch(() => [] as SreAction[]);
+  const [sandboxRead, insightsRead, egressRead, orchestratorRead, sreRead] = await Promise.allSettled([
+    listSandboxes(), getInsights(), listEgress(), getOrchestrator(), listSreActions(),
+  ]);
+  const error = sandboxRead.status === "rejected";
+  const sandboxes = sandboxRead.status === "fulfilled" ? sandboxRead.value : [];
+  const insights = insightsRead.status === "fulfilled" ? insightsRead.value : null;
+  const egress = egressRead.status === "fulfilled" ? egressRead.value : null;
+  const orchestrator = orchestratorRead.status === "fulfilled" ? orchestratorRead.value : null;
+  const sreActions = sreRead.status === "fulfilled" ? sreRead.value : null;
+  const sreSandbox = sandboxes.find((sandbox) => sandbox.name === "sre");
+  const pendingSreActions = sreActions?.filter((action) => action.actionable).length ?? 0;
 
   const counts = sandboxes.reduce<Record<string, number>>((acc, s) => {
     const p = s.phase ?? "Unknown";
@@ -54,7 +49,7 @@ export default async function FleetHealth() {
     return acc;
   }, {});
   const degraded = sandboxes.filter((s) => s.phase === "Degraded" || s.phase === "Failed");
-  const egressPending = egress.filter((e) => e.phase === "Pending").length;
+  const egressPending = egress?.filter((e) => e.phase === "Pending").length ?? 0;
   const headlamp = headlampUrl();
 
   return (
@@ -74,9 +69,9 @@ export default async function FleetHealth() {
             <Metric label="Sandboxes" value={sandboxes.length} mono />
             <Metric label="Running" value={(counts["Running"] ?? 0) + (counts["Ready"] ?? 0)} mono ok />
             <Metric label="Degraded" value={degraded.length} mono danger={degraded.length > 0} href="/console/fleet" />
-            <Metric label="Egress grants" value={egress.length} mono warn={egressPending > 0} href="/console/approvals" hint={egressPending > 0 ? `${egressPending} pending` : undefined} />
-            <Metric label="Amp. blocks" value={insights?.amplification_rejections ?? 0} mono warn={(insights?.amplification_rejections ?? 0) > 0} />
-            <Metric label="Receipts issued" value={insights?.receipts_issued ?? 0} mono href="/console/audit" />
+            <Metric label="Egress grants" value={egress?.length ?? null} mono warn={egressPending > 0} href="/console/approvals" hint={egress === null ? "Egress inventory unavailable" : egressPending > 0 ? `${egressPending} pending` : undefined} />
+            <Metric label="Amp. blocks" value={insights?.amplification_rejections ?? null} mono warn={(insights?.amplification_rejections ?? 0) > 0} hint={insights === null ? "Insights unavailable" : undefined} />
+            <Metric label="Receipts issued" value={insights?.receipts_issued ?? null} mono href="/console/audit" hint={insights === null ? "Insights unavailable" : undefined} />
           </div>
 
           <section className="rounded-lg border border-border bg-surface">
@@ -86,7 +81,7 @@ export default async function FleetHealth() {
             </div>
             {degraded.length === 0 ? (
               <p className="px-5 py-6 text-sm text-foreground-muted">
-                Cluster is healthy — no degraded or failed sandboxes.
+                No sandboxes currently report Degraded or Failed. This does not verify model calls, tools, or completed work.
               </p>
             ) : (
               <ul className="divide-y divide-border">
@@ -121,7 +116,7 @@ export default async function FleetHealth() {
 
           {/* Orchestrator health — the compose engine + which inference path it
               runs on, with the failover recommendation under load. */}
-          {orchestrator && (
+          {orchestrator ? (
             <section className={`rounded-lg border p-5 ${orchestrator.recommend_direct ? "border-amber-500/30 bg-amber-500/[0.04]" : "border-border bg-surface"}`}>
               <div className="flex flex-wrap items-start justify-between gap-3">
                 <div>
@@ -131,19 +126,24 @@ export default async function FleetHealth() {
                   <p className="mt-1 max-w-2xl text-xs text-foreground-muted">{orchestrator.note}</p>
                 </div>
                 <span className={`shrink-0 rounded-full px-2.5 py-0.5 text-[11px] font-semibold ${
-                  orchestrator.mode === "direct" ? "bg-emerald-500/15 text-emerald-600"
-                  : orchestrator.mode === "sandbox" ? "bg-signal/15 text-signal"
+                  orchestrator.mode !== "none" ? "bg-signal/15 text-signal"
                   : "bg-rose-500/15 text-rose-600"}`}>
-                  {orchestrator.mode === "direct" ? "Direct endpoint" : orchestrator.mode === "sandbox" ? "Sandbox router" : "No path"}
+                  {orchestrator.mode === "direct" ? "Configured direct" : orchestrator.mode === "sandbox" ? "Sandbox router" : "No path"}
                 </span>
               </div>
               <dl className="mt-3 grid grid-cols-2 gap-3 sm:grid-cols-4 text-xs">
                 <div><dt className="text-foreground-muted">Direct endpoint</dt><dd className="font-medium">{orchestrator.direct_configured ? "configured" : "not set"}</dd></div>
                 <div><dt className="text-foreground-muted">Orchestrator sandbox</dt><dd className="font-medium">{orchestrator.sandbox_present ? (orchestrator.sandbox_phase ?? "present") : "absent"}</dd></div>
-                <div><dt className="text-foreground-muted">Pod</dt><dd className="font-medium">{orchestrator.sandbox_ready ?? "—"}{orchestrator.sandbox_waiting_reason ? ` · ${orchestrator.sandbox_waiting_reason}` : ""}{orchestrator.sandbox_restarts ? ` · ${orchestrator.sandbox_restarts}↻` : ""}</dd></div>
-                <div title="Running sandbox inference-routers the compose orchestrator can route through when no direct endpoint is set — each is a fallback path, so more than one means redundancy."><dt className="text-foreground-muted">Router fallbacks</dt><dd className="font-medium">{orchestrator.router_candidates}{orchestrator.router_candidates === 1 ? " path" : " paths"}</dd></div>
+                <div><dt className="text-foreground-muted">Pod</dt><dd className="break-words font-medium">{orchestrator.sandbox_ready ?? "—"}{orchestrator.sandbox_waiting_reason ? ` · ${orchestrator.sandbox_waiting_reason}` : ""}</dd></div>
+                <div title="Pod-status candidates, not verified model calls or a guarantee of independent capacity."><dt className="text-foreground-muted">Router candidates</dt><dd className="font-medium">{orchestrator.router_candidates}{orchestrator.router_candidates === 1 ? " path" : " paths"}</dd></div>
+                <div><dt className="text-foreground-muted">Restarts</dt><dd className="font-medium">{orchestrator.sandbox_restarts ?? "—"}</dd></div>
+                <div><dt className="text-foreground-muted">Node</dt><dd className="break-all font-mono text-[11px]">{orchestrator.sandbox_node ?? "—"}</dd></div>
+                <div><dt className="text-foreground-muted">Uptime</dt><dd className="font-medium">{formatUptime(orchestrator.sandbox_uptime_seconds)}</dd></div>
+                <div><dt className="text-foreground-muted">Evidence</dt><dd className="font-medium">Configuration &amp; pod status</dd></div>
               </dl>
             </section>
+          ) : (
+            <HonestState variant="not_wired" title="Orchestrator status unavailable" detail="The compose-engine status could not be retrieved. Its routing and readiness are unknown; refresh to retry." />
           )}
 
           {/* Cluster tools — deep-links to the K8s-native surfaces an operator
@@ -169,16 +169,20 @@ export default async function FleetHealth() {
               <Link href="/console/sre-actions" className="rounded-lg border border-border bg-surface p-3 transition hover:border-signal/40">
                 <p className="flex items-center gap-1.5 text-sm font-medium">
                   <Icon name="wrench" className="h-3.5 w-3.5" /> kars-SRE
-                  {sreActions.filter((a) => a.actionable).length > 0 && (
+                  {pendingSreActions > 0 && (
                     <span className="ml-auto rounded-full bg-warning/15 px-1.5 py-0.5 text-[10px] font-semibold text-warning">
-                      {sreActions.filter((a) => a.actionable).length} pending
+                      {pendingSreActions} pending
                     </span>
                   )}
                 </p>
                 <p className="mt-0.5 text-xs text-foreground-muted">
-                  {sreActions.length > 0
-                    ? `${sreActions.length} remediation proposal${sreActions.length === 1 ? "" : "s"} from the SRE agent — review & decide.`
-                    : "No remediation proposals yet. If the kars-sre agent is installed, its proposals appear here for approval."}
+                  {sreActions === null
+                    ? "SRE proposal history unavailable. Open SRE Actions to retry."
+                    : `${sreSandbox ? "" : "SRE agent not installed. "}${sreActions.length > 0
+                      ? `${sreActions.length} recorded remediation proposal${sreActions.length === 1 ? "" : "s"} — review & decide.`
+                      : sreSandbox
+                        ? `No remediation proposals recorded. Sandbox phase: ${sreSandbox.phase ?? "Unknown"}.`
+                        : "Install and enroll kars-SRE to enable diagnosis."}`}
                 </p>
               </Link>
             </div>
@@ -200,7 +204,7 @@ function Metric({
   hint,
 }: {
   label: string;
-  value: number;
+  value: number | null;
   mono?: boolean;
   ok?: boolean;
   danger?: boolean;
@@ -209,7 +213,7 @@ function Metric({
   hint?: string;
 }) {
   const body = (
-    <div className="rounded-lg border border-border bg-surface p-4 transition hover:border-signal/40">
+    <div className="h-full rounded-lg border border-border bg-surface p-4 transition hover:border-signal/40">
       <p
         className={[
           "text-2xl font-semibold",
@@ -217,7 +221,7 @@ function Metric({
           danger ? "text-danger" : warn ? "text-warning" : ok ? "text-ok" : "text-foreground",
         ].join(" ")}
       >
-        {value}
+        {value ?? "—"}
       </p>
       <p className="mt-0.5 text-xs text-foreground-muted">{label}</p>
       {hint && <p className="mt-0.5 text-[11px] font-medium text-warning">{hint}</p>}

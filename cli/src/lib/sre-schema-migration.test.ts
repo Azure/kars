@@ -6,11 +6,25 @@ import { canonicalSchema, normalizedCrd, schemaDigest } from "./schema-documents
 import { assertSchemaCompatibility } from "./schema-compatibility.js";
 import { planCoreSchemaDocuments, stageCoreSchemaDocuments } from "./schema-stage.js";
 import { qualifySreSchemaMigration, sreMigrationSummary } from "./sre-schema-migration.js";
-import { canonicalMigrationSchemas, migrationFixture } from "./sre-migration.test-support.js";
+import { canonicalMigrationSchemas, currentCoreSchemas, migrationFixture } from "./sre-migration.test-support.js";
 import { CANONICAL_SCHEMAS, EVALUATOR_V2, MIGRATION } from "./sre-migration-catalog.js";
 import { planCoreHelmSchemas } from "./core-helm-schemas.js";
 
 describe("closed BASE365 SRE schema migration", () => {
+  it.each(["KarsAuthConfig", "KarsSkill", "KarsTask", "KarsTeam"])(
+    "does not extend the historical migration permit to the current %s schema",
+    async kind => {
+      const f = migrationFixture();
+      const current = currentCoreSchemas().find(object => object.spec.names.kind === kind)!;
+      const targetIndex = f.after.findIndex(object => object.spec.names.kind === kind);
+      expect(schemaDigest(normalizedCrd(current))).not.toBe(schemaDigest(normalizedCrd(f.after[targetIndex])));
+      f.after[targetIndex] = current;
+      await expect(qualifySreSchemaMigration(f.execute, f.after, f.owner))
+        .rejects.toThrow(`Unreviewed target schema in BASE365 migration: ${current.metadata.name}`);
+      expect(f.writes).toEqual([]);
+    },
+  );
+
   it("accepts a new-CRD server CREATE preview without inventing a persisted resourceVersion", async () => {
     const f = migrationFixture(true);
     const execute: typeof f.execute = async (file, args, options) => {

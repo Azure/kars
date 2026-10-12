@@ -27,21 +27,18 @@ impl Cluster {
     /// model on workload-identity clusters — without a static token, reusing the
     /// same governed path agents use. Prefers a persistent sandbox; falls back
     /// to any Running sandbox pod. Returns `(namespace, pod)`.
-    /// Ranked list of stable sandbox `(namespace, pod)` candidates whose
+    /// Ranked list of sandbox `(namespace, pod)` candidates whose
     /// inference router the Bridge can route an orchestrator/composer model call
-    /// through. Excludes ephemeral standing-run sandboxes (short-lived / busy),
+    /// through. Prefers stable sandboxes over ephemeral standing-run sandboxes,
     /// requires the router container ready, and orders freshest-first (a
     /// recently (re)started pod runs the current router image with valid
     /// provider auth). The caller tries them in order so a single sandbox with
     /// stale auth or a warming router is skipped gracefully.
-    pub async fn running_sandbox_candidates(&self) -> Vec<(String, String)> {
+    pub async fn running_sandbox_candidates(&self) -> Result<Vec<(String, String)>, kube::Error> {
         let pods: Api<Pod> = Api::all(self.client.clone());
-        let Ok(list) = pods
+        let list = pods
             .list(&ListParams::default().labels("kars.azure.com/sandbox"))
-            .await
-        else {
-            return Vec::new();
-        };
+            .await?;
         let mut candidates: Vec<&Pod> = list
             .items
             .iter()
@@ -87,10 +84,10 @@ impl Cluster {
             let tb = b.metadata.creation_timestamp.as_ref().map(|t| t.0);
             eph(a).cmp(&eph(b)).then(tb.cmp(&ta)) // stable first, then freshest
         });
-        candidates
+        Ok(candidates
             .into_iter()
             .filter_map(|p| Some((p.metadata.namespace.clone()?, p.metadata.name.clone()?)))
-            .collect()
+            .collect())
     }
 
     /// Drive a real model call through a sandbox's secure inference router,

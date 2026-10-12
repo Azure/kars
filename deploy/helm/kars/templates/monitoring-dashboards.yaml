@@ -1,0 +1,17 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- if and .Values.monitoring.enabled .Values.monitoring.grafana.enabled }}
+{{- range $dashboard := list "fleet" "ops" }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kars-{{ $dashboard }}-dashboard
+  namespace: monitoring
+  labels:
+    grafana_dashboard: "1"
+data:
+  kars-{{ $dashboard }}.json: |
+    {{- $.Files.Get (printf "files/monitoring/grafana-dashboard-kars-%s.json" $dashboard) | nindent 4 }}
+{{- end }}
+{{- end }}

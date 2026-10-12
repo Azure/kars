@@ -99,7 +99,7 @@ fn valid_capabilities(capabilities: &[String]) -> bool {
     })
 }
 
-fn valid_deliverable_name(name: &str) -> bool {
+pub(crate) fn valid_deliverable_name(name: &str) -> bool {
     !name.is_empty()
         && name.len() <= 128
         && name.as_bytes()[0].is_ascii_alphanumeric()
@@ -145,6 +145,19 @@ fn execution_plan_is_acyclic(plan: &ExecutionPlan) -> bool {
         .all(|role| visit(&role.name, &dependencies, &mut visiting, &mut visited))
 }
 
+// A reviewed Task delegates to roles, then phases. A standing Team first delegates to a run.
+pub const REVIEWED_TASK_DELEGATION_DEPTH: i32 = 2;
+pub const REVIEWED_TEAM_DELEGATION_DEPTH: i32 = REVIEWED_TASK_DELEGATION_DEPTH + 1;
+
+pub fn validate_reviewed_delegation_depth(depth: i64, required: i32) -> Result<(), String> {
+    if depth < i64::from(required) {
+        return Err(format!(
+            "ReviewedDelegationDepthInsufficient: this reviewed execution requires delegationDepth >= {required}, but the envelope grants {depth}; re-review the envelope before activation"
+        ));
+    }
+    Ok(())
+}
+
 pub fn validate_activation(
     plan: Option<&ExecutionPlan>,
     decomposition: Option<&str>,
@@ -158,8 +171,85 @@ pub fn validate_activation(
     if let Some(plan) = plan {
         validate_execution_plan(plan)?;
         if active {
-            return Err("TypedPlanExecutionUnavailable: the current executor cannot enforce reviewed roles, phases, budgets and deliverables; keep this package paused".into());
+            validate_filesystem_execution(plan)?;
         }
+    }
+    Ok(())
+}
+
+/// Installed executor subset. Each fresh phase exports one immutable handoff; synthesis
+/// reads those handoffs and exports the exact reviewed UTF-8 deliverable names.
+pub fn validate_filesystem_execution(plan: &ExecutionPlan) -> Result<(), String> {
+    validate_execution_plan(plan)?;
+    let files = |caps: &[String]| caps.len() == 2
+        && caps.iter().any(|c| c == "filesystem-read")
+        && caps.iter().any(|c| c == "filesystem-write");
+    let objective_valid = |text: &str| text.trim_matches(|c: char| c.is_whitespace() || c == '\u{feff}').len() >= 20;
+    let mut unsupported = Vec::new();
+    for role in &plan.roles {
+        if !objective_valid(&role.objective) {
+            unsupported.push(format!("role {} objective needs at least 20 trimmed UTF-8 bytes", role.name));
+        }
+        if role.budget_tokens.is_some_and(|n| n > 9_007_199_254_740_991) {
+            unsupported.push(format!("role {} budget exceeds the exact wire-integer limit", role.name));
+        }
+        for phase in &role.phases {
+            let label = format!("role {} phase {}", role.name, phase.name);
+            if !objective_valid(&phase.objective) {
+                unsupported.push(format!("{label} objective needs at least 20 trimmed UTF-8 bytes"));
+            }
+            if !phase.fresh_context {
+                unsupported.push(format!("{label} requires freshContext=true"));
+            }
+            if !files(&phase.capabilities) {
+                unsupported.push(format!("{label} requests capabilities {:?}; installed execution requires exactly filesystem-read and filesystem-write", phase.capabilities));
+            }
+            if !phase.required_tool_calls.is_empty() {
+                let names = phase.required_tool_calls.iter().map(|call| call.name.as_str()).collect::<Vec<_>>();
+                unsupported.push(format!("{label} requires external tool calls {names:?}, which installed reviewed execution does not support"));
+            }
+            if phase.max_tool_calls < 1 {
+                unsupported.push(format!("{label} needs a positive maxToolCalls"));
+            }
+        }
+    }
+    if !objective_valid(&plan.synthesis.objective) {
+        unsupported.push("synthesis objective needs at least 20 trimmed UTF-8 bytes".into());
+    }
+    if !files(&plan.synthesis.capabilities) {
+        unsupported.push(format!("synthesis requests capabilities {:?}; installed execution requires exactly filesystem-read and filesystem-write", plan.synthesis.capabilities));
+    }
+    if plan.synthesis.max_tool_calls < 1 {
+        unsupported.push("synthesis needs a positive maxToolCalls".into());
+    }
+    for deliverable in &plan.deliverables {
+        if let Some(media_type) = deliverable.media_type.as_deref()
+            && !matches!(media_type, "text/plain" | "text/markdown" | "application/json")
+        {
+            unsupported.push(format!("deliverable {} requests media type {media_type}; installed execution supports UTF-8 text/plain, text/markdown and application/json", deliverable.name));
+        }
+    }
+    if !unsupported.is_empty() {
+        return Err(format!("TypedPlanExecutionUnavailable: {}", unsupported.join("; ")));
+    }
+    for role in &plan.roles {
+        for (index, phase) in role.phases.iter().enumerate() {
+            let inputs = if index == 0 { role.depends_on.len() } else { 1 };
+            let minimum = inputs + 1;
+            if phase.max_tool_calls < minimum as i32 {
+                return Err(format!(
+                    "TypedPlanExecutionUnavailable: role {} phase {} needs at least {minimum} tool calls for {inputs} immutable input reads and one handoff export",
+                    role.name, phase.name
+                ));
+            }
+        }
+    }
+    let minimum = plan.roles.len() + plan.deliverables.len();
+    if plan.synthesis.max_tool_calls < minimum as i32 {
+        return Err(format!(
+            "TypedPlanExecutionUnavailable: synthesis needs at least {minimum} tool calls for {} immutable role handoff reads and {} deliverable exports",
+            plan.roles.len(), plan.deliverables.len()
+        ));
     }
     Ok(())
 }

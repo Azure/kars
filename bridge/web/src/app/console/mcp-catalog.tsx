@@ -12,11 +12,26 @@ import { useActionState, useMemo, useState } from "react";
 import { Icon } from "@/components/icon";
 import { applyGovernanceAction, type GovState } from "./governance-actions";
 import { MCP_CATALOG, MCP_CATEGORIES, type McpCatalogEntry } from "./mcp-catalog-data";
+import type { McpServer } from "@/lib/types";
+import { mcpStatus } from "./mcp-status";
 
 const init: GovState = { error: null, ok: null };
 
-function AddForm({ entry, onDone }: { entry: McpCatalogEntry; onDone: () => void }) {
-  const [state, action, pending] = useActionState(applyGovernanceAction, init);
+function AddForm({ entry, onDone, onBusy }: {
+  entry: McpCatalogEntry;
+  onDone: () => void;
+  onBusy: (busy: boolean) => void;
+}) {
+  const [state, action, pending] = useActionState(async (previous: GovState, form: FormData) => {
+    onBusy(true);
+    try {
+      return await applyGovernanceAction(previous, form);
+    } catch {
+      return { error: "Couldn't confirm the request. Check the service list before retrying; your input has been retained.", ok: null };
+    } finally {
+      onBusy(false);
+    }
+  }, init);
   const [name, setName] = useState(entry.name);
   const [url, setUrl] = useState(entry.url);
   const [tools, setTools] = useState(entry.allowedTools.join(", "));
@@ -53,18 +68,20 @@ function AddForm({ entry, onDone }: { entry: McpCatalogEntry; onDone: () => void
 
   if (state.ok) {
     return (
-      <div className="rounded-lg border border-ok/30 bg-ok/5 p-3 text-xs">
-        <p className="font-medium text-ok">
+      <div role="status" className="rounded-lg border border-border bg-surface p-3 text-xs">
+        <p className="font-medium">
           {entry.label} {managed ? "installation requested." : "registered."}
         </p>
         <p className="mt-0.5 text-foreground-muted">{state.ok}</p>
+        {managed && <p className="mt-2 text-foreground-muted">This is not a readiness result. Follow deployment and MCP probe status in the service list below.</p>}
         <button type="button" onClick={onDone} className="mt-2 rounded-md border border-border px-2 py-1 text-[11px] hover:bg-surface-muted">Done</button>
       </div>
     );
   }
 
   return (
-    <form action={action} className="space-y-2 rounded-lg border border-border bg-surface-muted/60 p-3">
+    <form action={action} aria-busy={pending} className="rounded-lg border border-border bg-surface-muted/60 p-3">
+      <fieldset disabled={pending} className="space-y-2">
       <input type="hidden" name="kind" value="McpServer" />
       <input type="hidden" name="spec" value={spec} />
       <div className="flex items-center gap-2">
@@ -78,7 +95,7 @@ function AddForm({ entry, onDone }: { entry: McpCatalogEntry; onDone: () => void
           className="mt-0.5 w-full rounded-md border border-border bg-surface px-2.5 py-1.5 font-mono text-xs" />
       </label>
       {managed ? (
-        <div className="rounded-md border border-ok/30 bg-ok/5 px-2.5 py-2 text-[11px] text-foreground-muted">
+        <div className="rounded-md border border-border bg-surface px-2.5 py-2 text-[11px] text-foreground-muted">
           <span className="font-medium text-foreground">Managed on this cluster.</span>{" "}
           The Kars controller deploys the reviewed <span className="font-mono">{entry.managedPreset}</span> preset,
           creates its Service and NetworkPolicy, probes <span className="font-mono">initialize → tools/list</span>,
@@ -122,22 +139,23 @@ function AddForm({ entry, onDone }: { entry: McpCatalogEntry; onDone: () => void
         <button type="submit" disabled={pending || blocked} className="rounded-md bg-signal px-3 py-1.5 text-xs font-semibold text-signal-fg disabled:opacity-50">
           {pending ? (managed ? "Installing…" : "Registering…") : (managed ? "Install on cluster" : "Register endpoint")}
         </button>
-        <button type="button" onClick={onDone} className="text-xs text-foreground-muted hover:text-foreground">Cancel</button>
+        <button type="button" disabled={pending} onClick={onDone} className="text-xs text-foreground-muted hover:text-foreground disabled:opacity-50">Cancel</button>
         {blocked && <span className="text-[11px] text-foreground-muted">
           {!url.trim() ? "Enter the real endpoint URL." : "Add an issuer URL, or turn off production."}
         </span>}
-        {state.error && <p className="text-xs text-danger">{state.error}</p>}
+        {state.error && <p role="alert" className="text-xs text-danger">{state.error}</p>}
       </div>
+      </fieldset>
     </form>
   );
 }
 
-export function McpCatalog() {
+export function McpCatalog({ servers }: { servers: McpServer[] }) {
   const [open, setOpen] = useState(false);
   const [cat, setCat] = useState<string>("All");
   const [q, setQ] = useState("");
   const [selected, setSelected] = useState<string | null>(null);
-  const [installed, setInstalled] = useState<Set<string>>(new Set());
+  const [busy, setBusy] = useState(false);
 
   const filtered = useMemo(() => {
     const needle = q.trim().toLowerCase();
@@ -167,12 +185,14 @@ export function McpCatalog() {
           <p className="text-sm font-semibold">Add an MCP service</p>
           <p className="text-xs text-foreground-muted">Managed presets are deployed on this cluster; hosted/external servers register a real endpoint.</p>
         </div>
-        <button type="button" onClick={() => setOpen(false)} className="text-xs text-foreground-muted hover:text-foreground">Close</button>
+        <button type="button" disabled={busy} onClick={() => setOpen(false)} className="text-xs text-foreground-muted hover:text-foreground disabled:opacity-50">Close</button>
       </div>
 
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <input
           value={q}
+          disabled={busy}
+          aria-label="Search MCP services"
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search services…"
           className="min-w-40 flex-1 rounded-lg border border-border bg-surface px-3 py-1.5 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
@@ -182,6 +202,7 @@ export function McpCatalog() {
             <button
               key={c}
               type="button"
+              disabled={busy}
               onClick={() => setCat(c)}
               className={`rounded-lg border px-2 py-1 text-[11px] font-medium ${cat === c ? "border-signal/40 bg-signal/10 text-signal" : "border-border text-foreground-muted hover:text-foreground"}`}
             >
@@ -192,7 +213,10 @@ export function McpCatalog() {
       </div>
 
       <ul className="grid gap-2 sm:grid-cols-2">
-        {filtered.map((e) => (
+        {filtered.map((e) => {
+          const existing = servers.find((server) => server.name === e.name);
+          const status = existing ? mcpStatus(existing) : null;
+          return (
           <li key={e.id} className="rounded-lg border border-border bg-surface-muted/40 p-3">
             <div className="flex items-start justify-between gap-2">
               <div className="flex items-start gap-2">
@@ -208,11 +232,15 @@ export function McpCatalog() {
                   </div>
                 </div>
               </div>
-              {installed.has(e.id) ? (
-                <span className="shrink-0 text-[11px] text-ok">✓ added</span>
+              {existing && status && selected !== e.id ? (
+                <a href={`#mcp-${existing.namespace}-${existing.name}`}
+                  className="shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium hover:bg-surface-muted">
+                  View service · {status.label}
+                </a>
               ) : (
                 <button
                   type="button"
+                  disabled={busy}
                   onClick={() => setSelected(selected === e.id ? null : e.id)}
                   className="shrink-0 rounded-md border border-border px-2 py-1 text-[11px] font-medium hover:border-signal/40 hover:text-signal"
                 >
@@ -224,15 +252,15 @@ export function McpCatalog() {
               <div className="mt-3">
                 <AddForm
                   entry={e}
+                  onBusy={setBusy}
                   onDone={() => {
-                    setInstalled((prev) => new Set(prev).add(e.id));
                     setSelected(null);
                   }}
                 />
               </div>
             )}
           </li>
-        ))}
+        ); })}
       </ul>
     </div>
   );

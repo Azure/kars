@@ -2,18 +2,21 @@
 // Licensed under the MIT License.
 
 //! Token budget enforcement — per-sandbox UTC-calendar daily +
-//! monthly counters with on-disk persistence and per-request cap.
+//! monthly counters and a per-request cap. Managed calendar bindings use
+//! authenticated Kubernetes-backed accounting; local operation retains the
+//! legacy optional file backend.
 //!
 //! Wire contract for Slice 2b:
 //!
 //! * `check_budget(sandbox, daily_limit, monthly_limit)` is called
 //!   BEFORE every inference call. Returns `Err` when either counter is
 //!   at-or-over the corresponding limit, mapped to HTTP 429 in
-//!   `chat_completions.rs`.
-//! * `record_usage(sandbox, tokens)` is called AFTER every inference
-//!   call with the total tokens returned by the upstream provider.
-//!   Persists the updated counters to `persist_path` on a best-effort
-//!   basis (errors are logged, never propagated).
+//!   `chat_completions.rs`. Unavailable calendar accounting returns HTTP 503.
+//! * Managed calendars record Begin at the final provider-send boundary and
+//!   Finish from complete provider usage before returning the final result.
+//!   Interrupted work blocks replacement writers; no empty restart is admitted.
+//!   This is completed-usage accounting, not a token-amount reservation.
+//!   `record_usage` only updates the legacy local/file backend.
 //! * `check_per_request(total)` is the existing warn-only response-side
 //!   check (kept for back-compat — pre-flight `max_tokens` cap lives
 //!   in `chat_completions::decide_per_request_gate`).
@@ -21,7 +24,7 @@
 //! Reset semantics (UTC calendar):
 //!
 //! * Daily counter resets when the current UTC date changes vs the
-//!   stored `day_key` (Unix days since epoch).
+//!   stored `day_key` (CE days).
 //! * Monthly counter resets when the current UTC `(year, month0)`
 //!   pair changes vs the stored `month_key` (year*12 + month0).
 //!
@@ -34,9 +37,8 @@
 //! `{ "sandboxes": { "<name>": { "day_key", "daily", "month_key",
 //! "monthly" } } }`. Atomic-rename pattern: write to `*.tmp`, fsync,
 //! rename over the target. On startup we load on best-effort — a
-//! corrupt or missing file means we start fresh (this is correct: the
-//! tracker is a counter, never a source of truth, and over-counting
-//! is the safer failure mode anyway).
+//! corrupt or missing legacy file starts fresh and cannot establish a durable
+//! quota. Calendar accounts instead reject missing/replaced/corrupt state.
 
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -63,7 +65,7 @@ impl Clock for SystemClock {
     }
 }
 
-/// Days since Unix epoch in UTC. Wraps far beyond u32 limits (~11.7m
+/// Days since CE in UTC. Wraps far beyond u32 limits (~11.7m
 /// years from epoch) so casting back is safe in practice.
 fn day_key(now: DateTime<Utc>) -> u32 {
     let days = now.date_naive().num_days_from_ce();
@@ -109,11 +111,93 @@ pub struct TokenBudgetTracker {
     /// every `record_usage`. The dir must exist; we don't try to
     /// `mkdir -p`.
     persist_path: Option<PathBuf>,
+    calendar: Option<Arc<crate::inference_budget::calendar::Client>>,
     /// Injectable clock — `SystemClock` in production.
     clock: Arc<dyn Clock>,
 }
 
+#[derive(Debug, Serialize)]
+#[serde(transparent)]
+pub struct CheckError {
+    message: String,
+    #[serde(skip)]
+    unavailable: bool,
+}
+
+impl CheckError {
+    fn unavailable(message: impl Into<String>) -> Self {
+        Self {
+            message: message.into(),
+            unavailable: true,
+        }
+    }
+
+    pub fn status(&self) -> axum::http::StatusCode {
+        if self.unavailable {
+            axum::http::StatusCode::SERVICE_UNAVAILABLE
+        } else {
+            axum::http::StatusCode::TOO_MANY_REQUESTS
+        }
+    }
+
+    pub fn code(&self) -> &'static str {
+        if self.unavailable {
+            "token_accounting_unavailable"
+        } else {
+            "budget_exceeded"
+        }
+    }
+}
+
+impl std::fmt::Display for CheckError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        self.message.fmt(f)
+    }
+}
+
+impl std::ops::Deref for CheckError {
+    type Target = str;
+    fn deref(&self) -> &str {
+        &self.message
+    }
+}
+
 impl TokenBudgetTracker {
+    pub fn calendar_client(&self) -> Option<Arc<crate::inference_budget::calendar::Client>> {
+        self.calendar.clone()
+    }
+    pub fn with_calendar(
+        daily_default: u64,
+        per_request_limit: u64,
+        calendar: Arc<crate::inference_budget::calendar::Client>,
+    ) -> Self {
+        let mut tracker = Self::new(daily_default, per_request_limit);
+        tracker.calendar = Some(calendar);
+        tracker
+    }
+
+    pub async fn observed_usage(&self, sandbox: &str) -> Result<(u64, u64), CheckError> {
+        if let Some(calendar) = &self.calendar {
+            if sandbox != calendar.sandbox() {
+                return Err(CheckError::unavailable(
+                    "Calendar accounting identity mismatch",
+                ));
+            }
+            let remote = calendar
+                .read()
+                .await
+                .map_err(|error| CheckError::unavailable(error.to_string()))?;
+            let now = self.clock.now();
+            if remote.day > day_key(now) || remote.month > month_key(now) {
+                return Err(CheckError::unavailable(
+                    "Calendar accounting clock mismatch",
+                ));
+            }
+            return Ok(remote.current(day_key(now), month_key(now)));
+        }
+        Ok(self.get_usage(sandbox).await)
+    }
+
     /// Construct an in-memory tracker (no persistence) with the
     /// system clock. Equivalent of the pre–Slice-2b constructor.
     #[must_use]
@@ -123,15 +207,16 @@ impl TokenBudgetTracker {
             per_request_limit,
             usage: Arc::new(RwLock::new(HashMap::new())),
             persist_path: None,
+            calendar: None,
             clock: Arc::new(SystemClock),
         }
     }
 
     /// Construct a tracker that loads previously-persisted counters
     /// from `persist_path` and writes to it on every `record_usage`.
-    /// Load failures (missing file, malformed JSON) are logged and
-    /// the tracker starts empty — over-counting is safer than
-    /// under-counting.
+    /// This legacy local backend starts empty on missing/malformed data.
+    /// It is not durable across Pod replacement; managed sandboxes use
+    /// the authenticated calendar accounting backend instead.
     pub fn with_persistence<P: AsRef<Path>>(
         daily_default: u64,
         per_request_limit: u64,
@@ -172,6 +257,7 @@ impl TokenBudgetTracker {
             per_request_limit,
             usage: Arc::new(RwLock::new(initial)),
             persist_path: Some(path),
+            calendar: None,
             clock: Arc::new(SystemClock),
         }
     }
@@ -196,6 +282,7 @@ impl TokenBudgetTracker {
             per_request_limit,
             usage: Arc::new(RwLock::new(initial)),
             persist_path,
+            calendar: None,
             clock,
         }
     }
@@ -211,54 +298,38 @@ impl TokenBudgetTracker {
         sandbox: &str,
         daily_limit: Option<u64>,
         monthly_limit: Option<u64>,
-    ) -> Result<(), String> {
+    ) -> Result<(), CheckError> {
+        let (daily_used, monthly_used) = self.observed_usage(sandbox).await?;
         let daily_effective = daily_limit.unwrap_or(self.daily_default);
         let monthly_effective = monthly_limit.unwrap_or(0);
         if daily_effective == 0 && monthly_effective == 0 {
             return Ok(());
         }
 
-        let now = self.clock.now();
-        let today = day_key(now);
-        let this_month = month_key(now);
-
-        let usage = self.usage.read().await;
-        let entry = match usage.get(sandbox) {
-            Some(e) => e,
-            None => return Ok(()),
-        };
-
-        // Roll forward if the stored counter is from an earlier
-        // day / month — those are conceptually zero now.
-        let daily_used = if entry.day_key == today {
-            entry.daily
-        } else {
-            0
-        };
-        let monthly_used = if entry.month_key == this_month {
-            entry.monthly
-        } else {
-            0
-        };
-
         if daily_effective > 0 && daily_used >= daily_effective {
-            return Err(format!(
-                "Daily token budget exceeded ({daily_used}/{daily_effective} tokens). \
+            return Err(CheckError {
+                unavailable: false,
+                message: format!(
+                    "Daily token budget exceeded ({daily_used}/{daily_effective} tokens). \
                  Resets at the next UTC midnight."
-            ));
+                ),
+            });
         }
         if monthly_effective > 0 && monthly_used >= monthly_effective {
-            return Err(format!(
-                "Monthly token budget exceeded ({monthly_used}/{monthly_effective} tokens). \
+            return Err(CheckError {
+                unavailable: false,
+                message: format!(
+                    "Monthly token budget exceeded ({monthly_used}/{monthly_effective} tokens). \
                  Resets on the 1st of next month UTC."
-            ));
+                ),
+            });
         }
         Ok(())
     }
 
     /// Compat shim for the legacy single-limit path. New code should
     /// pass the loaded policy's limits directly via [`check_budget`].
-    pub async fn check_budget_legacy(&self, sandbox: &str) -> Result<(), String> {
+    pub async fn check_budget_legacy(&self, sandbox: &str) -> Result<(), CheckError> {
         self.check_budget(sandbox, None, None).await
     }
 
@@ -276,11 +347,18 @@ impl TokenBudgetTracker {
     }
 
     /// Record token usage from a completed request. Updates both the
-    /// daily and monthly counters with UTC-calendar rollover, then
-    /// best-effort persists. Cost: one snapshot serialise + atomic
-    /// rename per inference call; well within budget for AI-call
-    /// latency (~100ms upstream).
+    /// daily and monthly counters with UTC-calendar rollover. Calendar
+    /// failures latch subsequent admission closed; the legacy local
+    /// backend remains best-effort file persistence.
     pub async fn record_usage(&self, sandbox: &str, tokens: u64) {
+        if let Some(calendar) = &self.calendar {
+            if sandbox != calendar.sandbox() {
+                tracing::error!(sandbox, "Calendar usage identity mismatch");
+                return;
+            }
+            // Managed usage is settled once at the final provider-send boundary.
+            return;
+        }
         let now = self.clock.now();
         let today = day_key(now);
         let this_month = month_key(now);

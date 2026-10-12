@@ -486,6 +486,257 @@ async fn stale_uid_and_revision_cannot_request_runs() {
 }
 
 #[tokio::test]
+async fn stopped_revision_preserves_execution_gate_and_spec() {
+    let fixture = Fixture::new().await;
+    fixture.store.lock().unwrap().task["spec"]["execution"]["launch"] = json!(false);
+    let before = fixture.task();
+    assert!(fixture.cluster().request_mesh_run(&before).await.is_err());
+    assert!(fixture.store.lock().unwrap().requests.is_empty());
+    let nonce = fixture
+        .cluster()
+        .redrive_with_revision(
+            &before,
+            "run-1",
+            "Use both handoffs in the revised briefing.",
+        )
+        .await
+        .unwrap();
+    let after = fixture.task();
+    assert_ne!(nonce, "run-1");
+    assert_eq!(after.metadata.uid, before.metadata.uid);
+    assert_eq!(
+        serde_json::to_value(&after.spec).unwrap(),
+        serde_json::to_value(&before.spec).unwrap()
+    );
+    let annotations = after.metadata.annotations.unwrap();
+    assert_eq!(annotations[REQUESTED], nonce);
+    assert_eq!(annotations[COMPLETED], "run-1");
+}
+
+#[tokio::test]
+async fn stopped_revision_rejects_incomplete_or_deleting_identity() {
+    let fixture = Fixture::new().await;
+    for (field, value) in [
+        ("name", json!("")),
+        ("namespace", json!("")),
+        ("uid", Value::Null),
+        ("resourceVersion", json!("")),
+        ("deletionTimestamp", json!("2026-10-03T00:00:00Z")),
+    ] {
+        {
+            let mut store = fixture.store.lock().unwrap();
+            store.task = task();
+            store.task["spec"]["execution"]["launch"] = json!(false);
+            store.task["metadata"][field] = value;
+        }
+        assert!(
+            fixture
+                .cluster()
+                .redrive_with_revision(&fixture.task(), "run-1", "Revise retained output.")
+                .await
+                .is_err()
+        );
+    }
+    assert!(fixture.store.lock().unwrap().requests.is_empty());
+}
+
+async fn pending_stopped_revision(fixture: &Fixture) -> (KarsTask, String) {
+    fixture.store.lock().unwrap().task["spec"]["execution"]["launch"] = json!(false);
+    let nonce = fixture
+        .cluster()
+        .redrive_with_revision(
+            &fixture.task(),
+            "run-1",
+            "Complete files: café briefing and checklist.\nKeep the exact feedback.",
+        )
+        .await
+        .unwrap();
+    (fixture.task(), nonce)
+}
+
+#[tokio::test]
+async fn retry_preserves_complete_context_spec_and_previous_run_with_a_fresh_nonce() {
+    let fixture = Fixture::new().await;
+    let (before, expected) = pending_stopped_revision(&fixture).await;
+    let nonce = fixture
+        .cluster()
+        .retry_stopped_revision(&before, &expected)
+        .await
+        .unwrap();
+    let after = fixture.task();
+    assert_ne!(nonce, expected);
+    assert_eq!(after.metadata.uid, before.metadata.uid);
+    assert_eq!(
+        serde_json::to_value(&after.spec).unwrap(),
+        serde_json::to_value(&before.spec).unwrap()
+    );
+    for key in [
+        COMPLETED,
+        "kars.azure.com/run-objective-b64",
+        "kars.azure.com/run-objective-digest",
+    ] {
+        assert_eq!(
+            after.metadata.annotations.as_ref().unwrap()[key],
+            before.metadata.annotations.as_ref().unwrap()[key]
+        );
+    }
+    assert_eq!(
+        after.metadata.annotations.as_ref().unwrap()[REQUESTED],
+        nonce
+    );
+    assert_eq!(
+        after.metadata.annotations.as_ref().unwrap()["kars.azure.com/run-objective-nonce"],
+        nonce
+    );
+    assert!(
+        fixture
+            .cluster()
+            .retry_stopped_revision(&after, &expected)
+            .await
+            .is_err()
+    );
+    assert!(
+        fixture
+            .cluster()
+            .retry_stopped_revision(&before, &expected)
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.store.lock().unwrap().patches, 2);
+}
+
+#[tokio::test]
+async fn retry_rejects_running_completed_stale_or_corrupt_context_without_writes() {
+    let fixture = Fixture::new().await;
+    let (before, expected) = pending_stopped_revision(&fixture).await;
+    fixture.store.lock().unwrap().requests.clear();
+    for (key, value) in [
+        ("kars.azure.com/run-objective-nonce", "stale"),
+        ("kars.azure.com/run-objective-b64", "not base64!"),
+        ("kars.azure.com/run-objective-digest", "sha256:wrong"),
+        (COMPLETED, expected.as_str()),
+    ] {
+        let mut changed = before.clone();
+        changed
+            .metadata
+            .annotations
+            .as_mut()
+            .unwrap()
+            .insert(key.into(), value.into());
+        assert!(
+            fixture
+                .cluster()
+                .retry_stopped_revision(&changed, &expected)
+                .await
+                .is_err()
+        );
+    }
+    for key in [
+        "kars.azure.com/run-objective-b64",
+        "kars.azure.com/run-objective-digest",
+        "kars.azure.com/run-objective-nonce",
+    ] {
+        let mut changed = before.clone();
+        changed.metadata.annotations.as_mut().unwrap().remove(key);
+        assert!(
+            fixture
+                .cluster()
+                .retry_stopped_revision(&changed, &expected)
+                .await
+                .is_err()
+        );
+    }
+    let mut running = before.clone();
+    running.spec.execution.as_mut().unwrap().launch = true;
+    assert!(
+        fixture
+            .cluster()
+            .retry_stopped_revision(&running, &expected)
+            .await
+            .is_err()
+    );
+    assert!(
+        fixture
+            .cluster()
+            .retry_stopped_revision(&before, "stale")
+            .await
+            .is_err()
+    );
+    for objective in [vec![b'x'; 65_537], vec![0xff], b" \n".to_vec()] {
+        let mut changed = before.clone();
+        let annotations = changed.metadata.annotations.as_mut().unwrap();
+        annotations.insert(
+            "kars.azure.com/run-objective-b64".into(),
+            STANDARD.encode(&objective),
+        );
+        annotations.insert(
+            "kars.azure.com/run-objective-digest".into(),
+            format!(
+                "sha256:{}",
+                crate::providers::signing::sha256_hex(&objective)
+            ),
+        );
+        assert!(
+            fixture
+                .cluster()
+                .retry_stopped_revision(&changed, &expected)
+                .await
+                .is_err()
+        );
+    }
+    assert!(fixture.store.lock().unwrap().requests.is_empty());
+    assert_eq!(fixture.store.lock().unwrap().patches, 1);
+}
+
+#[tokio::test]
+async fn retry_patch_response_loss_is_reported_without_replay() {
+    let fixture = Fixture::new().await;
+    let (before, expected) = pending_stopped_revision(&fixture).await;
+    fixture.store.lock().unwrap().lose_patch_response = true;
+    assert!(
+        fixture
+            .cluster()
+            .retry_stopped_revision(&before, &expected)
+            .await
+            .is_err()
+    );
+    let after = fixture.task();
+    assert_ne!(
+        after.metadata.annotations.as_ref().unwrap()[REQUESTED],
+        expected
+    );
+    assert!(!after.spec.execution.as_ref().unwrap().launch);
+    assert!(
+        fixture
+            .cluster()
+            .retry_stopped_revision(&after, &expected)
+            .await
+            .is_err()
+    );
+    assert_eq!(fixture.store.lock().unwrap().patches, 2);
+}
+
+#[tokio::test]
+async fn retry_route_requires_verified_phase_failure_not_just_a_pending_request() {
+    let fixture = Fixture::new().await;
+    let (_, expected) = pending_stopped_revision(&fixture).await;
+    let mut current = review();
+    current["data"]["status"] = json!("changes_requested");
+    current["data"]["redrivePending"] = json!("true");
+    current["data"]["requestedRevisionNonce"] = json!(expected);
+    fixture.store.lock().unwrap().review = Some(current);
+    let (status, _) = fixture
+        .route(
+            Method::POST,
+            "review",
+            json!({"decision":"retry_revision","assignment_nonce":expected}),
+        )
+        .await;
+    assert_eq!(status, StatusCode::CONFLICT);
+    assert_eq!(fixture.store.lock().unwrap().patches, 1);
+}
+
+#[tokio::test]
 async fn revision_binds_distinct_nonce_exact_objective_and_digest() {
     let fixture = Fixture::new().await;
     let before = fixture.task();

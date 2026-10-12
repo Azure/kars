@@ -5,7 +5,9 @@
  * Tests for `runtime.ts` — the CLI's runtime-aware helpers (S10.A5).
  */
 import { describe, expect, it } from "vitest";
+import { readFileSync } from "node:fs";
 import {
+  DEFAULT_OPENCLAW_VERSION,
   agentContainerName,
   assertRuntimeWired,
   buildRuntimeBlock,
@@ -126,10 +128,23 @@ describe("buildRuntimeBlock", () => {
     const block = buildRuntimeBlock({ kind: "OpenClaw", model: "gpt-4.1" }) as Record<string, unknown>;
     expect(block.kind).toBe("OpenClaw");
     const oc = block.openclaw as Record<string, unknown>;
-    expect(oc.version).toBe("2026.3.13");
+    expect(oc.version).toBe("2026.9.8");
     expect((oc.config as Record<string, Record<string, string>>).agent.model).toBe("azure/gpt-4.1");
     // No image override.
     expect("image" in oc).toBe(false);
+  });
+
+  it("keeps the CLI baseline aligned with the existing image and plugin pins", () => {
+    const plugins = JSON.parse(readFileSync(new URL("../../sandbox-images/openclaw/external-plugins.json", import.meta.url), "utf8"));
+    const dockerfile = readFileSync(new URL("../../sandbox-images/openclaw/Dockerfile.base", import.meta.url), "utf8");
+    expect(DEFAULT_OPENCLAW_VERSION).toBe(plugins.openclawVersion);
+    expect(dockerfile).toContain(`ARG OPENCLAW_VERSION=${DEFAULT_OPENCLAW_VERSION}\n`);
+  });
+
+  it("preserves an explicit runtime version without changing the image", () => {
+    const block = buildRuntimeBlock({ kind: "OpenClaw", openclawVersion: "operator-version" });
+    expect(block.openclaw).toMatchObject({ version: "operator-version" });
+    expect(block.openclaw).not.toHaveProperty("image");
   });
 
   it("respects --image override for OpenClaw", () => {

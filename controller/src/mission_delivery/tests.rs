@@ -201,6 +201,18 @@ impl Fixture {
         }
         f
     }
+    async fn hermes() -> Self {
+        let f = Self::new().await;
+        let mut task: KarsTask = f.get(TASK);
+        task.spec.execution.as_mut().unwrap().runtime = Some("Hermes".into());
+        task.status.as_mut().unwrap().envelope_digest = Some(task.envelope_digest());
+        f.set(TASK, &task);
+        f.mutate(SANDBOX, |v| {
+            v["spec"]["runtime"] = json!({"kind":"Hermes","hermes":{}})
+        });
+        f.install_workload(workload_objects("kars-run", "run", "agent").0);
+        f
+    }
     fn get<T: DeserializeOwned>(&self, path: &str) -> T {
         serde_json::from_value(self.state.lock().unwrap().objects[path].clone()).unwrap()
     }
@@ -726,6 +738,108 @@ async fn publishes_actual_uid_binding_and_repeated_publication_is_a_read_only_no
     assert_eq!(f.writes("/api/v1/namespaces/work/configmaps"), 1);
     assert_eq!(f.get::<Value>(TASK), original);
     assert_eq!(f.writes(TASK), 0);
+}
+
+#[tokio::test]
+async fn hermes_projects_and_binds_the_selected_agent_without_changing_dispatcher_or_run() {
+    let f = Fixture::hermes().await;
+    let original: Value = f.get(TASK);
+    let prepared = f.applied().await;
+    let deployment: Value = f.get(DEPLOYMENT);
+    let container = &deployment["spec"]["template"]["spec"]["containers"][0];
+    assert_eq!(container["name"], "agent");
+    let env = container["env"].as_array().unwrap();
+    assert!(
+        env.iter()
+            .any(|e| e["name"] == "KARS_MISSION_IDENTITY_ROOT")
+    );
+    assert!(env.iter().any(|e| e["name"] == "KARS_MISSION_CONTRACT"));
+    assert!(env.iter().any(|e| e["name"] == "KARS_MISSION_ADMISSION"));
+    publish(&f.client, &prepared).await.unwrap();
+    let map: Value = f.get(BINDING);
+    let binding: Value =
+        serde_json::from_str(map["data"]["binding.json"].as_str().unwrap()).unwrap();
+    assert_eq!(
+        binding["agentDid"],
+        identity::did(
+            &prepared.runtime_root.value,
+            identity::Role::Runtime,
+            "sandbox-uid",
+            "run-pod"
+        )
+        .unwrap()
+    );
+    assert_eq!(binding["dispatcherDid"], prepared.dispatcher_did);
+    assert!(binding.get("runtime").is_none());
+    publish(&f.client, &prepared).await.unwrap();
+    assert_eq!(f.get::<Value>(BINDING), map);
+    assert_eq!(f.get::<Value>(TASK), original);
+    assert_eq!(f.writes(TASK), 0);
+    assert_eq!(f.writes("/api/v1/namespaces/work/configmaps"), 1);
+}
+
+#[tokio::test]
+async fn hermes_rejects_runtime_mismatch_and_wrong_or_duplicate_projection_container() {
+    for case in [
+        "task",
+        "sandbox",
+        "wrong container",
+        "missing container",
+        "duplicate container",
+    ] {
+        let f = Fixture::hermes().await;
+        if case == "task" {
+            f.mutate(TASK, |v| {
+                v["spec"]["blueprint"]["runtime"] = "OpenClaw".into()
+            });
+            let mut task: KarsTask = f.get(TASK);
+            task.status.as_mut().unwrap().envelope_digest = Some(task.envelope_digest());
+            f.set(TASK, &task);
+        }
+        if case == "sandbox" {
+            f.mutate(SANDBOX, |v| {
+                v["spec"]["runtime"]["kind"] = "OpenClaw".into()
+            });
+        }
+        let mut desired: Value = f.get(DEPLOYMENT);
+        let containers = desired["spec"]["template"]["spec"]["containers"]
+            .as_array_mut()
+            .unwrap();
+        if case == "wrong container" {
+            containers[0]["name"] = "openclaw".into();
+        }
+        if case == "missing container" {
+            containers.clear();
+        }
+        if case == "duplicate container" {
+            containers.push(containers[0].clone());
+        }
+        let mut desired: Deployment = serde_json::from_value(desired).unwrap();
+        let result = prepare_with(&f.client, &f.get(SANDBOX), &mut desired, &config()).await;
+        assert!(result.is_err(), "{case}");
+        assert!(
+            !serde_json::to_string(&desired)
+                .unwrap()
+                .contains("KARS_MISSION_")
+        );
+        assert_eq!(f.writes("/api/v1/namespaces/work/configmaps"), 0);
+    }
+}
+
+#[tokio::test]
+async fn hermes_binding_rejects_coherent_workload_with_tampered_installed_admission() {
+    let f = Fixture::hermes().await;
+    let prepared = f.applied().await;
+    let mut deployment: Value = f.get(DEPLOYMENT);
+    let env = deployment["spec"]["template"]["spec"]["containers"][0]["env"]
+        .as_array_mut()
+        .unwrap();
+    env.iter_mut()
+        .find(|e| e["name"] == "KARS_MISSION_ADMISSION")
+        .unwrap()["value"] = "{}".into();
+    f.install_workload(deployment);
+    assert!(publish(&f.client, &prepared).await.is_err());
+    assert_eq!(f.writes("/api/v1/namespaces/work/configmaps"), 0);
 }
 
 #[tokio::test]

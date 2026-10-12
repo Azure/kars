@@ -20,13 +20,36 @@ export interface IntakeState {
   error: string | null;
 }
 
+function packageValidationError(error: BffError): string | null {
+  if ([400, 409, 422].includes(error.status)
+    && ["bad_request", "rejected", "conflict"].includes(error.code) && error.message) {
+    return error.message;
+  }
+  return error.status === 422
+    ? "The mission package has invalid fields. Review the execution plan and its field types before creating it."
+    : null;
+}
+
 /** Validate the composed package against the live cluster (the §20 gate). */
 export async function validateMissionAction(
   blueprint: unknown,
   envelope?: Parameters<typeof import("@/lib/bff").validatePackage>[2],
 ): Promise<import("@/lib/types").ValidationResult> {
   const { validatePackage } = await import("@/lib/bff");
-  return validatePackage(defaultNamespace(), blueprint, envelope);
+  try {
+    return await validatePackage(defaultNamespace(), blueprint, envelope);
+  } catch (error) {
+    return {
+      ok: false,
+      checks: [{
+        id: "package_validation",
+        label: "Mission package validation failed",
+        status: "fail",
+        detail: (error instanceof BffError ? packageValidationError(error) : null)
+          ?? "Could not validate the mission package. Recheck it before launching.",
+      }],
+    };
+  }
 }
 
 /** Ask the orchestrator to compose a launch package from a plain objective. */
@@ -126,25 +149,28 @@ export async function createMissionAction(
     try {
       delegation = JSON.parse(delegationRaw) as import("@/lib/types").MissionDelegation;
     } catch {
-      delegation = null;
+      return { error: "The delegation package is not valid JSON. Review it before creating the mission." };
     }
   }
-  const delegationDepth = delegation?.mode === "principal-specialists" ? 1 : 0;
-
   // The editable composition (model/harness/instructions/tools/MCP/egress/
   // isolation/memory) — serialized by the package UI. Parsed defensively; an
-  // empty/invalid payload simply omits the blueprint and the controller uses
-  // its defaults (honest, never a hard failure on a malformed optional field).
+  // invalid reviewed payload must not fall back to the controller's defaults.
   let blueprint: CreateTaskRequest["blueprint"] = null;
   const bpRaw = formData.get("blueprint_json");
   if (typeof bpRaw === "string" && bpRaw.trim() !== "") {
     try {
       const parsed = JSON.parse(bpRaw) as NonNullable<CreateTaskRequest["blueprint"]>;
-      if (parsed && typeof parsed === "object") blueprint = parsed;
+      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+        return { error: "The reviewed mission package must be a JSON object." };
+      }
+      blueprint = parsed;
     } catch {
-      blueprint = null;
+      return { error: "The reviewed mission package is not valid JSON. Correct it before creating the mission." };
     }
   }
+
+  // Typed plans require mission → role → phase; legacy specialists use only one level.
+  const delegationDepth = blueprint?.execution_plan ? 2 : delegation?.mode === "principal-specialists" ? 1 : 0;
 
   if (objective.length === 0 || objective.length > 4096) {
     return { error: "Describe what you want done (1–4096 characters)." };
@@ -186,7 +212,8 @@ export async function createMissionAction(
             "The run environment isn't connected, so this mission can't be created yet. Nothing was charged.",
         };
       }
-      if (err.code === "rejected" && err.message) return { error: err.message };
+      const validationError = packageValidationError(err);
+      if (validationError) return { error: validationError };
       return { error: "We couldn't create this mission. Please adjust and try again." };
     }
     throw err;

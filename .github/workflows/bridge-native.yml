@@ -162,7 +162,7 @@ jobs:
             --tag kars-native-runtime-base:latest .native/core/tests/e2e
           docker build --file tests/native-credentials/Dockerfile.runtime \
             --tag kars-native-runtime:latest tests/native-credentials
-          docker build --file bff/Dockerfile --tag kars-native-bff:latest bff
+          docker build --file bff/Dockerfile --tag kars-native-bff:latest ..
           python3 ../ci/bridge_image_contract.py kars-native-bff:latest --kind bff
           docker build --file tests/native-credentials/Dockerfile.probe \
             --tag kars-native-probe:latest tests/native-credentials

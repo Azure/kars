@@ -45,7 +45,8 @@ export function LiveActivityView({
   activityDetail?: string;
 }) {
   // One stream, shared by the graph and the feed.
-  const events = useLiveTrace(ns, name, running, activity, runNonce);
+  const { events, routerActivity: live } = useLiveTrace(ns, name, running, activity, runNonce);
+  const routerActivity = live ? { producer: live, observations: live.observations, provisional: true } : null;
   return (
     <div className="space-y-4">
       {showGraph && (
@@ -53,6 +54,7 @@ export function LiveActivityView({
           running={running}
           activity={activity}
           events={events}
+          routerActivity={routerActivity}
           ns={ns}
           name={name}
           runNonce={runNonce}

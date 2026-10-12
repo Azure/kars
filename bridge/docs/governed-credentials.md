@@ -115,6 +115,15 @@ mutations, and the existing retention/cleanup contract is unchanged. Other API
 failures and transport/serialization failures remain errors, not conflicts or
 successes. Responses and logs omit Kubernetes messages and credential values.
 
+The final activation of a newly created Task or Team is separate from credential
+source writes. After attachment, it retries at most twice when a 409 is followed
+by a new resourceVersion with exactly the same captured intent. It reuses the
+credential-review digest, excluding only status, resourceVersion and status
+managedFields; UID, spec, generation and all other metadata remain bound. Every
+attempt keeps an exact UID/resourceVersion fence. Changed authority, replacement,
+deletion, other errors or continued contention fail explicitly. It never repeats
+source writes, credential attachment or target creation.
+
 ## Explicit metadata review and continuation
 
 The credential form on **Console -> Agent capabilities** uses

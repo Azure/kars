@@ -8,6 +8,10 @@ import { ActivityStream } from "@/components/activity-stream";
 import { AgentGraph } from "@/components/agent-graph";
 import { ExecutionLifetime } from "@/components/execution-lifetime";
 import { useLiveTrace } from "@/components/use-live-trace";
+import { RouterActivityPanel } from "@/components/router-activity-panel";
+import { matchesRouterFocus, routerProducerKey, type BoundRouterActivity } from "@/lib/router-activity";
+import { reviewedPhaseRouterActivity } from "@/lib/team-run-evidence";
+import type { ReviewedExecution } from "@/lib/types/missions";
 import type {
   ActivityEvent,
   Approval,
@@ -18,6 +22,10 @@ import type {
 } from "@/lib/types";
 
 function focusLabel(query: string): string {
+  if (query.startsWith("observations:")) {
+    return new URLSearchParams(query.slice("observations:".length)).has("producer")
+      ? "All observations for selected producer" : "Selected router observations";
+  }
   if (query.startsWith("agent:")) return query.slice("agent:".length);
   if (query.startsWith("actions:")) {
     const parameters = new URLSearchParams(query.slice("actions:".length));
@@ -49,7 +57,8 @@ export function ExecutionExplorer({
   identity = null,
   envelopeDigest = null,
   receipt = null,
-  routerActivityPresented = false,
+  routerActivity: recordedRouterActivity = null,
+  phases = [],
 }: {
   running: boolean;
   activity: ActivityEvent[];
@@ -67,50 +76,43 @@ export function ExecutionExplorer({
   identity?: import("@/lib/types").AgentIdentity | null;
   envelopeDigest?: string | null;
   receipt?: Receipt | null;
-  routerActivityPresented?: boolean;
+  routerActivity?: BoundRouterActivity | null;
+  phases?: ReviewedExecution["phases"];
 }) {
-  const events = useLiveTrace(ns, name, running, activity, runNonce);
+  const { events, routerActivity: live } = useLiveTrace(ns, name, running, activity, runNonce);
+  const recorded = runNonce && recordedRouterActivity?.producer.run_nonce === runNonce
+    ? recordedRouterActivity : null;
+  const routerActivity = recorded ?? (live
+    ? { producer: live, observations: live.observations, provisional: true } : null);
+  const producers = [
+    ...(routerActivity ? [{ name, label: agentLabel, binding: routerActivity }] : []),
+    ...phases.flatMap(phase => {
+      const binding = reviewedPhaseRouterActivity(phase);
+      return binding && phase.task_name
+        ? [{ name: phase.task_name, label: `${phase.role} / ${phase.phase}`, binding }] : [];
+    }),
+  ];
   const [tab, setTab] = useState<"lifetime" | "tools">("lifetime");
-  const [focus, setFocus] = useState("");
+  const [selection, setSelection] = useState({ nonce: runNonce, query: "" });
+  const focus = selection.nonce === runNonce
+    && (!selection.query.startsWith("observations:") || producers.some(producer => matchesRouterFocus(producer.binding, selection.query)))
+    ? selection.query : "";
+  const setFocus = (query: string) => setSelection({ nonce: runNonce, query });
 
   const inspect = (query: string) => {
     setFocus(query);
     setTab("tools");
   };
 
-  if (events.length === 0) {
-    return (
-      <div className="space-y-4">
-        {!routerActivityPresented && <ActivityStream
-          running={running}
-          activity={activity}
-          events={events}
-          telemetry={telemetry}
-          ns={ns}
-          name={name}
-          runNonce={runNonce}
-          principalAgentName={name}
-          title="Rounds and tool records"
-          detail="Available revision-bound round and tool records. Missing records do not establish that no work occurred."
-        />}
-        {(assignmentEvents.length > 0 || approvals.length > 0) && (
-          <ExecutionLifetime
-            running={running}
-            activity={events}
-            assignmentEvents={assignmentEvents}
-            approvals={approvals}
-          />
-        )}
-      </div>
-    );
-  }
-
   return (
     <div className="space-y-4">
       <AgentGraph
+        key={runNonce ?? "unbound"}
         running={running}
         activity={activity}
         events={events}
+        routerActivity={routerActivity}
+        phases={phases}
         ns={ns}
         name={name}
         runNonce={runNonce}
@@ -164,13 +166,29 @@ export function ExecutionExplorer({
         <div className="mt-2">
           {tab === "lifetime" ? (
             <ExecutionLifetime
-              key={`lifetime-${focus}`}
+              key={`lifetime-${runNonce}-${focus}`}
               running={running}
               activity={events}
+              routerActivity={routerActivity}
+              phases={phases}
               assignmentEvents={assignmentEvents}
               approvals={approvals}
               focusQuery={focus}
             />
+          ) : producers.length || phases.length ? (
+            <div className="space-y-3">
+              {producers.filter(producer => matchesRouterFocus(producer.binding, focus)).map(producer => (
+                <div key={routerProducerKey(producer.binding.producer)}>
+                  <h3 className="px-3 py-2 text-sm font-semibold">{producer.label}</h3>
+                  <RouterActivityPanel binding={producer.binding} ns={ns} name={producer.name} focusQuery={focus} />
+                </div>
+              ))}
+              {!producers.some(producer => matchesRouterFocus(producer.binding, focus)) && (
+                <p className="p-4 text-sm text-foreground-muted">
+                  No retained router observations match this selection. Phase completion and file evidence remain available in Execution flow.
+                </p>
+              )}
+            </div>
           ) : (
             <ActivityStream
               key={`tools-${focus}`}

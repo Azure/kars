@@ -353,7 +353,10 @@ pub(super) fn plan_remediation_update(
         })
         .collect::<Vec<_>>();
     let editable = |task: &&TeamTaskDto| {
-        task.status == "pending" && task.run.is_none() && task.assignment_nonce.is_none()
+        task.status == "pending"
+            && task.run.is_none()
+            && task.run_uid.is_none()
+            && task.assignment_nonce.is_none()
     };
     let pending = family.iter().copied().rfind(editable);
     if source_json(&incoming.description).and_then(|source| {
@@ -426,7 +429,7 @@ pub(super) fn plan_remediation_update(
                 "[Dependabot source withdrawn] {}: {}",
                 identity.repo, identity.package
             );
-            updated.status = "done".into();
+            updated.status = "retired".into();
             updated.done_at = incoming.created_at.clone();
             updated.description.push_str(
                 "\n\nSource-only retirement: no new open findings remain in this observation. This is not evidence of a remediation, delivered PR, or successful run.",
@@ -461,7 +464,7 @@ pub(super) fn plan_remediation_update(
     let mut followup = with_observations(incoming, &novel, &id);
     followup.depends_on = retained
         .iter()
-        .filter(|task| task.status != "done")
+        .filter(|task| !crate::routes::teams::work::finished(task))
         .map(|task| task.id.clone())
         .collect();
     if !family.is_empty() {

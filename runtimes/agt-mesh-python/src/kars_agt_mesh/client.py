@@ -99,12 +99,13 @@ class MeshClient:
         # channel per peer DID and let the channel own the state.
         self._channels: dict[str, SecureChannel] = {}
         # Inbox queue — drained by `inbox()` async iterator.
-        self._inbox: asyncio.Queue[InboundMessage] = asyncio.Queue()
+        self._inbox: asyncio.Queue[InboundMessage | tuple[tuple[object, int], InboundMessage]] = asyncio.Queue()
         self._is_connected = False
         # Filesystem handle for the prekey-writer lock (acquired by
         # ``_acquire_prekey_writer_lock``, released on ``disconnect``
         # or process exit). Kept open for the lifetime of the client so
         # the kernel-held flock stays valid.
+        self.connection_auth = None
         self._prekey_lock_fd: int | None = None
 
     def _acquire_prekey_writer_lock(self) -> None:
@@ -313,6 +314,7 @@ class MeshClient:
                 reconnect_max_seconds=self._config.reconnect_max_seconds,
                 on_frame=self._handle_frame,
                 entra_token=_entra_token,
+                connection_auth=self.connection_auth,
             )
             await self._relay.connect()
             self._is_connected = True
@@ -326,6 +328,8 @@ class MeshClient:
         """Close the relay WS and HTTP client. Per-peer ratchet state
         is preserved in memory so a subsequent :meth:`connect` resumes
         sessions without re-running X3DH."""
+        if self.connection_auth is not None:
+            await self.connection_auth.shutdown()
         if self._relay is not None:
             await self._relay.disconnect()
             self._relay = None
@@ -337,6 +341,19 @@ class MeshClient:
 
     # ── Public API: discovery + send ────────────────────────────────────
 
+    def _auth_stamp(self):
+        if self.connection_auth is None:
+            return None
+        self.connection_auth.check()
+        return self.connection_auth, self.connection_auth.generation
+
+    def _check_auth(self, stamp):
+        if stamp is not None:
+            auth, generation = stamp
+            if auth is not self.connection_auth or generation != auth.generation:
+                raise MeshTransportError("Mesh operation belongs to a superseded authorization")
+            auth.check()
+
     async def discover(self, capability: str) -> list[str]:
         """Return DIDs of registered agents advertising ``capability``.
 
@@ -344,7 +361,9 @@ class MeshClient:
         name → DID lookup."""
         if self._registry is None:
             raise MeshTransportError("Not connected — call connect() first")
+        stamp = self._auth_stamp()
         agents = await self._registry.discover(capability)
+        self._check_auth(stamp)
         return [a.did for a in agents]
 
     async def send_by_name(self, *, to: str, payload: bytes) -> None:
@@ -352,7 +371,9 @@ class MeshClient:
         an encrypted payload."""
         if self._registry is None:
             raise MeshTransportError("Not connected — call connect() first")
+        stamp = self._auth_stamp()
         peer = await self._registry.find_by_display_name(to)
+        self._check_auth(stamp)
         if peer is None:
             raise MeshPeerNotFoundError(
                 f"No agent registered with display_name={to!r}"
@@ -373,6 +394,7 @@ class MeshClient:
         understood — TS receivers ignored the bundled ciphertext and
         the first message was lost on cross-runtime sends.
         """
+        stamp = self._auth_stamp()
         if not self._is_connected:
             raise MeshTransportError("Not connected — call connect() first")
         if self._relay is None or self._registry is None:
@@ -381,6 +403,7 @@ class MeshClient:
         channel = self._channels.get(to)
         if channel is None:
             channel, establishment = await self._initiate_session(to)
+            self._check_auth(stamp)
             self._channels[to] = channel
             knock_frame = {
                 "v": 1,
@@ -395,12 +418,14 @@ class MeshClient:
             await self._relay.send_frame(knock_frame)
             logger.debug("Sent KNOCK to %s (id=%s)", to, knock_frame["id"])
 
+        self._check_auth(stamp)
         wire_payload = _payload_to_wire_bytes(payload)
         encrypted = channel.send(wire_payload)
         message_frame = _encrypted_to_message_frame(
             encrypted, self._identity.did, to
         )
         await self._relay.send_frame(message_frame)
+        self._check_auth(stamp)
         logger.debug(
             "Sent MESSAGE frame (%d bytes payload, %d bytes on wire) to %s (id=%s)",
             len(payload),
@@ -416,7 +441,8 @@ class MeshClient:
         arrived at the local relay receive loop. Backpressure: the
         underlying ``asyncio.Queue`` is unbounded by default; callers
         with strict memory budgets should consume in a tight loop."""
-        return _InboxIterator(self._inbox)
+        self._auth_stamp()
+        return _InboxIterator(self)
 
     # ── Internals ───────────────────────────────────────────────────────
 
@@ -444,6 +470,8 @@ class MeshClient:
         return channel, establishment
 
     async def _handle_frame(self, frame: dict) -> None:
+        if self.connection_auth is not None:
+            self.connection_auth.check()
         ftype = frame.get("type")
         if ftype == "message":
             await self._handle_message_frame(frame)
@@ -482,14 +510,14 @@ class MeshClient:
         # TS SDK puts on every message so callers see the original bytes
         # they would have sent.
         app_payload = _wire_bytes_to_payload(plaintext)
-        await self._inbox.put(
-            InboundMessage.new(
-                from_did=from_did,
-                from_display_name=None,
-                payload=app_payload,
-                message_id=str(frame.get("id", "")),
-            )
+        message = InboundMessage.new(
+            from_did=from_did,
+            from_display_name=None,
+            payload=app_payload,
+            message_id=str(frame.get("id", "")),
         )
+        stamp = self._auth_stamp()
+        await self._inbox.put((stamp, message) if stamp is not None else message)
 
     async def _handle_knock_frame(self, frame: dict) -> None:
         """Auto-accept a KNOCK frame.
@@ -539,11 +567,13 @@ class MeshClient:
             )
             return
 
+        stamp = self._auth_stamp()
         try:
             await self._top_up_otks()
         except Exception as exc:  # noqa: BLE001
             logger.warning("OTK top-up failed: %s", exc)
 
+        self._check_auth(stamp)
         self._channels[from_did] = channel
         logger.info("Accepted KNOCK from %s", from_did)
 
@@ -580,14 +610,26 @@ class MeshClient:
 
 
 class _InboxIterator:
-    def __init__(self, queue: asyncio.Queue[InboundMessage]) -> None:
-        self._queue = queue
+    def __init__(self, client: MeshClient) -> None:
+        self._client = client
+        self._queue = client._inbox
 
     def __aiter__(self) -> _InboxIterator:
         return self
 
     async def __anext__(self) -> InboundMessage:
-        return await self._queue.get()
+        self._client._auth_stamp()
+        while True:
+            item = await self._queue.get()
+            if isinstance(item, tuple):
+                stamp, message = item
+                try:
+                    self._client._check_auth(stamp)
+                except MeshTransportError:
+                    continue
+                return message
+            self._client._auth_stamp()
+            return item
 
 
 def _iso_utc() -> str:

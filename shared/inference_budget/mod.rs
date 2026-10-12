@@ -4,6 +4,7 @@
 //! Governed-inference accounting contract, shared by controller and router.
 //! This accounts for tokens and configured maximum inference prices only.
 
+pub mod calendar;
 pub mod catalog;
 pub mod ledger;
 pub mod tariffs;

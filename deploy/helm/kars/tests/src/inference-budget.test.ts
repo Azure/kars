@@ -12,7 +12,7 @@ const { parse, parseAllDocuments } = require("yaml");
 const chart = fileURLToPath(new URL("../../", import.meta.url));
 let counter = 0;
 
-function render(inferenceBudget?: unknown, existingSecret?: unknown) {
+function render(inferenceBudget?: unknown, existingSecret?: unknown, routerTag?: string) {
   const fixture = join(chart, "tests", `.budget-fixture-${process.pid}-${++counter}`);
   mkdirSync(fixture);
   try {
@@ -22,6 +22,7 @@ function render(inferenceBudget?: unknown, existingSecret?: unknown) {
     const values = parse(readFileSync(join(chart, "values.yaml"), "utf8"));
     delete values.inferenceBudget;
     if (inferenceBudget !== undefined) values.inferenceBudget = inferenceBudget;
+    if (routerTag !== undefined) values.inferenceRouter.image.tag = routerTag;
     if (existingSecret !== undefined) {
       const helper = join(fixture, "templates/_inference-budget-tls.tpl");
       const source = readFileSync(helper, "utf8");
@@ -63,6 +64,54 @@ const configured = {
 };
 
 describe("governed inference budget Helm contract", () => {
+  it("allows calendar sandboxes only through the authenticated accounting transport", () => {
+    const documents = render(configured);
+    const network = documents.find((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "NetworkPolicy" && doc.metadata.name === "kars-system-operator-allow");
+    const ingress = network.spec.ingress.filter((rule: { ports: { port: number }[] }) =>
+      rule.ports.some((port) => port.port === 9447));
+    expect(ingress).toEqual([{
+      from: ["inference-budget", "calendar-budget"].map((label) => ({
+        namespaceSelector: { matchLabels: { [`kars.azure.com/${label}`]: "v1" } },
+        podSelector: { matchLabels: { "kars.azure.com/component": "sandbox" } },
+      })),
+      ports: [{ protocol: "TCP", port: 9447 }],
+    }]);
+    const store = documents.find((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "Role" && doc.metadata.name === "kars-inference-budget-store");
+    expect(store.metadata.namespace).toBe("customer-system");
+    expect(store.rules).toContainEqual({
+      apiGroups: [""], resources: ["configmaps"], verbs: ["get", "create", "patch"],
+    });
+    const disabled = render({ enabled: false }).find(
+      (doc: { kind: string; metadata: { name: string } }) =>
+        doc.kind === "NetworkPolicy" && doc.metadata.name === "kars-system-operator-allow");
+    expect(disabled.spec.ingress.some((rule: { ports: { port: number }[] }) =>
+      rule.ports.some((port) => port.port === 9447))).toBe(false);
+  });
+
+  it("keeps an explicit router image pin coherent with the governed router pin", () => {
+    const documents = render(configured, undefined, `latest@${configured.routerImageDigest}`);
+    const controller = documents.find((doc: { kind: string; metadata: { name: string } }) =>
+      doc.kind === "Deployment" && doc.metadata.name === "kars-controller");
+    const env = controller.spec.template.spec.containers[0].env;
+    expect(env).toContainEqual({
+      name: "KARS_INFERENCE_BUDGET_ROUTER_DIGEST", value: configured.routerImageDigest,
+    });
+    expect(env.find((item: { name: string }) => item.name === "INFERENCE_ROUTER_IMAGE").value
+      .endsWith(`:latest@${configured.routerImageDigest}`)).toBe(true);
+  });
+
+  it("refuses a router upgrade that would silently retain the old governed image", () => {
+    expect(() => render(configured, undefined, `latest@sha256:${"8".repeat(64)}`))
+      .toThrow(/routerImageDigest must match the digest pinned in inferenceRouter.image.tag/);
+  });
+
+  it("does not require a governed pin for a standalone pinned router", () => {
+    expect(() => render({ enabled: false }, undefined, `latest@sha256:${"8".repeat(64)}`))
+      .not.toThrow();
+  });
+
   it.each([undefined, configured])(
     "publishes observational account phase and keyed standard conditions with %s", (value) => {
       const definition = render(value).find((doc: { kind: string; spec?: { names?: { kind?: string } } }) =>

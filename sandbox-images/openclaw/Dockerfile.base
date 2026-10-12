@@ -10,6 +10,15 @@
 # Tag:    kars-sandbox-base:dev (local) or ${ACR}/kars-sandbox-base:latest (prod)
 
 ARG AZURELINUX_BASE=mcr.microsoft.com/azurelinux/base/core:3.0@sha256:35149ae8dd179684f969944f54a337c665a64e702486154eb44253fb39c2505b
+ARG NODE_VERSION=24.21.0
+ARG BUILDPLATFORM
+
+# Compile on the builder's native CPU, not an emulated target Go runtime.
+# Keep this independent stage first so --target go-builder is inexpensive.
+FROM --platform=${BUILDPLATFORM} golang:1.26.6-bookworm@sha256:116d58cbd88c1297624acc6e967a060012422bacf9930927e23fb719189c6f36 AS go-builder
+ARG TARGETARCH
+COPY sandbox-images/openclaw/build-go-tools.sh /tmp/build-go-tools.sh
+RUN sh /tmp/build-go-tools.sh "$TARGETARCH" /out
 
 # ─── Node Builder (OpenClaw) ─────────────────────────────────────────────────
 
@@ -17,19 +26,32 @@ FROM ${AZURELINUX_BASE} AS builder
 
 # Detect arch for Node.js download (x64 or arm64)
 ARG TARGETARCH
-RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    tdnf install -y tar gzip ca-certificates curl git && tdnf clean all && \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
-    tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
-    rm /tmp/node.tar.gz
+ARG NODE_VERSION
+COPY sandbox-images/openclaw/node24-SHASUMS256.txt /tmp/node-SHASUMS256.txt
+COPY sandbox-images/openclaw/verify-node-archive.sh /tmp/verify-node-archive.sh
+RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in (arm64|aarch64) echo "arm64";; (amd64|x86_64) echo "x64";; (*) echo "Unsupported Node.js architecture" >&2; exit 1;; esac) && \
+    NODE_ARCHIVE="node-v${NODE_VERSION}-linux-${NODEJS_ARCH}.tar.gz" && \
+    tdnf upgrade -y --refresh && \
+    tdnf install -y tar gzip ca-certificates curl git python3 && tdnf clean all && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://nodejs.org/dist/v${NODE_VERSION}/$NODE_ARCHIVE" -o "/tmp/$NODE_ARCHIVE" && \
+    sh /tmp/verify-node-archive.sh "/tmp/$NODE_ARCHIVE" /tmp/node-SHASUMS256.txt && \
+    tar xzf "/tmp/$NODE_ARCHIVE" -C /usr/local --strip-components=1 && \
+    rm "/tmp/$NODE_ARCHIVE" /tmp/node-SHASUMS256.txt /tmp/verify-node-archive.sh
 
 # Install OpenClaw
 # NOTE: Docker caches RUN layers by instruction text, so @latest won't
 # re-pull once cached.  Pass --build-arg OPENCLAW_CACHE_BUST=$(date +%s)
 # or change the value below to force a fresh pull.
-ARG OPENCLAW_VERSION=2026.5.27
+ARG OPENCLAW_VERSION=2026.9.8
 ARG OPENCLAW_CACHE_BUST=0
-RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && npm install -g openclaw@${OPENCLAW_VERSION}
+RUN echo "openclaw cache-bust: ${OPENCLAW_CACHE_BUST}" && \
+    npm install -g --engine-strict "openclaw@${OPENCLAW_VERSION}" && \
+    node -e 'if (require("/usr/local/lib/node_modules/openclaw/package.json").version !== process.argv[1]) process.exit(1)' "$OPENCLAW_VERSION"
+
+# OpenClaw 2026.9 externalized these channels/providers. Install through its
+# genuine installer at build time; runtime startup only copies the SQLite seed.
+COPY sandbox-images/openclaw/external-plugins.json sandbox-images/openclaw/plugin-state.py /opt/kars-build/
+RUN python3 /opt/kars-build/plugin-state.py build /opt/kars-build/external-plugins.json
 
 # OpenClaw ≥2026.4 hoists channel bundle chunks to dist/ but npm installs don't
 # stage extension deps into the top-level node_modules/ (openclaw/openclaw#62749).
@@ -63,10 +85,6 @@ RUN TOPMOD="/usr/local/lib/node_modules/openclaw/node_modules" && \
     # Feishu (1 package)
     link_pkg feishu @larksuiteoapi/node-sdk && \
     echo "OpenClaw extension dep symlinks applied"
-
-# Patch vulnerable transitive npm deps (tar, minimatch, glob, brace-expansion)
-# without waiting for upstream OpenClaw to update them.
-RUN cd /usr/local/lib/node_modules && npm audit fix --force 2>/dev/null || true
 
 # Pre-install popular ClawHub skills at build time (VirusTotal-scanned).
 # kars's runtime security (egress guard, Content Safety, read-only rootfs)
@@ -140,43 +158,21 @@ RUN mkdir -p /opt/openclaw-stage && \
     fi
 SHELL ["/bin/sh", "-c"]
 
-# ─── Go Builder (CLI tools for OpenClaw skills) ──────────────────────────────
-
-FROM golang:1.24-alpine AS go-builder
-
-# Build Go CLI tools that enable built-in OpenClaw skills.
-# Each tool is a small static binary (~5-15MB) — discarded build cache doesn't bloat the runtime image.
-# GOTOOLCHAIN=auto lets Go download a newer toolchain if a module requires it (e.g. go >= 1.23).
-RUN apk add --no-cache git && \
-    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/blucli/cmd/blu@latest && \
-    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/eightctl/cmd/eightctl@latest && \
-    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/gifgrep/cmd/gifgrep@latest && \
-    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/ordercli/cmd/ordercli@latest && \
-    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/sonoscli/cmd/sonos@latest && \
-    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/camsnap/cmd/camsnap@latest && \
-    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/goplaces/cmd/goplaces@latest && \
-    GOTOOLCHAIN=auto CGO_ENABLED=0 go install github.com/steipete/songsee/cmd/songsee@latest
-
-# wacli requires CGO + sqlite (go-sqlite3). Build statically so the binary
-# can be copied into the CGO-less Azure Linux runtime image without libsqlite3.
-RUN apk add --no-cache gcc musl-dev sqlite-static && \
-    GOTOOLCHAIN=auto CGO_ENABLED=1 \
-    go install -tags "sqlite_omit_load_extension" \
-      -ldflags='-linkmode external -extldflags "-static"' \
-      github.com/openclaw/wacli/cmd/wacli@latest
-
 # ─── Base Runtime Stage ──────────────────────────────────────────────────────
 
 FROM ${AZURELINUX_BASE}
 
 # Detect arch for Node.js download
 ARG TARGETARCH
-RUN tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux jq tmux unzip \
+ARG NODE_VERSION
+RUN tdnf upgrade -y --refresh && \
+    tdnf install -y tar gzip curl git shadow-utils ca-certificates iptables util-linux jq tmux unzip \
                     python3 python3-pip && tdnf clean all
 
 # Vendored Python packages (zero PyPI dependency)
 COPY vendor/sandbox-wheels/ /tmp/sandbox-wheels/
-RUN pip3 install --no-cache-dir --no-index --find-links=/tmp/sandbox-wheels/ \
+RUN (cd /tmp/sandbox-wheels && sha256sum --check SHA256SUMS) && \
+    pip3 install --no-cache-dir --no-index --find-links=/tmp/sandbox-wheels/ \
       requests httpx beautifulsoup4 lxml cssselect \
       pandas numpy matplotlib seaborn scipy sympy \
       pyyaml toml python-dotenv \
@@ -189,14 +185,19 @@ RUN pip3 install --no-cache-dir --no-index --find-links=/tmp/sandbox-wheels/ \
       sqlalchemy cryptography tiktoken \
       dnspython networkx geopy \
       ftfy unidecode qrcode fpdf2 nano-pdf && \
+    pip3 check && \
     rm -rf /tmp/sandbox-wheels
 
-# Node.js (vendored binary) + update npm to fix tar/minimatch/glob CVEs
-RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "x64";; esac) && \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://nodejs.org/dist/v22.22.3/node-v22.22.3-linux-${NODEJS_ARCH}.tar.gz" -o /tmp/node.tar.gz && \
-    tar xzf /tmp/node.tar.gz -C /usr/local --strip-components=1 && \
-    rm /tmp/node.tar.gz && \
-    npm install -g npm@latest
+# Node.js (checksum-pinned binary) + update npm to fix tar/minimatch/glob CVEs
+COPY sandbox-images/openclaw/node24-SHASUMS256.txt /tmp/node-SHASUMS256.txt
+COPY sandbox-images/openclaw/verify-node-archive.sh /tmp/verify-node-archive.sh
+RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in (arm64|aarch64) echo "arm64";; (amd64|x86_64) echo "x64";; (*) echo "Unsupported Node.js architecture" >&2; exit 1;; esac) && \
+    NODE_ARCHIVE="node-v${NODE_VERSION}-linux-${NODEJS_ARCH}.tar.gz" && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://nodejs.org/dist/v${NODE_VERSION}/$NODE_ARCHIVE" -o "/tmp/$NODE_ARCHIVE" && \
+    sh /tmp/verify-node-archive.sh "/tmp/$NODE_ARCHIVE" /tmp/node-SHASUMS256.txt && \
+    tar xzf "/tmp/$NODE_ARCHIVE" -C /usr/local --strip-components=1 && \
+    rm "/tmp/$NODE_ARCHIVE" /tmp/node-SHASUMS256.txt /tmp/verify-node-archive.sh && \
+    npm install -g npm@12.2.0
 
 # Install npm CLIs that unlock built-in OpenClaw skills. MUST come AFTER
 # the Node.js tarball extraction above — the tarball overwrites
@@ -216,14 +217,19 @@ RUN NODEJS_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm6
 #
 # NO `|| true` or `2>/dev/null` — silent install failures MUST fail
 # the build so we catch them in CI instead of shipping a broken image.
-RUN npm install -g clawhub mcporter @steipete/oracle
+RUN npm install -g clawhub@0.23.3 mcporter@0.14.2 @steipete/oracle@0.21.4
 
 # AGT governance SDK — install from vendored wheels (GitHub release v3.0.0)
 # Avoids PyPI dependency during build (files.pythonhosted.org can be unreachable)
 
 # Install GitHub CLI (enables github skill)
 RUN GH_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
-    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://github.com/cli/cli/releases/download/v2.89.0/gh_2.89.0_linux_${GH_ARCH}.tar.gz" -o /tmp/gh.tar.gz && \
+    GH_SHA256=$(case "$GH_ARCH" in \
+      arm64) echo "7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484";; \
+      amd64) echo "bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386";; \
+    esac) && \
+    curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://github.com/cli/cli/releases/download/v2.102.0/gh_2.102.0_linux_${GH_ARCH}.tar.gz" -o /tmp/gh.tar.gz && \
+    echo "$GH_SHA256  /tmp/gh.tar.gz" | sha256sum --check --strict && \
     tar xzf /tmp/gh.tar.gz -C /usr/local --strip-components=1 && \
     rm /tmp/gh.tar.gz
 
@@ -235,9 +241,14 @@ RUN RG_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "aarch64-
     rm -rf /tmp/rg.tar.gz /tmp/ripgrep-*
 
 # Install 1Password CLI (enables 1password skill)
-RUN OP_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "arm64";; *) echo "amd64";; esac) && \
-    OP_VER="2.33.1" && \
+RUN OP_VER="2.40.0" && \
+    case "${TARGETARCH:-$(uname -m)}" in \
+      arm64|aarch64) OP_ARCH="arm64"; OP_SHA256="0e8ac99ee93d661aa725dc24a5ef8bf344741d224064a5dfb469dc689faec86a";; \
+      amd64|x86_64) OP_ARCH="amd64"; OP_SHA256="74277219e8da60958c00f9aee9d2023225e98fdda8bfd2156a5d9e85e0edaab3";; \
+      *) echo "Unsupported 1Password architecture" >&2; exit 1;; \
+    esac && \
     curl -fsSL --retry 5 --retry-delay 3 --retry-all-errors --connect-timeout 15 "https://cache.agilebits.com/dist/1P/op2/pkg/v${OP_VER}/op_linux_${OP_ARCH}_v${OP_VER}.zip" -o /tmp/op.zip && \
+    echo "$OP_SHA256  /tmp/op.zip" | sha256sum --check --strict - && \
     unzip -qo /tmp/op.zip -d /usr/local/bin/ && \
     rm /tmp/op.zip
 
@@ -248,7 +259,7 @@ RUN HIM_ARCH=$(case "${TARGETARCH:-$(uname -m)}" in arm64|aarch64) echo "aarch64
     rm /tmp/himalaya.tgz
 
 # Copy Go CLI tools from go-builder (enables blucli, eightctl, gifgrep, etc.)
-COPY --from=go-builder /go/bin/* /usr/local/bin/
+COPY --from=go-builder /out/ /usr/local/bin/
 
 # Security: create non-root user (sandbox=1000) and router user (router=1001)
 # UID separation enables iptables egress guard: UID 1000 is restricted to
@@ -262,12 +273,27 @@ RUN groupadd -g 1000 sandbox && \
 # Set prompt for the sandbox user
 RUN echo 'export PS1="kars@\\h:\\w\\$ "' >> /sandbox/.bashrc
 
-# Copy OpenClaw from builder (npm global root is /usr/local/lib/node_modules)
-COPY --from=builder /usr/local/lib/node_modules /usr/local/lib/node_modules
+# Copy only OpenClaw, not the builder's older bundled npm over the updated runtime npm.
+COPY --from=builder /usr/local/lib/node_modules/openclaw /usr/local/lib/node_modules/openclaw
+COPY --from=builder /opt/openclaw-managed /opt/openclaw-managed
+COPY --from=builder /opt/openclaw-plugin-seed.sqlite /opt/openclaw-plugin-seed.sqlite
+COPY sandbox-images/openclaw/plugin-state.py /usr/local/lib/kars-plugin-state.py
+COPY sandbox-images/openclaw/link-plugin-host.py /usr/local/lib/kars-link-plugin-host.py
+RUN python3 /usr/local/lib/kars-link-plugin-host.py && \
+    chmod -R a+rX /opt/openclaw-managed && chmod -R a-w /opt/openclaw-managed && \
+    chmod 444 /opt/openclaw-plugin-seed.sqlite /usr/local/lib/kars-plugin-state.py /usr/local/lib/kars-link-plugin-host.py
 RUN ln -sf /usr/local/lib/node_modules/openclaw/openclaw.mjs /usr/local/bin/openclaw && \
-    for bin in clawhub mcporter oracle; do \
-      [ -f "/usr/local/lib/node_modules/.bin/$bin" ] && ln -sf "/usr/local/lib/node_modules/.bin/$bin" "/usr/local/bin/$bin"; \
-    done; true
+    for bin in openclaw clawhub mcporter oracle; do \
+      test -x "$(command -v "$bin")" || exit 1; \
+    done
+
+# Patch the six scan-identified package locations offline without reinstalling
+# the host, changing its native dependency graph, or altering plugin seed state.
+COPY vendor/sandbox-node/ /tmp/kars-node-updates/
+COPY sandbox-images/openclaw/update-node-dependencies.cjs /tmp/kars-node-updates/
+RUN node /tmp/kars-node-updates/update-node-dependencies.cjs \
+      /usr/local/lib/node_modules /tmp/kars-node-updates/security-updates.json && \
+    rm -rf /tmp/kars-node-updates
 
 # Copy pre-installed ClawHub skills from builder (installed via openclaw skills install)
 COPY --from=builder /root/.openclaw/workspace/skills/ /opt/clawhub-skills/

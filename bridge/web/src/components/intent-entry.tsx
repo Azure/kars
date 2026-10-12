@@ -13,7 +13,6 @@
 import { useMemo, useState, useTransition } from "react";
 import { useRouter } from "next/navigation";
 import { classifyIntent, type IntentKind } from "@/lib/classify-intent";
-import { LoopDesigner } from "@/components/loop-designer";
 import { Icon } from "@/components/icon";
 
 const EXAMPLES: { label: string; text: string; kind: IntentKind }[] = [
@@ -45,7 +44,7 @@ export function IntentEntry() {
   const ready = intent.trim().length >= 8;
 
   function go() {
-    if (!ready) return;
+    if (!ready || pending) return;
     const q = `intent=${encodeURIComponent(intent.trim())}`;
     const href = kind === "team" ? `/workspace/teams/new?${q}` : `/workspace/new?${q}`;
     startTransition(() => router.push(href));
@@ -54,6 +53,8 @@ export function IntentEntry() {
   return (
     <div>
       <textarea
+        aria-label="Describe the outcome"
+        disabled={pending}
         value={intent}
         onChange={(e) => {
           setIntent(e.target.value);
@@ -82,10 +83,11 @@ export function IntentEntry() {
             </span>
             <div className="min-w-0">
               <p className="text-sm font-semibold">
-                {kind === "team" ? "Recommended: a standing team" : "Recommended: a one-off mission"}
+                {override ? "Selected: " : "Suggested: "}
+                {kind === "team" ? "a standing team" : "a one-off mission"}
                 {!override && (
                   <span className="ml-2 rounded-full bg-surface px-2 py-0.5 text-[10px] font-medium uppercase tracking-wide text-foreground-muted">
-                    {auto.confidence} confidence
+                    Based on wording
                   </span>
                 )}
               </p>
@@ -97,6 +99,8 @@ export function IntentEntry() {
           <div className="flex shrink-0 items-center gap-1.5 rounded-lg border border-border bg-surface p-1 text-xs">
             <button
               type="button"
+              aria-pressed={kind === "mission"}
+              disabled={pending}
               onClick={() => setOverride("mission")}
               className={`rounded-md px-2.5 py-1 font-medium transition ${
                 kind === "mission" ? "bg-signal text-signal-fg" : "text-foreground-muted hover:text-foreground"
@@ -106,6 +110,8 @@ export function IntentEntry() {
             </button>
             <button
               type="button"
+              aria-pressed={kind === "team"}
+              disabled={pending}
               onClick={() => setOverride("team")}
               className={`rounded-md px-2.5 py-1 font-medium transition ${
                 kind === "team" ? "bg-accent text-accent-fg" : "text-foreground-muted hover:text-foreground"
@@ -138,6 +144,7 @@ export function IntentEntry() {
           <button
             key={ex.label}
             type="button"
+            disabled={pending}
             onClick={() => {
               setIntent(ex.text);
               setOverride(null);

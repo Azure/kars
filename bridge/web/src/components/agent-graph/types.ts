@@ -13,8 +13,9 @@ export interface AgentAction {
   result: string;
   ok: boolean | null;
   round: number;
-  ms: number;
-  ts: string;
+  ms: number | null;
+  ts: string | null;
+  source: "legacy" | "router-upstream" | "model-proposed" | "harness-reported";
   seq: number | null;
   agentInstance: string | null;
 }

@@ -14,13 +14,36 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 async fn private_activation_checks_exact_policy_binding_epoch_and_root_incarnations() {
     let server = MockServer::start().await;
     let mut objects = BTreeMap::new();
-    let activation = test_support::install(
+    let mut activation = test_support::install(
         &mut objects,
         "core",
         "core-uid",
         "controller",
         &[("work", "work-uid"), ("bridge", "bridge-uid")],
     );
+    let consumer_path = "/apis/apps/v1/namespaces/bridge/deployments/bff";
+    let consumer_template = json!({
+        "metadata":{"creationTimestamp":null,"labels":{"app":"bff"}},
+        "spec":{"containers":[{"name":"bff","image":"reviewed",
+            "env":[{"name":"BRIDGE_HEADLAMP_URL","value":"http://reviewed"}]}]}
+    });
+    objects.insert(consumer_path.into(), json!({
+        "apiVersion":"apps/v1","kind":"Deployment",
+        "metadata":{"name":"bff","namespace":"bridge","uid":"bff-deployment","resourceVersion":"1"},
+        "spec":{"template":consumer_template}
+    }));
+    objects.get_mut("/api/v1/namespaces/bridge").unwrap()["metadata"]["annotations"]
+        [format!("{PREFIX}parent-bff-deployment")] = "a".repeat(64).into();
+    let scope = activation["namespaces"]
+        .as_array_mut()
+        .unwrap()
+        .iter_mut()
+        .find(|scope| scope["namespace"]["name"] == "bridge")
+        .unwrap();
+    scope["consumers"] = json!([{
+        "kind":"Deployment","object":{"name":"bff","uid":"bff-deployment","resourceVersion":"1"},
+        "templateDigest":hash(&consumer_template)
+    }]);
     let grant: KarsCredentialGrant = serde_json::from_value(json!({
         "apiVersion":"kars.azure.com/v1alpha1","kind":"KarsCredentialGrant",
         "metadata":{"name":"workspace","namespace":"work","uid":"grant","resourceVersion":"1"},
@@ -57,6 +80,13 @@ async fn private_activation_checks_exact_policy_binding_epoch_and_root_incarnati
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
     verify(&client, &grant).await.unwrap();
+    objects
+        .lock()
+        .unwrap()
+        .get_mut("/apis/apps/v1/namespaces/core/deployments/kars-controller")
+        .unwrap()["spec"]["template"]["metadata"]["annotations"] = json!({EPOCH: "a".repeat(64)});
+    verify(&client, &grant).await.unwrap();
+    *objects.lock().unwrap() = baseline.clone();
     let mut invalid_intent = grant.clone();
     invalid_intent
         .spec
@@ -75,6 +105,32 @@ async fn private_activation_checks_exact_policy_binding_epoch_and_root_incarnati
     assert!(verify(&client, &grant).await.is_err());
     *objects.lock().unwrap() = baseline.clone();
     for (path, pointer, value) in [
+        (
+            consumer_path,
+            "/spec/template/spec/containers/0/image",
+            json!("unreviewed"),
+        ),
+        (
+            consumer_path,
+            "/spec/template/spec/containers/0/env/0/value",
+            json!("http://unreviewed"),
+        ),
+        (consumer_path, "/metadata/uid", json!("replaced-bff")),
+        (
+            consumer_path,
+            "/spec/template/metadata/creationTimestamp",
+            json!("changed"),
+        ),
+        (
+            consumer_path,
+            "/spec/template/metadata/labels/app",
+            json!("unreviewed"),
+        ),
+        (
+            "/api/v1/namespaces/bridge",
+            "/metadata/annotations/kars.azure.com~1private-parent-bff-deployment",
+            json!("prior-epoch"),
+        ),
         (
             "/apis/admissionregistration.k8s.io/v1/validatingadmissionpolicies/kars-private-consumption",
             "/spec/failurePolicy",
@@ -115,6 +171,28 @@ async fn private_activation_checks_exact_policy_binding_epoch_and_root_incarnati
             "/metadata/uid",
             json!("replacement"),
         ),
+        (
+            "/apis/apps/v1/namespaces/core/deployments/kars-controller",
+            "/spec/template/spec/containers/0/image",
+            json!("different-root-image"),
+        ),
+        (
+            "/apis/apps/v1/namespaces/core/deployments/kars-controller",
+            "/spec/template/spec/containers",
+            json!([{"name":"controller","image":"fixture",
+                "env":[{"name":"SANDBOX_NODE_SELECTOR","value":"changed"}]}]),
+        ),
+        (
+            "/apis/apps/v1/namespaces/core/deployments/kars-controller",
+            "/spec/template/metadata",
+            json!({"creationTimestamp":null,
+                "annotations":{"kubectl.kubernetes.io/restartedAt":"2026-10-11T10:00:00Z"}}),
+        ),
+        (
+            "/apis/apps/v1/namespaces/core/deployments/kars-controller",
+            "/spec/template/metadata",
+            json!({"creationTimestamp":null,"labels":{"unreviewed":"change"}}),
+        ),
     ] {
         *objects.lock().unwrap() = baseline.clone();
         *objects
@@ -126,6 +204,9 @@ async fn private_activation_checks_exact_policy_binding_epoch_and_root_incarnati
             .unwrap() = value;
         assert!(verify(&client, &grant).await.is_err(), "{path} {pointer}");
     }
+    *objects.lock().unwrap() = baseline.clone();
+    objects.lock().unwrap().remove(consumer_path);
+    assert!(verify(&client, &grant).await.is_err());
     *objects.lock().unwrap() = baseline.clone();
     objects
         .lock()

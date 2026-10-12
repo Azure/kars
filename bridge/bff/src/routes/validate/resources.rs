@@ -271,18 +271,36 @@ pub(super) async fn check_resources(
     //     fixable launch check (get the operator to approve it first).
     if !bp.skills.is_empty() {
         for s in &bp.skills {
-            let found = cluster
-                .get_kind(namespace, "KarsSkill", s)
-                .await
-                .ok()
-                .flatten();
-            let approved = found.as_ref().is_some_and(|o| {
-                o.metadata
-                    .annotations
-                    .as_ref()
-                    .and_then(|a| a.get("kars.azure.com/skill-review"))
-                    .is_some_and(|review| review == "approved")
+            let found = match cluster.get_kind(namespace, "KarsSkill", s).await {
+                Ok(found) => found,
+                Err(error) => {
+                    checks.push(Check {
+                        id: format!("skill:{s}"),
+                        label: format!("Skill \"{s}\" could not be checked"),
+                        status: CheckStatus::Fail,
+                        detail: format!("Skill lookup failed: {error}"),
+                    });
+                    continue;
+                }
+            };
+            let mut problem = found.as_ref().and_then(|object| {
+                crate::skill_package::approved_digest(&serde_json::json!(object)).err()
             });
+            if let Some(object) = &found
+                && problem.is_none()
+            {
+                if object
+                    .data
+                    .pointer("/spec/boundingPolicy")
+                    .and_then(serde_json::Value::as_str)
+                    != bp.tool_policy.as_deref()
+                {
+                    problem = Some("Select the skill's exact bounding tool policy".into());
+                } else if let Err(error) = cluster.skill_package_files(object).await {
+                    problem = Some(format!("Skill package validation failed: {error}"));
+                }
+            }
+            let approved = found.is_some() && problem.is_none();
             if approved {
                 let required_mcp = found
                     .as_ref()
@@ -297,13 +315,16 @@ pub(super) async fn check_resources(
                         .await
                         .ok()
                         .flatten();
-                    let ready = dependency.as_ref().is_some_and(|resource| {
-                        readiness_of(std::slice::from_ref(resource), server).is_some_and(|status| {
-                            (status.ready.unwrap_or(false)
-                                || status.phase.as_deref() == Some("Ready"))
-                                && status_observes_current_generation(resource)
-                        })
-                    });
+                    let ready = bp.mcp_servers.iter().any(|name| name == server)
+                        && dependency.as_ref().is_some_and(|resource| {
+                            readiness_of(std::slice::from_ref(resource), server).is_some_and(
+                                |status| {
+                                    (status.ready.unwrap_or(false)
+                                        || status.phase.as_deref() == Some("Ready"))
+                                        && status_observes_current_generation(resource)
+                                },
+                            )
+                        });
                     checks.push(Check {
                         id: format!("skill_mcp:{s}:{server}"),
                         label: format!("Skill “{s}” dependency “{server}”"),
@@ -315,7 +336,7 @@ pub(super) async fn check_resources(
                         detail: if ready {
                             "The skill's required MCP server is Ready in this namespace.".into()
                         } else {
-                            "The skill requires an MCP server that is missing, stale, or not Ready in this namespace.".into()
+                            "Explicitly select the skill's required MCP server; it must also be current and Ready in this namespace.".into()
                         },
                     });
                 }
@@ -333,14 +354,14 @@ pub(super) async fn check_resources(
                             id: format!("skill:{s}"),
                             label: format!("Skill “{s}” is approved and mountable"),
                             status: CheckStatus::Pass,
-                            detail: "The skill package is approved; the controller will mount it into the sandbox.".into(),
+                            detail: "The current skill identity, review, policy and package bytes match. The runtime pins a read-only snapshot.".into(),
                         }
                     } else {
                         Check {
                             id: format!("skill:{s}"),
                             label: format!("Skill “{s}” is not approved"),
                             status: CheckStatus::Fail,
-                            detail: "The skill exists but hasn't been approved — the sandbox trust gate will refuse to mount it. An operator must approve it before the agent can use it.".into(),
+                            detail: problem.clone().unwrap_or_else(|| "Independent current approval is required".into()),
                         }
                     }
                 }

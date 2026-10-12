@@ -426,20 +426,21 @@ fi
 # panel — even though the underlying Entra Agent ID is provisioned and
 # the workload identity binding is correct.
 #
-# Two paths (priority preserved from OpenClaw):
-#   1. MESH_AUTH_BACKEND=EntraAgentIdentity → ask the router's
-#      /v1/mesh-token endpoint for a sidecar-mediated mint (Phase 6.b).
-#   2. AGT_SKIP_ENTRA=1 → operator kill switch for dev clusters that
-#      don't have api://agentmesh provisioned. Skip the whole block.
-#   3. AZURE_FEDERATED_TOKEN_FILE set (default AKS WI path) → direct
-#      token exchange via the loopback forward proxy.
-#
-# Same fail-open trust-threshold rule as OpenClaw: when Entra fails,
-# AGT_TRUST_THRESHOLD is forced to 0 so anonymous-tier KNOCKs still go
-# through (the AGT SDK's X3DH proves cryptographic identity regardless).
-if [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
+# SRE has no mesh. For other sandboxes, EntraAgentIdentity requires a
+# token and successful registry verification in mesh.py before publishing
+# the client to tools or starting the inbox worker. It cannot be combined
+# with AGT_SKIP_ENTRA=1; Kind/no-Entra must leave the required backend unset.
+# Without that backend, explicit skip and legacy best-effort WI behavior
+# remain available.
+if printf '%s' "${SRE_ENABLED:-}" | grep -Eiq '^(true|1|yes)$'; then
+  echo "[kars-hermes] SRE mode — skipping mesh token acquisition (mesh disabled)"
+elif [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
+  echo "[kars-hermes] ERROR: EntraAgentIdentity requires Entra; remove conflicting AGT_SKIP_ENTRA=1" >&2
+  exit 1
+elif [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ]; then
+  unset AGT_OAUTH_TOKEN
   echo "[kars-hermes] MESH_AUTH_BACKEND=EntraAgentIdentity — acquiring mesh token via /v1/mesh-token"
-  _ROUTER_URL="${ROUTER_LOCAL_URL:-http://127.0.0.1:8443}"
+  _ROUTER_URL="http://127.0.0.1:8443"
   _ACCESS_TOKEN=""
   _DELAY=1
   _ELAPSED=0
@@ -447,15 +448,15 @@ if [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ -z "${AGT_OAUTH_TOKE
   _ATTEMPT=0
   while [ "$_ELAPSED" -lt "$_MAX_WAIT" ]; do
     _ATTEMPT=$((_ATTEMPT + 1))
-    _MESH_RESP=$(curl -s -4 --connect-timeout 3 --max-time 8 \
+    _MESH_RESP=$(curl -s -4 --noproxy 127.0.0.1 --connect-timeout 3 --max-time 8 \
       -w "\n__HTTP_STATUS__%{http_code}" \
       "${_ROUTER_URL}/v1/mesh-token" 2>/dev/null || echo "")
-    _MESH_STATUS=$(printf '%s\n' "$_MESH_RESP" | grep -E '^__HTTP_STATUS__' | sed 's/^__HTTP_STATUS__//')
+    _MESH_STATUS=$(printf '%s\n' "$_MESH_RESP" | sed -n 's/^__HTTP_STATUS__//p')
     _MESH_BODY=$(printf '%s\n' "$_MESH_RESP" | sed '/^__HTTP_STATUS__/d')
     if [ "$_MESH_STATUS" = "200" ]; then
-      _ACCESS_TOKEN=$(printf '%s' "$_MESH_BODY" | python3 -c "import sys,json; print(json.load(sys.stdin).get('access_token',''))" 2>/dev/null || echo "")
+      _ACCESS_TOKEN=$(printf '%s' "$_MESH_BODY" | python3 -c "import sys,json; t=json.load(sys.stdin).get('access_token'); print(t.strip() if isinstance(t,str) and not any(c.isspace() for c in t.strip()) else '')" 2>/dev/null || echo "")
       if [ -n "$_ACCESS_TOKEN" ]; then
-        echo "[kars-hermes] Mesh token acquired via auth-sidecar after ${_ATTEMPT} attempt(s) (${_ELAPSED}s) — verified-tier registration"
+        echo "[kars-hermes] Mesh token acquired via auth-sidecar after ${_ATTEMPT} attempt(s) (${_ELAPSED}s) — registry verification still required"
         export AGT_OAUTH_TOKEN="$_ACCESS_TOKEN"
         break
       fi
@@ -469,11 +470,12 @@ if [ "${MESH_AUTH_BACKEND:-}" = "EntraAgentIdentity" ] && [ -z "${AGT_OAUTH_TOKE
     if [ "$_DELAY" -lt 4 ]; then _DELAY=$((_DELAY * 2)); fi
   done
   if [ -z "${AGT_OAUTH_TOKEN:-}" ]; then
-    echo "[kars-hermes] /v1/mesh-token failed after ${_ELAPSED}s (${_ATTEMPT} attempts, last status=${_MESH_STATUS:-network-error}); registering as anonymous tier"
-    export AGT_TRUST_THRESHOLD=0
+    echo "[kars-hermes] ERROR: required /v1/mesh-token failed after ${_ELAPSED}s (${_ATTEMPT} attempts, last status=${_MESH_STATUS:-network-error}); refusing anonymous mesh startup" >&2
+    exit 1
   fi
   unset _MESH_RESP _MESH_STATUS _MESH_BODY _ROUTER_URL _ACCESS_TOKEN _DELAY _ELAPSED _MAX_WAIT _ATTEMPT
 elif [ "${AGT_SKIP_ENTRA:-0}" = "1" ]; then
+  unset AGT_OAUTH_TOKEN
   echo "[kars-hermes] AGT_SKIP_ENTRA=1 — Entra token exchange disabled, registering as anonymous tier"
   if [ -n "${AGT_TRUST_THRESHOLD:-}" ] && [ "${AGT_TRUST_THRESHOLD}" != "0" ]; then
     echo "[kars-hermes] AGT_SKIP_ENTRA=1 overrides AGT_TRUST_THRESHOLD=${AGT_TRUST_THRESHOLD} → 0 (anonymous-tier fail-open)"
@@ -605,8 +607,8 @@ EOF
 # reasoning loop, what's read-only vs proposal-only, and what it CAN'T
 # do (no spawn, no mesh, no governance-state mutation — per the
 # §7.8 containment design).
-if [ "${SRE_ENABLED:-}" = "true" ]; then
-  echo "[kars-hermes] SRE_ENABLED=true — writing kars-sre persona to $HERMES_HOME/SOUL.md"
+if printf '%s' "${SRE_ENABLED:-}" | grep -Eiq '^(true|1|yes)$'; then
+  echo "[kars-hermes] SRE mode — writing kars-sre persona to $HERMES_HOME/SOUL.md"
   _SRE_MODEL="${KARS_MODEL:-${AZURE_OPENAI_DEPLOYMENT:-gpt-5.4}}"
   # Single heredoc, UNQUOTED so ${_SRE_MODEL} interpolates. Literal
   # $-signs in command examples below are escaped with \$ to keep the
@@ -780,23 +782,11 @@ if [ "$1" = "hermes" ]; then
     echo "[kars-hermes] No channels — starting hermes gateway in idle daemon mode"
   fi
 
-  # ── kars-sre proactive watcher (Slice 4) ──────────────────────────
-  # When SRE_ENABLED=true AND at least one channel is configured, spawn
-  # the watcher as a background process. It polls K8s events for
-  # failure-class reasons in kars-* namespaces, dedupes per
-  # (ns, kind, name, reason) in a 10-min window, and on each new
-  # incident creates a KarsSREAction CR + pushes a Telegram alert with
-  # the action_id + `kars sre approve` command. Operator opt-out:
-  # SRE_WATCHER_ENABLED=false. Failures inside the watcher are
-  # contained (it logs to stderr and continues) so it cannot crash the
-  # gateway.
-  if [ "${SRE_ENABLED:-}" = "true" ] \
-      && [ "$WANT_GATEWAY" = "true" ] \
-      && [ "${SRE_WATCHER_ENABLED:-true}" != "false" ]; then
-    echo "[kars-hermes] SRE_ENABLED + channels detected — starting proactive watcher"
-    # Use sandbox UID via $AS_SANDBOX so the watcher uses the same SA
-    # token + httpx singleton as the agent. stderr→pod stdout for
-    # debuggability via `kubectl logs`.
+  # SRE sweeps also run without a human channel. The supervisor checks
+  # registered authority and router budget readiness before every bounded
+  # Hermes turn; remedies remain pending proposals, never auto-approved.
+  if printf '%s' "${SRE_ENABLED:-}" | grep -Eiq '^(true|1|yes)$'; then
+    echo "[kars-hermes] SRE mode — starting governed health supervisor"
     $AS_SANDBOX python3 -m kars_runtime_hermes.plugin.sre_watcher &
   fi
 

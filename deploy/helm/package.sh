@@ -12,7 +12,7 @@
 #   DEST=/tmp/foo bash deploy/helm/package.sh   # custom destination
 #
 # The script:
-#   1. Runs `helm lint` and fails fast on any error.
+#   1. Builds locked dependencies, then runs `helm lint`.
 #   2. Calls `helm package` to produce kars-<version>.tgz.
 #   3. Computes a sha256 alongside the tarball.
 #   4. Prints the resulting paths.
@@ -30,8 +30,11 @@ fi
 
 mkdir -p "$DEST"
 
+echo "▶ helm dependency build ${CHART_DIR}"
+helm dependency build "$CHART_DIR" --skip-refresh
+
 echo "▶ helm lint ${CHART_DIR}"
-helm lint "$CHART_DIR"
+helm lint "$CHART_DIR" --namespace kars-system
 
 echo "▶ helm package ${CHART_DIR} → ${DEST}"
 helm package "$CHART_DIR" --destination "$DEST"

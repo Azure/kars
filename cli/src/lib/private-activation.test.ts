@@ -89,6 +89,37 @@ function budgetFixture(replicas = 2) {
 }
 
 describe("generic private activation staging", () => {
+  it.each([
+    ["capture", 3], ["drain", 4], ["retired-root check", 5], ["budget-baseline check", 6],
+  ] as const)("keeps new root descendants visible at the %s boundary", async (_boundary, arrivalRead) => {
+    for (const terminating of [false, true]) {
+      const f = fixture();
+      const review = await f.preview();
+      const pod = rootPod(f, "late-root");
+      Object.assign(pod.spec, { serviceAccountName: "default", automountServiceAccountToken: false });
+      f.objects.get(f.key("replicasets.apps", "root-rs", "core")).spec.template.spec = structuredClone(pod.spec);
+      if (terminating) Object.assign(pod.metadata, { deletionTimestamp: "2026-01-01T00:00:00Z" });
+      expect(consumesPrivateAuthority(pod, "core", review)).toBe(false);
+      let reads = 0;
+      const execute = async (args: string[], input?: string) => {
+        if (args[0] === "get" && args[1] === "pods" && args[args.indexOf("-n") + 1] === "core") {
+          if (++reads === arrivalRead) f.pods.set("core", [pod]);
+        }
+        return f.execute(args, input);
+      };
+      await expect(stagePrivateActivation(execute, review)).rejects.toThrow();
+      expect(reads).toBeGreaterThanOrEqual(arrivalRead);
+      for (const scope of review.namespaces) {
+        const namespace = f.objects.get(f.key("namespace", scope.namespace.name));
+        expect(namespace.metadata.annotations[`${PRIVATE_PREFIX}epoch`]).toBeUndefined();
+        expect(namespace.metadata.annotations[`${PRIVATE_PREFIX}state`]).toBe("Pending");
+      }
+      expect(f.deployment.spec.replicas).toBe(arrivalRead === 3 ? 1 : 0);
+      expect(f.pods.get("core")).toEqual([pod]);
+      expect(f.calls.some(args => args[0] === "delete")).toBe(false);
+    }
+  });
+
   it.each(["absent", "false"])("blocks qualification while an old root token UID is terminating with budget=%s and no TLS", async budget => {
     const f = fixture();
     const root = f.objects.get(f.key("deployment", "kars-controller", "core"));
@@ -192,6 +223,23 @@ describe("generic private activation staging", () => {
     const before = structuredClone(pod);
     await stagePrivateActivation(f.execute, await f.preview());
     expect(f.pods.get("core")).toEqual([before]);
+  });
+
+  it("preserves an exactly reviewed root Pod that consumes no private authority", async () => {
+    const f = fixture();
+    Object.assign(f.deployment.spec.template.spec, { automountServiceAccountToken: false });
+    const pod = rootPod(f);
+    f.pods.set("core", [pod]);
+    const review = await f.preview();
+    expect(consumesPrivateAuthority(pod, "core", review)).toBe(false);
+    const before = structuredClone({ deployment: f.deployment, pod });
+    const now = vi.spyOn(Date, "now").mockReturnValueOnce(0).mockReturnValue(120_001);
+    try {
+      const staged = await stagePrivateActivation(f.execute, review);
+      await validateQualifiedActivation(f.execute, staged);
+    } finally { now.mockRestore(); }
+    expect({ deployment: f.deployment, pod }).toEqual(before);
+    expect(f.calls.some(args => args[0] === "delete" || (args[0] === "patch" && args[2] === "kars-controller"))).toBe(false);
   });
 
   it.each([0, 2])("keeps reviewed replica intent %s through two-apply post-retirement budget rotation", async replicas => {

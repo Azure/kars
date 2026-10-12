@@ -11,7 +11,8 @@ import { Stepper, banner, section, kvLine, checkLine } from "../stepper.js";
 import { loadConfig, promptAndSaveCredentials, resolveSecret, getSecret, loadSecrets, listSecretVariants, type KarsConfig } from "../config.js";
 import { stageRustBinaries, archForDockerPlatform } from "../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../lib/stage-mesh-plugin.js";
-import { ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
+import { AGT_CORE_MANIFEST, AGT_MESH_DOCKERFILE, ensureAgtRepo, ensureAgtWheels } from "../lib/agt-bootstrap.js";
+import { DEFAULT_OPENCLAW_VERSION } from "../runtime.js";
 
 /**
  * Pre-flight: verify every binary `kars dev` shells out to is on PATH.
@@ -111,8 +112,7 @@ export async function preflightTools(
   // the toolkit at all; surfacing the missing clone there is pure
   // friction for the common "I just want to re-apply env vars" loop.
   const needsAgtRepo = opts.build && !opts.noMesh;
-  const agtDockerfile = path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile");
-  const agtMissing = needsAgtRepo && !existsSync(agtDockerfile);
+  const agtMissing = needsAgtRepo && !existsSync(path.join(agtRepo, AGT_CORE_MANIFEST));
 
   if (missing.length === 0 && !agtMissing) return;
 
@@ -761,9 +761,9 @@ Notes:
         }
       }
       if (meshProvider === "agt" && options.build) {
-        if (!existsSync(path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile"))) {
+        if (!existsSync(path.join(agtRepo, AGT_CORE_MANIFEST))) {
           console.error(chalk.red(`\n  Error: --mesh-provider=agt --build requires the agent-governance-toolkit checkout.`));
-          console.error(chalk.red(`  Looked for: ${path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile")}\n`));
+          console.error(chalk.red(`  Looked for: ${path.join(agtRepo, AGT_CORE_MANIFEST)}\n`));
           console.error(chalk.yellow(`  Clone it:`));
           console.error(chalk.cyan(`      git clone https://github.com/microsoft/agent-governance-toolkit ${agtRepo}\n`));
           console.error(chalk.dim(`  Or pass --agt-repo <path> / set $KARS_AGT_REPO if you already have it elsewhere.\n`));
@@ -1114,7 +1114,7 @@ Notes:
           // Build mesh relay + registry images from the AGT toolkit.
           // (Vendored Rust relay/registry were removed in Phase 5.2.)
           {
-            const agtDockerfile = path.join(agtRepo, "agent-governance-python/agent-mesh/docker/Dockerfile");
+            const agtDockerfile = path.join(repoRoot, AGT_MESH_DOCKERFILE);
 
             // Check whether both images are already loaded locally.
             const haveImage = async (tag: string): Promise<boolean> => {
@@ -1127,14 +1127,11 @@ Notes:
             const registryCached = await haveImage("agentmesh-registry:dev");
 
             if ((!relayCached || !registryCached) && !existsSync(agtDockerfile)) {
-              console.error(chalk.red(`\n  Mesh images need to be built from the agent-governance-toolkit source,`));
-              console.error(chalk.red(`  but no checkout was found at:`));
-              console.error(chalk.red(`      ${agtRepo}\n`));
-              console.error(chalk.yellow(`  Clone it next to your kars repo and re-run:`));
-              console.error(chalk.cyan(`      git clone https://github.com/microsoft/agent-governance-toolkit ${agtRepo}`));
-              console.error(chalk.cyan(`      kars dev\n`));
-              console.error(chalk.dim(`  Or pass --agt-repo <path> / set $KARS_AGT_REPO if you already have it elsewhere.\n`));
+              console.error(chalk.red(`\n  Kars AL3 AgentMesh Dockerfile not found at ${agtDockerfile}\n`));
               process.exit(1);
+            }
+            if (!relayCached || !registryCached || options.build) {
+              await ensureAgtWheels(agtRepo, repoRoot);
             }
 
             // agt: single Dockerfile, COMPONENT build-arg switches relay vs registry.
@@ -1147,7 +1144,7 @@ Notes:
                 "--build-arg", "COMPONENT=relay",
                 "-t", "agentmesh-relay:dev",
                 "-f", agtDockerfile,
-                agtRepo,
+                repoRoot,
               ], { stdio: "inherit" });
               console.log();
             }
@@ -1160,7 +1157,7 @@ Notes:
                 "--build-arg", "COMPONENT=registry",
                 "-t", "agentmesh-registry:dev",
                 "-f", agtDockerfile,
-                agtRepo,
+                repoRoot,
               ], { stdio: "inherit" });
               console.log();
             }
@@ -1258,11 +1255,12 @@ Notes:
           // because nothing in this codepath built it. Mirror the kind
           // build to make `kars dev --target docker` work out of the
           // box.
-          const agtDockerfile = path.join(
-            agtRepo,
-            "agent-governance-python/agent-mesh/docker/Dockerfile",
-          );
-          if (existsSync(agtDockerfile)) {
+          const agtDockerfile = path.join(repoRoot, AGT_MESH_DOCKERFILE);
+          if (!(await haveImage("agentmesh-relay:dev")) || !(await haveImage("agentmesh-registry:dev"))) {
+            if (!existsSync(agtDockerfile)) {
+              throw new Error(`Kars AL3 AgentMesh Dockerfile not found at ${agtDockerfile}`);
+            }
+            await ensureAgtWheels(agtRepo, repoRoot);
             if (!(await haveImage("agentmesh-relay:dev"))) {
               stepper.update("Building agt relay image (Python from local AGT)...");
               await execa("docker", [
@@ -1270,7 +1268,7 @@ Notes:
                 "--build-arg", "COMPONENT=relay",
                 "-t", "agentmesh-relay:dev",
                 "-f", agtDockerfile,
-                agtRepo,
+                repoRoot,
               ], { stdio: "pipe" });
             }
             if (!(await haveImage("agentmesh-registry:dev"))) {
@@ -1280,7 +1278,7 @@ Notes:
                 "--build-arg", "COMPONENT=registry",
                 "-t", "agentmesh-registry:dev",
                 "-f", agtDockerfile,
-                agtRepo,
+                repoRoot,
               ], { stdio: "pipe" });
             }
           }
@@ -1343,7 +1341,8 @@ Notes:
           for (let i = 0; i < 30; i++) {
             try {
               await execa("docker", [
-                "exec", AGT_REGISTRY, "curl", "-sf",
+                "exec", AGT_REGISTRY, "python3", "-c",
+                "import sys,urllib.request; urllib.request.urlopen(sys.argv[1],timeout=5).close()",
                 `http://localhost:${meshPorts.registry}${meshPorts.healthPath}`,
               ], { stdio: "pipe" });
               agtReady = true;
@@ -1757,7 +1756,7 @@ Notes:
 
         section("Environment");
         kvLine("OS", "Azure Linux 3.0");
-        kvLine("OpenClaw", "2026.3.13");
+        kvLine("OpenClaw baseline", DEFAULT_OPENCLAW_VERSION);
         kvLine(
           "Model",
           `${model} (${isGithubModelsMode ? "GitHub Models" : isCopilotMode ? "GitHub Copilot" : "Azure OpenAI"})`,

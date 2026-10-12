@@ -30,6 +30,7 @@ import { requireBundledAsset } from "../lib/repo-assets.js";
 import { RUNTIME_IMAGE_TARGETS } from "../lib/image-targets.js";
 import { connectDeploymentTarget } from "../lib/deployment-target.js";
 import { restartController, restartSandboxes } from "../lib/deployment-rollout.js";
+import { restartOwnedMetrics } from "../lib/metrics-image-apply.js";
 import { assertControllerMutationAllowed, PrivateRootUpgradeBlocked } from "../lib/private-root-upgrade-guard.js";
 import { inspectNamespaceOwnership } from "../lib/namespace-ownership.js";
 import { assertRollbackSafe, assertSafeMutation } from "../lib/sre-authority.js";
@@ -164,6 +165,10 @@ export function buildHelmUpgradeArgs(
     "--create-namespace",
     "--reuse-values",
     "--set", `controller.image.repository=${ctx.acrLoginServer}/kars-controller`,
+    "--set", `metricsServer.image.repository=${ctx.acrLoginServer}/kars-metrics-server`,
+    "--set", `metricsServer.image.tag=${tag}`,
+    "--set", `headlamp.image.repository=${ctx.acrLoginServer}/kars-headlamp`,
+    "--set", `headlamp.image.tag=${tag}`,
     "--set", `controller.image.tag=${tag}`,
     "--set", `inferenceRouter.image.repository=${ctx.acrLoginServer}/kars-inference-router`,
     "--set", `inferenceRouter.image.tag=${tag}`,
@@ -805,6 +810,7 @@ export async function rolloutRestartAll(execa: Execa, installation?: MeshInstall
   const mesh = installation ?? await inspectMeshInstallation(execa);
   await restartMesh(execa, mesh);
   await restartController(execa);
+  await restartOwnedMetrics(execa);
   await restartSandboxes(execa);
 }
 

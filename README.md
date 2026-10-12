@@ -239,6 +239,13 @@ git clone https://github.com/Azure/kars.git && cd kars
 cd cli && npm ci && npm run build && npm link && cd ..
 kars dev   # builds the images locally for your architecture
 ```
+
+Source controller/router builds on non-Linux hosts use the existing
+`Dockerfile.multistage` recipes with the repository root as their build context.
+Keep `shared/` and the controller's embedded `deploy/helm/kars/` admission files
+in that context. Check these inputs without compiling or starting Docker with
+`python3 -m unittest ci.test_rust_image_context`; CI runs the same check.
+
 </details>
 
 On first run, `kars dev` shows a three-way provider picker — **GitHub Copilot** (default; one device-code login, no Azure account), **Azure AI Foundry / Azure OpenAI** (full feature set: Memory Store, agents, Content Safety), or **GitHub Models** (free, PAT-only, smaller context). Your choice is saved to `~/.kars/config.json` and reused on later runs; switch with `kars credentials`. Full walkthrough: **[Getting started → Launch a sandbox](docs/getting-started.md#12-launch-a-sandbox)**.

@@ -7,7 +7,7 @@ use std::collections::{BTreeSet, HashSet};
 
 use crate::kars::cluster::Cluster;
 use crate::providers::signing::sha256;
-use crate::routes::teams::read_task_list;
+use crate::routes::teams::read_tasks;
 
 use super::github::github_get_json;
 use super::intake::source_id;
@@ -277,6 +277,7 @@ pub(super) fn review_followup_task(
         done_at: None,
         stuck_since: None,
         assignment_nonce: None,
+        ..Default::default()
     })
 }
 
@@ -318,6 +319,7 @@ pub(super) fn dedupe_followup_task(
         done_at: None,
         stuck_since: None,
         assignment_nonce: None,
+        ..Default::default()
     })
 }
 
@@ -326,9 +328,13 @@ pub(super) async fn collect_review_items(
     client: &reqwest::Client,
     token: &str,
     config: &EngineeringSourceConfig,
+    team: &crate::kars::team::KarsTeam,
     observed_at: &str,
 ) -> (Vec<EngineeringReviewItem>, Vec<TeamTaskDto>, Vec<String>) {
-    let backlog = read_task_list(&cluster.read_team_tasks(&config.team_name).await);
+    let backlog = match read_tasks(cluster, team).await {
+        Ok(backlog) => backlog,
+        Err(error) => return (Vec::new(), Vec::new(), vec![error.to_string()]),
+    };
     let configured_repos = config
         .repos
         .iter()

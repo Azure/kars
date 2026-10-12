@@ -26,6 +26,7 @@ COPY a2a-gateway/ a2a-gateway/
 COPY kars-a2a-core/ kars-a2a-core/
 COPY eval-corpus/ eval-corpus/
 COPY conformance-runner/ conformance-runner/
+COPY shared/ shared/
 COPY tests/ tests/
 
 # Cache-bust: changing this ARG invalidates the cargo build layer

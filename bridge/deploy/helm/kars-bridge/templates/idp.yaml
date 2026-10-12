@@ -1,5 +1,47 @@
 {{/* Copyright (c) Microsoft Corporation.
-Licensed under the MIT License. */}}{{- if .Values.idp.enabled }}
+Licensed under the MIT License. */}}
+{{- if not (kindIs "bool" .Values.networkPolicy.dexApiServerIngress) }}
+{{- fail "networkPolicy.dexApiServerIngress must be a boolean" }}
+{{- end }}
+{{- if .Values.networkPolicy.dexApiServerIngress }}
+{{- if not (and .Values.networkPolicy.create .Values.idp.enabled .Values.idp.dex.tls.enabled) }}
+{{- fail "networkPolicy.dexApiServerIngress requires networkPolicy.create, idp.enabled and idp.dex.tls.enabled" }}
+{{- end }}
+{{- if not (.Capabilities.APIVersions.Has "cilium.io/v2/CiliumNetworkPolicy") }}
+{{- fail "networkPolicy.dexApiServerIngress requires the CiliumNetworkPolicy API" }}
+{{- end }}
+{{- end }}
+{{- if .Values.idp.enabled }}
+{{- $tls := .Values.idp.dex.tls | default dict }}
+{{- $headlamp := .Values.idp.headlampClient | default dict }}
+{{- range $option := list (dict "name" "idp.dex.tls" "value" $tls) (dict "name" "idp.headlampClient" "value" $headlamp) }}
+{{- if and (hasKey $option.value "enabled") (not (kindIs "bool" $option.value.enabled)) }}
+{{- fail (printf "%s.enabled must be a boolean" $option.name) }}
+{{- end }}
+{{- end }}
+{{- if or $tls.enabled $headlamp.enabled }}
+{{- if not (regexMatch "^https://[^/?#@[:space:]]+(/[^?#[:space:]]*)?$" .Values.idp.issuer) }}
+{{- fail "idp.issuer must be HTTPS when Dex TLS or the Headlamp client is enabled" }}
+{{- end }}
+{{- end }}
+{{- if and $tls.enabled (not $tls.secretName) }}
+{{- fail "idp.dex.tls.secretName must reference an existing TLS Secret" }}
+{{- end }}
+{{- if $headlamp.enabled }}
+{{- if not (trim (required "idp.headlampClient.clientID is required" $headlamp.clientID)) }}
+{{- fail "idp.headlampClient.clientID must not be blank" }}
+{{- end }}
+{{- if eq $headlamp.clientID .Values.idp.clientId }}
+{{- fail "idp.headlampClient.clientID must differ from the Bridge client ID" }}
+{{- end }}
+{{- $secret := $headlamp.clientSecret | default dict }}
+{{- if not (and $secret.name $secret.key) }}
+{{- fail "idp.headlampClient.clientSecret.name and key must reference an existing Secret" }}
+{{- end }}
+{{- if not (regexMatch "^(https://[^/?#@[:space:]]+|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?)/oidc-callback$" (required "idp.headlampClient.callbackURL is required" $headlamp.callbackURL)) }}
+{{- fail "idp.headlampClient.callbackURL must be HTTPS /oidc-callback (HTTP only on loopback)" }}
+{{- end }}
+{{- end }}
 # kars Bridge — in-cluster IdP (Dex) for multi-user SSO.
 #
 # WHY THIS EXISTS: colleagues reach the Bridge over a single
@@ -29,13 +71,25 @@ data:
     # resolve the authorize/login redirects.
     issuer: {{ .Values.idp.issuer | quote }}
     storage: { type: memory }
-    web: { http: 0.0.0.0:5556 }
+    web:
+      http: 0.0.0.0:5556
+      {{- if $tls.enabled }}
+      https: 0.0.0.0:5557
+      tlsCert: /etc/dex-tls/tls.crt
+      tlsKey: /etc/dex-tls/tls.key
+      {{- end }}
     oauth2: { skipApprovalScreen: true }
     staticClients:
       - id: {{ .Values.idp.clientId | quote }}
         name: kars Bridge
         secretEnv: DEX_CLIENT_SECRET
         redirectURIs: {{ .Values.idp.redirectURIs | toJson }}
+      {{- if $headlamp.enabled }}
+      - id: {{ $headlamp.clientID | quote }}
+        name: kars Headlamp
+        secretEnv: DEX_HEADLAMP_CLIENT_SECRET
+        redirectURIs: [{{ $headlamp.callbackURL | quote }}]
+      {{- end }}
     enablePasswordDB: {{ .Values.idp.dex.enablePasswordDB }}
     {{- with .Values.idp.dex.staticPasswords }}
     staticPasswords:
@@ -71,6 +125,9 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 1001
+        {{- if $tls.enabled }}
+        fsGroup: 1001
+        {{- end }}
         seccompProfile:
           type: RuntimeDefault
       {{- with .Values.global.imagePullSecrets }}
@@ -88,8 +145,19 @@ spec:
                 secretKeyRef:
                   name: {{ .Values.idp.secretName }}
                   key: client-secret
+            {{- if $headlamp.enabled }}
+            - name: DEX_HEADLAMP_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $headlamp.clientSecret.name | quote }}
+                  key: {{ $headlamp.clientSecret.key | quote }}
+            {{- end }}
           ports:
             - containerPort: 5556
+            {{- if $tls.enabled }}
+            - name: https
+              containerPort: 5557
+            {{- end }}
           securityContext:
             allowPrivilegeEscalation: false
             capabilities: { drop: ["ALL"] }
@@ -97,10 +165,26 @@ spec:
             - name: config
               mountPath: /etc/dex
               readOnly: true
+            {{- if $tls.enabled }}
+            - name: tls
+              mountPath: /etc/dex-tls
+              readOnly: true
+            {{- end }}
       volumes:
         - name: config
           configMap:
             name: dex
+        {{- if $tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ $tls.secretName | quote }}
+            defaultMode: 288
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        {{- end }}
 ---
 apiVersion: v1
 kind: Service
@@ -111,12 +195,20 @@ metadata:
     {{- include "kars-bridge.labels" . | nindent 4 }}
     app: dex
 spec:
+  {{- with .Values.idp.dex.clusterIP }}
+  clusterIP: {{ . | quote }}
+  {{- end }}
   selector:
     app: dex
   ports:
     - name: http
       port: 5556
       targetPort: 5556
+    {{- if $tls.enabled }}
+    - name: https
+      port: 5557
+      targetPort: https
+    {{- end }}
 {{- if .Values.networkPolicy.create }}
 ---
 # kars ships a kars-system-default-deny that drops pod-to-pod on non-allowlisted
@@ -141,5 +233,36 @@ spec:
       ports:
         - port: 5556
           protocol: TCP
+        {{- if $tls.enabled }}
+        - port: 5557
+          protocol: TCP
+        {{- end }}
+{{- if .Values.networkPolicy.dexApiServerIngress }}
+---
+apiVersion: cilium.io/v2
+kind: CiliumNetworkPolicy
+metadata:
+  name: {{ .Release.Name }}-dex-apiserver
+  namespace: {{ include "kars-bridge.namespace" . }}
+  labels:
+    {{- include "kars-bridge.labels" . | nindent 4 }}
+spec:
+  endpointSelector:
+    matchLabels:
+      app: dex
+  ingress:
+    - fromEntities: ["kube-apiserver"]
+      toPorts:
+        - ports:
+            - port: "5557"
+              protocol: TCP
+    - fromNodes:
+        - matchLabels:
+            node-role.kubernetes.io/control-plane: ""
+      toPorts:
+        - ports:
+            - port: "5557"
+              protocol: TCP
+{{- end }}
 {{- end }}
 {{- end }}

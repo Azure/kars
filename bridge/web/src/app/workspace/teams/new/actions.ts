@@ -47,9 +47,22 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
   // (audit f41). An explicit Name still wins.
   let name = slugify(String(form.get("name") ?? ""));
   if (!name) name = slugify(displayName || charter);
-  const parsedBudget = parseTeamBudget(form.get("budget_tokens"), form.get("budget_scope"));
+  const parsedBudget = parseTeamBudget(form.get("budget_tokens"), form.get("budget_scope"), form.get("budget_usd_micros"));
   if (parsedBudget.error !== null) return { error: parsedBudget.error };
   const tier = Number(form.get("tier") ?? 3);
+  const ceilingRaw = String(form.get("authority_ceiling") ?? "").trim();
+  const depthRaw = String(form.get("delegation_depth") ?? "").trim();
+  const authorityCeiling = ceilingRaw ? Number(ceilingRaw) : undefined;
+  const delegationDepth = depthRaw ? Number(depthRaw) : undefined;
+  if (!Number.isInteger(tier) || tier < 1 || tier > 5) {
+    return { error: "Autonomy tier must be an integer from 1 to 5." };
+  }
+  if (authorityCeiling !== undefined && (!Number.isInteger(authorityCeiling) || authorityCeiling < 1 || authorityCeiling > tier)) {
+    return { error: "Authority ceiling must be a positive integer no greater than tier." };
+  }
+  if (delegationDepth !== undefined && (!Number.isInteger(delegationDepth) || delegationDepth < 0 || delegationDepth > 2147483647)) {
+    return { error: "Delegation depth must be a non-negative 32-bit integer." };
+  }
   const cadence = Number(form.get("cadence") ?? 0);
   const lifecycleMode = String(form.get("lifecycle_mode") ?? "resourceOptimized") as TeamLifecycleMode;
   const warmIdleSeconds = Math.min(
@@ -143,6 +156,8 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
   try {
     await createTeam(defaultNamespace(), {
       name, charter, tier,
+      authority_ceiling: authorityCeiling,
+      delegation_depth: delegationDepth,
       budget: parsedBudget.budget,
       display_name: displayName || undefined,
       cadence_minutes: cadence || undefined,
@@ -150,6 +165,7 @@ export async function createTeamAction(_p: NewTeamState, form: FormData): Promis
       warm_idle_seconds: lifecycleMode === "resourceOptimized" ? warmIdleSeconds : undefined,
       reporting_to: reporting || undefined,
       tool_policy: toolPolicy || undefined,
+      pin_tool_policy: form.get("pin_tool_policy") === "on",
       runtime: runtime || undefined,
       model: model || undefined,
       model_fallbacks: modelFallbacks,

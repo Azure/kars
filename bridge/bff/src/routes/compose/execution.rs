@@ -129,6 +129,16 @@ pub(crate) fn validate_execution_plan(
     crate::kars::task::execution_plan::validate_execution_plan(&plan.clone().into_crd())
 }
 
+pub(crate) fn validate_execution_plan_for_launch(
+    plan: &crate::routes::tasks::ExecutionPlanDto,
+) -> Result<(), String> {
+    crate::kars::task::execution_plan::validate_activation(
+        Some(&plan.clone().into_crd()),
+        None,
+        true,
+    )
+}
+
 fn parse_execution_plan_result(
     json: &serde_json::Value,
 ) -> Result<crate::routes::tasks::ExecutionPlanDto, String> {

@@ -58,7 +58,14 @@ async fn recheck(client: &Client, prepared: &Prepared, runtime: &workload::Workl
         .get_metadata(&prepared.task.name_any())
         .await
         .map_err(|e| api_error("recheck binding Task", e))?;
-    same_snapshot(&prepared.task.metadata, &task.metadata)
+    same_snapshot(&prepared.task.metadata, &task.metadata)?;
+    let grant = crate::reviewed_execution::grant(client, &prepared.task)
+        .await
+        .map_err(|_| Error::NotReady("reviewed authority changed before publication"))?;
+    if grant != prepared.reviewed {
+        return Err(Error::NotReady("reviewed contract changed"));
+    }
+    Ok(())
 }
 
 fn owned(map: &ConfigMap, desired: &ConfigMap) -> Result<()> {
@@ -91,21 +98,23 @@ pub(super) async fn publish(client: &Client, prepared: &Prepared) -> Result<()> 
         .map_err(|_| Error::Invalid("applied mission Deployment is outside sandbox custody"))?;
     // Check the actual applied identity environment, not just the desired manifest.
     let mut expected = deployment.clone();
+    let container_name = super::runtime_container(&prepared.task, &prepared.sandbox)?;
     let env = expected
         .spec
         .as_mut()
         .and_then(|s| s.template.spec.as_mut())
-        .and_then(|p| p.containers.iter_mut().find(|c| c.name == "openclaw"))
-        .ok_or(Error::Invalid("applied OpenClaw container missing"))?
+        .and_then(|p| p.containers.iter_mut().find(|c| c.name == container_name))
+        .ok_or(Error::Invalid("applied selected runtime container missing"))?
         .env
         .get_or_insert_with(Vec::new);
     env.retain(|e| !e.name.starts_with("KARS_MISSION_"));
-    super::project(
+    super::project_contract(
         &mut expected,
         &prepared.task,
         &prepared.sandbox,
         &prepared.runtime_root.uid,
         &prepared.dispatcher_did,
+        prepared.reviewed.as_ref(),
     )?;
     if deployment.spec != expected.spec {
         return Err(Error::NotReady(
@@ -113,7 +122,7 @@ pub(super) async fn publish(client: &Client, prepared: &Prepared) -> Result<()> 
         ));
     }
     let runtime = workload::read(client, deployment).await?;
-    let binding = json!({
+    let mut binding = json!({
         "taskName": prepared.task.name_any(), "taskUid": identity(&prepared.task.metadata)?.0,
         "sandboxName": prepared.sandbox.name_any(), "sandboxUid": identity(&prepared.sandbox.metadata)?.0,
         "namespaceUid": identity(&namespace.metadata)?.0,
@@ -125,6 +134,10 @@ pub(super) async fn publish(client: &Client, prepared: &Prepared) -> Result<()> 
         "dispatcherDid": prepared.dispatcher_did,
         "admission": super::admission::for_task(&prepared.task)?,
     });
+    if let Some(grant) = &prepared.reviewed {
+        binding["reviewed"] =
+            serde_json::to_value(grant).map_err(|_| Error::Invalid("invalid reviewed binding"))?;
+    }
     let name = format!("kars-mission-binding-{}", prepared.task.name_any());
     if name.len() > 253 {
         return Err(Error::Invalid("mission binding name too long"));

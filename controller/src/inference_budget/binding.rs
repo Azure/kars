@@ -17,6 +17,7 @@ use crate::{
     inference_budget_contract::{
         AccountReference, BudgetError, BudgetScope, Limits, ResourceIdentity, RootIdentity,
         RootKind, TaskAuthority, TaskBudgetBinding,
+        ledger::{Ledger, Mutation},
     },
     kars_task::{KarsTask, TaskEnvelope},
     kars_team::KarsTeam,
@@ -422,6 +423,7 @@ pub async fn ensure_task(
             .await?;
     }
     let mut output = None;
+    let paused_team = team.as_ref().is_some_and(|team| team.spec.paused);
     for (index, node) in nodes.iter().enumerate() {
         let authority = TaskAuthority {
             task: resource(node)?,
@@ -431,46 +433,11 @@ pub async fn ensure_task(
             effective_authorization: lineage.nodes[index].effective_authorization.clone(),
             limits: limits(&node.spec.envelope)?,
         };
-        let current = store.read(&root, &account.uid).await?;
-        let old = current
-            .status
-            .as_ref()
-            .and_then(|status| status.ledger.as_ref())
-            .and_then(|ledger| ledger.nodes.get(&authority.task.uid));
-        match old {
-            Some(old) if old.authority != authority => {
-                store
-                    .transact(&root, &account.uid, |ledger| {
-                        ledger.close_subtree(&authority.task.uid)
-                    })
-                    .await?;
-                store
-                    .transact(&root, &account.uid, |ledger| {
-                        ledger.update_authority(authority.clone())
-                    })
-                    .await?;
-                store
-                    .transact(&root, &account.uid, |ledger| {
-                        ledger.resume_task(&authority.task.uid, &authority.authorization_digest)
-                    })
-                    .await?;
-            }
-            Some(old) if !old.active => {
-                store
-                    .transact(&root, &account.uid, |ledger| {
-                        ledger.resume_task(&authority.task.uid, &authority.authorization_digest)
-                    })
-                    .await?;
-            }
-            Some(_) => {}
-            None => {
-                store
-                    .transact(&root, &account.uid, |ledger| {
-                        ledger.register_task(authority.clone())
-                    })
-                    .await?;
-            }
-        }
+        store
+            .transact(&root, &account.uid, |ledger| {
+                bind_authority(ledger, &authority, paused_team)
+            })
+            .await?;
         let binding = task_binding(
             node,
             index.checked_sub(1).map(|index| &nodes[index]),
@@ -482,4 +449,35 @@ pub async fn ensure_task(
         output = Some(binding);
     }
     output.ok_or_else(|| BudgetError::Identity.into())
+}
+
+pub(super) fn bind_authority(
+    ledger: &Ledger,
+    authority: &TaskAuthority,
+    paused_team: bool,
+) -> Result<Mutation<()>, BudgetError> {
+    let mut next = match ledger.nodes.get(&authority.task.uid) {
+        Some(old) if old.authority != *authority => {
+            ledger
+                .close_subtree(&authority.task.uid)?
+                .next
+                .update_authority(authority.clone())?
+                .next
+        }
+        Some(_) if paused_team => ledger.close_subtree(&authority.task.uid)?.next,
+        Some(_) => ledger.clone(),
+        None if paused_team => ledger.register_dormant_task(authority.clone())?.next,
+        None => ledger.register_task(authority.clone())?.next,
+    };
+    if !paused_team && !next.nodes[&authority.task.uid].active {
+        next = next
+            .resume_task(&authority.task.uid, &authority.authorization_digest)?
+            .next;
+    }
+    next.validate()?;
+    Ok(Mutation {
+        changed: next != *ledger,
+        next,
+        value: (),
+    })
 }

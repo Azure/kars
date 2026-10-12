@@ -167,6 +167,7 @@ mod tests {
             decision: "allow".into(),
             previous_hash: if seq == 0 { "".into() } else { "abcd".into() },
             hash: format!("hash-{seq}"),
+            skill_audit_metadata: None,
         }
     }
 

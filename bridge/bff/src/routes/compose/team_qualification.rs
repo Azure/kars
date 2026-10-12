@@ -52,6 +52,12 @@ fn team_proposal_qualification(
     proposal: &ComposeTeamProposal,
     options: &crate::routes::options::Options,
 ) -> Result<(), String> {
+    if let Some(error) = super::team::team_plan_roster_error(proposal) {
+        return Err(error);
+    }
+    if let Some(plan) = &proposal.execution_plan {
+        super::validate_execution_plan_for_launch(plan)?;
+    }
     let principal_runtime = "OpenClaw";
     let principal_route = proposal
         .model
@@ -135,7 +141,7 @@ fn team_proposal_qualification(
             &principal_route.1,
             &principal_route_label,
             &format!("MCP server `{server}`"),
-            crate::routes::options::mcp_server_qualified_for_route(
+            crate::routes::options::mcp_server_admitted_for_route(
                 principal_runtime,
                 &principal_route.0,
                 &principal_route.1,
@@ -158,7 +164,7 @@ fn team_proposal_qualification(
             &principal_route.1,
             &principal_route_label,
             &format!("memory `{memory}`"),
-            crate::routes::options::memory_binding_qualified_for_route(
+            crate::routes::options::memory_binding_admitted_for_route(
                 principal_runtime,
                 &principal_route.0,
                 &principal_route.1,
@@ -192,13 +198,14 @@ fn team_proposal_qualification(
             role.runtime.trim()
         };
         let role_required = team_role_qualification_requirements(plan, &role.name);
+        let role_tokens = plan.role_qualification_budget(&role.name, None);
         if !crate::routes::options::route_admitted(
             runtime,
             provider,
             deployment,
             &role_required,
             1,
-            None,
+            role_tokens,
         )? {
             let missing = crate::routes::options::route_qualification_gap(
                 runtime,
@@ -206,7 +213,7 @@ fn team_proposal_qualification(
                 deployment,
                 &role_required,
                 1,
-                None,
+                role_tokens,
             )?;
             return Err(format!(
                 "role `{}` route {} lacks retained qualification for [{}]",
@@ -227,7 +234,7 @@ fn team_proposal_qualification(
                     deployment,
                     &role_route_label,
                     &format!("role `{}` MCP server `{server}`", role.name),
-                    crate::routes::options::mcp_server_qualified_for_route(
+                    crate::routes::options::mcp_server_admitted_for_route(
                         runtime, provider, deployment, option,
                     ),
                     || {
@@ -250,7 +257,7 @@ fn team_proposal_qualification(
                 deployment,
                 &role_route_label,
                 &format!("role `{}` memory `{memory}`", role.name),
-                crate::routes::options::memory_binding_qualified_for_route(
+                crate::routes::options::memory_binding_admitted_for_route(
                     runtime, provider, deployment, option,
                 ),
                 || {
@@ -271,7 +278,7 @@ fn team_proposal_qualification(
                 deployment,
                 &role_route_label,
                 &format!("role `{}` skill `{skill}`", role.name),
-                crate::routes::options::skill_version_qualified_for_route(
+                crate::routes::options::skill_version_admitted_for_route(
                     runtime, provider, deployment, option,
                 ),
                 || {
@@ -323,7 +330,6 @@ pub(super) fn normalize_team_proposal_route(
     {
         proposal.model = route.clone();
         for role in &mut proposal.roles {
-            role.runtime.clear();
             role.model.clear();
         }
         if team_proposal_qualification(proposal, options).is_ok() {
@@ -347,16 +353,19 @@ pub(super) fn admitted_team_fallbacks(
     proposal: &ComposeTeamProposal,
     options: &crate::routes::options::Options,
 ) -> Vec<String> {
-    let mut candidates = options
-        .models
+    let mut seen = std::collections::HashSet::new();
+    proposal
+        .model_fallbacks
         .iter()
-        .map(|model| format!("{}::{}", model.provider, model.deployment))
-        .filter(|route| route != &proposal.model)
-        .collect::<Vec<_>>();
-    candidates.sort();
-    candidates.dedup();
-    candidates
-        .into_iter()
+        .cloned()
+        .filter(|route| {
+            route != &proposal.model
+                && options
+                    .models
+                    .iter()
+                    .any(|model| *route == format!("{}::{}", model.provider, model.deployment))
+                && seen.insert(route.clone())
+        })
         .filter(|route| {
             let mut trial = proposal.clone();
             trial.model = route.clone();

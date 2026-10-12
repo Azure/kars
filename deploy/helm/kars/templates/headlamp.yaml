@@ -1,0 +1,228 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- $headlamp := .Values.headlamp | default dict }}
+{{- if $headlamp.enabled }}
+{{- $oidc := $headlamp.oidc | default dict }}
+{{- $oidcPort := 443 }}
+{{- if and (hasKey $oidc "enabled") (not (kindIs "bool" $oidc.enabled)) }}
+{{- fail "headlamp.oidc.enabled must be a boolean" }}
+{{- end }}
+{{- if $oidc.enabled }}
+{{- $issuerURL := required "headlamp.oidc.issuerURL is required" $oidc.issuerURL }}
+{{- if not (regexMatch "^https://[^/?#@[:space:]]+(/[^?#[:space:]]*)?$" $issuerURL) }}
+{{- fail "headlamp.oidc.issuerURL must be an HTTPS issuer without credentials, query or fragment" }}
+{{- end }}
+{{- $issuer := urlParse $issuerURL }}
+{{- $port := regexFind ":[0-9]+$" $issuer.host | trimPrefix ":" }}
+{{- if $port }}{{- $oidcPort = int $port }}{{- end }}
+{{- if or (lt $oidcPort 1) (gt $oidcPort 65535) }}
+{{- fail "headlamp.oidc.issuerURL port must be between 1 and 65535" }}
+{{- end }}
+{{- if not (trim (required "headlamp.oidc.clientID is required" $oidc.clientID)) }}
+{{- fail "headlamp.oidc.clientID must not be blank" }}
+{{- end }}
+{{- $secret := $oidc.clientSecret | default dict }}
+{{- if not (and $secret.name $secret.key) }}
+{{- fail "headlamp.oidc.clientSecret.name and key must reference an existing Secret in headlamp" }}
+{{- end }}
+{{- $callback := required "headlamp.oidc.callbackURL is required" $oidc.callbackURL }}
+{{- if not (regexMatch "^(https://[^/?#@[:space:]]+|http://(localhost|127\\.0\\.0\\.1|\\[::1\\])(:[0-9]+)?)/oidc-callback$" $callback) }}
+{{- fail "headlamp.oidc.callbackURL must be an HTTPS /oidc-callback URL (HTTP only on loopback)" }}
+{{- end }}
+{{- end }}
+{{- $ownerID := printf "%s/%s" .Release.Namespace .Release.Name }}
+{{- range $resource := list (dict "api" "v1" "kind" "Namespace" "namespace" "") (dict "api" "apps/v1" "kind" "Deployment" "namespace" "headlamp") }}
+{{- $existing := lookup $resource.api $resource.kind $resource.namespace "headlamp" }}
+{{- if $existing }}
+{{- $annotations := $existing.metadata.annotations | default dict }}
+{{- $marker := get $annotations "kars.azure.com/headlamp-owner" }}
+{{- $release := get $annotations "meta.helm.sh/release-name" }}
+{{- $namespace := get $annotations "meta.helm.sh/release-namespace" }}
+{{- $helmOwned := and (eq $release $.Release.Name) (eq $namespace $.Release.Namespace) }}
+{{- if not (and (or (eq $marker $ownerID) $helmOwned) (or (not $marker) (eq $marker $ownerID)) (or (not (or $release $namespace)) $helmOwned)) }}
+{{- fail "Headlamp exists outside this Core installation; set headlamp.enabled=false to keep it external instead of adopting it" }}
+{{- end }}
+{{- end }}
+{{- end }}
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: headlamp
+  labels:
+    app.kubernetes.io/name: kars-headlamp
+  annotations:
+    helm.sh/resource-policy: keep
+    kars.azure.com/headlamp-owner: {{ $ownerID | quote }}
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: headlamp
+  namespace: headlamp
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: headlamp
+  namespace: headlamp
+  labels:
+    app.kubernetes.io/name: headlamp
+    app.kubernetes.io/part-of: kars
+  annotations:
+    kars.azure.com/headlamp-plugin: bundled
+    kars.azure.com/headlamp-owner: {{ $ownerID | quote }}
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: headlamp
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: headlamp
+        app.kubernetes.io/part-of: kars
+    spec:
+      serviceAccountName: headlamp
+      automountServiceAccountToken: true
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      {{- with .Values.headlamp.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.headlamp.hostAliases }}
+      hostAliases:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      containers:
+        - name: headlamp
+          image: "{{ .Values.headlamp.image.repository }}:{{ .Values.headlamp.image.tag }}"
+          imagePullPolicy: {{ .Values.headlamp.image.pullPolicy }}
+          args:
+            - -html-static-dir=/headlamp/frontend
+            - -plugins-dir=/headlamp/plugins
+            - -in-cluster
+            - -in-cluster-context-name=main
+            - -session-ttl=3600
+          {{- if $oidc.enabled }}
+          env:
+            - name: HEADLAMP_CONFIG_OIDC_CLIENT_ID
+              value: {{ $oidc.clientID | quote }}
+            - name: HEADLAMP_CONFIG_OIDC_CLIENT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: {{ $oidc.clientSecret.name | quote }}
+                  key: {{ $oidc.clientSecret.key | quote }}
+            - name: HEADLAMP_CONFIG_OIDC_IDP_ISSUER_URL
+              value: {{ $oidc.issuerURL | quote }}
+            - name: HEADLAMP_CONFIG_OIDC_CALLBACK_URL
+              value: {{ $oidc.callbackURL | quote }}
+            - name: HEADLAMP_CONFIG_OIDC_SCOPES
+              value: {{ $oidc.scopes | default "profile,email" | quote }}
+            - name: HEADLAMP_CONFIG_OIDC_USE_PKCE
+              value: "true"
+            - name: HEADLAMP_CONFIG_OIDC_SKIP_TLS_VERIFY
+              value: "false"
+            {{- if $oidc.caConfigMap }}
+            - name: HEADLAMP_CONFIG_OIDC_CA_FILE
+              value: /etc/headlamp/oidc/ca.crt
+            {{- end }}
+          {{- end }}
+          ports:
+            - name: http
+              containerPort: 4466
+          readinessProbe:
+            httpGet:
+              path: /
+              port: http
+          livenessProbe:
+            httpGet:
+              path: /
+              port: http
+            initialDelaySeconds: 10
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          resources:
+            {{- toYaml .Values.headlamp.resources | nindent 12 }}
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+            {{- if and $oidc.enabled $oidc.caConfigMap }}
+            - name: oidc-ca
+              mountPath: /etc/headlamp/oidc
+              readOnly: true
+            {{- end }}
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi
+        {{- if and $oidc.enabled $oidc.caConfigMap }}
+        - name: oidc-ca
+          configMap:
+            name: {{ $oidc.caConfigMap | quote }}
+            defaultMode: 292
+            items:
+              - key: ca.crt
+                path: ca.crt
+        {{- end }}
+      {{- with .Values.headlamp.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.headlamp.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: headlamp
+  namespace: headlamp
+spec:
+  type: ClusterIP
+  selector:
+    app.kubernetes.io/name: headlamp
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: kars-headlamp
+  namespace: headlamp
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/name: headlamp
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: 4466
+  egress:
+    - ports:
+        - protocol: UDP
+          port: 53
+        - protocol: TCP
+          port: 53
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 6443
+        {{- if and $oidc.enabled (ne $oidcPort 443) (ne $oidcPort 6443) }}
+        - protocol: TCP
+          port: {{ $oidcPort }}
+        {{- end }}
+{{- end }}

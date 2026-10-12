@@ -25,15 +25,16 @@
 import { execa } from "execa";
 import chalk from "chalk";
 import * as path from "node:path";
-import { existsSync, mkdtempSync, rmSync, readFileSync, writeFileSync, statSync, readdirSync } from "node:fs";
-import * as os from "node:os";
+import { existsSync, readFileSync, statSync, readdirSync } from "node:fs";
 import { resolveBundledAsset, findRepoRootOrNull } from "../../lib/repo-assets.js";
+import { hasCoreHeadlamp, HEADLAMP_OPERATOR_LOGIN } from "../../lib/headlamp-ownership.js";
+import { installMonitoring } from "./monitoring.js";
+import { monitoringServices } from "../../lib/monitoring-services.js";
 
 /** Pin the same chart version as local-k8s so the kars plugin's
  * pluginLib API stays compatible. Bumping requires re-testing the
  * plugin against the new Headlamp image. */
 export const HEADLAMP_CHART_VERSION = "0.41.0";
-const KPS_CHART_VERSION = "85.3.3";
 
 export interface HeadlampStackOptions {
   /** kubectl context name. e.g. `kars-aks` or `kind-kars`. */
@@ -59,6 +60,10 @@ function kctl(ctx: string, args: string[]): string[] {
  */
 export async function installHeadlamp(opts: HeadlampStackOptions): Promise<void> {
   const { context } = opts;
+  if (await hasCoreHeadlamp(context)) {
+    console.log("  Using Core-managed Headlamp; its image and plugin are updated through Core configuration.");
+    return;
+  }
   try {
     await execa("kubectl", kctl(context, ["create", "namespace", "headlamp"]), { stdio: "pipe" });
   } catch {
@@ -110,6 +115,7 @@ export async function installHeadlamp(opts: HeadlampStackOptions): Promise<void>
  */
 export async function installKarsPlugin(opts: HeadlampStackOptions): Promise<void> {
   const { context } = opts;
+  if (await hasCoreHeadlamp(context)) return;
 
   // Prefer the prebuilt plugin bundled with the CLI (so this works with no
   // repo checkout — npm-installed `kars`). Fall back to a repo checkout,
@@ -242,198 +248,10 @@ ${indent(pkgContent, 4)}
   }
 }
 
-/**
- * Install kube-prometheus-stack + apply our PodMonitors and
- * Grafana dashboards. Labels the `monitoring` namespace with the
- * `app.kubernetes.io/{name,component}` keys the sandbox
- * NetworkPolicy ingress allows scraping from — without these the
- * sandbox router's `:8443` metrics endpoint stays unreachable.
- */
-export async function installPrometheus(opts: HeadlampStackOptions): Promise<void> {
-  const { context } = opts;
-  void opts.repoRoot;
-
-  try {
-    await execa("kubectl", kctl(context, ["create", "namespace", "monitoring"]), { stdio: "pipe" });
-  } catch {
-    /* already exists */
-  }
-  await execa("kubectl", kctl(context, [
-    "label", "namespace", "monitoring",
-    "app.kubernetes.io/name=kars",
-    "app.kubernetes.io/component=system",
-    "--overwrite",
-  ]), { stdio: "pipe" });
-
-  try {
-    await execa("helm", ["repo", "add", "prometheus-community", "https://prometheus-community.github.io/helm-charts"], { stdio: "pipe" });
-  } catch {
-    /* already added */
-  }
-  await execa("helm", ["repo", "update", "prometheus-community"], { stdio: "pipe" });
-
-  const valuesYaml = `
-alertmanager:
-  enabled: false
-
-prometheus:
-  prometheusSpec:
-    retention: 2d
-    podMonitorSelectorNilUsesHelmValues: false
-    serviceMonitorSelectorNilUsesHelmValues: false
-    probeSelectorNilUsesHelmValues: false
-    ruleSelectorNilUsesHelmValues: false
-    resources:
-      requests:
-        cpu: 100m
-        memory: 256Mi
-      limits:
-        memory: 1Gi
-
-grafana:
-  adminPassword: admin
-  defaultDashboardsTimezone: browser
-  service:
-    type: ClusterIP
-  grafana.ini:
-    auth.anonymous:
-      enabled: true
-      org_role: Viewer
-    security:
-      allow_embedding: true
-      cookie_samesite: none
-  sidecar:
-    dashboards:
-      enabled: true
-      label: grafana_dashboard
-      labelValue: "1"
-      searchNamespace: ALL
-  resources:
-    requests:
-      cpu: 50m
-      memory: 128Mi
-
-defaultRules:
-  create: false
-
-kubeApiServer:
-  enabled: true
-kubelet:
-  enabled: true
-kubeControllerManager:
-  enabled: false
-coreDns:
-  enabled: false
-kubeEtcd:
-  enabled: false
-kubeScheduler:
-  enabled: false
-kubeProxy:
-  enabled: false
-`.trimStart();
-
-  const tmpdir = mkdtempSync(path.join(os.tmpdir(), "kars-kps-"));
-  const valuesPath = path.join(tmpdir, "values.yaml");
-  writeFileSync(valuesPath, valuesYaml);
-
-  try {
-    const { stdout } = await execa("helm", [
-      "template",
-      "kps",
-      "prometheus-community/kube-prometheus-stack",
-      "--version", KPS_CHART_VERSION,
-      "--namespace", "monitoring",
-      "--include-crds",
-      "--values", valuesPath,
-    ], { stdio: "pipe" });
-
-    // kube-prometheus-stack renders CRDs AND CRs in the same stream.
-    // `kubectl apply --server-side` racing both can fail with "no matches
-    // for kind Prometheus/ServiceMonitor" because the CR is processed
-    // before the API server has registered the CRD. Split the stream:
-    // apply CRDs first, wait for them to be Established, then apply
-    // the rest. Single source of truth — works on AKS (where the race
-    // is reliably losable) and on kind (where it usually worked
-    // accidentally because of timing).
-    const docs = stdout.split(/^---\s*$/m).filter((d) => d.trim().length > 0);
-    const crdDocs: string[] = [];
-    const otherDocs: string[] = [];
-    const crdNames: string[] = [];
-    for (const doc of docs) {
-      if (/^kind:\s*CustomResourceDefinition\s*$/m.test(doc)) {
-        crdDocs.push(doc);
-        const m = doc.match(/^\s*name:\s*([^\s]+)/m);
-        if (m) crdNames.push(m[1]);
-      } else {
-        otherDocs.push(doc);
-      }
-    }
-
-    if (crdDocs.length > 0) {
-      await execa(
-        "kubectl",
-        kctl(context, ["apply", "-f", "-", "--server-side", "--force-conflicts"]),
-        { input: crdDocs.join("\n---\n"), stdio: ["pipe", "inherit", "inherit"] },
-      );
-      // Wait for each CRD to reach the Established condition so the
-      // API server's discovery cache picks it up before the CR apply.
-      for (const name of crdNames) {
-        try {
-          await execa("kubectl", kctl(context, [
-            "wait", "--for=condition=Established", `crd/${name}`, "--timeout=60s",
-          ]), { stdio: "pipe" });
-        } catch {
-          /* best-effort — some pre-existing CRDs may already be Established under a different name */
-        }
-      }
-    }
-
-    if (otherDocs.length > 0) {
-      await execa(
-        "kubectl",
-        kctl(context, ["apply", "-f", "-", "--server-side", "--force-conflicts"]),
-        { input: otherDocs.join("\n---\n"), stdio: ["pipe", "inherit", "inherit"] },
-      );
-    }
-  } finally {
-    try { rmSync(tmpdir, { recursive: true, force: true }); } catch { /* best-effort */ }
-  }
-
-  try {
-    await execa(
-      "kubectl",
-      kctl(context, ["rollout", "status", "deployment/kps-grafana", "-n", "monitoring", "--timeout=180s"]),
-      { stdio: "inherit" },
-    );
-  } catch {
-    console.warn(chalk.yellow(
-      "  ⚠ Grafana deployment did not become Ready within 180s — observability panels may be empty until 'kubectl get pods -n monitoring' shows kps-grafana Ready.",
-    ));
-  }
-
-  // Resolve monitoring manifests from a repo checkout OR the bundled copy.
-  const monitoringDir = resolveBundledAsset("deploy/monitoring");
-  if (!monitoringDir) {
-    console.warn(chalk.yellow("  ⚠ monitoring manifests not bundled — skipping dashboards"));
-    return;
-  }
-  for (const f of [
-    "podmonitor-sandbox-router.yaml",
-    "agentmesh-json-exporter.yaml",
-    "grafana-dashboard-configmap.yaml",
-  ]) {
-    const p = path.join(monitoringDir, f);
-    if (!existsSync(p)) {
-      console.warn(chalk.yellow(`  ⚠ missing ${f} — skipping`));
-      continue;
-    }
-    await execa(
-      "kubectl",
-      kctl(context, ["apply", "-f", p, "--server-side", "--force-conflicts"]),
-      { stdio: "inherit" },
-    );
-  }
+export async function installPrometheus(opts: HeadlampStackOptions, tools = { kubectl: "kubectl", helm: "helm" }): Promise<void> {
+  await installMonitoring(opts.context, tools);
 }
+
 
 /**
  * Kill any prior port-forward on `localPort` then spawn a fresh
@@ -456,17 +274,19 @@ async function killAndForward(context: string, localPort: number, ns: string, ta
   child.unref();
 }
 
-/** Start headlamp + grafana + prometheus port-forwards detached. */
+/** Start Headlamp and installed monitoring service port-forwards detached. */
 export async function startPortForwards(opts: {
   context: string;
   headlampPort: number;
   grafanaPort: number;
   prometheusPort: number;
-}): Promise<void> {
+}): Promise<{ grafana: boolean; prometheus: boolean }> {
+  const services = await monitoringServices(opts.context);
   await killAndForward(opts.context, opts.headlampPort, "headlamp", "service/headlamp", 80);
-  await killAndForward(opts.context, opts.grafanaPort, "monitoring", "service/kps-grafana", 80);
-  await killAndForward(opts.context, opts.prometheusPort, "monitoring", "service/kps-kube-prometheus-stack-prometheus", 9090);
+  if (services.grafana) await killAndForward(opts.context, opts.grafanaPort, "monitoring", "service/kps-grafana", 80);
+  if (services.prometheus) await killAndForward(opts.context, opts.prometheusPort, "monitoring", "service/kps-kube-prometheus-stack-prometheus", 9090);
   await new Promise((r) => setTimeout(r, 1500));
+  return services;
 }
 
 /** Cross-platform `open <url>`. Best-effort. */
@@ -485,6 +305,10 @@ export async function openBrowser(url: string): Promise<void> {
 /** Mint a 24-hour ServiceAccount token for the headlamp SA so the
  * dashboard can log in. */
 export async function mintHeadlampToken(context: string): Promise<string | null> {
+  if (await hasCoreHeadlamp(context)) {
+    console.log(HEADLAMP_OPERATOR_LOGIN);
+    return null;
+  }
   try {
     const { stdout } = await execa("kubectl", kctl(context, [
       "create", "token", "headlamp",

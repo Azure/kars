@@ -91,6 +91,7 @@ pub(super) fn backlog_task(repo: &str, pr: &GithubPull, created_at: &str) -> Tea
         done_at: None,
         stuck_since: None,
         assignment_nonce: None,
+        ..Default::default()
     }
 }
 
@@ -130,12 +131,13 @@ pub(super) fn legacy_alert_retirement(
         depends_on: Vec::new(),
         acceptance_criteria: Vec::new(),
         review_required: false,
-        status: "done".into(),
+        status: "retired".into(),
         run: None,
         created_at: Some(created_at.to_string()),
         done_at: Some(created_at.to_string()),
         stuck_since: None,
         assignment_nonce: None,
+        ..Default::default()
     }
 }
 
@@ -205,6 +207,7 @@ pub(super) fn alert_backlog_task(
         done_at: None,
         stuck_since: None,
         assignment_nonce: None,
+        ..Default::default()
     }
 }
 

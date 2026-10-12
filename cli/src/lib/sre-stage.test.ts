@@ -1,7 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { copyFileSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -85,12 +85,14 @@ describe("existing action API prerequisite compatibility", () => {
   it("feeds the actual offline Helm render through template staging with the repaired action API first", async () => {
     const f = fixture();
     const execute: Execute = (file, args, options) => file === "helm" && args[0] === "template"
-      ? execa(file, [...args, "--dry-run=client"], { ...options, timeout: 20_000 }) : f.execute(file, args, options);
+      ? execa(file, [...args, "--dry-run=client", "--set", "monitoring.enabled=false",
+        "--set", "datapathWitness.enabled=false"], { ...options, timeout: 20_000 }) : f.execute(file, args, options);
     const root = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
     const directory = mkdtempSync(join(tmpdir(), "kars-sre-stage-"));
     const chart = join(directory, "chart");
     try {
       mkdirSync(join(chart, "templates"), { recursive: true });
+      cpSync(join(root, "charts"), join(chart, "charts"), { recursive: true });
       for (const file of [
         "Chart.yaml", "values.yaml",
         "templates/crd-karssreaction.yaml", "templates/crd-karssreregistration.yaml",

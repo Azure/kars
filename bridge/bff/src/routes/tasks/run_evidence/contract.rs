@@ -6,7 +6,10 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use super::Reply;
-use crate::kars::task::ExecutionPhase;
+use crate::kars::task::{ExecutionPhase, execution_plan::valid_deliverable_name};
+
+const MAX_ARTIFACTS: usize = 16;
+const MAX_ARTIFACT_BYTES: usize = 128 * 1024;
 
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
@@ -94,11 +97,50 @@ fn digest(value: &Value) -> bool {
         })
 }
 
-/// Checks terminal contract integrity, not permission to execute the reviewed plan.
+fn required_outputs(value: &Value) -> Option<Vec<&str>> {
+    let values = value
+        .as_array()
+        .filter(|names| names.len() <= MAX_ARTIFACTS)?;
+    let mut names = values
+        .iter()
+        .map(|v| v.as_str().filter(|name| valid_deliverable_name(name)))
+        .collect::<Option<Vec<_>>>()?;
+    names.sort_unstable();
+    if names.windows(2).any(|pair| pair[0] == pair[1]) {
+        return None;
+    }
+    Some(names)
+}
+
+fn artifacts_valid(reply: &Reply) -> bool {
+    let fields = &reply.extensions;
+    if fields.get("artifactFormat").is_some_and(|v| v != "text-v1") {
+        return false;
+    }
+    let Some(value) = fields.get("artifacts") else {
+        return true;
+    };
+    reply.status == "succeeded"
+        && fields.get("artifactFormat").is_some_and(|v| v == "text-v1")
+        && value.as_object().is_some_and(|artifacts| {
+            artifacts.len() <= MAX_ARTIFACTS
+                && artifacts.iter().all(|(name, content)| {
+                    valid_deliverable_name(name)
+                        && content
+                            .as_str()
+                            .is_some_and(|s| !s.trim_matches(ecmascript_whitespace).is_empty())
+                })
+        })
+        && serde_json::to_vec(value).is_ok_and(|bytes| bytes.len() <= MAX_ARTIFACT_BYTES)
+}
+
+/// Checks reply contract integrity, not permission to execute the reviewed plan.
 /// Replies carry input digests only; upstream document bytes belong to assignments.
 pub(super) fn valid(reply: &Reply) -> Option<()> {
     let fields = &reply.extensions;
     if fields.contains_key("inputArtifacts")
+        || (reply.version != 4 && fields.contains_key("requiredOutputs"))
+        || !artifacts_valid(reply)
         || reply
             .evidence
             .as_ref()
@@ -119,7 +161,20 @@ pub(super) fn valid(reply: &Reply) -> Option<()> {
                 return None;
             }
         }
-        2 | 3 => {
+        2 | 3 | 4 => {
+            if reply.version == 4 {
+                let required = required_outputs(fields.get("requiredOutputs")?)?;
+                if reply.status == "succeeded"
+                    && required.iter().any(|name| {
+                        !fields
+                            .get("artifacts")
+                            .and_then(Value::as_object)
+                            .is_some_and(|artifacts| artifacts.contains_key(*name))
+                    })
+                {
+                    return None;
+                }
+            }
             let phase = phase(fields.get("reviewedPhase")?)?;
             if fields.get("phaseDigest")?.as_str()? != phase_digest(&phase)? {
                 return None;
@@ -128,9 +183,10 @@ pub(super) fn valid(reply: &Reply) -> Option<()> {
                 if fields.contains_key("inputDigest") {
                     return None;
                 }
-            } else if !digest(fields.get("inputDigest")?)
-                || phase.max_tool_calls == 0
-                || !phase.capabilities.iter().any(|c| c == "filesystem-read")
+            } else if (reply.version == 3 || fields.contains_key("inputDigest"))
+                && (!digest(fields.get("inputDigest")?)
+                    || phase.max_tool_calls == 0
+                    || !phase.capabilities.iter().any(|c| c == "filesystem-read"))
             {
                 return None;
             }

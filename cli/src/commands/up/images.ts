@@ -21,7 +21,7 @@
 import { execa } from "execa";
 import * as path from "path";
 import type { Stepper } from "../../stepper.js";
-import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
+import { AGT_MESH_DOCKERFILE, ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
 import { stageRustBinaries } from "../../lib/stage-rust-bin.js";
 import { isPhaseSkippable, markPhaseDone, type ResumeTopology } from "./resume.js";
 import { assertControllerMutationAllowed } from "../../lib/private-root-upgrade-guard.js";
@@ -82,6 +82,8 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     // source GHCR repo (version-tagged) → target ACR repo (:latest)
     const releaseImages: Array<{ src: string; target: string; required: boolean }> = [
       { src: `${GHCR}/kars-controller:${releaseVersion}`, target: "kars-controller:latest", required: true },
+      { src: `${GHCR}/kars-metrics-server:${releaseVersion}`, target: "kars-metrics-server:latest", required: true },
+      { src: `${GHCR}/kars-headlamp:${releaseVersion}`, target: "kars-headlamp:latest", required: true },
       { src: `${GHCR}/kars-inference-router:${releaseVersion}`, target: "kars-inference-router:latest", required: true },
       { src: `${GHCR}/openclaw-sandbox:${releaseVersion}`, target: "openclaw-sandbox:latest", required: true },
       // Mesh images: GHCR publishes `kars-agentmesh-*`; the agentmesh
@@ -132,6 +134,9 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
   } else if (options.build) {
     // Developer mode: build locally and push
     stepper.step("Building and pushing images...");
+    stepper.update("Bootstrapping AGT toolkit + Python wheels...");
+    const agtRepo = await ensureAgtRepo(undefined, repoRoot);
+    await ensureAgtWheels(agtRepo, repoRoot);
     stepper.update("Logging into ACR...");
     await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
 
@@ -189,6 +194,8 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     }
 
     await buildPush(controllerDf, "kars-controller:latest");
+    await buildPush("sandbox-images/metrics-server/Dockerfile", "kars-metrics-server:latest");
+    await buildPush("sandbox-images/headlamp/Dockerfile", "kars-headlamp:latest");
     await buildPush(routerDf, "kars-inference-router:latest");
 
     // Build sandbox base if not already in ACR
@@ -216,12 +223,6 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     // DEFAULT_*_IMAGE constants in `reconciler/runtime.rs`. Skipped
     // when --skip-runtime-images is passed (faster first deploy).
     if (!options.skipRuntimeImages) {
-      // The Python runtime Dockerfiles COPY runtimes/wheels/. ensureAgtWheels()
-      // auto-clones the pinned AGT repo if missing and builds the wheels into
-      // runtimes/wheels/. No-op when the cache stamp matches the current pin.
-      stepper.update("Bootstrapping AGT toolkit + Python wheels...");
-      const agtRepo = await ensureAgtRepo(undefined, repoRoot);
-      await ensureAgtWheels(agtRepo, repoRoot);
       for (const rt of [
         { dir: "openai-agents", tag: "kars-runtime-openai-agents:latest" },
         { dir: "maf-python", tag: "kars-runtime-maf-python:latest" },
@@ -235,24 +236,9 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
       }
     }
 
-    // AgentMesh relay+registry images: kars does not build these (vendored
-    // forks removed in Phase 5.2). Import the pre-built AGT-compatible images
-    // from the public source ACR — the deploy/agentmesh-agt.yaml manifest
-    // references them by tag.
-    for (const tag of ["agentmesh-relay-agt:latest", "agentmesh-registry-agt:latest"]) {
-      stepper.update(`Importing ${tag} from ${options.sourceAcr}...`);
-      await assertControllerMutationAllowed(execa);
-      await execa("az", [
-        "acr", "import",
-        "--name", acr,
-        "--source", `${options.sourceAcr}/${tag}`,
-        "--image", tag,
-        "--force",
-      ], { stdio: "pipe" }).then(() => {
-        stepper.detail("ok", tag);
-      }).catch((e: { message?: string }) => {
-        stepper.detail("skip", `${tag} — import failed (${(e.message ?? "").split("\n")[0].slice(0, 80)})`);
-      });
+    for (const component of ["relay", "registry"]) {
+      await buildPush(AGT_MESH_DOCKERFILE, `agentmesh-${component}-agt:latest`,
+        ["--build-arg", `COMPONENT=${component}`]);
     }
 
     stepper.done("Images built and pushed to ACR");
@@ -268,6 +254,8 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     // deploy still reported success.
     const images: Array<{ source: string; target: string; required: boolean }> = [
       { source: `${sourceAcr}/kars-controller:latest`, target: "kars-controller:latest", required: true },
+      { source: `${sourceAcr}/kars-metrics-server:latest`, target: "kars-metrics-server:latest", required: true },
+      { source: `${sourceAcr}/kars-headlamp:latest`, target: "kars-headlamp:latest", required: true },
       { source: `${sourceAcr}/kars-inference-router:latest`, target: "kars-inference-router:latest", required: true },
       { source: `${sourceAcr}/openclaw-sandbox:latest`, target: "openclaw-sandbox:latest", required: true },
       { source: `${sourceAcr}/agentmesh-relay-agt:latest`, target: "agentmesh-relay-agt:latest", required: true },
@@ -310,7 +298,7 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
       throw new Error(
         `Failed to import ${customerFailures} required image(s) from ${sourceAcr}. ` +
           `Verify you can 'az acr import' from it (network + auth) and that it hosts the ` +
-          `controller, inference-router, openclaw-sandbox, and agentmesh-*-agt images. ` +
+          `controller, metrics-server, inference-router, openclaw-sandbox, and agentmesh-*-agt images. ` +
           `Tip: 'kars up --release' imports the public GHCR images instead — no source-ACR access needed.`,
       );
     }

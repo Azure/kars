@@ -26,14 +26,17 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 import json
 import logging
+import uuid
 from datetime import datetime, timezone
 from typing import Any, Awaitable, Callable
 
 import websockets
 from nacl import signing
 from websockets.exceptions import ConnectionClosed, WebSocketException
+from websockets.protocol import State
 
 from .errors import MeshTransportError
 
@@ -49,7 +52,8 @@ class RelayTransport:
 
     1. :meth:`connect` — opens the WS, sends an auth frame, starts the
        heartbeat task, starts the receive loop. Returns once the
-       connection is established (auth ack received).
+       connection is established (required mode: authenticated roundtrip and
+       registry verification; legacy mode preserves send-only startup).
     2. :meth:`send_frame` — fire-and-forget; raises
        :class:`MeshTransportError` if the WS isn't currently open.
     3. :meth:`disconnect` — graceful close. Pending sends are flushed.
@@ -74,6 +78,7 @@ class RelayTransport:
         reconnect_max_seconds: float,
         on_frame: FrameHandler,
         entra_token: str | None = None,
+        connection_auth=None,
     ) -> None:
         self._url = url
         self._identity_did = identity_did
@@ -91,8 +96,11 @@ class RelayTransport:
         # field is missing). The TS SDK includes the same token under
         # the `token` key — Python parity here.
         self._entra_token = entra_token
+        self._auth = connection_auth
+        self._auth_timeout = 10.0
 
         self._ws: websockets.WebSocketClientProtocol | None = None
+        self._closing_ws: websockets.WebSocketClientProtocol | None = None
         self._recv_task: asyncio.Task[None] | None = None
         self._hb_task: asyncio.Task[None] | None = None
         self._stop_event = asyncio.Event()
@@ -100,14 +108,18 @@ class RelayTransport:
 
     @property
     def is_connected(self) -> bool:
-        return self._ws is not None and not self._stop_event.is_set()
+        return (self._ws is not None and not self._stop_event.is_set()
+                and (self._auth is None or (self._auth.ready and not self._auth.closed)))
 
     async def connect(self) -> None:
         """Open the WS + start the background reconnect loop. Returns
         once we are connected for the first time."""
         if self._recv_task is not None:
-            return  # idempotent — already running
+            if not self.is_connected:
+                raise MeshTransportError("Relay is not authorized or connected")
+            return
         self._stop_event.clear()
+        self._connected_event.clear()
         self._recv_task = asyncio.create_task(self._run_with_reconnect())
         # Wait for first successful connection (or the loop to give up).
         await self._connected_event.wait()
@@ -117,28 +129,43 @@ class RelayTransport:
     async def disconnect(self) -> None:
         """Stop the reconnect loop + close any open WS."""
         self._stop_event.set()
-        if self._hb_task is not None:
-            self._hb_task.cancel()
-            self._hb_task = None
-        if self._ws is not None:
-            try:
-                await self._ws.close()
-            except Exception:  # noqa: BLE001
-                pass
-            self._ws = None
+        self._connected_event.set()
+        if self._auth is not None:
+            self._auth.stop()
+        if self._recv_task is not None:
+            self._recv_task.cancel()
+        heartbeat = self._hb_task
+        if heartbeat is not None:
+            heartbeat.cancel()
         if self._recv_task is not None:
             await asyncio.gather(self._recv_task, return_exceptions=True)
-            self._recv_task = None
+        if heartbeat is not None:
+            await asyncio.gather(heartbeat, return_exceptions=True)
+        # Retain a socket whose context-manager close failed. Required auth must
+        # not release the prekey writer while an old socket may still be alive.
+        for ws in (self._ws, self._closing_ws):
+            if ws is not None:
+                try:
+                    await ws.close()
+                except Exception:  # noqa: BLE001
+                    if self._auth is not None:
+                        raise MeshTransportError("Relay teardown incomplete; client quarantined") from None
+        self._ws = self._closing_ws = None
+        self._recv_task = self._hb_task = None
 
     async def send_frame(self, frame: dict[str, Any]) -> None:
         """Send one JSON frame over the WS. Caller is responsible for
         filling ``v``, ``type``, ``from``, ``ts``, etc. — the
         transport doesn't validate frame shape."""
+        if self._auth is not None:
+            self._auth.check()
         if self._ws is None:
             raise MeshTransportError("Relay WS is not connected")
         try:
             await self._ws.send(json.dumps(frame))
-        except (ConnectionClosed, WebSocketException) as exc:
+        except (ConnectionClosed, WebSocketException, OSError) as exc:
+            if self._auth is not None:
+                self._auth.fail()
             raise MeshTransportError(f"send_frame failed: {exc}") from exc
 
     # ── Internal: reconnect loop ────────────────────────────────────────
@@ -153,6 +180,12 @@ class RelayTransport:
             except asyncio.CancelledError:
                 raise
             except Exception as exc:  # noqa: BLE001
+                if self._closing_ws is not None and self._closing_ws.state is State.CLOSED:
+                    self._closing_ws = None
+                if self._auth is not None and (not self._session_was_authorized or self._closing_ws is not None):
+                    self._auth.fail()
+                    self._stop_event.set()
+                    break
                 logger.warning(
                     "Relay WS dropped (%s); reconnecting in %.1fs",
                     exc,
@@ -169,34 +202,92 @@ class RelayTransport:
         self._connected_event.set()
 
     async def _open_and_serve(self) -> None:
-        """Open one WS, register, run heartbeat + receive until close."""
+        """Open one WS, authorize, then dispatch application frames."""
+        self._session_was_authorized = False
+        if self._auth is not None:
+            self._entra_token = await self._auth.prepare_relay()
         logger.info("Opening relay WS: %s", self._url)
+        # Preserve direct router connections when newer clients auto-detect
+        # proxies; websockets 12/13 don't accept this keyword at all.
+        proxy_options = {"proxy": None} if "proxy" in inspect.signature(websockets.connect).parameters else {}
         async with websockets.connect(
             self._url,
+            **proxy_options,
             user_agent_header=self._user_agent,
-            # 30s ping interval — keep alive across NAT timeouts.
+            open_timeout=10,
+            close_timeout=3,
             ping_interval=30,
             ping_timeout=10,
-            # 1 MB max frame — bigger payloads go via mesh_transfer_file
-            # (chunked, encrypted, deferred).
             max_size=1 * 1024 * 1024,
         ) as ws:
             self._ws = ws
-            await self._send_connect_frame()
-            self._connected_event.set()
-            self._hb_task = asyncio.create_task(self._heartbeat_loop())
             try:
+                await self._send_connect_frame()
+                pending = []
+                if self._auth is not None:
+                    async with asyncio.timeout(self._auth_timeout):
+                        pending = await self._auth_roundtrip(ws)
+                        await self._auth.verify_relay()
+                    self._session_was_authorized = True
+                self._connected_event.set()
+                self._hb_task = asyncio.create_task(self._heartbeat_loop())
+                for raw in pending:
+                    await self._handle_raw(raw)
                 async for raw in ws:
                     await self._handle_raw(raw)
             finally:
+                # Revoke before any cleanup awaits: a concurrent tool must never
+                # use the socket while close/heartbeat teardown is in progress.
+                self._connected_event.clear()
+                self._closing_ws = ws
+                self._ws = None
+                self._entra_token = None if self._auth is not None else self._entra_token
+                if self._auth is not None:
+                    self._auth.suspend()
                 if self._hb_task is not None:
                     self._hb_task.cancel()
-                    try:
-                        await self._hb_task
-                    except (asyncio.CancelledError, Exception):  # noqa: BLE001
-                        pass
+                    await asyncio.gather(self._hb_task, return_exceptions=True)
                     self._hb_task = None
-                self._ws = None
+        self._closing_ws = None
+
+    async def _auth_roundtrip(self, ws) -> list[str]:
+        # Pinned AGT relay/app.py:389-423 has no connect ACK. A nonce-bound
+        # self-routed KNOCK proves it reached the authenticated frame loop
+        # (:468-490). Consume it here, never as peer or mission delivery.
+        probe = {
+            "v": 1, "type": "knock", "from": self._identity_did,
+            "to": self._identity_did, "id": str(uuid.uuid4()), "ts": _iso_utc(),
+            "intent": {"action": "kars_auth_probe"},
+        }
+        await ws.send(json.dumps(probe))
+        pending, size = [], 0
+        while True:
+            raw = await ws.recv()
+            if not isinstance(raw, str):
+                raise MeshTransportError("Unexpected relay authentication frame")
+            frame = json.loads(raw)
+            if frame == probe:
+                return pending
+            if not isinstance(frame, dict) or frame.get("type") == "error":
+                raise MeshTransportError("Relay authentication rejected")
+            # AGT delivers its offline inbox before reading our probe. Preserve
+            # those frames, bounded and undispatched until verification succeeds.
+            size += len(raw.encode("utf-8"))
+            if len(pending) >= 128 or size > 1024 * 1024:
+                raise MeshTransportError("Relay authentication backlog exceeded")
+            pending.append(raw)
+
+    async def reconnect(self) -> None:
+        """Rotate only the socket; the owning client's prekeys remain untouched."""
+        if self._auth is not None:
+            self._auth.suspend()
+        self._connected_event.clear()
+        if self._ws is None:
+            raise MeshTransportError("Relay WS is not connected")
+        await self._ws.close()
+        await self._connected_event.wait()
+        if self._auth is not None:
+            self._auth.check()
 
     async def _send_connect_frame(self) -> None:
         """First frame after the WS opens identifies the DID and
@@ -241,6 +332,8 @@ class RelayTransport:
                 await asyncio.sleep(self._heartbeat_interval)
                 if self._ws is None:
                     return
+                if self._auth is not None:
+                    self._auth.check()
                 await self._ws.send(
                     json.dumps(
                         {
@@ -253,10 +346,14 @@ class RelayTransport:
                 )
         except asyncio.CancelledError:
             pass
-        except (ConnectionClosed, WebSocketException):
+        except (ConnectionClosed, WebSocketException, OSError, MeshTransportError):
+            if self._auth is not None:
+                self._auth.fail()
             return
 
     async def _handle_raw(self, raw: str | bytes) -> None:
+        if self._auth is not None:
+            self._auth.check()
         if isinstance(raw, bytes):
             # Binary frames not currently used; ignore so an unknown
             # extension doesn't crash the receive loop.
@@ -268,6 +365,9 @@ class RelayTransport:
                 "Discarding malformed relay frame (not JSON): %r", raw[:80]
             )
             return
+        if self._auth is not None and isinstance(frame, dict) and frame.get("type") == "error":
+            self._auth.fail()
+            raise MeshTransportError("Authenticated relay rejected an operation")
         try:
             await self._on_frame(frame)
         except Exception as exc:  # noqa: BLE001

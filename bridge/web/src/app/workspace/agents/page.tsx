@@ -11,6 +11,7 @@ import { HonestState } from "@/components/honest-state";
 import { LivePulse, LiveRefresh } from "@/components/live-refresh";
 import { FleetLive } from "@/components/fleet-live";
 import { listAgents, getFleetTelemetry } from "@/lib/bff";
+import { formatUptime } from "@/lib/format";
 import { TIER_LABELS, type AgentLifecycle, type FleetTelemetry } from "@/lib/types";
 
 export const dynamic = "force-dynamic";
@@ -116,7 +117,7 @@ function HealthRow({ h }: { h: import("@/lib/types").PodHealth }) {
         tone={h.restarts > 0 ? "warn" : "muted"}
         label={`${h.restarts} restart${h.restarts === 1 ? "" : "s"}`}
       />
-      {h.uptime_seconds != null && <HealthChip tone="muted" label={`up ${fmtUptime(h.uptime_seconds)}`} />}
+      {h.uptime_seconds != null && <HealthChip tone="muted" label={`up ${formatUptime(h.uptime_seconds)}`} />}
       {h.node && <HealthChip tone="muted" label={h.node} mono />}
       {h.waiting_reason && <HealthChip tone="danger" label={h.waiting_reason} />}
     </div>
@@ -146,13 +147,6 @@ function HealthChip({
       {label}
     </span>
   );
-}
-
-function fmtUptime(s: number): string {
-  if (s < 60) return `${s}s`;
-  if (s < 3600) return `${Math.floor(s / 60)}m`;
-  if (s < 86400) return `${Math.floor(s / 3600)}h ${Math.floor((s % 3600) / 60)}m`;
-  return `${Math.floor(s / 86400)}d`;
 }
 
 function fmtTok(n: number): string {

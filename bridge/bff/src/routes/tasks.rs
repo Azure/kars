@@ -18,13 +18,17 @@ mod mapping;
 mod models;
 mod presentation;
 mod queries;
+mod reviewed_execution;
+pub(crate) use reviewed_execution::read as read_reviewed_execution;
 mod revision;
 mod router_activity;
+pub(crate) use router_activity::ARTIFACT as ROUTER_OBSERVATIONS_ARTIFACT;
 pub(crate) mod run_evidence;
 
 #[cfg(test)]
 mod tests;
 
+pub(crate) use artifacts::artifact_key;
 pub use artifacts::download_artifact;
 pub use creation::create_task;
 pub use diagnostics::{TroubleshootDto, troubleshoot_task};

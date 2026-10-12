@@ -11,6 +11,175 @@ use super::{
 use std::collections::BTreeSet;
 
 #[test]
+fn public_resource_admission_never_reports_missing_evidence_as_qualified() {
+    const CHILD: &str = "KARS_RESOURCE_ADMISSION_TEST_CHILD";
+    if std::env::var_os(CHILD).is_none() {
+        for mode in ["required", "validation"] {
+            for records in ["[]", "{"] {
+                let result = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args(["--exact", "routes::options::qualification_tests::public_resource_admission_never_reports_missing_evidence_as_qualified"])
+                    .env(CHILD, "1")
+                    .env("BRIDGE_ROUTE_QUALIFICATION_MODE", mode)
+                    .env("BRIDGE_QUALIFICATION_RECORDS_JSON", records)
+                    .env_remove("BRIDGE_ADDITIONAL_QUALIFICATION_RECORDS_JSON")
+                    .output().unwrap();
+                assert!(
+                    result.status.success(),
+                    "{}\n{}",
+                    String::from_utf8_lossy(&result.stdout),
+                    String::from_utf8_lossy(&result.stderr)
+                );
+                assert!(String::from_utf8_lossy(&result.stdout).contains("1 passed"));
+            }
+        }
+        return;
+    }
+    let option = super::RefOption {
+        name: "approved-resource".into(),
+        namespace: "demo".into(),
+        summary: None,
+        mode: None,
+        discovered_tools: Vec::new(),
+        tool_schema_digest: Some("sha256:tools-v1".into()),
+        compiled_digest: Some("sha256:memory-v1".into()),
+        backend: Some("foundry".into()),
+        readiness: Some("Ready".into()),
+        version: Some("1.0.0".into()),
+        recipe: None,
+        version_digest: Some("sha256:skill-v1".into()),
+        qualified_routes: Vec::new(),
+    };
+    type Check = fn(&str, &str, &str, &super::RefOption) -> Result<bool, String>;
+    let checks: [(Check, Check); 3] = [
+        (
+            super::mcp_server_qualified_for_route,
+            super::mcp_server_admitted_for_route,
+        ),
+        (
+            super::memory_binding_qualified_for_route,
+            super::memory_binding_admitted_for_route,
+        ),
+        (
+            super::skill_version_qualified_for_route,
+            super::skill_version_admitted_for_route,
+        ),
+    ];
+    for (qualified, admitted) in checks {
+        let proof = qualified("OpenClaw", "foundry", "model", &option);
+        let admission = admitted("OpenClaw", "foundry", "model", &option);
+        if std::env::var("BRIDGE_QUALIFICATION_RECORDS_JSON").unwrap() == "{" {
+            assert!(proof.is_err());
+            assert!(admission.is_err());
+        } else {
+            assert!(!proof.unwrap());
+            assert_eq!(
+                admission.unwrap(),
+                std::env::var("BRIDGE_ROUTE_QUALIFICATION_MODE").unwrap() == "validation"
+            );
+        }
+    }
+}
+
+#[test]
+fn resource_validation_admission_preserves_bindings_and_never_creates_evidence() {
+    use super::RouteQualificationMode as Mode;
+    use super::qualification::resource_admitted_in;
+    for (kind, backend, schema, version) in [
+        ("skill", None, None, Some("sha256:skill-v1")),
+        ("mcp", None, Some("sha256:tools-v1"), None),
+        ("memory", Some("foundry"), Some("sha256:binding-v1"), None),
+    ] {
+        let resource = QualifiedResourceSelection {
+            kind: kind.into(),
+            name: "installed-resource".into(),
+            backend: backend.map(str::to_string),
+            schema_digest: schema.map(str::to_string),
+            version_digest: version.map(str::to_string),
+        };
+        for mode in [Mode::Required, Mode::Validation] {
+            assert_eq!(
+                resource_admitted_in(mode, "[]", "OpenClaw", "foundry", "model", &resource)
+                    .unwrap(),
+                mode == Mode::Validation,
+            );
+            assert!(
+                resource_admitted_in(mode, "{", "OpenClaw", "foundry", "model", &resource).is_err()
+            );
+        }
+        assert!(
+            !resource_is_qualified_in("[]", "OpenClaw", "foundry", "model", &resource).unwrap()
+        );
+        assert!(
+            resource_qualification_routes_in("[]", &resource)
+                .unwrap()
+                .is_empty()
+        );
+        for missing in [None, Some(" \t".into())] {
+            let mut incomplete = resource.clone();
+            if kind == "skill" {
+                incomplete.version_digest = missing.clone();
+            } else {
+                incomplete.schema_digest = missing.clone();
+            }
+            assert!(
+                !resource_admitted_in(
+                    Mode::Validation,
+                    "[]",
+                    "OpenClaw",
+                    "foundry",
+                    "model",
+                    &incomplete
+                )
+                .unwrap()
+            );
+            if kind == "memory" {
+                let mut incomplete = resource.clone();
+                incomplete.backend = missing;
+                assert!(
+                    !resource_admitted_in(
+                        Mode::Validation,
+                        "[]",
+                        "OpenClaw",
+                        "foundry",
+                        "model",
+                        &incomplete
+                    )
+                    .unwrap()
+                );
+            }
+        }
+        for kind in ["channel", "unknown"] {
+            let mut unsupported = resource.clone();
+            unsupported.kind = kind.into();
+            assert!(
+                !resource_admitted_in(
+                    Mode::Validation,
+                    "[]",
+                    "OpenClaw",
+                    "foundry",
+                    "model",
+                    &unsupported
+                )
+                .unwrap()
+            );
+        }
+        let mut unnamed = resource;
+        unnamed.name = " ".into();
+        assert!(
+            !resource_admitted_in(
+                Mode::Validation,
+                "[]",
+                "OpenClaw",
+                "foundry",
+                "model",
+                &unnamed
+            )
+            .unwrap()
+        );
+    }
+}
+
+#[test]
 fn route_validation_mode_is_explicit_and_defaults_to_required() {
     use super::RouteQualificationMode as Mode;
     assert_eq!(Mode::parse(None).unwrap(), Mode::Required);

@@ -64,7 +64,7 @@ export function EnvelopeReveal({
 
   const facets: Facet[] = [
     { icon: "brain", label: "Model", value: model, why: modelWhy, tone: "accent" },
-    { icon: "gear", label: "Harness", value: blueprint.runtime ?? "OpenClaw", why: "Verified runtime on this cluster." },
+    { icon: "gear", label: "Harness", value: blueprint.runtime ?? "OpenClaw", why: "Selected runtime; launch checks configuration, while actual execution is verified separately." },
     { icon: "target", label: "Autonomy", value: `Tier ${tier} · ${TIER_WORD[tier] ?? "?"}`, why: tier <= 3 ? "Pauses before anything costly or irreversible." : "Acts autonomously within the envelope.", tone: "signal" },
     {
       icon: "branch",

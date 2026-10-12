@@ -23,6 +23,44 @@ use super::presentation::deliverable_pull_requests;
 use super::run_evidence::{mission_result, run_telemetry};
 
 #[test]
+fn task_summary_keeps_annotation_only_team_machinery_out_of_missions() {
+    let mut task: crate::kars::task::KarsTask = serde_json::from_value(serde_json::json!({
+        "metadata":{"name":"eng-principal","namespace":"work"},
+        "spec":{"objective":"Team principal","envelope":{"tier":2,"authorityCeiling":2}}
+    }))
+    .unwrap();
+    assert!(super::mapping::to_summary(&task).team.is_none());
+    task.metadata.annotations = Some([("kars.azure.com/team".into(), "eng".into())].into());
+    assert_eq!(
+        super::mapping::to_summary(&task).team.as_deref(),
+        Some("eng")
+    );
+    task.metadata.labels = Some([("kars.azure.com/team".into(), "eng".into())].into());
+    assert_eq!(
+        super::mapping::to_summary(&task).team.as_deref(),
+        Some("eng")
+    );
+}
+
+#[test]
+fn task_summary_preserves_parent_identity_without_name_heuristics() {
+    let task: crate::kars::task::KarsTask = serde_json::from_value(serde_json::json!({
+        "metadata":{"name":"ordinary-name","namespace":"work"},
+        "spec":{"objective":"Internal phase","envelope":{"tier":2,"authorityCeiling":2},
+            "parentRef":{"name":"parent-mission"}}
+    }))
+    .unwrap();
+    assert_eq!(
+        super::mapping::to_summary(&task).parent.as_deref(),
+        Some("parent-mission")
+    );
+    let mut standalone = task;
+    standalone.spec.parent_ref = None;
+    standalone.metadata.name = Some("rp-still-a-real-root".into());
+    assert!(super::mapping::to_summary(&standalone).parent.is_none());
+}
+
+#[test]
 fn execution_plan_dto_into_crd_preserves_web_search_capability() {
     let blueprint = BlueprintDto {
         execution_plan: Some(ExecutionPlanDto {
@@ -466,7 +504,12 @@ fn deliverable_text_repairs_legacy_question_mark_replacements() {
 #[test]
 fn real_deliverable_gates_error_and_no_change() {
     use super::is_real_deliverable;
-    assert!(!is_real_deliverable(Some("error"), "anything"));
+    for status in ["error", "failed", "rejected"] {
+        assert!(!is_real_deliverable(
+            Some(status),
+            "A useful-looking partial draft"
+        ));
+    }
     assert!(!is_real_deliverable(Some("ok"), "   "));
     assert!(!is_real_deliverable(
         Some("ok"),
@@ -532,7 +575,9 @@ fn classify_blocked_detects_budget_and_parses_pair() {
     // A real deliverable is not blocked.
     assert!(classify_blocked(Some("ok"), "Here is the finished report.").is_none());
     // An error run is handled elsewhere, not as blocked.
-    assert!(classify_blocked(Some("error"), "Daily token budget exceeded").is_none());
+    for status in ["error", "failed", "rejected"] {
+        assert!(classify_blocked(Some(status), "Daily token budget exceeded").is_none());
+    }
 }
 
 #[test]

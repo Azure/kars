@@ -15,6 +15,8 @@ export interface ArtifactFile {
 export interface MissionArtifacts {
   task: string;
   evidence_key: string | null;
+  current: boolean;
+  parent: string | null;
   team: string | null;
   archived: boolean;
   display_name: string | null;

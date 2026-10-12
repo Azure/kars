@@ -32,6 +32,7 @@ describe("immutable pushed artifact configuration", () => {
       { name: "controller", image: `mirror.azurecr.io/kars-controller:latest@${digest}` },
       { name: "router", image: `mirror.azurecr.io/kars-inference-router:latest@${digest}` },
       { name: "sandbox", image: `mirror.azurecr.io/openclaw-sandbox:latest@${digest}` },
+      { name: "metrics-server", image: `mirror.azurecr.io/kars-metrics-server:latest@${digest}` },
       ...RUNTIME_IMAGE_TARGETS.map(runtime => ({ name: runtime.name, image: `mirror.azurecr.io/${runtime.repo}:latest@${digest}` })),
     ];
     const mesh = { registry: `mirror.azurecr.io/agentmesh-registry-agt:latest@${digest}`,
@@ -47,6 +48,8 @@ describe("immutable pushed artifact configuration", () => {
     expect(controller.image).toBe(images[0].image);
     expect(controller.env).toContainEqual(expect.objectContaining({ name: "INFERENCE_ROUTER_IMAGE", value: images[1].image }));
     expect(controller.env).toContainEqual(expect.objectContaining({ name: "SANDBOX_IMAGE", value: images[2].image }));
+    expect(resources.find(item => item.kind === "Deployment" && item.metadata.name === "kars-metrics-server")!
+      .spec!.template!.spec!.containers![0].image).toBe(images[3].image);
     for (const runtime of RUNTIME_IMAGE_TARGETS) {
       expect(controller.env).toContainEqual(expect.objectContaining({
         name: runtime.env, value: images.find(item => item.name === runtime.name)!.image,

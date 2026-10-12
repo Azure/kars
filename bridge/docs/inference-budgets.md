@@ -23,6 +23,23 @@ role cookie and `BRIDGE_ROLES` cannot grant SSO admin access. See [RBAC](rbac.md
 
 ## Enforcement modes
 
+Finite `GovernedInference` Mission budgets also require operator-declared
+model contracts. Package validation, saved-Mission validation, and both direct
+creation-with-launch, saved-Mission launch and immediate replication reject an absent, unreadable,
+malformed or invalid contract catalogue, or a requested primary/fallback model
+without a current contract (including maximum prices for a currency cap).
+Provider sign-in and model discovery do not enroll these contracts.
+
+This preflight is a **necessary-condition check**, not enforcement proof:
+finding a model name in the catalogue remains a warning, never a green
+readiness assertion. The router separately verifies the exact provider,
+endpoint, operation, account, broker, credentials and reservations.
+Do not remove a Mission's cap to bypass a missing-contract failure.
+Mission review, saved-Mission execution and Team preflight share the same
+failure-first check display. Blocking reasons stay visible; warning and
+passed-check disclosures retain every detail without burying the blocker.
+Warnings are not execution proof and must still be reviewed.
+
 Each level has one of three modes:
 
 | Mode | Behavior |
@@ -53,13 +70,28 @@ Each level has one of three modes:
 
 ## Editing policies
 
-The **per-sandbox** policies (`InferencePolicy` CRs) are mostly
-controller-generated from each mission's budget. On the same page an operator can:
+`InferencePolicy.spec.tokenBudget` configures the router's per-request,
+daily and monthly token limits. It is separate from a Mission's
+`GovernedInference` lifetime budget and its model-contract requirements;
+one must not be silently substituted for the other.
+
+Controller-generated **per-sandbox** policies (`InferencePolicy` CRs) select a
+Mission's model routes; they do not translate its lifetime cap into a daily
+token limit. On the same page an operator can:
 
 - **author** a standalone `InferencePolicy` (a selector + token budget +
   content-safety floor) — `PUT /api/operator/inferencepolicies`;
 - **edit** a policy's daily budget in place — `PATCH …/inferencepolicies/{name}`;
 - **remove** an authored one.
+
+Rejected saves preserve the authored name, specification and explicit force
+choice, so an operator can correct a validation error and retry without
+re-entering the resource identity. Errors and successful saves are announced
+to assistive technology.
+Policy, MCP and profile editors open in viewport-sized native dialogs rather
+than squeezing the form into a table cell. Keyboard focus stays in the dialog
+and returns to its trigger on dismissal; Escape and Cancel preserve the draft
+and cannot dismiss an in-flight save.
 
 ## API
 

@@ -1,7 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
+import type { ReviewedTask } from "./mission-reviewed.js";
 import { KubernetesError, type KubernetesJson } from "./kubernetes-json.js";
 import { KubernetesMissionStore, missionObjective } from "./mission-store.js";
 import { MissionDispatcher, missionAttemptName, missionContentDigest, type MissionAttempt, type MissionCandidate } from "./mission-dispatcher.js";
@@ -25,7 +27,7 @@ const stamp = "2026-10-02T20:00:00.000Z";
 const clone = <T>(v: T): T => JSON.parse(JSON.stringify(v)) as T;
 interface Resource {
   metadata: MissionMetadata;
-  spec?: NonNullable<MissionWorkloadResources["deployment"]["spec"]> & { objective?: string; execution?: { launch: boolean }; suspended?: boolean; blueprint?: { executionPlan?: unknown } };
+  spec?: NonNullable<MissionWorkloadResources["deployment"]["spec"]> & { objective?: string; execution?: { launch: boolean; runtime?: string }; suspended?: boolean; blueprint?: { executionPlan?: unknown; runtime?: string }; runtime?: { kind?: string } };
   status?: NonNullable<MissionWorkloadResources["deployment"]["status"]> & { executionPhase?: string; envelopeDigest?: string; sandboxRef?: { name: string }; phase?: string; conditions?: Array<{ type: string; status: string }> };
   data?: Record<string, string>; immutable?: boolean;
 }
@@ -56,10 +58,17 @@ class Api implements KubernetesJson {
     throw new Error(`Unexpected API operation ${method}`);
   }
 }
-function fixture() {
+function fixture(candidate: MissionCandidate = c) {
+  const c = candidate;
+  const runtime = c.runtime ?? "OpenClaw";
+  const taskPath = `/apis/kars.azure.com/v1alpha1/namespaces/${c.namespace}/karstasks/${c.taskName}`;
+  const mapsPath = `/api/v1/namespaces/${c.namespace}/configmaps`;
+  const owner = { apiVersion: "kars.azure.com/v1alpha1", kind: "KarsTask", name: c.taskName, uid: c.taskUid, controller: true };
+  const admission = { version: 1, state: "run", taskGeneration: 1, authorizationDigest: `sha256:${"a".repeat(64)}`,
+    runNonce: c.runNonce, objectiveDigest: missionContentDigest(c.content) };
   const api = new Api();
   const task = { apiVersion: "kars.azure.com/v1alpha1", kind: "KarsTask", metadata: { name: c.taskName, namespace: c.namespace, uid: c.taskUid, generation: 1, annotations: { [`${p}run-requested`]: c.runNonce } },
-    spec: { objective: c.content, execution: { launch: true } }, status: { observedGeneration: 1, executionPhase: "Running", sandboxRef: { name: "briefing" },
+    spec: { objective: c.content, execution: { launch: true, ...(c.runtime ? { runtime } : {}) } }, status: { observedGeneration: 1, executionPhase: "Running", sandboxRef: { name: "briefing" },
       phase: "Ready", conditions: [{ type: "Ready", status: "True" }], envelopeDigest: admission.authorizationDigest } };
   api.put(taskPath, task);
   const bindingPath = `${mapsPath}/kars-mission-binding-${c.taskName}`;
@@ -67,13 +76,13 @@ function fixture() {
     data: { "binding.json": JSON.stringify({ ...c, admission, sandboxName: "briefing", podName: "briefing-abc", namespaceUid: "namespace-uid",
       deploymentUid: "deployment-uid", deploymentGeneration: 1, replicaSetName: "briefing-rs", replicaSetUid: "replicaset-uid" }) } });
   const sandboxPath = `/apis/kars.azure.com/v1alpha1/namespaces/${c.namespace}/karssandboxes/briefing`;
-  api.put(sandboxPath, { metadata: { name: "briefing", namespace: c.namespace, uid: c.sandboxUid, ownerReferences: [owner], annotations: { [`${p}namespace-uid`]: "namespace-uid" } } });
+  api.put(sandboxPath, { metadata: { name: "briefing", namespace: c.namespace, uid: c.sandboxUid, ownerReferences: [owner], annotations: { [`${p}namespace-uid`]: "namespace-uid" } }, spec: { runtime: { kind: runtime } } });
   const namespacePath = "/api/v1/namespaces/kars-briefing";
   api.put(namespacePath, { metadata: { name: "kars-briefing", uid: "namespace-uid", annotations: {
     [`${p}namespace-claim-version`]: "v1", [`${p}sandbox-namespace`]: c.namespace, [`${p}sandbox-name`]: "briefing", [`${p}sandbox-uid`]: c.sandboxUid,
   } }, status: { phase: "Active" } });
   const deploymentPath = "/apis/apps/v1/namespaces/kars-briefing/deployments/briefing";
-  const template = { metadata: { labels: { [`${p}sandbox`]: "briefing" } }, spec: { containers: [{ name: "openclaw", image: "sandbox:latest", env: [
+  const template = { metadata: { labels: { [`${p}sandbox`]: "briefing" } }, spec: { containers: [{ name: runtime === "Hermes" ? "agent" : "openclaw", image: "sandbox:latest", env: [
     { name: "KARS_MISSION_ADMISSION", value: JSON.stringify(admission) },
     { name: "KARS_MISSION_CONTRACT", value: JSON.stringify(missionContract()) },
   ] }] } };
@@ -96,11 +105,14 @@ function fixture() {
   return { api, store: new KubernetesMissionStore(api), task, bindingPath, sandboxPath, namespacePath, deploymentPath, replicaSetPath, podPath, paths };
 }
 function initial(candidate = c): MissionAttempt {
-  return { version: 1, candidate, assignment: { ...candidate, ...missionContract(candidate.reviewedPhase), type: "mission:assign", bootId: "boot-1", assignmentId: "assignment-1" },
+  const { taskName, taskUid, sandboxUid, podUid, runNonce, agentDid, dispatcherDid, content } = candidate;
+  return { version: 1, candidate, assignment: { taskName, taskUid, sandboxUid, podUid, runNonce, agentDid, dispatcherDid, content,
+    ...missionContract(candidate.reviewedPhase), type: "mission:assign", bootId: "boot-1", assignmentId: "assignment-1" },
     contentDigest: missionContentDigest(candidate.content), ownerSession: "dispatcher-process", startedAt: stamp, updatedAt: stamp, phase: "dispatching", events: [] };
 }
 function next(prior: MissionAttempt, status: "accepted" | "running" | "succeeded" | "failed" | "rejected"): MissionAttempt {
-  const reply: MissionReply = { ...prior.assignment, type: "mission:reply", status,
+  const { inputArtifacts: _inputArtifacts, ...replyAssignment } = prior.assignment;
+  const reply: MissionReply = { ...replyAssignment, type: "mission:reply", status,
     ...(status === "succeeded" ? { output: "Actual approval checklist.", evidence } : {}),
     ...(prior.assignment.version === 2 && (status === "running" || status === "succeeded") ? { evidence: clone(phaseEvidence) } : {}) };
   return { ...prior, phase: status, reply, events: [...prior.events, { at: stamp, status, ...(reply.evidence ? { evidence: reply.evidence } : {}) }] };
@@ -113,6 +125,152 @@ const key = missionAttemptName(c).replace("kars-mission-attempt-", "");
 const outputPath = `${mapsPath}/kars-mission-output-${key}`;
 const artifactPath = `${mapsPath}/kars-mission-artifacts-${key}`;
 const projectionPath = `${mapsPath}/kars-mission-output-${c.taskName}`;
+
+describe.each([
+  ["OpenClaw", "protocol-fixture.json"],
+  ["Hermes", "protocol-hermes-fixture.json"],
+] as const)("installed %s reviewed Task journey", (runtime, filename) => {
+  const reviewedFixture = JSON.parse(readFileSync(new URL(`../../controller/src/reviewed_execution/${filename}`, import.meta.url), "utf8"));
+  function installed(synthesis: boolean) {
+    const name = synthesis ? "report" : reviewedFixture.phaseName;
+    const path = `/apis/kars.azure.com/v1alpha1/namespaces/default/karstasks/${name}`;
+    const task = clone(reviewedFixture.resources[path]) as ReviewedTask;
+    if (synthesis) task.metadata.annotations![`${p}mission-decomposition`] = "execution-plan/v1";
+    const grant = clone(synthesis ? reviewedFixture.synthesisGrant : reviewedFixture.phaseGrant);
+    const candidate = { ...c, runtime, namespace: "default", taskName: name, taskUid: task.metadata.uid!,
+      runNonce: task.metadata.annotations![`${p}run-requested`], content: task.spec.objective };
+    const h = fixture(candidate);
+    for (const [path, resource] of Object.entries(reviewedFixture.resources)) h.api.put(path, resource as Resource);
+    h.api.put(path, { ...task, status: { ...task.status, executionPhase: "Running", sandboxRef: { name: "briefing" } } });
+    if (!synthesis) {
+      delete h.api.resources.get(path)!.metadata.annotations![`${p}run-completed`];
+      h.api.resources.delete(`/api/v1/namespaces/default/configmaps/${missionAttemptName(candidate)}`);
+    }
+    const admitted = { version: 1, state: "run", taskGeneration: task.metadata.generation, authorizationDigest: task.status!.envelopeDigest,
+      runNonce: candidate.runNonce, objectiveDigest: missionContentDigest(candidate.content) };
+    const binding = h.api.resources.get(h.bindingPath)!;
+    binding.data!["binding.json"] = JSON.stringify({ ...JSON.parse(binding.data!["binding.json"]), admission: admitted, reviewed: grant });
+    for (const workload of [h.deploymentPath, h.replicaSetPath]) {
+      const env = h.api.resources.get(workload)!.spec!.template!.spec!.containers![0].env as Array<{name:string;value:string}>;
+      env.find(e => e.name === "KARS_MISSION_ADMISSION")!.value = JSON.stringify(admitted);
+      env.find(e => e.name === "KARS_MISSION_CONTRACT")!.value = JSON.stringify(grant.contract);
+    }
+    return { ...h, reference: candidate, grant };
+  }
+  it.each([false, true])("discovers installed synthesis=%s with exact phase, named evidence and custody", async synthesis => {
+    const h = installed(synthesis);
+    const candidate = await h.store.candidate(h.reference, c.dispatcherDid);
+    expect(candidate).not.toBeNull();
+    expect(candidate!.runtime).toBe(runtime);
+    expect(candidate!.agentName).toBe(synthesis ? "briefing" : "writer / draft");
+    expect(candidate!.requiredOutputs).toEqual(synthesis ? ["report.md"] : ["handoff.md"]);
+    expect(candidate!.reviewedPhase).toEqual(h.grant.contract.reviewedPhase);
+    expect(candidate!.inputArtifacts?.[0].content).toBe(synthesis ? "Reviewed handoff — 日本語" : undefined);
+    expect(await h.store.isCurrent(candidate!)).toBe(true);
+    if (!synthesis) {
+      const attempt = initial(candidate!);
+      attempt.assignment = { ...attempt.assignment, ...missionContract(candidate!.reviewedPhase, candidate!.inputArtifacts, candidate!.requiredOutputs), artifactFormat: "text-v1" };
+      expect(await h.store.create(attempt)).not.toBeNull();
+      const binding = h.api.resources.get(h.bindingPath)!;
+      binding.data!["binding.json"] = "{}";
+      expect(await h.store.candidate(h.reference, c.dispatcherDid)).toEqual(candidate);
+      expect(await h.store.isCurrent(candidate!)).toBe(false);
+    }
+  });
+  it("publishes JSON-restored inputs without rerunning the assignment", async () => {
+    const h = installed(true);
+    const discovered = await h.store.candidate(h.reference, c.dispatcherDid);
+    expect(discovered).not.toBeNull();
+    const candidate = clone(discovered!);
+    expect(await h.store.isCurrent(candidate)).toBe(true);
+    const attempt = initial(candidate);
+    attempt.assignment = {
+      ...attempt.assignment,
+      ...missionContract(candidate.reviewedPhase, candidate.inputArtifacts, candidate.requiredOutputs),
+      ...(candidate.inputArtifacts ? { inputArtifacts: candidate.inputArtifacts } : {}),
+      artifactFormat: "text-v1",
+    };
+    const created = await h.store.create(attempt);
+    expect(created).not.toBeNull();
+    const done = next(created!.attempt, "succeeded");
+    const phase = candidate.reviewedPhase!;
+    done.reply!.evidence = { ...evidence, phase: {
+      name: phase.name, attemptedToolCalls: phase.minToolCalls, successfulToolCalls: phase.minToolCalls,
+      minToolCalls: phase.minToolCalls, maxToolCalls: phase.maxToolCalls,
+    } };
+    done.events.at(-1)!.evidence = done.reply!.evidence;
+    done.reply!.artifacts = { [candidate.requiredOutputs![0]]: "Actual retained reviewed document." };
+    await h.store.replace(created!, done);
+    const recoveredStore = new KubernetesMissionStore(h.api);
+    const recovered = (await recoveredStore.get(candidate))!.attempt;
+    const retained = clone(recovered);
+    expect(await recoveredStore.publish(recovered)).toBe(true);
+    expect(await recoveredStore.publish(recovered)).toBe(true);
+    expect((await recoveredStore.get(candidate))!.attempt).toEqual(retained);
+    expect(h.api.resources.get(h.paths.task)!.metadata.annotations![`${p}run-completed`]).toBe(candidate.runNonce);
+    expect(h.api.resources.get(`/api/v1/namespaces/default/configmaps/kars-mission-artifacts-${candidate.taskName}`)!.data)
+      .toMatchObject(done.reply!.artifacts);
+    expect(h.api.calls.filter(call => call.method === "POST"
+      && call.body?.metadata.name === missionAttemptName(candidate))).toHaveLength(1);
+  });
+  it.each(["one collision", "continuous collisions", "revocation"])(
+    "revalidates the complete acknowledgment snapshot after %s without redispatch", async kind => {
+      const h = installed(true);
+      const candidate = await h.store.candidate(h.reference, c.dispatcherDid);
+      expect(candidate).not.toBeNull();
+      let reads = 0;
+      h.api.before = (method,path) => {
+        if (method !== "GET" || path !== h.paths.task) return;
+        reads++;
+        if (reads !== 2 && kind !== "continuous collisions") return;
+        const task = clone(h.api.resources.get(path)!);
+        if (kind === "revocation") task.spec!.execution!.launch = false;
+        h.api.put(path,task);
+      };
+      h.api.calls.length = 0;
+      if (kind === "one collision") {
+        await h.store.acknowledge(candidate!);
+        expect(h.api.calls.filter(call => call.method === "PATCH")).toHaveLength(1);
+        expect(h.api.resources.get(h.paths.task)!.metadata.annotations![`${p}run-ack`]).toBe(candidate!.runNonce);
+      } else {
+        await expect(h.store.acknowledge(candidate!)).rejects.toThrow(
+          kind === "revocation" ? "Run changed before annotation" : "authority changed during custody traversal");
+        expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+      }
+      expect(reads).toBeLessThanOrEqual(9);
+      expect(h.api.calls.some(call => call.method === "POST" || call.method === "PUT")).toBe(false);
+    });
+  it.each(["no grant", "source unfinished", "input outside graph", "required names", "installed contract"]) (
+    "holds root synthesis on %s", async kind => {
+      const h = installed(true);
+      const admitted = await h.store.candidate(h.reference, c.dispatcherDid);
+      expect(admitted).not.toBeNull();
+      const binding = h.api.resources.get(h.bindingPath)!;
+      const b = JSON.parse(binding.data!["binding.json"]);
+      if (kind === "no grant") delete b.reviewed;
+      if (kind === "source unfinished") delete h.api.resources.get(`/apis/kars.azure.com/v1alpha1/namespaces/default/karstasks/${reviewedFixture.phaseName}`)!.metadata.annotations![`${p}run-completed`];
+      if (kind === "input outside graph") b.reviewed.inputs[0].source.taskName = "unreviewed";
+      if (kind === "required names") b.reviewed.contract.requiredOutputs = [];
+      binding.data!["binding.json"] = JSON.stringify(b);
+      if (kind === "installed contract") {
+        const env = h.api.resources.get(h.deploymentPath)!.spec!.template!.spec!.containers![0].env as Array<{name:string;value:string}>;
+        env.find(e => e.name === "KARS_MISSION_CONTRACT")!.value = JSON.stringify(missionContract());
+      }
+      expect(await h.store.candidate(h.reference, c.dispatcherDid)).toBeNull();
+      expect(await h.store.isCurrent(clone(admitted!))).toBe(false);
+    });
+  it.each(["unknown marker", "empty marker", "missing plan", "missing pin"])(
+    "does not let the composer marker bypass reviewed authority: %s", async kind => {
+      const h = installed(true);
+      const task = h.api.resources.get(h.paths.task)!;
+      if (kind === "unknown marker") task.metadata.annotations![`${p}mission-decomposition`] = "unknown/v2";
+      if (kind === "empty marker") task.metadata.annotations![`${p}mission-decomposition`] = "";
+      if (kind === "missing plan") delete task.spec!.blueprint!.executionPlan;
+      if (kind === "missing pin") delete task.metadata.annotations![`${p}reviewed-state`];
+      expect(await h.store.candidate(h.reference, c.dispatcherDid)).toBeNull();
+      expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+    });
+});
 
 describe("installed mission admission", () => {
   it.each(["missing digest", "changed digest", "generation", "observed generation", "phase", "condition", "missing condition"])("rejects stale Task authority: %s", async kind => {
@@ -206,6 +364,92 @@ describe("installed mission admission", () => {
   });
 });
 
+describe("runtime-bound mission candidates", () => {
+  const hermes: MissionCandidate = { ...c, runtime: "Hermes" };
+
+  it.each(["execution", "blueprint"])("discovers Hermes from trusted %s runtime with the agent container", async source => {
+    const h = fixture(hermes);
+    if (source === "blueprint") {
+      const spec = h.api.resources.get(taskPath)!.spec!;
+      spec.execution!.runtime = "OpenClaw";
+      spec.blueprint = { runtime: "Hermes" };
+    }
+    const candidate = await h.store.candidate(c, c.dispatcherDid);
+    expect(candidate).toEqual({ ...hermes, agentName: "briefing" });
+    expect(await h.store.isCurrent(candidate!)).toBe(true);
+    expect(await h.store.isCurrent(c)).toBe(false);
+    expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+  });
+
+  it.each(["sandbox mismatch", "missing sandbox runtime", "unsupported Task", "blueprint precedence", "wrong container", "missing container", "duplicate container"])(
+    "rejects Hermes %s before execution", async kind => {
+      const h = fixture(hermes);
+      if (kind === "sandbox mismatch") h.api.resources.get(h.sandboxPath)!.spec!.runtime!.kind = "OpenClaw";
+      if (kind === "missing sandbox runtime") delete h.api.resources.get(h.sandboxPath)!.spec!.runtime;
+      if (kind === "unsupported Task") h.api.resources.get(taskPath)!.spec!.execution!.runtime = "MAF";
+      if (kind === "blueprint precedence") h.api.resources.get(taskPath)!.spec!.blueprint = { runtime: "OpenClaw" };
+      for (const path of [h.deploymentPath, h.replicaSetPath]) {
+        const spec = h.api.resources.get(path)!.spec!.template!.spec!;
+        if (kind === "wrong container") spec.containers![0].name = "openclaw";
+        if (kind === "missing container") spec.containers = [];
+        if (kind === "duplicate container") spec.containers!.push(clone(spec.containers![0]));
+      }
+      expect(await h.store.isCurrent(hermes)).toBe(false);
+      expect(await h.store.candidate(c, c.dispatcherDid)).toBeNull();
+      expect(h.api.calls.every(call => call.method === "GET")).toBe(true);
+    });
+
+  it.each([null, "", "MAF", "hermes", 7, {}])("rejects malformed candidate runtime %j without legacy fallback", async runtime => {
+    const h = fixture();
+    expect(await h.store.isCurrent({ ...c, runtime } as MissionCandidate)).toBe(false);
+    expect(h.api.calls.map(call => call.path)).toEqual([taskPath]);
+  });
+
+  it.each(["task", "sandbox"] as const)("fences %s runtime changes during reverse reads", async target => {
+    const h = fixture(hermes); let reads = 0;
+    h.api.before = (method, path) => {
+      if (method !== "GET" || path !== h.paths[target] || ++reads !== 2) return;
+      const changed = clone(h.api.resources.get(path)!);
+      if (target === "task") changed.spec!.execution!.runtime = "OpenClaw";
+      else changed.spec!.runtime!.kind = "OpenClaw";
+      h.api.put(path, changed);
+    };
+    expect(await h.store.isCurrent(hermes)).toBe(false);
+  });
+
+  it.each([undefined, "router-observations-v1"] as const)(
+    "recovers and publishes Hermes artifact bytes with activity %s after the live binding disappears without a new claim", async activityFormat => {
+    const h = fixture(hermes);
+    const attempt = initial(hermes);
+    attempt.assignment.artifactFormat = "text-v1";
+    if (activityFormat) attempt.assignment.activityFormat = activityFormat;
+    const created = (await h.store.create(attempt))!;
+    const terminal = next(created.attempt, "succeeded");
+    terminal.reply!.artifacts = { "checklist.md": "# Approval checklist\nReviewed evidence — 日本語\n" };
+    const completed = (await h.store.replace(created, terminal)).attempt;
+    h.api.resources.delete(h.bindingPath);
+    h.api.resources.delete(h.podPath);
+    expect(await h.store.candidate(c, c.dispatcherDid)).toEqual(hermes);
+    expect(await h.store.isCurrent(hermes)).toBe(false);
+    expect(await h.store.publish(completed)).toBe(true);
+    expect(h.api.resources.get(artifactPath)!.data!["checklist.md"]).toBe(terminal.reply!.artifacts!["checklist.md"]);
+    expect(h.api.resources.get(taskPath)!.metadata.annotations![`${p}run-completed`]).toBe(c.runNonce);
+    expect(await h.store.candidate(c, c.dispatcherDid)).toBeNull();
+    expect(h.api.calls.filter(call => call.method === "POST" && (call.body as Resource)?.metadata.name === missionAttemptName(c))).toHaveLength(1);
+  });
+
+  it("retains Hermes evidence but does not complete a Task whose runtime changed", async () => {
+    const h = fixture(hermes);
+    const created = (await h.store.create(initial(hermes)))!;
+    const completed = (await h.store.replace(created, next(created.attempt, "succeeded"))).attempt;
+    h.api.resources.get(taskPath)!.spec!.execution!.runtime = "OpenClaw";
+    expect(await h.store.candidate(c, c.dispatcherDid)).toEqual(hermes);
+    expect(await h.store.publish(completed)).toBe(false);
+    expect(h.api.resources.get(artifactPath)!.data!["response.md"]).toBe(completed.reply!.output);
+    expect(h.api.resources.get(taskPath)!.metadata.annotations![`${p}run-completed`]).toBeUndefined();
+  });
+});
+
 describe("mission candidate discovery", () => {
   it.each(["typed plan", "null plan", "marker", "unknown marker", "empty marker"])("rejects new execution with %s before resolving a runtime binding", async kind => {
     const h = fixture(); const task = h.api.resources.get(taskPath)!;
@@ -221,7 +465,7 @@ describe("mission candidate discovery", () => {
     const h = fixture();
     expect(await h.store.isCurrent(phasedCandidate)).toBe(false);
     expect(h.api.calls.map(call => call.path)).toEqual([taskPath]);
-    expect(await h.store.candidate(c, c.dispatcherDid)).toEqual({ ...c, agentName: "briefing" });
+    expect(await h.store.candidate(c, c.dispatcherDid)).toEqual({ ...c, agentName: "briefing", runtime: "OpenClaw" });
   });
 
   it("recovers a persisted phase claim before the typed-plan activation guard without authorizing another dispatch", async () => {
@@ -239,7 +483,7 @@ describe("mission candidate discovery", () => {
 
   it("rereads the Task and validates its live binding before returning a candidate", async () => {
     const h = fixture();
-    expect(await h.store.candidate(c, c.dispatcherDid)).toEqual({ ...c, agentName: "briefing" });
+    expect(await h.store.candidate(c, c.dispatcherDid)).toEqual({ ...c, agentName: "briefing", runtime: "OpenClaw" });
     h.api.resources.get(taskPath)!.metadata.annotations![`${p}run-completed`] = c.runNonce;
     expect(await h.store.candidate(c, c.dispatcherDid)).toBeNull();
   });

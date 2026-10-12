@@ -41,6 +41,10 @@ pub(crate) fn install(
     }
     let revision = hash(&json!(ids));
     let epoch = "a".repeat(64);
+    let root_template = json!({"metadata":{"creationTimestamp":null},
+        "spec":{"serviceAccountName":"kars-controller",
+            "containers":[{"name":"controller","image":"fixture"}]}});
+    let template_digest = hash(&root_template);
     let mut scope_list = BTreeMap::from([(root, root_uid)]);
     scope_list.extend(scopes.iter().copied());
     let mut namespaces = Vec::new();
@@ -68,7 +72,7 @@ pub(crate) fn install(
         namespace["metadata"]["annotations"][format!("{PREFIX}root-user")] =
             format!("system:serviceaccount:{root}:kars-controller").into();
         namespace["metadata"]["annotations"][format!("{PREFIX}root-template-digest")] =
-            "b".repeat(64).into();
+            template_digest.clone().into();
         namespaces.push(
             json!({"namespace":{"name":name,"uid":uid,"resourceVersion":"1"},
             "consumers":[],"epoch":epoch}),
@@ -81,13 +85,12 @@ pub(crate) fn install(
     objects.insert(format!("/apis/apps/v1/namespaces/{root}/deployments/kars-controller"), json!({
         "apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"kars-controller","namespace":root,
             "uid":"controller-deploy","resourceVersion":"1"},
-        "spec":{"template":{"metadata":{},"spec":{"serviceAccountName":"kars-controller",
-            "containers":[{"name":"controller","image":"fixture"}]}}}
+        "spec":{"template":root_template}
     }));
     json!({"contract":CONTRACT,"phase":"qualified","bundleRevision":revision,
         "root":{"namespace":{"name":root,"uid":root_uid,"resourceVersion":"1"},
             "account":{"name":"kars-controller","uid":account_uid,"resourceVersion":"1"},
             "deployment":{"name":"kars-controller","uid":"controller-deploy","resourceVersion":"1"},
-            "templateDigest":"b".repeat(64),"replicaIntent":1},
+            "templateDigest":template_digest,"replicaIntent":1},
         "profile":"kcm-certificate","controllerUids":{},"namespaces":namespaces})
 }

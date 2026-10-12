@@ -20,7 +20,7 @@ pub enum MissionRunError {
     Cluster(#[from] kube::Error),
 }
 
-fn run_identity(task: &KarsTask) -> Result<(&str, &str, &str, &str), MissionRunError> {
+fn mission_identity(task: &KarsTask) -> Result<(&str, &str, &str, &str), MissionRunError> {
     let meta = &task.metadata;
     match (
         meta.namespace.as_deref(),
@@ -33,19 +33,29 @@ fn run_identity(task: &KarsTask) -> Result<(&str, &str, &str, &str), MissionRunE
                 && !name.is_empty()
                 && !uid.is_empty()
                 && !rv.is_empty()
-                && meta.deletion_timestamp.is_none()
-                && task
-                    .spec
-                    .execution
-                    .as_ref()
-                    .is_some_and(|execution| execution.launch) =>
+                && meta.deletion_timestamp.is_none() =>
         {
             Ok((ns, name, uid, rv))
         }
         _ => Err(MissionRunError::Conflict(
-            "the mission must be current and launched; reload before requesting a run",
+            "the mission identity must be current and not deleting; reload before requesting a run or revision",
         )),
     }
+}
+
+fn run_identity(task: &KarsTask) -> Result<(&str, &str, &str, &str), MissionRunError> {
+    let identity = mission_identity(task)?;
+    if !task
+        .spec
+        .execution
+        .as_ref()
+        .is_some_and(|execution| execution.launch)
+    {
+        return Err(MissionRunError::Conflict(
+            "the mission must be launched before requesting a run",
+        ));
+    }
+    Ok(identity)
 }
 
 fn annotation<'a>(task: &'a KarsTask, key: &str) -> Option<&'a str> {
@@ -57,7 +67,7 @@ fn annotation<'a>(task: &'a KarsTask, key: &str) -> Option<&'a str> {
         .filter(|v| !v.is_empty())
 }
 
-fn run_nonce(prefix: &str, uid: &str, rv: &str) -> String {
+pub(crate) fn run_nonce(prefix: &str, uid: &str, rv: &str) -> String {
     // The API-server revision is unique for this UID. The patch's CAS admits at
     // most one request from that revision, including across BFF processes.
     format!(
@@ -318,7 +328,7 @@ impl Cluster {
         reviewed_nonce: &str,
         revised_objective: &str,
     ) -> Result<String, MissionRunError> {
-        let (ns, name, uid, rv) = run_identity(task)?;
+        let (ns, name, uid, rv) = mission_identity(task)?;
         if reviewed_nonce.is_empty()
             || revised_objective.trim().is_empty()
             || annotation(task, REQUESTED) != Some(reviewed_nonce)
@@ -335,6 +345,59 @@ impl Cluster {
                 "kars.azure.com/run-objective-nonce": nonce,
                 "kars.azure.com/run-objective-b64": BASE64_STANDARD.encode(revised_objective.as_bytes()),
                 "kars.azure.com/run-objective-digest": format!("sha256:{}", sha256_hex(revised_objective.as_bytes()))
+            }}
+        });
+        self.tasks(ns)
+            .patch(name, &PatchParams::default(), &Patch::Merge(patch))
+            .await?;
+        Ok(nonce)
+    }
+
+    /// Rebind an explicitly retried, stopped revision without changing its
+    /// complete objective or execution gate. The caller verifies phase failure.
+    pub async fn retry_stopped_revision(
+        &self,
+        task: &KarsTask,
+        expected_nonce: &str,
+    ) -> Result<String, MissionRunError> {
+        let (ns, name, uid, rv) = mission_identity(task)?;
+        let invalid = || {
+            MissionRunError::Conflict(
+                "the stopped revision or its complete context changed; reload before retrying",
+            )
+        };
+        if expected_nonce.is_empty()
+            || !task
+                .spec
+                .execution
+                .as_ref()
+                .is_some_and(|execution| !execution.launch)
+            || annotation(task, REQUESTED) != Some(expected_nonce)
+            || annotation(task, COMPLETED) == Some(expected_nonce)
+            || annotation(task, "kars.azure.com/run-objective-nonce") != Some(expected_nonce)
+        {
+            return Err(invalid());
+        }
+        let encoded = annotation(task, "kars.azure.com/run-objective-b64").ok_or_else(invalid)?;
+        if encoded.len() > 87_384 {
+            return Err(invalid());
+        }
+        let objective = BASE64_STANDARD.decode(encoded).map_err(|_| invalid())?;
+        let text = std::str::from_utf8(&objective).map_err(|_| invalid())?;
+        let digest = format!("sha256:{}", sha256_hex(&objective));
+        if text.trim().is_empty()
+            || objective.len() > 65_536
+            || annotation(task, "kars.azure.com/run-objective-digest") != Some(digest.as_str())
+        {
+            return Err(invalid());
+        }
+        let nonce = run_nonce("rev", uid, rv);
+        let patch = serde_json::json!({
+            "metadata": { "uid": uid, "resourceVersion": rv, "annotations": {
+                "kars.azure.com/run-requested": nonce,
+                "kars.azure.com/run-objective-nonce": nonce,
+                "kars.azure.com/run-objective-b64": encoded,
+                "kars.azure.com/run-objective-digest": digest
             }}
         });
         self.tasks(ns)

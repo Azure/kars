@@ -3,14 +3,7 @@
 
 "use client";
 
-// kars Bridge Operator Console — Mesh topology, as a real node-link graph. Each
-// agent sandbox is a node (harness-badged, governance-marked) positioned on an
-// SVG canvas; a parent→child delegation is drawn as an actual connecting
-// line — a REAL end-to-end-encrypted A2A link (a principal spawns a sub-agent
-// and talks to it over the AGT mesh). No competitor has encrypted inter-agent
-// comms, so none can show this. We draw only edges we can prove from the
-// delegation graph; per-session ratchet/handshake state is not exposed as an
-// API yet, so it is deliberately NOT fabricated here.
+// Controller-recorded sandbox ancestry, not AgentMesh traffic evidence.
 //
 // Layout: principals laid out along a horizontal baseline; each principal's
 // children fan out in an arc beneath it. Deterministic (not physics-
@@ -185,8 +178,8 @@ export function MeshTopology({ sandboxes }: { sandboxes: Sandbox[] }) {
         <div>
           <h2 className="text-sm font-semibold">Team delegation topology</h2>
           <p className="mt-0.5 max-w-3xl text-xs text-foreground-muted">
-            Each lane is one principal-led team run. Curved links show proven encrypted delegations,
-            including nested sub-agents.
+            Curved links show controller-recorded parent and sub-agent relationships.
+            They do not establish that those agents exchanged messages through the AgentMesh relay.
           </p>
         </div>
         <div className="flex flex-wrap gap-1.5 text-[11px]">
@@ -194,7 +187,7 @@ export function MeshTopology({ sandboxes }: { sandboxes: Sandbox[] }) {
             {roots.length} principal{roots.length === 1 ? "" : "s"}
           </span>
           <span className="rounded-full border border-accent/25 bg-accent/10 px-2.5 py-1 text-accent">
-            {edges.length} encrypted link{edges.length === 1 ? "" : "s"}
+            {edges.length} delegation relationship{edges.length === 1 ? "" : "s"}
           </span>
           <span className="rounded-full border border-ok/25 bg-ok/10 px-2.5 py-1 text-ok">
             {executing} executing
@@ -208,7 +201,7 @@ export function MeshTopology({ sandboxes }: { sandboxes: Sandbox[] }) {
           className="block"
           style={{ width: `${Math.max(width, 720)}px`, minWidth: "100%", height: `${height}px` }}
           role="img"
-          aria-label="Team delegation topology: principal and sub-agent sandboxes connected by encrypted links"
+          aria-label="Team delegation topology: controller-recorded parent and sub-agent relationships, not message traffic"
         >
           <defs>
             <marker
@@ -364,7 +357,7 @@ export function MeshTopology({ sandboxes }: { sandboxes: Sandbox[] }) {
             <span className="font-bold text-foreground">✓</span> governed
           </span>
         </div>
-        <span>Only controller-recorded parent→child delegations are shown; links are never inferred.</span>
+        <span>AgentMesh delivery, decryption and replies are not verified by this topology.</span>
       </div>
     </section>
   );

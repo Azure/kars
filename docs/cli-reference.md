@@ -100,9 +100,11 @@ All commands also inherit Commander.js built-in `--help`.
 
 One-command bootstrap: provisions Azure resources (AKS cluster, ACR, Key
 Vault, Workload Identity), deploys the kars Helm chart, and creates a
-first sandbox — all from a single invocation. Ideal for new deployments and
-for CI pipelines. Use `--upgrade` to skip infra-provisioning and just re-run
-Helm + RBAC against an existing cluster.
+first sandbox — all from a single invocation. Entra Agent ID tenant/Blueprint
+prerequisites and identity activation are **not** part of this bootstrap.
+Use `--upgrade` to skip infra-provisioning and re-run Helm, workload restarts,
+health checks and applicable Workload Identity configuration checks against
+the cached deployment target.
 
 **Usage:**
 ```
@@ -127,14 +129,42 @@ kars up [options]
 | `--skip-runtime-images` | `false` | Skip building/importing the 7 multi-runtime adapter images (faster first deploy; only OpenClaw + BYO will be runnable) |
 | `--foundry-endpoint <url>` | — | Existing Azure AI Foundry project endpoint (`services.ai.azure.com`) |
 | `--openai-endpoint <url>` | — | Existing Azure OpenAI endpoint (`openai.azure.com`; derived from Foundry if omitted) |
-| `--service-tree <guid>` | — | ServiceTree / `serviceManagementReference` GUID for the Entra blueprint. Required only in Microsoft-style enterprise tenants. Falls back to `KARS_SERVICE_TREE` env var. |
+| `--service-tree <guid>` | — | Reserved provisioning option, temporarily refused by current `up`; review tenant prerequisites separately. `KARS_SERVICE_TREE` does not enable Blueprint provisioning here. |
 | `--dry-run` | `false` | Show what would be done without executing |
-| `--upgrade` | `false` | Fast upgrade: skip prompts, reuse cached context, re-run Helm + RBAC only |
+| `--upgrade` | `false` | Fast upgrade: skip prompts and infra, reuse cached target/subscription, re-run Helm, restart workloads and verify health plus applicable Workload Identity configuration |
 | `--from-scratch` | `false` | Ignore any partial state from a prior failed run and start over |
 | `--mesh-peer` | `true` | Enable mesh federation peer (`--no-mesh-peer` to disable) |
-| `--global-registry <url>` | — | Use an external AgentMesh registry (skip local registry deployment) |
-| `--expose-registry` | `false` | Deploy AGIC Ingress to expose this cluster's registry publicly |
+| `--mesh-trust <mode>` | `anonymous` | `anonymous` allows the installed mode without downgrading Entra; `entra` requires reviewed existing same-Core-release Helm activation and verifies both mesh templates, not token acceptance |
+| `--global-registry <url>` | — | Use an external AgentMesh registry; trust/availability are not attested. Refused with `--mesh-trust=entra`; changing managed/external ownership needs an explicit migration. |
+| `--expose-registry` | `false` | Temporarily refused before changes; configure and verify public DNS/TLS/ingress ownership separately |
 | `--skip-preflight` | `false` | Skip upfront RBAC & provider checks (advanced) |
+
+**Entra activation:** Ordinary and fast `up` do not provision Entra tenant or
+Blueprint prerequisites, nor raw-apply `KarsAuthConfig`. Reuse the existing
+Blueprint and shared SDK auth-sidecar architecture through the
+[reviewed same-Core-release Helm activation procedure](../deploy/helm/kars/README.md#explicit-activation-in-the-same-core-release).
+Establish Core with the sidecar disabled first. Later `--mesh-trust=entra`
+runs require that activation and compare the release's literal audience/tenant
+pair with both live registry/relay Pod templates and readiness. These are
+configuration checks, **not accepted-token or Agent ID lifecycle proof**.
+The default `anonymous` requirement preserves installed Entra trust. Sidecar
+Workload Identity and the controller's Workload Identity/provisioning path
+have separate prerequisites; enabling one does not establish the other.
+
+**Workload Identity verification:** The shared ARM helper verifies the intended
+user-assigned identity and principal in the explicitly selected subscription,
+ensures controller/sandbox federated credentials with the exact issuer,
+service-account subject and sole `api://AzureADTokenExchange` audience, and
+ensures Managed Identity Contributor for that principal scoped to that same
+identity resource. It creates missing entries and reads back credentials and
+roles, rejecting conflicts or malformed inventories. Ordinary `up` checks
+before creating the sandbox CR; fast upgrade checks current sandboxes after
+Helm and workload restarts when federation is configured. A failed ARM check
+does not undo those changes. Partial/malformed cached federation configuration
+is refused before connecting. A missing cached subscription also blocks an
+actual fast upgrade: run ordinary `kars up` to select and save the intended
+subscription rather than relying on the ambient Azure account. ARM readback is **not token-exchange, propagation,
+Foundry authorization or per-agent lifecycle verification**.
 
 **Examples:**
 ```bash
@@ -147,7 +177,7 @@ kars up --name prod-agent --region westus3 --release
 # Production deployment with Confidential VM isolation in a named resource group
 kars up --name prod-agent --isolation confidential -g my-rg --region westus3 --release
 
-# Fast upgrade (skip infra, re-run Helm only)
+# Fast upgrade (cached target/subscription, Helm + restart/configuration checks)
 kars up --upgrade
 
 # Dry run to preview what would be created
@@ -156,8 +186,8 @@ kars up --dry-run
 # Developer — build images locally, connect to Foundry
 kars up --build --foundry-endpoint https://my-project.services.ai.azure.com
 
-# Microsoft-corporate tenant (or any tenant that mandates ServiceTree)
-kars up --service-tree 1c826d4f-22b0-4c67-b755-778a05d7ffc9
+# Require Entra only AFTER reviewed identity activation in the existing Core release
+kars up --upgrade --mesh-trust=entra
 
 # Force a clean run (discard any auto-resume state)
 kars up --from-scratch
@@ -1460,8 +1490,8 @@ Authoring new corpora and signing them is covered separately:
 
 Manages AgentMesh identity and authentication for cross-environment agent
 handoff and federation. Controls the Ed25519 mesh identity (stored
-AES-256-GCM encrypted at `~/.kars/mesh-identity.json`), relay
-registration enforcement, and cluster federation peer state.
+AES-256-GCM encrypted at `~/.kars/mesh-identity.json`) and cluster federation
+peer state, and inspects declared mesh security configuration.
 
 > **Cross-Framework Secure Mesh.** kars meshes agents written in *different*
 > frameworks — **Hermes**, **OpenClaw**, and **LangGraph** — over a single
@@ -1483,7 +1513,7 @@ kars mesh <subcommand> [arguments] [options]
 | `status` | Show current mesh identity |
 | `list` | List mesh pairings and offload sandboxes on the cluster |
 | `reset` | Delete mesh identity (requires re-authentication) |
-| `security <mode>` | Toggle relay `REQUIRE_REGISTRATION` (mode: `open`, `strict`, `status`) |
+| `security <mode>` | Read-only security configuration (`status`); `open` and `strict` are unsupported and exit nonzero without changes |
 | `peer <mode>` | Toggle controller mesh federation (mode: `enable`, `disable`, `status`) |
 | `promote` | Promote the AKS cluster registry to a public global endpoint |
 | `unpair` | Delete mesh pairings from the AKS cluster |
@@ -1507,7 +1537,27 @@ kars mesh <subcommand> [arguments] [options]
 | Flag | Default | Description |
 |---|---|---|
 | `-n, --namespace <ns>` | `agentmesh` | AgentMesh namespace |
-| `--deployment <name>` | `relay` | Relay deployment name |
+| `--deployment <name>` | Discover Kars relay and registry | Inspect only the named relay deployment; required for external installations or other namespaces |
+
+`security status` uses the existing installation/ownership reader to discover
+Kars Helm or standalone deployments in `agentmesh`. With `--deployment`, it
+reads only that relay and does not infer ownership or inspect the registry.
+It never changes Kubernetes resources or resolves referenced Secrets/ConfigMaps.
+
+The output is **configuration only**, not a security verdict:
+
+- Official Microsoft AGT ignores `REQUIRE_REGISTRATION`. The old `open`/`strict`
+  toggles are refused before any cluster call; they cannot enforce registration.
+- Official AGT requires DID proof-of-possession (PoP) by default. Status reports
+  declared bypass settings or unresolved environment references, without changing
+  them. Neither refused mode weakens PoP.
+- `AGENTMESH_ENTRA_AUDIENCE` and `AGENTMESH_ENTRA_TENANT_ID` must both be nonblank
+  for Entra verification. An incomplete pair can leave verification disabled.
+  Paired literals are reported as declared, **not as validated JWT acceptance**.
+- Image defaults, environment references, and live processes are not inspected.
+  Deployment configuration or healthy Pods do not prove authentication works;
+  genuine Entra-token acceptance and invalid/missing-token rejection still need
+  live validation. This command performs neither.
 
 **Options for `peer`:**
 | Flag | Default | Description |
@@ -1543,8 +1593,11 @@ kars mesh status
 # List pairings on the cluster
 kars mesh list
 
-# Enable strict registration on the relay
-kars mesh security strict
+# Inspect declared relay/registry security configuration (not JWT acceptance)
+kars mesh security status
+
+# Inspect a specific external relay without changing it
+kars mesh security status --namespace external-mesh --deployment custom-relay
 
 # Enable controller federation
 kars mesh peer enable

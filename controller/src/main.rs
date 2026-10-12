@@ -23,6 +23,8 @@ mod auth_config;
 mod auth_config_reconciler;
 mod backoff;
 mod config_hash;
+#[path = "../../shared/team_memory.rs"]
+mod team_memory;
 #[path = "../../shared/constant_time.rs"]
 mod constant_time;
 mod crd;
@@ -36,6 +38,8 @@ mod egress_allowlist_compile;
 mod egress_approval;
 mod egress_approval_compile;
 mod egress_approval_reconciler;
+#[path = "../../shared/eval_names.rs"]
+mod eval_names;
 mod fedcred;
 mod fedcred_reaper;
 mod field_managers;
@@ -89,9 +93,13 @@ mod private_activation;
 mod private_tls;
 mod providers;
 mod reconciler;
+mod reviewed_execution;
 #[path = "../../shared/service_observer.rs"]
 mod service_observer;
 mod signer_policy;
+mod skill_delivery;
+#[path = "../../shared/skill_package.rs"]
+mod skill_package;
 mod sre_authority;
 #[path = "../../shared/sre_privacy.rs"]
 mod sre_privacy;
@@ -334,6 +342,10 @@ async fn main() -> Result<()> {
         let client = client.clone();
         tokio::spawn(async move { sre_authority::run(client).await })
     };
+    let mission_identity_handle = {
+        let client = client.clone();
+        tokio::spawn(async move { mission_delivery::dispatcher::run(client).await })
+    };
     let auth_config_handle = {
         // KarsAuthConfig reconciler — materialises the sidecar env
         // ConfigMap when an operator installs the tenant trust anchor
@@ -498,6 +510,9 @@ async fn main() -> Result<()> {
         }
         res = sre_authority_handle => {
             res?;
+        }
+        res = mission_identity_handle => {
+            res??;
         }
         res = auth_config_handle => {
             // auth-config reconciler exiting is non-fatal (it sleeps

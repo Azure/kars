@@ -1,8 +1,9 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it, expect } from "vitest";
-import { existsSync, mkdtempSync } from "node:fs";
+import { describe, it, expect, afterEach } from "vitest";
+import { existsSync, mkdtempSync, mkdirSync, writeFileSync, cpSync, symlinkSync, rmSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -97,5 +98,79 @@ describe("bundle-deploy-assets manifest", () => {
       const covered = declared.some((d) => rel === d || rel.startsWith(d + "/"));
       expect(covered, `bundle script must cover '${rel}'`).toBe(true);
     }
+  });
+});
+
+describe("locked Core chart bundling", () => {
+  const fixtures: string[] = [];
+  afterEach(() => {
+    for (const root of fixtures.splice(0)) rmSync(root, { recursive: true, force: true });
+  });
+
+  function fixture() {
+    const root = mkdtempSync(path.join(os.tmpdir(), "kars-bundle-chart-"));
+    fixtures.push(root);
+    const script = path.join(root, "cli/scripts/bundle-deploy-assets.mjs");
+    const chart = path.join(root, "deploy/helm/kars");
+    const distChart = path.join(root, "cli/dist/deploy/helm/kars");
+    mkdirSync(path.dirname(script), { recursive: true });
+    mkdirSync(path.join(chart, "charts"), { recursive: true });
+    mkdirSync(distChart, { recursive: true });
+    cpSync(path.join(repoRoot, "cli/scripts/bundle-deploy-assets.mjs"), script);
+    symlinkSync(path.join(repoRoot, "cli/node_modules"), path.join(root, "cli/node_modules"), "dir");
+    const dependencies = [
+      { name: "dependency", alias: "monitoring", version: "1.2.3", repository: "https://charts.example.test" },
+      { name: "local-child", alias: "datapathWitness", version: "0.1.0", repository: "file://../local-child" },
+    ];
+    writeFileSync(path.join(chart, "Chart.yaml"), JSON.stringify({ apiVersion: "v2", name: "kars", dependencies }));
+    writeFileSync(path.join(chart, "Chart.lock"), JSON.stringify({
+      dependencies: dependencies.map(({ alias: _alias, ...dependency }) => dependency),
+    }));
+    for (const dependency of dependencies) {
+      writeFileSync(path.join(chart, "charts", `${dependency.name}-${dependency.version}.tgz`), "fixture archive");
+    }
+    writeFileSync(path.join(root, "deploy/agentmesh-agt.yaml"), "kind: List\nitems: []\n");
+    writeFileSync(path.join(distChart, "obsolete-template.yaml"), "stale");
+    return {
+      chart, distChart,
+      bundle: () => execFileSync(process.execPath, [script], { encoding: "utf8", stdio: "pipe" }),
+    };
+  }
+
+  it("bundles remote and local locked dependencies by original name and removes stale chart files", () => {
+    const { distChart, bundle } = fixture();
+    expect(bundle()).toContain("copied");
+    expect(existsSync(path.join(distChart, "charts/dependency-1.2.3.tgz"))).toBe(true);
+    expect(existsSync(path.join(distChart, "charts/local-child-0.1.0.tgz"))).toBe(true);
+    expect(existsSync(path.join(distChart, "obsolete-template.yaml"))).toBe(false);
+  });
+
+  it.each(["Chart.lock", "charts/dependency-1.2.3.tgz", "charts/local-child-0.1.0.tgz"])(
+    "fails before replacing the bundle when %s is missing",
+    (missing) => {
+      const { chart, distChart, bundle } = fixture();
+      rmSync(path.join(chart, missing));
+      expect(bundle).toThrow(/helm dependency build deploy\/helm\/kars/);
+      expect(existsSync(path.join(distChart, "obsolete-template.yaml"))).toBe(true);
+    },
+  );
+
+  it.each(["stale", "duplicate", "malformed"])("refuses a %s dependency lock", (kind) => {
+    const { chart, bundle } = fixture();
+    const dependency = { name: "dependency", version: "1.2.2", repository: "https://charts.example.test" };
+    const dependencies = kind === "stale" ? [dependency]
+      : kind === "duplicate" ? [dependency, dependency] : "not-an-array";
+    writeFileSync(path.join(chart, "Chart.lock"), JSON.stringify({ dependencies }));
+    expect(bundle).toThrow(/match Chart.lock/);
+  });
+
+  it.each(["empty", "directory", "symlink"])("refuses a %s dependency archive", (kind) => {
+    const { chart, bundle } = fixture();
+    const archive = path.join(chart, "charts/dependency-1.2.3.tgz");
+    rmSync(archive);
+    if (kind === "empty") writeFileSync(archive, "");
+    else if (kind === "directory") mkdirSync(archive);
+    else symlinkSync(path.join(chart, "Chart.yaml"), archive);
+    expect(bundle).toThrow(/not a regular archive/);
   });
 });

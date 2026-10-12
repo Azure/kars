@@ -3,6 +3,7 @@
 
 import Link from "next/link";
 import { DeliverableBody } from "@/components/deliverable-view";
+import { RetainedTeamDocuments } from "@/components/retained-team-documents";
 import { HonestState } from "@/components/honest-state";
 import { ExecutionExplorer } from "@/components/execution-explorer";
 import { LiveRefresh } from "@/components/live-refresh";
@@ -14,12 +15,15 @@ import { EgressRequest } from "@/app/workspace/missions/[name]/egress-request";
 import { MissionBlockers } from "@/app/workspace/missions/[name]/mission-blockers";
 import { authWired, defaultNamespace, operatorIdentity } from "@/lib/config";
 import { getArchivedTeamRun, getTask, getTeam, listTaskApprovals } from "@/lib/bff";
-import { analyzeTeamRun } from "@/lib/team-run-evidence";
-import { revisionArtifactUrl } from "@/lib/mission-run-evidence";
+import { analyzeTeamRun, teamRunMetrics } from "@/lib/team-run-evidence";
+import { isSystemEvidenceArtifact } from "@/lib/router-activity";
+import { formatEvidenceTime } from "@/lib/format";
+import { missionFailureMessage, missionRunState, revisionArtifactUrl } from "@/lib/mission-run-evidence";
 import { currentPrincipal } from "@/lib/session";
 import type { ReactNode } from "react";
 import { HaltTeamRunButton } from "./halt-button";
 import { ArtifactSummary } from "./artifact-summary";
+import { missingTeamResource, TeamReadError } from "../../../read-error";
 
 export const dynamic = "force-dynamic";
 
@@ -31,12 +35,12 @@ const OUTCOME = {
   },
   running: {
     label: "Running",
-    detail: "The principal and role workers are still executing. Outcome classification appears only after the run terminates.",
+    detail: "The run remains active. Published evidence appears here as it becomes available; this status does not establish which individual roles are currently executing.",
     tone: "border-sky-500/40 bg-sky-500/[0.07] text-sky-600",
   },
   delivered: {
     label: "Delivered",
-    detail: "Every selected role returned a durable handback in the core assignment ledger.",
+    detail: "Every selected role has a recorded completion, and the principal produced a reviewable result.",
     tone: "border-signal/40 bg-signal/[0.07] text-signal",
   },
   delivered_with_issues: {
@@ -66,15 +70,26 @@ export default async function TeamRunPage({
   const { name, run } = await params;
   const { tab } = await searchParams;
   const ns = defaultNamespace();
-  const [team, task, allApprovals, principal] = await Promise.all([
-    getTeam(ns, name).catch(() => null),
-    getTask(ns, run).catch(() => null),
-    listTaskApprovals(ns, run).catch(() => []),
-    currentPrincipal(),
-  ]);
+  let records;
+  try {
+    records = await Promise.all([
+      getTeam(ns, name).catch(missingTeamResource),
+      getTask(ns, run).catch(missingTeamResource),
+      listTaskApprovals(ns, run).catch(missingTeamResource),
+      currentPrincipal(),
+    ]);
+  } catch (error) {
+    return <TeamReadError error={error} />;
+  }
+  const [team, task, allApprovals, principal] = records;
   if (!team) return <RunUnavailable run={run} />;
   if (!task) {
-    const archived = await getArchivedTeamRun(ns, name, run).catch(() => null);
+    let archived;
+    try {
+      archived = await getArchivedTeamRun(ns, name, run).catch(missingTeamResource);
+    } catch (error) {
+      return <TeamReadError error={error} />;
+    }
     if (!archived) return <RunUnavailable run={run} />;
     const pullRequests = archivedPullRequests(archived.content ?? "", team.git_write_repos);
     return (
@@ -125,6 +140,11 @@ export default async function TeamRunPage({
             <HonestState variant="empty" title="Archived content unavailable" detail="The commons index remains, but its retained content was pruned." />
           )}
         </section>
+        {archived.archive && (
+          <section className="rounded-xl border border-border bg-surface p-5">
+            <RetainedTeamDocuments archive={archived.archive} />
+          </section>
+        )}
         <dl className="flex flex-wrap gap-x-6 gap-y-2 rounded-xl border border-border bg-surface px-5 py-4 text-xs text-foreground-muted">
           <div><dt>Digest</dt><dd className="font-mono text-foreground">{archived.digest}</dd></div>
           <div><dt>Stored size</dt><dd className="text-foreground">{archived.size_bytes.toLocaleString()} bytes</dd></div>
@@ -133,7 +153,7 @@ export default async function TeamRunPage({
       </div>
     );
   }
-  const approvals = allApprovals.filter(
+  const approvals = (allApprovals ?? []).filter(
     (approval) =>
       approval.run_nonce == null
       || task.current_run_nonce == null
@@ -142,12 +162,15 @@ export default async function TeamRunPage({
   if (task.team !== name) return <RunUnavailable run={run} />;
 
   const evidence = analyzeTeamRun(team, task);
+  const metrics = teamRunMetrics(task);
+  const { currentResult, failed, realDelivery, routerActivity } = missionRunState(task);
+  const producer = currentResult?.run_evidence;
   const rosterRuntimes = [...new Set(team.roster.flatMap((role) => role.runtime ? [role.runtime] : []))];
   const rosterModels = [...new Set(team.roster.flatMap((role) => role.model ? [role.model] : []))];
   const principalRuntime = task.composition?.runtime ?? (rosterRuntimes.length === 1 ? rosterRuntimes[0] : null);
   const principalModel = task.composition?.model ?? (rosterModels.length === 1 ? rosterModels[0] : null);
   const synthesizedGraphAgents = evidence.roles
-    .filter((role) => role.state !== "skipped")
+    .filter((role) => ["delivered", "failed", "working"].includes(role.state))
     .map((role) => ({
       name: role.role.member_task ?? role.role.name,
       namespace: ns,
@@ -158,7 +181,7 @@ export default async function TeamRunPage({
             ? "Failed"
             : role.state === "working"
               ? "Running"
-              : "Ready",
+              : "Pending",
       runtime: role.role.runtime ?? principalRuntime,
       role: role.role.name,
       parent: run,
@@ -191,20 +214,23 @@ export default async function TeamRunPage({
       || task.assignment?.state === "Running"
     );
   const running =
-    task.launched && !team.paused && (awaitingAssignment || assignmentInFlight);
+    evidence.outcome === "running"
+    && task.launched && !team.paused && (awaitingAssignment || assignmentInFlight);
+  const failedPhases = metrics.phases?.filter((phase) => phase.state === "failed") ?? [];
   const roleDelivered = evidence.roles.filter((r) => r.state === "delivered").length;
-  const roleTarget = evidence.roles.filter((r) => r.state !== "skipped").length;
   const lastActivityAt =
     [
       task.assignment?.last_progress_at,
       task.assignment?.completed_at,
       task.result?.finished_at,
+      ...(metrics.phases ?? []).map((phase) => phase.result?.finished_at),
     ]
       .filter((value): value is string => value != null)
       .sort()
       .at(-1) ?? null;
   const evidenceArtifacts = task.artifacts.filter(
     (a) =>
+      !isSystemEvidenceArtifact(a.name) &&
       !a.name.endsWith("collaboration.jsonl") &&
       !a.name.endsWith("research-evidence.jsonl") &&
       !a.name.endsWith("subagent-telemetry.jsonl") &&
@@ -212,18 +238,14 @@ export default async function TeamRunPage({
       !a.name.endsWith("task-checkpoint.json"),
   );
   const missingSelectedRoles = evidence.roles.filter(
-    (role) => role.state === "missing" || role.state === "failed",
+    (role) => metrics.roleLifecycleKnown && (role.state === "missing" || role.state === "failed"),
   );
-  const failedToolCalls = task.activity.filter(
+  const failedToolCalls = metrics.activity.filter(
     (event) => event.kind === "tool" && !event.ok,
   );
-  const promptShare =
-    task.result?.total_tokens && task.result.prompt_tokens
-      ? Math.round((task.result.prompt_tokens / task.result.total_tokens) * 100)
-      : null;
   const claimedPullRequest =
-    task.result?.status === "error" &&
-    githubPullRequests(task.result.output).length > 0;
+    failed && currentResult != null &&
+    githubPullRequests(currentResult.output).length > 0;
 
   return (
     <div className="space-y-6">
@@ -260,13 +282,15 @@ export default async function TeamRunPage({
           <dd className="font-medium text-foreground">
             {lastActivityAt
               ? new Date(lastActivityAt).toLocaleString()
-              : "No activity recorded"}
+              : "Activity not yet available on this run"}
           </dd>
         </div>
         <div>
           <dt>Completed</dt>
           <dd className="font-medium text-foreground">
-            {task.result?.finished_at ? new Date(task.result.finished_at).toLocaleString() : "In progress"}
+            {currentResult?.finished_at
+              ? formatEvidenceTime(currentResult.finished_at)
+              : evidence.outcome === "running" ? "In progress" : "No final result recorded"}
           </dd>
         </div>
       </dl>
@@ -278,19 +302,42 @@ export default async function TeamRunPage({
             <p className="mt-1 max-w-3xl text-sm text-foreground-muted">{outcome.detail}</p>
           </div>
           <div className="grid grid-cols-3 gap-5 text-right text-xs text-foreground-muted">
-            <div><strong className="block text-base text-foreground">{roleDelivered}/{roleTarget}</strong>selected roles</div>
-            <div><strong className="block text-base text-foreground">{evidenceArtifacts.length}</strong>artifacts</div>
-            <div><strong className="block text-base text-foreground">{(task.result?.total_tokens ?? 0).toLocaleString()}</strong>tokens</div>
+            <div><strong className="block text-base text-foreground">{metrics.selectedRoles == null || !metrics.roleLifecycleKnown ? "Unavailable" : `${roleDelivered}/${metrics.selectedRoles}`}</strong>recorded role completions</div>
+            <div><strong className="block text-base text-foreground">{evidenceArtifacts.length}</strong>captured output files</div>
+            <div><strong className="block text-base text-foreground">{metrics.tokens?.toLocaleString() ?? "Unavailable"}</strong>recorded tokens</div>
           </div>
         </div>
+        <p className="mt-3 text-xs text-foreground-muted">
+          These values cover evidence published on this run. Unavailable role activity or usage
+          does not mean that no work has occurred.
+        </p>
       </section>
       {task.checkpoint && <TaskCheckpointPanel checkpoint={task.checkpoint} />}
 
-      {evidence.evidenceMode !== "ledger" && task.result != null && (
-        <section className="rounded-xl border border-warning/40 bg-warning/[0.06] px-5 py-4">
-          <h2 className="font-semibold">Historical run — assignment ledger unavailable</h2>
+      {failedPhases.length > 0 && (
+        <section className="rounded-xl border border-danger/50 bg-danger/[0.06] px-5 py-4">
+          <h2 className="font-semibold">Why this run failed</h2>
           <p className="mt-1 text-sm text-foreground-muted">
-            This run predates durable child lifecycle events. Its retained output and artifacts remain visible, but Bridge will not infer Delivered N/N from them.
+            A required phase failed. Principal synthesis is held; completed role work is preserved,
+            but it is not a final delivery.
+          </p>
+          {failedPhases.map((phase) => (
+            <div key={`${phase.role}:${phase.phase}`} className="mt-3">
+              <h3 className="text-sm font-medium">{phase.role} / {phase.phase}</h3>
+              <p className="mt-1 whitespace-pre-wrap break-words text-xs text-foreground-muted">
+                {missionFailureMessage(phase.result)}
+              </p>
+            </div>
+          ))}
+        </section>
+      )}
+
+      {!["ledger", "reviewed-phases"].includes(evidence.evidenceMode) && task.result != null && (
+        <section className="rounded-xl border border-warning/40 bg-warning/[0.06] px-5 py-4">
+          <h2 className="font-semibold">Assignment ledger unavailable</h2>
+          <p className="mt-1 text-sm text-foreground-muted">
+            Retained output and artifacts remain visible, but this view has no current assignment ledger.
+            Bridge will not infer Delivered N/N from artifacts or classify the run as historical merely because its ledger is unavailable.
           </p>
         </section>
       )}
@@ -301,12 +348,12 @@ export default async function TeamRunPage({
           <p className="mt-1 text-sm text-foreground-muted">{task.result.blocked.detail}</p>
         </section>
       )}
-      {task.result?.status === "error" && !task.result.blocked && (
+      {currentResult && failed && !currentResult.blocked && (
         <section className="rounded-xl border border-danger/50 bg-danger/[0.06] px-5 py-4">
           <h2 className="font-semibold">Why this run failed</h2>
           <p className="mt-1 text-sm text-foreground-muted">
-            The agent produced a confident narrative, but the retained execution evidence did not
-            support a successful outcome.
+            The runtime reported a failed outcome. The retained failure output below records the
+            reported cause; completed role work does not establish final delivery.
           </p>
           <ul className="mt-3 space-y-1.5 text-sm">
             {missingSelectedRoles.length > 0 && (
@@ -327,13 +374,6 @@ export default async function TeamRunPage({
                 PR deliverable. No verified PR is attached to this run.
               </li>
             )}
-            {promptShare != null && promptShare >= 85 && (
-              <li>
-                • {promptShare}% of the {(task.result.total_tokens ?? 0).toLocaleString()} tokens
-                were prompt/context tokens, indicating repeated context replay rather than useful
-                completion.
-              </li>
-            )}
           </ul>
           <Link
             href={`/workspace/teams/${encodeURIComponent(name)}/runs/${encodeURIComponent(run)}?tab=activity`}
@@ -342,15 +382,15 @@ export default async function TeamRunPage({
           >
             Open searchable execution flow →
           </Link>
-          <details className="mt-4 rounded-lg border border-danger/25 bg-surface/60">
+          <details open className="mt-4 rounded-lg border border-danger/25 bg-surface/60">
             <summary className="cursor-pointer px-3 py-2 text-xs font-medium">
-              Raw agent narrative
+              Retained failure output
               <span className="ml-2 font-normal text-foreground-muted">
-                untrusted because the run failed
+                not an accepted deliverable
               </span>
             </summary>
             <p className="max-h-96 overflow-auto whitespace-pre-wrap border-t border-danger/20 px-3 py-3 text-xs text-foreground-muted">
-              {task.result.output}
+              {missionFailureMessage(currentResult)}
             </p>
           </details>
         </section>
@@ -371,7 +411,9 @@ export default async function TeamRunPage({
                     Who was selected, who completed their assignment, and which outputs were retained.
                   </p>
                   <div className="mt-4 grid gap-3 md:grid-cols-2">
-                    {evidence.roles.map((r) => (
+                    {evidence.roles.map((r) => {
+                      const phases = metrics.phases?.filter((phase) => phase.role === r.role.name) ?? [];
+                      return (
                       <div key={r.role.name} className="rounded-lg border border-border bg-surface-muted/30 p-4">
                         <div className="flex items-center justify-between gap-3">
                           <p className="font-medium">{r.role.name.replace(/-/g, " ")}</p>
@@ -387,28 +429,55 @@ export default async function TeamRunPage({
                                    : "bg-warning/10 text-warning"
                           }`}>
                             {r.state === "delivered"
-                              ? "Handback received"
+                              ? phases.length > 0 ? "Phase completed" : "Handback received"
                               : r.state === "skipped"
                                 ? "Skipped for this task"
                                 : r.state === "working"
                                   ? "Working"
                                   : r.state === "failed"
-                                    ? "Handback failed"
-                                    : "No handback"}
+                                    ? phases.length > 0 ? "Phase failed" : "Handback failed"
+                                    : "No handback visible"}
                           </span>
                         </div>
                         <p className="mt-1 text-xs text-foreground-muted">{r.role.system_prompt}</p>
-                        <p className="mt-2 text-[11px] text-foreground-muted">
-                          {r.artifacts.length} artifact{r.artifacts.length === 1 ? "" : "s"} · {r.handbacks.length} structured handback{r.handbacks.length === 1 ? "" : "s"}
-                          {r.artifactAttribution === "inferred" ? " · artifact ownership inferred from retained file names and paths" : ""}
-                        </p>
+                        {phases.length > 0 ? (
+                          <div className="mt-2 space-y-2">
+                            <p className="text-[11px] text-foreground-muted">
+                              Recorded from revision-bound phase results, not mesh handback messages.
+                            </p>
+                            {phases.map((phase) => (
+                              <details key={`${phase.phase}:${phase.task_uid}:${phase.run_nonce}`} className="rounded-md border border-border p-2">
+                                <summary className="cursor-pointer text-xs">
+                                  {phase.phase} · {phase.state}
+                                </summary>
+                                {phase.result ? (
+                                  <>
+                                    <p className="mt-2 text-[11px] text-foreground-muted">
+                                      Result recorded: {formatEvidenceTime(phase.result.finished_at)}
+                                    </p>
+                                    {phase.state === "failed" ? (
+                                      <p className="mt-2 whitespace-pre-wrap break-words text-xs text-danger">
+                                        {missionFailureMessage(phase.result)}
+                                      </p>
+                                    ) : <DeliverableBody output={phase.result.output} />}
+                                  </>
+                                ) : <p className="mt-2 text-xs text-foreground-muted">Phase output is not available.</p>}
+                              </details>
+                            ))}
+                          </div>
+                        ) : (
+                          <p className="mt-2 text-[11px] text-foreground-muted">
+                            {r.artifacts.length} artifact{r.artifacts.length === 1 ? "" : "s"} · {r.handbacks.length} structured handback{r.handbacks.length === 1 ? "" : "s"}
+                            {r.artifactAttribution === "inferred" ? " · artifact ownership inferred from retained file names and paths" : ""}
+                          </p>
+                        )}
                         {r.handbacks.at(-1)?.at && (
                           <p className="mt-1 text-[11px] text-foreground-muted" suppressHydrationWarning>
                             Latest handback: {new Date(r.handbacks.at(-1)!.at!).toLocaleString()}
                           </p>
                         )}
                       </div>
-                    ))}
+                    ); })}
                   </div>
                 </section>
 
@@ -434,6 +503,8 @@ export default async function TeamRunPage({
               <div className="space-y-4">
                 {task.result == null && <DeployTimeline task={task} />}
                 <ExecutionExplorer
+                  routerActivity={routerActivity && producer ? { observations: routerActivity, producer, provisional: false } : null}
+                  phases={metrics.phases ?? []}
                   running={running}
                   activity={task.activity}
                   telemetry={task.telemetry}
@@ -443,7 +514,7 @@ export default async function TeamRunPage({
                   name={run}
                   runNonce={task.current_run_nonce}
                   agentLabel={team.display_name ?? team.name}
-                  agentPhase={team.paused ? "Hibernating" : task.assignment?.state ?? task.execution_phase ?? task.phase}
+                  agentPhase={currentResult?.run_evidence?.status ?? (team.paused ? "Hibernating" : task.assignment?.state ?? task.execution_phase ?? task.phase)}
                   agentRuntime={principalRuntime}
                   agentModel={principalModel}
                   subAgents={graphSubAgents}
@@ -490,7 +561,10 @@ export default async function TeamRunPage({
                   </section>
                 )}
                 <section className="rounded-xl border border-border bg-surface p-5">
-                  <h2 className="text-sm font-semibold">Role artifacts</h2>
+                  <h2 className="text-sm font-semibold">Captured run files</h2>
+                  <p className="mt-1 text-xs text-foreground-muted">
+                    Files retained for this revision. Role attribution is shown only when recorded or explicitly inferred.
+                  </p>
                   <div className="mt-3 space-y-3">
                     {evidence.roles.flatMap((r) => r.artifacts.map((a) => (
                       <details key={`${r.role.name}-${a.name}`} className="rounded-lg border border-border bg-surface-muted/30">
@@ -516,10 +590,26 @@ export default async function TeamRunPage({
                     ))}
                   </div>
                 </section>
-                {task.result?.output && task.result.status !== "error" && !task.result.blocked && (
+                {task.artifacts.some((artifact) => isSystemEvidenceArtifact(artifact.name)) && (
+                  <section className="rounded-xl border border-border bg-surface p-5">
+                    <h2 className="text-sm font-semibold">System evidence</h2>
+                    <p className="mt-1 text-xs text-foreground-muted">
+                      Recorded execution evidence, not a deliverable. The Execution flow tab presents the available records.
+                    </p>
+                    {task.artifacts.filter((artifact) => isSystemEvidenceArtifact(artifact.name)).map((artifact) => (
+                      <details key={artifact.name} className="mt-3 rounded-lg border border-border">
+                        <summary className="cursor-pointer px-4 py-3 text-sm">{artifact.name}</summary>
+                        <div className="border-t border-border px-4 py-3">
+                          <ArtifactBody artifact={artifact} downloadHref={revisionArtifactUrl(ns, run, artifact.name, task.current_run_nonce)} />
+                        </div>
+                      </details>
+                    ))}
+                  </section>
+                )}
+                {currentResult && realDelivery && (
                   <section className="rounded-xl border border-border bg-surface p-5">
                     <h2 className="text-sm font-semibold">Principal synthesis</h2>
-                    <div className="mt-3"><DeliverableBody output={task.result.output} /></div>
+                    <div className="mt-3"><DeliverableBody output={currentResult.output} /></div>
                   </section>
                 )}
               </div>

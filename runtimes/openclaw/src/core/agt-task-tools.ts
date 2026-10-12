@@ -10,6 +10,8 @@
 // The actual handlers live in plugin.ts processTaskWithTools()'s
 // switch block; only the *shape* moves here.
 
+import { MCP_BRIDGE_TOOLS } from "./agt-tools/mcp-bridge.js";
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 const WEB_SEARCH_TOOL: any = {
   type: "function" as const,
@@ -46,6 +48,10 @@ const MEMORY_TOOL: any = {
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 export const TASK_TOOLS: any[] = [
+  ...MCP_BRIDGE_TOOLS.map(({ name, description, parameters }) => ({
+    type: "function" as const,
+    function: { name, description, parameters },
+  })),
   {
     type: "function" as const,
     function: {

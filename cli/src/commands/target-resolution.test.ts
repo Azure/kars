@@ -17,7 +17,8 @@ vi.mock("../config.js", async importOriginal => ({
   ...await importOriginal<typeof import("../config.js")>(),
   loadContext: () => mocked.context,
 }));
-vi.mock("../lib/agt-bootstrap.js", () => ({
+vi.mock("../lib/agt-bootstrap.js", async original => ({
+  ...await original<typeof import("../lib/agt-bootstrap.js")>(),
   ensureAgtRepo: mocked.ensureAgtRepo, ensureAgtWheels: vi.fn(),
 }));
 

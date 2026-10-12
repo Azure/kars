@@ -48,19 +48,20 @@ export default async function ConsoleLayout({
   return (
     <div className="flex min-h-full flex-col">
       <header className="sticky top-0 z-10 border-b border-border bg-surface/90 backdrop-blur">
-        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between px-6">
+        <div className="mx-auto flex h-14 max-w-7xl items-center justify-between gap-2 px-4 sm:px-6">
           <Link
             href="/console"
+            aria-label="kars Console"
             className="flex items-center gap-2.5 rounded focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
           >
             <span className="grid h-7 w-7 place-items-center rounded-md bg-foreground text-background text-sm font-bold">
               kb
             </span>
-            <span className="font-semibold tracking-tight">
+            <span className="hidden font-semibold tracking-tight sm:inline">
               kars <span className="text-foreground-muted">Console</span>
             </span>
           </Link>
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             <span
               title={`Namespace: ${ns}`}
               className="hidden items-center gap-1.5 font-mono text-xs text-foreground-muted sm:inline-flex"

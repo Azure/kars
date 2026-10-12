@@ -23,6 +23,7 @@ use crate::kars::task::{BudgetScope, TaskBudget};
 use crate::routes::ownership::require_owned_task;
 use crate::state::AppState;
 
+mod budget_contracts;
 mod envelope;
 mod models;
 mod network;
@@ -130,17 +131,31 @@ pub async fn validate_task(
         .map(blueprint_to_dto)
         .unwrap_or_default();
     let tier = Some(task.spec.envelope.tier);
-    Ok(Json(
-        run_checks(
-            cluster,
-            &ns,
-            &bp,
-            tier,
-            task.spec.envelope.budget.as_ref(),
-            None,
-        )
-        .await,
-    ))
+    let mut result = run_checks(
+        cluster,
+        &ns,
+        &bp,
+        tier,
+        task.spec.envelope.budget.as_ref(),
+        None,
+    )
+    .await;
+    if let Err(detail) = crate::kars::execution_plans::validate(&task, true) {
+        if !result
+            .checks
+            .iter()
+            .any(|check| check.id == "execution_plan" && check.status == CheckStatus::Fail)
+        {
+            result.checks.push(Check {
+                id: "execution_activation".into(),
+                label: "Stored execution package cannot be activated".into(),
+                status: CheckStatus::Fail,
+                detail,
+            });
+        }
+        result.ok = false;
+    }
+    Ok(Json(result))
 }
 
 /// Project the typed task blueprint into the validation DTO (the checks operate
@@ -183,6 +198,81 @@ fn blueprint_to_dto(b: &crate::kars::task::TaskBlueprint) -> crate::routes::task
     }
 }
 
+pub(crate) async fn require_budget_contracts(
+    cluster: &crate::kars::cluster::Cluster,
+    task: &crate::kars::task::KarsTask,
+) -> AppResult<()> {
+    let blueprint = task
+        .spec
+        .blueprint
+        .as_ref()
+        .map(blueprint_to_dto)
+        .unwrap_or_default();
+    if let Some(check) =
+        budget_contracts::check(cluster, &blueprint, task.spec.envelope.budget.as_ref()).await
+        && check.status == CheckStatus::Fail
+    {
+        return Err(AppError::BadRequest(check.detail));
+    }
+    Ok(())
+}
+
+pub(crate) async fn require_team_budget_contracts(
+    cluster: &crate::kars::cluster::Cluster,
+    team: &crate::kars::team::KarsTeam,
+) -> AppResult<()> {
+    let mut blueprint = team
+        .spec
+        .blueprint
+        .as_ref()
+        .map(blueprint_to_dto)
+        .unwrap_or_default();
+    let plan = blueprint.execution_plan.take();
+    let budget = team.spec.envelope.budget.as_ref();
+    if let Some(check) = budget_contracts::check(cluster, &blueprint, budget).await
+        && check.status == CheckStatus::Fail
+    {
+        return Err(AppError::BadRequest(check.detail));
+    }
+    if let Some(plan) = plan {
+        for role in &plan.roles {
+            let roster = team
+                .spec
+                .roster
+                .iter()
+                .find(|entry| entry.name == role.name);
+            let mut role_blueprint = roster
+                .and_then(|entry| entry.blueprint.as_ref())
+                .or(team.spec.blueprint.as_ref())
+                .map(blueprint_to_dto)
+                .unwrap_or_default();
+            role_blueprint.execution_plan = None;
+            let mut role_budget = budget.cloned().unwrap_or(TaskBudget {
+                scope: None,
+                tokens: None,
+                usd_micros: None,
+            });
+            role_budget.tokens = plan.role_qualification_budget(&role.name, role_budget.tokens);
+            if let Some(envelope) = roster.and_then(|entry| entry.envelope.as_ref())
+                && let Some(limit) = envelope.budget.as_ref().and_then(|budget| budget.tokens)
+                && limit > 0
+            {
+                role_budget.tokens = Some(role_budget.tokens.map_or(limit, |cap| cap.min(limit)));
+            }
+            if let Some(check) =
+                budget_contracts::check(cluster, &role_blueprint, Some(&role_budget)).await
+                && check.status == CheckStatus::Fail
+            {
+                return Err(AppError::BadRequest(format!(
+                    "Role {:?}: {}",
+                    role.name, check.detail
+                )));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// Run the full §20 check suite against a package. Pure read + DNS.
 async fn run_checks(
     cluster: &crate::kars::cluster::Cluster,
@@ -195,7 +285,11 @@ async fn run_checks(
     let mut checks: Vec<Check> = Vec::new();
     let budget_tokens = budget.and_then(|b| b.tokens);
 
+    checks.push(envelope::check_workspace(cluster, namespace).await);
     envelope::check_envelope(cluster, bp, tier, budget, &mut checks).await;
+    if let Some(check) = budget_contracts::check(cluster, bp, budget).await {
+        checks.push(check);
+    }
 
     resources::check_resources(cluster, namespace, bp, &mut checks).await;
 

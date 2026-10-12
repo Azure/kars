@@ -1,0 +1,32 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- if and .Values.monitoring.enabled .Values.monitoring.prometheus.enabled }}
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: kars-prometheus-query
+  namespace: monitoring
+rules:
+  - apiGroups: [""]
+    resources: ["services/proxy"]
+    resourceNames: ["kps-kube-prometheus-stack-prometheus:9090"]
+    verbs: ["get"]
+{{- with .Values.monitoring.querySubjects }}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: kars-prometheus-query
+  namespace: monitoring
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: kars-prometheus-query
+subjects:
+  {{- range . }}
+  - apiGroup: rbac.authorization.k8s.io
+    kind: {{ .kind }}
+    name: {{ .name | quote }}
+  {{- end }}
+{{- end }}
+{{- end }}

@@ -2,8 +2,11 @@
 // Licensed under the MIT License.
 
 import type { ActivityEvent, SubAgent } from "@/lib/types";
-import { actionFromEvent, destinationsFrom, normalize } from "./activity";
+import { actionFromEvent, actionsFromRouter, destinationsFrom, normalize } from "./activity";
+import { routerProducerKey, type BoundRouterActivity } from "@/lib/router-activity";
 import type { AgentExecution, ToolEvent } from "./types";
+import type { ReviewedExecution } from "@/lib/types/missions";
+import { reviewedPhaseRouterActivity } from "@/lib/team-run-evidence";
 
 export function buildAgentExecutions({
   agentLabel,
@@ -14,6 +17,8 @@ export function buildAgentExecutions({
   name,
   running,
   subAgents,
+  routerActivity,
+  phases = [],
 }: {
   agentLabel: string;
   agentModel: string | null;
@@ -23,7 +28,68 @@ export function buildAgentExecutions({
   name: string | undefined;
   running: boolean;
   subAgents: SubAgent[];
+  routerActivity?: BoundRouterActivity | null;
+  phases?: ReviewedExecution["phases"];
 }): AgentExecution[] {
+    if (phases.length) {
+      const principal = buildAgentExecutions({
+        agentLabel, agentModel, agentPhase, agentRuntime, events, name, running,
+        subAgents: [], routerActivity,
+      });
+      return [...principal, ...phases.map((phase, index) => {
+        const binding = reviewedPhaseRouterActivity(phase);
+        const [agent] = buildAgentExecutions({
+          agentLabel: `${phase.role} / ${phase.phase}`,
+          agentModel: phase.result?.model ?? null,
+          agentPhase: phase.state,
+          agentRuntime: null,
+          events: [], name: phase.task_name ?? undefined,
+          running: phase.state === "active", subAgents: [], routerActivity: binding,
+        });
+        return {
+          ...agent,
+          id: `phase-${phase.task_uid ?? index}`,
+          displayName: `${phase.role} / ${phase.phase}`,
+          technicalName: phase.task_name ?? `${phase.role} / ${phase.phase}`,
+          role: phase.role,
+          relationship: "Phase reserved by the reviewed Team execution plan",
+          parent: name ?? null,
+          parentId: "principal",
+          isPrincipal: false,
+          traceQuery: binding ? agent.traceQuery : `phase:${phase.task_uid ?? index}`,
+          lastActivity: phase.result?.run_evidence?.finished_at ?? agent.lastActivity,
+          searchText: `${agent.searchText} ${normalize(`${phase.role} ${phase.phase}`)}`,
+        };
+      })];
+    }
+    if (routerActivity) {
+      const { producer, observations, provisional } = routerActivity;
+      const actions = actionsFromRouter(routerActivity);
+      const records = observations.state === "observed" ? observations.trace.events : [];
+      const models = [...new Set(records.flatMap(event => event.kind === "round" && event.model ? [event.model] : []))];
+      const [agent] = buildAgentExecutions({
+        agentLabel: producer.agent_name, name: producer.agent_name,
+        agentModel: models.length === 1 ? models[0] : null, agentRuntime: null,
+        agentPhase: provisional ? "Running" : agentPhase ?? "Finished",
+        events: [], running: provisional, subAgents: [],
+      });
+      return [{
+        ...agent,
+        role: "Recorded producer",
+        relationship: "Producer bound to this run and assignment; delegation is not recorded here",
+        traceQuery: `observations:${new URLSearchParams({ producer: routerProducerKey(producer) })}`,
+        observedAgentName: producer.agent_name,
+        observedAgentInstance: producer.pod_uid,
+        identitySearchText: normalize(`${producer.agent_name} ${producer.agent_did} ${producer.assignment_id}`),
+        searchText: normalize(`${producer.agent_name} ${producer.agent_did} ${producer.assignment_id} ${models.join(" ")} ${actions.map(action => `${action.human} ${action.raw} ${action.args} ${action.result}`).join(" ")}`),
+        rounds: records.filter(event => event.kind === "round").length,
+        toolCalls: records.filter(event => event.kind === "tool_result").length,
+        failures: records.filter(event => event.kind === "tool_result" && event.ok === false).length,
+        lastActivity: actions.reduce<string | null>((latest, action) =>
+          action.ts && (!latest || action.ts > latest) ? action.ts : latest, null),
+        actions,
+      }];
+    }
     const rootInactive = Boolean(
       !running
       && agentPhase
@@ -105,7 +171,7 @@ export function buildAgentExecutions({
       const agentEvents = records.get(definition.id) ?? [];
       const actions = agentEvents
         .map(actionFromEvent)
-        .sort((left, right) => left.ts.localeCompare(right.ts));
+        .sort((left, right) => (left.ts ?? "").localeCompare(right.ts ?? ""));
       const tools = agentEvents.filter(
         (event): event is ToolEvent => event.kind === "tool",
       );

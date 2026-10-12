@@ -14,7 +14,7 @@
 // Edits PUT straight to /api/operator/inference-budgets/* and re-read the live
 // hierarchy (usage recomputed server-side from completed runs).
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useId, useState } from "react";
 import type { InferenceBudgets, BudgetLevel } from "@/lib/types";
 import { Icon } from "@/components/icon";
 
@@ -38,6 +38,35 @@ function fmt(n: number): string {
   return n.toLocaleString();
 }
 
+export async function persistBudget(
+  url: string,
+  body: SaveBody | { clear: true } | { daily_tokens: number },
+  method: "PUT" | "PATCH" = "PUT",
+): Promise<void> {
+  if ("daily_tokens" in body && (!Number.isSafeInteger(body.daily_tokens) || body.daily_tokens < 0)) {
+    throw new Error("Daily token cap must be a non-negative whole number within the supported range.");
+  }
+  if ("buffer_percent" in body && (!Number.isInteger(body.buffer_percent) || body.buffer_percent < 0 || body.buffer_percent > 1000)) {
+    throw new Error("Buffer headroom must be a whole number between 0 and 1,000 percent.");
+  }
+  let response: Response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(20_000),
+    });
+  } catch {
+    throw new Error("Couldn't confirm the budget update. Check the current status before retrying.");
+  }
+  if (!response.ok) {
+    throw new Error(response.status === 403
+      ? "Only a cluster or org admin can change this setting."
+      : `Budget update was not confirmed (HTTP ${response.status}). Check the current status before retrying.`);
+  }
+}
+
 export function InferenceBudgets({ isAdmin = true }: { isAdmin?: boolean }) {
   const [data, setData] = useState<InferenceBudgets | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +75,7 @@ export function InferenceBudgets({ isAdmin = true }: { isAdmin?: boolean }) {
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch("/api/operator/inference-budgets", { cache: "no-store" });
+      const r = await fetch("/api/operator/inference-budgets", { cache: "no-store", signal: AbortSignal.timeout(20_000) });
       if (!r.ok) throw new Error();
       setData(await r.json());
       setError(null);
@@ -60,22 +89,33 @@ export function InferenceBudgets({ isAdmin = true }: { isAdmin?: boolean }) {
     return () => window.clearTimeout(timer);
   }, [load]);
 
-  if (error) {
-    return <p className="text-xs text-danger">{error}</p>;
-  }
   if (!data) {
-    return <p className="text-xs text-foreground-muted">Loading measured usage…</p>;
+    return error ? (
+      <div role="alert" className="text-xs text-danger">
+        <p>{error}</p>
+        <button type="button" onClick={() => void load()} className="font-medium underline">Retry loading budgets</button>
+      </div>
+    ) : <p className="text-xs text-foreground-muted">Loading measured usage…</p>;
   }
 
   const clusterUsed = data.cluster_used_today;
 
   return (
     <div className="space-y-4">
+      {error && (
+        <div role="alert" className="text-xs text-danger">
+          <p>{error} The values below may be outdated.</p>
+          <button type="button" onClick={() => void load()} className="font-medium underline">Retry loading budgets</button>
+        </div>
+      )}
       <p className="text-xs text-foreground-muted">
         Aggregate caps over inference token spend, above the per-sandbox policy. The meter is the
         real daily utilization measured from completed runs (UTC day). Passive alerts; buffer allows
         a headroom then blocks; strict blocks at the limit — only an admin raises it.
       </p>
+      <button type="button" onClick={() => void load()} className="text-xs font-medium text-signal underline">
+        Refresh measured budgets
+      </button>
 
       {/* Active budget alerts — the real "raise alerts" surface (item 2 passive
           mode + any breach). Prominent so a breach isn't buried in a meter. */}
@@ -105,11 +145,7 @@ export function InferenceBudgets({ isAdmin = true }: { isAdmin?: boolean }) {
         fallbackUsed={clusterUsed}
         canEdit={isAdmin}
         onSave={async (body) => {
-          await fetch("/api/operator/inference-budgets/cluster", {
-            method: "PUT",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify(body),
-          });
+          await persistBudget("/api/operator/inference-budgets/cluster", body);
           await load();
         }}
       />
@@ -143,19 +179,11 @@ export function InferenceBudgets({ isAdmin = true }: { isAdmin?: boolean }) {
             fallbackUsed={w.used_today}
             canEdit={isAdmin}
             onSave={async (body) => {
-              await fetch(`/api/operator/inference-budgets/workspaces/${encodeURIComponent(w.scope)}`, {
-                method: "PUT",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify(body),
-              });
+              await persistBudget(`/api/operator/inference-budgets/workspaces/${encodeURIComponent(w.scope)}`, body);
               await load();
             }}
             onRemove={async () => {
-              await fetch(`/api/operator/inference-budgets/workspaces/${encodeURIComponent(w.scope)}`, {
-                method: "PUT",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ clear: true }),
-              });
+              await persistBudget(`/api/operator/inference-budgets/workspaces/${encodeURIComponent(w.scope)}`, { clear: true });
               await load();
             }}
           />
@@ -166,11 +194,7 @@ export function InferenceBudgets({ isAdmin = true }: { isAdmin?: boolean }) {
             defaultNs={data.default_namespace}
             onCancel={() => setAddingNs(false)}
             onCreate={async (ns, body) => {
-              await fetch(`/api/operator/inference-budgets/workspaces/${encodeURIComponent(ns)}`, {
-                method: "PUT",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify(body),
-              });
+              await persistBudget(`/api/operator/inference-budgets/workspaces/${encodeURIComponent(ns)}`, body);
               setAddingNs(false);
               await load();
             }}
@@ -207,19 +231,11 @@ export function InferenceBudgets({ isAdmin = true }: { isAdmin?: boolean }) {
             fallbackUsed={u.used_today}
             canEdit={isAdmin}
             onSave={async (body) => {
-              await fetch(`/api/operator/inference-budgets/users/${encodeURIComponent(u.scope)}`, {
-                method: "PUT",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify(body),
-              });
+              await persistBudget(`/api/operator/inference-budgets/users/${encodeURIComponent(u.scope)}`, body);
               await load();
             }}
             onRemove={async () => {
-              await fetch(`/api/operator/inference-budgets/users/${encodeURIComponent(u.scope)}`, {
-                method: "PUT",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify({ clear: true }),
-              });
+              await persistBudget(`/api/operator/inference-budgets/users/${encodeURIComponent(u.scope)}`, { clear: true });
               await load();
             }}
           />
@@ -232,11 +248,7 @@ export function InferenceBudgets({ isAdmin = true }: { isAdmin?: boolean }) {
             defaultNs={data.unbudgeted_users[0] ?? ""}
             onCancel={() => setAddingUser(false)}
             onCreate={async (u, body) => {
-              await fetch(`/api/operator/inference-budgets/users/${encodeURIComponent(u)}`, {
-                method: "PUT",
-                headers: { "content-type": "application/json" },
-                body: JSON.stringify(body),
-              });
+              await persistBudget(`/api/operator/inference-budgets/users/${encodeURIComponent(u)}`, body);
               setAddingUser(false);
               await load();
             }}
@@ -301,6 +313,7 @@ function BudgetCard({
   const [mode, setMode] = useState<string>(level?.mode ?? "passive");
   const [buffer, setBuffer] = useState(level?.buffer_percent ?? 20);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   return (
     <div className="rounded-lg border border-border bg-surface-muted/30 p-3">
@@ -323,6 +336,7 @@ function BudgetCard({
                   setDaily(level?.daily_tokens ?? 0);
                   setMode(level?.mode ?? "passive");
                   setBuffer(level?.buffer_percent ?? 20);
+                  setError(null);
                   setEditing(true);
                 }}
                 className="rounded-md border border-border px-2 py-1 text-[11px] font-medium hover:bg-surface-muted"
@@ -347,6 +361,7 @@ function BudgetCard({
 
       {editing && (
         <div className="mt-3 space-y-2 rounded-md border border-border bg-surface p-3">
+          {error && <p role="alert" className="text-xs text-danger">{error}</p>}
           <label className="block text-[11px] font-medium text-foreground-muted">
             Daily token cap (0 = no cap)
             <input
@@ -390,9 +405,15 @@ function BudgetCard({
               disabled={busy}
               onClick={async () => {
                 setBusy(true);
-                await onSave({ daily_tokens: daily, mode, buffer_percent: buffer });
-                setBusy(false);
-                setEditing(false);
+                setError(null);
+                try {
+                  await onSave({ daily_tokens: daily, mode, buffer_percent: buffer });
+                  setEditing(false);
+                } catch (error) {
+                  setError(error instanceof Error ? error.message : "Couldn't confirm the budget update.");
+                } finally {
+                  setBusy(false);
+                }
               }}
               className="rounded-md bg-signal px-3 py-1.5 text-[11px] font-semibold text-signal-fg disabled:opacity-50"
             >
@@ -412,9 +433,15 @@ function BudgetCard({
                 disabled={busy}
                 onClick={async () => {
                   setBusy(true);
-                  await onRemove();
-                  setBusy(false);
-                  setEditing(false);
+                  setError(null);
+                  try {
+                    await onRemove();
+                    setEditing(false);
+                  } catch (error) {
+                    setError(error instanceof Error ? error.message : "Couldn't confirm removal of the budget cap.");
+                  } finally {
+                    setBusy(false);
+                  }
                 }}
                 className="ml-auto rounded-md border border-border px-3 py-1.5 text-[11px] text-foreground-muted hover:border-danger/40 hover:text-danger"
               >
@@ -448,19 +475,22 @@ function AddWorkspace({
   const [mode, setMode] = useState("buffer");
   const [buffer, setBuffer] = useState(20);
   const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const suggestionsId = useId();
 
   return (
     <div className="space-y-2 rounded-lg border border-signal/30 bg-signal/[0.03] p-3">
+      {error && <p role="alert" className="text-xs text-danger">{error}</p>}
       <label className="block text-[11px] font-medium text-foreground-muted">
         {label}
         <input
           value={ns}
           onChange={(e) => setNs(e.target.value)}
-          list="ws-suggestions"
+          list={suggestionsId}
           placeholder={placeholder}
           className="mt-1 w-full rounded-md border border-border bg-surface px-2 py-1 text-sm font-mono"
         />
-        <datalist id="ws-suggestions">
+        <datalist id={suggestionsId}>
           {suggestions.map((s) => (
             <option key={s} value={s} />
           ))}
@@ -509,8 +539,14 @@ function AddWorkspace({
           disabled={busy || !ns.trim()}
           onClick={async () => {
             setBusy(true);
-            await onCreate(ns.trim(), { daily_tokens: daily, mode, buffer_percent: buffer });
-            setBusy(false);
+            setError(null);
+            try {
+              await onCreate(ns.trim(), { daily_tokens: daily, mode, buffer_percent: buffer });
+            } catch (error) {
+              setError(error instanceof Error ? error.message : "Couldn't confirm the new budget.");
+            } finally {
+              setBusy(false);
+            }
           }}
           className="rounded-md bg-signal px-3 py-1.5 text-[11px] font-semibold text-signal-fg disabled:opacity-50"
         >
@@ -535,30 +571,32 @@ export function InferenceBudgetEdit({ name, current }: { name: string; current: 
   const [editing, setEditing] = useState(false);
   const [val, setVal] = useState(current ?? 0);
   const [busy, setBusy] = useState(false);
-  const [saved, setSaved] = useState(false);
+  const [saved, setSaved] = useState<number | null>(null);
+  const [error, setError] = useState<string | null>(null);
 
   if (!editing) {
     return (
       <button
         type="button"
         onClick={() => {
-          setVal(current ?? 0);
+          setVal(saved ?? current ?? 0);
           setEditing(true);
-          setSaved(false);
+          setError(null);
         }}
         className="inline-flex items-center gap-1 rounded px-1.5 py-0.5 tabular-nums hover:bg-surface-muted"
         title="Edit daily token budget"
       >
-        {saved ? <span className="text-signal">{(current ?? 0).toLocaleString()} ✓</span> : (current != null ? current.toLocaleString() : "—")}
+        {saved != null ? <span className="text-signal">{saved.toLocaleString()} ✓</span> : (current != null ? current.toLocaleString() : "—")}
         <span aria-hidden className="text-foreground-muted"><Icon name="pencil" size={10} /></span>
       </button>
     );
   }
   return (
-    <span className="inline-flex items-center gap-1">
+    <span className="inline-flex flex-wrap items-center gap-1">
       <input
         type="number"
         min={0}
+        aria-label="Daily token budget"
         value={val}
         onChange={(e) => setVal(Number(e.target.value))}
         className="w-24 rounded border border-border bg-surface px-1.5 py-0.5 text-xs tabular-nums"
@@ -568,14 +606,16 @@ export function InferenceBudgetEdit({ name, current }: { name: string; current: 
         disabled={busy}
         onClick={async () => {
           setBusy(true);
-          await fetch(`/api/operator/inferencepolicies/${encodeURIComponent(name)}`, {
-            method: "PATCH",
-            headers: { "content-type": "application/json" },
-            body: JSON.stringify({ daily_tokens: val }),
-          });
-          setBusy(false);
-          setEditing(false);
-          setSaved(true);
+          setError(null);
+          try {
+            await persistBudget(`/api/operator/inferencepolicies/${encodeURIComponent(name)}`, { daily_tokens: val }, "PATCH");
+            setEditing(false);
+            setSaved(val);
+          } catch (error) {
+            setError(error instanceof Error ? error.message : "Couldn't confirm the policy budget update.");
+          } finally {
+            setBusy(false);
+          }
         }}
         className="rounded bg-signal px-1.5 py-0.5 text-[10px] font-semibold text-signal-fg disabled:opacity-50"
       >
@@ -583,11 +623,14 @@ export function InferenceBudgetEdit({ name, current }: { name: string; current: 
       </button>
       <button
         type="button"
+        disabled={busy}
+        aria-label="Cancel budget edit"
         onClick={() => setEditing(false)}
         className="rounded border border-border px-1.5 py-0.5 text-[10px] text-foreground-muted"
       >
         ✕
       </button>
+      {error && <span role="alert" className="w-full text-xs text-danger">{error}</span>}
     </span>
   );
 }

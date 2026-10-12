@@ -8,11 +8,15 @@
 
 import chalk from "chalk";
 import ora from "ora";
-import { execa } from "execa";
+import { execa as execute } from "execa";
+import { createSubscriptionPinnedExeca } from "../../lib/azure-subscription.js";
+import { ensureWorkloadIdentity, sandboxNamesForFederation, validateWorkloadIdentityConfig } from "../../lib/workload-identity.js";
 import { loadContext } from "../../config.js";
 import { requireBundledAsset } from "../../lib/repo-assets.js";
 import { cliReleaseTag } from "../../lib/version.js";
-import { rolloutRestartAll } from "../upgrade.js";
+import { rolloutRestartAll, verifyHealth } from "../upgrade.js";
+import { helmUsesEntra, inspectUpMeshTrust, validateMeshTrustOptions, verifyHelmMeshTrust } from "./mesh-trust.js";
+import { recheckMeshOwnership } from "../../lib/mesh-release.js";
 import { inspectNamespaceOwnership } from "../../lib/namespace-ownership.js";
 import { assertSafeMutation } from "../../lib/sre-authority.js";
 import { prepareCoreHelmSchemas } from "../../lib/core-helm-schemas.js";
@@ -22,31 +26,54 @@ export interface UpOptionsForUpgrade {
   upgrade?: boolean;
   registrationMode?: string;
   acrName?: string;
+  meshTrust?: unknown;
+  meshProvider?: unknown;
+  globalRegistry?: unknown;
+  exposeRegistry?: unknown;
+  serviceTree?: unknown;
   [key: string]: unknown;
 }
 
 const blue = chalk.hex("#0078D4");
 
 export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void> {
+        const mode = validateMeshTrustOptions(options);
         const ctx = loadContext();
         if (!ctx?.acrLoginServer || !ctx?.aksCluster || !ctx?.resourceGroup) {
           console.error(chalk.red("\n  No cached deployment context. Run 'kars up' first (without --upgrade).\n"));
           process.exit(1);
         }
+        if (options.globalRegistry != null && options.globalRegistry !== ctx.globalRegistryUrl) {
+          throw new Error("Fast upgrade cannot change the external registry; use a reviewed normal up configuration.");
+        }
+        const globalRegistry = ctx.registryMode === "global" ? ctx.globalRegistryUrl : undefined;
+        validateMeshTrustOptions({ meshTrust: mode, globalRegistry });
 
         console.log(blue("\n  kars · Fast Upgrade\n"));
 
-        // Connect to AKS
+        if (options.dryRun) {
+          console.log("Would connect to the cached AKS target, verify ownership/trust, upgrade Core Helm and restart its workloads; no changes made or live checks performed.");
+          return;
+        }
+        if (typeof ctx.subscription !== "string" || !ctx.subscription.trim()) {
+          throw new Error("Cached deployment context has no subscription. Run 'kars up' without --upgrade to select and save the intended subscription; fast upgrade will not use the ambient account.");
+        }
+        const subscriptionId = ctx.subscription.trim();
+        const execa = createSubscriptionPinnedExeca(execute, subscriptionId);
+        const federation = ctx.oidcIssuerUrl != null || ctx.identityName != null || ctx.identityResourceGroup != null
+          ? validateWorkloadIdentityConfig({ subscriptionId, identityName: ctx.identityName ?? "",
+            resourceGroup: ctx.identityResourceGroup ?? ctx.resourceGroup, issuer: ctx.oidcIssuerUrl ?? "" })
+          : undefined;
+        // Connect only after the non-mutating preview has returned.
         let spin = ora("Connecting to AKS...").start();
         await execa("az", ["aks", "get-credentials", "--name", ctx.aksCluster, "--resource-group", ctx.resourceGroup, "--overwrite-existing"], { stdio: "pipe" });
         spin.succeed("AKS connected");
-        if (options.dryRun) {
-          console.log("Would upgrade the cached Kars Helm release and restart its workloads; no changes made.");
-          return;
-        }
         await assertControllerMutationAllowed(execa);
         for (const result of await inspectNamespaceOwnership(execa)) console.log(result);
         await assertSafeMutation(execa);
+        const trust = await inspectUpMeshTrust(execa, mode, globalRegistry);
+        const requireEntra = mode === "entra" || (trust.mesh.kind === "helm" && helmUsesEntra(trust.mesh.values));
+        await verifyHelmMeshTrust(execa, trust.mesh, requireEntra);
 
         // Resolve the Helm chart from a repo checkout OR the bundled package
         // copy (so `kars up --upgrade` works with no source tree).
@@ -63,6 +90,10 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
           // `--set` flags below still override the image repos/tags.
           "--reuse-values",
           "--set", `controller.image.repository=${ctx.acrLoginServer}/kars-controller`,
+          "--set", `metricsServer.image.repository=${ctx.acrLoginServer}/kars-metrics-server`,
+          "--set", "metricsServer.image.tag=latest",
+          "--set", `headlamp.image.repository=${ctx.acrLoginServer}/kars-headlamp`,
+          "--set", "headlamp.image.tag=latest",
           "--set", `controller.image.tag=latest`,
           "--set", `inferenceRouter.image.repository=${ctx.acrLoginServer}/kars-inference-router`,
           "--set", `inferenceRouter.image.tag=latest`,
@@ -95,17 +126,14 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
         if (options.meshPeer === false) {
           helmArgs.push("--set", "meshPeer.enabled=false");
         }
-        // Fedcred config for controller auto-creation
-        if (ctx.oidcIssuerUrl) {
-          try {
-            const { stdout: subId } = await execa("az", ["account", "show", "--query", "id", "--output", "tsv"], { stdio: "pipe", timeout: 10000 });
-            helmArgs.push(
-              "--set", `fedcred.subscriptionId=${subId.trim()}`,
-              "--set", `fedcred.identityName=${ctx.identityName || ""}`,
-              "--set", `fedcred.identityResourceGroup=${ctx.identityResourceGroup || ctx.resourceGroup}`,
-              "--set", `fedcred.oidcIssuerUrl=${ctx.oidcIssuerUrl}`,
-            );
-          } catch { /* non-critical */ }
+        // Use the same validated target for the controller and the ARM verification below.
+        if (federation) {
+          helmArgs.push(
+            "--set", `fedcred.subscriptionId=${federation.subscriptionId}`,
+            "--set", `fedcred.identityName=${federation.identityName}`,
+            "--set", `fedcred.identityResourceGroup=${federation.resourceGroup}`,
+            "--set", `fedcred.oidcIssuerUrl=${federation.issuer}`,
+          );
         }
         // Discover deployments
         try {
@@ -133,7 +161,9 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
         } catch { /* non-critical */ }
 
         spin = ora("Upgrading Helm release...").start();
+        await recheckMeshOwnership(execa, trust.mesh);
         await prepareCoreHelmSchemas(execa, helmArgs);
+        await recheckMeshOwnership(execa, trust.mesh);
         await execa("helm", helmArgs, { stdio: "pipe" });
         spin.succeed("Helm upgraded");
 
@@ -143,79 +173,25 @@ export async function runFastUpgrade(options: UpOptionsForUpgrade): Promise<void
         // sandboxes + the standalone AgentMesh relay/registry is what actually
         // pulls the new bits; restarting only the controller left them stale.
         spin = ora("Restarting kars workloads (controller, sandboxes, mesh)...").start();
-        await rolloutRestartAll(execa);
-        spin.succeed("Workloads restarted");
+        await recheckMeshOwnership(execa, trust.mesh);
+        const installed = await inspectUpMeshTrust(execa, requireEntra ? "entra" : mode, globalRegistry);
+        await rolloutRestartAll(execa, installed.mesh);
+        await recheckMeshOwnership(execa, installed.mesh);
+        await verifyHelmMeshTrust(execa, installed.mesh, requireEntra);
+        const health = await verifyHealth(execa, installed.mesh);
+        if (!health.healthy) throw new Error(`Fast upgrade health verification failed: ${health.reason}`);
+        spin.succeed("Workloads restarted and healthy");
 
-        // Ensure controller SA has a fedcred (so it can get ARM tokens via WI to create sandbox fedcreds)
-        if (ctx.oidcIssuerUrl && ctx.identityName) {
-          spin = ora("Ensuring controller SA fedcred + MI Contributor...").start();
-          const idRg = ctx.identityResourceGroup || ctx.resourceGroup;
-
-          // Controller SA fedcred
-          await execa("az", [
-            "identity", "federated-credential", "create",
-            "--identity-name", ctx.identityName,
-            "--resource-group", idRg,
-            "--name", "kars-controller-sa",
-            "--issuer", ctx.oidcIssuerUrl,
-            "--subject", "system:serviceaccount:kars-system:kars-controller",
-            "--audiences", "api://AzureADTokenExchange",
-            "--output", "none",
-          ], { stdio: "pipe", timeout: 30000 }).catch(() => {});
-
-          // MI Contributor self-scoped (so controller can create/delete fedcreds)
+        if (federation) {
+          spin = ora("Verifying controller and sandbox Workload Identity configuration...").start();
           try {
-            const { stdout: subId } = await execa("az", [
-              "account", "show", "--query", "id", "--output", "tsv",
-            ], { stdio: "pipe", timeout: 10000 });
-            const miScope = `/subscriptions/${subId.trim()}/resourceGroups/${idRg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${ctx.identityName}`;
-            const { stdout: miPid } = await execa("az", [
-              "identity", "show",
-              "--name", ctx.identityName,
-              "--resource-group", idRg,
-              "--query", "principalId",
-              "--output", "tsv",
-            ], { stdio: "pipe" });
-            await execa("az", [
-              "role", "assignment", "create",
-              "--assignee-object-id", miPid.trim(),
-              "--assignee-principal-type", "ServicePrincipal",
-              "--role", "Managed Identity Contributor",
-              "--scope", miScope,
-              "--output", "none",
-            ], { stdio: "pipe" });
-          } catch { /* already exists or lacks Owner — non-fatal */ }
-
-          spin.succeed("Controller SA fedcred + MI Contributor ready");
-        }
-
-        // Ensure federated credentials exist for all sandboxes
-        if (ctx.oidcIssuerUrl && ctx.identityName) {
-          spin = ora("Syncing federated credentials for sandboxes...").start();
-          try {
-            const { stdout: sandboxJson } = await execa("kubectl", [
-              "get", "karssandbox", "-A", "-o", "json",
-            ], { stdio: "pipe", timeout: 15000 });
-            const sandboxes = JSON.parse(sandboxJson).items || [];
-            let created = 0;
-            for (const sb of sandboxes) {
-              const sbName = sb.metadata?.name;
-              if (!sbName) continue;
-              const sbNs = `kars-${sbName}`;
-              await execa("az", [
-                "identity", "federated-credential", "create",
-                "--identity-name", ctx.identityName,
-                "--resource-group", ctx.identityResourceGroup || ctx.resourceGroup,
-                "--name", `kars-${sbName}`,
-                "--issuer", ctx.oidcIssuerUrl,
-                "--subject", `system:serviceaccount:${sbNs}:sandbox`,
-                "--audiences", "api://AzureADTokenExchange",
-                "--output", "none",
-              ], { stdio: "pipe", timeout: 30000 }).then(() => { created++; }).catch(() => {});
-            }
-            spin.succeed(`Federated credentials synced (${created} created, ${sandboxes.length} total)`);
-          } catch {
-            spin.warn("Federated credential sync skipped");
+            const { stdout } = await execa("kubectl", ["get", "karssandbox", "-A", "-o", "json"], { stdio: "pipe", timeout: 15000 });
+            const names = sandboxNamesForFederation(stdout);
+            await ensureWorkloadIdentity(execa, federation, names);
+            spin.succeed(`Workload Identity configuration verified (controller + ${names.length} sandboxes); token exchange not tested`);
+          } catch (error) {
+            spin.fail("Workload Identity configuration incomplete; fast upgrade did not complete");
+            throw error;
           }
         }
 

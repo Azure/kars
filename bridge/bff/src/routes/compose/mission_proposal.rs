@@ -323,7 +323,23 @@ pub(super) fn parse_and_validate(
         ComposeProposal {
             tier,
             model,
-            model_fallbacks: Vec::new(),
+            model_fallbacks: json
+                .get("model_fallbacks")
+                .and_then(|value| value.as_array())
+                .into_iter()
+                .flatten()
+                .filter_map(|value| {
+                    let provider = value.get("provider")?.as_str()?;
+                    let deployment = value.get("deployment")?.as_str()?;
+                    o.models
+                        .iter()
+                        .find(|model| model.provider == provider && model.deployment == deployment)
+                        .map(|model| ComposeModel {
+                            provider: model.provider.clone(),
+                            deployment: model.deployment.clone(),
+                        })
+                })
+                .collect(),
             model_basis,
             runtime,
             instructions,

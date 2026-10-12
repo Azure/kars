@@ -7,6 +7,16 @@ description: kars - Enterprise-grade OpenClaw sandbox orchestrator for AKS
 type: application
 version: 0.1.0
 appVersion: "0.1.0"
+dependencies:
+  - name: kube-prometheus-stack
+    alias: monitoring
+    version: 85.3.3
+    repository: https://prometheus-community.github.io/helm-charts
+    condition: monitoring.enabled
+  - name: kars-datapath-witness
+    alias: datapathWitness
+    version: 0.1.0
+    repository: file://../kars-datapath-witness
 keywords:
   - azure
   - openclaw

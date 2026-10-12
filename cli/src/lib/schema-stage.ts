@@ -12,6 +12,7 @@ import {
 } from "./sre-schema-migration.js";
 import { schemaStep } from "./sre-schema-diagnostics.js";
 import { buildSchemaWriteRequest, verifySchemaWritePreview } from "./schema-write-request.js";
+import { coreSchemaDocuments } from "./monitoring-schemas.js";
 
 interface PlannedSchema { desired: ObjectMap; current?: ObjectMap; uid?: string; change: boolean }
 export interface SchemaStageOptions extends SchemaOwner, SchemaWait {
@@ -68,6 +69,7 @@ async function existingPoliciesObserved(execute: SchemaExecute, documents: Objec
 export async function waitForInstalledCoreSchemas(
   execute: SchemaExecute, documents: ObjectMap[], options: SchemaWait = {},
 ): Promise<void> {
+  documents = coreSchemaDocuments(documents);
   const crds = documents.filter(object => object.kind === "CustomResourceDefinition");
   if (!crds.length || crds.length > 64) throw new Error("Missing or unbounded installed core schema inventory");
   const identities = new Map<string, string>();
@@ -96,7 +98,7 @@ export async function planCoreSchemaDocuments(
 ): Promise<() => Promise<{ schemas: number; published: true }>> {
   schemaStep("schema-plan");
   validateOwner(options);
-  documents = structuredClone(documents);
+  documents = structuredClone(coreSchemaDocuments(documents));
   if (options.reviewedSreMigration && options.rollbackDocuments) throw new Error("Reviewed SRE schema migration cannot use automatic rollback");
   const owner: SchemaOwner = { release: options.release, namespace: options.namespace, ownership: options.ownership };
   const crds = documents.filter(object => object.kind === "CustomResourceDefinition");

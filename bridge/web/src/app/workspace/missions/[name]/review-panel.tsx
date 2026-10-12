@@ -9,6 +9,7 @@
 // review lineage and a link into the run's provenance (the execution trace).
 
 import { useState, useTransition } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { submitReview } from "./review-actions";
 import { setLaunch } from "@/app/tasks/[name]/launch-actions";
@@ -41,6 +42,7 @@ export function ReviewPanel({
   kind,
   initial,
   eligible = false,
+  launched = false,
   sandboxLive = false,
 }: {
   task: string;
@@ -48,6 +50,7 @@ export function ReviewPanel({
   kind: string;
   initial: ReviewState | null;
   eligible?: boolean;
+  launched?: boolean;
   /** True when the producing agent's sandbox is still Running — so approving can
    *  offer to terminate it (cleanup-on-good). False once it's already torn down. */
   sandboxLive?: boolean;
@@ -66,11 +69,29 @@ export function ReviewPanel({
   const revision = initial?.revision ?? 0;
   const history = initial?.history ?? [];
   const chip = statusChip(status, redrivePending);
+  const retryNonce = !launched && redrivePending ? initial?.retryable_revision_nonce : null;
+
+  function retryRevision() {
+    if (!retryNonce) return;
+    setError(null);
+    startTransition(async () => {
+      const res = await submitReview(task, retryNonce, "retry_revision");
+      if (res.error) {
+        setError(res.error);
+        return;
+      }
+      router.refresh();
+    });
+  }
 
   function act(decision: "approve" | "request_changes") {
     setError(null);
     if (decision === "approve" && (!eligible || !assignmentNonce || redrivePending)) {
       setError("Approval requires a validated successful deliverable for this revision.");
+      return;
+    }
+    if (decision === "request_changes" && (!assignmentNonce || redrivePending)) {
+      setError("A revision requires a completed run with no revision already pending.");
       return;
     }
     if (decision === "request_changes" && comment.trim().length === 0) {
@@ -123,22 +144,56 @@ export function ReviewPanel({
       </div>
 
       {redrivePending ? (
-        <p className="mt-4 rounded-lg border border-sky-500/30 bg-sky-500/5 px-4 py-3 text-sm text-foreground-muted">
+        <div className="mt-4 rounded-lg border border-border bg-surface-muted/40 px-4 py-3 text-sm text-foreground-muted">
+          {retryNonce ? (
+            <>
+              <p className="font-medium text-foreground">This revision stopped after a verified phase failure.</p>
+              <p className="mt-1">Prepare a fresh attempt with the same complete documents and feedback.
+                Prior work and spending stay recorded; the lifetime budget does not reset.
+                The new request remains stopped until you review and launch it from Overview.</p>
+              <button type="button" disabled={pending} onClick={retryRevision}
+                className="mt-3 rounded-lg bg-signal px-4 py-2 text-sm font-semibold text-signal-fg transition hover:opacity-90 disabled:opacity-50">
+                {pending ? "Preparing retry…" : "Retry failed revision"}
+              </button>
+            </>
+          ) : (
+          <p>
           <span className="font-medium text-sky-700">Changes requested — received.</span>{" "}
           A distinct revision has been requested from your feedback. A request alone does not
           prove the agent has started; check the revision status and recorded activity.
-        </p>
+          {!launched && (
+            <> The runtime remains stopped.{" "}
+              <Link href={`/workspace/missions/${encodeURIComponent(task)}?tab=overview`} className="font-medium text-signal underline">
+                Launch the revision from Overview
+              </Link>{" "}
+              to begin it through the normal execution checks.
+            </>
+          )}
+          </p>
+          )}
+        </div>
       ) : (
         <div className="mt-4 space-y-3">
-          {!eligible && <p className="text-xs text-foreground-muted">Approval unavailable: this revision has no validated successful deliverable. You can still request changes.</p>}
+          {!eligible && <p className="text-xs text-foreground-muted">Approval unavailable: this revision has no validated successful deliverable.</p>}
+          {!launched && (
+            <p className="rounded-lg border border-border bg-surface-muted/40 px-4 py-3 text-sm text-foreground-muted">
+              This Mission&apos;s runtime is stopped. You can review retained output or request
+              changes now. A requested revision waits until you{" "}
+              <Link href={`/workspace/missions/${encodeURIComponent(task)}?tab=overview`} className="font-medium text-signal underline">
+                launch it from Overview
+              </Link>{" "}
+              through the normal execution checks.
+            </p>
+          )}
           {status === "approved" && eligible && !requesting ? (
             <div className="space-y-3">
               <p className="rounded-lg border border-emerald-500/30 bg-emerald-500/5 px-4 py-3 text-sm text-emerald-700">
                 ✓ You approved this deliverable{revision > 0 ? ` (rev ${revision})` : ""}.{" "}
                 <button
                   type="button"
+                  disabled={pending || !assignmentNonce}
                   onClick={() => setRequesting(true)}
-                  className="underline hover:no-underline"
+                  className="underline hover:no-underline disabled:opacity-50"
                 >
                   Request changes to iterate
                 </button>
@@ -191,7 +246,7 @@ export function ReviewPanel({
               </button>
               <button
                 type="button"
-                disabled={pending}
+                disabled={pending || !assignmentNonce}
                 onClick={() => setRequesting(true)}
                 className="rounded-lg border border-border bg-surface px-4 py-2 text-sm font-medium transition hover:bg-surface-muted disabled:opacity-50"
               >
@@ -210,7 +265,7 @@ export function ReviewPanel({
               <div className="flex flex-wrap gap-2">
                 <button
                   type="button"
-                  disabled={pending}
+                  disabled={pending || !assignmentNonce}
                   onClick={() => act("request_changes")}
                   className="rounded-lg bg-signal px-4 py-2 text-sm font-semibold text-signal-fg transition hover:opacity-90 disabled:opacity-50"
                 >
@@ -231,9 +286,9 @@ export function ReviewPanel({
               </div>
             </div>
           )}
-          {error && <p className="text-xs text-rose-600">{error}</p>}
         </div>
       )}
+      {error && <p role="alert" className="mt-3 text-xs text-rose-600">{error}</p>}
 
       {history.length > 0 && (
         <div className="mt-5 border-t border-border pt-4">
@@ -246,7 +301,7 @@ export function ReviewPanel({
                     h.decision === "approve" ? "font-medium text-emerald-600" : "font-medium text-amber-600"
                   }
                 >
-                  {h.decision === "approve" ? "Approved" : "Requested changes"}
+                  {h.decision === "approve" ? "Approved" : h.decision === "retry_revision" ? "Retried revision" : "Requested changes"}
                 </span>{" "}
                 <span className="text-foreground-muted">
                   · rev {h.revision} · {formatEvidenceTime(h.decided_at)} · {h.reviewer}

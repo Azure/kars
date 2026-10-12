@@ -8,13 +8,14 @@ import {
   recheckMeshOwnership, restartMesh, updateLegacyMeshImages, verifyMeshHealth,
   type MeshImages, type MeshInstallation,
 } from "../lib/mesh-release.js";
-import { coreImageValues, imageValueArgs, PUSH_COMPONENTS, resolvePushedArtifacts, type PushedImage } from "../lib/image-targets.js";
+import { controllerEnv, coreImageValues, imageValueArgs, managedMcpTarget, PUSH_COMPONENTS, resolvePushedArtifacts, type PushedImage } from "../lib/image-targets.js";
 import { inspectCoreInstallation, recheckCoreOwnership, requireHealthyDeployment, updateLegacyCore, verifyCoreConfiguration } from "../lib/core-image-apply.js";
 import { inspectSandboxPlans, refreshSandboxImages } from "../lib/sandbox-image-apply.js";
 import { inspectManagedMcpPlans, refreshManagedMcpImages } from "../lib/managed-mcp-image-apply.js";
 import { assertSafeMutation } from "../lib/sre-authority.js";
 import { prepareCoreHelmSchemas } from "../lib/core-helm-schemas.js";
 import { assertControllerMutationAllowed } from "../lib/private-root-upgrade-guard.js";
+import { inspectMetricsInstallation, updateLegacyMetricsImage, verifyMetricsImage } from "../lib/metrics-image-apply.js";
 
 export interface PushApplyResult {
   applied: string[];
@@ -34,12 +35,22 @@ export async function applyPushedImages(
 ): Promise<PushApplyResult> {
   if (images.some(item => !PUSH_COMPONENTS.includes(item.name))) throw new Error("Unknown pushed component; no apply plan exists");
   const buildOnly = images.filter(item => item.name === "sandbox-base").map(item => item.name);
-  const deployable = images.filter(item => item.name !== "sandbox-base");
+  let deployable = images.filter(item => item.name !== "sandbox-base");
   if (!deployable.length) throw new Error("sandbox-base is build-only; no deployment was applied");
   const isMesh = (item: PushedImage) => item.name === "relay" || item.name === "registry";
   const selectedCore = deployable.filter(item => !isMesh(item));
   const selectedMesh = deployable.some(isMesh);
-  const core = selectedCore.length ? await inspectCoreInstallation(execute) : undefined;
+  let core = selectedCore.length ? await inspectCoreInstallation(execute) : undefined;
+  if (core && selectedCore.some(item => item.name === "metrics-server")) {
+    const metrics = await inspectMetricsInstallation(execute, core);
+    if (metrics.kind === "unmanaged" || (metrics.kind === "absent" && core.kind === "legacy")) {
+      const reason = metrics.kind === "unmanaged" ? metrics.reason : "the template-owned metrics prerequisite is not installed";
+      deployable = deployable.filter(item => item.name !== "metrics-server");
+      if (!deployable.length) throw new Error(`Metrics image not applied: ${reason}.`);
+      buildOnly.push("metrics-server");
+    }
+  }
+  if (!deployable.some(item => !isMesh(item))) core = undefined;
   const mesh = selectedMesh || core?.kind === "helm"
     ? installation ?? await inspectMeshInstallation(execute) : undefined;
   if (selectedMesh && (!mesh || mesh.kind === "external" || mesh.kind === "absent")) {
@@ -84,15 +95,21 @@ export async function applyPushedImages(
     await restartMesh(execute, mesh, Object.keys(meshImages) as Array<"registry" | "relay">);
     await verifyMeshHealth(execute, mesh, meshImages);
   }
-  if (core?.kind === "legacy") await updateLegacyCore(execute, core, coreImages);
+  const controllerImages = coreImages.filter(item => item.name !== "metrics-server");
+  const metricsImage = coreImages.find(item => item.name === "metrics-server")?.image;
+  if (core?.kind === "legacy") {
+    if (controllerImages.length) await updateLegacyCore(execute, core, controllerImages);
+    if (metricsImage) await updateLegacyMetricsImage(execute, core, metricsImage);
+  }
   if (core) {
     await verifyCoreConfiguration(execute, core, coreImages);
-    await restartController(execute);
+    if (coreImages.some(item => item.name === "controller" || controllerEnv(item.name))) await restartController(execute);
     requireHealthyDeployment(await verifyCoreConfiguration(execute, core, coreImages));
+    if (metricsImage) await verifyMetricsImage(execute, core, metricsImage);
   }
   const updatedSandboxes = await refreshSandboxImages(execute, plans);
   const updatedManagedMcp = await refreshManagedMcpImages(execute, managedPlans, core?.deployment.metadata.namespace ?? "kars-system");
   return { applied: artifacts.map(item => item.name), buildOnly, updatedSandboxes,
-    ...(coreImages.some(image => image.name === "mcp-everything") ? { updatedManagedMcp } : {}),
+    ...(coreImages.some(image => managedMcpTarget(image.name)) ? { updatedManagedMcp } : {}),
     preservedOverrides: plans.filter(plan => plan.pinned).length };
 }

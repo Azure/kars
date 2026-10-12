@@ -33,6 +33,113 @@ Required integration configuration:
 
 Use repository-level `make dev` to run the BFF and web application together.
 
+## Session recovery
+
+Expired-session RSC navigation and prefetch requests receive a same-origin,
+non-cacheable 401 rather than following the document login redirect into the
+external identity provider. Next can fall back to document navigation; ordinary
+page requests retain the existing login redirect and return destination.
+Team Pause, Resume, and Edit failures with status 401 offer a plain **Sign in
+again** link back to the Team. Unsaved edits remain visible until navigation.
+Signing in does not replay a rejected mutation: review and retry the change
+explicitly. Permission denials (403) remain permission errors, not login loops.
+
+## Operator configuration
+
+Configuration and Agent capabilities must load their backing resources before
+offering changes. An API failure is not an empty catalogue or an unconfigured
+integration: the page shows an explicit error and retry guidance. Integration
+stores require the existing reviewed, UID-bound credential grant; neither the
+page nor its error recovery grants broader Secret access.
+
+The provider wizard validates connection URLs and provider tags before advancing.
+Switching provider kinds clears entered credentials and model selections.
+AI Runway's missing API is an unavailable optional capability, while permission
+and transport failures remain errors rather than appearing as an empty cluster.
+
+## Team profile drafts
+
+Using a Ready profile copies its supported settings into an editable, paused-by-default
+Team draft; later profile edits do not update that draft. Unsupported envelope
+constraints or unavailable skills block copying rather than being silently omitted.
+Scoped positive token and optional micro-USD budgets are copied into the lifetime
+budget controls and sent unchanged to preflight and creation. A profile's
+`toolPolicyRef` selects and pins that same policy in the Team authority envelope;
+missing policies or conflicting profile policy settings block copying. Explicit
+pinning never substitutes another policy when the selected policy is unavailable.
+Reserved egress-allowlist references and unknown envelope fields remain rejected
+because the Team controller cannot enforce them. Draft controls remain editable;
+copying a template is not authorization to launch or renew a model contract.
+A profile does not supply a typed execution plan. The plan JSON editor remains
+available for manual authoring, including after its contents are cleared. JSON
+syntax is not execution approval: the BFF validates the complete plan and exact
+roster match, and launch requires a fresh package check. Plan, roster or budget
+changes invalidate the previous check.
+
+The org chart shows the controller's default member tier, bounded by the Team's
+explicit authority ceiling. Zero delegation depth is displayed as disabled;
+neither the caption nor profile copying increases that depth.
+Controller rejection takes precedence over paused/hibernating presentation on
+the Team detail, Team list and Workspace home. The detail shows the controller's
+reported constraint; pausing or resuming does not repair an invalid envelope.
+Unset member model/harness fields select Team defaults, not a separate cluster
+route. Saving a partial member route binds its missing model or harness to the
+reviewed Team route (including inherited model fallbacks for a harness-only
+override). Explicit member routes remain explicit; this does not copy omitted
+network or tool capabilities into a member override.
+
+## Team activity evidence
+
+Team summaries distinguish unavailable evidence from measured zero. Token usage
+requires an explicitly known, bounded total from the current revision; a genuine
+zero remains visible. Execution flow filters activity and assignment events to
+that same revision. Missing role-selection records do not turn the standing
+roster into selected or running workers.
+
+Reviewed runs also expose their controller-reserved role and phase tree. Bridge
+checks the pinned state, root revision and plan, each child UID/specification and
+owner, and the current committed phase terminal. The flow shows those phases'
+actual start/finish times and links to their own evidence and files; it does not
+manufacture assignment-ledger events or attach child files to the root download.
+Every phase must complete before its role is shown as completed. Aggregate token
+usage includes the principal and phases only when all those totals are known.
+Changed or unavailable reservations are reported explicitly.
+
+The graph and drill-down use the principal's and each phase's revision-bound
+router observations. Selecting a producer or action filters that producer's
+records and links to its own evidence download. The timeline includes recorded
+phase starts/completions and router observation timestamps. These timestamps
+identify when the router recorded an observation, not exact tool start times.
+Older untimestamped records remain readable in each producer's sequence order;
+their missing timing is not reconstructed. Completed filesystem calls report
+success/failure, duration, byte counts and an explicitly exported artifact name
+through the existing router endpoint. Raw arguments, document contents and
+credentials are not copied into telemetry. Model proposals and harness-reported
+results remain distinct; reported result counts are not independent proof of
+successful tool execution. These fields travel through the maintained runtime,
+router and Bridge builds; no live-only configuration is required.
+
+Counts describe published records, not unpublished work. Missing records do not
+prove inactivity or that a run is historical.
+Transport errors and unavailable SSE observations clear the provisional live
+graph without discarding retained activity. Native EventSource reconnection
+keeps the existing producer and progress pins; opening a connection alone does
+not restore observations. Only a validated snapshot can do that. Explicit
+completion, revocation, and end frames still close the stream.
+Artifacts alone do not establish role handbacks or delivery.
+Failed runs expose their retained failure output without inferring a confident
+narrative or diagnosing context replay from token ratios. Missing role handbacks
+are reported only when current role-lifecycle evidence is available.
+Both `failed` and `rejected` runtime terminals are failures, as is legacy `error`.
+The separate runtime error is retained alongside any partial output; none is an
+accepted deliverable.
+
+Focused checks:
+
+```bash
+node --test tests/team-run-evidence.test.mjs tests/mission-run-evidence.test.mjs tests/team-run-links.test.mjs
+```
+
 ## Build check
 
 ```bash
@@ -59,6 +166,19 @@ The secret is mounted only for dependency installation; it is not copied into
 an image layer. Without it, npm uses its default configuration. Lockfile versions
 and integrity checks are unchanged. Do not pass registry credentials as build
 arguments or copy them into the build context.
+
+Geist Sans and Geist Mono are self-hosted from the locked `geist` npm package
+(SIL Open Font License), using its `next/font/local` loaders and bundled variable
+WOFF2 files. The existing `--font-geist-sans` and `--font-geist-mono` variables
+are preserved. Production compilation runs with networking disabled after
+installing dependencies; it does not fetch fonts from Google. The final image
+serves the generated font assets locally.
+
+The `sharp` override requires at least 0.35.5 within the 0.35 series, including
+its patched prebuilt librsvg dependency (GHSA-wq5f-xc86-pv6w). Keep its native
+packages synchronized through npm rather than editing lockfile integrity data.
+Qualify the final image with real image processing and a fresh vulnerability
+scan; a successful Next.js build alone is not runtime acceptance.
 
 ## Copilot device sign-in
 

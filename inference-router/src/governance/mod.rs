@@ -547,10 +547,7 @@ impl Governance {
     }
 
     /// Build structured context from an action string (matches server.py).
-    fn build_context(
-        action: &str,
-        extra: Option<&Value>,
-    ) -> Option<HashMap<String, serde_yaml::Value>> {
+    fn build_context(action: &str, extra: Option<&Value>) -> Option<HashMap<String, Value>> {
         let parts: Vec<&str> = action.splitn(2, ':').collect();
         let category = parts.first().copied().unwrap_or("unknown");
         let detail = parts.get(1).copied().unwrap_or("");
@@ -559,21 +556,18 @@ impl Governance {
         let mut ctx = HashMap::new();
         ctx.insert(
             "action".into(),
-            serde_yaml::to_value(serde_json::json!({
+            serde_json::json!({
                 "full": action,
                 "category": category,
                 "detail": detail,
                 "command": cmd,
-            }))
-            .unwrap_or(serde_yaml::Value::Null),
+            }),
         );
 
         if let Some(extra_val) = extra {
             if let Some(obj) = extra_val.as_object() {
                 for (k, v) in obj {
-                    if let Ok(yaml_v) = serde_yaml::to_value(v) {
-                        ctx.insert(k.clone(), yaml_v);
-                    }
+                    ctx.insert(k.clone(), v.clone());
                 }
             }
         }
@@ -882,12 +876,25 @@ mod tests {
     #[test]
     fn build_context_parses_action_string() {
         let ctx = Governance::build_context("shell:ls -la /tmp", None).unwrap();
-        let action = ctx.get("action").unwrap();
-        let action_map: serde_json::Value = serde_yaml::from_value(action.clone()).unwrap();
+        let action_map = ctx.get("action").unwrap();
         assert_eq!(action_map["category"], "shell");
         assert_eq!(action_map["detail"], "ls -la /tmp");
         assert_eq!(action_map["command"], "ls");
         assert_eq!(action_map["full"], "shell:ls -la /tmp");
+    }
+
+    #[test]
+    fn build_context_preserves_json_extra() {
+        let extra = serde_json::json!({
+            "scope_id": "assignment-scope",
+            "tool": {"name": "file_write", "args": {"overwrite": false}},
+            "values": [null, true, 9_007_199_254_740_991_u64],
+        });
+        let context = Governance::build_context("file_write", Some(&extra)).unwrap();
+        for (name, value) in extra.as_object().unwrap() {
+            assert_eq!(context.get(name), Some(value));
+        }
+        assert_eq!(context["action"]["category"], "file_write");
     }
 
     #[test]

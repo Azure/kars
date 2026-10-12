@@ -1,0 +1,17 @@
+{
+  "elf_machine": 62,
+  "glibc_max": "2.34",
+  "needed": [
+    "ld-linux-x86-64.so.2",
+    "libc.so.6",
+    "libgcc_s.so.1",
+    "libm.so.6"
+  ],
+  "target": "x86_64-unknown-linux-gnu",
+  "rust": "1.95.0",
+  "maturin": "1.8.7",
+  "wheel": "agent_control_specification-0.4.0b0-cp311-abi3-linux_x86_64.whl",
+  "sha256": "8debfe5040ef179f6b24d02aa17c7869aed3e9daad2d69c1d782ecfc8ace162b",
+  "cargo_lock_sha256": "1c17d8fa87643487a34226f684cf339c4601a6f6b533f9d4d9d2451b5bb0907c",
+  "native_runtime_acceptance": false
+}

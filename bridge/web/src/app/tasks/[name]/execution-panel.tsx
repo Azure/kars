@@ -14,6 +14,8 @@ import { StatusBadge } from "@/components/status-badge";
 import { missionStatus } from "@/components/mission-status";
 import type { TaskDetail, ValidationResult } from "@/lib/types";
 import { runMissionClient } from "@/lib/run-mission-client";
+import { missionRunState } from "@/lib/mission-run-evidence";
+import { ValidationChecks } from "@/components/validation-checks";
 import { setLaunch, validateTask } from "./launch-actions";
 
 type Tone = "ok" | "warning" | "danger" | "muted";
@@ -60,6 +62,7 @@ function statusView(task: TaskDetail): { label: string; tone: Tone } {
 export function ExecutionPanel({ task }: { task: TaskDetail }) {
   const router = useRouter();
   const [pending, startTransition] = useTransition();
+  const [action, setAction] = useState<"launch" | "stop" | "run" | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const [preflight, setPreflight] = useState<{
@@ -73,25 +76,24 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
   const validation = preflight?.key === validationKey && preflight.attempt === attempt
     ? preflight.result : null;
   const [launchAccepted, setLaunchAccepted] = useState<boolean | null>(null);
+  const [launchBaseline, setLaunchBaseline] = useState<number | null>(null);
   const [rerunBaseline, setRerunBaseline] = useState<string | null | undefined>(undefined);
-  const awaitingAssignment = Boolean(
-    task.current_run_nonce
-    && task.assignment?.task_id !== task.current_run_nonce,
-  );
-  const assignmentInFlight =
-    awaitingAssignment
-    || (
-      task.assignment?.completed_at == null
-      && (task.assignment?.state === "Assigned" || task.assignment?.state === "Running")
-    );
+  const { currentResult, assignmentInFlight } = missionRunState(task);
+  const launchAcknowledged =
+    launchAccepted !== null
+    && launchAccepted === task.launched
+    && task.observed_generation !== launchBaseline;
+  if (launchAcknowledged) setLaunchAccepted(null);
+  const launched = launchAcknowledged ? task.launched : launchAccepted ?? task.launched;
   const rerunAccepted =
-    assignmentInFlight
-    || (rerunBaseline !== undefined && (task.result?.finished_at ?? null) === rerunBaseline);
-  const launched = launchAccepted ?? task.launched;
+    launched && task.phase !== "Degraded" && task.execution_phase !== "Degraded" && (
+      assignmentInFlight
+      || (rerunBaseline !== undefined && (task.result?.finished_at ?? null) === rerunBaseline)
+    );
   const effectiveTask = {
     ...task,
     launched,
-    result: rerunAccepted ? null : task.result,
+    result: rerunAccepted ? null : currentResult,
   };
   const ready = task.phase === "Ready";
   const checking = !launched && validation === null;
@@ -115,10 +117,10 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
   }, [task.name, validationKey, attempt, launched]);
 
   useEffect(() => {
-    if (launchAccepted === null || launchAccepted === task.launched) return;
+    if (launchAccepted === null || launchAcknowledged) return;
     const timer = window.setInterval(() => router.refresh(), 2_000);
     return () => window.clearInterval(timer);
-  }, [launchAccepted, router, task.launched]);
+  }, [launchAccepted, launchAcknowledged, router]);
 
   useEffect(() => {
     if (!rerunAccepted) return;
@@ -128,6 +130,7 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
 
   function toggle(launch: boolean) {
     if (launch && (!ready || checking || !validation?.ok)) return;
+    setAction(launch ? "launch" : "stop");
     setError(null);
     const epoch = validationEpoch.current;
     startTransition(async () => {
@@ -145,6 +148,7 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
         if (res.error) {
           setError(res.error);
         } else {
+          setLaunchBaseline(task.observed_generation);
           setLaunchAccepted(launch);
           window.setTimeout(() => router.refresh(), 0);
         }
@@ -160,6 +164,7 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
   }
 
   function run() {
+    setAction("run");
     setError(null);
     startTransition(async () => {
       const res = await runMissionClient(task.namespace, task.name);
@@ -175,21 +180,17 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
   const sandboxRunning = task.execution_phase === "Running";
   const running = sandboxRunning && effectiveTask.result == null;
   const view = statusView(effectiveTask);
-  // Fail loud: if the mission is launched but the sandbox never reached Running
-  // and nothing has been delivered, the run is stalled — say so with a reason,
-  // never a silent "Idle". A common cause is a chat-gateway harness (Hermes)
-  // that waits for messages instead of executing an autonomous loop.
   const stalled =
     launched &&
     !running &&
-    task.result == null &&
-    task.phase !== "Degraded" &&
+    currentResult == null &&
+    view.label !== "Blocked" && view.label !== "Run failed" &&
     (task.activity?.length ?? 0) === 0;
 
   return (
     <section
       aria-labelledby="exec-heading"
-      className="rounded-xl border border-border bg-surface p-6"
+      className="scroll-mt-28 rounded-xl border border-border bg-surface p-6"
     >
       <div className="flex items-center justify-between gap-4">
         <div>
@@ -197,9 +198,11 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
             Execution
           </h2>
           <p className="mt-0.5 text-sm text-foreground-muted">
-            {rerunAccepted
-              ? "A corrected rerun is in progress. This panel updates until a new terminal result arrives."
-              : task.result?.status === "error"
+            {view.label === "Blocked"
+              ? "Execution is held. Resolve the recorded reason before retrying."
+              : rerunAccepted
+              ? "A run is requested and awaiting a current terminal result. Check Activity for recorded progress."
+              : currentResult?.status === "error"
               ? "The latest run failed. Its sandbox remains available for a corrected re-run."
               : launched
               ? "This task is launched — the controller materializes a governed sandbox."
@@ -218,13 +221,11 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
 
       {stalled && (
         <div className="mt-3 rounded-lg border border-warning/40 bg-warning/10 px-3 py-2.5 text-xs text-warning">
-          <p className="font-semibold">This run hasn&rsquo;t started producing work.</p>
+          <p className="font-semibold">Execution is waiting for readiness or dispatch.</p>
           <p className="mt-1 leading-relaxed">
-            The sandbox is up but the agent hasn&rsquo;t reached <span className="font-medium">Running</span> or
-            emitted any activity yet. If this persists, the chosen harness may not execute an autonomous
-            mission (for example, a chat-gateway harness like <span className="font-mono">Hermes</span> waits
-            for inbound messages). Check the deploy timeline below, or re-compose with the{" "}
-            <span className="font-mono">OpenClaw</span> harness for one-shot missions.
+            Controller admission alone does not prove model access or agent activity.
+            Review the deployment checks and current diagnostic reason.
+            Activity shows recorded work, not a prediction that either harness has started.
           </p>
         </div>
       )}
@@ -252,30 +253,8 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
       )}
 
       {validation && !launched && (
-        <div className="mt-3 rounded-lg border border-border bg-surface-muted/40 px-3 py-2.5">
-          <p className="text-xs font-medium text-foreground-muted">Pre-flight check</p>
-          <ul className="mt-1.5 space-y-1">
-            {validation.checks.map((c) => (
-              <li key={c.id} className="flex items-start gap-2 text-xs">
-                <span
-                  className={
-                    c.status === "pass"
-                      ? "text-ok"
-                      : c.status === "warn"
-                        ? "text-warning"
-                        : "text-danger"
-                  }
-                  aria-hidden
-                >
-                  {c.status === "pass" ? "✓" : c.status === "warn" ? "!" : "✕"}
-                </span>
-                <span>
-                  <span className="font-medium">{c.label}</span>{" "}
-                  <span className="text-foreground-muted">{c.detail}</span>
-                </span>
-              </li>
-            ))}
-          </ul>
+        <div>
+          <ValidationChecks checks={validation.checks} />
           {!validation.ok && (
             <p className="mt-2 text-xs font-medium text-danger">
               This mission can&apos;t launch until the failing checks are resolved. Follow each check&apos;s
@@ -294,12 +273,12 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
               onClick={() => toggle(true)}
               className="rounded-lg bg-signal px-4 py-2 text-sm font-medium text-signal-fg hover:opacity-90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
             >
-              {pending ? "Validating / launching…" : "Launch"}
+              {pending && action === "launch" ? "Validating / launching…" : "Launch"}
             </button>
             <button
               type="button"
               disabled={pending || checking}
-              onClick={() => { setError(null); setAttempt((value) => value + 1); }}
+              onClick={() => { setError(null); setAttempt((value) => value + 1); router.refresh(); }}
               className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-surface-muted disabled:opacity-50"
             >
               Recheck launch
@@ -327,7 +306,7 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
               title={sandboxRunning ? "Run this mission again" : "The sandbox must be Running to re-run."}
               className="rounded-lg bg-signal px-4 py-2 text-sm font-medium text-signal-fg hover:opacity-90 disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
             >
-              {pending ? "Running…" : "Run again"}
+              {pending && action === "run" ? "Running…" : "Run again"}
             </button>
             <button
               type="button"
@@ -336,7 +315,7 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
               title="Tear down the running agent sandbox and free its resources. Keeps the mission and its deliverable."
               className="rounded-lg border border-border px-4 py-2 text-sm font-medium hover:bg-surface-muted disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
             >
-              {pending ? "Stopping…" : "Stop sandbox"}
+              {pending && action === "stop" ? "Stopping…" : "Stop sandbox"}
             </button>
           </>
         ) : (
@@ -344,7 +323,10 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
           // manual "run" button to second-guess; just an honest status + a way out.
           <>
             <span className="inline-flex items-center gap-2 rounded-lg bg-surface-muted px-3 py-2 text-sm font-medium text-foreground-muted">
-              {rerunAccepted || running ? "Running the mission…" : view.label === "Deploying" ? "Coming online…" : "Starting…"}
+              {view.label === "Blocked" ? "Execution blocked"
+                : view.label === "Run failed" ? "Run failed"
+                : running ? "Running the mission…"
+                : view.label === "Deploying" ? "Coming online…" : "Awaiting execution…"}
             </span>
             <button
               type="button"
@@ -353,7 +335,7 @@ export function ExecutionPanel({ task }: { task: TaskDetail }) {
               title="Tear down the agent sandbox. Keeps the mission; you can launch it again later."
               className="text-xs text-foreground-muted underline underline-offset-2 hover:text-foreground disabled:opacity-50"
             >
-              {pending ? "Stopping…" : "Stop"}
+              {pending && action === "stop" ? "Stopping…" : "Stop"}
             </button>
           </>
         )}

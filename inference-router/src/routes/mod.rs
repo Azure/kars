@@ -193,7 +193,14 @@ impl AppState {
         // persistence (in-memory only) — used by integration tests.
         let persist_path = std::env::var("TOKEN_BUDGET_PERSIST_PATH")
             .unwrap_or_else(|_| "/var/lib/kars/token-budgets.json".into());
-        let budget = if persist_path.is_empty() {
+        let budget = if let Some(calendar) = crate::inference_budget::calendar::Client::from_env()?
+        {
+            TokenBudgetTracker::with_calendar(
+                config.token_budget_daily,
+                config.token_budget_per_request,
+                calendar,
+            )
+        } else if persist_path.is_empty() {
             TokenBudgetTracker::new(config.token_budget_daily, config.token_budget_per_request)
         } else if let Some(parent) = std::path::Path::new(&persist_path).parent()
             && let Err(e) = std::fs::create_dir_all(parent)
@@ -395,6 +402,7 @@ impl AppState {
 
         let mut upstream = UpstreamConfig::azure(endpoint, deployment, sandbox_name.to_string());
         upstream.inference_budget = self.inference_budget.clone();
+        upstream.calendar_budget = self.budget.calendar_client();
         if self.services.identity_valid {
             upstream.telemetry = Some(self.services.telemetry.clone());
         }
@@ -486,6 +494,23 @@ pub(crate) fn apply_model_preference_override(
     Ok(())
 }
 
+pub(crate) fn resolve_primary_upstream(
+    state: &AppState,
+    policy: &crate::inference_policy_loader::InferencePolicySnapshot,
+    mut upstream: UpstreamConfig,
+) -> anyhow::Result<UpstreamConfig> {
+    apply_provider_resolution(state, &mut upstream, policy)?;
+    let candidates = crate::failover::candidates_for_request(&upstream, policy, b"{}");
+    let candidate = candidates
+        .first()
+        .ok_or_else(|| anyhow::anyhow!("model route absent"))?;
+    Ok(crate::failover::resolve_candidate(
+        &upstream,
+        &state.config,
+        candidate,
+    )?)
+}
+
 /// Extract the admin bearer token from either `Authorization: Bearer <token>`
 /// (canonical) or the legacy `x-kars-admin: <token>` header.
 ///
@@ -539,6 +564,14 @@ async fn healthz() -> &'static str {
 }
 
 async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
+    if let Err(error) = state.budget.observed_usage(&state.sandbox_name).await {
+        tracing::warn!(error = %error, "Router calendar accounting is not ready");
+        return (
+            StatusCode::SERVICE_UNAVAILABLE,
+            "not ready - calendar token accounting unavailable",
+        )
+            .into_response();
+    }
     if state.inference_budget.is_some() {
         return match crate::inference_budget::readiness::ready(
             &state,
@@ -558,18 +591,15 @@ async fn readyz(State(state): State<AppState>) -> impl IntoResponse {
                 .into_response(),
         };
     }
-    // Check that we can acquire a token (validates Workload Identity / IMDS setup)
-    let audience = if state
-        .config
-        .foundry_endpoint
-        .as_deref()
-        .is_some_and(|ep| ep.contains("services.ai.azure.com") && ep.contains("/api/projects/"))
-    {
-        "https://ai.azure.com"
-    } else {
-        "https://cognitiveservices.azure.com"
-    };
-    match state.auth.get_token(audience).await {
+    let credential = async {
+        let policy =
+            crate::inference_policy_loader::current_snapshot(&state.inference_policy).await;
+        let target =
+            resolve_primary_upstream(&state, &policy, state.upstream_config(&state.sandbox_name))?;
+        crate::proxy::credential_for_upstream(&state.auth, Some(&state.copilot), &target).await
+    }
+    .await;
+    match credential {
         Ok(_) => {
             // Also check Content Safety endpoint if configured
             if let Some(ref cs_endpoint) = state.config.content_safety_endpoint

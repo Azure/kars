@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use super::task::execution_plan::{ExecutionPlan, validate_activation};
+use super::task::execution_plan::{
+    ExecutionPlan, REVIEWED_TASK_DELEGATION_DEPTH, REVIEWED_TEAM_DELEGATION_DEPTH,
+    validate_activation, validate_reviewed_delegation_depth,
+};
 use serde::Serialize;
 use serde_json::Value;
 use std::collections::BTreeMap;
@@ -38,10 +41,34 @@ fn reviewed(object: &Value, active: bool) -> Result<ReviewedPlans, String> {
         .transpose()?;
     let root = plan(&object["spec"]["blueprint"])?;
     validate_activation(root.as_ref(), decomposition.as_deref(), active)?;
+    let depth = object["spec"]["envelope"]["delegationDepth"]
+        .as_i64()
+        .unwrap_or(0);
+    if active && root.is_some() {
+        validate_reviewed_delegation_depth(
+            depth,
+            if object["kind"] == "KarsTeam" {
+                REVIEWED_TEAM_DELEGATION_DEPTH
+            } else {
+                REVIEWED_TASK_DELEGATION_DEPTH
+            },
+        )?;
+    }
     let mut roles = BTreeMap::new();
     if let Some(roster) = object["spec"]["roster"].as_array() {
         for role in roster {
-            if let Some(plan) = plan(&role["blueprint"])? {
+            let role_plan = plan(&role["blueprint"])?;
+            let inherits_plan = role["blueprint"].is_null() && root.is_some();
+            if active && (role_plan.is_some() || inherits_plan) {
+                let role_depth = if role["envelope"].is_null() {
+                    depth.saturating_sub(1).max(0)
+                } else {
+                    role["envelope"]["delegationDepth"].as_i64().unwrap_or(0)
+                };
+                validate_reviewed_delegation_depth(role_depth, REVIEWED_TASK_DELEGATION_DEPTH)
+                    .map_err(|error| format!("roster role {}: {error}", role["name"]))?;
+            }
+            if let Some(plan) = role_plan {
                 validate_activation(Some(&plan), None, active)?;
                 let name = role["name"]
                     .as_str()
@@ -116,6 +143,30 @@ pub fn identity_fence(
         return Err("Captured target is being deleted".into());
     }
     Ok(serde_json::json!({"uid":uid,"resourceVersion":version}))
+}
+
+pub fn activation_fence<T: Serialize>(object: &T, active: bool) -> Result<Value, String> {
+    let object = serde_json::to_value(object).map_err(|error| error.to_string())?;
+    let metadata = serde_json::from_value(object["metadata"].clone())
+        .map_err(|error| format!("Invalid target metadata: {error}"))?;
+    let mut fence = identity_fence(&metadata)?;
+    if active
+        && object["kind"] == "KarsTask"
+        && plan(&object["spec"]["blueprint"])?.is_some()
+        && object["metadata"]["annotations"]["kars.azure.com/run-requested"]
+            .as_str()
+            .is_none_or(str::is_empty)
+    {
+        // Core needs the first run binding before it can materialize a reviewed
+        // plan. Publish it atomically with launch; preserve existing revisions.
+        let nonce = super::cluster::run_nonce(
+            "run",
+            metadata.uid.as_deref().unwrap(),
+            metadata.resource_version.as_deref().unwrap(),
+        );
+        fence["annotations"] = serde_json::json!({"kars.azure.com/run-requested":nonce});
+    }
+    Ok(fence)
 }
 
 #[cfg(test)]

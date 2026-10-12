@@ -10,6 +10,7 @@
 // here — you connect/remove those as providers above.
 
 import { useActionState, useState } from "react";
+import { useRouter } from "next/navigation";
 import { Icon } from "@/components/icon";
 import { Badge, Section } from "@/components/ui";
 import { HonestState } from "@/components/honest-state";
@@ -36,6 +37,7 @@ function ModelRow({
   m: ModelOption;
   localDeployments: LocalModelDeployment[];
 }) {
+  const router = useRouter();
   const local = isLocalProvider(m.provider);
   const managedDeployment = localDeployments.find((deployment) => {
     if (!deployment.managed) return false;
@@ -78,6 +80,14 @@ function ModelRow({
         </span>
       </div>
       {defState.error && <p className="text-[11px] text-danger">{defState.error}</p>}
+      {defState.ok && !m.is_default && (
+        <div role="status" className="flex flex-wrap items-center gap-2 text-[11px] text-foreground-muted">
+          <p>{defState.ok}</p>
+          <button type="button" onClick={() => router.refresh()} className="font-medium text-signal hover:underline">
+            Refresh status
+          </button>
+        </div>
+      )}
       {rmState.error && <p className="text-[11px] text-danger">{rmState.error}</p>}
     </li>
   );

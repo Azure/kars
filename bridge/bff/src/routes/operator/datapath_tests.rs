@@ -69,6 +69,76 @@ fn assert_invalid_without_evidence(dto: DatapathWitnessDto) {
     assert!(dto.sandboxes.is_empty());
 }
 
+fn with_owner(mut cm: ConfigMap, owner: &str) -> ConfigMap {
+    cm.metadata
+        .annotations
+        .as_mut()
+        .unwrap()
+        .insert("meta.helm.sh/release-name".into(), owner.into());
+    cm
+}
+
+#[test]
+fn witness_core_and_standalone_require_matching_owners() {
+    for release in ["kars", "kars-datapath-witness"] {
+        for enabled in [true, false] {
+            let dto = classify(
+                Ok(Some(with_owner(settings(enabled), release))),
+                Ok(None),
+                now(),
+            );
+            assert_eq!(dto.owner_release.as_deref(), Some(release));
+            assert_eq!(dto.state, if enabled { "pending" } else { "disabled" });
+        }
+        for report_owner in ["kars", "kars-datapath-witness", "foreign"] {
+            let dto = classify(
+                Ok(Some(with_owner(settings(true), release))),
+                Ok(Some(with_owner(
+                    cm("kars-datapath-witness", "witness.json", report()),
+                    report_owner,
+                ))),
+                now(),
+            );
+            if release == report_owner {
+                assert_eq!(dto.state, "observed");
+                assert!(dto.enabled);
+                assert_eq!(dto.owner_release.as_deref(), Some(release));
+            } else {
+                assert_invalid_without_evidence(dto);
+            }
+        }
+    }
+    let dto = classify(
+        Ok(Some(with_owner(settings(true), "foreign"))),
+        Ok(Some(with_owner(
+            cm("kars-datapath-witness", "witness.json", report()),
+            "foreign",
+        ))),
+        now(),
+    );
+    assert!(dto.owner_release.is_none());
+    assert_invalid_without_evidence(dto);
+}
+
+#[test]
+fn witness_foreign_empty_report_is_not_a_pending_owned_publisher() {
+    for (settings_owner, report_owner) in [
+        ("kars", "kars-datapath-witness"),
+        ("kars-datapath-witness", "kars"),
+    ] {
+        let mut empty = with_owner(
+            cm("kars-datapath-witness", "witness.json", report()),
+            report_owner,
+        );
+        empty.data = None;
+        assert_invalid_without_evidence(classify(
+            Ok(Some(with_owner(settings(true), settings_owner))),
+            Ok(Some(empty)),
+            now(),
+        ));
+    }
+}
+
 #[derive(Deserialize)]
 struct HostMatchCase {
     name: String,

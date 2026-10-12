@@ -10,7 +10,7 @@ pub(crate) mod credential_bindings;
 #[cfg(test)]
 mod persistence_tests;
 mod promotion;
-mod requests;
+pub(crate) mod requests;
 mod runs;
 pub(crate) mod specs;
 #[cfg(test)]
@@ -18,6 +18,9 @@ mod state_tests;
 mod tasks;
 #[cfg(test)]
 mod tests;
+mod work;
+
+pub(crate) use tasks::owner_ref as team_owner_ref;
 
 use anyhow::Result;
 use chrono::{DateTime, Utc};
@@ -138,6 +141,11 @@ async fn reconcile(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, Reconci
     }
     let outcome = reconcile_valid(&teams, &tasks_api, &effective, &ctx.client).await;
     if let Err(error) = &outcome {
+        if matches!(error, ReconcileError::Kube(kube::Error::Api(response)) if response.code == 409)
+        {
+            tracing::debug!(team = %team.name_any(), %error, "Concurrent Team update; retrying without replacing progress");
+            return outcome;
+        }
         // Admission may already have persisted a reservation. Retain it, and
         // never publish stale status over a replaced or edited Team.
         match teams.get(&team.name_any()).await {
@@ -261,6 +269,8 @@ async fn reconcile_valid(
         last_run_at = Some(now.to_rfc3339());
     }
     let mut next_run_at = None;
+    let work_selection = work::select(client, team).await?;
+    let mut request_cadence = false;
     if let Some(minutes) = every {
         let interval = chrono::Duration::minutes(i64::from(minutes));
         let previous = parse_optional_time(prior.last_run_at.as_deref(), "lastRunAt")?;
@@ -271,29 +281,11 @@ async fn reconcile_valid(
             && due
             && stats.active < MAX_CONCURRENT_RUNS
         {
-            let name = runs::cadence_name(team)?;
-            let allowance = specs::run_knowledge_budget(team).map_err(ReconcileError::Invalid)?;
-            let knowledge = crate::team_commons::prior_knowledge(client, team, allowance).await?;
-            let task = tasks::apply_task(
-                tasks_api,
-                team,
-                &name,
-                specs::run_spec(team, &knowledge).map_err(ReconcileError::Invalid)?,
-                "taskforce",
-            )
-            .await?;
-            let created_timestamp = task
-                .metadata
-                .creation_timestamp
-                .as_ref()
-                .map(|time| time.0.to_string());
-            let created =
-                parse_optional_time(created_timestamp.as_deref(), "task creationTimestamp")?
-                    .unwrap_or(now);
-            generated = generated.saturating_add(1);
-            last_generated = Some(name);
-            last_run_at = Some(created.to_rfc3339());
-            next_run_at = Some((created + interval).to_rfc3339());
+            request_cadence = !matches!(
+                work_selection,
+                work::Selection::Blocked | work::Selection::AwaitingReview
+            );
+            next_run_at = previous.map(|previous| (previous + interval).to_rfc3339());
         } else {
             next_run_at = previous.map(|previous| (previous + interval).to_rfc3339());
         }
@@ -310,6 +302,8 @@ async fn reconcile_valid(
         "Hibernating"
     } else if cadence_blocked {
         PHASE_DEGRADED
+    } else if matches!(work_selection, work::Selection::AwaitingReview) {
+        "AwaitingReview"
     } else if generated == 0 {
         "Watching"
     } else if overdue {
@@ -414,8 +408,10 @@ async fn reconcile_valid(
     .await?;
     if let Some(prepared) = &prepared {
         requests::finish(client, teams, tasks_api, &persisted, prepared).await?;
+    } else if request_cadence {
+        requests::enqueue_cadence(teams, &persisted).await?;
     }
-    Ok(Action::requeue(if manual_pending {
+    Ok(Action::requeue(if manual_pending || request_cadence {
         REQUEUE_PENDING
     } else if every.is_some() && !team.spec.paused {
         Duration::from_secs(30)

@@ -1,25 +1,17 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// kars Bridge Workspace — Pre-flight access readiness (design note FL5).
-//
-// Before (and during) a run, the operator must be able to see — at a glance —
-// that the agent has every access it needs, and nothing it doesn't. This panel
-// turns the composed envelope into an explicit checklist: model path, tool
-// policy, connected services, network egress, isolation, shared memory. Honest
-// states: pre-launch each line reads "verified at launch" (it's a plan);
-// once the controller has materialised the sandbox the same lines read
-// "verified" (the boundary is live). A degraded sandbox surfaces as attention.
+// Materialized configuration is not evidence of successful access checks.
 
 import type { Composition } from "@/lib/types";
 import { egressScope, humanizeMcp } from "@/lib/format";
 
-type Readiness = "verified" | "pending" | "attention";
+type Readiness = "configured" | "pending" | "attention";
 
 function StatusDot({ state }: { state: Readiness }) {
   const map: Record<Readiness, { cls: string; glyph: string; label: string }> = {
-    verified: { cls: "text-emerald-600", glyph: "✓", label: "Verified" },
-    pending: { cls: "text-foreground-muted", glyph: "○", label: "At launch" },
+    configured: { cls: "text-foreground-muted", glyph: "○", label: "Configured" },
+    pending: { cls: "text-foreground-muted", glyph: "○", label: "Retained" },
     attention: { cls: "text-amber-600", glyph: "!", label: "Attention" },
   };
   const m = map[state];
@@ -27,7 +19,7 @@ function StatusDot({ state }: { state: Readiness }) {
     <span className={`inline-flex items-center gap-1.5 text-xs font-medium ${m.cls}`}>
       <span
         aria-hidden
-        className={`grid h-4 w-4 place-items-center rounded-full text-[10px] ${state === "verified" ? "bg-emerald-500/10" : state === "attention" ? "bg-amber-500/10" : "bg-surface-muted"}`}
+        className={`grid h-4 w-4 place-items-center rounded-full text-[10px] ${state === "attention" ? "bg-amber-500/10" : "bg-surface-muted"}`}
       >
         {m.glyph}
       </span>
@@ -71,13 +63,9 @@ export function ReadinessPanel({
   delivered?: boolean;
   failed?: boolean;
 }) {
-  // A delivered mission ran to completion behind the enforced boundary, so its
-  // accesses were verified even though the sandbox has since been torn down and
-  // the execution phase has returned to idle.
   const live =
-    delivered ||
-    (launched && (executionPhase === "Running" || executionPhase === "Ready" || executionPhase === "Succeeded"));
-  const base: Readiness = degraded ? "attention" : live ? "verified" : "pending";
+    launched && (executionPhase === "Running" || executionPhase === "Ready" || executionPhase === "Succeeded");
+  const base: Readiness = degraded ? "attention" : live ? "configured" : "pending";
 
   const rows: { label: string; value: string }[] = [
     { label: "Model path", value: composition.model ?? "controller default" },
@@ -97,36 +85,33 @@ export function ReadinessPanel({
           if (int.length) parts.push(`${int.length} internal (${int.join(", ")})`);
           return parts.join(" · ");
         })()
-      : "model path only — all else denied",
+      : "No additional direct egress configured",
   });
   if (composition.memory) rows.push({ label: "Shared memory", value: composition.memory });
 
-  const allVerified = base === "verified";
   const headline = degraded
-    ? "One or more accesses need attention"
+    ? "The controller reports degraded execution; inspect diagnostics for the cause"
     : failed
-      ? "The access boundary was verified; execution failed afterward"
-    : live
-      ? "Every access the agent needs is verified and bounded"
-      : "Access plan — verified the moment this mission launches";
+      ? "Execution failed; this configuration does not establish which accesses succeeded"
+      : delivered
+        ? "Retained configuration — delivery does not verify every configured access"
+        : "Configured routes and policies — individual access checks are not recorded here";
 
   return (
     <section className="rounded-xl border border-border bg-surface p-6">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold">Pre-flight access</h2>
+          <h2 className="text-sm font-semibold">Access configuration</h2>
           <p className="mt-0.5 text-xs text-foreground-muted">{headline}</p>
         </div>
         <span
           className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium ${
-            allVerified
-              ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
-              : degraded
+            degraded
                 ? "border-amber-500/30 bg-amber-500/10 text-amber-600"
                 : "border-border bg-surface-muted text-foreground-muted"
           }`}
         >
-          {allVerified ? "Ready" : degraded ? "Needs attention" : "Pending launch"}
+          {degraded ? "Needs attention" : live ? "Configured" : "Not running"}
         </span>
       </div>
       <ul className="mt-4 divide-y divide-border rounded-lg border border-border">
@@ -135,8 +120,9 @@ export function ReadinessPanel({
         ))}
       </ul>
       <p className="mt-3 text-[11px] text-foreground-muted">
-        Each line is enforced at the sandbox boundary — the agent cannot reach anything not listed
-        here. Granting more happens through an approval you&apos;ll see in your Inbox.
+        Configuration is not a connectivity test or proof of tool success. Review recorded Activity
+        for actual outcomes and diagnostics for the current sandbox. Changes still require the
+        applicable authorization and approval checks.
       </p>
     </section>
   );

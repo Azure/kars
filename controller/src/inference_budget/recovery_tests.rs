@@ -115,6 +115,51 @@ fn enroll_new_authority(ledger: &Ledger, authority: &TaskAuthority, now: i64) ->
     inflight(next, authority, "new", now)
 }
 
+#[test]
+fn paused_team_binding_stays_dormant_and_preserves_uncertain_usage_on_resume() {
+    use crate::inference_budget::binding::bind_authority;
+    let now = 100;
+    let account = original_account(now);
+    let ledger = Store::ledger(&account).unwrap();
+    let (_, authority) = task_authority("A");
+    let paused = bind_authority(ledger, &authority, true).unwrap().next;
+    assert!(!paused.nodes["root"].active);
+    assert!(paused.sessions["old"].closed);
+    assert!(paused.meters.uncertain.tokens > 0);
+    assert!(!bind_authority(&paused, &authority, true).unwrap().changed);
+    let (_, updated) = task_authority("B");
+    let edited = bind_authority(&paused, &updated, true).unwrap().next;
+    assert!(!edited.nodes["root"].active);
+    assert_eq!(edited.nodes["root"].authority, updated);
+    assert_eq!(edited.meters, paused.meters);
+    let resumed = bind_authority(&edited, &updated, false).unwrap().next;
+    assert!(resumed.nodes["root"].active);
+    assert_eq!(resumed.meters, paused.meters);
+    assert!(resumed.sessions["old"].closed);
+    assert!(resumed.register_session(identity("old")).is_err());
+    assert!(!bind_authority(&resumed, &updated, false).unwrap().changed);
+}
+
+#[test]
+fn paused_team_binding_can_prepare_new_members_without_reopening_parent() {
+    use crate::inference_budget::binding::bind_authority;
+    let (_, parent) = task_authority("A");
+    let empty = Ledger::new("account-uid".into(), root(), parent.limits).unwrap();
+    let dormant = bind_authority(&empty, &parent, true).unwrap().next;
+    let mut child = parent.clone();
+    child.task.name = "child".into();
+    child.task.uid = "child".into();
+    child.parent_uid = Some("root".into());
+    let dormant = bind_authority(&dormant, &child, true).unwrap().next;
+    assert!(dormant.nodes.values().all(|node| !node.active));
+    assert!(!bind_authority(&dormant, &child, true).unwrap().changed);
+    assert!(bind_authority(&dormant, &child, false).is_err());
+    let resumed = bind_authority(&dormant, &parent, false).unwrap().next;
+    let resumed = bind_authority(&resumed, &child, false).unwrap().next;
+    assert!(resumed.nodes.values().all(|node| node.active));
+    assert_eq!(resumed.meters, dormant.meters);
+}
+
 #[derive(Clone)]
 struct Enrollment {
     state: Arc<Mutex<State>>,

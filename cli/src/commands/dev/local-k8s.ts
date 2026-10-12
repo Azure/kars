@@ -18,7 +18,10 @@
  */
 
 import { execa } from "execa";
+import { createHash } from "node:crypto";
 import chalk from "chalk";
+import { hasCoreHeadlamp, HEADLAMP_OPERATOR_LOGIN } from "../../lib/headlamp-ownership.js";
+import { installPrometheus } from "../up/headlamp_stack.js";
 import * as path from "node:path";
 import * as os from "node:os";
 import { existsSync, writeFileSync, mkdtempSync, rmSync, readFileSync } from "node:fs";
@@ -27,12 +30,51 @@ import { loadConfig, getSecret, type KarsConfig } from "../../config.js";
 import { loadAgtProfile } from "../../refs.js";
 import { stageRustBinaries, type RustArch } from "../../lib/stage-rust-bin.js";
 import { stageMeshPlugin } from "../../lib/stage-mesh-plugin.js";
-import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
+import { AGT_MESH_DOCKERFILE, ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
 import { resolveBundledAsset, requireBundledAsset, findRepoRootOrNull } from "../../lib/repo-assets.js";
 import { buildCopilotFallbackChain } from "../../github-copilot.js";
 import { CLAIM, prepareCredentialNamespace } from "../../lib/namespace-ownership.js";
 import { assertSafeMutation } from "../../lib/sre-authority.js";
-import { prepareCoreTemplateSchemas } from "../../lib/core-helm-schemas.js";
+import { prepareCoreHelmSchemas } from "../../lib/core-helm-schemas.js";
+import { sreHelmStageWait } from "../../lib/sre-helm.js";
+import { DEFAULT_OPENCLAW_VERSION } from "../../runtime.js";
+import { MONITORING_IMAGE_TARGETS } from "../../lib/image-targets.js";
+import { monitoringServices } from "../../lib/monitoring-services.js";
+
+const LOCAL_HERMES_IMAGE = "kars-runtime-hermes:latest";
+const LOCAL_EVAL_RUNNER_IMAGE = "kars-conformance-runner:latest";
+
+export function localK8sImagePlan(sandboxImage: string) {
+  return [
+    ...MONITORING_IMAGE_TARGETS.map(({ repo }) => ({ repo, target: `${repo}:latest`,
+      aliases: [`ghcr.io/azure/${repo}:latest`, `karsacr.azurecr.io/${repo}:latest`] })),
+    { repo: "kars-metrics-server", target: "kars-metrics-server:latest",
+      aliases: ["karsacr.azurecr.io/kars-metrics-server:latest", "ghcr.io/azure/kars-metrics-server:latest"] },
+    { repo: "kars-headlamp", target: "kars-headlamp:latest",
+      aliases: ["karsacr.azurecr.io/kars-headlamp:latest", "ghcr.io/azure/kars-headlamp:latest"] },
+    { repo: "openclaw-sandbox", target: "kars-sandbox:dev",
+      aliases: [sandboxImage, "karsacr.azurecr.io/openclaw-sandbox:latest", "openclaw-sandbox:latest", "openclaw-sandbox:dev"] },
+    { repo: "kars-controller", target: "kars-controller:dev",
+      aliases: ["karsacr.azurecr.io/kars-controller:latest", "kars-controller:latest"] },
+    { repo: "kars-inference-router", target: "kars-inference-router:dev",
+      aliases: ["karsacr.azurecr.io/kars-inference-router:latest", "kars-inference-router:latest"] },
+    { repo: "kars-runtime-hermes", target: LOCAL_HERMES_IMAGE,
+      aliases: ["karsacr.azurecr.io/kars-runtime-hermes:latest", "kars-runtime-hermes:dev"] },
+    { repo: "kars-conformance-runner", target: LOCAL_EVAL_RUNNER_IMAGE,
+      aliases: ["karsacr.azurecr.io/kars-conformance-runner:latest", "ghcr.io/azure/kars-conformance-runner:latest"] },
+  ];
+}
+
+export async function buildLocalConformanceRunnerImage(runtime: string, repoRoot: string, arch: RustArch): Promise<void> {
+  const multistage = process.platform !== "linux";
+  if (!multistage) await stageRustBinaries(repoRoot, ["kars-conformance-runner"], arch);
+  await execa(runtime, [
+    "build", "--platform", `linux/${arch}`,
+    "-t", LOCAL_EVAL_RUNNER_IMAGE,
+    "-f", path.join(repoRoot, `sandbox-images/conformance-runner/Dockerfile${multistage ? ".multistage" : ""}`),
+    repoRoot,
+  ], { stdio: "inherit" });
+}
 
 export interface LocalK8sOptions {
   /** Sandbox / agent name. Reused as Helm release name suffix. */
@@ -417,6 +459,7 @@ export async function ensureCluster(
   kind: string,
   name: string,
   env: NodeJS.ProcessEnv,
+  runtime: string,
 ): Promise<void> {
   if (await clusterExists(kind, name, env)) return;
   // Kind v0.20+ on single-node clusters automatically removes the
@@ -430,6 +473,46 @@ export async function ensureCluster(
     stdio: ["pipe", "inherit", "inherit"],
     env,
   });
+  // Journald sizes its RAM-backed store from VM memory, not each Kind node's
+  // cgroup limit. Bound new nodes only; never change a reused cluster's logs.
+  const nodes = await kindNodeInventory(kind, name, env);
+  const ids: string[] = [];
+  for (const node of nodes) {
+    const { stdout } = await execa(runtime, ["inspect", "--format",
+      '{{.Id}} {{index .Config.Labels "io.x-k8s.kind.cluster"}}', node], { env });
+    const [id, owner, extra] = stdout.trim().split(/\s+/);
+    if (!/^[a-f0-9]{64}$/.test(id ?? "") || owner !== name || extra !== undefined) {
+      throw new Error(`Cannot configure journals for an unverified Kind node: ${node}`);
+    }
+    ids.push(id);
+  }
+  const journal = "[Journal]\nRuntimeMaxUse=128M\nRuntimeMaxFileSize=16M\n";
+  for (const id of ids) {
+    const { stdout } = await execa(runtime, ["exec", "-i", id, "sh", "-c",
+      "set -eu; " +
+      "test ! -e /etc/systemd/journald.conf.d/90-kars-kind-runtime.conf; " +
+      "mkdir -p /etc/systemd/journald.conf.d; " +
+      "cat > /etc/systemd/journald.conf.d/90-kars-kind-runtime.conf; " +
+      "systemctl restart systemd-journald; " +
+      "systemctl is-active --quiet systemd-journald; " +
+      "cat /etc/systemd/journald.conf.d/90-kars-kind-runtime.conf"],
+    { env, input: journal, timeout: 30_000 });
+    if (stdout !== journal) throw new Error(`Kind journal configuration verification failed: ${id}`);
+  }
+}
+
+async function kindNodeInventory(
+  kind: string,
+  clusterName: string,
+  env: NodeJS.ProcessEnv,
+): Promise<string[]> {
+  const { stdout: inventory } = await execa(kind, ["get", "nodes", "--name", clusterName], { env });
+  const nodes = inventory.split(/\r?\n/).map(node => node.trim()).filter(Boolean);
+  if (!nodes.length || new Set(nodes).size !== nodes.length
+    || nodes.some(node => !/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/.test(node) || !node.startsWith(`${clusterName}-`))) {
+    throw new Error(`Invalid or empty Kind node inventory for cluster ${clusterName}`);
+  }
+  return nodes;
 }
 
 async function loadImageIntoKind(
@@ -439,6 +522,7 @@ async function loadImageIntoKind(
   image: string,
   env: NodeJS.ProcessEnv,
 ): Promise<void> {
+  const nodes = await kindNodeInventory(kind, clusterName, env);
   // `kind load docker-image` has a known issue where it can silently fail
   // to surface an image into the node's containerd (the import succeeds at
   // the kind layer but `crictl images` doesn't show it — observed on
@@ -464,56 +548,72 @@ async function loadImageIntoKind(
     // fall through to the ctr import path
   }
 
-  // Verify the node has THIS EXACT image (by ID), not merely the tag. A
-  // `:dev` / `:latest` tag left over from an earlier `kars dev` build or
-  // `--release` pull points at a STALE image, and `kind load` won't re-point
-  // it — so the cluster silently keeps running the old image. This is
-  // precisely why `kars dev --release` never actually exercised the
-  // distroless images: the kind node kept a tool-rich multistage `:dev` from
-  // a prior build, masking every distroless breakage (egress-guard,
-  // operator probes, …). Compare the source image ID with the node's and
-  // re-import on ANY mismatch — erring toward re-import is safe (worst case
-  // it's a slower load), erring toward skip is what shipped the bug.
-  const node = `${clusterName}-control-plane`;
-  const shortId = (s: string) => s.replace(/^sha256:/, "").slice(0, 24);
-  const sourceId = await execa(runtime, [
-    "image",
-    "inspect",
-    image,
-    "--format",
-    "{{.Id}}",
-  ])
-    .then((r) => shortId(r.stdout.trim()))
-    .catch(() => "");
-  const nodeId = await execa(runtime, [
-    "exec",
-    node,
-    "crictl",
-    "images",
-    "-q",
-    image,
-  ])
-    .then((r) => shortId(r.stdout.trim()))
-    .catch(() => "");
-  const upToDate = sourceId !== "" && sourceId === nodeId;
+  const sourceId = (await execa(runtime, ["image", "inspect", image, "--format", "{{.Id}}"])).stdout.trim();
+  if (!/^sha256:[a-f0-9]{64}$/.test(sourceId)) throw new Error(`Invalid local image identity for ${image}`);
+  const record = (value: unknown): value is Record<string, unknown> =>
+    typeof value === "object" && value !== null && !Array.isArray(value);
+  const verified = async (node: string) => {
+    const { stdout } = await execa(runtime, ["exec", node, "crictl", "inspecti", "--output", "json", image]);
+    const result: unknown = JSON.parse(stdout);
+    const config = record(result) && record(result.status) ? result.status.id : undefined;
+    if (typeof config !== "string" || !/^sha256:[a-f0-9]{64}$/.test(config)) {
+      throw new Error(`Invalid CRI image identity for ${image}`);
+    }
+    if (config === sourceId) return true;
+    // Containerd-backed Docker returns an index/manifest ID, whereas CRI
+    // returns a config ID. Follow hash-verified descriptors before comparing.
+    const content = async (digest: unknown) => {
+      if (typeof digest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(digest)) {
+        throw new Error(`Invalid image descriptor for ${image}`);
+      }
+      const { stdout: bytes } = await execa(runtime,
+        ["exec", node, "ctr", "-n=k8s.io", "content", "get", digest], { maxBuffer: 1024 * 1024 });
+      if (`sha256:${createHash("sha256").update(bytes).digest("hex")}` !== digest) {
+        throw new Error(`Image descriptor content mismatch for ${image}`);
+      }
+      const document: unknown = JSON.parse(bytes);
+      if (!record(document) || document.schemaVersion !== 2 || typeof document.mediaType !== "string") {
+        throw new Error(`Unsupported image descriptor for ${image}`);
+      }
+      return document;
+    };
+    let manifest = await content(sourceId);
+    if (manifest.mediaType === "application/vnd.oci.image.index.v1+json"
+      || manifest.mediaType === "application/vnd.docker.distribution.manifest.list.v2+json") {
+      if (!Array.isArray(manifest.manifests)) throw new Error(`Invalid image index for ${image}`);
+      const platforms = manifest.manifests.filter((entry: unknown): entry is Record<string, unknown> =>
+        record(entry) && record(entry.platform) && entry.platform.os === "linux"
+        && entry.platform.architecture === hostDockerArch());
+      if (platforms.length !== 1) throw new Error(`Ambiguous or missing native image platform for ${image}`);
+      manifest = await content(platforms[0].digest);
+    }
+    if (manifest.mediaType !== "application/vnd.oci.image.manifest.v1+json"
+      && manifest.mediaType !== "application/vnd.docker.distribution.manifest.v2+json") {
+      throw new Error(`Unsupported image manifest for ${image}`);
+    }
+    return record(manifest.config) && manifest.config.digest === config;
+  };
+  for (const node of nodes) {
+    try {
+      if (await verified(node)) continue;
+    } catch (error) {
+      console.warn(`Local image verification requires a direct import for ${image} on ${node}: ${(error as Error).message}`);
+    }
 
-  if (upToDate) return;
-
-  // `buffer: false` is essential: execa otherwise accumulates the
-  // subprocess stdout into its result (capped at `maxBuffer`, default
-  // 100 MB) *even when the stream is also piped*. `docker save` of a
-  // multi-hundred-MB image (e.g. openclaw-sandbox) overflows that cap and
-  // fails the whole `kars dev` bring-up at "Loading kars images". We never
-  // need the tarball in memory — it streams straight to `ctr import` — so
-  // disable buffering entirely.
-  const save = execa(runtime, ["save", image], { buffer: false });
-  const importProc = execa(
-    runtime,
-    ["exec", "-i", node, "ctr", "-n=k8s.io", "images", "import", "-"],
-    { stdio: ["pipe", "inherit", "inherit"] },
-  );
-  if (save.stdout && importProc.stdin) save.stdout.pipe(importProc.stdin);
-  await Promise.all([save, importProc]);
+    // Stream each fallback sequentially: no in-memory archive or parallel
+    // exports of large runtime images.
+    const save = execa(runtime, ["save", image], { buffer: false });
+    const importProc = execa(
+      runtime,
+      ["exec", "-i", node, "ctr", "-n=k8s.io", "images", "import", "-"],
+      { stdio: ["pipe", "inherit", "inherit"] },
+    );
+    if (save.stdout && importProc.stdin) save.stdout.pipe(importProc.stdin);
+    await Promise.all([save, importProc]);
+    if (!await verified(node)) {
+      throw new Error(`Image import did not verify the expected local image ${image} on ${node} in kind cluster ${clusterName}`);
+    }
+  }
 }
 
 async function localImageExists(runtime: string, image: string): Promise<boolean> {
@@ -630,6 +730,45 @@ async function rebuildDevImages(
   }
   type Spec = { name: string; tag: string; build: () => Promise<void> };
   const specs: Spec[] = [
+    ...MONITORING_IMAGE_TARGETS.map(({ repo, dockerfile, target }) => ({
+      name: repo,
+      tag: `${repo}:latest`,
+      build: async () => {
+        await execa(runtime, ["build", "--platform", platform,
+          ...(target ? ["--target", target] : []),
+          "-t", `${repo}:latest`, "-f", path.join(repoRoot, dockerfile), repoRoot,
+        ], { stdio: "inherit" });
+      },
+    })),
+    {
+      name: "conformance-runner",
+      tag: LOCAL_EVAL_RUNNER_IMAGE,
+      build: () => buildLocalConformanceRunnerImage(runtime, repoRoot, archToken as RustArch),
+    },
+    {
+      name: "metrics-server",
+      tag: "kars-metrics-server:latest",
+      build: async () => {
+        await execa(runtime, [
+          "build", "--platform", platform,
+          "-t", "kars-metrics-server:latest",
+          "-f", path.join(repoRoot, "sandbox-images/metrics-server/Dockerfile"),
+          repoRoot,
+        ], { stdio: "inherit" });
+      },
+    },
+    {
+      name: "headlamp",
+      tag: "kars-headlamp:latest",
+      build: async () => {
+        await execa(runtime, [
+          "build", "--platform", platform,
+          "-t", "kars-headlamp:latest",
+          "-f", path.join(repoRoot, "sandbox-images/headlamp/Dockerfile"),
+          repoRoot,
+        ], { stdio: "inherit" });
+      },
+    },
     {
       name: "inference-router",
       tag: "kars-inference-router:dev",
@@ -711,31 +850,15 @@ async function rebuildDevImages(
       },
     },
     {
-      // Hermes runtime image. Built so the operator's `n` → spawn
-      // dialog can launch a Hermes sandbox without the user having
-      // to know about `docker build -t kars-runtime-hermes …`. The
-      // target tag matches DEFAULT_HERMES_IMAGE in
-      // controller/src/reconciler/runtime.rs so the controller's
-      // image string resolves cleanly to the kind-loaded image
-      // (no retag dance in the load step).
-      //
-      // The Dockerfile COPYs runtimes/wheels/ — ensureAgtWheels()
-      // already populated that at the top of runLocalK8s, so this
-      // step never blocks on wheel availability.
-      //
-      // Cost: ~3-5 min on first build (Python pip install + Hermes
-      // pip install + ripgrep/op binaries). Subsequent runs reuse
-      // the docker layer cache → <10s. Acceptable for OOTB; if
-      // you really want to skip, pass --no-build to kars dev.
       name: "runtime-hermes",
-      tag: "karsacr.azurecr.io/kars-runtime-hermes:latest",
+      tag: LOCAL_HERMES_IMAGE,
       build: async () => {
         const dockerfile = path.join(repoRoot, "sandbox-images/hermes/Dockerfile");
-        if (!existsSync(dockerfile)) return; // chart drift; skip silently
+        if (!existsSync(dockerfile)) throw new Error(`Required Hermes Dockerfile missing: ${dockerfile}`);
         await execa(runtime, [
           "build",
           "--platform", platform,
-          "-t", "karsacr.azurecr.io/kars-runtime-hermes:latest",
+          "-t", LOCAL_HERMES_IMAGE,
           "-f", dockerfile,
           repoRoot,
         ], { stdio: "inherit" });
@@ -755,7 +878,7 @@ async function rebuildDevImages(
   // changed). Sandbox + runtime images stay opt-in because their builds
   // are minutes long; users can pass --force-build or `kars push` to
   // refresh them deliberately.
-  const ALWAYS_REBUILD = new Set(["inference-router", "controller"]);
+  const ALWAYS_REBUILD = new Set(["inference-router", "controller", "conformance-runner"]);
   for (const s of specs) {
     const arch = await imageArch(runtime, s.tag);
     const archMismatch = arch !== null && arch !== archToken;
@@ -793,6 +916,11 @@ async function loadImageIfPresent(
 ): Promise<{ loaded: boolean; reason?: string }> {
   const tryLoad = async (img: string): Promise<boolean> => {
     if (!(await localImageExists(runtime, img))) return false;
+    const arch = await imageArch(runtime, img);
+    const expectedArch = hostDockerArch();
+    if (arch !== expectedArch) {
+      throw new Error(`Required local image ${img} has architecture ${arch ?? "unknown"}; expected ${expectedArch}. Build or obtain the native image before installing.`);
+    }
     if (img !== targetImage) {
       // Retag to the canonical name so values-local-dev.yaml's
       // `imagePullPolicy: Never` finds it. `image tag` works the same
@@ -812,6 +940,24 @@ async function loadImageIfPresent(
     loaded: false,
     reason: `'${targetImage}' (and aliases: ${candidateAliases.join(", ") || "<none>"}) not found locally — build via 'make images'`,
   };
+}
+
+export async function loadRequiredLocalImages(
+  kind: string,
+  runtime: string,
+  clusterName: string,
+  env: NodeJS.ProcessEnv,
+  sandboxImage: string,
+): Promise<number> {
+  if (!clusterName) throw new Error("The requested kind cluster must be explicit");
+  const images = localK8sImagePlan(sandboxImage);
+  for (const image of images) {
+    const result = await loadImageIfPresent(kind, runtime, clusterName, image.target, env, image.aliases);
+    if (!result.loaded) {
+      throw new Error(`Required local image unavailable: ${result.reason ?? image.target}. Core was not applied. Build the images or use --release.`);
+    }
+  }
+  return images.length;
 }
 
 function findRepoRoot(start: string): string {
@@ -838,18 +984,15 @@ export async function installLocalCoreChart(
 ): Promise<void> {
   if (!clusterName) throw new Error("The requested kind cluster must be explicit");
   const context = `kind-${clusterName}`;
-  // We render-then-apply (rather than `helm install`) to keep failures
-  // visible: `kubectl apply -f -` shows precisely which resources didn't
-  // accept admission. Phase 4 may switch to `helm install --atomic` once
-  // CRDs and the values overlay are stable.
+  // Core dependencies require Helm's namespace/certificate hook ordering.
+  // Schema preflight refuses legacy template ownership rather than adopting it.
   const args = [
-    "template",
+    "upgrade", "--install",
     release,
     chartDir,
     "--namespace",
     "kars-system",
-    "--include-crds",
-    "--kube-context", context,
+    "--timeout", "300s",
   ];
   for (const overlay of valuesOverlays) {
     args.push("-f", overlay);
@@ -857,20 +1000,15 @@ export async function installLocalCoreChart(
   for (const kv of setArgs) {
     args.push("--set", kv);
   }
-  const execute = (file: string, commandArgs: readonly string[], options: { stdio: "pipe"; input?: string; timeout?: number }) =>
-    execa(file === "kubectl" ? kubectl : helm,
-      [file === "kubectl" ? "--context" : "--kube-context", context, ...commandArgs], options);
-  const { stdout } = await execa(helm, [...args, "--dry-run=client"]);
-  const remainder = await prepareCoreTemplateSchemas(execute, stdout,
-    { release, namespace: "kars-system", ownership: "template" });
-  await execa(
-    kubectl,
-    ["--context", context, "apply", "-f", "-", "--server-side"],
-    {
-      input: remainder,
-      stdio: ["pipe", "inherit", "inherit"],
+  const execute = new Proxy(execa, {
+    apply(target, receiver, [file, commandArgs = [], options]) {
+      return Reflect.apply(target, receiver, [file === "kubectl" ? kubectl : helm,
+        [file === "kubectl" ? "--context" : "--kube-context", context, ...commandArgs], options]);
     },
-  );
+  });
+  args.push(await sreHelmStageWait(execute));
+  await prepareCoreHelmSchemas(execute, args);
+  await execute("helm", args, { stdio: "inherit" });
 }
 
 /**
@@ -1052,6 +1190,7 @@ async function deployAgentMesh(
   agtRepo: string | undefined,
   archToken: string,
   releaseVersion?: string,
+  noBuild = false,
 ): Promise<void> {
   void meshProvider;
   const platform = `linux/${archToken}`;
@@ -1068,7 +1207,7 @@ async function deployAgentMesh(
       const remote = `ghcr.io/azure/kars-agentmesh-${component}:${releaseVersion}`;
       console.log(chalk.dim(`  Pulling published agentmesh-${component} (${releaseVersion})…`));
       try {
-        await execa(tools.runtime, ["pull", remote], { stdio: "pipe" });
+        await execa(tools.runtime, ["pull", "--platform", `linux/${hostDockerArch()}`, remote], { stdio: "pipe" });
         await execa(tools.runtime, ["tag", remote, localTag(component)], { stdio: "pipe" });
       } catch (e) {
         throw new Error(
@@ -1077,7 +1216,7 @@ async function deployAgentMesh(
         );
       }
     }
-  } else {
+  } else if (!noBuild) {
     // ── Build relay + registry images locally (AGT Python) ────────────
     if (!agtRepo) {
       throw new Error(
@@ -1085,15 +1224,12 @@ async function deployAgentMesh(
         "  Clone it:  git clone https://github.com/microsoft/agent-governance-toolkit",
       );
     }
-    const agtDockerfile = path.join(
-      agtRepo,
-      "agent-governance-python/agent-mesh/docker/Dockerfile",
-    );
+    const repoRoot = findRepoRoot(process.cwd());
+    await ensureAgtWheels(agtRepo, repoRoot);
+    const agtDockerfile = path.join(repoRoot, AGT_MESH_DOCKERFILE);
     if (!existsSync(agtDockerfile)) {
       throw new Error(
-        `AGT Dockerfile not found at ${agtDockerfile}\n` +
-        `  Clone it:  git clone https://github.com/microsoft/agent-governance-toolkit ${agtRepo}\n` +
-        `  Or pass --agt-repo <path> / set $KARS_AGT_REPO if you already have it elsewhere.`,
+        `Kars AL3 AgentMesh Dockerfile not found at ${agtDockerfile}`,
       );
     }
     for (const component of ["relay", "registry"] as const) {
@@ -1110,7 +1246,7 @@ async function deployAgentMesh(
           localTag(component),
           "-f",
           agtDockerfile,
-          agtRepo,
+          repoRoot,
         ],
         { stdio: "inherit" },
       );
@@ -1269,7 +1405,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // source. In --release mode we pull published relay/registry images, so
   // skip the bootstrap entirely (it also requires a repo checkout, which a
   // released/npm-installed run won't have).
-  if (opts.noMesh !== true && !opts.globalRegistry && !releaseMode) {
+  if (opts.noMesh !== true && !opts.globalRegistry && !releaseMode && !opts.noBuild) {
     stepper.step("Bootstrapping AGT toolkit + Python wheels…");
     try {
       const repoRootForAgt = findRepoRoot(process.cwd());
@@ -1312,7 +1448,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   }
 
   stepper.step(`Ensuring kind cluster '${opts.clusterName}' exists…`);
-  await ensureCluster(tools.kind, opts.clusterName, tools.env);
+  await ensureCluster(tools.kind, opts.clusterName, tools.env, tools.runtime);
   await assertSafeMutation((file,args,commandOptions) => execa(
     file === "kubectl" ? tools.kubectl : file,
     ["--context", `kind-${opts.clusterName}`, ...args], commandOptions,
@@ -1351,11 +1487,9 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   // right variant automatically.
   if (releaseMode) {
     stepper.step(`Pulling published images (${opts.releaseVersion})…`);
-    const pulls: { remote: string; devTag: string }[] = [
-      { remote: releaseRef("openclaw-sandbox"), devTag: opts.image },
-      { remote: releaseRef("kars-controller"), devTag: "kars-controller:dev" },
-      { remote: releaseRef("kars-inference-router"), devTag: "kars-inference-router:dev" },
-    ];
+    const pulls = localK8sImagePlan(opts.image).map(image => ({
+      remote: releaseRef(image.repo), devTag: image.repo === "openclaw-sandbox" ? opts.image : image.target,
+    }));
     for (const { remote, devTag } of pulls) {
       try {
         await execa(tools.runtime, ["pull", remote], { stdio: "pipe" });
@@ -1371,143 +1505,16 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     stepper.done(`pulled ${pulls.length} published image(s) for ${opts.releaseVersion}`);
   }
 
-  // The values-local-dev overlay pins all images to local "dev" tags
-  // with imagePullPolicy=Never, so we MUST load all three images that
-  // the chart references — sandbox, controller, inference-router.
-  // Missing any of them turns the helm install into an ErrImageNeverPull
-  // loop with no useful diagnostics.
-  //
-  // PLUS: runtime images. When the operator spawns a non-OpenClaw
-  // sandbox (`n` → cycle to Hermes / Anthropic / …), the controller
-  // resolves the pod image to `karsacr.azurecr.io/kars-runtime-<X>:latest`
-  // (see controller/src/reconciler/runtime.rs::DEFAULT_*_IMAGE). On
-  // local-k8s that image isn't in the cluster, so the pod
-  // ImagePullBackOffs. We load every runtime image that's been built
-  // locally — silently skipping any that aren't present (the controller
-  // will then ImagePullBackOff and the operator's pod-events display
-  // surfaces a clear error pointing at the missing build).
+  // These names must match the chart's local overlay. Both default harnesses
+  // are required; missing images must not become a successful partial install.
   stepper.step("Loading kars images into the kind cluster…");
   if (opts.noBuild && !releaseMode) {
     stepper.done("skipped image load (--no-build)");
   } else {
-    // `target` = the canonical image name the controller looks for
-    // INSIDE kind. `aliases` = local docker tags we accept as a SOURCE
-    // for re-tagging. `loadImageIfPresent` re-tags the matched local
-    // image AS the target before kind-loading, so the kind containerd
-    // ends up with the canonical name in `crictl images` and the
-    // workload's `imagePullPolicy: Never` pull succeeds without ever
-    // touching the network.
-    //
-    // The target MUST be the exact image name the local-dev workloads
-    // reference, because `imagePullPolicy: Never` does a literal name match:
-    //   - controller pod    → `controller.image` (values-local-dev.yaml)
-    //   - sandbox container  → controller's `SANDBOX_IMAGE` env
-    //                          (= `sandbox.image`, values-local-dev.yaml)
-    //   - router sidecar     → controller's `INFERENCE_ROUTER_IMAGE` env
-    //                          (= `inferenceRouter.image`, values-local-dev.yaml)
-    // values-local-dev.yaml pins all three to local `:dev` tags, so the
-    // targets here are those `:dev` names — NOT the `karsacr.azurecr.io/...`
-    // ACR names (those are the AKS/`kars up` image strings the controller
-    // falls back to only when the `*_IMAGE` env is unset; on local-dev the
-    // env is always set to `:dev`). Loading the ACR name into the node while
-    // the workload requests `:dev` is an ErrImageNeverPull — the controller
-    // never starts and `kars dev` times out at "Waiting for sandbox pod".
-    // The ACR `:latest` names are kept as *aliases* (fallback retag sources).
-    const images: { target: string; aliases: string[] }[] = [
-      {
-        target: "kars-sandbox:dev", // matches sandbox.image (values-local-dev)
-        aliases: [
-          opts.image, // the local build / --release retag (usually kars-sandbox:dev)
-          "karsacr.azurecr.io/openclaw-sandbox:latest",
-          "openclaw-sandbox:latest",
-          "openclaw-sandbox:dev",
-        ],
-      },
-      {
-        target: "kars-controller:dev", // matches controller.image
-        aliases: [
-          "karsacr.azurecr.io/kars-controller:latest",
-          "kars-controller:latest",
-        ],
-      },
-      {
-        target: "kars-inference-router:dev", // matches inferenceRouter.image
-        aliases: [
-          "karsacr.azurecr.io/kars-inference-router:latest",
-          "kars-inference-router:latest",
-        ],
-      },
-    ];
-
-    // Runtime images — only Hermes is auto-loaded here because Hermes
-    // is the second-most-common runtime after OpenClaw and is the one
-    // the user just productized in this PR. Other runtimes (Anthropic,
-    // LangGraph, Pydantic AI, MAF Python, OpenAI Agents) build from
-    // sandbox-images/<dir>/Dockerfile too but stay opt-in to keep
-    // `kars dev` startup fast for the common case. Power users can
-    // `docker build` them by hand; this loop picks them up on the
-    // next `kars dev` run.
-    //
-    // The target is the controller's canonical default image string so
-    // the retag + `kind load` plumbing wires correctly with NO
-    // controller-side change needed.
-    const runtimeImages: { target: string; aliases: string[] }[] = [
-      {
-        target: "karsacr.azurecr.io/kars-runtime-hermes:latest",
-        aliases: ["kars-runtime-hermes:latest", "kars-runtime-hermes:dev"],
-      },
-    ];
-    images.push(...runtimeImages);
-
-    const missing: string[] = [];
-    const missingRuntimes: string[] = [];
-    for (const img of images) {
-      const result = await loadImageIfPresent(
-        tools.kind,
-        tools.runtime,
-        opts.clusterName,
-        img.target,
-        tools.env,
-        img.aliases,
-      );
-      if (!result.loaded) {
-        // Separate "runtime" misses from "core" misses — runtimes are
-        // opt-in (only block if the user actually spawns one), but the
-        // core 3 images are hard requirements.
-        if (img.target.includes("kars-runtime-")) {
-          missingRuntimes.push(img.target);
-        } else {
-          missing.push(result.reason ?? img.target);
-        }
-      }
-    }
-    if (missing.length > 0) {
-      console.warn(
-        chalk.yellow(
-          `  ⚠ some images missing from local ${tools.runtimeName}; the deployment will fail until you build them:\n     - ${missing.join("\n     - ")}\n     Hint: 'make images' or 'make build && make images' from repo root.`,
-        ),
-      );
-    }
-    if (missingRuntimes.length > 0) {
-      // Soft warning — the core deployment is fine; the user just can't
-      // spawn one of these runtimes from the operator UI until they
-      // build the image. Spell out the docker build command so the fix
-      // is one-shot copy-paste.
-      const runtimeHints = missingRuntimes.map((img) => {
-        const m = img.match(/kars-runtime-([a-z-]+):latest/);
-        const dir = m ? m[1] : "<runtime>";
-        return `       docker build -t ${img} -f sandbox-images/${dir}/Dockerfile .`;
-      });
-      console.warn(
-        chalk.dim(
-          `  ℹ runtime images not loaded into kind (operator 'n' → cycle will let you pick these,\n     but the pod will ImagePullBackOff until the image exists):\n${runtimeHints.join("\n")}`,
-        ),
-      );
-    }
-    stepper.done(
-      `loaded ${images.length - missing.length - missingRuntimes.length}/${images.length} images` +
-        (missingRuntimes.length > 0 ? ` (${missingRuntimes.length} runtime image(s) skipped)` : ""),
+    const loaded = await loadRequiredLocalImages(
+      tools.kind, tools.runtime, opts.clusterName, tools.env, opts.image,
     );
+    stepper.done(`loaded ${loaded} required images`);
   }
 
   // Sandboxes are scheduled with `nodeSelector: kars.azure.com/pool=sandbox`.
@@ -1563,7 +1570,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   const credsOverlay = await provisionDevCreds(tools.kubectl, `kind-${opts.clusterName}`, creds, mcpGithub);
   try {
     const meshProvider = opts.meshProvider ?? "agt";
-    await installLocalCoreChart(tools.helm, tools.kubectl, opts.clusterName, opts.name, chartDir, [
+    await installLocalCoreChart(tools.helm, tools.kubectl, opts.clusterName, "kars", chartDir, [
       valuesOverlay,
       credsOverlay,
     ], [
@@ -1618,6 +1625,7 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
       opts.agtRepo,
       archToken,
       opts.releaseVersion,
+      opts.noBuild,
     );
     stepper.done(`agentmesh-${meshProvider} ready`);
   }
@@ -1679,9 +1687,9 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
     await installAzureclawPlugin(tools, opts.clusterName);
     stepper.done("kars plugin installed");
 
-    stepper.step("Installing Prometheus + Grafana stack…");
-    await installPrometheus(tools, opts.clusterName);
-    stepper.done("Prometheus + Grafana installed");
+    stepper.step("Checking monitoring installation…");
+    await installPrometheus({ context: `kind-${opts.clusterName}` }, { kubectl: tools.kubectl, helm: tools.helm });
+    stepper.done("Monitoring configuration checked");
   } catch (e) {
     stepper.stop();
     console.warn(
@@ -1699,14 +1707,12 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   const headlampUrl = `http://localhost:${headlampPort}/`;
   await startHeadlampPortForward(tools, headlampPort);
 
-  // Grafana + Prometheus port-forwards so the Headlamp plugin embeds work
-  // out of the box. Grafana is exposed at :3000 (anonymous Viewer, allow_embedding
-  // enabled in the chart values below). Prometheus at :19091 for ad-hoc PromQL.
+  // Optional monitoring services are forwarded only when installed.
   const grafanaPort = 3000;
   const grafanaUrl = `http://localhost:${grafanaPort}/`;
   const prometheusPort = 19091;
   const prometheusUrl = `http://localhost:${prometheusPort}/`;
-  await startMonitoringPortForwards(tools, grafanaPort, prometheusPort);
+  const monitoring = await startMonitoringPortForwards(tools, `kind-${opts.clusterName}`, grafanaPort, prometheusPort);
 
   await openBrowser(headlampUrl);
 
@@ -1714,14 +1720,14 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
   console.log(chalk.green("  ✓ Local-k8s dev environment is ready."));
   console.log("");
   console.log(chalk.bold("  Headlamp dashboard:"));
-  console.log(`    ${chalk.cyan(headlampUrl)}  (token printed below)`);
+  console.log(`    ${chalk.cyan(headlampUrl)}`);
   console.log("");
-  await printHeadlampToken(tools);
+  await printHeadlampToken(tools, opts.clusterName);
   console.log("");
   console.log(chalk.bold("  Observability stack:"));
-  console.log(`    Grafana:    ${chalk.cyan(grafanaUrl)}   (anonymous Viewer)`);
-  console.log(`    Prometheus: ${chalk.cyan(prometheusUrl)}`);
-  console.log(
+  console.log(monitoring.grafana ? `    Grafana:    ${chalk.cyan(grafanaUrl)}` : "    Grafana:    not installed (optional)");
+  console.log(monitoring.prometheus ? `    Prometheus: ${chalk.cyan(prometheusUrl)}` : "    Prometheus: not installed");
+  if (monitoring.grafana) console.log(
     chalk.dim(
       `    Default dashboards: 'kars — Sandbox Fleet Overview' (uid kars-fleet)\n` +
         `                        'kars — Agent Fleet Operations' (uid kars-ops)`,
@@ -1804,6 +1810,10 @@ export async function runLocalK8s(opts: LocalK8sOptions): Promise<void> {
  * users who want a stable URL.
  */
 async function installHeadlamp(tools: Tooling, clusterName: string): Promise<void> {
+  if (await hasCoreHeadlamp(`kind-${clusterName}`, "headlamp", tools.kubectl)) {
+    console.log("  Using Core-managed Headlamp; its image and plugin are updated through Core configuration.");
+    return;
+  }
   // Ensure the headlamp namespace exists. `helm install --create-namespace`
   // can't be used because we use template-and-apply to keep diagnostics clean.
   try {
@@ -1900,271 +1910,18 @@ async function installHeadlamp(tools: Tooling, clusterName: string): Promise<voi
 }
 
 /**
- * Install kube-prometheus-stack + apply our PodMonitor/json-exporter/dashboard
- * manifests so observability is wired end-to-end on first run. Mirrors the
- * Headlamp pattern (helm template → kubectl apply, idempotent).
- *
- * Defaults are tuned for a kind cluster:
- *   - AlertManager off (no UI, no PVC)
- *   - 2d retention (kind disks are ephemeral anyway)
- *   - Grafana: anonymous Viewer + allow_embedding so the Headlamp iframe
- *     works without auth
- *   - podMonitorSelectorNilUsesHelmValues=false so our PodMonitor is
- *     discovered without label gymnastics
- *
- * The chart version is pinned for reproducibility. The matching Headlamp
- * plugin (tools/headlamp-plugin) reads
- *   kars_mesh_messages_{sent,received}_total
- *   kars_tokens_total
- *   kars_agt_policy_evaluations_total
- *   agentmesh_relay_*
- * which all light up once the PodMonitor + json-exporter manifests below
- * are applied.
- */
-async function installPrometheus(tools: Tooling, clusterName: string): Promise<void> {
-  const ctx = `kind-${clusterName}`;
-
-  // Ensure namespace exists + has the labels the sandbox NetworkPolicy
-  // ingress allows scraping from (app.kubernetes.io/name=kars,
-  // component=system). Without these labels kindnet would block the
-  // PodMonitor scrape on :8443.
-  try {
-    await execa(tools.kubectl, ["--context", ctx, "create", "namespace", "monitoring"]);
-  } catch {
-    // already exists — fine
-  }
-  await execa(tools.kubectl, [
-    "--context",
-    ctx,
-    "label",
-    "namespace",
-    "monitoring",
-    "app.kubernetes.io/name=kars",
-    "app.kubernetes.io/component=system",
-    "--overwrite",
-  ]);
-
-  // Add the prometheus-community helm repo (idempotent).
-  try {
-    await execa(tools.helm, [
-      "repo",
-      "add",
-      "prometheus-community",
-      "https://prometheus-community.github.io/helm-charts",
-    ]);
-  } catch {
-    // already added — fine
-  }
-  await execa(tools.helm, ["repo", "update", "prometheus-community"]);
-
-  // Write a tmp values file — kube-prometheus-stack has nested keys with
-  // dots ("grafana.ini") that are painful to express via --set. Yaml is
-  // clearer and survives chart upgrades.
-  const valuesYaml = `
-alertmanager:
-  enabled: false
-
-prometheus:
-  prometheusSpec:
-    retention: 2d
-    # Pick up PodMonitors created elsewhere in the cluster (our deploy/monitoring/*.yaml)
-    podMonitorSelectorNilUsesHelmValues: false
-    serviceMonitorSelectorNilUsesHelmValues: false
-    probeSelectorNilUsesHelmValues: false
-    ruleSelectorNilUsesHelmValues: false
-    resources:
-      requests:
-        cpu: 100m
-        memory: 256Mi
-      limits:
-        memory: 1Gi
-
-grafana:
-  adminPassword: admin
-  defaultDashboardsTimezone: browser
-  service:
-    type: ClusterIP
-  grafana.ini:
-    auth.anonymous:
-      enabled: true
-      org_role: Viewer
-    security:
-      allow_embedding: true
-      cookie_samesite: none
-  sidecar:
-    dashboards:
-      enabled: true
-      label: grafana_dashboard
-      labelValue: "1"
-      searchNamespace: ALL
-  resources:
-    requests:
-      cpu: 50m
-      memory: 128Mi
-
-# Trim down for kind — full kube-state-metrics + node-exporter are kept
-# because the in-image Grafana dashboards reference them.
-defaultRules:
-  create: false
-
-kubeApiServer:
-  enabled: true
-kubelet:
-  enabled: true
-kubeControllerManager:
-  enabled: false
-coreDns:
-  enabled: false
-kubeEtcd:
-  enabled: false
-kubeScheduler:
-  enabled: false
-kubeProxy:
-  enabled: false
-`.trimStart();
-
-  const KPS_CHART_VERSION = "85.3.3";
-  const tmpdir = mkdtempSync(path.join(os.tmpdir(), "kars-kps-"));
-  const valuesPath = path.join(tmpdir, "values.yaml");
-  writeFileSync(valuesPath, valuesYaml);
-
-  try {
-    const { stdout } = await execa(tools.helm, [
-      "template",
-      "kps",
-      "prometheus-community/kube-prometheus-stack",
-      "--version",
-      KPS_CHART_VERSION,
-      "--namespace",
-      "monitoring",
-      "--include-crds",
-      "--values",
-      valuesPath,
-    ]);
-
-    // Split CRDs from CRs: kubectl --server-side races otherwise, which
-    // surfaces on AKS as "no matches for kind Prometheus/ServiceMonitor".
-    // Apply CRDs, wait for Established, then apply the rest.
-    const docs = stdout.split(/^---\s*$/m).filter((d) => d.trim().length > 0);
-    const crdDocs: string[] = [];
-    const otherDocs: string[] = [];
-    const crdNames: string[] = [];
-    for (const doc of docs) {
-      if (/^kind:\s*CustomResourceDefinition\s*$/m.test(doc)) {
-        crdDocs.push(doc);
-        const m = doc.match(/^\s*name:\s*([^\s]+)/m);
-        if (m) crdNames.push(m[1]);
-      } else {
-        otherDocs.push(doc);
-      }
-    }
-
-    if (crdDocs.length > 0) {
-      await execa(
-        tools.kubectl,
-        ["--context", ctx, "apply", "-f", "-", "--server-side", "--force-conflicts"],
-        { input: crdDocs.join("\n---\n"), stdio: ["pipe", "inherit", "inherit"] },
-      );
-      for (const name of crdNames) {
-        try {
-          await execa(
-            tools.kubectl,
-            ["--context", ctx, "wait", "--for=condition=Established", `crd/${name}`, "--timeout=60s"],
-            { stdio: "pipe" },
-          );
-        } catch {
-          /* best-effort */
-        }
-      }
-    }
-
-    if (otherDocs.length > 0) {
-      await execa(
-        tools.kubectl,
-        ["--context", ctx, "apply", "-f", "-", "--server-side", "--force-conflicts"],
-        { input: otherDocs.join("\n---\n"), stdio: ["pipe", "inherit", "inherit"] },
-      );
-    }
-  } finally {
-    try {
-      rmSync(tmpdir, { recursive: true, force: true });
-    } catch {
-      // best-effort cleanup
-    }
-  }
-
-  // Wait for Grafana to be ready (best-effort 180s — kube-prometheus-stack
-  // pulls several images on first install). Don't fail the whole dev
-  // command if it overruns; the Operator may still be reconciling Prometheus.
-  try {
-    await execa(
-      tools.kubectl,
-      [
-        "--context",
-        ctx,
-        "rollout",
-        "status",
-        "deployment/kps-grafana",
-        "-n",
-        "monitoring",
-        "--timeout=180s",
-      ],
-      { stdio: "inherit" },
-    );
-  } catch {
-    console.warn(
-      chalk.yellow(
-        "  ⚠ Grafana deployment did not become ready within 180s — observability panels may be empty until 'kubectl get pods -n monitoring' shows kps-grafana Ready.",
-      ),
-    );
-  }
-
-  // Apply our kars-specific monitoring manifests: PodMonitor for
-  // every sandbox router, prometheus-json-exporter for the AGT relay
-  // /health endpoint, and the two Grafana dashboards (fleet + ops).
-  // Resolve from a repo checkout OR the bundled copy (so --release works).
-  const monitoringDir = resolveBundledAsset("deploy/monitoring");
-  if (!monitoringDir) {
-    console.log(chalk.dim("    monitoring manifests not bundled — skipping dashboards"));
-    return;
-  }
-  for (const f of [
-    "podmonitor-sandbox-router.yaml",
-    "agentmesh-json-exporter.yaml",
-    "grafana-dashboard-configmap.yaml",
-  ]) {
-    const p = path.join(monitoringDir, f);
-    if (!existsSync(p)) {
-      console.warn(chalk.yellow(`  ⚠ missing ${f} — skipping`));
-      continue;
-    }
-    await execa(
-      tools.kubectl,
-      [
-        "--context",
-        ctx,
-        "apply",
-        "-f",
-        p,
-        "--server-side",
-        "--force-conflicts",
-      ],
-      { stdio: "inherit" },
-    );
-  }
-}
-
-/**
  * Start detached `kubectl port-forward` for Grafana (3000) and Prometheus
  * (19091) so the Headlamp plugin's iframe + ad-hoc PromQL just work
  * after `kars dev`. Same kill-existing-then-spawn pattern as the
  * Headlamp port-forward.
  */
-async function startMonitoringPortForwards(
-  tools: Tooling,
+export async function startMonitoringPortForwards(
+  tools: Pick<Tooling, "kubectl">,
+  context: string,
   grafanaLocalPort: number,
   prometheusLocalPort: number,
-): Promise<void> {
+): Promise<{ grafana: boolean; prometheus: boolean }> {
+  const services = await monitoringServices(context, tools.kubectl);
   const { spawn } = await import("node:child_process");
   const startOne = async (
     localPort: number,
@@ -2186,6 +1943,8 @@ async function startMonitoringPortForwards(
     const child = spawn(
       tools.kubectl,
       [
+        "--context",
+        context,
         "port-forward",
         "-n",
         "monitoring",
@@ -2201,11 +1960,12 @@ async function startMonitoringPortForwards(
   };
 
   // kps-grafana service is on :80, kps-kube-prometheus-stack-prometheus on :9090.
-  await startOne(grafanaLocalPort, "service/kps-grafana", 80);
-  await startOne(prometheusLocalPort, "service/kps-kube-prometheus-stack-prometheus", 9090);
+  if (services.grafana) await startOne(grafanaLocalPort, "service/kps-grafana", 80);
+  if (services.prometheus) await startOne(prometheusLocalPort, "service/kps-kube-prometheus-stack-prometheus", 9090);
 
   // Give the forwards a moment to bind.
-  await new Promise((r) => setTimeout(r, 1500));
+  if (services.grafana || services.prometheus) await new Promise((r) => setTimeout(r, 1500));
+  return services;
 }
 
 /**
@@ -2226,6 +1986,7 @@ async function installAzureclawPlugin(
   tools: Tooling,
   clusterName: string,
 ): Promise<void> {
+  if (await hasCoreHeadlamp(`kind-${clusterName}`, "headlamp", tools.kubectl)) return;
   // Prefer the prebuilt plugin bundled with the CLI (so `kars dev --release`
   // works with no repo checkout); fall back to a repo checkout, building it
   // on demand if a source tree is present.
@@ -2477,7 +2238,11 @@ async function openBrowser(url: string): Promise<void> {
  * Bearer token — we mint one for the cluster-admin SA we bound above
  * and dump it for the user to paste into the Headlamp login screen.
  */
-async function printHeadlampToken(tools: Tooling): Promise<void> {
+async function printHeadlampToken(tools: Tooling, clusterName: string): Promise<void> {
+  if (await hasCoreHeadlamp(`kind-${clusterName}`, "headlamp", tools.kubectl)) {
+    console.log(HEADLAMP_OPERATOR_LOGIN);
+    return;
+  }
   try {
     const { stdout } = await execa(tools.kubectl, [
       "create",
@@ -2795,7 +2560,7 @@ export async function autoCreateSandbox(
     "  runtime:",
     "    kind: OpenClaw",
     "    openclaw:",
-    '      version: "2026.3.13"',
+    `      version: ${JSON.stringify(DEFAULT_OPENCLAW_VERSION)}`,
     `      image: ${opts.image}`,
     "      config:",
     "        agent:",

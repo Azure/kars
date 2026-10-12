@@ -235,6 +235,30 @@ async fn privacy_rpc_fresh_writer_template_permission_or_evaluation_failure_revo
 }
 
 #[tokio::test]
+async fn privacy_rpc_root_template_change_revokes_existing_proof() {
+    for enrolled in [false, true] {
+        let rig = Rig::new(enrolled).await;
+        assert_eq!(
+            rig.call(&rig.request, TOKEN).await.0,
+            reqwest::StatusCode::OK
+        );
+        rig.data
+            .lock()
+            .unwrap()
+            .objects
+            .get_mut("/apis/apps/v1/namespaces/kars-system/deployments/kars-controller")
+            .unwrap()["spec"]["template"]["spec"]["containers"][0]["image"] =
+            json!("unreviewed-root-image");
+        let (status, value) = rig.call(&rig.request, TOKEN).await;
+        assert_eq!(status, reqwest::StatusCode::FORBIDDEN);
+        assert_eq!(
+            value,
+            json!({"capability":wire::CAPABILITY,"allowed":false})
+        );
+    }
+}
+
+#[tokio::test]
 async fn privacy_rpc_current_uid_generation_epoch_version_and_recipient_loss_deny() {
     for (path, pointer, value) in [
         (SANDBOX, "/metadata/uid", json!("replacement")),

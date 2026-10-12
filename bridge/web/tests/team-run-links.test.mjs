@@ -33,7 +33,7 @@ test("live claim warnings and archive links use the same host-checked parser", (
   }
   visit(source);
   assert.ok(claim);
-  assert.match(claim.initializer.getText(source), /githubPullRequests\(task\.result\.output\)/);
+  assert.match(claim.initializer.getText(source), /githubPullRequests\(currentResult\.output\)/);
 });
 
 test("GitHub links in prose, markdown, and supported bare URLs retain canonical HTTPS output", () => {

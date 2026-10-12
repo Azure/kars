@@ -177,6 +177,7 @@ pub async fn resolve(
     if workspace.metadata.deletion_timestamp.is_some() {
         return Err(Error::Identity);
     }
+
     let tasks: Api<KarsTask> = Api::namespaced(client.clone(), &namespace);
     let mut current = tasks
         .get(&leaf.name_any())
@@ -328,6 +329,25 @@ pub async fn resolve(
         nodes,
         team,
     })
+}
+
+/// Retry only a changing read inventory. Each attempt retains the caller's leaf
+/// UID/generation and repeats all readiness, attenuation and double-read checks.
+pub async fn resolve_with_retry(
+    client: &Client,
+    leaf: &KarsTask,
+    readiness: LeafReadiness,
+) -> Result<VerifiedTaskLineage, Error> {
+    for attempt in 1..=3 {
+        match resolve(client, leaf, readiness).await {
+            Err(Error::Changed) if attempt < 3 => {
+                tracing::debug!(attempt, "Task authority snapshot changed; retrying read-only inventory");
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            result => return result,
+        }
+    }
+    Err(Error::Changed)
 }
 
 #[cfg(test)]

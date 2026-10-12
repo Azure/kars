@@ -170,6 +170,22 @@ impl BlueprintDto {
 }
 
 impl ExecutionPlanDto {
+    pub(crate) fn role_qualification_budget(
+        &self,
+        role_name: &str,
+        lifetime_tokens: Option<i64>,
+    ) -> Option<i64> {
+        let role_tokens = self
+            .roles
+            .iter()
+            .find(|role| role.name == role_name)
+            .and_then(|role| role.budget_tokens);
+        match (role_tokens, lifetime_tokens) {
+            (Some(role), Some(lifetime)) => Some(role.min(lifetime)),
+            _ => role_tokens.or(lifetime_tokens),
+        }
+    }
+
     pub(crate) fn from_crd(plan: &crate::kars::task::ExecutionPlan) -> Self {
         Self {
             schema: plan.schema.clone(),
@@ -279,6 +295,7 @@ impl ExecutionPlanDto {
 #[derive(Debug, Serialize)]
 pub struct TaskSummaryDto {
     pub name: String,
+    pub parent: Option<String>,
     pub namespace: String,
     pub objective: String,
     pub display_name: Option<String>,
@@ -311,6 +328,7 @@ pub struct TaskSummaryDto {
 /// Browser-facing task detail (single view).
 #[derive(Debug, Serialize)]
 pub struct TaskDetailDto {
+    pub reviewed_execution: Option<super::reviewed_execution::ReviewedExecutionDto>,
     pub name: String,
     pub namespace: String,
     pub objective: String,
@@ -493,6 +511,7 @@ pub struct MissionTelemetryDto {
 #[derive(Debug, Serialize)]
 pub struct MissionResultDto {
     pub output: String,
+    pub error: Option<String>,
     pub reviewable: bool,
     pub usage_known: bool,
     pub run_evidence: Option<super::run_evidence::MissionRunEvidenceDto>,

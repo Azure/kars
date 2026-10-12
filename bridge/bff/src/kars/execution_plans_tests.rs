@@ -16,6 +16,48 @@ fn team() -> Value {
 }
 
 #[test]
+fn execution_plan_activation_binds_only_initial_task_launch() {
+    let mut task = team();
+    task["kind"] = json!("KarsTask");
+    let expected = super::super::cluster::run_nonce("run", "team-uid", "9");
+    let fence = activation_fence(&task, true).unwrap();
+    assert_eq!(
+        fence["annotations"]["kars.azure.com/run-requested"],
+        expected
+    );
+    assert_eq!(fence["uid"], "team-uid");
+    assert_eq!(fence["resourceVersion"], "9");
+    assert!(
+        activation_fence(&task, false)
+            .unwrap()
+            .get("annotations")
+            .is_none()
+    );
+    assert!(
+        activation_fence(&team(), true)
+            .unwrap()
+            .get("annotations")
+            .is_none()
+    );
+    task["metadata"]["annotations"]["kars.azure.com/run-requested"] = json!("existing-revision");
+    assert!(
+        activation_fence(&task, true)
+            .unwrap()
+            .get("annotations")
+            .is_none()
+    );
+    task["spec"]["blueprint"] = json!({});
+    assert!(
+        activation_fence(&task, true)
+            .unwrap()
+            .get("annotations")
+            .is_none()
+    );
+    task["metadata"]["uid"] = Value::Null;
+    assert!(activation_fence(&task, true).is_err());
+}
+
+#[test]
 fn execution_plans_preserve_root_and_role_plans_and_semantic_defaults() {
     let mut expected = team();
     expected["spec"]["roster"] =
@@ -170,6 +212,48 @@ fn execution_plans_fence_effective_team_updates_and_keep_pure_pause_available() 
         json!({"charter":"Changed legacy standing mandate."}),
     )
     .unwrap();
+}
+
+#[test]
+fn execution_plans_require_nested_depth_only_when_activating_reviewed_work() {
+    let mut object = team();
+    object["spec"]["blueprint"]["executionPlan"] =
+        json!(super::super::task::execution_plan::tests::filesystem_plan());
+    for (kind, required) in [("KarsTask", 2), ("KarsTeam", 3)] {
+        object["kind"] = json!(kind);
+        for depth in 0..=4 {
+            object["spec"]["envelope"]["delegationDepth"] = json!(depth);
+            validate(&object, false).unwrap();
+            let result = validate(&object, true);
+            if depth >= required {
+                result.unwrap();
+            } else {
+                assert!(
+                    result
+                        .unwrap_err()
+                        .contains("ReviewedDelegationDepthInsufficient")
+                );
+            }
+        }
+    }
+    object["spec"]["envelope"]["delegationDepth"] = json!(3);
+    object["spec"]["roster"] = json!([{"name":"writer"}]);
+    validate(&object, true).unwrap();
+    object["spec"]["roster"][0]["envelope"] =
+        json!({"tier":1,"authorityCeiling":1,"delegationDepth":1});
+    assert!(validate(&object, true).unwrap_err().contains("roster role"));
+    validate(&object, false).unwrap();
+    // An explicit empty blueprint is a complete override, not inherited execution.
+    object["spec"]["roster"][0]["blueprint"] = json!({});
+    validate(&object, true).unwrap();
+    object["spec"]["roster"][0]["blueprint"] = object["spec"]["blueprint"].clone();
+    assert!(validate(&object, true).unwrap_err().contains("roster role"));
+    object["spec"]["roster"][0]["envelope"]["delegationDepth"] = json!(2);
+    validate(&object, true).unwrap();
+    object["spec"]["envelope"]["delegationDepth"] = json!(1);
+    let active: super::super::team::KarsTeam = serde_json::from_value(object).unwrap();
+    prepare_team_patch(&active, json!({"paused":true})).unwrap();
+    assert!(prepare_team_patch(&active, json!({"paused":false})).is_err());
 }
 
 #[test]

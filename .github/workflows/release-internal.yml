@@ -168,6 +168,8 @@ jobs:
     timeout-minutes: 30
     outputs:
       controller_digest: ${{ steps.digests.outputs.controller }}
+      metrics_digest: ${{ steps.digests.outputs.metrics }}
+      headlamp_digest: ${{ steps.digests.outputs.headlamp }}
       router_digest: ${{ steps.digests.outputs.router }}
       gateway_digest: ${{ steps.digests.outputs.gateway }}
       runner_digest: ${{ steps.digests.outputs.runner }}
@@ -179,6 +181,16 @@ jobs:
           - name: controller
             dockerfile: controller/Dockerfile
             ghcr: kars-controller
+            platforms: linux/amd64,linux/arm64
+          - name: metrics-server
+            dockerfile: sandbox-images/metrics-server/Dockerfile
+            ghcr: kars-metrics-server
+            no_binaries: true
+            platforms: linux/amd64,linux/arm64
+          - name: headlamp
+            dockerfile: sandbox-images/headlamp/Dockerfile
+            ghcr: kars-headlamp
+            no_binaries: true
             platforms: linux/amd64,linux/arm64
           - name: inference-router
             dockerfile: inference-router/Dockerfile
@@ -255,6 +267,8 @@ jobs:
           # Map matrix name → output key
           case "${{ matrix.image.name }}" in
             controller)          echo "controller=${DIGEST}"   >> "$GITHUB_OUTPUT" ;;
+            metrics-server)      echo "metrics=${DIGEST}"      >> "$GITHUB_OUTPUT" ;;
+            headlamp)            echo "headlamp=${DIGEST}"     >> "$GITHUB_OUTPUT" ;;
             inference-router)    echo "router=${DIGEST}"       >> "$GITHUB_OUTPUT" ;;
             a2a-gateway)         echo "gateway=${DIGEST}"      >> "$GITHUB_OUTPUT" ;;
             conformance-runner)  echo "runner=${DIGEST}"       >> "$GITHUB_OUTPUT" ;;
@@ -477,6 +491,16 @@ jobs:
             "visibility": "INTERNAL_PRIVATE",
             "publish_status": "Behind the wall — GHCR private + GitHub Release on private repo",
             "containers": [
+              {
+                "name": "kars-metrics-server",
+                "ghcr": "ghcr.io/azure/kars-metrics-server:${{ env.VERSION }}",
+                "digest": "${{ needs.build-images.outputs.metrics_digest }}"
+              },
+              {
+                "name": "kars-headlamp",
+                "ghcr": "ghcr.io/azure/kars-headlamp:${{ env.VERSION }}",
+                "digest": "${{ needs.build-images.outputs.headlamp_digest }}"
+              },
               {
                 "name": "kars-controller",
                 "ghcr": "ghcr.io/azure/kars-controller:${{ env.VERSION }}",

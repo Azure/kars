@@ -5,10 +5,11 @@
 
 // kars Bridge Operator Console — the sandbox fleet as a filterable working
 // surface (not a raw dump). Search by name/namespace/parent, filter by phase,
-// and see age at a glance; each card keeps the full conditions table for triage.
+// and see age at a glance; each card keeps full conditions for triage.
 
 import { useMemo, useState } from "react";
 import { Section, Badge } from "@/components/ui";
+import { formatEvidenceTime } from "@/lib/format";
 import type { Sandbox } from "@/lib/types";
 
 type Tone = "ok" | "warn" | "danger" | "info" | "muted" | "accent";
@@ -40,11 +41,11 @@ function conditionTone(type_: string, status: string): string {
   return status === "True" ? "text-ok" : "text-foreground-muted";
 }
 
-function age(iso: string | null): string {
+function age(iso: string | null, observedAt: number): string {
   if (!iso) return "";
   const t = Date.parse(iso);
   if (Number.isNaN(t)) return "";
-  const s = Math.max(0, Math.floor((Date.now() - t) / 1000));
+  const s = Math.max(0, Math.floor((observedAt - t) / 1000));
   if (s < 60) return `${s}s`;
   if (s < 3600) return `${Math.floor(s / 60)}m`;
   if (s < 86400) return `${Math.floor(s / 3600)}h`;
@@ -53,9 +54,9 @@ function age(iso: string | null): string {
 
 function Meta({ k, v }: { k: string; v: string }) {
   return (
-    <div className="inline-flex items-baseline gap-1.5">
-      <dt className="text-foreground-muted">{k}</dt>
-      <dd className="font-mono">{v}</dd>
+    <div className="inline-flex max-w-full flex-wrap items-baseline gap-x-1.5">
+      <dt className="shrink-0 text-foreground-muted">{k}</dt>
+      <dd className="min-w-0 font-mono [overflow-wrap:anywhere]">{v}</dd>
     </div>
   );
 }
@@ -87,7 +88,11 @@ function matchesPhase(s: Sandbox, f: PhaseFilter): boolean {
   return !["Running", "Ready", "Degraded", "Failed", "Pending", "Launching"].includes(p);
 }
 
-export function FleetList({ sandboxes, initialQuery = "" }: { sandboxes: Sandbox[]; initialQuery?: string }) {
+export function FleetList({ sandboxes, observedAt, initialQuery = "" }: {
+  sandboxes: Sandbox[];
+  observedAt: number;
+  initialQuery?: string;
+}) {
   const [q, setQ] = useState(initialQuery);
   const [phase, setPhase] = useState<PhaseFilter>("All");
   const [leadsOnly, setLeadsOnly] = useState(false);
@@ -124,18 +129,20 @@ export function FleetList({ sandboxes, initialQuery = "" }: { sandboxes: Sandbox
     <div className="space-y-4">
       <div className="flex flex-wrap items-center gap-2">
         <input
+          aria-label="Search sandboxes"
           value={q}
           onChange={(e) => setQ(e.target.value)}
           placeholder="Search name, namespace, parent, harness…"
-          className="min-w-56 flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
+          className="min-w-0 flex-1 basis-56 rounded-lg border border-border bg-surface px-3 py-2 text-sm focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-signal"
         />
-        <div className="flex items-center gap-1">
+        <div className="flex flex-wrap items-center gap-1">
           {PHASES.map((p) => (
             <button
               key={p}
               type="button"
+              aria-pressed={phase === p}
               onClick={() => setPhase(p)}
-              className={`rounded-lg border px-2.5 py-1.5 text-xs font-medium ${
+              className={`whitespace-nowrap rounded-lg border px-2.5 py-1.5 text-xs font-medium ${
                 phase === p ? "border-signal/40 bg-signal/10 text-signal" : "border-border text-foreground-muted hover:text-foreground"
               }`}
             >
@@ -156,16 +163,16 @@ export function FleetList({ sandboxes, initialQuery = "" }: { sandboxes: Sandbox
         <ul className="space-y-3">
           {filtered.map((s) => (
             <Section key={`${s.namespace}/${s.name}`} className="!p-5">
-              <div className="flex items-start justify-between gap-4">
+              <div className="flex flex-wrap items-start justify-between gap-2">
                 <div className="min-w-0">
-                  <p className="font-mono text-sm font-medium">
+                  <p className="font-mono text-sm font-medium [overflow-wrap:anywhere]">
                     {s.name}
                     {!s.parent && <span className="ml-2 rounded-full bg-surface-muted px-1.5 py-0.5 text-[10px] font-medium text-foreground-muted">lead</span>}
                   </p>
-                  <p className="mt-0.5 font-mono text-xs text-foreground-muted">{s.namespace}</p>
+                  <p className="mt-0.5 font-mono text-xs text-foreground-muted [overflow-wrap:anywhere]">{s.namespace}</p>
                 </div>
                 <div className="flex shrink-0 items-center gap-2">
-                  {s.created && <span className="text-xs text-foreground-muted">{age(s.created)} old</span>}
+                  {s.created && <span className="text-xs text-foreground-muted">{age(s.created, observedAt)} old</span>}
                   {s.phase === "Running" && s.working === false ? (
                     <span title="The pod is Running but the agent has produced no activity — idle (e.g. a chat-gateway harness waiting for input, or between scheduled runs).">
                       <Badge tone="muted" dot>
@@ -189,22 +196,20 @@ export function FleetList({ sandboxes, initialQuery = "" }: { sandboxes: Sandbox
                 {s.parent && <Meta k="parent" v={s.parent} />}
                 {s.runtime_namespace && <Meta k="runtime namespace" v={s.runtime_namespace} />}
                 {resourceUsage(s) && <Meta k="CPU / memory" v={resourceUsage(s)!} />}
-                {s.created && <Meta k="created" v={new Date(s.created).toLocaleString()} />}
+                {s.created && <Meta k="created" v={formatEvidenceTime(s.created)} />}
               </dl>
-              {s.message && <p className="mt-2 text-xs text-foreground-muted">{s.message}</p>}
+              {s.message && <p className="mt-2 text-xs text-foreground-muted [overflow-wrap:anywhere]">{s.message}</p>}
               {s.conditions.length > 0 && (
-                <table className="mt-3 w-full text-xs">
-                  <tbody>
-                    {s.conditions.map((c, i) => (
-                      <tr key={i} className="border-t border-border">
-                        <td className="py-1.5 pr-3 font-mono text-foreground-muted">{c.type_}</td>
-                        <td className={`py-1.5 pr-3 font-medium ${conditionTone(c.type_, c.status)}`}>{c.status}</td>
-                        <td className="py-1.5 pr-3 text-foreground-muted">{c.reason ?? ""}</td>
-                        <td className="py-1.5 text-foreground-muted">{c.message ?? ""}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
+                <dl className="mt-3 text-xs">
+                  {s.conditions.map((c, i) => (
+                    <div key={i} className="grid grid-cols-1 gap-x-3 gap-y-1 border-t border-border py-2 [overflow-wrap:anywhere] sm:grid-cols-[minmax(0,1fr)_minmax(0,0.5fr)_minmax(0,1fr)_minmax(0,2fr)]">
+                      <dt className="font-mono font-medium text-foreground-muted">{c.type_}</dt>
+                      <dd className={`font-medium ${conditionTone(c.type_, c.status)}`}><span className="sr-only">Status: </span>{c.status}</dd>
+                      {c.reason && <dd className="text-foreground-muted"><span className="sr-only">Reason: </span>{c.reason}</dd>}
+                      {c.message && <dd className="text-foreground-muted sm:col-start-4"><span className="sr-only">Message: </span>{c.message}</dd>}
+                    </div>
+                  ))}
+                </dl>
               )}
             </Section>
           ))}

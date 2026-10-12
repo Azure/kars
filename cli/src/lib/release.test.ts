@@ -2,6 +2,8 @@
 // Licensed under the MIT License.
 
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { parse } from "yaml";
 import {
   parseVersionTag,
   compareVersions,
@@ -10,6 +12,68 @@ import {
   type ReleaseNote,
 } from "./release.js";
 import { buildHelmUpgradeArgs, summarizeChangelog } from "../commands/upgrade.js";
+
+describe("native Hermes release wiring", () => {
+  interface Step {
+    name?: string;
+    uses?: string;
+    run?: string;
+    with?: Record<string, string | boolean>;
+  }
+  interface Job {
+    "runs-on"?: string;
+    needs?: string[];
+    strategy?: { matrix: { runtime: Array<{ name: string; ghcr: string; arch?: string; runner?: string; suffix?: string }> } };
+    steps: Step[];
+  }
+  const workflow: { jobs: Record<string, Job> } = parse(readFileSync(
+    new URL("../../../.github/workflows/release-public-interim.yml", import.meta.url), "utf8",
+  ));
+  const build = workflow.jobs["build-runtimes"];
+  const merge = workflow.jobs["merge-sandbox"];
+
+  it("builds Hermes on both native runners without expanding other adapters", () => {
+    const runtimes = build.strategy!.matrix.runtime;
+    expect(runtimes.filter(runtime => runtime.name === "hermes")).toEqual([
+      { name: "hermes", ghcr: "kars-runtime-hermes", arch: "amd64", runner: "ubuntu-22.04", suffix: "-amd64" },
+      { name: "hermes", ghcr: "kars-runtime-hermes", arch: "arm64", runner: "ubuntu-24.04-arm", suffix: "-arm64" },
+    ]);
+    expect(build["runs-on"]).toBe("${{ matrix.runtime.runner || 'ubuntu-22.04' }}");
+    expect(runtimes.filter(runtime => runtime.name !== "hermes").every(runtime => !runtime.arch && !runtime.suffix)).toBe(true);
+    expect(build.steps.some(step => step.uses?.includes("setup-qemu"))).toBe(false);
+    expect(build.steps.find(step => step.name?.startsWith("Guard"))?.run).toContain("platform.machine()");
+  });
+
+  it("keeps per-architecture pushes and SBOM artifacts separate until merging", () => {
+    const push = build.steps.find(step => step.uses?.startsWith("docker/build-push-action"))!.with!;
+    expect(push.platforms).toBe("linux/${{ matrix.runtime.arch || 'amd64' }}");
+    expect(String(push.tags).trim().split("\n").every(tag => tag.endsWith("${{ matrix.runtime.suffix }}"))).toBe(true);
+    const sbom = build.steps.find(step => step.name === "Generate SBOM (SPDX JSON)")!.with!;
+    const upload = build.steps.find(step => step.name === "Upload SBOM")!.with!;
+    expect(sbom.image).toBe("${{ env.REGISTRY }}/${{ matrix.runtime.ghcr }}:${{ env.VERSION }}${{ matrix.runtime.suffix }}");
+    expect(sbom["output-file"]).toContain("${{ matrix.runtime.suffix }}");
+    expect(upload.path).toBe(sbom["output-file"]);
+    expect(upload.name).toContain("${{ matrix.runtime.suffix }}");
+  });
+
+  it("merges and signs Hermes only after both native builds", () => {
+    expect(merge.needs).toContain("build-runtimes");
+    const commands = merge.steps.find(step => step.name === "Create multi-arch manifests (:VERSION + :latest)")!.run!;
+    expect(commands).toContain("for name in kars-sandbox-base openclaw-sandbox kars-runtime-hermes;");
+    expect(commands).toContain('"${REGISTRY}/${name}:${VERSION}-amd64"');
+    expect(commands).toContain('"${REGISTRY}/${name}:${VERSION}-arm64"');
+    expect(commands).toContain('echo "hermes=${DIGEST}"');
+    expect(merge.steps.find(step => step.name === "Attest Hermes manifest provenance")?.with).toMatchObject({
+      "subject-name": "${{ env.REGISTRY }}/kars-runtime-hermes",
+      "subject-digest": "${{ steps.digests.outputs.hermes }}",
+      "push-to-registry": true,
+    });
+    expect(merge.steps.find(step => step.name === "Cosign keyless sign manifests")?.run)
+      .toContain("kars-runtime-hermes@${{ steps.digests.outputs.hermes }}");
+    expect(workflow.jobs.release.needs).toContain("merge-sandbox");
+    expect(workflow.jobs.release.steps.some(step => step.run?.includes("${{ needs.merge-sandbox.outputs.hermes_digest }}"))).toBe(true);
+  });
+});
 
 describe("parseVersionTag", () => {
   it("parses stable + prerelease tags (v optional)", () => {
@@ -46,11 +110,13 @@ describe("releaseImagePlan", () => {
     const targets = plan.map((p) => p.target);
     expect(targets).toContain("kars-controller:latest");
     expect(targets).toContain("kars-inference-router:latest");
+    expect(targets).toContain("kars-metrics-server:latest");
+    expect(targets).toContain("kars-headlamp:latest");
     expect(targets).toContain("openclaw-sandbox:latest");
     expect(targets).toContain("agentmesh-relay-agt:latest");
     expect(targets).toContain("agentmesh-registry-agt:latest");
     // core + mesh are required
-    for (const t of ["kars-controller:latest", "agentmesh-relay-agt:latest"]) {
+    for (const t of ["kars-controller:latest", "kars-metrics-server:latest", "kars-headlamp:latest", "agentmesh-relay-agt:latest"]) {
       expect(plan.find((p) => p.target === t)?.required).toBe(true);
     }
     // version is threaded into the GHCR source
@@ -80,6 +146,8 @@ describe("buildHelmUpgradeArgs", () => {
     expect(args).toContain("--install");
     expect(args.join(" ")).toContain("controller.image.repository=karsacr.azurecr.io/kars-controller");
     expect(args.join(" ")).toContain("controller.image.tag=latest");
+    expect(args.join(" ")).toContain("headlamp.image.repository=karsacr.azurecr.io/kars-headlamp");
+    expect(args.join(" ")).toContain("headlamp.image.tag=latest");
     expect(args.join(" ")).toContain("inferenceRouter.azure.openai.endpoint=https://x.services.ai.azure.com/api/projects/p");
   });
   it("omits the foundry endpoint when absent", () => {

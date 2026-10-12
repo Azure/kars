@@ -6,20 +6,6 @@ import { useState } from "react";
 import { useFormStatus } from "react-dom";
 import type { BlueprintEgress } from "@/lib/types";
 
-export function CheckMark({ status }: { status: "pass" | "fail" | "warn" }) {
-  const map = {
-    pass: { c: "text-ok", s: "✓" },
-    warn: { c: "text-warning", s: "!" },
-    fail: { c: "text-danger", s: "✕" },
-  } as const;
-  const m = map[status];
-  return (
-    <span className={`mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px] font-bold ${m.c}`} aria-hidden>
-      {m.s}
-    </span>
-  );
-}
-
 export function CreateButton({
   disabled,
   launch,

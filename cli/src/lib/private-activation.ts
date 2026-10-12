@@ -207,6 +207,29 @@ export async function verifyPrivateBundle(execute: Execute): Promise<string> {
   return digest(identities);
 }
 
+export async function validateObservedControllerProfile(execute: Execute, profile: string): Promise<void> {
+  const inventory = record(JSON.parse(await execute([
+    "get", "pods", "-n", "kube-system", "-l", "component=kube-controller-manager",
+    "--chunk-size=0", "-o", "json",
+  ])));
+  if (at(inventory, "metadata", "continue")) throw new Error("Controller-manager inventory is incomplete");
+  for (const pod of list(inventory.items)) {
+    if (!at(pod, "metadata", "annotations", "kubernetes.io/config.mirror")) continue;
+    const containers = list(at(pod, "spec", "containers"));
+    for (const container of containers) {
+      if (at(container, "name") !== "kube-controller-manager") continue;
+      const flags = [...list(at(container, "command") ?? []), ...list(at(container, "args") ?? [])]
+        .filter(arg => typeof arg === "string" && arg.startsWith("--use-service-account-credentials"));
+      if (!flags.length) continue;
+      const expected = profile === "service-accounts"
+        ? "--use-service-account-credentials=true" : "--use-service-account-credentials=false";
+      if (canonical(flags) !== canonical([expected])) {
+        throw new Error("Selected private controller profile contradicts the observed controller-manager configuration; re-preview with its actual credential mode");
+      }
+    }
+  }
+}
+
 export async function previewPrivateActivation(
   execute: Execute, workspace: string, writers: { namespace: string }[], targets: { name: string }[],
   rootNamespace: string, profile: string, consumers: string[],
@@ -214,6 +237,7 @@ export async function previewPrivateActivation(
   if (!rootNamespace || !["service-accounts", "kcm-certificate"].includes(profile)) {
     throw new Error("Re-preview private enrollment with --private-root and an explicit --private-controller-profile");
   }
+  await validateObservedControllerProfile(execute, profile);
   const bundleRevision = await verifyPrivateBundle(execute);
   const rootNs = await read(execute, "namespace", rootNamespace);
   const deployment = await read(execute, "deployment", "kars-controller", rootNamespace);
@@ -292,10 +316,12 @@ export async function requiresPrivatePodReview(
   if (!raw.trim()) return false;
   const parent = record(JSON.parse(raw));
   reviewed(parent);
-  // A changed ServiceAccount must not hide a root descendant from preflight or
-  // completion. Ownership here only selects review; reviewedOwner authorizes it.
-  return list(at(parent, "metadata", "ownerReferences") ?? []).some(owner =>
+  const rootDescendant = list(at(parent, "metadata", "ownerReferences") ?? []).some(owner =>
     at(owner, "controller") === true && at(owner, "uid") === activation.root.deployment.uid);
+  if (!rootDescendant) return false;
+  // Only an exactly reviewed, non-consuming root execution may be left alone.
+  // A changed ServiceAccount or old template must not hide its descendants.
+  return !await reviewedOwner(execute, pod, scope, undefined, activation.root);
 }
 
 export async function verifyOwnedRuntimeNamespace(execute: Execute, workspace: string, namespace: string): Promise<void> {
@@ -463,6 +489,7 @@ export async function patchNamespace(
 }
 
 export async function stagePrivateActivation(execute: Execute, activation: PrivateActivation): Promise<PrivateActivation> {
+  await validateObservedControllerProfile(execute, activation.profile);
   await validatePrivateActivation(execute, activation);
   const staged = structuredClone(activation);
   const continuity = await reviewPrivateContinuity(execute, staged);
@@ -490,7 +517,7 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
     if (at(pods, "metadata", "continue")) throw new Error("Private consumer inventory is incomplete");
     for (const pod of list(pods.items)) {
       if (!captured.get(scope.namespace.name)?.has(reviewed(pod, true).uid)
-        && !consumesPrivateAuthority(pod, scope.namespace.name, staged)) continue;
+        && !await requiresPrivatePodReview(execute, pod, scope, staged)) continue;
       if (retirement.phase === "retired") throw new Error("Private authority reappeared after the retirement baseline; preserve protection for operator review");
       const owner = await reviewedOwner(execute, pod, scope, undefined, staged.root);
       if (!owner) throw new Error("Unexplained private consumer preserved; explicitly review its actual owner before activation");
@@ -530,7 +557,7 @@ export async function stagePrivateActivation(execute: Execute, activation: Priva
       if (at(inventory, "metadata", "continue")) throw new Error("Private consumer retirement inventory is incomplete");
       for (const pod of list(inventory.items)) {
         const capturedUid = captured.get(scope.namespace.name)?.has(reviewed(pod, true).uid);
-        if (!capturedUid && !consumesPrivateAuthority(pod, scope.namespace.name, staged)) continue;
+        if (!capturedUid && !await requiresPrivatePodReview(execute, pod, scope, staged)) continue;
         if (!await reviewedOwner(execute, pod, scope, undefined, staged.root)) throw new Error("Unexplained private consumer preserved during retirement");
         pending = true;
       }

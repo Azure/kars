@@ -39,8 +39,8 @@ dependencies = [
     # listed here so `pip install -e .[dev]` against a venv that already has
     # them installed (or a --find-links source) resolves cleanly. If they are
     # not available in the active Python environment install them via:
-    #   pip install --find-links ../wheels a2a_agentmesh agent_sandbox
-    "a2a_agentmesh>=3.3.0,<5",
+    #   pip install --find-links ../wheels a2a_agentmesh==5.0.0
+    "a2a_agentmesh==5.0.0",
 ]
 
 [project.optional-dependencies]

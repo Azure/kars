@@ -1,0 +1,40 @@
+{
+  "policy": {
+    "apiVersion": "admissionregistration.k8s.io/v1",
+    "kind": "ValidatingAdmissionPolicy",
+    "metadata": {"name": "kars-eval-proxy-port"},
+    "spec": {
+      "failurePolicy": "Fail",
+      "matchConstraints": {
+        "matchPolicy": "Equivalent",
+        "namespaceSelector": {},
+        "objectSelector": {},
+        "resourceRules": [{
+          "apiGroups": [""],
+          "apiVersions": ["v1"],
+          "operations": ["CONNECT"],
+          "resources": ["pods/portforward"],
+          "scope": "Namespaced"
+        }]
+      },
+      "matchConditions": [{
+        "name": "evaluation-service-account",
+        "expression": "request.userInfo.username.matches('^system:serviceaccount:[^:]+:karseval-proxy-[a-f0-9]{24}$')"
+      }],
+      "validations": [{
+        "expression": "has(object.ports) && size(object.ports) == 1 && object.ports[0] == 8444",
+        "message": "Evaluation service accounts may forward only the router proxy port 8444.",
+        "reason": "Forbidden"
+      }]
+    }
+  },
+  "binding": {
+    "apiVersion": "admissionregistration.k8s.io/v1",
+    "kind": "ValidatingAdmissionPolicyBinding",
+    "metadata": {"name": "kars-eval-proxy-port"},
+    "spec": {
+      "policyName": "kars-eval-proxy-port",
+      "validationActions": ["Deny", "Audit"]
+    }
+  }
+}

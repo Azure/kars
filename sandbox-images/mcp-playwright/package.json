@@ -1,0 +1,12 @@
+{
+  "name": "@kars-runtime/mcp-playwright-image",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Azure Linux 3 image for the managed Playwright MCP preset",
+  "scripts": {
+    "test": "node --test --test-timeout=60000 image.test.mjs"
+  },
+  "dependencies": {
+    "@playwright/mcp": "0.0.78"
+  }
+}

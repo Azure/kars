@@ -69,7 +69,10 @@ export function TeamServerTabs({
 
 export function NowHero({
   teamName,
+  phase,
+  detail,
   health,
+  paused,
   active,
   runRunning,
   runInFlight,
@@ -86,7 +89,10 @@ export function NowHero({
   idleDeadlineAt,
 }: {
   teamName: string;
+  phase?: string;
+  detail?: string | null;
   health: string | null;
+  paused: boolean;
   active: boolean;
   runRunning: boolean;
   runInFlight: boolean;
@@ -102,6 +108,18 @@ export function NowHero({
   runtimeState: TeamDetail["runtime_state"];
   idleDeadlineAt: string | null;
 }) {
+  if (phase === "Degraded") {
+    return (
+      <section role="alert" className="rounded-xl border border-danger/40 bg-danger/5 p-5">
+        <h2 className="text-sm font-semibold">Team blocked by controller validation</h2>
+        <p className="mt-2 text-sm">{detail || "The controller rejected this Team configuration. Check Diagnostics before enabling work."}</p>
+        <p className="mt-2 text-xs text-foreground-muted">
+          {paused ? "The Team remains paused. " : ""}
+          Review the reported constraint; resuming does not repair it or authorize wider limits.
+        </p>
+      </section>
+    );
+  }
   const tone: Record<string, string> = {
     Healthy: "border-emerald-500/30 bg-emerald-500/5",
     Watching: "border-sky-500/30 bg-sky-500/5",
@@ -112,7 +130,9 @@ export function NowHero({
   };
   const cls = tone[health ?? ""] ?? "border-border bg-surface";
   const headline = !active
-    ? "Hibernating — no runs are being generated"
+    ? paused
+      ? "Paused — no new runs are being generated"
+      : "Waiting for active team status"
     : health === "AwaitingReview"
       ? "Awaiting your review — no further assignment or memory promotion will proceed"
       : health === "Stalled"
@@ -125,9 +145,11 @@ export function NowHero({
 
   const mode: { label: string; dot: string; note: string } = !active
     ? {
-        label: "Hibernating",
+        label: paused ? "Hibernating" : "Not yet active",
         dot: "bg-foreground-muted",
-        note: "Paused — no sandbox is running and no runs are minted until you resume.",
+        note: paused
+          ? "Paused — no new runs are minted until you resume. Check the latest run for any work still finishing."
+          : "The team is enabled, but its controller has not confirmed active operation. Check Diagnostics if this state persists.",
       }
     : health === "AwaitingReview"
       ? {

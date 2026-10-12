@@ -54,8 +54,11 @@ chosen registry separately before installation.
 
 The BFF Docker build defaults to one Cargo compilation job to limit peak memory
 on local development machines. On a larger builder, override it with
-`docker build --build-arg CARGO_BUILD_JOBS=4 -t <registry>/kars-bridge-bff:latest bff`.
-This changes build concurrency, not the locked dependencies or release profile.
+`docker build --build-arg CARGO_BUILD_JOBS=4 -f bff/Dockerfile -t <registry>/kars-bridge-bff:latest ..`.
+The repository-root context preserves the BFF's shared execution-plan module;
+`bff/Dockerfile.dockerignore` limits inputs to BFF and shared sources, excluding
+host build output and local environment files. The concurrency override does
+not change the locked dependencies or release profile.
 
 The BFF, web and Teams gateway **shipping runtimes use Microsoft Azure Linux 3
 distroless**, matching Kars core's runtime-image policy. Rust and npm toolchains

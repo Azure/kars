@@ -38,14 +38,16 @@ governance `Ready`. `execution.launch` is a separate opt-in:
 - `OpenClaw`, `OpenAIAgents`, `MicrosoftAgentFramework` (`MAF` alias), and `Hermes`
   use the existing sandbox runtime contract. Task `BYO` is rejected until the
   blueprint can carry its required image/contract configuration.
-- **Budget ceilings are planning declarations, not operative quotas.**
+- **Unscoped budget ceilings remain planning declarations.**
   `budget.tokens` and `budget.usdMicros` describe total task-subtree limits;
   `0` or absence means no cap declared on that axis. An unbounded child cannot
-  attenuate a positive parent cap. Launch with either positive ceiling is
-  rejected as `UnsupportedLaunchBudget`. The existing per-sandbox daily/monthly
-  token counters reset independently and do not enforce subtree totals or money.
-  Bounded Bridge launches require durable aggregate enforcement before support
-  can be claimed. Do not clear a reviewed budget merely to bypass this gate.
+  attenuate a positive parent cap. Launch with a positive unscoped ceiling is
+  rejected as `UnsupportedLaunchBudget`; do not clear a reviewed budget to bypass
+  this gate. Explicit `budget.scope: GovernedInference` uses the shared durable
+  account and requires the installed broker, valid model catalog, and exact
+  Task/account/runtime admission. It does not use the independently resetting
+  per-sandbox daily/monthly counters. See [governed inference budgets](../governed-inference-budgets.md)
+  for enforcement boundaries and the current qualification limits.
 - Same-name sandbox/policy conflicts are preserved. Only resources controller-owned
   by the exact task UID can be updated or deleted, with UID/resourceVersion
   concurrency checks. Cleanup remains `Stopping` and retries API errors or
@@ -74,6 +76,81 @@ default invalidates prior task bindings. The pure `TaskEnvelope::digest()` remai
 available for lattice/team uses, **not** task approval authorization.
 Reference names are bound; this digest does not attest mutable referenced resource
 contents or container images. Those require separate policy/runtime evidence.
+
+### Reviewed execution: fresh filesystem subset
+
+`blueprint.executionPlan` retains the reviewed `kars.execution-plan/v1` graph in
+Task authorization. Active execution currently supports **OpenClaw only**, with
+at least two delegation levels and `envelope.budget.scope: GovernedInference`.
+This is a locally tested implementation, **not installed Kind/AKS qualification**.
+Existing Team admission, reservations, credentials, approvals, and revocation
+remain prerequisites; this scheduler is not an alternative Team launch API.
+
+Bridge package pre-flight and composer launchability use the same installed
+activation contract as Launch, not just the broader schema validator. Stored
+Mission pre-flight also checks the retained decomposition marker and delegation
+depth. Unsupported plans remain reviewable drafts, but cannot receive a passing
+launch check; they are not silently rewritten or granted more capabilities.
+Launch displays safe structured validation reasons. Malformed reviewed JSON is
+rejected before creation rather than replaced with controller defaults.
+
+- Each role has 1–8 ordered phases with `freshContext: true`, exactly
+  `filesystem-read` and `filesystem-write`, no required external tool calls, and
+  a positive `maxToolCalls` (at most 32). The receiver enforces each phase's
+  minimum/maximum measured tool calls through the existing filesystem task loop.
+  Synthesis uses the same capability pair and a positive tool-call maximum.
+  Role, phase, and synthesis objectives require at least 20 trimmed UTF-8 bytes
+  and at most 1,200 bytes before trimming.
+- The controller reserves an inactive, named role Task and fresh phase children
+  using the existing Task materializer. Exact parent authority, owner UID,
+  reserved child UID/spec, plan digest, Task generation, and run nonce bind their
+  progression. Missing/replaced reservations fail closed rather than recreating
+  accepted work. A revision gets a new bound graph; old assignments cannot
+  authorize new synthesis, and already accepted non-replayable work is not
+  resent or forcibly interrupted.
+- Every phase must explicitly export useful UTF-8 **`handoff.md`**. Later phases
+  read their predecessor; a role's first phase reads the final handoffs of its
+  declared dependencies. Synthesis reads all roles' final handoffs. Graph
+  membership and current review authority are verified independently of immutable
+  output custody; a valid artifact hash alone grants no input permission.
+- `maxParallel` limits admitted unfinished roles. The mesh service currently
+  dispatches sequentially, so this is an **upper bound**, not a throughput promise.
+  Failed, ambiguous, incomplete, or stale children never unlock synthesis.
+- Optional role `budgetTokens` narrows the existing governed role subtree cap
+  and must be an exact positive wire integer (at most 9,007,199,254,740,991);
+  all its phases charge the same ancestor/account ledger. Root synthesis also
+  charges that shared root/Team account. The root cap must also fit that exact
+  wire-integer bound. Revisions do not reset aggregate charges.
+- Synthesis must explicitly export every typed `deliverables[].name`; names are
+  not inferred from prose. Deliverables are bounded safe filenames (0–16), with
+  absent media type or `text/plain`, `text/markdown`, or `application/json`.
+  These labels do not validate document semantics or JSON schema. Missing/blank
+  required outputs fail execution; scratch files and old/different exports do not
+  satisfy a requirement. Existing retry-aware export and immutable publication
+  checks remain in force.
+- Installed tool ceilings must cover complete input reads plus explicit exports:
+  a role's first phase needs at least `dependsOn.length + 1` calls, each later
+  phase needs at least two, and synthesis needs at least
+  `roles.length + deliverables.length`. Insufficient plans remain reviewable
+  drafts but cannot activate; limits are never silently increased. Runtime
+  input reads must succeed in full before any output write or successful
+  completion. Partial or failed reads, filenames, and inline claims do not
+  establish input consumption. Reading a handoff does not by itself establish
+  the accuracy or usefulness of the resulting document.
+
+The installed mission v4 contract carries the exact admitted phase, required
+output names, and optional input digest. Its owned binding additionally
+pins the reviewed graph and immutable source references. Agent-supplied fields
+cannot expand that contract. Encrypted dispatch retains durable claim-before-send,
+exact assignment correlation, and terminal replay without re-execution; named
+phase Tasks feed existing Activity evidence without fabricating success.
+
+Plans requiring shell, network, web search, MCP, memory, required external calls,
+non-fresh phases, other capability combinations, binary deliverables, or Hermes
+remain rejected as `TypedPlanExecutionUnavailable`. They are never silently
+narrowed to filesystem work. Broader coding/noncoding journeys and fresh
+Core+Bridge Helm acceptance still require separate implementation/installed
+verification; the filesystem subset alone does not establish them.
 
 `KarsApproval` freezes `taskRef`, action and TTL at admission; the human may set
 `spec.decision` once. The controller snapshots the request, binds the task UID
@@ -581,8 +658,8 @@ spec:
       - provider: azure-openai
         deployment: gpt-4.1-mini
   tokenBudget:
-    perRequestTokens: 8000                                # enforced per call (today)
-    dailyTokens: 200000                                   # accepted; aggregate enforcement on roadmap
+    perRequestTokens: 8000                                # requested-output check; see scope below
+    dailyTokens: 200000                                   # UTC daily usage threshold
     monthlyTokens: 5000000
   contentSafety:
     hate: Medium
@@ -599,15 +676,17 @@ spec:
 | `spec.guardrails[]` | Optional ordered guardrail pipeline (1–8 stages) the router runs on `/v1/chat/completions` and the Anthropic Messages routes. Stage: `{provider, applyTo}` with `provider: openai-moderation` (Bedrock Guardrails / Model Armor are roadmap follow-ups) and `applyTo: input \| output \| both`. Fail-closed: a declared stage that cannot run (missing key, backend outage) blocks the request. Streaming responses use hold-and-release windows — no assistant message text reaches the client before a scan covers it (tool-call arguments and provider "thinking" deltas are not yet scanned — see note). Text over 16k chars is scanned in successive windows, not truncated. |
 | `spec.modelPreference.primary` | `{provider, deployment}`. `provider` is one of `azure-openai`, `anthropic`, `gemini`, `bedrock`, `ollama`. This tag stays **informational** — it does not select the upstream (use `spec.provider`); `modelPreference` drives deployment failover within the resolved provider. |
 | `spec.modelPreference.fallback[]` | Ordered fallback routes — first healthy wins, deterministically. No load-balancing. Failover walks deployments on the resolved provider (cross-provider failover is a follow-up). |
-| `spec.tokenBudget.perRequestTokens` | Per-call hard cap. Inference calls exceeding this are refused **before** the upstream forward. |
-| `spec.tokenBudget.dailyTokens` / `monthlyTokens` | Accepted and surfaced in status; **aggregate enforcement is not yet wired** — see roadmap below. CEL enforces `monthlyTokens ≥ dailyTokens`. |
+| `spec.tokenBudget.perRequestTokens` | Chat Completions rejects an explicitly requested output maximum above this cap before forwarding. This is not a total input-plus-output reservation; see scope below. |
+| `spec.tokenBudget.dailyTokens` / `monthlyTokens` | UTC-calendar usage thresholds checked before supported inference calls. CEL enforces `monthlyTokens ≥ dailyTokens`. These are separate from a Mission's lifetime `GovernedInference` budget. |
 | `spec.contentSafety` | Per-category severity floors (`Safe` \| `Low` \| `Medium` \| `High`). The router parses Foundry `prompt_filter_results` inline; there is **no** separate Content Safety call. |
 | `spec.contentSafety.requirePromptShields` | Fail-closed if Prompt Shields are advertised by the deployment but the response lacks the corresponding annotations. |
 | `spec.bundleRef` | Signed OCI artifact alternative to inline `tokenBudget` / `contentSafety` / `modelPreference` / `provider` / `guardrails` / `displayName`. `appliesTo` always comes from the CR. |
 
 > **Provider + guardrail enforcement scope today.** `spec.provider` routing and `spec.guardrails[]` scanning are wired on `/v1/chat/completions` and the Anthropic Messages routes (`/anthropic/v1/messages`, `/v1/messages`). Every other inference-bearing route, `/v1/completions`, `/v1/responses`, `/v1/embeddings`, image generation, and the Foundry proxy families that serve model output (`/agents*`, `/openai/responses*`, `/openai/conversations*`), does **not** implement either; rather than silently bypass the policy, they **fail closed** (501 for a non-Azure `spec.provider`, 403 when guardrails are declared). A plain Azure policy with no guardrails uses those routes exactly as before. The Foundry proxy guard is default-deny: only an explicit exempt set of canonical management/storage APIs (memory stores, knowledge bases, evaluations, files, vector stores, containers, and similar) bypasses it, because those surfaces are not general-purpose inference channels; every other or unknown Foundry path fails closed. Foundry proxy paths are canonicalized before routing: benign empty segments (`//`, trailing `/`) are collapsed, while dot segments (`.`/`..`, literal or percent-encoded), encoded slash/backslash forms, and malformed escapes are rejected outright (400 `invalid_path`) so a request cannot normalize into a different upstream route than the one classified. Guardrail output scanning covers assistant message text; tool-call arguments and provider extended-"thinking" deltas are not yet scanned. These gaps are on the roadmap.
 
-> **Budget enforcement scope today.** The router enforces `tokenBudget.perRequestTokens` on every model call. Aggregate counters across requests (`dailyTokens`, `monthlyTokens`) are **not yet persisted**; the fields are accepted and surfaced for forward compatibility but only the per-request limit fires denials today. Aggregate enforcement is on the roadmap — see [`docs/roadmap.md`](../roadmap.md#trust-topology-end-to-end).
+When an inline policy's `modelPreference` is absent, a sandbox inherits the configured cluster default model, using the same resolution as its router configuration. An explicitly empty primary deployment remains invalid; it does not silently fall back. This does not substitute defaults for an unresolved signed bundle.
+
+> **Budget enforcement scope today.** Calendar accounting on Chat Completions, Responses and Anthropic Messages uses the router's configured sandbox identity, never the caller-controlled `x-kars-sandbox` header. Requests without that header and runtime clients sending `self` share the same counters. Usage is recorded after the upstream response, so these thresholds are not reservations and concurrent in-flight requests can overshoot them. Per-request checks currently do not cover omitted output maxima or every inference API. Counter persistence requires a writable `TOKEN_BUDGET_PERSIST_PATH`; installed restart continuity and full protocol coverage remain beta acceptance gates. Do not interpret policy compilation or a router digest echo as proof of those gates.
 
 ---
 

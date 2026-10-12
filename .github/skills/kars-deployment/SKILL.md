@@ -28,14 +28,14 @@ kars up --resource-group <rg> --isolation confidential
 | `openclaw-sandbox:latest` | `sandbox-images/openclaw/Dockerfile` | Agent container (OpenClaw + Kars mesh plugin) |
 | `kars-inference-router:latest` | `inference-router/Dockerfile` | Per-pod proxy (AOAI, relay/registry, native AGT governance) |
 | `kars-controller:latest` | `controller/Dockerfile` | K8s controller (CRD reconciler) |
-| `agentmesh-relay-agt:latest` | Microsoft AGT AgentMesh image | WebSocket relay server |
-| `agentmesh-registry-agt:latest` | Microsoft AGT AgentMesh image | Agent discovery + prekey storage |
+| `agentmesh-relay-agt:latest` | `sandbox-images/agentmesh/Dockerfile`, `COMPONENT=relay` | AL3 distroless upstream AGT WebSocket relay |
+| `agentmesh-registry-agt:latest` | `sandbox-images/agentmesh/Dockerfile`, `COMPONENT=registry` | AL3 distroless upstream AGT registry + prekey storage |
 
 ## AKS Namespaces
 | Namespace | Purpose |
 |-----------|---------|
 | `kars-system` | Controller + CRDs |
-| `agentmesh` | Relay + Registry + PostgreSQL |
+| `agentmesh` | Relay + in-memory Registry |
 | `kars-foundry-test` | Parent sandbox (persistent) |
 | `kars-<name>` | Spawned sub-agent sandboxes (ephemeral) |
 
@@ -46,14 +46,24 @@ kars up --resource-group <rg> --isolation confidential
 - DO NOT set image env vars manually — use defaults
 
 ## AgentMesh Infrastructure
+Beta installs manage the mesh in the Core Helm release (`agentMesh.enabled=true`).
+Do not bootstrap it with raw manifests alongside Helm-owned resources.
+The standalone compatibility deployment is:
+
 ```bash
-# Deploy Microsoft AGT AgentMesh (relay + registry + postgres)
+# Standalone only: deploy Microsoft AGT AgentMesh (relay + registry)
 kubectl apply -f deploy/agentmesh-agt.yaml
 
 # Verify
 kubectl get pods -n agentmesh
-# Should show: postgres, registry, relay — all Running
+# Should show: registry and relay — both Running
 ```
+
+Build both components from the Kars repo root using the maintained recipe and
+validated AGT 5 core/server + native ACS wheels. Do not use upstream's deprecated
+`agentmesh-platform` Dockerfile or its removed `server` extra. Server image
+qualification does not establish installed identity or encrypted cross-runtime
+collaboration acceptance.
 
 ## Troubleshooting
 - **Pod stuck Pending**: Check node pool capacity (`kubectl describe pod`)

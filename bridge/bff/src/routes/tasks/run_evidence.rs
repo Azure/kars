@@ -10,8 +10,10 @@ use super::models::{MissionResultDto, MissionTelemetryDto};
 use super::presentation::{classify_blocked, deliverable_text, is_real_deliverable};
 
 mod contract;
+pub(crate) mod efficiency;
 #[cfg(test)]
 mod contract_tests;
+pub(crate) mod live;
 
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
 
@@ -50,6 +52,7 @@ struct Reply {
     boot_id: String,
     status: String,
     output: Option<String>,
+    error: Option<String>,
     #[serde(default, deserialize_with = "present_evidence")]
     evidence: Option<Evidence>,
     #[serde(flatten)]
@@ -94,6 +97,10 @@ fn identifier(value: &str) -> bool {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+}
+
+fn valid_agent_name(value: &str) -> bool {
+    !value.trim().is_empty() && value.len() <= 512
 }
 
 fn did(value: &str) -> bool {
@@ -141,7 +148,7 @@ fn terminal(data: &BTreeMap<String, String>) -> Option<(MissionRunEvidenceDto, O
         }
     }
     let agent_name = data.get("agentName")?.clone();
-    if !identifier(&agent_name) {
+    if !valid_agent_name(&agent_name) {
         return None;
     }
     let started_at = data.get("startedAt")?.clone();
@@ -183,6 +190,14 @@ fn terminal(data: &BTreeMap<String, String>) -> Option<(MissionRunEvidenceDto, O
     {
         return None;
     }
+    if reply.status != "succeeded"
+        && (reply.error.as_deref().unwrap_or_default()
+            != data.get("error").map(String::as_str).unwrap_or_default()
+            || reply.output.as_deref().unwrap_or_default()
+                != data.get("output").map(String::as_str).unwrap_or_default())
+    {
+        return None;
+    }
     Some((
         MissionRunEvidenceDto {
             task_uid: reply.task_uid,
@@ -214,6 +229,9 @@ pub(crate) fn mission_result(data: &BTreeMap<String, String>) -> MissionResultDt
             .filter(|n| safe_integer(*n))
     };
     let mut result = MissionResultDto {
+        error: matches!(status.as_deref(), Some("failed" | "rejected" | "error"))
+            .then(|| data.get("error").cloned())
+            .flatten(),
         reviewable: status.as_deref() == Some("ok")
             && is_real_deliverable(status.as_deref(), &output),
         output,
@@ -253,6 +271,7 @@ pub(crate) fn mission_result(data: &BTreeMap<String, String>) -> MissionResultDt
             None => {
                 result.source = Some("invalid_evidence".into());
                 result.reviewable = false;
+                result.error = None;
             }
         }
     } else if data.get("usageKnown").map(String::as_str) == Some("false") {
@@ -388,10 +407,48 @@ mod tests {
         data.insert("evidence.json".into(), reply.to_string());
         data.insert("status".into(), "failed".into());
         data.insert("usageKnown".into(), "false".into());
+        data.insert("error".into(), "".into());
         let result = mission_result(&data);
         assert!(result.run_evidence.is_some());
         assert!(!result.reviewable && !result.usage_known);
         assert!(result.total_tokens.is_none());
+    }
+
+    #[test]
+    fn terminal_failure_message_requires_exact_committed_projection() {
+        for status in ["failed", "rejected"] {
+            let mut data = output();
+            let mut reply: Value = serde_json::from_str(&data["evidence.json"]).unwrap();
+            reply["status"] = json!(status);
+            reply["output"] = json!("");
+            reply["error"] = json!("Governed inference /v1/session unavailable (HTTP 503)");
+            reply["evidence"]["usage"] = Value::Null;
+            data.insert("evidence.json".into(), reply.to_string());
+            data.insert("status".into(), status.into());
+            data.insert("output".into(), "".into());
+            data.insert("error".into(), reply["error"].as_str().unwrap().into());
+            data.insert("usageKnown".into(), "false".into());
+            let result = mission_result(&data);
+            assert_eq!(result.error.as_ref(), data.get("error"));
+            assert_eq!(result.status.as_deref(), Some(status));
+            assert!(result.output.is_empty() && !result.reviewable);
+            assert!(result.run_evidence.is_some() && result.total_tokens.is_none());
+            for mutation in [None, Some("unbound message")] {
+                let mut changed = data.clone();
+                if let Some(message) = mutation {
+                    changed.insert("error".into(), message.into());
+                } else {
+                    changed.remove("error");
+                }
+                let result = mission_result(&changed);
+                assert!(result.error.is_none() && result.run_evidence.is_none());
+                assert!(!result.reviewable);
+            }
+            let mut changed = data.clone();
+            changed.insert("output".into(), "Uncommitted partial output".into());
+            let result = mission_result(&changed);
+            assert!(result.error.is_none() && result.run_evidence.is_none());
+        }
     }
 
     #[test]

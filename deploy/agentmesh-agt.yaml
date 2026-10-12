@@ -1,20 +1,17 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
-# AGT upstream relay + registry — Phase 4 of the agentmesh provider swap.
+# AGT upstream relay + registry — standalone compatibility deployment.
 #
 # This manifest deploys the upstream Microsoft Agent Governance Toolkit
-# (AGT) Python relay+registry instead of our vendored Rust implementations.
+# (AGT) Python relay+registry from the source pin in vendor/agt/pin.json.
+# Product beta installations use the Core Helm release's agentMesh resources.
 #
-# Selection: kubectl apply ONLY ONE of agentmesh.yaml OR agentmesh-agt.yaml.
-# Both expose the same Service names (agentmesh-registry, agentmesh-relay)
-# in the same namespace (agentmesh), so the inference router and the
-# sandbox plugin connect identically. The wire protocol (AgentMesh Wire
-# v1.0) is shared between vendored and upstream — confirmed in upstream
-# MeshClient header which calls out kars compatibility features.
-#
-# Image source: build from the AGT clone at
-#   /agent-governance-toolkit/agent-governance-python/agent-mesh/docker/Dockerfile
+# Image source: build from the Kars repository root using
+#   sandbox-images/agentmesh/Dockerfile
+# and validated AGT core/server + native ACS wheels in runtimes/wheels/.
+# The final image is Azure Linux 3 distroless Python, not the deprecated
+# upstream agentmesh-platform Dockerfile/package extra.
 # with --build-arg COMPONENT=registry|relay, then tag and push as:
 #   karsacr.azurecr.io/agentmesh-registry-agt:latest
 #   karsacr.azurecr.io/agentmesh-relay-agt:latest
@@ -52,13 +49,9 @@ spec:
     spec:
       containers:
         - name: registry
-          # The kars-built image bundles AGT toolkit @bdea1097 (the
-          # pinned fork SHA at vendor/agt/pin.json that contains the
-          # SDK-side POP signing). Both the relay and the registry in
-          # this manifest must build from the same SHA so the wire
-          # protocol is consistent edge-to-edge — see the kars-side
-          # comment in vendor/agt/pin.json for the published-package
-          # transition criteria.
+          # Both servers and runtime SDKs must use the same vendor/agt/pin.json
+          # source revision; the image records that pin without replacing
+          # upstream registry identity, PoP, KNOCK or encrypted relay behavior.
           image: karsacr.azurecr.io/agentmesh-registry-agt:latest
           ports:
             - containerPort: 8082

@@ -202,7 +202,24 @@ impl Ledger {
                 .any(|uid| self.nodes[uid].authority.limits.finite()))
     }
 
-    pub fn register_task(&self, mut authority: TaskAuthority) -> Result<Mutation<()>, BudgetError> {
+    pub fn register_task(&self, authority: TaskAuthority) -> Result<Mutation<()>, BudgetError> {
+        self.register_task_state(authority, true)
+    }
+
+    /// Prepare a paused Team's ancestry without admitting any runtime session.
+    /// Inactive parents still enforce their immutable lineage and limits.
+    pub fn register_dormant_task(
+        &self,
+        authority: TaskAuthority,
+    ) -> Result<Mutation<()>, BudgetError> {
+        self.register_task_state(authority, false)
+    }
+
+    fn register_task_state(
+        &self,
+        mut authority: TaskAuthority,
+        active: bool,
+    ) -> Result<Mutation<()>, BudgetError> {
         self.validate()?;
         self.accepting()?;
         authority.task.validate()?;
@@ -219,7 +236,7 @@ impl Ledger {
             return Err(BudgetError::Authorization);
         }
         if let Some(existing) = self.nodes.get(&authority.task.uid) {
-            if existing.authority != authority || !existing.active {
+            if existing.authority != authority || existing.active != active {
                 return Err(BudgetError::Authorization);
             }
             return self.mutation(self.clone(), ());
@@ -232,7 +249,7 @@ impl Ledger {
                 .nodes
                 .get(parent_uid)
                 .ok_or(BudgetError::Authorization)?;
-            if !parent.active
+            if (active && !parent.active)
                 || parent.authority.root_task_uid != authority.root_task_uid
                 || !authority.limits.attenuates(parent.authority.limits)
             {
@@ -249,7 +266,7 @@ impl Ledger {
             authority.task.uid.clone(),
             Node {
                 authority,
-                active: true,
+                active,
                 meters: Meters::default(),
             },
         );

@@ -49,6 +49,7 @@ export interface ReceiptSummary {
   key_id: string | null;
   inclusion_seq: number | null;
   created: string | null;
+  /** Recorded-claim summary; `verified` means all required claims pass, not cryptographic verification. */
   verdict: "verified" | "failed" | "partial" | "none";
 }
 
@@ -132,26 +133,29 @@ export interface RouteEfficiency {
   route: string;
   harness: string;
   runs: number;
+  verified_runs: number;
+  measured_token_runs: number;
+  measured_tokens: number | null;
   delivered: number;
   success_rate: number;
   accepted: number;
   acceptance_rate: number;
-  avg_tokens: number;
-  tokens_per_outcome: number;
-  avg_rounds: number;
-  avg_tool_calls: number;
+  avg_tokens: number | null;
+  tokens_per_outcome: number | null;
+  avg_rounds: number | null;
+  avg_tool_calls: number | null;
   // 2026 enrichments.
-  avg_prompt_tokens: number;
-  avg_completion_tokens: number;
-  tool_fail_rate: number;
-  avg_wall_ms: number;
-  p95_wall_ms: number;
-  avg_ttfa_ms: number;
+  avg_prompt_tokens: number | null;
+  avg_completion_tokens: number | null;
+  tool_fail_rate: number | null;
+  avg_wall_ms: number | null;
+  p95_wall_ms: number | null;
+  avg_ttfa_ms: number | null;
   reliability_rate: number | null;
   reliability_k: number | null;
   reliability_samples: number;
   usd_per_outcome: number | null;
-  cache_hit_rate: number;
+  cache_hit_rate: number | null;
   top_fault: string;
 }
 
@@ -168,6 +172,10 @@ export interface Efficiency {
 export interface SkillSummary {
   name: string;
   namespace: string;
+  uid: string | null;
+  generation: number | null;
+  validated: boolean;
+  validation_detail: string | null;
   version: string | null;
   summary: string | null;
   bounding_policy: string | null;
@@ -258,6 +266,7 @@ export interface DatapathWitness {
   /** Optional for rolling upgrades from older BFFs. Missing means unknown. */
   state?: "missing" | "pending" | "disabled" | "stale" | "invalid" | "unavailable" | "observed" | "empty" | "legacy";
   requested_enabled?: boolean | null;
+  owner_release?: "kars" | "kars-datapath-witness" | null;
   settings_state?: "known" | "missing" | "invalid" | "unavailable";
   installation_state?: "unknown";
   diagnostic?: string;

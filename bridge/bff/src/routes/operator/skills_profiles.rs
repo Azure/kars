@@ -10,6 +10,7 @@ use serde::Serialize;
 
 use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
+use crate::skill_package as package;
 use crate::state::AppState;
 
 use super::policies::{ApplyCrdRequest, apply_err, apply_governance, delete_governance};
@@ -17,14 +18,14 @@ use super::{
     annotation, is_dns1123_label, name_of, ns_of, require_cluster, s, spec, status, upstream,
 };
 
-// Skill-admission annotation keys — the operator trust gate (§ skills workflow):
-// a user-uploaded skill is only usable once an operator has scanned + approved
-// it, which LOCKS the approval to the exact version digest at approval time.
-// Any later change to the skill breaks the lock and returns it to review.
-const ANN_REVIEW: &str = "kars.azure.com/skill-review";
-const ANN_LOCKED_DIGEST: &str = "kars.azure.com/skill-locked-digest";
+const ANN_REVIEW: &str = package::REVIEW;
+const ANN_LOCKED_DIGEST: &str = package::LOCKED_DIGEST;
 const ANN_APPROVED_BY: &str = "kars.azure.com/skill-approved-by";
 const ANN_APPROVED_AT: &str = "kars.azure.com/skill-approved-at";
+
+#[cfg(test)]
+#[path = "skills_profiles_tests.rs"]
+mod tests;
 
 // ─── Skills & Profiles (predefined building blocks for customers) ────────────
 
@@ -32,6 +33,10 @@ const ANN_APPROVED_AT: &str = "kars.azure.com/skill-approved-at";
 pub struct SkillDto {
     pub name: String,
     pub namespace: String,
+    pub uid: Option<String>,
+    pub generation: Option<i64>,
+    pub validated: bool,
+    pub validation_detail: Option<String>,
     pub version: Option<String>,
     pub summary: Option<String>,
     pub bounding_policy: Option<String>,
@@ -59,12 +64,15 @@ fn to_skill(o: &DynamicObject) -> SkillDto {
     let version_digest = s(status(o), "versionDigest");
     let review = annotation(o, ANN_REVIEW).unwrap_or_else(|| "pending".into());
     let locked_digest = annotation(o, ANN_LOCKED_DIGEST);
-    // Usable only when explicitly approved and the lock still matches the live
-    // digest. When the skill has no digest yet (not scanned), it can't be usable.
-    let usable = review == "approved" && locked_digest.is_some() && locked_digest == version_digest;
+    let usable = package::approved_digest(&serde_json::json!(o)).is_ok();
+    let validation = package::validated_digest(&serde_json::json!(o));
     SkillDto {
         name: name_of(o),
         namespace: ns_of(o),
+        uid: o.metadata.uid.clone(),
+        generation: o.metadata.generation,
+        validated: validation.is_ok(),
+        validation_detail: validation.err().or_else(|| s(status(o), "detail")),
         version: s(sp, "version"),
         summary: s(sp, "summary"),
         bounding_policy: s(sp, "boundingPolicy"),
@@ -161,7 +169,10 @@ pub async fn delete_mcp_profile(
 
 pub async fn list_skills(State(state): State<AppState>) -> AppResult<Json<Vec<SkillDto>>> {
     let cluster = require_cluster(&state)?;
-    let items = cluster.list_kind_all("KarsSkill").await.map_err(upstream)?;
+    let items = cluster
+        .list_kind("kars-system", "KarsSkill")
+        .await
+        .map_err(upstream)?;
     let mut dtos: Vec<SkillDto> = items.iter().map(to_skill).collect();
     dtos.sort_by(|a, b| a.name.cmp(&b.name));
     Ok(Json(dtos))
@@ -185,24 +196,22 @@ pub struct SubmitSkillRequest {
     pub recipe: Option<String>,
     #[serde(default)]
     pub mcp_servers: Vec<String>,
-    /// The skill PACKAGE files — flat filenames (SKILL.md + scripts). Stored as
-    /// the `karsskill-<name>` ConfigMap and mounted into a granting sandbox.
+    /// UTF-8 package files, including relative subdirectories.
     #[serde(default)]
     pub files: Vec<SkillFile>,
 }
 
 #[derive(Debug, serde::Deserialize)]
 pub struct SkillFile {
-    /// Flat filename (no path separators) — e.g. `SKILL.md`, `triage.sh`.
+    /// Relative path, such as `SKILL.md` or `references/checklist.md`.
     pub name: String,
     pub content: String,
 }
 
 /// `POST /api/skills` — USER skill submission. A team member uploads a skill
 /// package; it lands as a `KarsSkill` that starts life PENDING REVIEW (never
-/// usable until an operator scans + approves it). This is the user side of the
-/// trust gate: users propose capability, operators vet + sign, then it's
-/// grantable. The BFF never marks a user-submitted skill approved.
+/// usable until independent operator review). The BFF does not claim a malware
+/// scan or cryptographic attestation verification.
 pub async fn submit_skill(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
@@ -241,134 +250,190 @@ pub async fn submit_skill(
     if !req.mcp_servers.is_empty() {
         spec["mcpServers"] = serde_json::json!(req.mcp_servers);
     }
-    // Validate + collect the package files. Standard Agent Skills use
-    // subdirectories (scripts/, references/, assets/) referenced relatively from
-    // SKILL.md. ConfigMap keys can't contain '/', so we accept relative paths
-    // here and path-encode '/'→'__' only when writing the ConfigMap; the sandbox
-    // entrypoint decodes them back on mount so the on-disk tree matches exactly.
-    // A real skill package is at least a SKILL.md at the root.
     let mut files: std::collections::BTreeMap<String, String> = std::collections::BTreeMap::new();
     for f in &req.files {
-        let fname = f.name.trim();
-        let bad_segments = fname.split('/').any(|seg| {
-            seg.is_empty()
-                || !seg
-                    .chars()
-                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
-        });
-        if fname.is_empty()
-            || fname.starts_with('/')
-            || fname.ends_with('/')
-            || fname.contains("..")
-            || fname.contains("__") // reserved as the CM path separator
-            || fname.len() > 253
-            || bad_segments
-        {
+        let fname = &f.name;
+        if !package::valid_path(fname) || files.contains_key(fname) {
             return Err(AppError::BadRequest(format!(
-                "invalid skill file path '{fname}': use relative paths (letters, digits, . _ - and / for subdirs); no '..', no '__', no leading/trailing '/'"
+                "invalid or duplicate skill path '{fname}': use a unique relative path; no '.', '..', '__', empty segments or whitespace"
             )));
         }
         files.insert(fname.to_string(), f.content.clone());
     }
+    let cm_files: std::collections::BTreeMap<String, String> = files
+        .iter()
+        .map(|(path, content)| (path.replace('/', "__"), content.clone()))
+        .collect();
     if !files.is_empty() {
-        // A package the agent can actually USE must carry a SKILL.md — OpenClaw
-        // auto-discovers `<name>/SKILL.md` and reads its frontmatter `description`
-        // to know when to invoke the skill. Without it the files are dead weight.
-        let skill_md = files.get("SKILL.md");
-        match skill_md {
-            None => {
-                return Err(AppError::BadRequest(
-                    "a skill package must include a SKILL.md — the agent discovers the skill from it".into(),
-                ));
-            }
-            Some(md) if !md.contains("description:") => {
-                return Err(AppError::BadRequest(
-                    "SKILL.md must have YAML frontmatter with a `description:` — that's how the agent knows when to use the skill".into(),
-                ));
-            }
-            _ => {}
-        }
+        package::validate_manifest(&files.keys().cloned().collect::<Vec<_>>())
+            .map_err(AppError::BadRequest)?;
         spec["package"] = serde_json::json!(true);
         spec["files"] = serde_json::json!(files.keys().cloned().collect::<Vec<_>>());
-        let configmap_data: std::collections::BTreeMap<String, String> = files
-            .iter()
-            .map(|(path, content)| (path.replace('/', "__"), content.clone()))
-            .collect();
-        let canonical = serde_json::to_vec(&configmap_data)
-            .map_err(|e| AppError::Internal(anyhow::Error::new(e)))?;
-        spec["packageDigest"] = serde_json::json!(format!(
-            "sha256:{}",
-            crate::providers::signing::sha256_hex(canonical)
+        spec["packageDigest"] =
+            serde_json::json!(package::package_digest(&cm_files).map_err(AppError::BadRequest)?);
+    }
+    let applied = save_skill(cluster, name, &ns, spec, &principal, true).await?;
+    cluster
+        .write_skill_package(&applied, &cm_files)
+        .await
+        .map_err(|e| {
+            AppError::Upstream(format!(
+                "Skill saved pending review, but package persistence failed: {e}"
+            ))
+        })?;
+    Ok(Json(to_skill(&applied)))
+}
+
+async fn save_skill(
+    cluster: &crate::kars::cluster::Cluster,
+    name: &str,
+    namespace: &str,
+    spec: serde_json::Value,
+    principal: &Principal,
+    submitter_only: bool,
+) -> AppResult<DynamicObject> {
+    if namespace != "kars-system" || !package::valid_name(name) {
+        return Err(AppError::BadRequest(
+            "Skills require a DNS label in kars-system".into(),
         ));
     }
-    let uploader = principal.name;
-    let uploader_sub = principal.sub;
-    let body = serde_json::json!({
+    package::validate_spec(&spec).map_err(AppError::BadRequest)?;
+    let existing = cluster
+        .get_kind(namespace, "KarsSkill", name)
+        .await
+        .map_err(upstream)?;
+    if let Some(object) = &existing {
+        if object.metadata.deletion_timestamp.is_some() {
+            return Err(AppError::Conflict("Skill is terminating".into()));
+        }
+        if submitter_only
+            && annotation(object, ANN_UPLOADED_BY_SUB).as_deref() != Some(&principal.sub)
+        {
+            return Err(AppError::Forbidden(
+                "Only the original submitter may replace this skill package".into(),
+            ));
+        }
+    }
+    let mut body = serde_json::json!({
         "apiVersion": "kars.azure.com/v1alpha1",
         "kind": "KarsSkill",
         "metadata": {
             "name": name,
-            "namespace": ns,
+            "namespace": namespace,
             "labels": { "app.kubernetes.io/managed-by": "kars-bridge" },
-            // Explicitly PENDING — the operator trust gate must approve it before
-            // it is usable. Never set review=approved on the user path.
             "annotations": {
                 ANN_REVIEW: "pending",
-                ANN_UPLOADED_BY: uploader,
-                ANN_UPLOADED_BY_SUB: uploader_sub,
+                ANN_UPLOADED_BY: principal.name,
+                ANN_UPLOADED_BY_SUB: principal.sub,
             },
         },
         "spec": spec,
     });
-    let applied = cluster
-        .apply_kind(&ns, "KarsSkill", body, false)
-        .await
-        .map_err(apply_err)?;
-    // Persist the package files as the karsskill-<name> ConfigMap so the
-    // controller can mount them into a granting sandbox. ConfigMap keys can't
-    // contain '/', so subdirectory paths are encoded '/'→'__'; the sandbox
-    // entrypoint decodes them back to the real tree on mount.
-    if !files.is_empty() {
-        let cm_files: std::collections::BTreeMap<String, String> = files
-            .iter()
-            .map(|(path, content)| (path.replace('/', "__"), content.clone()))
-            .collect();
-        let package_digest = spec
-            .get("packageDigest")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| AppError::Internal(anyhow::anyhow!("package digest missing")))?;
+    match existing {
+        Some(object) => {
+            body["metadata"]["uid"] = serde_json::json!(object.metadata.uid);
+            body["metadata"]["resourceVersion"] =
+                serde_json::json!(object.metadata.resource_version);
+            crate::kars::execution_plans::identity_fence(&object.metadata)
+                .map_err(AppError::Conflict)?;
+            // Replace the submitted spec, including omitted optional fields,
+            // without SSA ownership conflicts with prior creation or review.
+            if let Some(previous) = object.data["spec"].as_object() {
+                for key in previous.keys() {
+                    if body["spec"].get(key).is_none() {
+                        body["spec"][key] = serde_json::Value::Null;
+                    }
+                }
+            }
+            for key in [
+                ANN_LOCKED_DIGEST,
+                ANN_APPROVED_BY,
+                ANN_APPROVED_AT,
+                package::LOCKED_UID,
+                package::LOCKED_GENERATION,
+                package::APPROVED_BY_SUB,
+            ] {
+                body["metadata"]["annotations"][key] = serde_json::Value::Null;
+            }
+            cluster
+                .merge_patch_kind(namespace, "KarsSkill", name, body)
+                .await
+                .map_err(review_error)
+        }
+        None => cluster
+            .create_kind(namespace, "KarsSkill", body)
+            .await
+            .map_err(apply_err),
+    }
+}
+
+pub(super) async fn edit_skill(
+    cluster: &crate::kars::cluster::Cluster,
+    principal: &Principal,
+    req: ApplyCrdRequest,
+) -> AppResult<Json<serde_json::Value>> {
+    let applied = save_skill(
+        cluster,
+        req.name.trim(),
+        req.namespace.as_deref().unwrap_or("kars-system"),
+        req.spec,
+        principal,
+        false,
+    )
+    .await?;
+    if spec(&applied)
+        .get("package")
+        .and_then(serde_json::Value::as_bool)
+        != Some(true)
+    {
         cluster
-            .write_skill_package(name, &cm_files, package_digest)
+            .write_skill_package(&applied, &Default::default())
             .await
             .map_err(|e| AppError::Upstream(e.to_string()))?;
     }
-    Ok(Json(to_skill(&applied)))
+    Ok(Json(
+        serde_json::json!({"applied":true,"kind":"KarsSkill","name":name_of(&applied),
+        "namespace":ns_of(&applied),"note":"Saved pending independent review of the current content."}),
+    ))
 }
 
-/// Locate a skill by name across namespaces, returning `(namespace, object)`.
 async fn find_skill(
     cluster: &crate::kars::cluster::Cluster,
     name: &str,
 ) -> AppResult<(String, DynamicObject)> {
-    let items = cluster.list_kind_all("KarsSkill").await.map_err(upstream)?;
-    items
-        .into_iter()
-        .find(|o| name_of(o) == name)
-        .map(|o| (ns_of(&o), o))
+    cluster
+        .get_kind("kars-system", "KarsSkill", name)
+        .await
+        .map_err(upstream)?
+        .map(|o| ("kars-system".into(), o))
         .ok_or(AppError::NotFound)
+}
+
+pub async fn get_skill_package(
+    State(state): State<AppState>,
+    axum::extract::Path(name): axum::extract::Path<String>,
+) -> AppResult<Json<serde_json::Value>> {
+    let cluster = require_cluster(&state)?;
+    let (_, object) = find_skill(cluster, &name).await?;
+    let files = cluster
+        .skill_package_files(&object)
+        .await
+        .map_err(|e| AppError::Conflict(e.to_string()))?;
+    Ok(Json(
+        serde_json::json!({"skill":to_skill(&object),"files":files}),
+    ))
 }
 
 /// `POST /api/operator/skills/:name/approve` — the operator admission gate.
 /// Records the operator's approval and LOCKS it to the skill's current version
 /// digest, after which users can assign the skill. Requires the skill to have
-/// been scanned (a version digest present) and its attestation to have verified
-/// — an operator can't approve a skill the controller hasn't validated. Any
-/// later change to the skill breaks the lock and returns it to review.
+/// current controller validation. This is manual review, not a malware scan or
+/// a cryptographic attestation. Mutation is conditional on the inspected object.
 pub async fn approve_skill(
     State(state): State<AppState>,
     Extension(principal): Extension<Principal>,
     axum::extract::Path(name): axum::extract::Path<String>,
-    Json(_req): Json<ApproveSkillRequest>,
+    Json(req): Json<ApproveSkillRequest>,
 ) -> AppResult<Json<SkillDto>> {
     let cluster = require_cluster(&state)?;
     let (ns, obj) = find_skill(cluster, &name).await?;
@@ -378,53 +443,48 @@ pub async fn approve_skill(
         .as_ref()
         .and_then(|a| a.get(ANN_UPLOADED_BY_SUB))
         .cloned();
-    if uploader_subject.as_deref() == Some(principal.sub.as_str()) {
+    if uploader_subject.as_deref().is_none_or(str::is_empty)
+        || uploader_subject.as_deref() == Some(principal.sub.as_str())
+    {
         return Err(AppError::Forbidden(
             "skill submitter cannot approve their own package".into(),
         ));
     }
-    let generation = obj.metadata.generation.unwrap_or_default();
-    let observed_generation = status(&obj)
-        .get("observedGeneration")
-        .and_then(|v| v.as_i64())
-        .unwrap_or_default();
-    if observed_generation != generation {
-        return Err(AppError::Conflict(
-            "skill changed after its last controller scan; wait for the current generation".into(),
-        ));
-    }
-    let digest = s(status(&obj), "versionDigest").ok_or_else(|| {
-        AppError::BadRequest(
-            "skill has not been scanned yet (no version digest) — the controller must validate it before approval".into(),
-        )
-    })?;
-    // Honest gate: don't let an operator approve a skill whose attestation the
-    // controller could not verify.
-    if status(&obj)
-        .get("attestationVerified")
-        .and_then(|v| v.as_bool())
-        == Some(false)
+    let digest = package::validated_digest(&serde_json::json!(obj)).map_err(AppError::Conflict)?;
+    if obj.metadata.uid.as_deref() != Some(req.uid.as_str())
+        || obj.metadata.generation != Some(req.generation)
+        || digest != req.version_digest
     {
-        return Err(AppError::BadRequest(
-            "skill attestation did not verify — cannot approve until the scan passes".into(),
+        return Err(AppError::Conflict(
+            "Skill changed since the displayed review; inspect the current package".into(),
         ));
     }
+    cluster
+        .skill_package_files(&obj)
+        .await
+        .map_err(|e| AppError::Conflict(e.to_string()))?;
     let by = principal.name;
     let now = chrono::Utc::now().to_rfc3339();
     let updated = cluster
-        .annotate_kind(
+        .merge_patch_kind(
             &ns,
             "KarsSkill",
             &name,
-            &[
-                (ANN_REVIEW, Some("approved".into())),
-                (ANN_LOCKED_DIGEST, Some(digest)),
-                (ANN_APPROVED_BY, Some(by)),
-                (ANN_APPROVED_AT, Some(now)),
-            ],
+            serde_json::json!({
+                "metadata": {
+                    "uid": obj.metadata.uid, "resourceVersion": obj.metadata.resource_version,
+                    "annotations": {
+                        ANN_REVIEW:"approved", ANN_LOCKED_DIGEST:digest,
+                        (package::LOCKED_UID):obj.metadata.uid,
+                        (package::LOCKED_GENERATION):obj.metadata.generation.map(|g| g.to_string()),
+                        (package::APPROVED_BY_SUB):principal.sub,
+                        ANN_APPROVED_BY:by, ANN_APPROVED_AT:now
+                    }
+                }
+            }),
         )
         .await
-        .map_err(upstream)?;
+        .map_err(review_error)?;
     Ok(Json(to_skill(&updated)))
 }
 
@@ -433,28 +493,55 @@ pub async fn approve_skill(
 pub async fn revoke_skill(
     State(state): State<AppState>,
     axum::extract::Path(name): axum::extract::Path<String>,
+    Json(req): Json<RevokeSkillRequest>,
 ) -> AppResult<Json<SkillDto>> {
     let cluster = require_cluster(&state)?;
-    let (ns, _) = find_skill(cluster, &name).await?;
+    let (ns, obj) = find_skill(cluster, &name).await?;
+    if obj.metadata.uid.as_deref() != Some(req.uid.as_str()) {
+        return Err(AppError::Conflict(
+            "Skill was replaced since it was displayed".into(),
+        ));
+    }
     let updated = cluster
-        .annotate_kind(
+        .merge_patch_kind(
             &ns,
             "KarsSkill",
             &name,
-            &[
-                (ANN_REVIEW, Some("pending".into())),
-                (ANN_LOCKED_DIGEST, None),
-                (ANN_APPROVED_BY, None),
-                (ANN_APPROVED_AT, None),
-            ],
+            serde_json::json!({
+                "metadata": {
+                    "uid":obj.metadata.uid, "resourceVersion":obj.metadata.resource_version,
+                    "annotations":{
+                        ANN_REVIEW:"pending", ANN_LOCKED_DIGEST:null,
+                        (package::LOCKED_UID):null, (package::LOCKED_GENERATION):null,
+                        (package::APPROVED_BY_SUB):null, ANN_APPROVED_BY:null, ANN_APPROVED_AT:null
+                    }
+                }
+            }),
         )
         .await
-        .map_err(upstream)?;
+        .map_err(review_error)?;
     Ok(Json(to_skill(&updated)))
 }
 
+fn review_error(error: kube::Error) -> AppError {
+    if matches!(&error, kube::Error::Api(status) if status.code == 409) {
+        AppError::Conflict("Skill changed during review; refresh and inspect it again".into())
+    } else {
+        upstream(error)
+    }
+}
+
 #[derive(Debug, serde::Deserialize)]
-pub struct ApproveSkillRequest {}
+pub struct ApproveSkillRequest {
+    pub uid: String,
+    pub generation: i64,
+    pub version_digest: String,
+}
+
+#[derive(Debug, serde::Deserialize)]
+pub struct RevokeSkillRequest {
+    pub uid: String,
+}
 
 #[derive(Debug, Serialize)]
 pub struct ProfileRoleDto {

@@ -1,15 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-// kars Bridge Workspace — the live Deploy timeline (design note FL/REQ15:
-// "dynamically watch agents deploy"). The journey rail shows the high-level
-// beat; this fills the Build→Run gap with the granular, real provisioning
-// steps so launch is a visible event, not a status flip. Every step is derived
-// from real task state (no fabrication): launch approved → sandbox provisioning
-// → inference router + access verified → agent online on the mesh → first
-// activity → running. Updates with the page's live refresh.
-
 import type { TaskDetail } from "@/lib/types";
+import { activityForRevision, missionRunState } from "@/lib/mission-run-evidence";
+import { reviewedPhases, reviewedPhaseRouterActivity } from "@/lib/team-run-evidence";
+import { formatEvidenceTime } from "@/lib/format";
 
 type StepState = "done" | "active" | "pending" | "failed";
 
@@ -28,14 +23,18 @@ export function DeployTimeline({ task }: { task: TaskDetail }) {
   const running = phase === "Running";
   const launching = phase === "Launching" || phase === "Pending";
   const hasSandbox = !!task.sandbox;
-  const accessVerified = running || phase === "Succeeded";
-  const agentOnline = !!task.agent_identity?.last_seen;
-  const firstActivity = (task.activity?.length ?? 0) > 0;
-  const failed = task.result?.status === "error";
-  const succeeded = !failed && (phase === "Succeeded" || !!task.result);
+  const lastSeen = formatEvidenceTime(task.agent_identity?.last_seen);
+  const identityObserved = lastSeen !== "Time unavailable";
+  const principalActivity = (task.activity ?? []).some(
+    event => activityForRevision(event, task.current_run_nonce ?? ""),
+  );
+  const phaseActivity = (reviewedPhases(task) ?? []).filter(phase => {
+    const observations = reviewedPhaseRouterActivity(phase)?.observations;
+    return observations?.state === "observed" && observations.trace.events.length > 0;
+  }).length;
+  const firstActivity = principalActivity || phaseActivity > 0;
+  const { failed, realDelivery: succeeded } = missionRunState(task);
 
-  // Derive each step's state from real signals. A step is "done" once a later
-  // signal proves it completed; "active" when it's the current frontier.
   const steps: { label: string; detail: string; state: StepState }[] = [
     {
       label: "Launch approved",
@@ -43,61 +42,65 @@ export function DeployTimeline({ task }: { task: TaskDetail }) {
       state: task.launched ? "done" : "pending",
     },
     {
-      label: "Sandbox provisioning",
+      label: "Principal sandbox reference",
       detail: hasSandbox
-        ? `Namespaced sandbox ${task.sandbox} — image pull, seccomp, default-deny egress.`
-        : "Creating the isolated namespace, network policy, and seccomp profile.",
-      state: hasSandbox && (accessVerified || agentOnline) ? "done" : launching || hasSandbox ? "active" : "pending",
+        ? `Controller recorded sandbox ${task.sandbox}. This reference does not establish pod readiness.`
+        : phaseActivity
+        ? "Reviewed phases have recorded work; the principal sandbox can start after their handoffs are ready."
+        : "Waiting for the controller to record the sandbox.",
+      state: hasSandbox ? "done" : launching ? "active" : "pending",
     },
     {
-      label: "Inference router + access verified",
-      detail: "The governed model path (router sidecar) is up; the composed accesses are enforced at the boundary.",
-      state: accessVerified ? "done" : hasSandbox ? "active" : "pending",
+      label: "Controller execution status",
+      detail: `Controller reports ${phase ?? "no execution status"}. Pod health and individual access checks are not included in this record.`,
+      state: failed ? "failed" : running || succeeded ? "done" : hasSandbox ? "active" : "pending",
     },
     {
-      label: "Agent online on the mesh",
-      detail: agentOnline
-        ? "The agent registered its encrypted mesh identity and is reachable."
-        : "Waiting for the agent to register on the encrypted agent mesh.",
-      state: agentOnline ? "done" : accessVerified ? "active" : "pending",
+      label: "Mesh registry observation",
+      detail: identityObserved
+        ? `Registry last saw this identity at ${lastSeen}. This is not a current reachability check or revision-producer proof.`
+        : "No timestamped mesh registry observation is available yet.",
+      state: identityObserved ? "done" : running ? "active" : "pending",
     },
     {
       label: "Working",
       detail: failed
-        ? "The agent started, but the run terminated before producing a deliverable. Open Run failed for the exact reason."
-        : firstActivity
-        ? "The agent's loop is live — tool calls and model rounds are streaming into Activity."
-        : "Waiting for the first model round / tool call.",
+        ? "This revision ended without an eligible deliverable. Open Run failed for the recorded reason."
+        : succeeded
+        ? "This revision has an eligible recorded deliverable. Review its output and evidence."
+        : principalActivity
+        ? "Timestamped activity is recorded for this revision. Inspect Activity for the reported outcomes."
+        : phaseActivity
+        ? `Revision-bound router activity is retained for ${phaseActivity} reviewed ${phaseActivity === 1 ? "phase" : "phases"}. Inspect Activity for their reported outcomes; this does not establish principal readiness.`
+        : "Waiting for the first revision-bound model round or tool record.",
       state: failed ? "failed" : succeeded ? "done" : firstActivity || running ? "active" : "pending",
     },
   ];
 
   const doneCount = steps.filter((s) => s.state === "done").length;
-  const allDone = !failed && (running || succeeded);
+  const workObserved = succeeded || firstActivity;
 
   return (
     <section className="rounded-xl border border-border bg-surface p-6">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h2 className="text-sm font-semibold">{failed ? "Run failed" : allDone ? "Running" : "Deploying"}</h2>
+          <h2 className="text-sm font-semibold">{failed ? "Run failed" : succeeded ? "Delivered" : firstActivity ? "Execution observed" : "Starting execution"}</h2>
           <p className="mt-0.5 text-xs text-foreground-muted">
             {failed
-              ? "Provisioning completed, but the agent run ended before delivery."
-              : allDone
-              ? "The agent is deployed and working — every step below is verified."
-              : "Watch the agent come online — each step is a real, verified provisioning event."}
+              ? "The recorded outcome is unsuccessful; it does not establish which provisioning checks passed."
+              : "Controller status, registry observations, and revision activity are separate signals — not a combined verification of readiness or access."}
           </p>
         </div>
         <span
           className={`shrink-0 rounded-full border px-2.5 py-1 text-xs font-medium ${
             failed
               ? "border-danger/30 bg-danger/10 text-danger"
-              : allDone
+              : workObserved
               ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600"
               : "border-signal/30 bg-signal/10 text-signal"
           }`}
         >
-          {failed ? "Failed" : allDone ? "Live" : `${doneCount}/${steps.length}`}
+          {failed ? "Failed" : succeeded ? "Delivered" : `${doneCount}/${steps.length} signals`}
         </span>
       </div>
       <ol className="mt-4 space-y-0">

@@ -91,9 +91,9 @@ export function AuditSearch({ receipts }: { receipts: ReceiptSummary[] }) {
       <div className="flex flex-wrap items-center gap-2">
         {([
           ["all", `All ${receipts.length}`],
-          ["verified", `Verified ${verdictCounts.verified}`],
-          ["partial", `Partial ${verdictCounts.partial}`],
-          ["failed", `Failed ${verdictCounts.failed}`],
+          ["verified", `Claims pass ${verdictCounts.verified}`],
+          ["partial", `Claims partial ${verdictCounts.partial}`],
+          ["failed", `Claims fail ${verdictCounts.failed}`],
         ] as const).map(([v, label]) => (
           <button
             key={v}
@@ -120,12 +120,12 @@ export function AuditSearch({ receipts }: { receipts: ReceiptSummary[] }) {
       {q && chain.length > 0 && (
         <div className="rounded-lg border border-signal/25 bg-signal/[0.04] p-3">
           <p className="text-[11px] font-semibold uppercase tracking-wide text-signal">
-            Chain of custody · {matches.length} receipt{matches.length === 1 ? "" : "s"} for “{query.trim()}”
+            Recorded positions · {matches.length} receipt{matches.length === 1 ? "" : "s"} for “{query.trim()}”
           </p>
           <p className="mt-1 font-mono text-xs text-foreground-muted">
             inclusion-log positions: {chain.map((n) => `#${n}`).join(" → ")}
             {unchained > 0 && (
-              <span className="text-amber-600"> · {unchained} not yet chained</span>
+              <span className="text-amber-600"> · {unchained} without a recorded position</span>
             )}
           </p>
         </div>
@@ -139,14 +139,14 @@ export function AuditSearch({ receipts }: { receipts: ReceiptSummary[] }) {
             q
               ? "No matching receipts"
               : verdict !== "all"
-                ? `No ${verdict} receipts`
+                ? "No receipts match this claim filter"
                 : "No receipts yet"
           }
           detail={
             q
               ? "No governance receipt matches that run or agent. Check the exact run/agent name, or clear the search to see all."
               : verdict !== "all"
-                ? `${receipts.length} receipt${receipts.length === 1 ? "" : "s"} exist, but none currently carry the “${verdict}” verdict. Clear the filter to see them.`
+                ? `${receipts.length} receipt${receipts.length === 1 ? "" : "s"} exist, but none match the selected recorded-claim status. Clear the filter to see them.`
                 : "A receipt is issued for each governance-validated run. None have been produced."
           }
         />

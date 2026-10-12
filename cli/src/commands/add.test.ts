@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { describe, it, expect } from "vitest";
+import { buildRuntimeBlock } from "../runtime.js";
 
 /**
  * Tests for the `add` command's sandbox manifest generation logic.
@@ -59,14 +60,7 @@ function buildSandboxManifest(name: string, options: AddOptions) {
     kind: "KarsSandbox",
     metadata: { name, namespace: "kars-system" },
     spec: {
-      runtime: {
-        kind: "OpenClaw",
-        openclaw: {
-          version: "2026.3.13",
-          ...(options.image ? { image: options.image } : {}),
-          config: { agent: { model: `azure/${options.model}` } },
-        },
-      },
+      runtime: buildRuntimeBlock({ kind: "OpenClaw", model: options.model, image: options.image }),
       sandbox: {
         isolation: options.isolation,
         seccompProfile: options.isolation === "standard" ? "RuntimeDefault" : "kars-strict",

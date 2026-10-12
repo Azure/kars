@@ -5,14 +5,16 @@
 
 import { useState } from "react";
 import {
-  copyWitnessCommand, WITNESS_DISABLE_COMMAND, WITNESS_ENABLE_COMMAND,
+  copyWitnessCommand, witnessCommands,
 } from "@/lib/datapath-witness";
+import type { DatapathWitness } from "@/lib/types/operations";
 
-export function DatapathSetup() {
+export function DatapathSetup({ ownerRelease }: { ownerRelease?: DatapathWitness["owner_release"] }) {
   const [message, setMessage] = useState("");
+  const commands = witnessCommands(ownerRelease);
   async function copy(action: "enable" | "disable") {
     try {
-      setMessage(await copyWitnessCommand(action, navigator.clipboard));
+      setMessage(await copyWitnessCommand(action, navigator.clipboard, ownerRelease));
     } catch {
       setMessage("Copy failed. Select the command below manually. No cluster change was made.");
     }
@@ -29,9 +31,16 @@ export function DatapathSetup() {
         <p>
           From the reviewed public Kars source, set <code>KARS_CONTEXT</code> explicitly and
           <code> WITNESS_VALUES</code> to a reviewed values file containing a built, published,
-          pullable aggregator image digest and explicit sandbox names. This source does not
-          promise a prepublished aggregator image. Linux nodes need readable kernel BTF and
+          pullable AL3 runtime digest for both <code>aggregator.image</code> and
+          <code> gadget.image</code>, plus explicit sandbox names. The maintained runtime includes
+          both the client and daemon; this source does not promise a prepublished image.
+          Linux nodes need readable kernel BTF and
           compatible eBPF support. The elevated IG DaemonSet uses a dedicated privileged-PSS namespace.
+        </p>
+        <p>
+          {ownerRelease === "kars-datapath-witness"
+            ? "The verified intent belongs to the standalone release. These commands preserve that owner."
+            : "Use the Core chart: place witness values under datapathWitness. No third Helm release is needed. Review the entire Core upgrade before applying it."}
         </p>
         {(["enable", "disable"] as const).map((action) => (
           <div key={action}>
@@ -43,15 +52,15 @@ export function DatapathSetup() {
               </button>
             </div>
             <pre className="overflow-x-auto rounded-lg border border-border bg-surface-muted p-3 font-mono text-xs">
-              {action === "enable" ? WITNESS_ENABLE_COMMAND : WITNESS_DISABLE_COMMAND}
+              {commands[action]}
             </pre>
           </div>
         ))}
         <p role="status" aria-live="polite">{message}</p>
         <p>
           Preflight refuses detected legacy/shared IG or witness ownership conflicts; never use
-          Helm adoption or force flags. Removal affects only this release&apos;s resources, not core
-          Kars, models, or CNI. Off retains intent metadata, Helm history, and the dedicated namespace;
+          Helm adoption or force flags. Disable the witness rather than uninstalling Core.
+          Off retains intent metadata, Helm history, and the dedicated namespace;
           inspect the operator&apos;s rollout and remaining pods before claiming capture has stopped.
         </p>
         <p>Build, permissions, limitations, and safe removal: <code>deploy/ebpf-witness/README.md</code>.</p>

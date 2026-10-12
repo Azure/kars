@@ -36,6 +36,7 @@ mod authentication_tests;
 pub struct UpstreamConfig {
     pub telemetry: Option<Arc<crate::task_telemetry::TaskTelemetry>>,
     pub inference_budget: Option<Arc<crate::inference_budget::Client>>,
+    pub calendar_budget: Option<Arc<crate::inference_budget::calendar::Client>>,
     pub endpoint: String,
     pub deployment: String,
     pub sandbox_name: String,
@@ -66,6 +67,7 @@ impl UpstreamConfig {
         Self {
             telemetry: None,
             inference_budget: None,
+            calendar_budget: None,
             endpoint,
             deployment,
             sandbox_name,
@@ -447,7 +449,7 @@ async fn send_with_retry(
     path: &str,
 ) -> Result<(
     reqwest::Response,
-    Option<crate::inference_budget::client::AttemptGuard>,
+    Option<crate::inference_budget::dispatch::Attempt>,
 )> {
     const MAX_ATTEMPTS: u32 = 3;
     const BACKOFF_MS: [u64; 2] = [250, 750]; // after attempts 1 and 2
@@ -539,7 +541,7 @@ pub async fn forward_stream(
 ) -> Result<(
     StatusCode,
     HeaderMap,
-    futures::stream::BoxStream<'static, Result<Bytes, reqwest::Error>>,
+    futures::stream::BoxStream<'static, Result<Bytes, std::io::Error>>,
 )> {
     crate::inference_budget::dispatch::preflight(&upstream, &Method::POST, path)?;
     let mut observation = upstream.telemetry.as_ref().and_then(|telemetry| {
@@ -650,7 +652,11 @@ pub async fn forward_stream(
     // single chunk so callers see the actual reason. Without this we only
     // see "status=413" and have to guess at causes (token cap? bytes cap?
     // schema break?). Do not put provider API bodies into logs.
-    if !status.is_success() {
+    let is_sse = response_headers
+        .get("content-type")
+        .and_then(|header| header.to_str().ok())
+        .is_some_and(|value| value.starts_with("text/event-stream"));
+    if !status.is_success() || (!is_sse && budget_attempt.is_some()) {
         let body_bytes = response.bytes().await.map_err(|error| {
             if let Some(observation) = observation.as_mut() {
                 observation.fail("response_body_error");
@@ -661,13 +667,15 @@ pub async fn forward_stream(
             observation.buffered(status.as_u16(), &body_bytes);
         }
         crate::inference_budget::dispatch::finish(budget_attempt, status, &body_bytes).await?;
-        tracing::warn!(
-            sandbox = %upstream.sandbox_name,
-            status = %status.as_u16(),
-            body_len = body_bytes.len(),
-            "Upstream returned non-success status"
-        );
-        let stream = futures::stream::once(async move { Ok::<_, reqwest::Error>(body_bytes) });
+        if !status.is_success() {
+            tracing::warn!(
+                sandbox = %upstream.sandbox_name,
+                status = %status.as_u16(),
+                body_len = body_bytes.len(),
+                "Upstream returned non-success status"
+            );
+        }
+        let stream = futures::stream::once(async move { Ok::<_, std::io::Error>(body_bytes) });
         return Ok((status, response_headers, stream.boxed()));
     }
 
@@ -726,10 +734,6 @@ pub async fn forward_stream(
         chunk
     });
 
-    let is_sse = response_headers
-        .get("content-type")
-        .and_then(|header| header.to_str().ok())
-        .is_some_and(|value| value.starts_with("text/event-stream"));
     Ok((
         status,
         response_headers,

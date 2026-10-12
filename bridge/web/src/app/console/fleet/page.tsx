@@ -9,7 +9,6 @@
 import { PageHeader, Stat } from "@/components/ui";
 import { HonestState } from "@/components/honest-state";
 import { getClusterCapacity, listSandboxes } from "@/lib/bff";
-import type { ClusterCapacity, Sandbox } from "@/lib/types";
 import { FleetList } from "./fleet-list";
 import { MeshTopology } from "./mesh-topology";
 import { CapacityDashboard } from "./capacity-dashboard";
@@ -17,23 +16,24 @@ import { LiveRefresh } from "@/components/live-refresh";
 
 export const dynamic = "force-dynamic";
 
+async function readFleetObservation() {
+  const [sandboxResult, capacityResult] = await Promise.allSettled([
+    listSandboxes(),
+    getClusterCapacity(),
+  ]);
+  return { sandboxResult, capacityResult, observedAt: Date.now() };
+}
+
 export default async function SandboxesPage({
   searchParams,
 }: {
   searchParams?: Promise<{ q?: string }>;
 }) {
   const initialQuery = (await searchParams)?.q ?? "";
-  let sandboxes: Sandbox[] = [];
-  let capacity: ClusterCapacity | null = null;
-  let error = false;
-  try {
-    [sandboxes, capacity] = await Promise.all([
-      listSandboxes(),
-      getClusterCapacity().catch(() => null),
-    ]);
-  } catch {
-    error = true;
-  }
+  const { sandboxResult, capacityResult, observedAt } = await readFleetObservation();
+  const sandboxes = sandboxResult.status === "fulfilled" ? sandboxResult.value : [];
+  const capacity = capacityResult.status === "fulfilled" ? capacityResult.value : null;
+  const error = sandboxResult.status === "rejected";
 
   const running = sandboxes.filter((s) => s.phase === "Running" || s.phase === "Ready").length;
   const executing = sandboxes.filter((s) => s.phase === "Running" && s.executing).length;
@@ -72,7 +72,18 @@ export default async function SandboxesPage({
         </p>
       )}
 
-      {capacity && <CapacityDashboard capacity={capacity} sandboxes={sandboxes} />}
+      {capacity && !error ? (
+        <CapacityDashboard capacity={capacity} sandboxes={sandboxes} />
+      ) : (
+        <HonestState
+          compact
+          variant="not_wired"
+          title="Cluster & agent utilization unavailable"
+          detail={capacity
+            ? "Sandbox inventory is unavailable, so resource usage cannot be correlated with agents. This panel retries automatically."
+            : "The Bridge backend could not load utilization. Existing sandbox records are shown when available. This panel retries automatically."}
+        />
+      )}
 
       {error ? (
         <HonestState variant="not_wired" title="Cluster unreachable" detail="The Bridge backend can't reach the Kubernetes API right now." />
@@ -81,7 +92,7 @@ export default async function SandboxesPage({
       ) : (
         <>
           <MeshTopology sandboxes={sandboxes} />
-          <FleetList sandboxes={sandboxes} initialQuery={initialQuery} />
+          <FleetList sandboxes={sandboxes} observedAt={observedAt} initialQuery={initialQuery} />
         </>
       )}
     </div>

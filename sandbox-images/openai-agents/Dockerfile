@@ -34,13 +34,10 @@ LABEL org.kars.runtime.kind="OpenAIAgents"
 LABEL org.kars.runtime.language="python"
 
 # ---- Install AGT-Python wheels and the kars adapter ----------------
-# The wheels directory must exist (even if empty) — the build context
-# always includes `runtimes/wheels/.gitkeep`. Operators run
-# `runtimes/build-agt-wheels.sh` to populate it before `docker build`.
+# Build the complete pure-Python owner set and both native ACS wheels first.
 COPY runtimes/wheels/ /tmp/agt-wheels/
-RUN if ls /tmp/agt-wheels/*.whl >/dev/null 2>&1; then \
-        pip install --no-cache-dir /tmp/agt-wheels/*.whl ; \
-    fi
+COPY runtimes/install-agt-wheels.py /tmp/install-agt-wheels.py
+RUN python3 /tmp/install-agt-wheels.py
 
 COPY runtimes/openai-agents/ /opt/kars-runtime-openai-agents/
 RUN pip install --no-cache-dir /opt/kars-runtime-openai-agents

@@ -206,7 +206,7 @@ impl Evidence {
 }
 
 pub(super) fn name(eval: &KarsEval) -> String {
-    format!("karseval-{}-report", eval.name_any())
+    super::bounded_name(&format!("karseval-{}-report", eval.name_any()), 253)
 }
 
 fn owned(cm: &ConfigMap, eval: &KarsEval) -> anyhow::Result<()> {
@@ -371,7 +371,10 @@ pub(super) async fn publish(
                                 "app.kubernetes.io/managed-by".into(),
                                 "kars-controller".into(),
                             ),
-                            (super::LABEL_KEY_CLAW_EVAL.into(), eval.name_any()),
+                            (
+                                super::LABEL_KEY_CLAW_EVAL.into(),
+                                super::bounded_name(&eval.name_any(), 63),
+                            ),
                         ]
                         .into(),
                     ),

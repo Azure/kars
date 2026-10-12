@@ -23,8 +23,8 @@ describe("Core durable mission dispatcher", () => {
     const controller = find(docs, "Deployment", "kars-controller").spec.template.spec.containers[0];
     expect(controller.env.some((env: any) => env.name.startsWith("KARS_MISSION_"))).toBe(false);
   });
-  it.each(["", "entra", "false"])("requires explicit development authentication, not %s", mode => {
-    expect(() => render("missionDispatcher.enabled=true", `missionDispatcher.authMode=${mode}`)).toThrow();
+  it.each(["", "anonymous", "false", "true", "1"])("requires explicit supported authentication, not %s", mode => {
+    expect(() => render("missionDispatcher.enabled=true", `missionDispatcher.authMode=${mode}`)).toThrow(/requires explicit authMode/);
   });
   it("provides a singleton hardened helper with controller-owned root reference", () => {
     const docs = render(...enabled); const deployment = find(docs, "Deployment", "kars-mission-dispatcher");
@@ -67,7 +67,7 @@ describe("Core durable mission dispatcher", () => {
       { name: "KARS_MISSION_DISPATCHER_DEPLOYMENT", value: "kars-mission-dispatcher" },
       { name: "KARS_MISSION_DISPATCHER_RELEASE", value: "kars" },
     ]));
-    const role = docs.find(doc => doc.kind === "ClusterRole" && doc.rules.some((rule: any) => rule.resources.includes("karssandboxes") && rule.verbs.includes("watch")));
+    const role = docs.find(doc => doc.kind === "ClusterRole" && doc.rules.some((rule: any) => rule.resources?.includes("karssandboxes") && rule.verbs.includes("watch")));
     expect(role.rules).toContainEqual({ apiGroups: ["apps"], resources: ["replicasets"], verbs: ["get", "list"] });
   });
   it("supports content-addressed image installation and an external official mesh", () => {

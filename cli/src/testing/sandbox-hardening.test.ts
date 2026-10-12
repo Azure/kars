@@ -148,6 +148,36 @@ describe("sandbox Dockerfile — image-level hardening (s7)", () => {
   });
 });
 
+describe("sandbox Dockerfile — pinned mesh packaging", () => {
+  const dockerfile = readFileSync(DOCKERFILE, "utf8");
+
+  it("builds both adapters from current source and their locks", () => {
+    expect(dockerfile).toContain("COPY mesh-plugin/src/ ./mesh-plugin/src/");
+    expect(dockerfile).toContain("COPY runtimes/openclaw/src/ ./runtimes/openclaw/src/");
+    expect(dockerfile).toContain("cd /build/mesh-plugin && npm ci --ignore-scripts && npm run build");
+    expect(dockerfile).toContain("cd /build/runtimes/openclaw && npm ci --ignore-scripts && npm run build");
+  });
+
+  it("preserves and verifies the canonical SDK file dependencies", () => {
+    expect(dockerfile).toContain("COPY vendor/agt/*.tgz vendor/agt/SHA256SUMS ./vendor/agt/");
+    expect(dockerfile).toContain('test "$MESH_PROVIDER" = agt');
+    expect(dockerfile).toContain("cd /build/vendor/agt && sha256sum -c SHA256SUMS");
+    expect(dockerfile).not.toMatch(/npm install[^\n]*@microsoft\/agent-governance-sdk/);
+  });
+
+  it("only accepts legacy SDK input identical to the canonical tarball", () => {
+    expect(dockerfile).toContain('test "$AGT_SDK_TARBALL" = "$(basename "$AGT_SDK_TARBALL")"');
+    expect(dockerfile).toContain('cmp "/build/legacy-agt-sdk/$AGT_SDK_TARBALL" "/build/vendor/agt/$AGT_SDK_TARBALL"');
+  });
+
+  it("retains both dependency trees for the relocated mesh link", () => {
+    expect(dockerfile).toContain("COPY --from=cli-builder /build/mesh-plugin/node_modules/ /mesh-plugin/node_modules/");
+    expect(dockerfile).toContain("COPY --from=cli-builder /build/runtimes/openclaw/node_modules/ /opt/kars-plugin/node_modules/");
+    expect(dockerfile).toMatch(/chmod -R a-w [^\n]*\/mesh-plugin/);
+    expect(dockerfile).toMatch(/chmod -R a\+rX [^\n]*\/mesh-plugin/);
+  });
+});
+
 // Skip the behavioural layer on platforms without GNU coreutils (macOS uses BSD cp,
 // which doesn't support --no-preserve=mode — the exact flag the sandbox depends on).
 // The static tests above still run everywhere and catch the regression class.

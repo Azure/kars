@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 use super::*;
+use crate::routes::teams::queries;
 use axum::{
     Router,
     body::Bytes,
@@ -14,6 +15,7 @@ use std::sync::{Arc, Mutex};
 const TEAM: &str = "/apis/kars.azure.com/v1alpha1/namespaces/work/karsteams/eng";
 const TASKS: &str = "/apis/kars.azure.com/v1alpha1/namespaces/work/karstasks";
 const REQUEST: &str = "kars.azure.com/run-now";
+const BACKLOG: &str = "/api/v1/namespaces/work/configmaps/kars-team-tasks-eng";
 
 fn assert_namespace_list(url: &str) {
     let uri: Uri = url.parse().unwrap();
@@ -199,6 +201,45 @@ fn run_ownership_uses_namespace_and_one_exact_controller_not_labels() {
     }
 }
 
+#[test]
+fn retained_runs_use_creation_times_not_random_identifiers_and_keep_custody_fences() {
+    let make = |name: &str, timestamp: Option<&str>| {
+        let mut task = run();
+        task.metadata.name = Some(name.into());
+        task.metadata.uid = Some(format!("uid-{name}"));
+        task.metadata.creation_timestamp =
+            timestamp.map(|value| serde_json::from_value(json!(value)).unwrap());
+        task
+    };
+    let latest = make("run-012345", Some("2026-10-09T02:08:11Z"));
+    let older = make("run-ffffff", Some("2026-10-09T01:08:11Z"));
+    let unknown = make("run-zzzzzz", None);
+    let mut foreign = make("run-foreign", Some("2026-10-09T03:08:11Z"));
+    foreign.metadata.owner_references.as_mut().unwrap()[0].uid = "another-team".into();
+    let mut member = make("run-member", Some("2026-10-09T03:08:11Z"));
+    member
+        .annotations_mut()
+        .insert("kars.azure.com/team-role".into(), "principal".into());
+    for tasks in [
+        vec![older.clone(), foreign.clone(), latest.clone(), member.clone(), unknown.clone()],
+        vec![unknown, member, latest, foreign, older],
+    ] {
+        assert_eq!(
+            queries::generated_runs_newest_first(&team(), tasks),
+            ["run-012345", "run-ffffff", "run-zzzzzz"]
+        );
+    }
+    let same_time = vec![
+        make("run-a", Some("2026-10-09T02:08:11Z")),
+        make("run-b", Some("2026-10-09T04:08:11+02:00")),
+    ];
+    assert_eq!(
+        queries::generated_runs_newest_first(&team(), same_time),
+        ["run-b", "run-a"]
+    );
+    assert!(queries::generated_runs_newest_first(&team(), Vec::new()).is_empty());
+}
+
 #[derive(Default)]
 struct Store {
     team: Value,
@@ -206,6 +247,8 @@ struct Store {
     calls: Vec<(Method, String, Value)>,
     replacement: Option<Value>,
     failure: Option<u16>,
+    backlog: Option<Value>,
+    backlog_replacement: Option<Value>,
 }
 
 struct Server(tokio::task::JoinHandle<()>);
@@ -219,7 +262,8 @@ fn failure(code: u16) -> Response {
     (
         StatusCode::from_u16(code).unwrap(),
         Json(json!({"apiVersion":"v1","kind":"Status",
-        "status":"Failure","reason":"Fixture","message":"Request rejected","code":code})),
+        "status":"Failure","reason":if code == 404 { "NotFound" } else { "Fixture" },
+        "message":"Request rejected","code":code})),
     )
         .into_response()
 }
@@ -244,6 +288,29 @@ async fn handle(
             "metadata":{},"items":state.tasks}),
         )
         .into_response();
+    }
+    if method == Method::GET && uri.path() == BACKLOG {
+        return state
+            .backlog
+            .as_ref()
+            .map(|backlog| Json(backlog.clone()).into_response())
+            .unwrap_or_else(|| failure(404));
+    }
+    if method == Method::PUT && uri.path() == BACKLOG {
+        if let Some(replacement) = state.backlog_replacement.take() {
+            state.backlog = Some(replacement);
+            return failure(409);
+        }
+        let Some(current) = &state.backlog else {
+            return failure(404);
+        };
+        if body["metadata"]["uid"] != current["metadata"]["uid"]
+            || body["metadata"]["resourceVersion"] != current["metadata"]["resourceVersion"]
+        {
+            return failure(409);
+        }
+        state.backlog = Some(body.clone());
+        return Json(body).into_response();
     }
     if method == Method::PATCH && uri.path() == TEAM {
         if let Some(replacement) = state.replacement.take() {
@@ -295,6 +362,82 @@ fn principal() -> Principal {
     }
 }
 
+fn backlog() -> Value {
+    json!({
+        "apiVersion":"v1", "kind":"ConfigMap",
+        "metadata":{"name":"kars-team-tasks-eng","namespace":"work","uid":"backlog-uid",
+            "resourceVersion":"10","ownerReferences":[{"apiVersion":"kars.azure.com/v1alpha1",
+                "kind":"KarsTeam","name":"eng","uid":"team-uid","controller":true}]},
+        "data":{"tasks.json":r#"[{"id":"a","title":"A","status":"pending"}]"#,"retained":"value"}
+    })
+}
+
+#[tokio::test]
+async fn backlog_errors_and_uid_replacement_never_become_an_empty_queue_or_a_new_write() {
+    use crate::routes::teams::{read_tasks, work, work_owner};
+    for mutation in [
+        "malformed",
+        "missing-data",
+        "unowned",
+        "foreign-owner",
+        "replaced",
+    ] {
+        let (cluster, state, _server) = fixture().await;
+        let mut stored = backlog();
+        match mutation {
+            "malformed" => stored["data"]["tasks.json"] = json!("not json"),
+            "missing-data" => {
+                stored["data"].as_object_mut().unwrap().remove("tasks.json");
+            }
+            "unowned" => {
+                stored["metadata"]
+                    .as_object_mut()
+                    .unwrap()
+                    .remove("ownerReferences");
+            }
+            "foreign-owner" => stored["metadata"]["ownerReferences"][0]["uid"] = json!("other"),
+            _ => {}
+        }
+        state.lock().unwrap().backlog = Some(stored.clone());
+        if mutation == "replaced" {
+            let mut replacement = stored.clone();
+            replacement["metadata"]["uid"] = json!("replacement-uid");
+            replacement["metadata"]["resourceVersion"] = json!("11");
+            state.lock().unwrap().backlog_replacement = Some(replacement.clone());
+            let owner = work_owner(&team()).unwrap();
+            let result = work::update(&cluster.configmaps("work"), &owner, None, true, |items| {
+                items[0].title = "Changed".into();
+                Ok(())
+            })
+            .await;
+            assert!(
+                matches!(result, Err(work::Error::Conflict(_))),
+                "{result:?}"
+            );
+            let state = state.lock().unwrap();
+            assert_eq!(state.backlog.as_ref(), Some(&replacement));
+            assert_eq!(
+                state
+                    .calls
+                    .iter()
+                    .filter(|(method, _, _)| *method == Method::PUT)
+                    .count(),
+                1
+            );
+        } else {
+            assert!(read_tasks(&cluster, &team()).await.is_err(), "{mutation}");
+            let state = state.lock().unwrap();
+            assert_eq!(state.backlog.as_ref(), Some(&stored));
+            assert!(
+                state
+                    .calls
+                    .iter()
+                    .all(|(method, _, _)| *method == Method::GET)
+            );
+        }
+    }
+}
+
 #[tokio::test]
 async fn request_records_only_fenced_intent_and_repeated_calls_preserve_it() {
     let (cluster, state, _server) = fixture().await;
@@ -314,11 +457,12 @@ async fn request_records_only_fenced_intent_and_repeated_calls_preserve_it() {
             result["request"],
             state.team["metadata"]["annotations"][REQUEST]
         );
-        assert_eq!(state.calls.len(), 3);
+        assert_eq!(state.calls.len(), 4);
         assert_eq!(state.calls[1].0, Method::GET);
-        assert_namespace_list(&state.calls[1].1);
-        assert_eq!(state.calls[2].0, Method::PATCH);
-        assert_eq!(state.calls[2].2, run_request_patch(&team()).unwrap());
+        assert_eq!(state.calls[1].1, BACKLOG);
+        assert_namespace_list(&state.calls[2].1);
+        assert_eq!(state.calls[3].0, Method::PATCH);
+        assert_eq!(state.calls[3].2, run_request_patch(&team()).unwrap());
         assert!(state.tasks.is_empty());
     }
     let saved = state.lock().unwrap().team.clone();
@@ -416,7 +560,7 @@ async fn namespace_wide_owned_active_runs_block_but_impostors_and_idle_tasks_do_
             assert!(result.is_ok(), "{case}: {result:?}");
         }
         let state = state.lock().unwrap();
-        assert_namespace_list(&state.calls[1].1);
+        assert_namespace_list(&state.calls[2].1);
         assert_eq!(
             state
                 .calls
@@ -461,7 +605,7 @@ async fn concurrent_team_changes_and_api_rejections_never_overwrite_current_stat
         }
         let state = state.lock().unwrap();
         assert_eq!(state.team, expected);
-        assert_eq!(state.calls.len(), 3);
+        assert_eq!(state.calls.len(), 4);
         assert!(state.tasks.is_empty());
     }
 }

@@ -470,9 +470,10 @@ pub async fn put_mcpserver(
 /// `PUT /api/operator/skills` — author/edit a `KarsSkill` (SSA).
 pub async fn put_skill(
     State(state): State<AppState>,
+    axum::extract::Extension(principal): axum::extract::Extension<crate::auth::Principal>,
     Json(req): Json<ApplyCrdRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
-    apply_governance(require_cluster(&state)?, "KarsSkill", req).await
+    super::skills_profiles::edit_skill(require_cluster(&state)?, &principal, req).await
 }
 
 /// Map a delete kube error: 404 → NotFound, 403 → actionable RBAC message,

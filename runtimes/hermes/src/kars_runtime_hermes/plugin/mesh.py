@@ -21,6 +21,7 @@ stub in v0.1 — chunked encrypted transfer ships in v0.2.
 from __future__ import annotations
 
 import asyncio
+import atexit
 import base64
 import json
 import logging
@@ -40,6 +41,8 @@ from kars_agt_mesh import (
 logger = logging.getLogger("kars.hermes.mesh")
 
 _MESH_SINGLETON: MeshClient | None = None
+_MESH_PENDING_CLEANUP: MeshClient | None = None
+_MESH_WORKER_REQUESTED = False
 _MESH_LOCK = threading.Lock()
 _BACKGROUND_LOOP: asyncio.AbstractEventLoop | None = None
 _BACKGROUND_THREAD: threading.Thread | None = None
@@ -70,13 +73,52 @@ def _get_or_init_loop() -> asyncio.AbstractEventLoop:
     return loop
 
 
-def _get_or_init_client() -> MeshClient:
+def _get_or_init_client(*, start_worker: bool = False) -> MeshClient:
     """Process-singleton MeshClient. First call connects (registers
     with registry + opens relay WS). Subsequent calls share state."""
-    global _MESH_SINGLETON
+    global _MESH_SINGLETON, _MESH_PENDING_CLEANUP, _MESH_WORKER_REQUESTED
+    if threading.current_thread() is _BACKGROUND_THREAD:
+        if _MESH_SINGLETON is None:
+            raise MeshTransportError("Mesh is unavailable; initialization must run outside its loop")
+        if _MESH_SINGLETON.connection_auth is not None:
+            _MESH_SINGLETON.connection_auth.check()
+        return _MESH_SINGLETON
     with _MESH_LOCK:
+        from . import sre  # noqa: PLC0415
+
+        if sre.is_enabled():
+            raise MeshTransportError("Mesh is disabled in SRE mode")
+        _MESH_WORKER_REQUESTED |= start_worker
+        required_entra = os.environ.get("MESH_AUTH_BACKEND") == "EntraAgentIdentity"
+        skip_entra = os.environ.get("AGT_SKIP_ENTRA") == "1"
+        if required_entra and skip_entra:
+            raise MeshTransportError("EntraAgentIdentity conflicts with AGT_SKIP_ENTRA=1")
+        if skip_entra or required_entra:
+            os.environ.pop("AGT_OAUTH_TOKEN", None)
+        oauth_token = os.environ.get("AGT_OAUTH_TOKEN", "").strip()
         if _MESH_SINGLETON is not None:
-            return _MESH_SINGLETON
+            client = _MESH_SINGLETON
+            if client.connection_auth is not None:
+                # All lease state is mutated on its owning event loop.
+                asyncio.run_coroutine_threadsafe(
+                    _check_client(client), _get_or_init_loop()
+                ).result(timeout=15)
+            if start_worker:
+                from . import mesh_worker
+
+                mesh_worker.start_worker(_get_or_init_client)
+            return client
+        if _MESH_PENDING_CLEANUP is not None:
+            # The SDK caches clients itself. If a previous disconnect raised,
+            # finish that teardown before its cached object can be reused.
+            from .mesh_auth import bounded_cleanup
+
+            asyncio.run_coroutine_threadsafe(
+                bounded_cleanup(_MESH_PENDING_CLEANUP), _get_or_init_loop()
+            ).result(timeout=15)
+            _MESH_PENDING_CLEANUP = None
+        if oauth_token:
+            os.environ["AGT_OAUTH_TOKEN"] = oauth_token
 
         name = os.environ.get("SANDBOX_NAME", "hermes")
         # Mesh routing through the loopback inference-router. The
@@ -100,7 +142,13 @@ def _get_or_init_client() -> MeshClient:
         registry_url = "http://127.0.0.1:8443/agt/registry"
         hermes_home = Path(os.environ.get("HERMES_HOME", "/sandbox/.hermes"))
         identity_path = hermes_home / ".agt" / "identity.json"
-        trust_threshold = int(os.environ.get("AGT_TRUST_THRESHOLD", "0"))
+        mission = None
+        if os.environ.get("KARS_MISSION_DISPATCH_ENABLED") == "true":
+            from .mission_receiver import bootstrap
+
+            mission = bootstrap(hermes_home)
+            identity_path = mission[0]
+        trust_threshold = 0 if skip_entra else int(os.environ.get("AGT_TRUST_THRESHOLD", "0"))
 
         config = MeshConfig(
             name=name,
@@ -111,72 +159,121 @@ def _get_or_init_client() -> MeshClient:
             user_agent=f"kars-agt-mesh/0.1.0 (hermes/{os.environ.get('HERMES_VERSION','0.15.2')})",
         )
         client = MeshClient(config)
+        receiver = None
+        if mission is not None:
+            from .mission_receiver import MissionReceiver
 
-        # Connect on the background loop. Blocks until first connection
-        # succeeds OR the registry rejects us.
+            receiver = getattr(client, "_kars_mission_receiver", None) or MissionReceiver(client, *mission[1:])
+
+        # Keep initialization and cleanup on the owning loop. The timeout
+        # must cancel connect itself, not just abandon its waiting caller.
+        # Do not expose the client to tools/the inbox worker until verified.
         loop = _get_or_init_loop()
-        future = asyncio.run_coroutine_threadsafe(client.connect(), loop)
-        future.result(timeout=30.0)
+        _MESH_PENDING_CLEANUP = client
+        future = asyncio.run_coroutine_threadsafe(
+            _connect_and_verify(client, oauth_token, required_entra), loop
+        )
+        future.result(timeout=60)
 
-        _MESH_SINGLETON = client
+        asyncio.run_coroutine_threadsafe(_publish_client(client, receiver), loop).result(timeout=15)
         logger.info(
             "MeshClient ready: name=%s relay=%s registry=%s",
             name,
             relay_url,
             registry_url,
         )
-
-        # ── Entra OAuth identity verification (opt-in) ─────────────────
-        # Mirrors OpenClaw's `/registry/verify` call in
-        # runtimes/openclaw/src/index.ts: when AGT_OAUTH_TOKEN is set
-        # (the controller injects a token exchanged from the pod's
-        # workload identity), POST it to the registry so the operator
-        # panel can show "Verified (Entra <appId-prefix>…)" tier instead
-        # of "Anonymous". Without this call, every Hermes sandbox stays
-        # Anonymous in the operator view even though the underlying
-        # Entra Agent ID is correctly provisioned.
-        oauth_token = os.environ.get("AGT_OAUTH_TOKEN", "").strip()
-        if oauth_token:
-            try:
-                from . import router_client  # noqa: PLC0415
-
-                # Use the registry-canonical DID (the AGT registry
-                # stores agents under `did:mesh:<sha256[:32]>`; the
-                # local kars_agt_mesh.identity emits the same shape, so
-                # the two agree).
-                verify_id = client._identity.did  # noqa: SLF001
-                resp = router_client.call(
-                    "POST",
-                    "/agt/registry/v1/registry/verify",
-                    json={
-                        "amid": verify_id,
-                        "verification_token": oauth_token,
-                    },
-                )
-                if resp.status_code < 400:
-                    logger.info(
-                        "AGT identity verified via OAuth — tier upgraded "
-                        "to 'verified' (id=%s)",
-                        verify_id,
-                    )
-                else:
-                    logger.warning(
-                        "AGT OAuth verification HTTP %s (anonymous tier): %s",
-                        resp.status_code,
-                        resp.text[:200],
-                    )
-            except Exception as exc:  # noqa: BLE001
-                logger.warning(
-                    "AGT OAuth verification failed (anonymous tier): %s",
-                    exc,
-                )
-        else:
-            logger.debug(
-                "AGT_OAUTH_TOKEN unset — Hermes sandbox stays at "
-                "anonymous tier in operator view"
-            )
-
         return client
+
+
+async def _publish_client(client, receiver):
+    global _MESH_SINGLETON, _MESH_PENDING_CLEANUP
+    if client.connection_auth is not None:
+        client.connection_auth.check()
+    client._kars_mission_receiver = receiver
+    _MESH_PENDING_CLEANUP = None
+    _MESH_SINGLETON = client
+    from . import mesh_worker
+
+    if _MESH_WORKER_REQUESTED or (mesh_worker._WORKER_TASK is not None and mesh_worker._WORKER_TASK.done()):
+        mesh_worker.start_worker(_get_or_init_client)
+
+
+async def _check_client(client):
+    client.connection_auth.check()
+
+
+def _quarantine(client):
+    global _MESH_SINGLETON, _MESH_PENDING_CLEANUP
+    if _MESH_SINGLETON is client:
+        _MESH_SINGLETON = None
+    _MESH_PENDING_CLEANUP = client
+
+
+async def _connect_and_verify(client: MeshClient, oauth_token: str, required_entra: bool) -> None:
+    from .mesh_auth import RequiredEntraLease, bounded_cleanup
+
+    client.connection_auth = RequiredEntraLease(client, _quarantine) if required_entra else None
+    try:
+        if required_entra:
+            await client.connection_auth.mint_initial()
+        await asyncio.wait_for(client.connect(), timeout=30.0)
+        if required_entra:
+            client.connection_auth.check()
+        elif oauth_token:
+            try:
+                # The router client has finite HTTP timeouts. Keep its sync
+                # request off the mesh loop so the relay can still shut down.
+                await asyncio.to_thread(_verify_identity, client, oauth_token)
+            except Exception:  # noqa: BLE001
+                logger.warning("Optional AGT OAuth verification failed (anonymous tier)")
+        else:
+            logger.debug("AGT_OAUTH_TOKEN unset — anonymous mesh explicitly permitted by configuration")
+    except BaseException:
+        # Includes connect cancellation/timeouts and verification rejection.
+        # disconnect closes the relay/HTTP client and releases the SDK's
+        # exclusive prekey lock; a later getter can safely retry the same client.
+        if client.connection_auth is not None:
+            client.connection_auth.stop()
+        await bounded_cleanup(client)
+        raise
+
+
+def shutdown_mesh() -> None:
+    """Bounded process shutdown; failed teardown stays quarantined, never unlocked."""
+    global _MESH_SINGLETON, _MESH_PENDING_CLEANUP
+    from .mesh_auth import bounded_cleanup
+
+    with _MESH_LOCK:
+        client = _MESH_SINGLETON or _MESH_PENDING_CLEANUP
+        if client is None or _BACKGROUND_LOOP is None or not _BACKGROUND_LOOP.is_running():
+            return
+        _quarantine(client)
+        try:
+            asyncio.run_coroutine_threadsafe(bounded_cleanup(client), _BACKGROUND_LOOP).result(timeout=15)
+        except Exception:
+            logger.error("Mesh shutdown incomplete; client quarantined")
+        else:
+            _MESH_PENDING_CLEANUP = None
+
+
+# Hermes 0.16.0 has session hooks, not a process-shutdown hook. Its gateway
+# handles SIGTERM/SIGINT with a graceful return; retain those signal handlers.
+atexit.register(shutdown_mesh)
+
+
+def _verify_identity(client: MeshClient, oauth_token: str) -> None:
+    from . import router_client  # noqa: PLC0415
+
+    verify_id = client._identity.did  # noqa: SLF001
+    resp = router_client.call(
+        "POST",
+        "/agt/registry/v1/registry/verify",
+        json={"amid": verify_id, "verification_token": oauth_token},
+    )
+    if not 200 <= resp.status_code < 300:
+        # Do not include the response body: an upstream may echo credentials.
+        raise MeshTransportError(f"AGT OAuth verification HTTP {resp.status_code}")
+    logger.info("AGT identity verified via OAuth (id=%s)", verify_id)
 
 
 # ── Hermes tool handlers ────────────────────────────────────────────────
@@ -299,6 +396,8 @@ def _kars_mesh_send(args: dict[str, Any], **_kwargs: Any) -> str:
 def _kars_mesh_inbox(_args: dict[str, Any], **_kwargs: Any) -> str:
     """``kars_mesh_inbox()`` — drain all currently-queued messages
     without blocking. Returns ``{"messages": [...]}``."""
+    if os.environ.get("KARS_MISSION_DISPATCH_ENABLED") == "true":
+        return json.dumps({"error": "Installed mission mode reserves the inbox for the shared mesh listener"})
     try:
         client = _get_or_init_client()
     except Exception as exc:  # noqa: BLE001
@@ -332,6 +431,8 @@ def _kars_mesh_await(args: dict[str, Any], **_kwargs: Any) -> str:
     """``kars_mesh_await(senders=[name,...], timeout_seconds=N)`` —
     block until at least one message arrives from each listed sender
     or the timeout fires."""
+    if os.environ.get("KARS_MISSION_DISPATCH_ENABLED") == "true":
+        return json.dumps({"error": "Installed mission mode reserves the inbox for the shared mesh listener"})
     try:
         client = _get_or_init_client()
     except Exception as exc:  # noqa: BLE001

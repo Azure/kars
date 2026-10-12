@@ -36,6 +36,26 @@ tool-call count, and hosts reached — the "who did what".
 
 ## Revision-bound router observations
 
+### Delegation topology versus AgentMesh communication
+
+Console → Sandboxes shows controller-recorded sandbox ancestry. Its relationships
+are not evidence of AgentMesh sessions or messages. Agent-to-agent transport runs
+through the AgentMesh relay, proxied by each sandbox's inference router.
+
+Registry identity verification, KNOCK/session acceptance, encrypted transmission,
+recipient decryption and a reply are separate observations. Neither registration
+nor a KNOCK establishes that useful collaboration occurred. Router frame counters
+distinguish message frames from heartbeats, but do not prove decryption or a
+task's result. The topology does not currently display a correlated run-level
+conversation record. Runtime logs and captured tool records may provide partial
+evidence; do not interpret missing records as proof that no exchange occurred.
+
+Cross-harness collaboration requires OpenClaw and Hermes to work on the same
+assignment with bidirectional exchanges and a combined result. Two independent
+successful runs do not establish this.
+
+### Captured observations
+
 A delivered Mission can show **runtime-forwarded router observations** beside its
 recorded producer and run. OpenClaw captures the scope and round IDs returned by
 the shared inference router, requests only those recorded rounds, and forwards

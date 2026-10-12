@@ -1,3 +1,4 @@
+{{- define "kars.controller.bootstrapDeployment" -}}
 {{/* Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. */}}{{- $localInference := .Values.localInference | default dict }}
 {{- $privacyRpc := .Values.observationPrivacyRpc | default dict }}
@@ -6,6 +7,12 @@ Licensed under the MIT License. */}}{{- $localInference := .Values.localInferenc
 {{- include "kars.missionDispatcher.validate" . }}
 {{- $inferenceCredentials := .Values.inferenceRouter.azure.openai.credentials | default dict }}
 {{- $budgetTls := (.Values.inferenceBudget | default dict).tls | default dict }}
+{{- $legacyEvalRunner := false }}
+{{- range .Values.controller.extraEnv }}
+{{- if eq .name "KARS_CONFORMANCE_RUNNER_IMAGE" }}
+{{- $legacyEvalRunner = true }}
+{{- end }}
+{{- end }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -123,6 +130,10 @@ spec:
               value: "{{ .Values.inferenceRouter.image.repository }}:{{ .Values.inferenceRouter.image.tag }}"
             - name: SANDBOX_IMAGE
               value: "{{ .Values.sandbox.image.repository }}:{{ .Values.sandbox.image.tag }}"
+            {{- if not $legacyEvalRunner }}
+            - name: KARS_CONFORMANCE_RUNNER_IMAGE
+              value: {{ (.Values.evals | default dict).runnerImage | default "ghcr.io/azure/kars-conformance-runner:latest" | quote }}
+            {{- end }}
             - name: MCP_MANAGED_NAMESPACE
               value: {{ (.Values.managedMcp | default dict).namespace | default "kars-mcp" | quote }}
             - name: MCP_PLAYWRIGHT_IMAGE
@@ -267,3 +278,13 @@ spec:
           emptyDir:
             medium: Memory
             sizeLimit: 64Mi
+{{- end }}
+{{- $deployment := include "kars.controller.bootstrapDeployment" . | fromYaml -}}
+{{- $live := lookup "apps/v1" "Deployment" .Release.Namespace "kars-controller" | default dict -}}
+{{- $settings := dict -}}
+{{- $grants := dict -}}
+{{- if dig "spec" "template" "metadata" "annotations" "kars.azure.com/credential-settings-revision" "" $live -}}
+  {{- $settings = lookup "v1" "Secret" .Release.Namespace "kars-credential-controller-settings" | default dict -}}
+  {{- $grants = lookup "kars.azure.com/v1alpha1" "KarsCredentialGrant" .Release.Namespace "" | default dict -}}
+{{- end -}}
+{{- include "kars.controller.operatorSettings" (dict "deployment" $deployment "live" $live "settings" $settings "grants" $grants) }}

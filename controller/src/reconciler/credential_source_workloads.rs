@@ -15,7 +15,8 @@ pub(super) fn owned(meta: &ObjectMeta, sandbox: &KarsSandbox, ns: &Namespace) ->
     let authored = meta.managed_fields.as_ref().is_some_and(|fields| {
         fields.iter().any(|entry| {
             entry.manager.as_deref() == Some(crate::field_managers::CLAWSANDBOX)
-                && entry.operation.as_deref() == Some("Apply")
+                // Atomic CREATE records Update even with an explicit field manager.
+                && matches!(entry.operation.as_deref(), Some("Apply" | "Update"))
                 && entry
                     .fields_v1
                     .as_ref()

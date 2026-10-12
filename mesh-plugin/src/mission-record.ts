@@ -22,9 +22,10 @@ export function unpackMissionAttempt(cm: MissionConfigMap, candidate: MissionRec
   const attempt = JSON.parse(cm.data["attempt.json"]) as MissionAttempt;
   if (!attempt || attempt.version !== 1 || attempt.candidate?.taskUid !== candidate.taskUid || attempt.candidate?.runNonce !== candidate.runNonce
     || attempt.candidate?.taskName !== candidate.taskName || attempt.candidate?.namespace !== candidate.namespace
+    || (attempt.candidate.runtime !== undefined && attempt.candidate.runtime !== "OpenClaw" && attempt.candidate.runtime !== "Hermes")
     || parseMissionMessage(attempt.assignment)?.type !== "mission:assign"
     || !sameMissionTarget(attempt.candidate, attempt.assignment)
-    || !sameMissionContract(missionContract(attempt.candidate.reviewedPhase, attempt.candidate.inputArtifacts), attempt.assignment)
+    || !sameMissionContract(missionContract(attempt.candidate.reviewedPhase, attempt.candidate.inputArtifacts, attempt.candidate.requiredOutputs), attempt.assignment)
     || attempt.contentDigest !== missionContentDigest(attempt.candidate.content)
     || attempt.assignment.content !== attempt.candidate.content || !Array.isArray(attempt.events) || attempt.events.length > 128
     || !["dispatching", "accepted", "running", "succeeded", "failed", "rejected", "uncertain"].includes(attempt.phase)
@@ -40,6 +41,7 @@ export function unpackMissionAttempt(cm: MissionConfigMap, candidate: MissionRec
       || !sameMissionTarget(attempt.assignment, attempt.reply) || !sameMissionContract(attempt.assignment, attempt.reply)
       || attempt.reply.bootId !== attempt.assignment.bootId
       || attempt.reply.assignmentId !== attempt.assignment.assignmentId
+      || attempt.reply.activityFormat !== attempt.assignment.activityFormat
       || (attempt.reply.artifactFormat !== undefined && attempt.reply.artifactFormat !== attempt.assignment.artifactFormat)))
     || (["accepted", "running", "succeeded", "failed", "rejected"].includes(attempt.phase) && attempt.reply?.status !== attempt.phase)) {
     throw new Error("Malformed durable mission attempt");
@@ -56,7 +58,7 @@ export function unpackMissionAttempt(cm: MissionConfigMap, candidate: MissionRec
       || ["succeeded", "failed", "rejected"].includes(lastStatus ?? "")
       || (attempt.assignment.version !== 1 && !missionEvidenceAdvances(lastEvidence, event.evidence))
       || !parseMissionMessage({ ...attempt.assignment, inputArtifacts: undefined, type: "mission:reply", status: event.status,
-        evidence: event.evidence, ...(event.status === "succeeded" ? { output: attempt.reply?.output } : {}) })) {
+        evidence: event.evidence, ...(event.status === "succeeded" ? { output: attempt.reply?.output, artifacts: attempt.reply?.artifacts } : {}) })) {
       throw new Error("Malformed mission event journal");
     }
     lastTime = Date.parse(event.at);
@@ -76,6 +78,7 @@ export function missionResultMaps(attempt: MissionAttempt, role: "canonical" | "
   if (!reply || !["succeeded", "failed", "rejected"].includes(attempt.phase) || reply.status !== attempt.phase
     || parseMissionMessage(reply)?.type !== "mission:reply" || !sameMissionTarget(assignment, reply) || !sameMissionContract(assignment, reply)
     || assignment.assignmentId !== reply.assignmentId || assignment.bootId !== reply.bootId
+    || assignment.activityFormat !== reply.activityFormat
     || (reply.artifactFormat !== undefined && reply.artifactFormat !== assignment.artifactFormat)) throw new Error("Mission has no valid terminal reply");
   const prefix = "kars.azure.com/";
   const key = missionAttemptName(candidate).replace("kars-mission-attempt-", "");

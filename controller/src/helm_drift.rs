@@ -31,6 +31,24 @@
 #![allow(dead_code)]
 
 #[cfg(test)]
+pub(crate) fn render_helm_template(path: &std::path::Path, label: &str) -> String {
+    let chart = path.parent().unwrap().parent().unwrap();
+    let template = format!("templates/{}", path.file_name().unwrap().to_str().unwrap());
+    let output = std::process::Command::new("helm")
+        .args(["template", "kars"])
+        .arg(chart)
+        .args(["--namespace", "kars-system", "--show-only", &template])
+        .output()
+        .expect("Helm is required to compare rendered CRD templates");
+    assert!(
+        output.status.success(),
+        "Helm failed rendering {label}: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).expect("rendered Helm schema must be UTF-8")
+}
+
+#[cfg(test)]
 use crate::crd_validations::{
     a2a_agent_crd, egress_approval_crd, inference_policy_crd, kars_approval_crd, kars_eval_crd,
     kars_memory_crd, kars_profile_crd, kars_receipt_crd, kars_skill_crd, kars_sre_action_crd,
@@ -241,21 +259,7 @@ mod tests {
             }
         };
         let helm_text = if helm_text.contains("{{") {
-            let path = std::path::Path::new(helm_path);
-            let chart = path.parent().unwrap().parent().unwrap();
-            let template = format!("templates/{}", path.file_name().unwrap().to_str().unwrap());
-            let output = std::process::Command::new("helm")
-                .args(["template", "kars"])
-                .arg(chart)
-                .args(["--namespace", "kars-system", "--show-only", &template])
-                .output()
-                .expect("Helm is required to compare rendered CRD templates");
-            assert!(
-                output.status.success(),
-                "Helm failed rendering {label}: {}",
-                String::from_utf8_lossy(&output.stderr)
-            );
-            String::from_utf8(output.stdout).expect("rendered Helm schema must be UTF-8")
+            super::render_helm_template(std::path::Path::new(helm_path), label)
         } else {
             helm_text
         };

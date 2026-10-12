@@ -274,11 +274,11 @@ export function getReview(
   );
 }
 
-/** Record a review decision; request_changes re-drives the producing task. */
+/** Record a review decision; a distinct revision preserves the existing launch gate. */
 export function postReview(
   namespace: string,
   name: string,
-  body: { decision: "approve" | "request_changes"; comment?: string },
+  body: { decision: "approve" | "request_changes"; assignment_nonce: string; comment?: string },
 ): Promise<import("./types").ReviewState> {
   return requestJson<import("./types").ReviewState>(
     `/api/namespaces/${encodeURIComponent(namespace)}/tasks/${encodeURIComponent(name)}/review`,
@@ -671,17 +671,21 @@ export function deleteGovernance(
  * approved+locked skills. */
 export function approveSkill(
   name: string,
-  approved_by?: string,
+  review: { uid: string; generation: number; version_digest: string },
 ): Promise<import("./types").SkillSummary> {
   return requestJson(`/api/operator/skills/${encodeURIComponent(name)}/approve`, {
     method: "POST",
-    body: JSON.stringify({ approved_by: approved_by ?? null }),
+    body: JSON.stringify(review),
   });
 }
 
 /** Revoke a skill's approval, returning it to review. */
-export function revokeSkill(name: string): Promise<import("./types").SkillSummary> {
-  return requestJson(`/api/operator/skills/${encodeURIComponent(name)}/revoke`, { method: "POST" });
+export function revokeSkill(name: string, uid: string): Promise<import("./types").SkillSummary> {
+  return requestJson(`/api/operator/skills/${encodeURIComponent(name)}/revoke`, { method: "POST", body: JSON.stringify({ uid }) });
+}
+
+export function getSkillPackage(name: string): Promise<{ skill: import("./types").SkillSummary; files: Record<string, string> }> {
+  return requestJson(`/api/operator/skills/${encodeURIComponent(name)}/package`);
 }
 
 /** Replicate a mission's exact package k times to measure pass^k reliability. */
@@ -738,7 +742,7 @@ export function verifyFoundry(): Promise<FoundryVerifyResult> {
 export function listAgents(): Promise<import("./types").AgentLifecycle[]> {
   return requestJson("/api/agents");
 }
-export function createTeam(namespace: string, body: { name: string; display_name?: string; charter: string; budget?: import("./types").Budget; tier?: number; authority_ceiling?: number; delegation_depth?: number; reporting_to?: string; knowledge_commons?: string; memory?: string; tool_policy?: string; runtime?: string; model?: string; model_fallbacks?: string[]; mcp_servers?: string[]; egress?: { host: string; port?: number }[]; egress_mode?: "learning" | "strict"; cadence_minutes?: number; lifecycle_mode?: import("./types").TeamLifecycleMode; warm_idle_seconds?: number; launch?: boolean; roles?: CreateRole[]; execution_plan?: import("./types").ExecutionPlan; git_write_repos?: string[]; created_by?: string }): Promise<{ created: boolean; name: string }> {
+export function createTeam(namespace: string, body: { name: string; display_name?: string; charter: string; budget?: import("./types").Budget; tier?: number; authority_ceiling?: number; delegation_depth?: number; reporting_to?: string; knowledge_commons?: string; memory?: string; tool_policy?: string; pin_tool_policy?: boolean; runtime?: string; model?: string; model_fallbacks?: string[]; mcp_servers?: string[]; egress?: { host: string; port?: number }[]; egress_mode?: "learning" | "strict"; cadence_minutes?: number; lifecycle_mode?: import("./types").TeamLifecycleMode; warm_idle_seconds?: number; launch?: boolean; roles?: CreateRole[]; execution_plan?: import("./types").ExecutionPlan; git_write_repos?: string[]; created_by?: string }): Promise<{ created: boolean; name: string }> {
   return requestJson(`/api/namespaces/${encodeURIComponent(namespace)}/teams`, { method: "POST", body: JSON.stringify(body) });
 }
 export function updateTeam(namespace: string, name: string, body: { charter?: string; paused?: boolean; cadence_minutes?: number; reporting_to?: string; lifecycle_mode?: import("./types").TeamLifecycleMode; warm_idle_seconds?: number; runtime?: string; model?: string; model_fallbacks?: string[]; memory?: string; mcp_servers?: string[]; execution_plan?: import("./types").ExecutionPlan }): Promise<{ updated: boolean }> {

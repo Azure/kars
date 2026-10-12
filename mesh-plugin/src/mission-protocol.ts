@@ -10,6 +10,8 @@ export const INPUT_MISSION_PROTOCOL_VERSION = 3;
 export const MAX_MISSION_MESSAGE_BYTES = 192 * 1024;
 export const MAX_MISSION_ARTIFACT_BYTES = 128 * 1024;
 export const MAX_MISSION_ARTIFACTS = 16;
+export const MISSION_ACTIVITY_FORMAT = "router-observations-v1";
+export const MAX_MISSION_ACTIVITY_BYTES = 32 * 1024;
 export type MissionArtifacts = Record<string, string>;
 
 export function validMissionArtifacts(value: unknown): value is MissionArtifacts {
@@ -38,17 +40,20 @@ export interface MissionTarget {
   dispatcherDid: string;
 }
 export interface MissionContract {
-  version: 1 | 2 | 3;
+  version: 1 | 2 | 3 | 4;
   reviewedPhase?: FilesystemPhase;
   phaseDigest?: string;
   inputDigest?: string;
+  requiredOutputs?: readonly string[];
 }
 export interface MissionProbe extends MissionTarget, MissionContract {
   type: "mission:probe";
   challenge: string;
+  activityFormat?: typeof MISSION_ACTIVITY_FORMAT;
 }
 export interface MissionAssignment extends MissionTarget, MissionContract {
   type: "mission:assign";
+  activityFormat?: typeof MISSION_ACTIVITY_FORMAT;
   bootId: string;
   assignmentId: string;
   artifactFormat?: "text-v1";
@@ -57,6 +62,8 @@ export interface MissionAssignment extends MissionTarget, MissionContract {
 }
 export interface MissionReply extends MissionTarget, MissionContract {
   type: "mission:reply";
+  activityFormat?: typeof MISSION_ACTIVITY_FORMAT;
+  routerObservations?: string;
   bootId: string;
   challenge?: string;
   assignmentId?: string;
@@ -135,17 +142,30 @@ export function snapshotMissionData(value: unknown): unknown {
   return result;
 }
 
-export function missionContract(reviewedPhase?: unknown, inputArtifacts?: unknown): MissionContract {
+export function missionRequiredOutputs(value: unknown): readonly string[] {
+  const names = snapshotMissionData(value);
+  if (!Array.isArray(names) || names.length > MAX_MISSION_ARTIFACTS || new Set(names).size !== names.length
+    || !names.every(name => typeof name === "string" && validMissionArtifacts({ [name]: "required" }))) {
+    throw new Error("Invalid required mission output names");
+  }
+  return Object.freeze([...(names as string[])].sort());
+}
+
+export function missionContract(reviewedPhase?: unknown, inputArtifacts?: unknown, requiredOutputs?: unknown): MissionContract {
   if (reviewedPhase === undefined) {
-    if (inputArtifacts !== undefined) throw new Error("Mission inputs require a reviewed read-capable phase");
+    if (inputArtifacts !== undefined || requiredOutputs !== undefined) throw new Error("Mission inputs and outputs require a reviewed phase");
     return Object.freeze({ version: MISSION_PROTOCOL_VERSION });
   }
   const phase = filesystemPhase(reviewedPhase);
   Object.freeze(phase.capabilities);
   Object.freeze(phase.requiredToolCalls);
   const contract = { reviewedPhase: Object.freeze(phase), phaseDigest: missionPhaseDigest(phase) };
+  if (inputArtifacts !== undefined && (!phase.capabilities.includes("filesystem-read") || phase.maxToolCalls < 1)) {
+    throw new Error("Mission inputs require a reviewed read-capable phase");
+  }
+  if (requiredOutputs !== undefined) return Object.freeze({ version: 4, ...contract,
+    ...(inputArtifacts !== undefined ? { inputDigest: missionInputsDigest(inputArtifacts) } : {}), requiredOutputs: missionRequiredOutputs(requiredOutputs) });
   if (inputArtifacts === undefined) return Object.freeze({ version: PHASE_MISSION_PROTOCOL_VERSION, ...contract });
-  if (!phase.capabilities.includes("filesystem-read") || phase.maxToolCalls < 1) throw new Error("Mission inputs require a reviewed read-capable phase");
   return Object.freeze({ version: INPUT_MISSION_PROTOCOL_VERSION, ...contract, inputDigest: missionInputsDigest(inputArtifacts) });
 }
 
@@ -158,21 +178,23 @@ export function parseMissionContract(value: unknown): MissionContract | null {
     if (v.version === MISSION_PROTOCOL_VERSION) {
       return keys.length === 1 && keys[0] === "version" ? missionContract() : null;
     }
-    const hasInputs = v.version === INPUT_MISSION_PROTOCOL_VERSION;
-    const expected = hasInputs ? ["version", "reviewedPhase", "phaseDigest", "inputDigest"] : ["version", "reviewedPhase", "phaseDigest"];
-    if ((!hasInputs && v.version !== PHASE_MISSION_PROTOCOL_VERSION) || keys.length !== expected.length
+    const outputs = v.version === 4;
+    const hasInputs = v.version === INPUT_MISSION_PROTOCOL_VERSION || (outputs && v.inputDigest !== undefined);
+    const expected = ["version", "reviewedPhase", "phaseDigest", ...(hasInputs ? ["inputDigest"] : []), ...(outputs ? ["requiredOutputs"] : [])];
+    if ((!outputs && !hasInputs && v.version !== PHASE_MISSION_PROTOCOL_VERSION) || keys.length !== expected.length
       || !keys.every(key => typeof key === "string" && expected.includes(key))) return null;
-    const contract = missionContract(v.reviewedPhase);
-    if (contract.version !== PHASE_MISSION_PROTOCOL_VERSION || v.phaseDigest !== contract.phaseDigest) return null;
+    const contract = missionContract(v.reviewedPhase, undefined, outputs ? v.requiredOutputs : undefined);
+    if (contract.version !== (outputs ? 4 : PHASE_MISSION_PROTOCOL_VERSION) || v.phaseDigest !== contract.phaseDigest) return null;
     if (!hasInputs) return contract;
     if (typeof v.inputDigest !== "string" || !/^sha256:[a-f0-9]{64}$/.test(v.inputDigest)
       || !contract.reviewedPhase!.capabilities.includes("filesystem-read") || contract.reviewedPhase!.maxToolCalls < 1) return null;
-    return Object.freeze({ ...contract, version: INPUT_MISSION_PROTOCOL_VERSION, inputDigest: v.inputDigest });
+    return Object.freeze({ ...contract, version: outputs ? 4 : INPUT_MISSION_PROTOCOL_VERSION, inputDigest: v.inputDigest });
   } catch { return null; }
 }
 
 export function sameMissionContract(a: MissionContract, b: MissionContract): boolean {
-  return a.version === b.version && a.phaseDigest === b.phaseDigest && a.inputDigest === b.inputDigest;
+  return a.version === b.version && a.phaseDigest === b.phaseDigest && a.inputDigest === b.inputDigest
+    && JSON.stringify(a.requiredOutputs) === JSON.stringify(b.requiredOutputs);
 }
 
 /** A constrained execution cannot erase prior counts or make unknown consumed usage known. */
@@ -192,14 +214,15 @@ export function parseMissionMessage(value: unknown): MissionMessage | null {
   try { value = snapshotMissionData(value); } catch { return null; }
   const v = value as Record<string, unknown>;
   if (v.version === MISSION_PROTOCOL_VERSION) {
-    if (v.reviewedPhase !== undefined || v.phaseDigest !== undefined || v.inputDigest !== undefined || v.inputArtifacts !== undefined) return null;
-  } else if (v.version === PHASE_MISSION_PROTOCOL_VERSION || v.version === INPUT_MISSION_PROTOCOL_VERSION) {
+    if (v.reviewedPhase !== undefined || v.phaseDigest !== undefined || v.inputDigest !== undefined || v.inputArtifacts !== undefined || v.requiredOutputs !== undefined) return null;
+  } else if (v.version === PHASE_MISSION_PROTOCOL_VERSION || v.version === INPUT_MISSION_PROTOCOL_VERSION || v.version === 4) {
     try {
-      const hasInputs = v.version === INPUT_MISSION_PROTOCOL_VERSION;
+      if (v.version !== 4 && v.requiredOutputs !== undefined) return null;
+      const hasInputs = v.version === INPUT_MISSION_PROTOCOL_VERSION || (v.version === 4 && v.inputDigest !== undefined);
       if (!hasInputs && (v.inputDigest !== undefined || v.inputArtifacts !== undefined)) return null;
       if (v.type !== "mission:assign" && v.inputArtifacts !== undefined) return null;
       const contract = parseMissionContract({ version: v.version, reviewedPhase: v.reviewedPhase, phaseDigest: v.phaseDigest,
-        ...(hasInputs ? { inputDigest: v.inputDigest } : {}) });
+        ...(hasInputs ? { inputDigest: v.inputDigest } : {}), ...(v.version === 4 ? { requiredOutputs: v.requiredOutputs } : {}) });
       if (!contract) return null;
       const inputs = hasInputs && v.type === "mission:assign" ? missionInputs(v.inputArtifacts) : undefined;
       if (inputs && missionInputsDigest(inputs) !== contract.inputDigest) return null;
@@ -207,6 +230,18 @@ export function parseMissionMessage(value: unknown): MissionMessage | null {
       if (Buffer.byteLength(JSON.stringify(value)) > MAX_MISSION_MESSAGE_BYTES) return null;
     } catch { return null; }
   } else return null;
+  if (v.activityFormat !== undefined && v.activityFormat !== MISSION_ACTIVITY_FORMAT) return null;
+  if (v.routerObservations !== undefined) {
+    if (v.type !== "mission:reply" || v.status !== "running" || v.activityFormat !== MISSION_ACTIVITY_FORMAT
+      || typeof v.routerObservations !== "string" || Buffer.byteLength(v.routerObservations) > MAX_MISSION_ACTIVITY_BYTES) return null;
+    try {
+      const observations = JSON.parse(v.routerObservations);
+      if (!observations || observations.version !== 1 || observations.source !== "runtime-forwarded-router-observations"
+        || observations.coverage !== "returned-responses-only" || !Number.isSafeInteger(observations.responses)
+        || observations.responses < 1 || !Array.isArray(observations.rounds)
+        || !["observed", "unavailable"].includes(observations.state)) return null;
+    } catch { return null; }
+  }
   if (v.artifactFormat !== undefined && (v.artifactFormat !== "text-v1" || !["mission:assign", "mission:reply"].includes(String(v.type)))) return null;
   if (v.artifacts !== undefined && (v.type !== "mission:reply" || v.status !== "succeeded" || v.artifactFormat !== "text-v1" || !validMissionArtifacts(v.artifacts))) return null;
   if (![v.taskName, v.taskUid, v.sandboxUid, v.podUid, v.runNonce].every(id)
@@ -238,6 +273,8 @@ export function parseMissionMessage(value: unknown): MissionMessage | null {
   if (v.status === "succeeded") {
     const e = v.evidence as MissionReply["evidence"];
     if (typeof v.output !== "string" || !v.output.trim() || !e?.usage || e.usage.totalTokens <= 0 || e.rounds <= 0) return null;
+    if ((value as MissionContract).requiredOutputs?.some(name => v.artifactFormat !== "text-v1"
+      || !Object.hasOwn(v.artifacts ?? {}, name))) return null;
   }
   return value as MissionReply;
 }

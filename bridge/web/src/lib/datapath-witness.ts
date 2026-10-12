@@ -3,8 +3,18 @@
 
 import type { DatapathWitness } from "./types/operations";
 
-export const WITNESS_ENABLE_COMMAND = 'helm upgrade --install kars-datapath-witness ./deploy/helm/kars-datapath-witness --namespace kars-system --kube-context "${KARS_CONTEXT:?Set the reviewed kube context}" --values "${WITNESS_VALUES:?Set the reviewed witness values file}" --set enabled=true --wait --timeout 10m';
-export const WITNESS_DISABLE_COMMAND = 'helm upgrade kars-datapath-witness ./deploy/helm/kars-datapath-witness --namespace kars-system --kube-context "${KARS_CONTEXT:?Set the reviewed kube context}" --reuse-values --set enabled=false --wait --timeout 10m';
+export const WITNESS_ENABLE_COMMAND = 'helm upgrade kars ./deploy/helm/kars --namespace kars-system --kube-context "${KARS_CONTEXT:?Set the reviewed kube context}" --reuse-values --values "${WITNESS_VALUES:?Set the reviewed Core witness values file}" --set datapathWitness.enabled=true --wait --timeout 10m';
+export const WITNESS_DISABLE_COMMAND = 'helm upgrade kars ./deploy/helm/kars --namespace kars-system --kube-context "${KARS_CONTEXT:?Set the reviewed kube context}" --reuse-values --set datapathWitness.enabled=false --wait --timeout 10m';
+
+export function witnessCommands(owner: DatapathWitness["owner_release"]) {
+  if (owner === "kars-datapath-witness") {
+    return {
+      enable: 'helm upgrade --install kars-datapath-witness ./deploy/helm/kars-datapath-witness --namespace kars-system --kube-context "${KARS_CONTEXT:?Set the reviewed kube context}" --values "${WITNESS_VALUES:?Set the reviewed witness values file}" --set enabled=true --wait --timeout 10m',
+      disable: 'helm upgrade kars-datapath-witness ./deploy/helm/kars-datapath-witness --namespace kars-system --kube-context "${KARS_CONTEXT:?Set the reviewed kube context}" --reuse-values --set enabled=false --wait --timeout 10m',
+    };
+  }
+  return { enable: WITNESS_ENABLE_COMMAND, disable: WITNESS_DISABLE_COMMAND };
+}
 
 const labels = {
   missing: "No report / installation unknown",
@@ -38,8 +48,9 @@ export function witnessPresentation(witness: DatapathWitness | null, now = Date.
 export async function copyWitnessCommand(
   action: "enable" | "disable",
   clipboard: Pick<Clipboard, "writeText"> | undefined,
+  owner?: DatapathWitness["owner_release"],
 ): Promise<string> {
   if (!clipboard) throw new Error("Clipboard unavailable");
-  await clipboard.writeText(action === "enable" ? WITNESS_ENABLE_COMMAND : WITNESS_DISABLE_COMMAND);
+  await clipboard.writeText(witnessCommands(owner)[action]);
   return "Command copied. No cluster change was made; a cluster operator must review and run it.";
 }

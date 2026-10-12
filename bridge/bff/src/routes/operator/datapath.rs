@@ -12,7 +12,7 @@ use crate::state::AppState;
 
 const MAX_AGE_SECONDS: i64 = 180;
 const MAX_BODY_BYTES: usize = 512 * 1024;
-const SETUP: &str = "Optional, off by default. A cluster operator runs Helm; Bridge only reads reports. See deploy/ebpf-witness/README.md and deploy/helm/kars-datapath-witness (enabled=true/false). Never adopt an existing observer without operator review.";
+const SETUP: &str = "Optional, off by default. A cluster operator runs Helm; Bridge only reads reports. Core uses datapathWitness.enabled=true/false; existing standalone owners retain their chart. See deploy/ebpf-witness/README.md. Never adopt an existing observer without operator review.";
 
 #[derive(Debug, Deserialize, Serialize)]
 pub struct DatapathWitnessSandbox {
@@ -39,6 +39,7 @@ pub struct DatapathWitnessDto {
     pub install_hint: String,
     pub state: &'static str,
     pub requested_enabled: Option<bool>,
+    pub owner_release: Option<String>,
     pub settings_state: &'static str,
     /// Reading ConfigMaps cannot establish Helm/DaemonSet installation state.
     pub installation_state: &'static str,
@@ -77,7 +78,7 @@ struct WitnessDoc {
     event_count: Option<u64>,
 }
 
-fn owned(cm: &ConfigMap) -> bool {
+fn owner(cm: &ConfigMap) -> Option<&str> {
     let label = |key: &str| {
         cm.metadata
             .labels
@@ -92,11 +93,14 @@ fn owned(cm: &ConfigMap) -> bool {
             .and_then(|m| m.get(key))
             .map(String::as_str)
     };
-    label("kars.azure.com/witness-addon") == Some("true")
+    let release = annotation("meta.helm.sh/release-name");
+    (label("kars.azure.com/witness-addon") == Some("true")
         && label("app.kubernetes.io/managed-by") == Some("Helm")
-        && annotation("meta.helm.sh/release-name") == Some("kars-datapath-witness")
+        && matches!(release, Some("kars" | "kars-datapath-witness"))
         && annotation("meta.helm.sh/release-namespace") == Some("kars-system")
-        && cm.metadata.deletion_timestamp.is_none()
+        && cm.metadata.deletion_timestamp.is_none())
+    .then_some(release)
+    .flatten()
 }
 
 fn valid_name(name: &str) -> bool {
@@ -149,6 +153,7 @@ fn classify(
         install_hint: SETUP.into(),
         state: "missing",
         requested_enabled: None,
+        owner_release: None,
         settings_state: "missing",
         installation_state: "unknown",
         diagnostic: "No report found. An observer may still be installed; operator inspection is required.",
@@ -174,7 +179,7 @@ fn classify(
                 .and_then(|raw| serde_json::from_str::<Settings>(raw).ok());
             match parsed {
                 Some(value)
-                    if owned(&cm)
+                    if owner(&cm).is_some()
                         && value.schema_version == 1
                         && value.release_revision > 0
                         && value.config_digest.len() == 64
@@ -185,6 +190,7 @@ fn classify(
                         && (!value.enabled || !value.sandboxes.is_empty()) =>
                 {
                     dto.requested_enabled = Some(value.enabled);
+                    dto.owner_release = owner(&cm).map(str::to_owned);
                     dto.settings_state = "known";
                     Some(value)
                 }
@@ -228,7 +234,7 @@ fn classify(
         return dto;
     };
     let Some(body) = cm.data.as_ref().and_then(|d| d.get("witness.json")) else {
-        if owned(&cm) && dto.requested_enabled == Some(true) {
+        if owner(&cm) == dto.owner_release.as_deref() && dto.requested_enabled == Some(true) {
             dto.state = "pending";
             dto.diagnostic =
                 "The release created its report object; the aggregator has not published a sample.";
@@ -270,7 +276,7 @@ fn classify(
         dto.diagnostic = "A report exists without verified operator-intent metadata. Installation and release identity are unknown.";
         return dto;
     };
-    if !owned(&cm)
+    if owner(&cm) != dto.owner_release.as_deref()
         || doc.schema_version != Some(1)
         || doc.publisher_uid.is_none()
         || doc.publisher_uid != cm.metadata.uid

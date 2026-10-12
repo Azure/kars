@@ -1,0 +1,28 @@
+# syntax=docker/dockerfile:1.7
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# The compiler runs on the builder's native architecture. Only the resulting
+# Linux ABI3 wheels enter the Azure Linux runtime images.
+FROM --platform=$BUILDPLATFORM rust:1.95.0-bookworm@sha256:6258907abe69656e41cd992e0b705cdcfabcbbe3db374f92ed2d47121282d4a1 AS compiler
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        python3 python3-venv cmake ninja-build \
+        gcc-aarch64-linux-gnu g++-aarch64-linux-gnu libc6-dev-arm64-cross \
+        gcc-x86-64-linux-gnu g++-x86-64-linux-gnu libc6-dev-amd64-cross \
+    && rm -rf /var/lib/apt/lists/* \
+    && python3 -m venv /opt/build-tools \
+    && /opt/build-tools/bin/pip install --no-cache-dir --only-binary=:all: maturin==1.8.7 \
+    && rustup target add --toolchain 1.95.0 \
+        x86_64-unknown-linux-gnu aarch64-unknown-linux-gnu
+ENV PATH="/opt/build-tools/bin:${PATH}" \
+    CARGO_BUILD_JOBS=2 CARGO_INCREMENTAL=0 \
+    CMAKE_BUILD_PARALLEL_LEVEL=2 MAKEFLAGS=-j2 \
+    PYTHONDONTWRITEBYTECODE=1
+COPY --from=agt /policy-engine/ /src/policy-engine/
+COPY runtimes/build-native-agt-wheel.py /opt/build-native-agt-wheel.py
+WORKDIR /src/policy-engine/sdk/python
+RUN python /opt/build-native-agt-wheel.py amd64 \
+    && python /opt/build-native-agt-wheel.py arm64
+
+FROM scratch AS wheels
+COPY --from=compiler /wheels/ /

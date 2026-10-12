@@ -107,7 +107,11 @@ export function createCopilotLoginController(
     pending(value: CopilotPendingReason | undefined): void;
     authorized(models: DiscoveredModel[]): void;
   },
-  clock: Clock = { now: Date.now, setTimeout, clearTimeout },
+  clock: Clock = {
+    now: Date.now,
+    setTimeout: (callback, milliseconds) => globalThis.setTimeout(callback, milliseconds),
+    clearTimeout: timer => globalThis.clearTimeout(timer),
+  },
 ) {
   let generation = 0;
   let disposed = false;

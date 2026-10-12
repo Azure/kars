@@ -158,11 +158,11 @@ impl Drop for Observation {
     }
 }
 
-pub fn wrap_stream(
-    inner: BoxStream<'static, Result<Bytes, reqwest::Error>>,
+pub fn wrap_stream<E: Send + 'static>(
+    inner: BoxStream<'static, Result<Bytes, E>>,
     observation: Option<Observation>,
     is_sse: bool,
-) -> BoxStream<'static, Result<Bytes, reqwest::Error>> {
+) -> BoxStream<'static, Result<Bytes, E>> {
     match observation {
         Some(observation) => {
             let accumulator = stream::Accumulator::new(observation.shape, is_sse);
@@ -176,12 +176,12 @@ pub fn wrap_stream(
     }
 }
 
-struct ObservedStream {
-    inner: BoxStream<'static, Result<Bytes, reqwest::Error>>,
+struct ObservedStream<E> {
+    inner: BoxStream<'static, Result<Bytes, E>>,
     observation: Observation,
     accumulator: stream::Accumulator,
 }
-impl Drop for ObservedStream {
+impl<E> Drop for ObservedStream<E> {
     fn drop(&mut self) {
         if !self.observation.finished {
             let parsed = self.accumulator.finish();
@@ -189,8 +189,8 @@ impl Drop for ObservedStream {
         }
     }
 }
-impl Stream for ObservedStream {
-    type Item = Result<Bytes, reqwest::Error>;
+impl<E> Stream for ObservedStream<E> {
+    type Item = Result<Bytes, E>;
     fn poll_next(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
         match self.inner.as_mut().poll_next(context) {
             Poll::Ready(Some(Ok(bytes))) => {

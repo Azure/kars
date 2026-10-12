@@ -100,7 +100,7 @@ class KindLifecycleTests(unittest.TestCase):
         self.create(legacy)
         legacy_uid = self.uid("ds", "legacy-ig", "witness-lifecycle-models")
         on_args = ("upgrade", RELEASE, str(CHART), "--set", "enabled=true", "--set", "sandboxes={demo}",
-                   "--set", "aggregator.image=" + IMAGE)
+                   "--set", "aggregator.image=" + IMAGE, "--set", "gadget.image=" + IMAGE)
         conflict = self.helm(*on_args, check=False)
         self.assertNotEqual(conflict.returncode, 0)
         self.assertIn("existing Inspektor Gadget", conflict.stderr)

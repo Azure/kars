@@ -67,21 +67,26 @@ test("the actual capabilities page renders blockers as text and hides stale tool
     workload_ref: "kars-mcp/example", discovered_tools: ["browser_navigate"],
   };
   const empty = () => null;
+  let refreshActive;
+  let servers = [server];
+  let profiles = [];
   const children = ({ children }) => children;
   const imports = {
     "react/jsx-runtime": require("react/jsx-runtime"),
     "@/lib/bff": {
-      listMcpServers: async () => [server],
-      listProfiles: async () => [], listSkills: async () => [], getOptions: async () => ({}),
+      listMcpServers: async () => servers,
+      listProfiles: async () => profiles, listSkills: async () => [], getOptions: async () => ({}),
     },
     "@/components/ui": { PageHeader: empty, Section: children, Badge: children },
     "@/components/honest-state": { HonestState: empty },
+    "@/components/console-load-error": { ConsoleLoadError: () => assert.fail("Fixture reads must succeed") },
     "../configuration/credential-form": { CredentialForm: empty },
     "../author-resource": { AuthorResource: empty },
     "../profile-editor": { ProfileEditor: empty },
     "../delete-resource": { DeleteResource: empty },
     "../skill-approval": { SkillApproval: empty },
     "@/components/skill-composer": { SkillComposer: empty },
+    "@/components/live-refresh": { LiveRefresh: ({ active }) => { refreshActive = active; return null; } },
     "../skill-submit-action": { submitSkillConsoleAction: empty },
     "../mcp-profiles": { McpProfiles: empty },
     "../mcp-catalog": { McpCatalog: empty },
@@ -103,6 +108,7 @@ test("the actual capabilities page renders blockers as text and hides stale tool
   }).outputText, context);
   const render = async () => renderToStaticMarkup(await context.exports.default());
   const pending = await render();
+  assert.equal(refreshActive, true);
   assert.match(pending, /ManagedMcpPending:/);
   assert.match(pending, /Missing pull Secret &lt;untrusted-markup&gt;/);
   assert.doesNotMatch(pending, /<untrusted-markup>|1 tools verified/);
@@ -110,9 +116,25 @@ test("the actual capabilities page renders blockers as text and hides stale tool
   server.phase = "Ready";
   server.status_current = false;
   const stale = await render();
+  assert.equal(refreshActive, true);
   assert.match(stale, /Reconciling/);
   assert.doesNotMatch(stale, /Missing pull Secret|1 tools verified/);
   server.status_current = true;
   server.status_message = "MCP server reconciled";
   assert.match(await render(), /1 tools verified/);
+  assert.equal(refreshActive, true, "Ready services must still reveal outages without a reload");
+  server.phase = "Degraded";
+  server.status_message = "Managed MCP initialize transport failure";
+  assert.match(await render(), /Managed MCP initialize transport failure/);
+  assert.equal(refreshActive, true, "Transient probe failure must not stop recovery updates");
+  servers = [];
+  await render();
+  assert.equal(refreshActive, false, "Stop service polling after deletion");
+  profiles = [{ name: "review-profile", roles: [], phase: null, spec: {} }];
+  const unknownProfile = await render();
+  assert.match(unknownProfile, /Awaiting validation/);
+  assert.doesNotMatch(unknownProfile, />ready</i);
+  assert.equal(refreshActive, true);
+  profiles[0].phase = "Degraded";
+  assert.match(await render(), /Controller validation failed/);
 });

@@ -44,6 +44,7 @@ function createMockApi(pluginConfig: Record<string, unknown> = {}) {
       providers.push(p);
     },
     registerCli: vi.fn(),
+    on: vi.fn(),
     resolvePath: (p: string) => p,
   };
 
@@ -629,6 +630,61 @@ describe("register() idempotency", () => {
     expect(count2).toBe(count1);
 
     delete process.env.AGT_SKIP_INIT;
+  });
+});
+
+describe("configured Kars system prompt", () => {
+  beforeEach(() => vi.stubEnv("AGT_SKIP_INIT", "1"));
+  afterEach(() => vi.unstubAllEnvs());
+
+  it("registers the exact configured prompt for every turn without reading conversation content", async () => {
+    const { default: plugin } = await import("./index.js");
+    const systemPrompt = 'Kars 🐾\nUse "named agents" & preserve \\paths | artifacts.\n';
+    const mock = createMockApi({ systemPrompt });
+    plugin.register(mock.api);
+    expect(mock.api.on).toHaveBeenCalledOnce();
+    const [name, handler] = mock.api.on.mock.calls[0];
+    expect(name).toBe("before_prompt_build");
+    mock.api.pluginConfig.systemPrompt = "subsequent workspace/config mutation";
+    expect(handler()).toEqual({ systemPrompt });
+    expect(handler({ prompt: "untrusted user prompt", messages: [] })).toEqual({ systemPrompt });
+    expect(plugin.configSchema.properties.systemPrompt.type).toBe("string");
+  });
+
+  it("captures separate instructions for each registered plugin context", async () => {
+    const { default: plugin } = await import("./index.js");
+    const first = createMockApi({ systemPrompt: "first agent" });
+    const second = createMockApi({ systemPrompt: "second agent" });
+    plugin.register(first.api);
+    plugin.register(second.api);
+    expect(first.api.on.mock.calls[0][1]()).toEqual({ systemPrompt: "first agent" });
+    expect(second.api.on.mock.calls[0][1]()).toEqual({ systemPrompt: "second agent" });
+  });
+
+  it.each([undefined, "", " \n "])("does not replace the host prompt when no instructions are configured (%j)", async (systemPrompt) => {
+    const { default: plugin } = await import("./index.js");
+    const mock = createMockApi({ systemPrompt });
+    plugin.register(mock.api);
+    expect(mock.api.on).not.toHaveBeenCalled();
+  });
+
+  it.each(["discovery", "setup-only", "setup-runtime", "cli-metadata"])("does not install a live hook during %s", async (registrationMode) => {
+    const { default: plugin } = await import("./index.js");
+    const mock = createMockApi({ systemPrompt: "Kars identity" });
+    plugin.register({ ...mock.api, registrationMode });
+    expect(mock.api.on).not.toHaveBeenCalled();
+  });
+
+  it("refuses configured instructions when the host cannot register the prompt hook", async () => {
+    const { default: plugin } = await import("./index.js");
+    const mock = createMockApi({ systemPrompt: "Kars identity" });
+    expect(() => plugin.register({ ...mock.api, on: undefined })).toThrow(/before_prompt_build/);
+    expect(mock.tools.size).toBe(0);
+  });
+
+  it.each([null, 42, {}, []].map((value) => [value]))("rejects non-string configured instructions (%j)", async (systemPrompt) => {
+    const { default: plugin } = await import("./index.js");
+    expect(() => plugin.register(createMockApi({ systemPrompt }).api)).toThrow(/systemPrompt.*string/);
   });
 });
 

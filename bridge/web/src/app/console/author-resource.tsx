@@ -70,18 +70,14 @@ const LABEL: Record<string, string> = {
   InferencePolicy: "inference policy",
 };
 
-export function AuthorResource({
-  kind,
-  initialName,
-  initialSpec,
-}: {
+type AuthorResourceProps = {
   kind: "ToolPolicy" | "McpServer" | "KarsSkill" | "KarsProfile" | "InferencePolicy";
   initialName?: string;
   initialSpec?: string;
-}) {
+};
+
+export function AuthorResource(props: AuthorResourceProps) {
   const [open, setOpen] = useState(false);
-  const [state, action, pending] = useActionState(applyGovernanceAction, init);
-  const editing = Boolean(initialName);
 
   if (!open) {
     return (
@@ -90,21 +86,38 @@ export function AuthorResource({
         onClick={() => setOpen(true)}
         className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-foreground-muted hover:text-foreground"
       >
-        {editing ? `Edit ${initialName}` : `+ Add ${LABEL[kind]}`}
+        {props.initialName ? `Edit ${props.initialName}` : `+ Add ${LABEL[props.kind]}`}
       </button>
     );
   }
+
+  return <AuthorResourceForm {...props} onClose={() => setOpen(false)} />;
+}
+
+function AuthorResourceForm({
+  kind,
+  initialName,
+  initialSpec,
+  onClose,
+}: AuthorResourceProps & { onClose: () => void }) {
+  const [state, action, pending] = useActionState(applyGovernanceAction, init);
+  const [name, setName] = useState(initialName ?? "");
+  const [spec, setSpec] = useState(initialSpec ?? TEMPLATES[kind]);
+  const [force, setForce] = useState(false);
+  const editing = Boolean(initialName);
 
   return (
     <form action={action} className="mt-2 space-y-2 rounded-lg border border-border bg-surface-muted p-3">
       <input type="hidden" name="kind" value={kind} />
       <div className="flex items-center justify-between">
         <p className="text-xs font-medium">{editing ? `Edit ${LABEL[kind]}` : `New ${LABEL[kind]}`}</p>
-        <button type="button" onClick={() => setOpen(false)} className="text-xs text-foreground-muted hover:text-foreground">Cancel</button>
+        <button type="button" disabled={pending} onClick={onClose} className="text-xs text-foreground-muted hover:text-foreground">Cancel</button>
       </div>
       <input
         name="name"
-        defaultValue={initialName}
+        aria-label={`${LABEL[kind]} name`}
+        value={name}
+        onChange={(event) => setName(event.target.value)}
         readOnly={editing}
         placeholder="name (lowercase-with-hyphens)"
         required
@@ -112,7 +125,9 @@ export function AuthorResource({
       />
       <textarea
         name="spec"
-        defaultValue={initialSpec ?? TEMPLATES[kind]}
+        aria-label={`${LABEL[kind]} specification`}
+        value={spec}
+        onChange={(event) => setSpec(event.target.value)}
         rows={10}
         spellCheck={false}
         className="w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs leading-relaxed"
@@ -121,14 +136,14 @@ export function AuthorResource({
         Applied with <span className="font-mono">kubectl apply</span> semantics (field manager <span className="font-mono">kars-bridge</span>). The cluster validates it — invalid specs are rejected with the API server&apos;s own message.
       </p>
       <label className="flex items-center gap-2 text-[11px] text-foreground-muted">
-        <input type="checkbox" name="force" /> Force — take ownership of fields another manager owns (only on a conflict)
+        <input type="checkbox" name="force" checked={force} onChange={(event) => setForce(event.target.checked)} /> Force — take ownership of fields another manager owns (only on a conflict)
       </label>
       <div className="flex items-center gap-3">
         <button type="submit" disabled={pending} className="rounded-lg bg-signal px-4 py-2 text-sm font-semibold text-signal-fg disabled:opacity-50">
           {pending ? "Applying…" : editing ? "Save changes" : `Create ${LABEL[kind]}`}
         </button>
-        {state.error && <p className="text-xs text-danger">{state.error}</p>}
-        {state.ok && <p className="text-xs text-ok">{state.ok}</p>}
+        {state.error && <p role="alert" className="text-xs text-danger">{state.error}</p>}
+        {state.ok && <p role="status" className="text-xs text-ok">{state.ok}</p>}
       </div>
     </form>
   );

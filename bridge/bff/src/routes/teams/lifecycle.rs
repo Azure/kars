@@ -79,8 +79,18 @@ pub(crate) async fn request_team_run(
     name: &str,
     principal: &Principal,
 ) -> AppResult<serde_json::Value> {
-    let api: Api<KarsTeam> = cluster.teams(ns);
     let team = require_owned_team(cluster, ns, name, principal).await?;
+    request_owned_team_run(cluster, &team).await
+}
+
+pub(crate) async fn request_owned_team_run(
+    cluster: &crate::kars::cluster::Cluster,
+    team: &KarsTeam,
+) -> AppResult<serde_json::Value> {
+    let owner = super::work_owner(team)?;
+    let ns = owner.namespace.as_str();
+    let name = owner.name.as_str();
+    let api: Api<KarsTeam> = cluster.teams(ns);
     crate::kars::execution_plans::validate(&team, true).map_err(AppError::BadRequest)?;
     let patch = run_request_patch(&team)?;
     if team.spec.paused {
@@ -88,9 +98,19 @@ pub(crate) async fn request_team_run(
             "team is paused — resume it before running".into(),
         ));
     }
+    crate::routes::validate::require_team_budget_contracts(cluster, team).await?;
     if team.annotations().contains_key("kars.azure.com/run-now") {
         return Err(AppError::BadRequest(
             "a run request is already pending for this team".into(),
+        ));
+    }
+    let work = super::read_tasks(cluster, &team).await?;
+    if work.iter().any(|item| !super::work::finished(item))
+        && super::work::next_pending(&work).is_none()
+    {
+        return Err(AppError::Conflict(
+            "Team work is already assigned or awaiting review; finish that step before another run"
+                .into(),
         ));
     }
     let active_run = cluster
@@ -133,7 +153,7 @@ pub(crate) async fn request_team_run(
     }))
 }
 
-fn owned_run(
+pub(super) fn owned_run(
     metadata: &k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta,
     team: &KarsTeam,
 ) -> bool {
@@ -187,6 +207,7 @@ fn run_request_patch(team: &KarsTeam) -> AppResult<serde_json::Value> {
             let (number, hash) = record
                 .request
                 .strip_prefix("manual-")
+                .or_else(|| record.request.strip_prefix("cadence-"))
                 .and_then(|value| value.split_once('-'))
                 .ok_or_else(|| AppError::Conflict("team admission sequence is invalid".into()))?;
             let prior = number

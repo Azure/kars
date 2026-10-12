@@ -188,11 +188,7 @@ async fn list_installation_repos(app_jwt: &str, installation_id: &str) -> AppRes
 /// `GET /api/github/app` — is the shared App configured, and where to install it.
 pub async fn get_app(State(state): State<AppState>) -> AppResult<Json<GithubAppDto>> {
     let cluster = require_cluster(&state)?;
-    let Some((app_id, key)) = cluster
-        .github_app_creds()
-        .await
-        .map_err(|e| AppError::Upstream(e.to_string()))?
-    else {
+    let Some((app_id, key)) = cluster.github_app_creds().await.map_err(AppError::from)? else {
         return Ok(Json(GithubAppDto {
             configured: false,
             slug: None,

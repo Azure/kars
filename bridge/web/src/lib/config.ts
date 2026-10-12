@@ -64,7 +64,7 @@ export function headlampUrl(): string | null {
  *                egress approvals. Manages governance for everyone's work.
  * - `admin`    — cluster/org administrator: everything an operator can do PLUS the
  *                highest-privilege actions — raising cluster/workspace inference
- *                budgets, cluster/provider configuration, and the roles surface.
+ *                budgets and managing retention policy.
  * They are SEPARATE permission sets and (with SSO) map to distinct groups. `admin`
  * implies `operator`, `auditor`, and `user`; `operator` implies `user`.
  */
@@ -86,12 +86,12 @@ export const ROLE_META: Record<Role, { label: string; blurb: string; glyph: Icon
   },
   operator: {
     label: "Operator",
-    blurb: "Govern the fleet: tool/inference policies, skills, MCP, evals, egress approvals.",
+    blurb: "Govern the fleet: policies, skills, MCP, evals, egress approvals and provider configuration.",
     glyph: "wrench",
   },
   admin: {
     label: "Admin",
-    blurb: "Cluster/org administration: raise inference budgets, provider config, manage roles.",
+    blurb: "Manage inference budgets and retention policy, with all operator and auditor permissions.",
     glyph: "crown",
   },
 };

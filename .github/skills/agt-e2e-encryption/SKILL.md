@@ -80,7 +80,7 @@ Defined in `inference-router/src/metrics.rs` (`AGT_MESH_MESSAGES_*`) and
 incremented in `inference-router/src/routes/mesh.rs` next to the
 atomic `MeshMetrics::messages_{sent,received}` counters. The
 `sandbox=<name>` label is added at scrape time by
-`deploy/monitoring/podmonitor-sandbox-router.yaml`.
+`deploy/helm/kars/templates/monitoring-podmonitor.yaml`.
 
 **Counted**: KNOCK frames, X3DH bundle exchange, each `mesh_send`
 call, explicit `sendHeartbeat()` ticks (every 30 s, scheduled from

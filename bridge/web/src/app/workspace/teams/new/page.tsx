@@ -11,6 +11,7 @@ import { getOptions, listProfiles } from "@/lib/bff";
 import { defaultNamespace } from "@/lib/config";
 import type { Options, ProfileSummary } from "@/lib/types";
 import { HonestState } from "@/components/honest-state";
+import { readTeamProfile, type TeamProfileEnvelope } from "@/lib/team-profile";
 import { TeamComposer } from "./team-composer";
 
 export const dynamic = "force-dynamic";
@@ -37,12 +38,21 @@ export default async function NewTeamPage({
     optionsError = true;
   }
   let profile: ProfileSummary | null = null;
+  let profileError: string | null = null;
+  let profileEnvelope: TeamProfileEnvelope | undefined;
   if (profileName) {
     try {
       const all = await listProfiles();
-      profile = all.find((p) => p.name === profileName) ?? null;
+      profile = all.find((p) => p.name === profileName && p.namespace === defaultNamespace()) ?? null;
+      if (!profile) {
+        profileError = `Profile "${profileName}" was not found in this workspace. No replacement template has been selected.`;
+      } else if (options) {
+        const result = readTeamProfile(profile, options.skills, options.tool_policies);
+        profileError = result.error;
+        if (result.envelope) profileEnvelope = result.envelope;
+      }
     } catch {
-      profile = null;
+      profileError = "The requested profile could not be loaded. Retry when the profile inventory is available; no replacement template has been selected.";
     }
   }
   return (
@@ -50,8 +60,8 @@ export default async function NewTeamPage({
       <div>
         <h1 className="text-2xl font-semibold tracking-tight">Set up a team</h1>
         <p className="mt-1 text-sm text-foreground-muted">
-          {profile
-            ? `Instantiating from the “${profile.display_name ?? profile.name}” profile — its charter, roles, and access are prefilled. Edit anything before you create.`
+          {profile && !profileError
+            ? `Copying the “${profile.display_name ?? profile.name}” template into an editable draft. Review the charter, roles and authority before creating a team.`
             : "A standing org that works continuously under a charter. Describe the mandate; kars proposes an editable org chart — each role can run its own harness and model."}
         </p>
       </div>
@@ -61,8 +71,10 @@ export default async function NewTeamPage({
           title="Can’t set up a team right now"
           detail="The run environment isn’t reachable, so the available models and harnesses couldn’t be loaded. Try again shortly."
         />
+      ) : profileError ? (
+        <HonestState variant="not_wired" title="This profile cannot be used yet" detail={profileError} />
       ) : (
-        <TeamComposer options={options} profile={profile} initialCharter={intent} />
+        <TeamComposer options={options} profile={profile} profileEnvelope={profileEnvelope} initialCharter={intent} />
       )}
     </div>
   );

@@ -14,19 +14,19 @@ export const dynamic = "force-dynamic";
 
 export default async function AuditorHome() {
   let audit: Audit | null = null;
-  let error = false;
+  let error: unknown = null;
   try {
     audit = await getAudit();
-  } catch {
-    error = true;
+  } catch (caught) {
+    error = caught;
   }
 
   return (
     <div className="space-y-6">
       <PageHeader
         eyebrow="Auditor"
-        title="Tamper-evident record"
-        lead="Everything the platform ran, as an independently-verifiable log. Confirm the chain is intact, inspect what each receipt attests, and verify any of it yourself. This surface is read-only — nothing here can change the platform."
+        title="Audit evidence"
+        lead="Inspect recorded governance claims, log integrity, and per-receipt verification separately. Missing evidence is not proof of enforcement. This surface is read-only — nothing here can change the platform."
       />
       <AuditView audit={audit} error={error} />
     </div>

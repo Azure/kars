@@ -211,7 +211,7 @@ impl Blocklist {
 
                 let mut new_domains = HashSet::new();
 
-                // Re-load seed file (controller may have updated it via CronJob)
+                // Re-load the mounted seed, including controller-supplied seed updates.
                 if let Some(ref path) = seed_path
                     && let Ok(content) = tokio::fs::read_to_string(path).await
                 {

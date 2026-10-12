@@ -201,6 +201,239 @@ fn team_role_binding_fixture() -> (Options, serde_json::Value) {
 }
 
 #[test]
+fn team_composer_rejects_a_principal_reintroduced_by_the_execution_plan() {
+    let (options, mut raw) = team_role_binding_fixture();
+    let mut principal = raw["execution_plan"]["roles"][1].clone();
+    principal["name"] = serde_json::json!("principal");
+    raw["execution_plan"]["roles"]
+        .as_array_mut()
+        .unwrap()
+        .push(principal);
+    let (mut proposal, _) =
+        parse_and_validate_team(&raw.to_string(), &options, &test_efficiency(), "");
+    assert!(!team_proposal_is_complete(&proposal));
+    let error = super::team_qualification::normalize_team_proposal_route(&mut proposal, &options)
+        .unwrap_err();
+    assert!(
+        error.contains("principal is reserved for execution_plan.synthesis"),
+        "{error}"
+    );
+    assert_eq!(proposal.execution_plan.as_ref().unwrap().roles.len(), 3);
+}
+
+#[test]
+fn composer_schema_does_not_teach_empty_synthesis_or_drop_requested_team_outputs() {
+    let options = test_options();
+    let efficiency = test_efficiency();
+    for prompt in [
+        build_system_prompt(&options, &efficiency, "", ""),
+        build_team_system_prompt(&options, &efficiency, "", ""),
+    ] {
+        assert!(!prompt.contains("\"max_tool_calls\": 0"));
+        assert!(!prompt.contains("\"capabilities\": []"));
+        assert!(prompt.contains("covering all handoff reads and deliverable exports"));
+    }
+    let team = build_team_system_prompt(&options, &efficiency, "", "");
+    assert!(team.contains("every requested output file by its exact name"));
+    assert!(team.contains("\"name\":\"<exact requested safe filename>\""));
+    assert!(team.contains("NOT a roster or execution_plan.roles entry"));
+}
+
+#[test]
+fn team_role_budget_reaches_proposal_diagnostics_and_fallbacks() {
+    const CHILD: &str = "KARS_TEST_COMPOSE_ROLE_BUDGET";
+    if std::env::var_os(CHILD).is_none() {
+        let records = ["OpenClaw", "Hermes"].into_iter().flat_map(|runtime| {
+            [("github-copilot", "gpt-5.6-sol", 2000), ("azure-foundry", "gpt-5.4-mini", 3000)]
+                .into_iter().map(move |(provider, deployment, minimum)| serde_json::json!({
+                    "runtime": runtime, "provider": provider, "deployment": deployment,
+                    "capabilities": ["single-agent", "team", "telemetry", "delegation", "artifacts", "filesystem-read", "filesystem-write"],
+                    "max_parallel": 1, "min_total_tokens": minimum,
+                    "evidence": {"task": "test-fixture", "run_id": "test-run", "digest": "sha256:test-fixture"}
+                }))
+        }).collect::<Vec<_>>();
+        let output = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "routes::compose::capability_tests::team_role_budget_reaches_proposal_diagnostics_and_fallbacks",
+                "--nocapture",
+            ])
+            .env(CHILD, "1")
+            .env("BRIDGE_ROUTE_QUALIFICATION_MODE", "required")
+            .env("BRIDGE_QUALIFICATION_RECORDS_JSON", serde_json::to_string(&records).unwrap())
+            .env_remove("BRIDGE_ADDITIONAL_QUALIFICATION_RECORDS_JSON")
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+    let (options, mut raw) = team_role_binding_fixture();
+    for role in raw["roles"].as_array_mut().unwrap() {
+        role["skills"] = serde_json::json!([]);
+    }
+    for role in raw["execution_plan"]["roles"].as_array_mut().unwrap() {
+        for phase in role["phases"].as_array_mut().unwrap() {
+            phase["capabilities"] = serde_json::json!(["filesystem-read", "filesystem-write"]);
+            phase["fresh_context"] = serde_json::json!(true);
+        }
+    }
+    raw["execution_plan"]["synthesis"]["capabilities"] =
+        serde_json::json!(["filesystem-read", "filesystem-write"]);
+    raw["execution_plan"]["synthesis"]["max_tool_calls"] = serde_json::json!(3);
+    raw["execution_plan"]["roles"][0]["budget_tokens"] = serde_json::json!(1999);
+    raw["execution_plan"]["roles"][1]["budget_tokens"] = serde_json::json!(4000);
+    let (mut proposal, _) =
+        parse_and_validate_team(&raw.to_string(), &options, &test_efficiency(), "");
+    proposal.model_fallbacks = vec!["azure-foundry::gpt-5.4-mini".into()];
+    proposal.roles.reverse();
+    let original = serde_json::to_value(&proposal).unwrap();
+    let error = super::team_qualification::normalize_team_proposal_route(&mut proposal, &options)
+        .expect_err("no candidate fits the exact-name source-reader cap");
+    assert!(error.contains("role `source-reader`"), "{error}");
+    assert!(
+        error.contains("[filesystem-read, filesystem-write, team, telemetry]"),
+        "{error}"
+    );
+    assert_eq!(serde_json::to_value(&proposal).unwrap(), original);
+    assert!(super::team_qualification::admitted_team_fallbacks(&proposal, &options).is_empty());
+
+    proposal.execution_plan.as_mut().unwrap().roles[0].budget_tokens = Some(2000);
+    let reviewed_plan = serde_json::to_value(&proposal.execution_plan).unwrap();
+    super::team_qualification::normalize_team_proposal_route(&mut proposal, &options)
+        .expect("candidate at its exact minimum is admitted without increasing the role cap");
+    assert_eq!(proposal.model, "github-copilot::gpt-5.6-sol");
+    assert!(proposal.roles.iter().all(|role| role.model.is_empty()));
+    assert_eq!(
+        proposal
+            .roles
+            .iter()
+            .find(|role| role.name == "source-reader")
+            .unwrap()
+            .runtime,
+        "Hermes"
+    );
+    assert_eq!(
+        serde_json::to_value(&proposal.execution_plan).unwrap(),
+        reviewed_plan
+    );
+    for (cap, admitted) in [(Some(2999), false), (Some(3000), true), (None, true)] {
+        proposal.execution_plan.as_mut().unwrap().roles[0].budget_tokens = cap;
+        let fallbacks = super::team_qualification::admitted_team_fallbacks(&proposal, &options);
+        assert_eq!(
+            fallbacks.contains(&"azure-foundry::gpt-5.4-mini".to_string()),
+            admitted,
+            "cap={cap:?}"
+        );
+    }
+    proposal.model_fallbacks.clear();
+    assert!(super::team_qualification::admitted_team_fallbacks(&proposal, &options).is_empty());
+    proposal.model_fallbacks = vec![
+        "github-copilot::gpt-5.6-sol".into(),
+        "azure-foundry::not-installed".into(),
+        "azure-foundry::gpt-5.4-mini".into(),
+        "azure-foundry::gpt-5.4-mini".into(),
+    ];
+    assert_eq!(
+        super::team_qualification::admitted_team_fallbacks(&proposal, &options),
+        ["azure-foundry::gpt-5.4-mini"]
+    );
+    let raw = serde_json::json!({
+        "model": {"provider":"github-copilot", "deployment":"gpt-5.6-sol"},
+        "runtime":"OpenClaw",
+        "budget_tokens":300000
+    });
+    let (mut mission, _) = super::mission_proposal::parse_and_validate(
+        &raw.to_string(),
+        &options,
+        &test_efficiency(),
+        "Write one local document.",
+    );
+    assert!(super::mission::admitted_mission_fallbacks(&mission, &options).is_empty());
+    mission.model_fallbacks = [
+        ("github-copilot", "gpt-5.6-sol"),
+        ("azure-foundry", "not-installed"),
+        ("azure-foundry", "gpt-5.4-mini"),
+        ("azure-foundry", "gpt-5.4-mini"),
+    ]
+    .into_iter()
+    .map(|(provider, deployment)| super::ComposeModel {
+        provider: provider.into(),
+        deployment: deployment.into(),
+    })
+    .collect();
+    let admitted = super::mission::admitted_mission_fallbacks(&mission, &options);
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0].deployment, "gpt-5.4-mini");
+    mission.budget_tokens = Some(2999);
+    assert!(super::mission::admitted_mission_fallbacks(&mission, &options).is_empty());
+}
+
+#[test]
+fn composers_preserve_requested_fallback_order_and_default_to_none() {
+    let (mut options, mut team_raw) = team_role_binding_fixture();
+    options.models.push(ModelOption {
+        provider: "azure-foundry".into(),
+        deployment: "gpt-4.1".into(),
+        is_default: false,
+        detail: None,
+    });
+    let mut mission_raw = serde_json::json!({
+        "model": {"provider":"github-copilot", "deployment":"gpt-5.6-sol"}
+    });
+    for empty in [None, Some(serde_json::json!([]))] {
+        if let Some(empty) = empty {
+            mission_raw["model_fallbacks"] = empty.clone();
+            team_raw["model_fallbacks"] = empty;
+        }
+        let (mission, _) = super::mission_proposal::parse_and_validate(
+            &mission_raw.to_string(),
+            &options,
+            &test_efficiency(),
+            "",
+        );
+        let (team, _) =
+            parse_and_validate_team(&team_raw.to_string(), &options, &test_efficiency(), "");
+        assert!(mission.model_fallbacks.is_empty());
+        assert!(team.model_fallbacks.is_empty());
+    }
+    mission_raw["model_fallbacks"] = serde_json::json!([
+        {"provider":"azure-foundry", "deployment":"gpt-5.4-mini"},
+        {"provider":"unknown", "deployment":"gpt-4.1"},
+        {"provider":"azure-foundry", "deployment":"gpt-4.1"}
+    ]);
+    team_raw["model_fallbacks"] = serde_json::json!([
+        "azure-foundry::gpt-5.4-mini",
+        "unknown::gpt-4.1",
+        "azure-foundry::gpt-4.1"
+    ]);
+    let (mission, _) = super::mission_proposal::parse_and_validate(
+        &mission_raw.to_string(),
+        &options,
+        &test_efficiency(),
+        "",
+    );
+    let (team, _) =
+        parse_and_validate_team(&team_raw.to_string(), &options, &test_efficiency(), "");
+    assert_eq!(
+        mission
+            .model_fallbacks
+            .iter()
+            .map(|model| { format!("{}::{}", model.provider, model.deployment) })
+            .collect::<Vec<_>>(),
+        ["azure-foundry::gpt-5.4-mini", "azure-foundry::gpt-4.1"]
+    );
+    assert_eq!(
+        team.model_fallbacks,
+        ["azure-foundry::gpt-5.4-mini", "azure-foundry::gpt-4.1"]
+    );
+}
+
+#[test]
 fn team_role_binding_does_not_inherit_an_unmatched_roles_configuration() {
     let (options, mut raw) = team_role_binding_fixture();
     raw["roles"][0]["name"] = serde_json::json!("unrelated-observer");
@@ -273,6 +506,42 @@ fn team_role_binding_preserves_legacy_planless_roster() {
     let (proposal, _) = parse_and_validate_team(&raw.to_string(), &options, &test_efficiency(), "");
     assert!(proposal.execution_plan.is_none());
     assert_eq!(serde_json::to_value(&proposal.roles).unwrap(), raw["roles"]);
+}
+
+#[test]
+fn team_mcp_duplicates_do_not_discard_later_installed_servers() {
+    let (mut options, mut raw) = team_role_binding_fixture();
+    let reference = options.skills[0].clone();
+    options.mcp_servers = (0..10)
+        .map(|index| RefOption {
+            name: format!("mcp-{index}"),
+            ..reference.clone()
+        })
+        .collect();
+    raw["mcp_servers"] = serde_json::json!([
+        null,
+        17,
+        "not-installed",
+        "mcp-0",
+        " mcp-0 ",
+        "mcp-1",
+        "mcp-2",
+        "mcp-1",
+        "mcp-3",
+        "mcp-4",
+        "mcp-5",
+        "mcp-6",
+        "mcp-7",
+        "mcp-8",
+        "mcp-9"
+    ]);
+    let (proposal, _) = parse_and_validate_team(&raw.to_string(), &options, &test_efficiency(), "");
+    assert_eq!(
+        proposal.mcp_servers,
+        (0..8)
+            .map(|index| format!("mcp-{index}"))
+            .collect::<Vec<_>>()
+    );
 }
 
 #[test]
@@ -413,6 +682,62 @@ fn execution_plan_rejects_unknown_capability_and_cycles() {
     plan.roles[0].phases[0].capabilities = vec!["shell".into()];
     plan.roles[0].depends_on = vec!["one".into()];
     assert!(validate_execution_plan(&plan).is_err());
+}
+
+#[test]
+fn launch_validation_rejects_structurally_valid_but_unexecutable_plans_without_rewriting() {
+    let value = serde_json::json!({
+        "schema": "kars.execution-plan/v1",
+        "roles": [{
+            "name": "note-author",
+            "objective": "Write the requested local Markdown checklist.",
+            "depends_on": [],
+            "budget_tokens": 400000,
+            "phases": [{
+                "name": "draft",
+                "objective": "Write and verify the requested Markdown file.",
+                "capabilities": ["filesystem-read", "filesystem-write"],
+                "min_tool_calls": 0,
+                "max_tool_calls": 2,
+                "required_tool_calls": [],
+                "fresh_context": true
+            }]
+        }],
+        "max_parallel": 1,
+        "synthesis": {
+            "objective": "Read the authored file and attach the final deliverable.",
+            "capabilities": ["filesystem-read", "filesystem-write"],
+            "max_tool_calls": 2
+        },
+        "deliverables": [{"name": "beta-smoke-check.md", "media_type": "text/markdown"}]
+    });
+    let supported = serde_json::from_value(value.clone()).unwrap();
+    assert!(super::validate_execution_plan_for_launch(&supported).is_ok());
+    for (pointer, unsupported) in [
+        ("/roles/0/phases/0/fresh_context", serde_json::json!(false)),
+        (
+            "/roles/0/phases/0/capabilities",
+            serde_json::json!(["filesystem-write"]),
+        ),
+        ("/roles/0/phases/0/max_tool_calls", serde_json::json!(0)),
+        ("/roles/0/phases/0/capabilities", serde_json::json!(["mcp"])),
+        ("/synthesis/capabilities", serde_json::json!([])),
+        ("/synthesis/max_tool_calls", serde_json::json!(0)),
+    ] {
+        let mut candidate = value.clone();
+        *candidate.pointer_mut(pointer).unwrap() = unsupported;
+        let plan: crate::routes::tasks::ExecutionPlanDto =
+            serde_json::from_value(candidate).unwrap();
+        let before = serde_json::to_value(&plan).unwrap();
+        assert!(validate_execution_plan(&plan).is_ok(), "{pointer}");
+        assert!(
+            super::validate_execution_plan_for_launch(&plan)
+                .unwrap_err()
+                .contains("TypedPlanExecutionUnavailable"),
+            "{pointer}"
+        );
+        assert_eq!(serde_json::to_value(&plan).unwrap(), before);
+    }
 }
 
 #[test]

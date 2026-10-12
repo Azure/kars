@@ -65,6 +65,7 @@ def _client() -> httpx.Client:
     """Per-process httpx client. Reused across all router calls."""
     return httpx.Client(
         base_url=ROUTER_BASE_URL,
+        trust_env=False,
         timeout=httpx.Timeout(connect=2.0, read=30.0, write=10.0, pool=2.0),
         headers=_headers(),
     )

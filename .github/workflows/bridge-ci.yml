@@ -122,7 +122,7 @@ jobs:
         run: PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s ci -p test_bridge_image_contract.py
       - name: Build and exercise the shipping BFF image without publishing
         run: |
-          docker build --tag kars-bridge-bff-qualification:latest .
+          docker build --file Dockerfile --tag kars-bridge-bff-qualification:latest ../..
           python3 ../../ci/bridge_image_contract.py kars-bridge-bff-qualification:latest --kind bff
       - name: Scan the actual BFF runtime including unfixed findings
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0

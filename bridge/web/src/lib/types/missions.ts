@@ -24,6 +24,7 @@ export interface Envelope {
 
 export interface TaskSummary {
   name: string;
+  parent: string | null;
   namespace: string;
   objective: string;
   display_name: string | null;
@@ -39,6 +40,7 @@ export interface TaskSummary {
 }
 
 export interface TaskDetail {
+  reviewed_execution?: ReviewedExecution | null;
   name: string;
   namespace: string;
   objective: string;
@@ -88,6 +90,21 @@ export interface TaskDetail {
   run_requested: boolean;
   /** Exact latest requested run nonce, available before assignment acknowledgement. */
   current_run_nonce: string | null;
+}
+
+export interface ReviewedExecution {
+  run_nonce: string;
+  issue: string | null;
+  phases: Array<{
+    role: string;
+    phase: string;
+    task_name: string | null;
+    task_uid: string | null;
+    run_nonce: string | null;
+    state: "pending" | "active" | "completed" | "failed" | "unavailable";
+    result: MissionResult | null;
+    router_activity?: import("../router-activity").RouterActivity | null;
+  }>;
 }
 
 export interface TeamRolePlan {
@@ -234,6 +251,8 @@ export interface MissionRunEvidence {
 
 /** A captured run outcome; presence alone does not establish a deliverable. */
 export interface MissionResult {
+  /** Separate runtime failure message; optional during rolling upgrades. */
+  error?: string | null;
   /** Optional during rolling upgrades; missing eligibility never enables approval. */
   reviewable?: boolean;
   usage_known?: boolean;

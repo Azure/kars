@@ -35,7 +35,10 @@ pub struct CommonsEntryDto {
     pub created_at: String,
     pub digest: String,
     pub size_bytes: i64,
+    pub stored_digest: String,
+    pub stored_size_bytes: i64,
     pub content: Option<String>,
+    pub archive: Option<crate::team_memory::RunArchive>,
 }
 
 /// Browser-facing commons response.
@@ -46,7 +49,7 @@ pub struct CommonsResponse {
     pub entries: Vec<CommonsEntryDto>,
 }
 
-fn commons_entry_key(id: &str) -> String {
+pub(crate) fn commons_entry_key(id: &str) -> String {
     format!(
         "entry-{}",
         id.chars()
@@ -145,6 +148,64 @@ fn commons_title(stored: &str, content: &str, charter_line: &str) -> String {
     }
 }
 
+fn commons_entry_dto(
+    entry: CommonsIndexEntry,
+    stored_content: &str,
+    charter_line: &str,
+    archive: Option<crate::team_memory::RunArchive>,
+) -> CommonsEntryDto {
+    let content = deliverable_text(stored_content);
+    let title = commons_title(&entry.title, &content, charter_line);
+    CommonsEntryDto {
+        id: entry.id,
+        title,
+        author: entry.author,
+        source_task: entry.source_task,
+        created_at: entry.created_at,
+        digest: crate::routes::artifacts::content_address(content.as_bytes()),
+        size_bytes: content.len() as i64,
+        stored_digest: entry.digest,
+        stored_size_bytes: entry.size_bytes,
+        content: Some(content),
+        archive,
+    }
+}
+
+#[cfg(test)]
+mod commons_content_tests {
+    use super::*;
+
+    #[test]
+    fn returned_content_and_stored_record_have_separate_exact_digests() {
+        for raw in [
+            "# Decision\n日本語\n".to_string(),
+            serde_json::json!({"result": {"payloads": [{"text": "# Decision\n日本語"}]}})
+                .to_string(),
+        ] {
+            let stored_digest = crate::routes::artifacts::content_address(raw.as_bytes());
+            let entry = CommonsIndexEntry {
+                id: "one".into(),
+                title: "Decision".into(),
+                author: "run-one".into(),
+                source_task: "run-one".into(),
+                created_at: "2026-10-12T08:00:00Z".into(),
+                digest: stored_digest.clone(),
+                size_bytes: raw.len() as i64,
+            };
+            let dto = commons_entry_dto(entry, &raw, "Charter", None);
+            let content = dto.content.as_ref().unwrap();
+            assert_eq!(dto.size_bytes, content.len() as i64);
+            assert_eq!(
+                dto.digest,
+                crate::routes::artifacts::content_address(content.as_bytes())
+            );
+            assert_eq!(dto.stored_digest, stored_digest);
+            assert_eq!(dto.stored_size_bytes, raw.len() as i64);
+            assert_eq!(content, "# Decision\n日本語");
+        }
+    }
+}
+
 /// `GET /api/namespaces/:ns/teams/:name/commons` — the team's shared,
 /// provenance-tracked knowledge commons (design note §14). Each entry records
 /// which run authored it, when, and a content digest.
@@ -162,11 +223,12 @@ pub async fn get_team_commons(
         .clone()
         .unwrap_or_else(|| name.clone());
 
-    let data = cluster.read_commons(&commons).await.unwrap_or_default();
-    let index: Vec<CommonsIndexEntry> = data
-        .get("index.json")
-        .and_then(|s| serde_json::from_str(s).ok())
-        .unwrap_or_default();
+    let data = cluster
+        .read_commons(&team.metadata, &commons)
+        .await?
+        .ok_or(AppError::NotFound)?;
+    let index: Vec<CommonsIndexEntry> =
+        serde_json::from_str(&data["index.json"]).map_err(anyhow::Error::from)?;
 
     // The charter's first line is what the controller historically used as every
     // entry's title; we use it to recognize and replace those duplicate rows.
@@ -187,35 +249,15 @@ pub async fn get_team_commons(
         .into_iter()
         .rev()
         .map(|e| {
-            let key = format!(
-                "entry-{}",
-                e.id.chars()
-                    .map(
-                        |c| if c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '.') {
-                            c
-                        } else {
-                            '_'
-                        }
-                    )
-                    .collect::<String>()
-            );
-            let content = data.get(&key).map(|c| deliverable_text(c));
-            let title = match content.as_deref() {
-                Some(c) => commons_title(&e.title, c, &charter_line),
-                None => e.title.clone(),
-            };
-            CommonsEntryDto {
-                id: e.id,
-                title,
-                author: e.author,
-                source_task: e.source_task,
-                created_at: e.created_at,
-                digest: e.digest,
-                size_bytes: e.size_bytes,
-                content,
-            }
+            let key = commons_entry_key(&e.id);
+            let archive = data
+                .get(&crate::team_memory::archive_key(&e.id))
+                .map(|raw| serde_json::from_str(raw))
+                .transpose()?;
+            Ok(commons_entry_dto(e, &data[&key], &charter_line, archive))
         })
-        .collect();
+        .collect::<Result<Vec<_>, serde_json::Error>>()
+        .map_err(anyhow::Error::from)?;
     let total_entries = entries.len() as i64;
     entries.truncate(50);
 
@@ -235,7 +277,7 @@ pub async fn get_archived_run(
 ) -> AppResult<Json<CommonsEntryDto>> {
     let cluster = require_cluster(&state)?;
     let team = require_owned_team(cluster, &ns, &name, &principal).await?;
-    let taskforce = run.starts_with(&format!("{name}-run-"));
+    let taskforce = super::is_run_name(&name, &run);
     let persistent = run.starts_with(&format!("{name}-principal-assign-"));
     if !taskforce && !persistent {
         return Err(AppError::NotFound);
@@ -247,41 +289,34 @@ pub async fn get_archived_run(
         .filter(|commons| !commons.trim().is_empty())
         .unwrap_or(&name);
     let data = cluster
-        .read_commons(commons_name)
-        .await
+        .read_commons(&team.metadata, commons_name)
+        .await?
         .ok_or(AppError::NotFound)?;
-    let entry = data
-        .get("index.json")
-        .and_then(|raw| serde_json::from_str::<Vec<CommonsIndexEntry>>(raw).ok())
-        .and_then(|entries| {
-            entries
-                .into_iter()
-                .find(|entry| entry.id == run || entry.source_task == run)
-        })
+    let entries: Vec<CommonsIndexEntry> =
+        serde_json::from_str(&data["index.json"]).map_err(anyhow::Error::from)?;
+    let entry = entries
+        .into_iter()
+        .rev()
+        .find(|entry| entry.id == run || entry.source_task == run)
         .ok_or(AppError::NotFound)?;
-    let content = data
-        .get(&commons_entry_key(&entry.id))
-        .map(|content| deliverable_text(content));
+    let content = &data[&commons_entry_key(&entry.id)];
     let charter_line = team
         .spec
         .charter
         .lines()
         .next()
         .unwrap_or(&team.spec.charter);
-    let title = content
-        .as_deref()
-        .map(|content| commons_title(&entry.title, content, charter_line))
-        .unwrap_or(entry.title);
-    Ok(Json(CommonsEntryDto {
-        id: entry.id,
-        title,
-        author: entry.author,
-        source_task: entry.source_task,
-        created_at: entry.created_at,
-        digest: entry.digest,
-        size_bytes: entry.size_bytes,
+    let archive = data
+        .get(&crate::team_memory::archive_key(&entry.id))
+        .map(|raw| serde_json::from_str(raw))
+        .transpose()
+        .map_err(anyhow::Error::from)?;
+    Ok(Json(commons_entry_dto(
+        entry,
         content,
-    }))
+        charter_line,
+        archive,
+    )))
 }
 
 /// One event in a team's continuous ledger.
@@ -305,11 +340,10 @@ pub async fn get_team_ledger(
     Path((ns, name)): Path<(String, String)>,
 ) -> AppResult<Json<Vec<LedgerEvent>>> {
     let cluster = require_cluster(&state)?;
-    require_owned_team(cluster, &ns, &name, &principal).await?;
+    let team = require_owned_team(cluster, &ns, &name, &principal).await?;
     let mut events: Vec<LedgerEvent> = Vec::new();
 
     // Run deliverables (delivery events, with token cost).
-    let run_prefix = format!("{name}-run-");
     for record in cluster.list_mission_output_evidence().await {
         let data = record.data;
         let task = data
@@ -317,7 +351,7 @@ pub async fn get_team_ledger(
             .cloned()
             .unwrap_or(record.evidence_key);
         let belongs_to_team = data.get("team") == Some(&name)
-            || task.starts_with(&run_prefix)
+            || super::is_run_name(&name, &task)
             || task.starts_with(&format!("{name}-principal-assign-"));
         if !belongs_to_team {
             continue;
@@ -353,25 +387,21 @@ pub async fn get_team_ledger(
     // Harvested knowledge (commons entries). Heal the legacy charter-as-title so
     // the ledger reads "Learned: <real headline>" rather than the same charter
     // line on every knowledge event.
-    if let Some(cm) = cluster.read_commons(&name).await
-        && let Some(idx) = cm.get("index.json")
-        && let Ok(entries) = serde_json::from_str::<Vec<CommonsIndexEntry>>(idx)
-    {
-        let charter_line = cluster
-            .teams(&ns)
-            .get_opt(&name)
-            .await
-            .ok()
-            .flatten()
-            .map(|t| {
-                t.spec
-                    .charter
-                    .lines()
-                    .next()
-                    .unwrap_or(&t.spec.charter)
-                    .to_string()
-            })
-            .unwrap_or_default();
+    let commons_name = team
+        .spec
+        .knowledge_commons
+        .as_deref()
+        .filter(|commons| !commons.trim().is_empty())
+        .unwrap_or(&name);
+    if let Some(cm) = cluster.read_commons(&team.metadata, commons_name).await? {
+        let entries: Vec<CommonsIndexEntry> =
+            serde_json::from_str(&cm["index.json"]).map_err(anyhow::Error::from)?;
+        let charter_line = team
+            .spec
+            .charter
+            .lines()
+            .next()
+            .unwrap_or(&team.spec.charter);
         for e in entries {
             let key = format!(
                 "entry-{}",

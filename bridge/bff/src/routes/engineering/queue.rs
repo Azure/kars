@@ -5,22 +5,67 @@
 
 use std::collections::BTreeMap;
 
-use chrono::Utc;
+use kube::ResourceExt;
 
 use crate::kars::cluster::Cluster;
-use crate::routes::teams::read_task_list;
+use crate::kars::team::KarsTeam;
+use crate::providers::signing::sha256;
+use crate::routes::teams::{read_tasks, request_owned_team_run, work, work_owner};
 
-use super::remediation::{
-    RemediationUpdate, aggregate_remediation_tasks, match_remediation_task, plan_remediation_update,
-};
+use super::remediation::{RemediationUpdate, aggregate_remediation_tasks, plan_remediation_update};
 use super::{EngineeringSourceConfig, MAX_ITEMS_PER_SYNC, TeamTaskDto};
+
+fn plan_update(task: &mut TeamTaskDto, existing: &[TeamTaskDto]) -> RemediationUpdate {
+    match plan_remediation_update(task, existing) {
+        RemediationUpdate::NotRemediation => {}
+        result => return result,
+    }
+    let Some(current) = existing.iter().find(|current| current.id == task.id) else {
+        return RemediationUpdate::Write(Box::new(task.clone()));
+    };
+    if current.status == "pending"
+        && current.run.is_none()
+        && current.run_uid.is_none()
+        && current.assignment_nonce.is_none()
+    {
+        let mut updated = current.clone();
+        updated.title = task.title.clone();
+        updated.description = task.description.clone();
+        updated.review_required |= task.review_required;
+        if task.status == "retired" {
+            updated.status = task.status.clone();
+            updated.done_at = task.done_at.clone();
+            updated.stuck_since = None;
+        }
+        return if &updated == current {
+            RemediationUpdate::Unchanged
+        } else {
+            RemediationUpdate::Write(Box::new(updated))
+        };
+    }
+    if task.status != "pending"
+        || (current.title == task.title && current.description == task.description)
+    {
+        return RemediationUpdate::Unchanged;
+    }
+    let digest = sha256(work::request(task).to_string().as_bytes());
+    let mut followup = task.clone();
+    followup.id = format!("engineering-followup-{}", hex::encode(&digest[..16]));
+    if existing.iter().any(|item| item.id == followup.id) {
+        return RemediationUpdate::Unchanged;
+    }
+    if !work::finished(current) && !followup.depends_on.contains(&current.id) {
+        followup.depends_on.push(current.id.clone());
+    }
+    RemediationUpdate::Write(Box::new(followup))
+}
 
 pub(super) fn merge_discovered_tasks(
     mut existing: Vec<TeamTaskDto>,
     discovered: Vec<TeamTaskDto>,
 ) -> (Vec<TeamTaskDto>, usize) {
     for task in &mut existing {
-        if engineering_task_requires_review(&task.id) {
+        if task.status == "pending" && engineering_task_requires_review(&task.id) {
             task.review_required = true;
         }
     }
@@ -31,7 +76,7 @@ pub(super) fn merge_discovered_tasks(
         .collect::<BTreeMap<_, _>>();
     let mut added = 0;
     for mut task in aggregate_remediation_tasks(discovered) {
-        match plan_remediation_update(&mut task, &existing) {
+        match plan_update(&mut task, &existing) {
             RemediationUpdate::Unchanged => continue,
             RemediationUpdate::Write(updated) => {
                 let updated = *updated;
@@ -44,58 +89,8 @@ pub(super) fn merge_discovered_tasks(
                 }
                 continue;
             }
-            RemediationUpdate::NotRemediation => {}
+            RemediationUpdate::NotRemediation => unreachable!("plan_update resolves ordinary work"),
         }
-        let (matching_id, _) = match_remediation_task(&mut task, |id| {
-            positions
-                .get(id)
-                .map(|index| existing[*index].description.as_str())
-        });
-        if let Some(index) = positions.get(&matching_id).copied() {
-            let current = &mut existing[index];
-            let renewable_alert = task.id.starts_with("dependabot-alert-")
-                || task.id.starts_with("code-scanning-alert-")
-                || task.id.starts_with("secret-scanning-alert-");
-            let renewable_human_decision = task.id.starts_with("github-pr-merge-")
-                || task.id.starts_with("github-pr-feedback-");
-            let renewable_pr_control =
-                task.id.starts_with("github-pr-fix-") || task.id.starts_with("github-pr-dedupe-");
-            if renewable_alert && task.status == "done" {
-                if current.status == "pending"
-                    && current.run.is_none()
-                    && current.assignment_nonce.is_none()
-                {
-                    current.title = task.title;
-                    current.description = task.description;
-                    current.status = "done".into();
-                    current.done_at = task.done_at;
-                    current.stuck_since = None;
-                }
-            } else if current.status == "done"
-                && (renewable_human_decision
-                    || ((renewable_alert || renewable_pr_control)
-                        && current.description != task.description))
-            {
-                current.title = task.title;
-                current.description = task.description;
-                current.status = "pending".into();
-                current.run = None;
-                current.done_at = None;
-                current.created_at = task.created_at;
-                added += 1;
-            } else if (renewable_alert || renewable_pr_control)
-                && matches!(current.status.as_str(), "pending" | "active")
-                && current.description != task.description
-            {
-                current.title = task.title;
-                current.description = task.description;
-            }
-            current.review_required |= task.review_required;
-            continue;
-        }
-        positions.insert(task.id.clone(), existing.len());
-        existing.push(task);
-        added += 1;
     }
     (existing, added)
 }
@@ -125,7 +120,7 @@ pub(super) fn append_bounded_tasks(
     let mut truncated = false;
     for mut task in aggregate_remediation_tasks(incoming) {
         let existing = known_tasks.values().cloned().collect::<Vec<_>>();
-        match plan_remediation_update(&mut task, &existing) {
+        match plan_update(&mut task, &existing) {
             RemediationUpdate::Unchanged => continue,
             RemediationUpdate::Write(updated) => {
                 let updated = *updated;
@@ -141,46 +136,7 @@ pub(super) fn append_bounded_tasks(
                 target.push(task);
                 continue;
             }
-            RemediationUpdate::NotRemediation => {}
-        }
-        let (matching_id, _) = match_remediation_task(&mut task, |id| {
-            known_tasks.get(id).map(|task| task.description.as_str())
-        });
-        let renewable_alert = task.id.starts_with("dependabot-alert-")
-            || task.id.starts_with("code-scanning-alert-")
-            || task.id.starts_with("secret-scanning-alert-");
-        match known_tasks.get(&matching_id) {
-            None => {
-                if accepted >= remaining {
-                    truncated = true;
-                    continue;
-                }
-                known_tasks.insert(task.id.clone(), task.clone());
-                accepted += 1;
-                target.push(task);
-            }
-            Some(current) => {
-                let reopen = renewable_alert
-                    && current.status == "done"
-                    && current.description != task.description;
-                if reopen {
-                    if accepted >= remaining {
-                        truncated = true;
-                        continue;
-                    }
-                    known_tasks.insert(task.id.clone(), task.clone());
-                    accepted += 1;
-                    target.push(task);
-                } else if renewable_alert
-                    && matches!(current.status.as_str(), "pending" | "active")
-                    && current.description != task.description
-                {
-                    let mut updated = current.clone();
-                    updated.description = task.description.clone();
-                    known_tasks.insert(matching_id, updated);
-                    target.push(task);
-                }
-            }
+            RemediationUpdate::NotRemediation => unreachable!("plan_update resolves ordinary work"),
         }
     }
     *queued_slots_used += accepted;
@@ -189,59 +145,54 @@ pub(super) fn append_bounded_tasks(
 
 pub(super) async fn merge_into_backlog(
     cluster: &Cluster,
-    team: &str,
+    team: &KarsTeam,
     discovered: Vec<TeamTaskDto>,
 ) -> Result<usize, String> {
-    let queued = std::sync::atomic::AtomicUsize::new(0);
-    let name = format!("kars-team-tasks-{team}");
-    cluster
-        .update_configmap_data(&name, &[("kars.azure.com/team-tasks", team)], |data| {
-            let existing = data
-                .get("tasks.json")
-                .map(|raw| read_task_list(raw))
-                .unwrap_or_default();
-            let (merged, added) = merge_discovered_tasks(existing, discovered.clone());
-            queued.store(added, std::sync::atomic::Ordering::Relaxed);
-            data.insert(
-                "tasks.json".to_string(),
-                serde_json::to_string(&merged).unwrap_or_else(|_| "[]".into()),
-            );
-        })
-        .await
-        .map_err(|e| format!("updating the team backlog failed: {e}"))?;
-    Ok(queued.load(std::sync::atomic::Ordering::Relaxed))
+    let owner = work_owner(team).map_err(|error| error.to_string())?;
+    work::update(
+        &cluster.configmaps(&owner.namespace),
+        &owner,
+        None,
+        true,
+        |existing| {
+            let (merged, added) = merge_discovered_tasks(existing.clone(), discovered.clone());
+            *existing = merged;
+            Ok(added)
+        },
+    )
+    .await
+    .map_err(|error| format!("updating the team backlog failed: {error}"))
 }
 
-pub(super) async fn request_team_run(
-    cluster: &Cluster,
-    namespace: &str,
-    team: &str,
-) -> Result<bool, String> {
-    let team_object = cluster
-        .teams(namespace)
-        .get_opt(team)
-        .await
-        .map_err(|error| format!("checking team run state failed: {error}"))?
-        .ok_or_else(|| "the standing team no longer exists".to_string())?;
-    if team_object.spec.paused {
+pub(super) async fn request_team_run(cluster: &Cluster, team: &KarsTeam) -> Result<bool, String> {
+    if team.spec.paused || team.annotations().contains_key("kars.azure.com/run-now") {
         return Ok(false);
     }
-    cluster
-        .teams(namespace)
-        .patch(
-            team,
-            &kube::api::PatchParams::default(),
-            &kube::api::Patch::Merge(serde_json::json!({
-                "metadata": {
-                    "annotations": {
-                        "kars.azure.com/backlog-run-now": Utc::now().to_rfc3339()
-                    }
-                }
-            })),
-        )
+    let tasks = read_tasks(cluster, team)
+        .await
+        .map_err(|error| error.to_string())?;
+    if work::next_pending(&tasks).is_none() {
+        return Ok(false);
+    }
+    request_owned_team_run(cluster, team)
         .await
         .map(|_| true)
         .map_err(|error| format!("queued work but could not request a team run: {error}"))
+}
+
+pub(super) async fn source_team(
+    cluster: &Cluster,
+    config: &EngineeringSourceConfig,
+) -> Result<KarsTeam, String> {
+    let team = cluster
+        .teams(&config.team_namespace)
+        .get(&config.team_name)
+        .await
+        .map_err(|error| format!("reading the standing team failed: {error}"))?;
+    if team.annotations().get("kars.azure.com/owner-sub") != Some(&config.owner_sub) {
+        return Err("the engineering source owner no longer owns this team".into());
+    }
+    Ok(team)
 }
 
 pub(super) async fn ensure_auto_run_for_backlog(
@@ -251,11 +202,6 @@ pub(super) async fn ensure_auto_run_for_backlog(
     if !config.enabled || !config.auto_run {
         return Ok(false);
     }
-    let has_pending = read_task_list(&cluster.read_team_tasks(&config.team_name).await)
-        .iter()
-        .any(|task| task.status == "pending");
-    if !has_pending {
-        return Ok(false);
-    }
-    request_team_run(cluster, &config.team_namespace, &config.team_name).await
+    let team = source_team(cluster, config).await?;
+    request_team_run(cluster, &team).await
 }

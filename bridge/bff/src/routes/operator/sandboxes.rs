@@ -134,16 +134,20 @@ fn to_sandbox(o: &DynamicObject) -> SandboxDto {
 
 fn cpu_millicores(raw: &str) -> Option<f64> {
     let raw = raw.trim();
-    if let Some(value) = raw.strip_suffix('n') {
-        return value.parse::<f64>().ok().map(|value| value / 1_000_000.0);
-    }
-    if let Some(value) = raw.strip_suffix('u') {
-        return value.parse::<f64>().ok().map(|value| value / 1_000.0);
-    }
-    if let Some(value) = raw.strip_suffix('m') {
-        return value.parse::<f64>().ok();
-    }
-    raw.parse::<f64>().ok().map(|value| value * 1_000.0)
+    let (value, multiplier) = if let Some(value) = raw.strip_suffix('n') {
+        (value, 0.000_001)
+    } else if let Some(value) = raw.strip_suffix('u') {
+        (value, 0.001)
+    } else if let Some(value) = raw.strip_suffix('m') {
+        (value, 1.0)
+    } else {
+        (raw, 1000.0)
+    };
+    value
+        .parse::<f64>()
+        .ok()
+        .map(|value| value * multiplier)
+        .filter(|value| value.is_finite() && *value >= 0.0)
 }
 
 fn memory_bytes(raw: &str) -> Option<u64> {
@@ -161,38 +165,66 @@ fn memory_bytes(raw: &str) -> Option<u64> {
             return value
                 .parse::<f64>()
                 .ok()
-                .map(|value| (value * multiplier) as u64);
+                .map(|value| value * multiplier)
+                .filter(|value| value.is_finite() && *value >= 0.0 && *value < u64::MAX as f64)
+                .map(|value| value as u64);
         }
     }
     raw.parse::<u64>().ok()
 }
 
-fn metric_usage(metric: &DynamicObject) -> (f64, u64) {
-    metric
-        .data
-        .get("containers")
-        .and_then(Value::as_array)
-        .map(|containers| {
-            containers
-                .iter()
-                .fold((0.0, 0_u64), |(cpu, memory), container| {
-                    let usage = container.get("usage").unwrap_or(&Value::Null);
-                    (
-                        cpu + usage
-                            .get("cpu")
-                            .and_then(Value::as_str)
-                            .and_then(cpu_millicores)
-                            .unwrap_or(0.0),
-                        memory
-                            + usage
-                                .get("memory")
-                                .and_then(Value::as_str)
-                                .and_then(memory_bytes)
-                                .unwrap_or(0),
-                    )
-                })
-        })
-        .unwrap_or((0.0, 0))
+fn sum_usage(
+    values: impl IntoIterator<Item = (Option<f64>, Option<u64>)>,
+) -> (Option<f64>, Option<u64>) {
+    let mut values = values.into_iter();
+    let Some(first) = values.next() else {
+        return (None, None);
+    };
+    values.fold(first, |(cpu, memory), next| {
+        (
+            cpu.zip(next.0)
+                .map(|(a, b)| a + b)
+                .filter(|value| value.is_finite()),
+            memory.zip(next.1).and_then(|(a, b)| a.checked_add(b)),
+        )
+    })
+}
+
+fn metric_usage(metric: &DynamicObject) -> (Option<f64>, Option<u64>) {
+    sum_usage(
+        metric
+            .data
+            .get("containers")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+            .map(|container| {
+                let usage = container.get("usage").unwrap_or(&Value::Null);
+                (
+                    usage
+                        .get("cpu")
+                        .and_then(Value::as_str)
+                        .and_then(cpu_millicores),
+                    usage
+                        .get("memory")
+                        .and_then(Value::as_str)
+                        .and_then(memory_bytes),
+                )
+            }),
+    )
+}
+
+fn describe_metrics_error(error: &kube::Error) -> String {
+    tracing::warn!(%error, "Kubernetes metrics request failed");
+    match error {
+        kube::Error::Api(status) => match status.code {
+            404 => "The Kubernetes Metrics API is not installed. Install and configure metrics-server to enable utilization.",
+            401 | 403 => "Bridge is not authorized to read Kubernetes metrics. Check its metrics.k8s.io access.",
+            503 => "The Kubernetes Metrics API is registered but unavailable. Check metrics-server health and kubelet connectivity.",
+            _ => "The Kubernetes Metrics API request failed. Check Bridge logs and metrics-server health.",
+        },
+        _ => "Bridge could not reach the Kubernetes Metrics API. Check cluster connectivity and Bridge logs.",
+    }.into()
 }
 
 fn inherit_sandbox_context(sandboxes: &mut [SandboxDto]) {
@@ -259,9 +291,8 @@ pub struct NodeCapacityDto {
 pub struct CapacityDto {
     pub metrics_available: bool,
     pub metrics_error: Option<String>,
-    pub team_max_concurrent_runs: usize,
-    pub global_active_runs_limit: usize,
-    pub active_team_runs: usize,
+    pub active_team_runs: Option<usize>,
+    pub activity_error: Option<String>,
     pub pod_metrics_available: bool,
     pub pod_metrics_error: Option<String>,
     pub nodes: Vec<NodeCapacityDto>,
@@ -278,17 +309,20 @@ pub async fn list_sandboxes(State(state): State<AppState>) -> AppResult<Json<Vec
     let task_teams: HashMap<(String, String), String> = cluster
         .list_kind_all("KarsTask")
         .await
-        .unwrap_or_default()
+        .map_err(upstream)?
         .into_iter()
         .filter_map(|task| {
             label(&task, "kars.azure.com/team").map(|team| ((ns_of(&task), name_of(&task)), team))
         })
         .collect();
-    let pod_metrics = cluster
-        .list_metrics_all("PodMetrics", "pods")
-        .await
-        .unwrap_or_default();
-    let usage: HashMap<(String, String), (f64, u64)> = pod_metrics
+    let pod_metrics = match cluster.list_metrics_all("PodMetrics", "pods").await {
+        Ok(metrics) => metrics,
+        Err(error) => {
+            describe_metrics_error(&error);
+            Vec::new()
+        }
+    };
+    let usage: HashMap<_, _> = pod_metrics
         .iter()
         .map(|metric| ((ns_of(metric), name_of(metric)), metric_usage(metric)))
         .collect();
@@ -303,18 +337,19 @@ pub async fn list_sandboxes(State(state): State<AppState>) -> AppResult<Json<Vec
             d.team = task_teams.get(&(d.namespace.clone(), task_name)).cloned();
         }
         if let Some(runtime_namespace) = d.runtime_namespace.as_deref() {
-            let (cpu, memory) = usage
-                .iter()
-                .filter(|((namespace, pod), _)| {
-                    namespace == runtime_namespace && pod.starts_with(&d.name)
-                })
-                .fold((0.0, 0_u64), |(cpu, memory), (_, usage)| {
-                    (cpu + usage.0, memory + usage.1)
-                });
-            if cpu > 0.0 || memory > 0 {
-                d.cpu_millicores = Some(cpu);
-                d.memory_bytes = Some(memory);
-            }
+            let (cpu, memory) = sum_usage(
+                usage
+                    .iter()
+                    .filter(|((namespace, pod), _)| {
+                        namespace == runtime_namespace
+                            && pod
+                                .strip_prefix(&d.name)
+                                .is_some_and(|suffix| suffix.starts_with('-'))
+                    })
+                    .map(|(_, usage)| *usage),
+            );
+            d.cpu_millicores = cpu;
+            d.memory_bytes = memory;
         }
         if d.phase.as_deref() == Some("Running") {
             let persisted_activity = cluster
@@ -376,7 +411,7 @@ pub async fn capacity(State(state): State<AppState>) -> AppResult<Json<CapacityD
                 })
                 .collect::<HashMap<_, _>>(),
         ),
-        Err(error) => (false, Some(error.to_string()), HashMap::new()),
+        Err(error) => (false, Some(describe_metrics_error(&error)), HashMap::new()),
     };
     let node_count = nodes.len();
     let covered_nodes = nodes
@@ -385,7 +420,8 @@ pub async fn capacity(State(state): State<AppState>) -> AppResult<Json<CapacityD
             node.metadata
                 .name
                 .as_ref()
-                .is_some_and(|name| metric_map.contains_key(name))
+                .and_then(|name| metric_map.get(name))
+                .is_some_and(|(cpu, memory)| cpu.is_some() && memory.is_some())
         })
         .count();
     let metrics_available = metrics_api_available && node_count > 0 && covered_nodes == node_count;
@@ -431,67 +467,67 @@ pub async fn capacity(State(state): State<AppState>) -> AppResult<Json<CapacityD
             }
         })
         .collect();
-    let team_max_concurrent_runs = cluster
-        .controller_env_value("KARS_TEAM_MAX_CONCURRENT_RUNS")
-        .await
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(2);
-    let global_active_runs_limit = cluster
-        .controller_env_value("KARS_TEAM_GLOBAL_ACTIVE_RUNS_LIMIT")
-        .await
-        .and_then(|value| value.parse().ok())
-        .unwrap_or(6);
-    let active_team_runs = cluster
-        .list_kind_all("KarsTask")
-        .await
-        .unwrap_or_default()
-        .iter()
-        .filter(|task| {
-            let annotations = task.metadata.annotations.as_ref();
-            let taskforce = annotations
-                .and_then(|values| values.get("kars.azure.com/team-role"))
-                .is_some_and(|role| role == "taskforce");
-            let launched = task
-                .data
-                .pointer("/spec/execution/launch")
-                .and_then(Value::as_bool)
-                .unwrap_or(false);
-            if !taskforce || !launched {
-                return false;
-            }
-            let requested =
-                annotations.and_then(|values| values.get("kars.azure.com/run-requested"));
-            let completed =
-                annotations.and_then(|values| values.get("kars.azure.com/run-completed"));
-            let delivery_pending = requested.is_some() && requested != completed;
-            let assignment_active = task
-                .data
-                .pointer("/status/assignment/state")
-                .and_then(Value::as_str)
-                .is_some_and(|state| matches!(state, "Assigned" | "Running"));
-            let execution_active = task
-                .data
-                .pointer("/status/executionPhase")
-                .and_then(Value::as_str)
-                .is_some_and(|phase| matches!(phase, "Launching" | "Running"));
-            delivery_pending || assignment_active || execution_active
-        })
-        .count();
+    let tasks = cluster.list_kind_all("KarsTask").await;
+    let activity_error = tasks.as_ref().err().map(|error| {
+        tracing::warn!(%error, "Fleet task activity request failed");
+        "Task activity could not be read. Check Bridge access to KarsTask resources and cluster connectivity.".into()
+    });
+    let active_team_runs = tasks.ok().map(|tasks| {
+        tasks
+            .iter()
+            .filter(|task| {
+                let annotations = task.metadata.annotations.as_ref();
+                let taskforce = annotations
+                    .and_then(|values| values.get("kars.azure.com/team-role"))
+                    .is_some_and(|role| role == "taskforce");
+                let launched = task
+                    .data
+                    .pointer("/spec/execution/launch")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
+                if !taskforce || !launched {
+                    return false;
+                }
+                let requested =
+                    annotations.and_then(|values| values.get("kars.azure.com/run-requested"));
+                let completed =
+                    annotations.and_then(|values| values.get("kars.azure.com/run-completed"));
+                let delivery_pending = requested.is_some() && requested != completed;
+                let assignment_active = task
+                    .data
+                    .pointer("/status/assignment/state")
+                    .and_then(Value::as_str)
+                    .is_some_and(|state| matches!(state, "Assigned" | "Running"));
+                let execution_active = task
+                    .data
+                    .pointer("/status/executionPhase")
+                    .and_then(Value::as_str)
+                    .is_some_and(|phase| matches!(phase, "Launching" | "Running"));
+                delivery_pending || assignment_active || execution_active
+            })
+            .count()
+    });
     let (pod_metrics_available, pod_metrics_error) =
         match cluster.list_metrics_all("PodMetrics", "pods").await {
-            Ok(items) if !items.is_empty() => (true, None),
+            Ok(items)
+                if items.iter().any(|item| {
+                    let (cpu, memory) = metric_usage(item);
+                    cpu.is_some() && memory.is_some()
+                }) =>
+            {
+                (true, None)
+            }
             Ok(_) => (
                 false,
-                Some("the metrics API returned no pod samples".into()),
+                Some("The Metrics API returned no complete pod samples yet.".into()),
             ),
-            Err(error) => (false, Some(error.to_string())),
+            Err(error) => (false, Some(describe_metrics_error(&error))),
         };
     Ok(Json(CapacityDto {
         metrics_available,
         metrics_error,
-        team_max_concurrent_runs,
-        global_active_runs_limit,
         active_team_runs,
+        activity_error,
         pod_metrics_available,
         pod_metrics_error,
         nodes,
@@ -500,7 +536,59 @@ pub async fn capacity(State(state): State<AppState>) -> AppResult<Json<CapacityD
 
 #[cfg(test)]
 mod tests {
-    use super::{SandboxDto, inherit_sandbox_context};
+    use super::{
+        SandboxDto, cpu_millicores, describe_metrics_error, inherit_sandbox_context, memory_bytes,
+        metric_usage, sum_usage,
+    };
+
+    #[test]
+    fn resource_quantities_reject_invalid_values_without_inventing_zero() {
+        for raw in ["-1", "NaN", "inf", "1e999"] {
+            assert_eq!(cpu_millicores(raw), None, "{raw}");
+            assert_eq!(memory_bytes(&format!("{raw}Gi")), None, "{raw}");
+        }
+        assert_eq!(cpu_millicores("250000000n"), Some(250.0));
+        assert_eq!(cpu_millicores("0m"), Some(0.0));
+        assert_eq!(memory_bytes("1.5Mi"), Some(1_572_864));
+        assert_eq!(memory_bytes("0"), Some(0));
+        assert_eq!(memory_bytes("18446744073709551616Ki"), None);
+    }
+
+    #[test]
+    fn partial_container_samples_and_overflows_are_not_complete_usage() {
+        let metric = serde_json::from_value(serde_json::json!({
+            "apiVersion": "metrics.k8s.io/v1beta1", "kind": "PodMetrics",
+            "metadata": {"name":"agent"},
+            "containers": [{"usage":{"cpu":"10m","memory":"1Mi"}}, {"usage":{"memory":"2Mi"}}]
+        }))
+        .unwrap();
+        assert_eq!(metric_usage(&metric), (None, Some(3_145_728)));
+        assert_eq!(sum_usage([]), (None, None));
+        assert_eq!(sum_usage([(Some(0.0), Some(0))]), (Some(0.0), Some(0)));
+        assert_eq!(
+            sum_usage([(Some(f64::MAX), Some(u64::MAX)), (Some(f64::MAX), Some(1))]),
+            (None, None)
+        );
+    }
+
+    #[test]
+    fn metrics_errors_explain_recovery_without_raw_api_payloads() {
+        for (code, explanation) in [
+            (404, "not installed"),
+            (403, "not authorized"),
+            (503, "registered but unavailable"),
+        ] {
+            let error = kube::Error::Api(kube::core::ErrorResponse {
+                status: "Failure".into(),
+                message: "RAW-API-BODY".into(),
+                reason: "Unhelpful parsing failure".into(),
+                code,
+            });
+            let message = describe_metrics_error(&error);
+            assert!(message.contains(explanation));
+            assert!(!message.contains("RAW-API-BODY"));
+        }
+    }
 
     fn sandbox(
         name: &str,

@@ -1,6 +1,7 @@
 {{/* Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. */}}{{- $mesh := .Values.agentMesh | default dict }}
 {{- if $mesh.enabled }}
+{{- $entraEnv := include "kars.agentMesh.entraEnv" . }}
 {{- $namespace := $mesh.namespace | default "agentmesh" }}
 {{- if ne $namespace "agentmesh" }}
 {{- fail "agentMesh.namespace must be agentmesh: current Kars endpoints and NetworkPolicies use this fixed namespace" }}
@@ -72,6 +73,9 @@ spec:
             - { name: HOST, value: "0.0.0.0" }
             - { name: PORT, value: "8082" }
             - { name: LOG_LEVEL, value: "info" }
+            {{- with $entraEnv }}
+            {{- . | nindent 12 }}
+            {{- end }}
           readinessProbe:
             httpGet: { path: /health, port: http }
             periodSeconds: 10
@@ -139,9 +143,9 @@ spec:
             - { name: HOST, value: "0.0.0.0" }
             - { name: PORT, value: "8083" }
             - { name: LOG_LEVEL, value: "info" }
-            - name: REGISTRY_URL
-              value: "http://agentmesh-registry.{{ $namespace }}.svc.cluster.local:8080"
-            - { name: REQUIRE_REGISTRATION, value: "true" }
+            {{- with $entraEnv }}
+            {{- . | nindent 12 }}
+            {{- end }}
           readinessProbe:
             httpGet: { path: /health, port: websocket }
             periodSeconds: 10

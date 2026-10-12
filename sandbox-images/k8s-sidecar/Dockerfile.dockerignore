@@ -1,0 +1,6 @@
+**
+!sandbox-images/
+!sandbox-images/k8s-sidecar/
+!sandbox-images/k8s-sidecar/Dockerfile
+!sandbox-images/k8s-sidecar/build.py
+!sandbox-images/k8s-sidecar/requirements.lock

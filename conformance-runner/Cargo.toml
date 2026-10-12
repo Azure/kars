@@ -23,6 +23,9 @@ clap = { version = "4", features = ["derive"] }
 # Async + HTTP client
 tokio = { workspace = true }
 reqwest = { workspace = true }
+kube = { workspace = true, features = ["ws"] }
+k8s-openapi = { workspace = true }
+rustls = { workspace = true }
 
 # Serde
 serde = { workspace = true }

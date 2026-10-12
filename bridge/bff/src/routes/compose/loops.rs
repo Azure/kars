@@ -51,16 +51,19 @@ const LOOP_PATTERN_IDS: [&str; 6] = [
     "standing-watch",
 ];
 
+fn pattern_allowed(pattern: &str, surface: &str) -> bool {
+    LOOP_PATTERN_IDS.contains(&pattern)
+        && match pattern {
+            "standing-watch" => surface == "team",
+            "explore-branch" => surface == "mission",
+            _ => true,
+        }
+}
+
 /// Keyword heuristic used both to seed the orchestrator and as the fallback.
 fn heuristic_pattern(intent: &str, surface: &str) -> &'static str {
     let t = intent.to_ascii_lowercase();
-    if surface == "team"
-        || t.contains("watch")
-        || t.contains("monitor")
-        || t.contains("keep an eye")
-        || t.contains("on cadence")
-        || t.contains("every ")
-    {
+    if surface == "team" {
         return "standing-watch";
     }
     if t.contains("test")
@@ -98,6 +101,37 @@ fn heuristic_pattern(intent: &str, surface: &str) -> &'static str {
     "plan-execute"
 }
 
+fn parse_proposal(raw: &str, intent: &str, surface: &str) -> Option<ProposeLoopResponse> {
+    let value = extract_json_object(raw)?;
+    let pattern = value
+        .get("pattern")?
+        .as_str()
+        .filter(|pattern| pattern_allowed(pattern, surface))?;
+    Some(ProposeLoopResponse {
+        pattern: pattern.to_string(),
+        goal: value
+            .get("goal")
+            .and_then(|goal| goal.as_str())
+            .map(str::trim)
+            .filter(|goal| !goal.is_empty())
+            .unwrap_or(intent)
+            .to_string(),
+        criteria: value
+            .get("criteria")
+            .and_then(|criteria| criteria.as_str())
+            .unwrap_or("")
+            .trim()
+            .to_string(),
+        rationale: value
+            .get("rationale")
+            .and_then(|rationale| rationale.as_str())
+            .unwrap_or("Best fit for this intent.")
+            .trim()
+            .to_string(),
+        source: "orchestrator".into(),
+    })
+}
+
 pub async fn propose_loop(
     State(state): State<AppState>,
     Json(req): Json<ProposeLoopRequest>,
@@ -126,15 +160,21 @@ pub async fn propose_loop(
         .map(|m| m.deployment.clone())
         .unwrap_or_default();
 
+    let allowed_patterns: Vec<_> = LOOP_PATTERN_IDS
+        .iter()
+        .copied()
+        .filter(|pattern| pattern_allowed(pattern, surface))
+        .collect();
     let system = format!(
         "You are a loop-engineering orchestrator. Given a user's intent, pick the ONE feedback-loop \
          pattern that best fits and draft the loop. Patterns: react (reason+act with tools), reflect \
          (draft, self-critique, revise), plan-execute (plan then do), eval-iterate (define acceptance \
          checks first, loop until they pass), explore-branch (generate candidates, prune), \
-         standing-watch (periodic observe->detect change->act, for standing {surface} work). \
+         standing-watch (periodic observe->detect change->act, teams only). \
+         Choose only from the allowed ids for this {surface} surface below. \
          Respond with ONLY a JSON object: {{\"pattern\": one of [{}], \"goal\": string, \
          \"criteria\": string with one success criterion per line, \"rationale\": one short sentence}}.",
-        LOOP_PATTERN_IDS.join(", ")
+        allowed_patterns.join(", ")
     );
     let user = format!(
         "Surface: {surface}\nIntent:\n{intent}\n\nA reasonable default pattern is '{heuristic}', but \
@@ -142,7 +182,7 @@ pub async fn propose_loop(
     );
 
     // Ask the orchestrator; parse its JSON. Any failure → honest heuristic.
-    match orchestrator_complete(
+    let fallback_reason = match orchestrator_complete(
         cluster,
         &system,
         &user,
@@ -152,49 +192,89 @@ pub async fn propose_loop(
     .await
     {
         Ok((raw, _src)) => {
-            if let Some(v) = extract_json_object(&raw) {
-                let pattern = v
-                    .get("pattern")
-                    .and_then(|p| p.as_str())
-                    .filter(|p| LOOP_PATTERN_IDS.contains(p))
-                    .unwrap_or(heuristic)
-                    .to_string();
-                let goal = v
-                    .get("goal")
-                    .and_then(|g| g.as_str())
-                    .map(|s| s.trim().to_string())
-                    .filter(|s| !s.is_empty())
-                    .unwrap_or_else(|| intent.to_string());
-                let criteria = v
-                    .get("criteria")
-                    .and_then(|c| c.as_str())
-                    .unwrap_or("")
-                    .trim()
-                    .to_string();
-                let rationale = v
-                    .get("rationale")
-                    .and_then(|r| r.as_str())
-                    .unwrap_or("Best fit for this intent.")
-                    .trim()
-                    .to_string();
-                return Ok(Json(ProposeLoopResponse {
-                    pattern,
-                    goal,
-                    criteria,
-                    rationale,
-                    source: "orchestrator".into(),
-                }));
+            if let Some(proposal) = parse_proposal(&raw, intent, surface) {
+                return Ok(Json(proposal));
             }
-            // Unparseable model output → heuristic.
+            tracing::warn!(
+                surface,
+                "Orchestrator returned an invalid or unsupported loop"
+            );
+            "the orchestrator returned an invalid or unsupported loop for this surface"
         }
-        Err(_) => { /* orchestrator unreachable → heuristic */ }
-    }
+        Err(error) => {
+            tracing::warn!(%error, surface, "Loop orchestration unavailable");
+            "the orchestrator was unavailable"
+        }
+    };
 
     Ok(Json(ProposeLoopResponse {
         pattern: heuristic.to_string(),
         goal: intent.to_string(),
         criteria: String::new(),
-        rationale: "Chosen from your intent's keywords (orchestrator unavailable).".into(),
+        rationale: format!("Suggested from your intent's keywords because {fallback_reason}."),
         source: "heuristic".into(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loop_patterns_match_the_surface_catalogue() {
+        for pattern in LOOP_PATTERN_IDS {
+            assert_eq!(
+                pattern_allowed(pattern, "mission"),
+                pattern != "standing-watch"
+            );
+            assert_eq!(
+                pattern_allowed(pattern, "team"),
+                pattern != "explore-branch"
+            );
+        }
+        assert!(!pattern_allowed("unknown", "mission"));
+        assert!(!pattern_allowed("unknown", "team"));
+    }
+
+    #[test]
+    fn mission_fallback_never_proposes_a_standing_only_loop() {
+        for intent in [
+            "Monitor once",
+            "Watch every report",
+            "Keep an eye on this task",
+            "On cadence",
+        ] {
+            assert!(pattern_allowed(
+                heuristic_pattern(intent, "mission"),
+                "mission"
+            ));
+            assert_eq!(heuristic_pattern(intent, "team"), "standing-watch");
+        }
+    }
+
+    #[test]
+    fn incompatible_or_invalid_model_choices_are_not_labelled_orchestrator_proposals() {
+        for (surface, pattern) in [
+            ("mission", "standing-watch"),
+            ("team", "explore-branch"),
+            ("mission", "unknown"),
+        ] {
+            let raw = serde_json::json!({"pattern": pattern, "goal": "Review clinic operations"})
+                .to_string();
+            assert!(parse_proposal(&raw, "original", surface).is_none());
+        }
+        assert!(parse_proposal("{}", "original", "mission").is_none());
+        assert!(parse_proposal("not JSON", "original", "mission").is_none());
+    }
+
+    #[test]
+    fn valid_model_proposals_retain_their_review_fields() {
+        let raw = r#"{"pattern":"reflect","goal":" Review clinic operations ","criteria":" Check breaks ","rationale":" Critique before approval "}"#;
+        let proposal = parse_proposal(raw, "original", "mission").unwrap();
+        assert_eq!(proposal.pattern, "reflect");
+        assert_eq!(proposal.goal, "Review clinic operations");
+        assert_eq!(proposal.criteria, "Check breaks");
+        assert_eq!(proposal.rationale, "Critique before approval");
+        assert_eq!(proposal.source, "orchestrator");
+    }
 }

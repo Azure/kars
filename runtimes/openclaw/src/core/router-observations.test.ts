@@ -39,6 +39,50 @@ afterEach(async () => {
 });
 
 describe("returned router response selection", () => {
+  it("retains observation time and allow-listed completion metadata, never raw payloads", async () => {
+    const source = trace();
+    const at = "2026-10-08T20:00:00.123Z";
+    await serve({ ...source, rounds: [1, 2], events: [
+      { ...source.events[0], observed_at: at },
+      { kind: "tool_result", scope_id: "scope-a", round: 1, reported_in_round: 2,
+        seq: 2, source: "harness-reported", name: "file_write", call_id: "call-1", ok: true,
+        observed_at: at, ms: 32, result_summary: {
+          kind: "file_write", bytes: 12, artifact_name: "briefing.md", private_content: "secret-marker",
+        } },
+    ] });
+    const selected = new ReturnedRouterResponses();
+    selected.capture(headers("1")); selected.capture(headers("2"));
+    const content = (await selected.artifact())!;
+    const events = JSON.parse(content).trace.events;
+    expect(events.every((event: { observed_at: string }) => event.observed_at === at)).toBe(true);
+    expect(events[1].result_summary).toEqual({ kind: "file_write", bytes: 12, artifact_name: "briefing.md" });
+    expect(events[1].ms).toBe(32);
+    expect(content).not.toContain("secret-marker");
+  });
+
+  it("reports completion only with valid returned scope and a positive bounded router receipt", async () => {
+    await serve({ recorded: true, source: "harness-reported", enforcement_changed: false });
+    const selected = new ReturnedRouterResponses();
+    await expect(selected.reportTool("call-1", true, 4)).rejects.toThrow("scope");
+    expect(calls).toHaveLength(0);
+    selected.capture(headers());
+    await selected.reportTool("call-1", true, 4, { kind: "file_write", bytes: 12 });
+    expect(calls[0].url).toBe("/telemetry/tool");
+    selected.capture(headers("2", "another-scope"));
+    await expect(selected.reportTool("call-2", true, 4)).rejects.toThrow("scope");
+    expect(calls).toHaveLength(1);
+  });
+
+  it.each([
+    [{ recorded: false }, 200], [{ recorded: true, source: "router", enforcement_changed: false }, 200],
+    ["invalid", 200], [{ recorded: true, source: "harness-reported", enforcement_changed: false }, 409],
+    ["x".repeat(5000), 200],
+  ])("surfaces rejected or invalid completion receipts (%#)", async (body, status) => {
+    await serve(body, status as number);
+    const selected = new ReturnedRouterResponses(); selected.capture(headers());
+    await expect(selected.reportTool("call-1", false, 2)).rejects.toThrow();
+  });
+
   it("produces the shared router-to-Bridge contract through the real collector", async () => {
     const contract = JSON.parse(readFileSync(new URL("../../../../inference-router/tests/fixtures/router-observations-v1.json", import.meta.url), "utf8"));
     const routerTrace = structuredClone(contract.trace);

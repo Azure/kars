@@ -25,7 +25,7 @@ fn blank(content: &str) -> bool {
     })
 }
 
-fn objective(task: &KarsTask, nonce: &str) -> Result<String> {
+pub(crate) fn objective(task: &KarsTask, nonce: &str) -> Result<String> {
     if annotation(&task.metadata, "kars.azure.com/run-objective-nonce") == Some(nonce) {
         let encoded = annotation(&task.metadata, "kars.azure.com/run-objective-b64")
             .ok_or(Error::Invalid("missing bound mission objective"))?;
@@ -58,7 +58,7 @@ fn objective(task: &KarsTask, nonce: &str) -> Result<String> {
 }
 
 /// Completion and ACK annotations intentionally do not change the installed admission.
-pub(super) fn for_task(task: &KarsTask) -> Result<Value> {
+pub(crate) fn for_task(task: &KarsTask) -> Result<Value> {
     let generation = task
         .metadata
         .generation

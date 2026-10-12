@@ -29,6 +29,7 @@ struct Store {
     before_patch: Option<Value>,
     prune_create: bool,
     prune_patch: bool,
+    get_failures: BTreeMap<String, u16>,
 }
 
 fn task() -> Value {
@@ -39,6 +40,49 @@ fn task() -> Value {
         "spec":{"objective":"Write a useful volunteer handbook.", "envelope":{"tier":1,"authorityCeiling":1},
             "execution":{"launch":false}}
     })
+}
+
+fn budget_catalogue(model: &str) -> Value {
+    json!({"apiVersion":"v1","kind":"ConfigMap",
+        "metadata":{"name":"kars-inference-budget-contracts"},
+        "data":{"contracts.json":json!({
+            "version":"foundry-only-v1",
+            "contracts":[{
+                "id":"foundry-chat","version":"v1","validUntil":"2030-01-01T00:00:00Z",
+                "providerId":"azure-openai","endpoint":"https://models.example",
+                "model":model,"operation":"ChatCompletions",
+                "outputField":"MaxTokens","maximumInputTokens":100,
+                "maximumOutputTokens":50,"maximumWireBytes":4096,
+                "outputBoundIncludesReasoning":true
+            }]
+        }).to_string()}})
+}
+
+#[tokio::test]
+async fn missing_budget_contract_blocks_launch_and_replication_before_writes() {
+    for route in ["tasks/task/launch", "tasks/task/replicate"] {
+        let mut object = task();
+        object["spec"]["envelope"]["budget"] = json!({"scope":"GovernedInference","tokens":40000});
+        object["spec"]["blueprint"] =
+            json!({"model":{"provider":"github-copilot","deployment":"gpt-6.1-sol"}});
+        let (state, store) = fixture(object);
+        store.lock().unwrap().objects.insert(
+            "/api/v1/namespaces/kars-system/configmaps/kars-inference-budget-contracts".into(),
+            budget_catalogue("gpt-5.4-mini"),
+        );
+        let (status, body) =
+            request(state, Method::POST, route, json!({"launch":true,"count":2})).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(body.to_string().contains("gpt-6.1-sol"), "{body}");
+        let store = store.lock().unwrap();
+        assert!(
+            store
+                .calls
+                .iter()
+                .all(|(method, _, _)| *method == Method::GET)
+        );
+        assert_eq!(store.objects[TASK]["spec"]["execution"]["launch"], false);
+    }
 }
 
 fn team() -> Value {
@@ -53,6 +97,68 @@ fn team() -> Value {
 
 fn plan() -> Value {
     json!(crate::kars::task::execution_plan::tests::plan())
+}
+
+#[tokio::test]
+async fn impossible_role_reservation_blocks_team_resume_and_run_without_writes() {
+    for resume in [false, true] {
+        let mut object = team();
+        let mut plan = json!(crate::kars::task::execution_plan::tests::filesystem_plan());
+        for role in plan["roles"].as_array_mut().unwrap() {
+            role["budgetTokens"] = json!(150_000);
+        }
+        object["spec"]["roster"] = json!(
+            plan["roles"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|role| json!({"name":role["name"]}))
+                .collect::<Vec<_>>()
+        );
+        object["spec"]["envelope"]["delegationDepth"] = json!(3);
+        object["spec"]["envelope"]["budget"] =
+            json!({"scope":"GovernedInference","tokens":1_500_000});
+        object["spec"]["paused"] = json!(resume);
+        object["spec"]["blueprint"] = json!({
+            "model":{"provider":"azure-foundry","deployment":"gpt-5.4-mini"},
+            "executionPlan":plan
+        });
+        object["metadata"]["annotations"][MARKER] = json!("execution-plan/v1");
+        let (state, store) = fixture(object);
+        with_options(&mut store.lock().unwrap());
+        let mut catalogue = budget_catalogue("gpt-5.4-mini");
+        let mut contracts: Value =
+            serde_json::from_str(catalogue["data"]["contracts.json"].as_str().unwrap()).unwrap();
+        contracts["contracts"][0]["maximumInputTokens"] = json!(272_000);
+        catalogue["data"]["contracts.json"] = json!(contracts.to_string());
+        store.lock().unwrap().objects.insert(
+            "/api/v1/namespaces/kars-system/configmaps/kars-inference-budget-contracts".into(),
+            catalogue,
+        );
+        let (status, body) = if resume {
+            request(state, Method::PATCH, "teams/team", json!({"paused":false})).await
+        } else {
+            request(state, Method::POST, "teams/team/run", json!({})).await
+        };
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        let detail = body.to_string();
+        assert!(
+            detail.contains("Role") && detail.contains("150000") && detail.contains("272001"),
+            "{body}"
+        );
+        let store = store.lock().unwrap();
+        assert!(
+            store
+                .calls
+                .iter()
+                .all(|(method, _, _)| *method == Method::GET)
+        );
+        assert_eq!(store.objects[TEAM]["spec"]["paused"], resume);
+        assert_eq!(
+            store.objects[TEAM]["spec"]["envelope"]["budget"]["tokens"],
+            1_500_000
+        );
+    }
 }
 
 fn reviewed(mut object: Value) -> Value {
@@ -132,6 +238,15 @@ fn fixture(object: Value) -> (AppState, Arc<Mutex<Store>>) {
                 .calls
                 .push((method.clone(), path.clone(), body.clone()));
             let (status, response) = match method {
+                Method::GET if store.get_failures.contains_key(&path) => {
+                    let code = store.get_failures[&path];
+                    (
+                        code,
+                        json!({"apiVersion":"v1","kind":"Status","status":"Failure",
+                        "code":code,"reason":if code == 404 { "NotFound" } else { "Forbidden" },
+                        "message":"fixture policy unavailable"}),
+                    )
+                }
                 Method::GET => (
                     200,
                     store
@@ -161,7 +276,12 @@ fn fixture(object: Value) -> (AppState, Arc<Mutex<Store>>) {
                     json_patch::merge(current, &body);
                     (200, current.clone())
                 }
-                Method::PATCH if path == TASK || path == TEAM => {
+                Method::PATCH
+                    if path == TASK
+                        || path == TEAM
+                        || path == format!("{API}/karstasks/created-task")
+                        || path == format!("{API}/karsteams/created-team") =>
+                {
                     if let Some(change) = store.before_patch.take() {
                         json_patch::merge(store.objects.get_mut(&path).unwrap(), &change);
                     }
@@ -225,6 +345,15 @@ async fn request(state: AppState, method: Method, route: &str, body: Value) -> (
 }
 
 fn with_options(store: &mut Store) {
+    store.objects.insert(
+        "/api/v1/namespaces/kars-system/configmaps/kars-inference-budget-contracts".into(),
+        budget_catalogue("primary"),
+    );
+    store.objects.insert(
+        "/api/v1/namespaces/kars-system/configmaps/kars-inference-budgets".into(),
+        json!({"apiVersion":"v1", "kind":"ConfigMap",
+            "metadata":{"name":"kars-inference-budgets"}, "data":{"budgets.json":"{}"}}),
+    );
     let core = "/apis/kars.azure.com/v1alpha1/namespaces/kars-system";
     let mut grant = store.objects[GRANT].clone();
     grant["metadata"]["namespace"] = "kars-system".into();
@@ -244,7 +373,8 @@ fn with_options(store: &mut Store) {
                     "name":"controller","image":"ghcr.io/example/controller:latest","env":[
                         {"name":"KARS_PROVIDER","value":"foundry"},
                         {"name":"KARS_TASK_DEFAULT_MODEL","value":"primary"},
-                        {"name":"SANDBOX_IMAGE","value":"ghcr.io/example/runtime:latest"}
+                        {"name":"SANDBOX_IMAGE","value":"ghcr.io/example/runtime:latest"},
+                        {"name":"IMAGE_PULL_REGISTRIES","value":"ghcr.io"}
                     ]
                 }]}
             }}
@@ -261,6 +391,10 @@ fn with_options(store: &mut Store) {
             "apiVersion":"kars.azure.com/v1alpha1", "kind":format!("{kind}List"), "metadata":{}, "items":[]
         }));
     }
+    store.objects.insert(
+        format!("{core}/karsskills"),
+        json!({"apiVersion":"kars.azure.com/v1alpha1","kind":"KarsSkillList","metadata":{},"items":[]}),
+    );
     store.objects.insert(
         format!("{API}/toolpolicies/kars-default"),
         json!({
@@ -285,7 +419,7 @@ fn qualified_child(test: &str) -> bool {
     }
     let records = json!([{
         "runtime":"OpenClaw", "provider":"azure-foundry", "deployment":"primary",
-        "capabilities":["team","telemetry","delegation","filesystem-write","mcp","artifacts"],
+        "capabilities":["team","telemetry","delegation","filesystem-read","filesystem-write","mcp","artifacts"],
         "max_parallel":1, "min_total_tokens":1000,
         "evidence":{"task":"test-fixture","run_id":"test-run","digest":"sha256:test-fixture"}
     }]);
@@ -319,6 +453,311 @@ fn create_team_request(launch: bool) -> Value {
         "roles":[{"name":"writer","system_prompt":"Write the requested useful handbook."}],
         "execution_plan":crate::routes::tasks::ExecutionPlanDto::from_crd(&crate::kars::task::execution_plan::tests::plan())
     })
+}
+
+#[tokio::test]
+async fn profile_team_create_preserves_budget_and_pinned_policy_without_fallback() {
+    if !qualified_child("profile_team_create_preserves_budget_and_pinned_policy_without_fallback") {
+        return;
+    }
+    for failure in [None, Some(404), Some(403)] {
+        let (state, store) = fixture(team());
+        {
+            let mut store = store.lock().unwrap();
+            with_options(&mut store);
+            let path = format!("{API}/toolpolicies/restricted");
+            let mut policy = store.objects[&format!("{API}/toolpolicies/kars-default")].clone();
+            policy["metadata"]["name"] = "restricted".into();
+            store.objects.insert(path.clone(), policy);
+            if let Some(code) = failure {
+                store.get_failures.insert(path, code);
+            }
+        }
+        let mut body = create_team_request(false);
+        body["tool_policy"] = "restricted".into();
+        body["pin_tool_policy"] = true.into();
+        body["budget"]["usd_micros"] = 250000.into();
+        body["delegation_depth"] = 0.into();
+        body["roles"][0]["runtime"] = "OpenClaw".into();
+        let (status, response) = request(state, Method::POST, "teams", body).await;
+        let store = store.lock().unwrap();
+        if failure.is_some() {
+            assert_eq!(
+                status,
+                if failure == Some(404) {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::BAD_GATEWAY
+                },
+                "{response}"
+            );
+            assert!(
+                store
+                    .calls
+                    .iter()
+                    .all(|(method, _, _)| *method == Method::GET)
+            );
+            assert!(
+                !store
+                    .objects
+                    .contains_key(&format!("{API}/karsteams/created-team"))
+            );
+        } else {
+            assert_eq!(status, StatusCode::OK, "{response}");
+            let spec = &store.objects[&format!("{API}/karsteams/created-team")]["spec"];
+            assert_eq!(spec["paused"], true);
+            assert_eq!(spec["envelope"]["delegationDepth"], 0);
+            assert_eq!(spec["envelope"]["budget"]["tokens"], 2_000_000);
+            assert_eq!(spec["envelope"]["budget"]["usdMicros"], 250000);
+            assert_eq!(spec["envelope"]["toolPolicyRef"]["name"], "restricted");
+            assert_eq!(spec["blueprint"]["toolPolicy"], "restricted");
+            assert_eq!(spec["roster"][0]["blueprint"]["toolPolicy"], "restricted");
+            assert_eq!(
+                spec["roster"][0]["blueprint"]["model"],
+                spec["blueprint"]["model"]
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn team_partial_role_routes_use_the_effective_updated_parent() {
+    if !qualified_child("team_partial_role_routes_use_the_effective_updated_parent") {
+        return;
+    }
+    let mut object = reviewed(team());
+    object["spec"]["blueprint"]["model"] =
+        json!({"provider":"old-provider","deployment":"old-model"});
+    object["spec"]["blueprint"]["runtime"] = "Hermes".into();
+    object["spec"]["blueprint"]["toolPolicy"] = "kars-default".into();
+    let (state, store) = fixture(object);
+    with_options(&mut store.lock().unwrap());
+    let (status, response) = request(
+        state,
+        Method::PATCH,
+        "teams/team",
+        json!({
+            "runtime":"OpenClaw",
+            "model":"azure-foundry::primary",
+            "roles":[{"name":"writer","runtime":"OpenClaw","model":null}]
+        }),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{response}");
+    let store = store.lock().unwrap();
+    let spec = &store.objects[TEAM]["spec"];
+    assert_eq!(
+        spec["roster"][0]["blueprint"]["model"],
+        spec["blueprint"]["model"]
+    );
+    assert_eq!(spec["roster"][0]["blueprint"]["runtime"], "OpenClaw");
+    assert_eq!(spec["roster"][0]["blueprint"]["toolPolicy"], "kars-default");
+    assert_eq!(spec["paused"], true);
+}
+
+fn supported_plan_dto() -> Value {
+    json!(crate::routes::tasks::ExecutionPlanDto::from_crd(
+        &crate::kars::task::execution_plan::tests::filesystem_plan(),
+    ))
+}
+
+fn create_task_request(depth: i32, launch: bool) -> Value {
+    json!({
+        "name":"created-task", "objective":"Write a useful volunteer handbook.", "launch":launch,
+        "envelope":{"tier":1,"authority_ceiling":1,"delegation_depth":depth,
+            "budget":{"tokens":2_000_000,"scope":"GovernedInference"}},
+        "blueprint":{"runtime":"OpenClaw","model":{"provider":"azure-foundry","deployment":"primary"},
+            "execution_plan":supported_plan_dto()}
+    })
+}
+
+#[tokio::test]
+async fn execution_plan_create_preserves_explicit_depth_and_team_default() {
+    if !qualified_child("execution_plan_create_preserves_explicit_depth_and_team_default") {
+        return;
+    }
+    for (depth, launch) in [
+        (0, false),
+        (1, false),
+        (2, false),
+        (4, false),
+        (2, true),
+        (4, true),
+    ] {
+        let (state, store) = fixture(task());
+        with_options(&mut store.lock().unwrap());
+        let (status, body) = request(
+            state,
+            Method::POST,
+            "tasks",
+            create_task_request(depth, launch),
+        )
+        .await;
+        assert_eq!(status, StatusCode::OK, "depth {depth}: {body}");
+        let store = store.lock().unwrap();
+        let created = &store.objects[&format!("{API}/karstasks/created-task")];
+        assert_eq!(
+            created["metadata"]["annotations"]["kars.azure.com/run-requested"]
+                .as_str()
+                .is_some_and(|nonce| nonce.starts_with("run-")),
+            launch,
+        );
+        assert_eq!(created["spec"]["envelope"]["delegationDepth"], depth);
+        assert_eq!(created["spec"]["envelope"]["budget"]["tokens"], 2_000_000);
+        assert_eq!(
+            created["spec"]["blueprint"]["executionPlan"],
+            json!(crate::kars::task::execution_plan::tests::filesystem_plan())
+        );
+        assert_eq!(
+            created["spec"]["execution"]["launch"]
+                .as_bool()
+                .unwrap_or(false),
+            launch
+        );
+    }
+    for (depth, launch) in [
+        (None, false),
+        (Some(1), false),
+        (Some(3), false),
+        (Some(4), false),
+        (None, true),
+        (Some(3), true),
+        (Some(4), true),
+    ] {
+        let (state, store) = fixture(task());
+        with_options(&mut store.lock().unwrap());
+        let mut body = create_team_request(launch);
+        body["execution_plan"] = supported_plan_dto();
+        if let Some(depth) = depth {
+            body["delegation_depth"] = json!(depth);
+        }
+        let (status, body) = request(state, Method::POST, "teams", body).await;
+        assert_eq!(status, StatusCode::OK, "depth {depth:?}: {body}");
+        let store = store.lock().unwrap();
+        let created = &store.objects[&format!("{API}/karsteams/created-team")];
+        assert_eq!(
+            created["spec"]["envelope"]["delegationDepth"],
+            depth.unwrap_or(3)
+        );
+        assert_eq!(created["spec"]["envelope"]["budget"]["tokens"], 2_000_000);
+        assert_eq!(
+            created["spec"]["blueprint"]["executionPlan"],
+            json!(crate::kars::task::execution_plan::tests::filesystem_plan())
+        );
+        assert_eq!(created["spec"]["paused"], !launch);
+    }
+}
+
+#[tokio::test]
+async fn execution_plan_create_rejects_insufficient_active_depth_before_discovery() {
+    for depth in [0, 1] {
+        let (state, store) = fixture(task());
+        let (status, body) = request(
+            state,
+            Method::POST,
+            "tasks",
+            create_task_request(depth, true),
+        )
+        .await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.to_string()
+                .contains("ReviewedDelegationDepthInsufficient"),
+            "{body}"
+        );
+        assert!(
+            store
+                .lock()
+                .unwrap()
+                .calls
+                .iter()
+                .all(|(method, _, _)| *method == Method::GET)
+        );
+    }
+    for depth in [0, 1, 2] {
+        let (state, store) = fixture(task());
+        let mut body = create_team_request(true);
+        body["execution_plan"] = supported_plan_dto();
+        body["delegation_depth"] = json!(depth);
+        let (status, body) = request(state, Method::POST, "teams", body).await;
+        assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+        assert!(
+            body.to_string()
+                .contains("ReviewedDelegationDepthInsufficient"),
+            "{body}"
+        );
+        let store = store.lock().unwrap();
+        assert_eq!(
+            store
+                .calls
+                .iter()
+                .map(|(_, path, _)| path.as_str())
+                .collect::<Vec<_>>(),
+            [GRANT, "/api/v1/namespaces/work"]
+        );
+    }
+}
+
+#[tokio::test]
+async fn execution_plan_task_launch_requires_two_levels_and_safe_stop_remains_available() {
+    for depth in [1, 2] {
+        for launch in [false, true] {
+            let mut source = reviewed(task());
+            source["spec"]["blueprint"]["executionPlan"] =
+                json!(crate::kars::task::execution_plan::tests::filesystem_plan());
+            source["spec"]["envelope"]["delegationDepth"] = json!(depth);
+            let (state, store) = fixture(source);
+            let (status, body) = request(
+                state,
+                Method::POST,
+                "tasks/task/launch",
+                json!({"launch":launch}),
+            )
+            .await;
+            let rejected = launch && depth < 2;
+            assert_eq!(
+                status,
+                if rejected {
+                    StatusCode::BAD_REQUEST
+                } else {
+                    StatusCode::OK
+                },
+                "{body}"
+            );
+            let store = store.lock().unwrap();
+            if rejected {
+                assert!(
+                    body.to_string()
+                        .contains("ReviewedDelegationDepthInsufficient")
+                );
+                assert!(
+                    store
+                        .calls
+                        .iter()
+                        .all(|(method, _, _)| *method == Method::GET)
+                );
+            } else {
+                assert_eq!(store.objects[TASK]["spec"]["execution"]["launch"], launch);
+                assert_eq!(
+                    store.objects[TASK]["metadata"]["annotations"]["kars.azure.com/run-requested"]
+                        .as_str()
+                        .is_some_and(|nonce| nonce.starts_with("run-")),
+                    launch,
+                );
+                let writes: Vec<_> = store
+                    .calls
+                    .iter()
+                    .filter(|(method, _, _)| *method == Method::PATCH)
+                    .collect();
+                assert_eq!(writes.len(), 1);
+                assert_eq!(writes[0].2["spec"]["execution"]["launch"], launch);
+                assert_eq!(
+                    store.objects[TASK]["spec"]["envelope"]["delegationDepth"],
+                    depth
+                );
+            }
+        }
+    }
 }
 
 #[tokio::test]
@@ -373,6 +812,7 @@ async fn execution_plan_team_create_retains_reviewed_draft_or_rejects_pruning() 
         let store = store.lock().unwrap();
         let created = &store.objects[&format!("{API}/karsteams/created-team")];
         assert_eq!(created["spec"]["paused"], true);
+        assert_eq!(created["spec"]["envelope"]["delegationDepth"], 3);
         assert_eq!(
             created["metadata"]["annotations"][MARKER],
             "execution-plan/v1"
@@ -491,6 +931,66 @@ fn assert_only_read(store: &Store, path: &str) {
 fn assert_fence(patch: &Value, uid: &str) {
     assert_eq!(patch["metadata"]["uid"], uid);
     assert_eq!(patch["metadata"]["resourceVersion"], "10");
+}
+
+#[tokio::test]
+async fn execution_plan_manual_team_run_preserves_reviewed_depth() {
+    for depth in [2, 3, 4] {
+        let mut object = reviewed(team());
+        object["spec"]["paused"] = false.into();
+        object["spec"]["envelope"]["delegationDepth"] = depth.into();
+        object["spec"]["blueprint"]["executionPlan"] =
+            json!(crate::kars::task::execution_plan::tests::filesystem_plan());
+        let (state, store) = fixture(object.clone());
+        let backlog_path = "/api/v1/namespaces/work/configmaps/kars-team-tasks-team";
+        {
+            let mut store = store.lock().unwrap();
+            store.objects.insert(format!("{API}/karstasks"), json!({
+                "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsTaskList", "metadata":{}, "items":[]
+            }));
+            store.objects.insert(backlog_path.into(), json!({
+                "apiVersion":"v1", "kind":"ConfigMap",
+                "metadata":{"name":"kars-team-tasks-team","namespace":"work","uid":"backlog-uid",
+                    "resourceVersion":"10","ownerReferences":[{"apiVersion":"kars.azure.com/v1alpha1",
+                        "kind":"KarsTeam","name":"team","uid":"team-uid","controller":true}]},
+                "data":{"tasks.json":"[]"}
+            }));
+        }
+        let (status, body) = request(state, Method::POST, "teams/team/run", json!({})).await;
+        let store = store.lock().unwrap();
+        assert_eq!(store.objects[TEAM]["spec"], object["spec"]);
+        if depth < 3 {
+            assert_eq!(status, StatusCode::BAD_REQUEST, "{body}");
+            assert!(
+                body.to_string()
+                    .contains("ReviewedDelegationDepthInsufficient"),
+                "{body}"
+            );
+            assert_only_read(&store, TEAM);
+        } else {
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(store.calls.len(), 4);
+            assert_eq!(
+                store.calls[1],
+                (Method::GET, backlog_path.into(), Value::Null)
+            );
+            assert_eq!(
+                store.calls[2],
+                (Method::GET, format!("{API}/karstasks"), Value::Null)
+            );
+            assert_eq!(store.calls[3].0, Method::PATCH);
+            assert_fence(&store.calls[3].2, "team-uid");
+            assert_eq!(
+                store.objects[TEAM]["metadata"]["annotations"]["kars.azure.com/run-now"],
+                body["request"]
+            );
+            assert!(
+                body["request"]
+                    .as_str()
+                    .is_some_and(|request| !request.is_empty())
+            );
+        }
+    }
 }
 
 #[tokio::test]

@@ -323,6 +323,25 @@ async fn skill_merge_inherits_runtime_model_isolation_and_checks_current_digest(
         },
     );
     skill.metadata.generation = Some(2);
+    skill.metadata.uid = Some("skill-uid".into());
+    skill.metadata.resource_version = Some("20".into());
+    skill.metadata.annotations = Some(std::collections::BTreeMap::from([
+        (crate::skill_package::REVIEW.into(), "approved".into()),
+        (crate::skill_package::LOCKED_UID.into(), "skill-uid".into()),
+        (crate::skill_package::LOCKED_GENERATION.into(), "2".into()),
+        (
+            crate::skill_package::LOCKED_DIGEST.into(),
+            skill.version_digest(),
+        ),
+        (
+            crate::skill_package::UPLOADED_BY_SUB.into(),
+            "author".into(),
+        ),
+        (
+            crate::skill_package::APPROVED_BY_SUB.into(),
+            "reviewer".into(),
+        ),
+    ]));
     skill.status = Some(crate::kars_skill::KarsSkillStatus {
         phase: Some("Ready".into()),
         observed_generation: Some(2),
@@ -344,6 +363,7 @@ async fn skill_merge_inherits_runtime_model_isolation_and_checks_current_digest(
     assert_eq!(blueprint.isolation.as_deref(), Some("confidential"));
     assert_eq!(blueprint.model.as_ref().unwrap().deployment, "model-a");
     assert_eq!(blueprint.tool_policy.as_deref(), Some("read-only"));
+    assert_eq!(blueprint.skills, ["read"]);
     server.reset().await;
     skill.metadata.generation = Some(3);
     Mock::given(method("GET"))

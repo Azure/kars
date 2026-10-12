@@ -23,6 +23,15 @@ def server():
         def do_POST(self):
             body = json.loads(self.rfile.read(int(self.headers["content-length"])))
             state["calls"].append((body, dict(self.headers)))
+            raw = state.get("raw_response")
+            if raw and raw["method"] == body["method"]:
+                data = raw["body"].encode()
+                self.send_response(raw["status"])
+                self.send_header("content-type", "text/plain")
+                self.send_header("content-length", str(len(data)))
+                self.end_headers()
+                self.wfile.write(data)
+                return
             if body["method"] == "initialize":
                 self.send_response(200)
                 self.send_header("mcp-session-id", "session-one")
@@ -101,6 +110,27 @@ def test_http_failure_is_not_replayed(server):
     server["status"] = 400
     result = json.loads(mcp_bridge._call_tool({"name": "everything.echo"}))
     assert result["isError"] is True
+    assert sum(body["method"] == "tools/call" for body, _ in server["calls"]) == 1
+
+
+@pytest.mark.parametrize("method", ["initialize", "notifications/initialized", "tools/call"])
+@pytest.mark.parametrize("status", [302, 403, 404, 503])
+def test_plain_text_http_failure_preserves_status_without_replay(server, method, status):
+    server["raw_response"] = {"method": method, "status": status, "body": "PRIVATE_SENTINEL"}
+    with pytest.raises(RuntimeError, match=f"^MCP HTTP {status}$"):
+        mcp_bridge._invoke("tools/call", {"name": "everything.echo"}, "everything")
+    assert sum(body["method"] == method for body, _ in server["calls"]) == 1
+    assert sum(body["method"] == "tools/call" for body, _ in server["calls"]) == (method == "tools/call")
+
+
+def test_plain_text_404_reinitializes_only_on_later_explicit_call(server):
+    server["raw_response"] = {"method": "tools/call", "status": 404, "body": "PRIVATE_SENTINEL"}
+    with pytest.raises(RuntimeError, match="^MCP HTTP 404$"):
+        mcp_bridge._invoke("tools/call", {"name": "everything.echo"}, "everything")
+    assert sum(body["method"] == "initialize" for body, _ in server["calls"]) == 1
+    del server["raw_response"]
+    mcp_bridge._invoke("tools/list", {}, "everything")
+    assert sum(body["method"] == "initialize" for body, _ in server["calls"]) == 2
     assert sum(body["method"] == "tools/call" for body, _ in server["calls"]) == 1
 
 

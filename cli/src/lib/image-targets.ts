@@ -20,18 +20,34 @@ export const RUNTIME_IMAGE_TARGETS: ReadonlyArray<{
 ];
 
 export interface PushedImage { name: string; image: string }
-export const MANAGED_MCP_IMAGE_TARGET = {
-  name: "mcp-everything", repo: "mcp-everything",
-  valueKey: "managedMcp.everythingImage", env: "MCP_EVERYTHING_IMAGE",
+export const MANAGED_MCP_IMAGE_TARGETS = [
+  { name: "mcp-everything", repo: "mcp-everything", preset: "everything",
+    valueKey: "managedMcp.everythingImage", env: "MCP_EVERYTHING_IMAGE" },
+  { name: "mcp-playwright", repo: "mcp-playwright", preset: "playwright",
+    valueKey: "managedMcp.playwrightImage", env: "MCP_PLAYWRIGHT_IMAGE" },
+] as const;
+export const METRICS_SERVER_IMAGE_TARGET = {
+  name: "metrics-server", repo: "kars-metrics-server",
+  dockerfile: "sandbox-images/metrics-server/Dockerfile",
 } as const;
+export const MONITORING_IMAGE_TARGETS: ReadonlyArray<{ repo: string; dockerfile: string; target?: string }> = [
+  { repo: "kars-prometheus", dockerfile: "sandbox-images/prometheus/Dockerfile" },
+  { repo: "kars-prometheus-operator", dockerfile: "sandbox-images/prometheus-operator/Dockerfile", target: "operator" },
+  { repo: "kars-prometheus-config-reloader", dockerfile: "sandbox-images/prometheus-operator/Dockerfile", target: "config-reloader" },
+  { repo: "kars-node-exporter", dockerfile: "sandbox-images/node-exporter/Dockerfile" },
+  { repo: "kars-webhook-certgen", dockerfile: "sandbox-images/webhook-certgen/Dockerfile" },
+  { repo: "kars-kube-state-metrics", dockerfile: "sandbox-images/kube-state-metrics/Dockerfile" },
+  { repo: "kars-json-exporter", dockerfile: "sandbox-images/json-exporter/Dockerfile" },
+];
 export const PUSH_COMPONENTS = ["controller", "router", "sandbox", "sandbox-base", "relay", "registry",
-  MANAGED_MCP_IMAGE_TARGET.name, ...RUNTIME_IMAGE_TARGETS.map(item => item.name)];
+  METRICS_SERVER_IMAGE_TARGET.name, ...MANAGED_MCP_IMAGE_TARGETS.map(item => item.name), ...RUNTIME_IMAGE_TARGETS.map(item => item.name)];
 
 export function pushImageTag(name: string): string {
   const repository = name === "controller" ? "kars-controller" : name === "router" ? "kars-inference-router"
     : name === "sandbox" ? "openclaw-sandbox" : name === "sandbox-base" ? "kars-sandbox-base"
     : name === "relay" || name === "registry" ? `agentmesh-${name}-agt`
-    : name === MANAGED_MCP_IMAGE_TARGET.name ? MANAGED_MCP_IMAGE_TARGET.repo : runtimeTarget(name)?.repo;
+    : name === METRICS_SERVER_IMAGE_TARGET.name ? METRICS_SERVER_IMAGE_TARGET.repo
+    : managedMcpTarget(name)?.repo ?? runtimeTarget(name)?.repo;
   if (!repository) throw new Error("Unknown pushed component; no image publication target exists");
   return `${repository}:latest`;
 }
@@ -50,6 +66,10 @@ export function runtimeTarget(name: string) {
   return RUNTIME_IMAGE_TARGETS.find(item => item.name === name);
 }
 
+export function managedMcpTarget(name: string) {
+  return MANAGED_MCP_IMAGE_TARGETS.find(item => item.name === name);
+}
+
 export function dockerPushDigest(output: string): string | undefined {
   const digests = new Set([...output.matchAll(/\bdigest:\s*(sha256:[a-f0-9]{64})\b/g)].map(match => match[1]));
   return digests.size === 1 ? [...digests][0] : undefined;
@@ -58,17 +78,18 @@ export function dockerPushDigest(output: string): string | undefined {
 export function controllerEnv(name: string): string | undefined {
   return name === "router" ? "INFERENCE_ROUTER_IMAGE"
     : name === "sandbox" ? "SANDBOX_IMAGE"
-    : name === MANAGED_MCP_IMAGE_TARGET.name ? MANAGED_MCP_IMAGE_TARGET.env : runtimeTarget(name)?.env;
+    : managedMcpTarget(name)?.env ?? runtimeTarget(name)?.env;
 }
 
 export function coreImageValues(images: PushedImage[]): Record<string, string> {
   const values: Record<string, string> = {};
   for (const { name, image } of images) {
     const runtime = runtimeTarget(name);
-    if (name === MANAGED_MCP_IMAGE_TARGET.name) values[MANAGED_MCP_IMAGE_TARGET.valueKey] = image;
+    const managed = managedMcpTarget(name);
+    if (managed) values[managed.valueKey] = image;
     else if (runtime) values[runtime.valueKey] = image;
-    else if (["controller", "router", "sandbox"].includes(name)) {
-      const prefix = name === "router" ? "inferenceRouter" : name;
+    else if (["controller", "router", "sandbox", METRICS_SERVER_IMAGE_TARGET.name].includes(name)) {
+      const prefix = name === "router" ? "inferenceRouter" : name === METRICS_SERVER_IMAGE_TARGET.name ? "metricsServer" : name;
       const { repository, tag } = splitImage(image);
       values[`${prefix}.image.repository`] = repository;
       values[`${prefix}.image.tag`] = tag;

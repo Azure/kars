@@ -1,0 +1,6 @@
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}
+{{- $admission := .Files.Get "files/eval-proxy-admission.json" | fromJson }}
+{{ toYaml $admission.policy }}
+---
+{{ toYaml $admission.binding }}

@@ -1,0 +1,19 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
+# This recipe uses the repository root, but only consumes these sources.
+**
+!bridge/
+!bridge/bff/
+!bridge/bff/**
+!shared/
+!shared/**
+**/target
+**/node_modules
+**/.git
+**/.env*
+**/__pycache__
+**/*.key
+**/*.pfx
+**/*.p12
+**/*.kubeconfig

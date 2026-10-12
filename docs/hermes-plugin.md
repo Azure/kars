@@ -22,6 +22,15 @@ The **kars Hermes plugin** is the agent-side runtime surface for kars on top of 
 
 For the conceptual split between plugin-owned mesh and router-owned governance/audit, see [Architecture → The mesh](architecture.md#the-mesh) and [AGT boundary](architecture/agt-boundary.md).
 
+Reviewed missions must read all immutable peer handoffs and retained Team
+documents before exporting findings. `kars_mission_read` at path `inputs` returns
+their complete JSON bundle, including every content, source and SHA256, in one
+authorized tool call. The existing 16-record/65536-byte input bound still
+applies. Every materialized file must match the sealed manifest before any input
+is marked consumed; missing, modified or unsafe files fail the whole read.
+Individual `inputs/<name>` reads remain supported. Neither tool-call nor
+inference-call limits are increased.
+
 ---
 
 ## Registered tools

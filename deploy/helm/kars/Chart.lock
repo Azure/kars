@@ -1,0 +1,9 @@
+dependencies:
+- name: kube-prometheus-stack
+  repository: https://prometheus-community.github.io/helm-charts
+  version: 85.3.3
+- name: kars-datapath-witness
+  repository: file://../kars-datapath-witness
+  version: 0.1.0
+digest: sha256:a52f5fcdf4a2a9913737a78d130d1ba9155561d7906816296f061b5ef8d0fb27
+generated: "2026-10-11T05:51:48.541175+02:00"

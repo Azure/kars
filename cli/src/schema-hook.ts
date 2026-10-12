@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { execFile } from "node:child_process";
+import { existsSync, realpathSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { isIP } from "node:net";
 import { pathToFileURL } from "node:url";
@@ -80,7 +81,9 @@ export async function runSchemaHook(args: readonly string[], execute?: SchemaExe
   }
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
+// Node resolves the entrypoint but leaves argv[1] at the projected ConfigMap symlink.
+if (process.argv[1] && existsSync(process.argv[1])
+  && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   runSchemaHook(process.argv.slice(2)).then(result => console.log(JSON.stringify(result))).catch(() => {
     // Never echo Helm manifests, subprocess output, credentials or command arguments into Job logs.
     console.error("Core schema staging failed. Helm must not proceed; no cluster cleanup, force or automatic write retry was attempted.");

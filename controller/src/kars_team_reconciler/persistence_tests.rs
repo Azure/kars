@@ -18,20 +18,22 @@ mod harvest;
 
 #[path = "request_tests.rs"]
 mod requests_tests;
+#[path = "work_tests.rs"]
+mod work_tests;
 
-const TEAM_PATH: &str = "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karsteams/eng";
 const TASKS_PATH: &str = "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karstasks";
 const CMS_PATH: &str = "/api/v1/namespaces/tenant-a/configmaps";
-const TEAM_STATUS_PATH: &str =
-    "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karsteams/eng/status";
+const APPROVALS_PATH: &str = "/apis/kars.azure.com/v1alpha1/namespaces/tenant-a/karsapprovals";
 
 #[derive(Default)]
 struct Store {
     tasks: BTreeMap<String, Value>,
     cms: BTreeMap<String, Value>,
+    approvals: BTreeMap<String, Value>,
     team: Value,
     version: i64,
     fail_status_once: bool,
+    conflict_status_once: bool,
     fail_after_status_once: bool,
     fail_after_activation_once: bool,
     fail_after_ack_once: bool,
@@ -91,13 +93,45 @@ impl Respond for KubeServer {
         let mut store = self.0.lock().unwrap();
         let path = request.url.path();
         let method = request.method.as_str();
-        if path == TEAM_PATH && method == "GET" {
+        let team_path = format!(
+            "/apis/kars.azure.com/v1alpha1/namespaces/{}/karsteams/{}",
+            store.team["metadata"]["namespace"].as_str().unwrap(),
+            store.team["metadata"]["name"].as_str().unwrap()
+        );
+        let team_status_path = format!("{team_path}/status");
+        if path == APPROVALS_PATH && method == "POST" {
+            let mut body: Value = serde_json::from_slice(&request.body).unwrap();
+            let name = body["metadata"]["name"].as_str().unwrap().to_owned();
+            if store.approvals.contains_key(&name) {
+                return failure(409);
+            }
+            store.version += 1;
+            body["metadata"]["uid"] = json!(format!("approval-{}", store.version));
+            body["metadata"]["resourceVersion"] = json!(store.version.to_string());
+            store.approvals.insert(name, body.clone());
+            return response(201, body);
+        }
+        if let Some(name) = path.strip_prefix(&format!("{APPROVALS_PATH}/"))
+            && method == "GET"
+        {
+            return store
+                .approvals
+                .get(name)
+                .map(|value| response(200, value.clone()))
+                .unwrap_or_else(|| failure(404));
+        }
+        if path == team_path && method == "GET" {
             return response(200, store.team.clone());
         }
-        if (path == TEAM_STATUS_PATH || path == TEAM_PATH) && method == "PATCH" {
-            let status = path == TEAM_STATUS_PATH;
+        if (path == team_status_path || path == team_path) && method == "PATCH" {
+            let status = path == team_status_path;
             if status && std::mem::take(&mut store.fail_status_once) {
                 return failure(500);
+            }
+            if status && std::mem::take(&mut store.conflict_status_once) {
+                store.version += 1;
+                store.team["metadata"]["resourceVersion"] = json!(store.version.to_string());
+                return failure(409);
             }
             if !status && let Some(team) = store.team_on_ack.take() {
                 store.team = team;
@@ -287,6 +321,37 @@ async fn setup(team: &KarsTeam) -> (MockServer, Client, Arc<Mutex<Store>>) {
 }
 
 #[tokio::test]
+async fn concurrent_team_status_write_preserves_progress_and_retries() {
+    let mut team = team();
+    team.spec.envelope.budget = None;
+    let (_server, client, store) = setup(&team).await;
+    let ctx = Arc::new(Ctx { client });
+    reconcile(Arc::new(team), ctx.clone()).await.unwrap();
+    let (fresh, status, tasks) = {
+        let mut state = store.lock().unwrap();
+        state.conflict_status_once = true;
+        (
+            serde_json::from_value(state.team.clone()).unwrap(),
+            state.team["status"].clone(),
+            state.tasks.clone(),
+        )
+    };
+    let error = reconcile(Arc::new(fresh), ctx.clone()).await.unwrap_err();
+    assert!(matches!(
+        error,
+        ReconcileError::Kube(kube::Error::Api(ref response)) if response.code == 409
+    ));
+    let fresh = {
+        let state = store.lock().unwrap();
+        assert_eq!(state.team["status"], status);
+        assert_eq!(state.tasks, tasks);
+        serde_json::from_value(state.team.clone()).unwrap()
+    };
+    reconcile(Arc::new(fresh), ctx).await.unwrap();
+    assert_eq!(store.lock().unwrap().team["status"]["phase"], PHASE_ACTIVE);
+}
+
+#[tokio::test]
 async fn failed_team_status_write_reuses_the_created_cadence_run() {
     let mut team = team();
     team.spec.envelope.budget = None;
@@ -295,8 +360,10 @@ async fn failed_team_status_write_reuses_the_created_cadence_run() {
         ..Default::default()
     });
     let (_server, client, store) = setup(&team).await;
-    store.lock().unwrap().fail_status_once = true;
     let ctx = Arc::new(Ctx { client });
+    reconcile(Arc::new(team), ctx.clone()).await.unwrap();
+    let team = serde_json::from_value(store.lock().unwrap().team.clone()).unwrap();
+    store.lock().unwrap().fail_status_once = true;
     assert!(reconcile(Arc::new(team), ctx.clone()).await.is_err());
     let persisted: KarsTeam = serde_json::from_value(store.lock().unwrap().team.clone()).unwrap();
     assert_eq!(
@@ -512,7 +579,7 @@ async fn five_entry_history_recovers_cadence_after_oversized_objective_rejection
         .await
         .unwrap();
     for n in 0..5 {
-        crate::team_commons::record_entry(
+        crate::team_commons::record_run(
             &client,
             &team,
             &format!("00000000-0000-4000-8000-{n:012}"),
@@ -520,6 +587,7 @@ async fn five_entry_history_recovers_cadence_after_oversized_objective_rejection
             &format!("engineering-run-{n:032x}"),
             &format!("engineering-run-{n:032x}"),
             &"f".repeat(400),
+            None,
         )
         .await
         .unwrap();
@@ -545,12 +613,18 @@ async fn five_entry_history_recovers_cadence_after_oversized_objective_rejection
     )
     .await
     .unwrap();
+    requests_tests::cycle(&client, &store).await.unwrap();
     {
         let state = store.lock().unwrap();
         assert_eq!(state.team["status"]["phase"], PHASE_ACTIVE);
         assert_eq!(state.team["status"]["generatedTaskCount"], 1);
-        assert_eq!(state.team["status"]["lastGeneratedTask"], name);
-        let objective = state.tasks[&name]["spec"]["objective"].as_str().unwrap();
+        let admitted_name = state.team["status"]["runAdmission"]["taskName"]
+            .as_str()
+            .unwrap();
+        assert_eq!(state.team["status"]["lastGeneratedTask"], admitted_name);
+        let objective = state.tasks[admitted_name]["spec"]["objective"]
+            .as_str()
+            .unwrap();
         assert!(objective.chars().count() <= specs::MAX_OBJECTIVE_CHARS);
         assert!(objective.starts_with(&specs::run_spec(&team, "").unwrap().objective));
         let entries: Vec<Value> = objective

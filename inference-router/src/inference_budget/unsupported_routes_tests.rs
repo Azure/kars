@@ -32,7 +32,7 @@ async fn assert_budget_denial(error: anyhow::Error, stage: &'static str) {
     assert_eq!(body["error"]["code"], "inference_budget_unavailable");
 }
 
-async fn endpoint_router(fixture: &Fixture, governed: bool) -> Router {
+async fn endpoint_state(fixture: &Fixture, governed: bool) -> AppState {
     let mut config = Config::from_env().unwrap();
     config.azure_openai_endpoint = Some(fixture.provider.uri());
     config.default_model = "model".into();
@@ -103,9 +103,272 @@ async fn endpoint_router(fixture: &Fixture, governed: bool) -> Router {
         guardrails: vec![],
         raw: json!({}),
     });
+    state
+}
+
+async fn endpoint_router(fixture: &Fixture, governed: bool) -> Router {
     Router::new()
         .merge(crate::routes::inference_routes())
+        .with_state(endpoint_state(fixture, governed).await)
+}
+
+async fn readiness_status(state: AppState) -> StatusCode {
+    crate::routes::health_routes()
         .with_state(state)
+        .oneshot(
+            HttpRequest::builder()
+                .uri("/readyz")
+                .body(Body::empty())
+                .unwrap(),
+        )
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn readiness_uses_copilot_exchange_without_azure_auth_or_model_execution() {
+    for status in [200, 401, 404, 503] {
+        let fixture = Fixture::new(100, false).await;
+        let exchange = MockServer::start().await;
+        let response = if status == 200 {
+            ResponseTemplate::new(status).set_body_json(json!({
+                "token": "readiness-jwt",
+                "expires_at": std::time::SystemTime::now()
+                    .duration_since(std::time::UNIX_EPOCH).unwrap().as_secs() + 3600,
+                "refresh_in": 1500,
+            }))
+        } else {
+            ResponseTemplate::new(status)
+        };
+        Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/exchange"))
+            .and(wiremock::matchers::header(
+                "authorization",
+                "token readiness-seat",
+            ))
+            .respond_with(response)
+            .expect(1)
+            .mount(&exchange)
+            .await;
+        let mut state = endpoint_state(&fixture, false).await;
+        *state.inference_policy.write().await = None;
+        Arc::get_mut(&mut state.config)
+            .unwrap()
+            .azure_openai_endpoint = Some("https://api.githubcopilot.com".into());
+        state.copilot = Arc::new(crate::copilot_auth::CopilotTokenCache::with_test_exchange(
+            "readiness-seat",
+            format!("{}/exchange", exchange.uri()),
+        ));
+        assert_eq!(
+            readiness_status(state).await,
+            if status == 503 {
+                StatusCode::SERVICE_UNAVAILABLE
+            } else {
+                // The execution path also supports direct non-editor OAuth tokens.
+                StatusCode::OK
+            },
+        );
+        assert!(
+            fixture
+                .provider
+                .received_requests()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+        assert!(
+            fixture
+                ._broker
+                .received_requests()
+                .await
+                .unwrap()
+                .is_empty()
+        );
+    }
+}
+
+#[tokio::test]
+async fn readiness_preserves_named_credentials_and_default_azure_auth() {
+    let fixture = Fixture::new(100, false).await;
+    for key in [None, Some("named-key")] {
+        let mut state = endpoint_state(&fixture, false).await;
+        Arc::get_mut(&mut state.config)
+            .unwrap()
+            .providers
+            .get_mut("budget-fixture")
+            .unwrap()
+            .api_key = key.map(str::to_string);
+        assert_eq!(readiness_status(state).await, StatusCode::OK);
+    }
+    let mut azure = endpoint_state(&fixture, false).await;
+    *azure.inference_policy.write().await = None;
+    Arc::get_mut(&mut azure.config)
+        .unwrap()
+        .azure_openai_endpoint = Some("https://configured.openai.azure.com".into());
+    azure.auth = Arc::new(WorkloadIdentityAuth::for_test(Some("azure-key"), None));
+    assert_eq!(readiness_status(azure).await, StatusCode::OK);
+    assert!(
+        fixture
+            .provider
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn readiness_missing_named_copilot_credentials_cannot_borrow_default_seat() {
+    let fixture = Fixture::new(100, false).await;
+    let mut state = endpoint_state(&fixture, false).await;
+    Arc::get_mut(&mut state.config)
+        .unwrap()
+        .providers
+        .get_mut("budget-fixture")
+        .unwrap()
+        .endpoint = "https://api.githubcopilot.com".into();
+    assert_eq!(
+        readiness_status(state).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(
+        fixture
+            .provider
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            ._broker
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn readiness_governed_broker_failure_is_not_bypassed_by_available_credentials() {
+    let fixture = Fixture::new(100, false).await;
+    Mock::given(wiremock::matchers::any())
+        .respond_with(ResponseTemplate::new(503))
+        .with_priority(1)
+        .mount(&fixture._broker)
+        .await;
+    let state = endpoint_state(&fixture, true).await;
+    assert_eq!(
+        readiness_status(state).await,
+        StatusCode::SERVICE_UNAVAILABLE
+    );
+    assert!(
+        !fixture
+            ._broker
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            .provider
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+}
+
+#[tokio::test]
+async fn token_policy_uses_sidecar_identity_across_headers_protocols_and_stream_modes() {
+    let fixture = Fixture::new(100, false).await;
+    for period in ["daily", "monthly"] {
+        let state = endpoint_state(&fixture, false).await;
+        {
+            let mut policy = state.inference_policy.write().await;
+            let policy = policy.as_mut().unwrap();
+            policy.daily_tokens = (period == "daily").then_some(10);
+            policy.monthly_tokens = (period == "monthly").then_some(10);
+        }
+        state.budget.record_usage("task", 20).await;
+        let app = Router::new()
+            .merge(crate::routes::inference_routes())
+            .with_state(state);
+        for path in [
+            "/v1/chat/completions",
+            "/v1/responses",
+            "/v1/messages",
+            "/anthropic/v1/messages",
+        ] {
+            for stream in [false, true] {
+                for identity in [
+                    None,
+                    Some("task"),
+                    Some("self"),
+                    Some("different-sandbox"),
+                    Some("INVALID"),
+                ] {
+                    let mut request = HttpRequest::builder()
+                        .method("POST")
+                        .uri(path)
+                        .header("content-type", "application/json");
+                    if let Some(identity) = identity {
+                        request = request.header("x-kars-sandbox", identity);
+                    }
+                    let response = app
+                        .clone()
+                        .oneshot(
+                            request
+                                .body(Body::from(
+                                    json!({
+                                        "model": "model",
+                                        "messages": [{"role": "user", "content": "test"}],
+                                        "input": "test",
+                                        "max_tokens": 1,
+                                        "stream": stream
+                                    })
+                                    .to_string(),
+                                ))
+                                .unwrap(),
+                        )
+                        .await
+                        .unwrap();
+                    assert_eq!(
+                        response.status(),
+                        StatusCode::TOO_MANY_REQUESTS,
+                        "{period} {path} stream={stream} header={identity:?}"
+                    );
+                    let body = to_bytes(response.into_body(), 4096).await.unwrap();
+                    let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                    assert!(
+                        body["error"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .to_lowercase()
+                            .contains(period)
+                    );
+                }
+            }
+        }
+    }
+    assert!(
+        fixture
+            .provider
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
+    assert!(
+        fixture
+            ._broker
+            .received_requests()
+            .await
+            .unwrap()
+            .is_empty()
+    );
 }
 
 #[tokio::test]

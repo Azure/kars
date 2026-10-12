@@ -7,13 +7,58 @@ import { routerUrl } from "./router-client.js";
 export const ROUTER_OBSERVATIONS_ARTIFACT = "kars-router-observations.json";
 const MAX_ARTIFACT_BYTES = 32 * 1024;
 
-/** Select existing router records using IDs returned to this executor. Not a recorder. */
+export type ToolResultSummary =
+  | { kind: "file_read"; bytes: number; returned_bytes: number; truncated: boolean }
+  | { kind: "file_write"; bytes: number; artifact_name?: string }
+  | { kind: "failure"; reason: "filesystem_operation_failed" | "invalid_arguments" | "policy_denied" | "reviewed_phase_denied" | "tool_execution_failed" };
+
+/** Select and report to the existing router recorder using returned response IDs. */
 export class ReturnedRouterResponses {
   private scope?: string;
   private rounds = new Set<number>();
   private responses = 0;
   private advertised = false;
   private invalid = false;
+
+  scopeId(): string | undefined {
+    return this.invalid ? undefined : this.scope;
+  }
+
+  async reportTool(callId: string, ok: boolean, latencyMs: number, summary?: ToolResultSummary): Promise<void> {
+    const scope = this.scopeId();
+    if (!scope) throw new Error("No valid returned router scope");
+    const body = JSON.stringify({ scope_id: scope, call_id: callId, ok,
+      latency_ms: Math.min(3_600_000, Math.max(0, Math.round(latencyMs))),
+      ...(summary ? { result_summary: summary } : {}) });
+    await new Promise<void>((resolve, reject) => {
+      const request = http.request(routerUrl("/telemetry/tool"), {
+        method: "POST", signal: AbortSignal.timeout(2000),
+        headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) },
+      }, response => {
+        const chunks: Buffer[] = [];
+        let size = 0;
+        response.on("data", (chunk: Buffer) => {
+          size += chunk.length;
+          if (size > 4096) { response.destroy(new Error("Tool receipt exceeds limit")); return; }
+          chunks.push(chunk);
+        });
+        response.on("end", () => {
+          try {
+            const receipt = JSON.parse(Buffer.concat(chunks).toString("utf8"));
+            if (response.statusCode !== 200 || receipt.recorded !== true
+              || receipt.source !== "harness-reported" || receipt.enforcement_changed !== false) {
+              throw new Error("Router refused tool completion report");
+            }
+            resolve();
+          } catch (error) { reject(error); }
+        });
+        response.on("error", reject);
+        response.on("aborted", () => reject(new Error("Tool receipt aborted")));
+      });
+      request.on("error", reject);
+      request.end(body);
+    });
+  }
 
   capture(headers: IncomingHttpHeaders): void {
     this.responses++;
@@ -60,13 +105,22 @@ export class ReturnedRouterResponses {
       const events = trace.events.map((event: Record<string, unknown>) => {
         const fields = event.kind === "round"
           ? ["provider", "model", "http_status", "accepted", "outcome", "usage_state", "finish_reason", "partial_observation", "ms", "tool_calls_observed"]
-          : ["call_id", "name", "ok", "reported_in_round"];
-        const selected = Object.fromEntries(["kind", "round", "scope_id", "seq", "source", ...fields]
+          : ["call_id", "name", "ok", "reported_in_round", "ms"];
+        const selected = Object.fromEntries(["kind", "round", "scope_id", "seq", "source", "observed_at", ...fields]
           .filter(key => Object.hasOwn(event, key)).map(key => [key, event[key]]));
         if (event.kind === "round" && event.usage && typeof event.usage === "object") {
           const usage = event.usage as Record<string, unknown>;
           selected.usage = Object.fromEntries(["prompt_tokens", "completion_tokens", "total_tokens"]
             .map(key => [key, usage[key] ?? null]));
+        }
+        if (event.kind === "tool_result" && event.result_summary && typeof event.result_summary === "object") {
+          const summary = event.result_summary as Record<string, unknown>;
+          const keys = summary.kind === "file_read" ? ["kind", "bytes", "returned_bytes", "truncated"]
+            : summary.kind === "file_write" ? ["kind", "bytes", "artifact_name"]
+              : summary.kind === "failure" ? ["kind", "reason"] : [];
+          if (!keys.length) throw new Error("Unknown tool summary");
+          selected.result_summary = Object.fromEntries(keys.filter(key => Object.hasOwn(summary, key))
+            .map(key => [key, summary[key]]));
         }
         return selected;
       });

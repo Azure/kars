@@ -19,6 +19,41 @@ const specSchema=(name:string)=>resource("CustomResourceDefinition",`${name}.kar
 const source=(path:string)=>readFileSync(new URL(path,root),"utf8");
 
 describe("governed credential public contract",()=>{
+  it("keeps credential writer match expressions within the native CEL authorization cost limit",()=>{
+    const auth=(verb:string)=>`authorizer.group('kars.azure.com').resource('karscredentialgrants').namespace(request.namespace) .name('workspace').check('${verb}').allowed()`;
+    const prefix="(object != null && (object.metadata.name.startsWith('kars-credential-input-') || object.metadata.name.startsWith('kars-credential-bundle-'))) || (oldObject != null && (oldObject.metadata.name.startsWith('kars-credential-input-') || oldObject.metadata.name.startsWith('kars-credential-bundle-')))";
+    const expected={
+      "kars-credential-source-boundary":[
+        `${prefix} || (${auth("use-agent-credentials")} && !${auth("project-credentials")})`,
+        `${prefix} || !${auth("manage")}`,
+      ],
+      "kars-credential-source-writes":[
+        `${auth("use-agent-credentials")} && !${auth("project-credentials")}`,
+        `!${auth("manage")}`,
+      ],
+    };
+    for(const [name,expressions] of Object.entries(expected)){
+      const policy=resource("ValidatingAdmissionPolicy",name);
+      const actual=policy.spec.matchConditions.map((condition:{expression:string})=>condition.expression.replace(/\s+/g," ").trim());
+      expect(actual).toEqual(expressions);
+      for(const expression of actual){
+        expect((expression.match(/\.check\(/g)??[]).length).toBeLessThanOrEqual(2);
+      }
+      expect(policy.spec.failurePolicy).toBe("Fail");
+      expect(resource("ValidatingAdmissionPolicyBinding",name).spec.validationActions).toEqual(["Deny","Audit"]);
+    }
+    for(const sourceName of [false,true]){
+      for(const writer of [false,true]){
+        for(const projector of [false,true]){
+          for(const manager of [false,true]){
+            expect((sourceName || (writer && !projector)) && (sourceName || !manager))
+              .toBe(sourceName || (writer && !projector && !manager));
+            expect((writer && !projector) && !manager).toBe(writer && !projector && !manager);
+          }
+        }
+      }
+    }
+  });
   it("evaluates private activation with materialized namespace metadata, never in match conditions",()=>{
     for(const name of ["kars-private-consumption","kars-private-consumption-connect"]){
       const policy=resource("ValidatingAdmissionPolicy",name);

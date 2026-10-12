@@ -45,12 +45,53 @@ passes the mounted corpus path, router URL and output path accepted by the
 packaged runner. The corpus source label remains in ConfigMap annotations
 and evaluation status; it is not an additional runner CLI option.
 
+Generated names preserve existing short names. Longer names retain a readable
+prefix and a hash of the full generated name: one-shot Jobs fit the 63-byte
+Job-label limit, CronJobs reserve Kubernetes' suffix within their 52-byte limit,
+and ConfigMaps fit the 253-byte resource-name limit. Labels and their lookup
+selectors use the same bounded value; owner references and report attribution
+retain the full Eval name and UID.
+
 Runner Pods require a non-root user, RuntimeDefault seccomp, no privilege
 escalation and dropped capabilities for namespaces enforcing the restricted
 Pod Security Standard. The shipped image declares UID 1000; custom images
 retain their declared numeric non-root user rather than being forced to that
-UID. This does not grant Kubernetes API access or weaken namespace admission
-policies.
+UID. Non-egress runs do not mount a Kubernetes service-account token.
+
+For `EgressConnect` cases, the controller verifies the sandbox's namespace
+claim and the Deployment/ReplicaSet/Pod ownership chain, then binds the run
+to exactly one ready router Pod UID. The runner uses Kubernetes-authenticated
+port-forwarding to that Pod's **loopback-only port 8444**. It sends CONNECT,
+reads the proxy response, and closes the connection without tunneled payload.
+The proxy is not exposed through a Service or rebound to a public address.
+
+An Eval-owned service account receives only `get` on the named Pod and
+`get`/`create` on its `pods/portforward` subresource. The maintained
+`kars-eval-proxy-port` admission policy additionally restricts these accounts
+to port 8444; RBAC alone cannot restrict port numbers. The controller refuses
+to grant access unless the exact policy and enforcing binding are installed
+and the policy has been type-checked. No exec, Secret access, router admin
+token or cluster-wide runner role is granted, including for custom images.
+Grants are owned by the target Pod, replaced when its incarnation changes,
+and revoked during Eval finalization. The service account is collected with
+the Eval, as are its UID-owned ConfigMaps, Jobs and CronJobs. Finalizer removal
+is fenced by Eval UID and resource version and preserves other finalizers;
+similarly named or labeled foreign resources are not cleanup targets.
+Both scheduled and one-shot templates retain the same UID binding across
+run-request acknowledgement.
+
+The runner checks that UID before and after opening each port-forward, before
+sending any probe; each request has a bounded timeout and cancels its forwarding
+task on completion or error. Missing permissions, an unavailable proxy or a
+replaced Pod are evaluation errors, not policy denials or passing cases.
+Standalone runner invocations can still explicitly select a reachable proxy
+with `--forward-proxy`; installed Jobs select `--forward-proxy-pod` together
+with `--forward-proxy-pod-uid` instead.
+
+The `egress-known-bad` baseline expects an enforcing egress policy, not learn
+mode. Learn mode retains blocklist protection but permits discovery of other
+hosts. DNS failures and upstream timeouts during discovery remain inconclusive;
+the evaluator never changes the target policy to make a baseline pass.
 
 ---
 

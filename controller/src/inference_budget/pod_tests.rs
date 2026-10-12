@@ -67,7 +67,8 @@ fn every_runtime_receives_only_a_router_private_token_mount() {
             "volumes": [], "serviceAccountName": "sandbox",
             "containers": [
                 {"name": agent, "env": [{"name":"KARS_RUNTIME_KIND","value":runtime}], "volumeMounts": []},
-                {"name":"inference-router","image":"router:latest","env": [], "volumeMounts":[]}
+                {"name":"inference-router","image":"router:latest","env": [], "volumeMounts":[],
+                 "livenessProbe":{"httpGet":{"path":"/healthz","port":"inference"},"timeoutSeconds":1}}
             ]
         });
         let original_agent = pod["containers"][0].clone();
@@ -82,6 +83,10 @@ fn every_runtime_receives_only_a_router_private_token_mount() {
             AUDIENCE
         );
         assert_eq!(router["readinessProbe"]["httpGet"]["path"], "/readyz");
+        assert_eq!(router["readinessProbe"]["timeoutSeconds"], 10, "{runtime}");
+        assert_eq!(router["readinessProbe"]["periodSeconds"], 15, "{runtime}");
+        assert_eq!(router["livenessProbe"]["httpGet"]["path"], "/healthz");
+        assert_eq!(router["livenessProbe"]["timeoutSeconds"], 1, "{runtime}");
         assert_eq!(
             router["image"],
             format!("router:latest@sha256:{}", "7".repeat(64))
@@ -94,21 +99,43 @@ fn every_runtime_receives_only_a_router_private_token_mount() {
 }
 
 #[tokio::test]
-async fn no_task_owner_no_reference_is_a_byte_safe_legacy_noop_without_api_access() {
+async fn no_task_owner_no_reference_preserves_legacy_pod_after_calendar_boundary_check() {
     let server = wiremock::MockServer::start().await;
     let config = kube::Config::new(server.uri().parse().unwrap());
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
     let client = Client::try_from(config).unwrap();
     let sandbox: KarsSandbox = serde_json::from_value(json!({
         "apiVersion":"kars.azure.com/v1alpha1", "kind":"KarsSandbox",
-        "metadata":{"name":"legacy","namespace":"workspace","uid":"legacy-uid"},
+        "metadata":{"name":"legacy","namespace":"workspace","uid":"legacy-uid","resourceVersion":"1"},
         "spec":{"inferenceRef":{"name":"legacy-inference"}}
     }))
     .unwrap();
     let namespace: Namespace = serde_json::from_value(json!({
-        "apiVersion":"v1","kind":"Namespace","metadata":{"name":"kars-legacy","uid":"namespace-uid"}
+        "apiVersion":"v1","kind":"Namespace",
+        "metadata":{
+            "name":"kars-legacy","uid":"namespace-uid","resourceVersion":"1",
+            "annotations":{
+                "kars.azure.com/namespace-claim-version":"v1",
+                "kars.azure.com/sandbox-namespace":"workspace",
+                "kars.azure.com/sandbox-name":"legacy",
+                "kars.azure.com/sandbox-uid":"legacy-uid"
+            }
+        }
     }))
     .unwrap();
+    assert!(
+        prepare(&client, &sandbox, &namespace)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert!(server.received_requests().await.unwrap().is_empty());
+    wiremock::Mock::given(wiremock::matchers::method("GET"))
+        .and(wiremock::matchers::path("/api/v1/namespaces/kars-legacy"))
+        .respond_with(wiremock::ResponseTemplate::new(200).set_body_json(&namespace))
+        .expect(1)
+        .mount(&server)
+        .await;
     let mut pod = json!({"containers":[{"name":"agent","envFrom":[{"secretRef":{"name":"legacy-credentials"}}]}]});
     let before = pod.clone();
     assert!(
@@ -118,7 +145,9 @@ async fn no_task_owner_no_reference_is_a_byte_safe_legacy_noop_without_api_acces
             .is_empty()
     );
     assert_eq!(pod, before);
-    assert!(server.received_requests().await.unwrap().is_empty());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 1);
+    assert_eq!(requests[0].method.as_str(), "GET");
 }
 
 #[test]

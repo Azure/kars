@@ -65,7 +65,55 @@ fmt: ## Format code
 
 # ─── Container Images ────────────────────────────────────────────────────────
 
-images: image-controller image-router image-sandbox image-relay image-registry image-runtimes ## Build all container images
+images: image-controller image-router image-metrics-server image-headlamp image-monitoring image-sandbox image-relay image-registry image-runtimes ## Build all default container images
+
+image-monitoring: image-prometheus image-prometheus-operator image-node-exporter image-webhook-certgen image-kube-state-metrics image-json-exporter ## Build the default AL3 monitoring stack (Grafana is optional)
+
+image-metrics-server: ## Build the AL3 Metrics API image
+	docker build --platform linux/amd64 \
+		-t $(REGISTRY)/kars-metrics-server:$(IMAGE_TAG) \
+		-t $(REGISTRY)/kars-metrics-server:latest \
+		--label "org.opencontainers.image.version=$(VERSION)" \
+		--label "org.opencontainers.image.revision=$(GIT_SHA)" \
+		-f sandbox-images/metrics-server/Dockerfile .
+
+image-headlamp: ## Build Headlamp with the Kars plugin on AL3
+	docker build -t $(REGISTRY)/kars-headlamp:latest \
+		-f sandbox-images/headlamp/Dockerfile .
+
+image-prometheus: ## Build Prometheus and both browser interfaces on AL3
+	docker build -t $(REGISTRY)/kars-prometheus:latest \
+		-f sandbox-images/prometheus/Dockerfile .
+
+image-prometheus-operator: ## Build the AL3 Prometheus operator and config reloader
+	docker build --target operator -t $(REGISTRY)/kars-prometheus-operator:latest \
+		-f sandbox-images/prometheus-operator/Dockerfile .
+	docker build --target config-reloader -t $(REGISTRY)/kars-prometheus-config-reloader:latest \
+		-f sandbox-images/prometheus-operator/Dockerfile .
+
+image-node-exporter: ## Build the AL3 Prometheus node exporter
+	docker build -t $(REGISTRY)/kars-node-exporter:latest \
+		-f sandbox-images/node-exporter/Dockerfile .
+
+image-webhook-certgen: ## Build the AL3 admission certificate helper
+	docker build -t $(REGISTRY)/kars-webhook-certgen:latest \
+		-f sandbox-images/webhook-certgen/Dockerfile .
+
+image-kube-state-metrics: ## Build the AL3 Kubernetes object-state exporter
+	docker build -t $(REGISTRY)/kars-kube-state-metrics:latest \
+		-f sandbox-images/kube-state-metrics/Dockerfile .
+
+image-json-exporter: ## Build the AL3 AgentMesh JSON metrics exporter
+	docker build -t $(REGISTRY)/kars-json-exporter:latest \
+		-f sandbox-images/json-exporter/Dockerfile .
+
+image-grafana: ## Build optional AL3 Grafana with the fixed monitoring dependencies
+	docker build -t $(REGISTRY)/kars-grafana:latest \
+		-f sandbox-images/grafana/Dockerfile .
+
+image-k8s-sidecar: ## Build the AL3 Grafana configuration sidecar
+	docker build -t $(REGISTRY)/kars-k8s-sidecar:latest \
+		-f sandbox-images/k8s-sidecar/Dockerfile .
 
 image-runtimes: image-runtime-anthropic image-runtime-langgraph image-runtime-maf-python image-runtime-openai-agents image-runtime-pydantic-ai ## Build all runtime adapter images
 
@@ -171,11 +219,14 @@ image-sandbox: image-router ## Build sandbox Docker image (slim overlay — fast
 # (deployAgentMesh helper) for the build invocation. The Makefile no
 # longer owns these targets after the Phase 5.2 vendored fork removal.
 
-push: ## Push all images to ACR (controller + router + sandbox-base + sandbox + runtimes)
+push: ## Push Core images to ACR (controller + router + metrics + sandbox-base + sandbox)
 	docker push $(REGISTRY)/kars-controller:$(IMAGE_TAG)
 	docker push $(REGISTRY)/kars-controller:latest
 	docker push $(REGISTRY)/kars-inference-router:$(IMAGE_TAG)
 	docker push $(REGISTRY)/kars-inference-router:latest
+	docker push $(REGISTRY)/kars-metrics-server:$(IMAGE_TAG)
+	docker push $(REGISTRY)/kars-metrics-server:latest
+	docker push $(REGISTRY)/kars-headlamp:latest
 	docker push $(REGISTRY)/kars-sandbox-base:$(IMAGE_TAG)
 	docker push $(REGISTRY)/kars-sandbox-base:latest
 	docker push $(REGISTRY)/openclaw-sandbox:$(IMAGE_TAG)

@@ -176,3 +176,10 @@ Node.js 22's built-in `fetch()` ignores `HTTPS_PROXY`. The sandbox uses `proxy-b
 - **No mocks or stubs in production code.** Always provide real, working implementations. If a dependency is unavailable, build the real integration or defer the feature — never ship a mock.
 - **No TODO/FIXME/HACK comments as placeholders.** If something needs to be done, do it now or track it as a GitHub issue. Code with TODO comments will not be merged.
 - **No placeholder or skeleton implementations.** Every function, class, and module must be fully implemented and tested. Empty methods, `throw new Error("not implemented")`, or `// TODO` stubs are not acceptable.
+
+<!-- mermaid-ai-skills:start -->
+## Mermaid Diagrams
+
+When the user asks to create, edit, or visualize a diagram, follow the
+instructions in `.github/instructions/mermaid.instructions.md`.
+<!-- mermaid-ai-skills:end -->

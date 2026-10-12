@@ -17,6 +17,8 @@
 
 import { useActionState, useState } from "react";
 import { applyGovernanceAction, type GovState } from "./governance-actions";
+import { useSpecEditor } from "./use-spec-editor";
+import { GovernanceDialog } from "./governance-dialog";
 import { Icon } from "@/components/icon";
 import type { ModelOption } from "@/lib/types";
 
@@ -126,28 +128,27 @@ export function InferencePolicyEditor({
 }) {
   const [open, setOpen] = useState(false);
   const [state, action, pending] = useActionState(applyGovernanceAction, init);
+  const [name, setName] = useState(initialName ?? "");
+  const [force, setForce] = useState(false);
   const editing = Boolean(initialName);
-  const [advanced, setAdvanced] = useState(false);
-  const [f, setF] = useState<FormShape>(() => parseSpec(initialSpec));
-  const [rawSpec, setRawSpec] = useState(() => JSON.stringify(initialSpec ?? {}, null, 2));
+  const { f, setF, advanced, rawSpec, setRawSpec, specJson, modeError, toggleMode } =
+    useSpecEditor(initialSpec, parseSpec, buildSpec);
 
-  if (!open) {
-    return (
+  const patch = (p: Partial<FormShape>) => setF((prev) => ({ ...prev, ...p }));
+
+  return (
+    <>
       <button
         type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
         onClick={() => setOpen(true)}
         className="rounded-lg border border-border bg-surface px-3 py-1.5 text-xs font-medium text-foreground-muted hover:text-foreground"
       >
         {editing ? `Edit ${initialName}` : "+ Add inference policy"}
       </button>
-    );
-  }
-
-  const specJson = advanced ? rawSpec : JSON.stringify(buildSpec(f));
-  const patch = (p: Partial<FormShape>) => setF((prev) => ({ ...prev, ...p }));
-
-  return (
-    <form action={action} className="mt-2 space-y-4 rounded-lg border border-border bg-surface-muted p-4">
+      {open && <GovernanceDialog title={editing ? "Edit inference policy" : "New inference policy"} pending={pending} onClose={() => setOpen(false)}>
+    <form action={action} className="w-full min-w-0 space-y-4 bg-surface-muted p-4 [&_fieldset]:min-w-0">
       <input type="hidden" name="kind" value="InferencePolicy" />
       <input type="hidden" name="spec" value={specJson} />
       <div className="flex items-center justify-between">
@@ -155,18 +156,21 @@ export function InferencePolicyEditor({
         <div className="flex items-center gap-3">
           <button
             type="button"
-            onClick={() => setAdvanced((v) => !v)}
+            onClick={toggleMode}
             className="text-xs text-foreground-muted hover:text-foreground"
           >
             {advanced ? "Use visual form" : "Edit as JSON"}
           </button>
-          <button type="button" onClick={() => setOpen(false)} className="text-xs text-foreground-muted hover:text-foreground">Cancel</button>
+          <button type="button" disabled={pending} onClick={() => setOpen(false)} className="text-xs text-foreground-muted hover:text-foreground">Cancel</button>
         </div>
       </div>
 
+      {modeError && <p role="alert" className="text-xs text-danger">{modeError}</p>}
       <input
         name="name"
-        defaultValue={initialName}
+        aria-label="inference policy name"
+        value={name}
+        onChange={(event) => setName(event.target.value)}
         readOnly={editing}
         placeholder="name (lowercase-with-hyphens)"
         required
@@ -175,6 +179,7 @@ export function InferencePolicyEditor({
 
       {advanced ? (
         <textarea
+          aria-label="Inference policy specification JSON"
           value={rawSpec}
           onChange={(e) => setRawSpec(e.target.value)}
           rows={14}
@@ -329,16 +334,18 @@ export function InferencePolicyEditor({
         Applied with <span className="font-mono">kubectl apply</span> semantics (field manager <span className="font-mono">kars-bridge</span>). The cluster validates it — invalid specs are rejected with the API server&apos;s own message.
       </p>
       <label className="flex items-center gap-2 text-[11px] text-foreground-muted">
-        <input type="checkbox" name="force" /> Force — take ownership of fields another manager owns (only on a conflict)
+        <input type="checkbox" name="force" checked={force} onChange={(event) => setForce(event.target.checked)} /> Force — take ownership of fields another manager owns (only on a conflict)
       </label>
       <div className="flex items-center gap-3">
         <button type="submit" disabled={pending} className="rounded-lg bg-signal px-4 py-2 text-sm font-semibold text-signal-fg disabled:opacity-50">
           {pending ? "Applying…" : editing ? "Save changes" : "Create inference policy"}
         </button>
-        {state.error && <p className="text-xs text-danger">{state.error}</p>}
-        {state.ok && <p className="text-xs text-ok">{state.ok}</p>}
+        {state.error && <p role="alert" className="text-xs text-danger">{state.error}</p>}
+        {state.ok && <p role="status" className="text-xs text-ok">{state.ok}</p>}
       </div>
     </form>
+      </GovernanceDialog>}
+    </>
   );
 }
 

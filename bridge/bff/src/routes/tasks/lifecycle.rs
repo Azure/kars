@@ -173,6 +173,9 @@ pub async fn replicate_task(
     let api: Api<KarsTask> = cluster.tasks(&ns);
     let source = require_owned_task(cluster, &ns, &name, &principal).await?;
     crate::kars::execution_plans::validate(&source, req.launch).map_err(AppError::BadRequest)?;
+    if req.launch {
+        crate::routes::validate::require_budget_contracts(cluster, &source).await?;
+    }
     if source
         .spec
         .blueprint
@@ -275,9 +278,10 @@ pub async fn launch_task(
     let task = require_owned_task(cluster, &ns, &name, &principal).await?;
     if req.launch {
         crate::kars::execution_plans::validate(&task, true).map_err(AppError::BadRequest)?;
+        crate::routes::validate::require_budget_contracts(cluster, &task).await?;
     }
-    let fence =
-        crate::kars::execution_plans::identity_fence(&task.metadata).map_err(AppError::Conflict)?;
+    let fence = crate::kars::execution_plans::activation_fence(&task, req.launch)
+        .map_err(AppError::Conflict)?;
     let api: Api<KarsTask> = cluster.tasks(&ns);
     let patch = serde_json::json!({
         "apiVersion": "kars.azure.com/v1alpha1",

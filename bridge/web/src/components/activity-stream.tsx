@@ -45,7 +45,7 @@ export function ActivityStream({
   principalAgentName?: string;
 }) {
   const [query, setQuery] = useState(focusQuery ?? "");
-  const sharedEvents = useLiveTrace(ns, name, running && externalEvents == null, activity, runNonce);
+  const { events: sharedEvents } = useLiveTrace(ns, name, running && externalEvents == null, activity, runNonce);
   const merged = externalEvents ?? sharedEvents;
   const hasActivity = merged && merged.length > 0;
   const toolEvents = hasActivity ? merged.filter((e) => e.kind === "tool").length : 0;

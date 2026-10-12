@@ -100,6 +100,42 @@ async fn apply(server: &MockServer) -> Result<(), kube::Error> {
 }
 
 #[tokio::test]
+async fn removed_skill_selection_does_not_survive_a_task_update() {
+    let server = MockServer::start().await;
+    let mut existing = object(&task());
+    existing.metadata.annotations = Some(std::collections::BTreeMap::from([
+        (crate::skill_delivery::SELECTION.into(), "old-skill".into()),
+        ("customer.example/note".into(), "preserve".into()),
+    ]));
+    Mock::given(method("GET"))
+        .and(path(OBJECT_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&existing))
+        .mount(&server)
+        .await;
+    Mock::given(method("PUT"))
+        .and(path(OBJECT_PATH))
+        .respond_with(ResponseTemplate::new(200).set_body_json(&existing))
+        .expect(1)
+        .mount(&server)
+        .await;
+    apply(&server).await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    let changed: Value =
+        serde_json::from_slice(&requests.iter().find(|r| r.method == "PUT").unwrap().body).unwrap();
+    assert!(
+        changed["metadata"]["annotations"]
+            .get(crate::skill_delivery::SELECTION)
+            .is_none()
+    );
+    assert_eq!(
+        changed["metadata"]["annotations"]["customer.example/note"],
+        "preserve"
+    );
+    assert_eq!(changed["metadata"]["uid"], "sandbox-uid");
+    assert_eq!(changed["metadata"]["resourceVersion"], "42");
+}
+
+#[tokio::test]
 async fn unowned_and_previous_task_uid_objects_are_never_modified_or_deleted() {
     for old_uid in [None, Some("previous-task-uid")] {
         let server = MockServer::start().await;
@@ -255,6 +291,7 @@ async fn materialized_resources_match_the_authorization_blueprint() {
         instructions: Some(" Cite evidence. ".into()),
         tool_policy: Some("read-only".into()),
         mcp_servers: vec!["docs".into()],
+        skills: Vec::new(),
         memory: Some(" team-memory ".into()),
         isolation: Some("enhanced".into()),
         egress: vec![TaskEgress {

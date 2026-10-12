@@ -6,14 +6,25 @@ use super::{
     service::{self, Broker},
     store::Store,
 };
+use futures::{StreamExt, future::BoxFuture, stream::FuturesUnordered};
 use k8s_openapi::api::core::v1::Secret;
 use kube::{Api, Client, ResourceExt};
+use std::{net::SocketAddr, time::Duration};
 use tokio::net::{TcpListener, TcpStream};
 use tokio_rustls::{TlsAcceptor, server::TlsStream};
+
+#[cfg(test)]
+#[path = "transport_tests.rs"]
+mod tests;
+
+const MAX_PENDING_HANDSHAKES: usize = 64;
+const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(10);
+type Handshake = BoxFuture<'static, Option<(TlsStream<TcpStream>, SocketAddr)>>;
 
 struct Listener {
     listener: TcpListener,
     tls: TlsAcceptor,
+    pending: FuturesUnordered<Handshake>,
 }
 
 impl axum::serve::Listener for Listener {
@@ -22,17 +33,37 @@ impl axum::serve::Listener for Listener {
 
     async fn accept(&mut self) -> (Self::Io, Self::Addr) {
         loop {
-            let Ok((stream, address)) = self.listener.accept().await else {
-                tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-                continue;
-            };
-            if let Ok(Ok(tls)) =
-                tokio::time::timeout(std::time::Duration::from_secs(10), self.tls.accept(stream))
-                    .await
-            {
-                return (tls, address);
+            tokio::select! {
+                completed = self.pending.next(), if !self.pending.is_empty() => {
+                    if let Some(Some(connection)) = completed {
+                        return connection;
+                    }
+                }
+                accepted = self.listener.accept(), if self.pending.len() < MAX_PENDING_HANDSHAKES => {
+                    let (stream, address) = match accepted {
+                        Ok(connection) => connection,
+                        Err(error) => {
+                            tracing::warn!(%error, "Inference budget TCP accept failed");
+                            tokio::time::sleep(Duration::from_millis(100)).await;
+                            continue;
+                        }
+                    };
+                    let tls = self.tls.clone();
+                    self.pending.push(Box::pin(async move {
+                        match tokio::time::timeout(HANDSHAKE_TIMEOUT, tls.accept(stream)).await {
+                            Ok(Ok(stream)) => Some((stream, address)),
+                            Ok(Err(_)) => {
+                                tracing::warn!("Inference budget TLS connection rejected");
+                                None
+                            }
+                            Err(_) => {
+                                tracing::warn!("Inference budget TLS handshake timed out");
+                                None
+                            }
+                        }
+                    }));
+                }
             }
-            tracing::warn!("Inference budget TLS connection rejected");
         }
     }
 
@@ -86,6 +117,7 @@ pub async fn run(client: Client, settings: Settings) -> anyhow::Result<()> {
     let listener = Listener {
         listener: socket,
         tls: TlsAcceptor::from(tls),
+        pending: FuturesUnordered::new(),
     };
     let store = Store::new(client.clone(), &settings.accounting_namespace);
     let router = service::router(Broker {

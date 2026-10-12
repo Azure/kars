@@ -14,23 +14,7 @@
 import { useState, useTransition } from "react";
 import { validatePackageAction } from "@/lib/preflight-actions";
 import type { ValidationResult } from "@/lib/types";
-
-function CheckMark({ status }: { status: "pass" | "fail" | "warn" }) {
-  const map = {
-    pass: { c: "text-emerald-600", s: "✓" },
-    warn: { c: "text-amber-600", s: "!" },
-    fail: { c: "text-rose-600", s: "✕" },
-  } as const;
-  const m = map[status];
-  return (
-    <span
-      className={`mt-0.5 inline-flex h-4 w-4 shrink-0 items-center justify-center rounded-full border text-[10px] font-bold ${m.c}`}
-      aria-hidden
-    >
-      {m.s}
-    </span>
-  );
-}
+import { ValidationChecks } from "./validation-checks";
 
 export function PreflightCheck({
   blueprint,
@@ -96,22 +80,10 @@ export function PreflightCheck({
           {pending ? "Checking…" : "Validate package"}
         </button>
       </div>
-      {error && <p className="mt-2 text-xs text-rose-600">{error}</p>}
-      {result && (
-        <ul className="mt-3 space-y-1.5">
-          {result.checks.map((c) => (
-            <li key={c.id} className="flex items-start gap-2 text-sm">
-              <CheckMark status={c.status} />
-              <span>
-                <span className="font-medium">{c.label}</span>
-                <span className="ml-1.5 text-xs text-foreground-muted">{c.detail}</span>
-              </span>
-            </li>
-          ))}
-        </ul>
-      )}
+      {error && <p role="alert" className="mt-2 text-xs text-danger">{error}</p>}
+      {result && <ValidationChecks checks={result.checks} />}
       {result && !result.ok && (
-        <p className="mt-2 text-xs font-medium text-rose-600">
+        <p className="mt-2 text-xs font-medium text-danger">
           Fix the failing checks above before launching.
         </p>
       )}

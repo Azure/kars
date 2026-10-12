@@ -21,10 +21,11 @@ Review [Compatibility](compatibility.md) before continuing.
 
 ## 2. Install Bridge with Dex
 
-Build and load the `dev` images referenced by `values-kind.yaml`:
+From `bridge/`, build and load the `dev` images referenced by `values-kind.yaml`.
+The BFF uses the repository-root context to include `shared/`:
 
 ```bash
-docker build -f bff/Dockerfile -t kars-bridge-bff:dev bff
+docker build -f bff/Dockerfile -t kars-bridge-bff:dev ..
 docker build -f web/Dockerfile -t kars-bridge-web:dev web
 kind load docker-image kars-bridge-bff:dev kars-bridge-web:dev --name <cluster>
 

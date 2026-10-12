@@ -3,6 +3,166 @@
 
 use super::*;
 
+fn full_archive(content: &str) -> RunArchive {
+    let source = crate::team_memory::Source {
+        namespace: "tenant-a".into(),
+        task_name: "task-1".into(),
+        task_uid: "task-uid".into(),
+        sandbox_uid: "sandbox-uid".into(),
+        pod_uid: "pod-uid".into(),
+        run_nonce: "run-1".into(),
+        assignment_id: "assignment-1".into(),
+        agent_did: format!("did:mesh:{}", "a".repeat(32)),
+        artifact_name: "report.md".into(),
+    };
+    let document = crate::team_memory::Document {
+        name: "report.md".into(),
+        source,
+        sha256: crate::team_memory::digest(content),
+        content: content.into(),
+    };
+    let mut handoff = document.clone();
+    handoff.name = "r0-p0.md".into();
+    handoff.source.task_name = "peer".into();
+    handoff.source.task_uid = "peer-uid".into();
+    handoff.source.artifact_name = "handoff.md".into();
+    RunArchive {
+        version: 1,
+        output: "Completed".into(),
+        output_sha256: crate::team_memory::digest("Completed"),
+        documents: vec![document],
+        handoffs: vec![handoff],
+    }
+}
+
+#[test]
+fn archives_enrich_without_rewriting_audited_summaries_and_reject_replacement() {
+    let (identity, cm) = store();
+    let cm = append(&identity, &cm, "one", "Completed");
+    let before = cm.data.clone().unwrap();
+    let archive = full_archive("Exact decision log\n日本語\n");
+    let updated = prepare_archive_update(&cm, None, "one", "task-1", &archive)
+        .unwrap()
+        .unwrap();
+    for (key, value) in before {
+        assert_eq!(updated.data.as_ref().unwrap()[&key], value);
+    }
+    assert!(
+        prepare_archive_update(&updated, None, "one", "task-1", &archive)
+            .unwrap()
+            .is_none()
+    );
+    assert!(
+        prepare_archive_update(&updated, None, "one", "task-1", &full_archive("Changed")).is_err()
+    );
+    let mut corrupt = updated.clone();
+    corrupt
+        .data
+        .as_mut()
+        .unwrap()
+        .insert(archive_key("one"), "{}".into());
+    assert!(read_index(&corrupt).is_err());
+    let mut unindexed = updated.clone();
+    unindexed.data.as_mut().unwrap().insert(
+        archive_key("missing"),
+        serde_json::to_string(&archive).unwrap(),
+    );
+    assert!(read_index(&unindexed).is_err());
+    let selected = select_documents(&updated, &read_index(&updated).unwrap()).unwrap();
+    assert_eq!(selected[0].content, archive.documents[0].content);
+    assert_eq!(selected[1].source, archive.handoffs[0].source);
+}
+
+#[test]
+fn whole_archives_prune_together_and_oversized_recall_fails_before_admission() {
+    let (identity, mut cm) = store();
+    let archive = full_archive(&"x".repeat(40000));
+    for n in 0..20 {
+        let id = format!("run-{n}");
+        let base = prepare_entry_update(
+            &identity,
+            &cm,
+            &id,
+            "Finding",
+            "analyst",
+            "task-1",
+            "Completed",
+        )
+        .unwrap();
+        cm = prepare_archive_update(&cm, base, &id, "task-1", &archive)
+            .unwrap()
+            .unwrap();
+    }
+    let index = read_index(&cm).unwrap();
+    assert!(index.len() < 20);
+    assert_eq!(index.last().unwrap().id, "run-19");
+    assert!(
+        cm.data
+            .as_ref()
+            .unwrap()
+            .iter()
+            .map(|(key, value)| key.len() + value.len())
+            .sum::<usize>()
+            <= MAX_STORE_BYTES
+    );
+    assert!(
+        select_documents(&cm, &index)
+            .unwrap_err()
+            .to_string()
+            .contains("refusing truncated recall")
+    );
+}
+
+#[test]
+fn summary_only_appends_also_prune_whole_archives_to_the_byte_budget() {
+    let (identity, mut cm) = store();
+    let archive = full_archive(&"x".repeat(40000));
+    for n in 0..11 {
+        let id = format!("archived-{n}");
+        let base = prepare_entry_update(
+            &identity,
+            &cm,
+            &id,
+            "Finding",
+            "analyst",
+            "task-1",
+            "Completed",
+        )
+        .unwrap();
+        cm = prepare_archive_update(&cm, base, &id, "task-1", &archive)
+            .unwrap()
+            .unwrap();
+    }
+    assert!(
+        cm.data
+            .as_ref()
+            .unwrap()
+            .contains_key(&archive_key("archived-0"))
+    );
+    for n in 0..20 {
+        cm = append(
+            &identity,
+            &cm,
+            &format!("summary-{n}"),
+            &"s".repeat(MAX_ENTRY_CHARS),
+        );
+        assert!(
+            cm.data
+                .as_ref()
+                .unwrap()
+                .iter()
+                .map(|(key, value)| key.len() + value.len())
+                .sum::<usize>()
+                <= MAX_STORE_BYTES
+        );
+        read_index(&cm).unwrap();
+    }
+    let data = cm.data.as_ref().unwrap();
+    assert!(!data.contains_key(&archive_key("archived-0")));
+    assert!(!data.contains_key(&content_key("archived-0")));
+    assert!(data.contains_key(&content_key("summary-19")));
+}
+
 fn team(namespace: &str, name: &str, uid: &str) -> KarsTeam {
     let mut team = KarsTeam::new(name, Default::default());
     team.metadata.namespace = Some(namespace.into());

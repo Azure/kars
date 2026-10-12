@@ -3,8 +3,9 @@
 
 //! Controller-owned identity projection and current-workload mission bindings.
 
-mod admission;
+pub(crate) mod admission;
 mod binding;
+pub(crate) mod dispatcher;
 mod identity;
 mod roots;
 #[cfg(test)]
@@ -212,6 +213,7 @@ pub(crate) struct Prepared {
     dispatcher_namespace: Namespace,
     dispatcher_did: String,
     runtime_root: roots::Root,
+    reviewed: Option<crate::reviewed_execution::Grant>,
 }
 
 async fn task_for(client: &Client, sandbox: &KarsSandbox) -> Result<Option<KarsTask>> {
@@ -306,11 +308,7 @@ async fn prepare_with(
     if !executable(&task, &fresh) || desired.spec.as_ref().and_then(|s| s.replicas) == Some(0) {
         return Ok(None);
     }
-    if fresh.spec.runtime.kind != RuntimeKind::OpenClaw {
-        return Err(Error::Invalid(
-            "encrypted mission execution requires OpenClaw",
-        ));
-    }
+    runtime_container(&task, &fresh)?;
     let namespace_name = desired
         .namespace()
         .ok_or(Error::Invalid("missing runtime namespace"))?;
@@ -383,7 +381,17 @@ async fn prepare_with(
     {
         return Err(Error::Invalid("sandbox changed while pinning mission root"));
     }
-    project(desired, &task, &pinned, &runtime_root.uid, &dispatcher_did)?;
+    let reviewed = crate::reviewed_execution::grant(client, &task)
+        .await
+        .map_err(|_| Error::NotReady("reviewed execution authority is not current"))?;
+    project_contract(
+        desired,
+        &task,
+        &pinned,
+        &runtime_root.uid,
+        &dispatcher_did,
+        reviewed.as_ref(),
+    )?;
     Ok(Some(Prepared {
         task,
         sandbox: pinned,
@@ -392,15 +400,39 @@ async fn prepare_with(
         dispatcher_namespace: helper_namespace,
         dispatcher_did,
         runtime_root,
+        reviewed,
     }))
 }
 
+#[cfg(test)]
 fn project(
     deployment: &mut Deployment,
     task: &KarsTask,
     sandbox: &KarsSandbox,
     root_uid: &str,
     dispatcher: &str,
+) -> Result<()> {
+    project_contract(deployment, task, sandbox, root_uid, dispatcher, None)
+}
+
+fn runtime_container(task: &KarsTask, sandbox: &KarsSandbox) -> Result<&'static str> {
+    match (
+        crate::kars_task::blueprint::effective_runtime_name(&task.spec),
+        &sandbox.spec.runtime.kind,
+    ) {
+        ("OpenClaw", RuntimeKind::OpenClaw) => Ok("openclaw"),
+        ("Hermes", RuntimeKind::Hermes) => Ok("agent"),
+        _ => Err(Error::Invalid("unsupported or mismatched mission runtime")),
+    }
+}
+
+fn project_contract(
+    deployment: &mut Deployment,
+    task: &KarsTask,
+    sandbox: &KarsSandbox,
+    root_uid: &str,
+    dispatcher: &str,
+    reviewed: Option<&crate::reviewed_execution::Grant>,
 ) -> Result<()> {
     let spec = deployment
         .spec
@@ -411,14 +443,15 @@ fn project(
         .spec
         .as_mut()
         .ok_or(Error::Invalid("missing runtime pod specification"))?;
+    let container_name = runtime_container(task, sandbox)?;
     let containers: Vec<_> = pod
         .containers
         .iter_mut()
-        .filter(|c| c.name == "openclaw")
+        .filter(|c| c.name == container_name)
         .collect();
     if containers.len() != 1 {
         return Err(Error::Invalid(
-            "mission requires exactly one OpenClaw container",
+            "mission requires exactly one selected runtime container",
         ));
     }
     let container = containers.into_iter().next().unwrap();
@@ -427,10 +460,14 @@ fn project(
         return Err(Error::Invalid("mission environment is already configured"));
     }
     let admission = admission::for_task(task)?.to_string();
+    let contract = reviewed.map_or_else(
+        || r#"{"version":1}"#.to_string(),
+        |g| g.contract.to_string(),
+    );
     for (key, value) in [
         ("KARS_MISSION_ADMISSION", admission.as_str()),
         ("KARS_MISSION_DISPATCH_ENABLED", "true"),
-        ("KARS_MISSION_CONTRACT", r#"{"version":1}"#),
+        ("KARS_MISSION_CONTRACT", contract.as_str()),
         (
             "KARS_MISSION_TASK_NAME",
             task.metadata.name.as_deref().unwrap_or_default(),

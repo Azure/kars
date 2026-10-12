@@ -1,0 +1,7 @@
+**
+!sandbox-images/
+!sandbox-images/json-exporter/
+!sandbox-images/json-exporter/Dockerfile
+!sandbox-images/json-exporter/build.sh
+!sandbox-images/json-exporter/json-exporter.go.mod
+!sandbox-images/json-exporter/json-exporter.go.sum

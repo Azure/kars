@@ -22,11 +22,12 @@ pub(crate) use palette::provider_for;
 pub use palette::{build_options, get_options};
 pub(crate) use projections::{mcp_server_option, memory_option, skill_option};
 pub(crate) use qualification::{
-    channel_adapter_qualified_for_route, mcp_server_qualified_for_route,
+    channel_adapter_qualified_for_route, mcp_server_admitted_for_route,
+    mcp_server_qualified_for_route, memory_binding_admitted_for_route,
     memory_binding_qualified_for_route, qualification_constraints_summary,
     resource_qualification_summary, route_admitted, route_label, route_minimum_tokens,
     route_qualification, route_qualification_gap, route_validation_note,
-    skill_version_qualified_for_route,
+    skill_version_admitted_for_route, skill_version_qualified_for_route,
 };
 
 #[cfg(test)]
@@ -136,7 +137,7 @@ pub struct Options {
     /// can add as a set (the operator vets the grouping once; users pick it).
     pub mcp_profiles: Vec<McpProfileOption>,
     pub memories: Vec<RefOption>,
-    /// Attested capability bundles (KarsSkill) a team role can acquire, so the
+    /// Currently approved capability bundles (KarsSkill) a team role can acquire, so the
     /// team composer can offer a real skill picker instead of teaching a concept
     /// with no control behind it.
     pub skills: Vec<RefOption>,

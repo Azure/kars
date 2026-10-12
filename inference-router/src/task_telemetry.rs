@@ -2,8 +2,10 @@
 // Licensed under the MIT License.
 
 //! Bounded router observations, not a durable execution or budget ledger.
-//! No prompts, tool arguments/results, URLs, headers or credentials are retained.
+//! No prompts, raw tool arguments/results, URLs, headers or credentials are retained.
+//! Runtime completion reports retain only bounded, typed operation metadata.
 
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::{
     collections::{HashMap, HashSet, VecDeque},
@@ -19,10 +21,80 @@ const MAX_EVENTS: usize = 1024;
 const MAX_PENDING: usize = 256;
 const TOOL_TTL: Duration = Duration::from_secs(20 * 60);
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum ToolSummary {
+    FileRead {
+        bytes: u64,
+        returned_bytes: u64,
+        truncated: bool,
+    },
+    FileWrite {
+        bytes: u64,
+        #[serde(skip_serializing_if = "Option::is_none")]
+        artifact_name: Option<String>,
+    },
+    Failure {
+        reason: ToolFailure,
+    },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ToolFailure {
+    FilesystemOperationFailed,
+    InvalidArguments,
+    PolicyDenied,
+    ReviewedPhaseDenied,
+    ToolExecutionFailed,
+}
+
+impl ToolSummary {
+    fn valid(&self, name: &str, ok: bool) -> bool {
+        match self {
+            Self::FileRead {
+                bytes,
+                returned_bytes,
+                truncated,
+            } => {
+                ok && matches!(name, "file_read" | "kars_mission_read")
+                    && *bytes <= 9_007_199_254_740_991
+                    && *returned_bytes <= 16 * 1024 * 1024
+                    && returned_bytes <= bytes
+                    && *truncated == (returned_bytes < bytes)
+            }
+            Self::FileWrite {
+                bytes,
+                artifact_name,
+            } => {
+                ok && matches!(name, "file_write" | "kars_mission_write")
+                    && *bytes <= 16 * 1024 * 1024
+                    && artifact_name.as_ref().is_none_or(|name| {
+                        !name.is_empty()
+                            && name.len() <= 128
+                            && name
+                                .bytes()
+                                .all(|c| c.is_ascii_alphanumeric() || b"._-".contains(&c))
+                            && !name.starts_with('.')
+                    })
+            }
+            Self::Failure { .. } => !ok,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct Completion {
+    ok: bool,
+    ms: u64,
+    summary: Option<ToolSummary>,
+}
+
 struct Pending {
     name: String,
     at: Instant,
     round: u64,
+    completion: Option<Completion>,
 }
 struct Inner {
     scope: String,
@@ -71,6 +143,8 @@ impl TaskTelemetry {
         inner.seq = inner.seq.saturating_add(1);
         event["seq"] = json!(inner.seq);
         event["scope_id"] = json!(inner.scope);
+        event["observed_at"] =
+            json!(chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
         inner.events.push_back(event);
         if inner.events.len() > MAX_EVENTS {
             inner.events.pop_front();
@@ -162,12 +236,24 @@ impl TaskTelemetry {
         let reporting_round = inner.round;
         for (id, ok) in parse::request_results(body, shape) {
             if let Some(pending) = inner.model_tools.remove(&id) {
-                Self::push(
-                    &mut inner,
-                    json!({"kind":"tool_result", "call_id":id, "name":pending.name,
+                let mut event = json!({"kind":"tool_result", "call_id":id, "name":pending.name,
                     "round":pending.round, "reported_in_round":reporting_round,
-                    "ok":ok, "source":"harness-reported"}),
-                );
+                    "ok":ok, "source":"harness-reported"});
+                if let Some(completion) = pending.completion {
+                    // A contradictory conversation message is not successful evidence.
+                    event["ok"] = json!(if ok.is_some_and(|value| value != completion.ok) {
+                        None
+                    } else {
+                        Some(completion.ok)
+                    });
+                    event["ms"] = json!(completion.ms);
+                    if ok.is_none_or(|value| value == completion.ok)
+                        && let Some(summary) = completion.summary
+                    {
+                        event["result_summary"] = json!(summary);
+                    }
+                }
+                Self::push(&mut inner, event);
             }
         }
         Some(observe::Observation::new(
@@ -207,6 +293,7 @@ impl TaskTelemetry {
                         name,
                         at: Instant::now(),
                         round,
+                        completion: None,
                     },
                 );
             } else {
@@ -271,33 +358,70 @@ impl TaskTelemetry {
             return false;
         }
         inner.seen_harness.insert(id.to_string());
-        let round = inner.round;
+        let round = inner
+            .model_tools
+            .get(id)
+            .filter(|pending| pending.name == name)
+            .map_or(inner.round, |pending| pending.round);
         inner.harness_tools.insert(
             id.to_string(),
             Pending {
                 name: name.to_string(),
                 at: Instant::now(),
                 round,
+                completion: None,
             },
         );
         true
     }
     pub fn complete_harness_tool(&self, scope: &str, id: &str, ok: bool, latency_ms: u64) -> bool {
+        self.complete_harness_tool_with_summary(scope, id, ok, latency_ms, None)
+    }
+    pub fn complete_harness_tool_with_summary(
+        &self,
+        scope: &str,
+        id: &str,
+        ok: bool,
+        latency_ms: u64,
+        summary: Option<ToolSummary>,
+    ) -> bool {
         let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
         if inner.scope != scope {
             return false;
         }
-        let Some(pending) = inner.harness_tools.remove(id) else {
+        let Some(pending) = inner.harness_tools.get(id) else {
             return false;
         };
-        if pending.at.elapsed() >= TOOL_TTL {
+        if pending.at.elapsed() >= TOOL_TTL
+            || summary
+                .as_ref()
+                .is_some_and(|value| !value.valid(&pending.name, ok))
+            || latency_ms > 3_600_000
+        {
             return false;
         }
-        Self::push(
-            &mut inner,
-            json!({"kind":"tool_result", "call_id":id, "name":pending.name,
-            "round":pending.round, "ok":ok, "ms":latency_ms.min(3_600_000), "source":"harness-reported"}),
-        );
+        let pending = inner
+            .harness_tools
+            .remove(id)
+            .expect("checked under the same lock");
+        let completion = Completion {
+            ok,
+            ms: latency_ms,
+            summary,
+        };
+        if let Some(model) = inner.model_tools.get_mut(id)
+            && model.round == pending.round
+            && model.name == pending.name
+            && model.at.elapsed() < TOOL_TTL
+        {
+            model.completion = Some(completion.clone());
+        }
+        let mut event = json!({"kind":"tool_result", "call_id":id, "name":pending.name,
+            "round":pending.round, "ok":ok, "ms":latency_ms, "source":"harness-reported"});
+        if let Some(summary) = completion.summary {
+            event["result_summary"] = json!(summary);
+        }
+        Self::push(&mut inner, event);
         true
     }
 }

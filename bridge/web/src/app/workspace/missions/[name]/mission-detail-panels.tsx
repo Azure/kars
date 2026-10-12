@@ -4,7 +4,7 @@
 // Mission detail server presentation; page fetching and routing stay in ./page.
 
 import Link from "next/link";
-import { missionFailureAdvice, revisionArtifactUrl } from "@/lib/mission-run-evidence";
+import { missionFailureAdvice, missionFailureMessage, revisionArtifactUrl } from "@/lib/mission-run-evidence";
 import { isSystemEvidenceArtifact } from "@/lib/router-activity";
 import { DeliverableView, DeliverableBody } from "@/components/deliverable-view";
 import { ProvenanceStory } from "@/components/provenance-story";
@@ -278,6 +278,8 @@ export function AgentIdentityCard({ identity }: { identity: AgentIdentity }) {
 export function ArtifactsPanel({ ns, task, runNonce, artifacts, pullRequests, activity, egress, tokens, routerActivityState = null }: { ns: string; task: string; runNonce: string | null; artifacts: MissionArtifact[]; pullRequests: import("@/lib/types").PullRequestRef[]; activity: import("@/lib/types").ActivityEvent[]; egress: string[]; tokens: number | null; routerActivityState?: "observed" | "unavailable" | null }) {
   const systemFiles = artifacts.filter(a => isSystemEvidenceArtifact(a.name)).length;
   const outputFiles = artifacts.length - systemFiles;
+  const orderedArtifacts = [...artifacts].sort((a, b) =>
+    Number(isSystemEvidenceArtifact(a.name)) - Number(isSystemEvidenceArtifact(b.name)));
   const fmtSize = (n: number | null) =>
     n == null ? "" : n < 1024 ? `${n} B` : `${(n / 1024).toFixed(1)} KB`;
   return (
@@ -330,9 +332,9 @@ export function ArtifactsPanel({ ns, task, runNonce, artifacts, pullRequests, ac
           : !routerActivityState && <p className="mt-2 text-xs text-foreground-muted">Detailed revision-bound trace unavailable. See Recorded run for terminal producer and usage evidence.</p>}
       </div>
       <ul className="mt-4 divide-y divide-border rounded-lg border border-border">
-        {artifacts.map((a, i) => (
+        {orderedArtifacts.map((a, i) => (
           <li key={a.name}>
-            <details open={i === 0} className="group">
+            <details open={i === 0 && !isSystemEvidenceArtifact(a.name)} className="group">
               <summary className="flex cursor-pointer items-center justify-between gap-3 px-4 py-2.5 hover:bg-surface-muted/50">
                 <span className="flex items-center gap-2 font-mono text-xs">
                   <span aria-hidden className="text-foreground-muted transition-transform group-open:rotate-180">⌄</span>
@@ -455,7 +457,7 @@ export function FailureDiagnostic({
   task: TaskDetail;
   troubleshoot: import("@/lib/types").Troubleshoot | null;
 }) {
-  const reason = task.result?.output ?? task.execution_detail ?? "The run ended with an error.";
+  const reason = task.result ? missionFailureMessage(task.result) : "No failure message was recorded for this revision.";
   const { cause, remedy } = missionFailureAdvice(reason);
   const stages: { label: string; reached: boolean }[] = [
     { label: "Task launch recorded", reached: task.launched },

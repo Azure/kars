@@ -56,7 +56,7 @@ pub async fn troubleshoot_task(
         .await
         .unwrap_or_default();
     let containers = cluster.sandbox_container_states(&sandbox).await;
-    let health = cluster.sandbox_pod_health(&sandbox).await;
+    let health = cluster.sandbox_pod_health(&sandbox).await?;
     let output = cluster.read_mission_output(&name).await;
     let result_status = output.as_ref().and_then(|d| d.get("status").cloned());
     let result_reason = output.as_ref().and_then(|d| d.get("output").cloned());

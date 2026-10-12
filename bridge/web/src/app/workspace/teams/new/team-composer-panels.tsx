@@ -191,7 +191,12 @@ export function renderGovernancePanel({ name, options, mcp, setMcp, toolPolicy, 
   );
 }
 
-export function renderOrgPanel({ name, tier, roles, options, addFromArchetype, addRole, addNote, patchRole, removeRole }: OrgPanelInput) {
+export function renderOrgPanel({ name, tier, authorityCeiling, delegationDepth, roles, options, addFromArchetype, addRole, addNote, patchRole, removeRole }: OrgPanelInput) {
+  const ceiling = authorityCeiling.trim() === "" ? tier : Number(authorityCeiling);
+  const depth = delegationDepth.trim() === "" ? null : Number(delegationDepth);
+  const validAuthority = Number.isInteger(tier) && tier >= 1 && tier <= 5
+    && Number.isInteger(ceiling) && ceiling >= 1 && ceiling <= tier
+    && (depth === null || (Number.isInteger(depth) && depth >= 0 && depth <= 2147483647));
   return (
 <div className="kb-card p-5 sm:p-6">
         <div className="flex items-center justify-between">
@@ -222,7 +227,11 @@ export function renderOrgPanel({ name, tier, roles, options, addFromArchetype, a
         <div className="mt-4 rounded-xl border border-signal/40 bg-signal/[0.05] p-3">
           <div className="flex items-center justify-between">
             <p className="text-sm font-semibold">{name || "this team"} <span className="font-normal text-foreground-muted">· Principal</span></p>
-            <span className="text-xs text-foreground-muted">Tier {tier} · grants members up to Tier {Math.max(1, tier - 1)}</span>
+            <span className="text-xs text-foreground-muted">
+              Tier {tier}{validAuthority
+                ? <> · default member Tier {Math.min(ceiling, Math.max(1, tier - 1))}{depth === 0 ? " · delegation disabled (depth 0)" : ""}</>
+                : " · invalid authority limits"}
+            </span>
           </div>
         </div>
 
@@ -244,7 +253,7 @@ export function renderOrgPanel({ name, tier, roles, options, addFromArchetype, a
                   {options.models.map((m) => <option key={`${m.provider}::${m.deployment}`} value={`${m.provider}::${m.deployment}`}>{m.deployment}</option>)}
                 </select>
                 <select aria-label="Role harness" value={r.runtime} onChange={(e) => patchRole(r.id, { runtime: e.target.value })} className="rounded-lg border border-border bg-surface px-2.5 py-1.5 text-xs">
-                  <option value="">harness: OpenClaw</option>
+                  <option value="">harness: team default</option>
                   {options.runtimes.filter((rt) => rt.wired).map((rt) => <option key={rt.kind} value={rt.kind}>{rt.label}</option>)}
                 </select>
               </div>

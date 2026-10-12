@@ -126,6 +126,77 @@ fn execution_plan_inheritance_and_overrides_preserve_paused_authority() {
     );
 }
 
+#[test]
+fn reviewed_team_depth_leaves_two_levels_for_runs_and_respects_role_overrides() {
+    let mut team = team();
+    team.spec.envelope.budget = None;
+    team.spec.envelope.delegation_depth = 3;
+    team.spec.paused = false;
+    team.spec.blueprint = Some(TaskBlueprint {
+        execution_plan: Some(crate::task_execution_plan::test_filesystem_plan()),
+        ..Default::default()
+    });
+    team.spec.roster = vec![TeamRole {
+        name: "writer".into(),
+        ..Default::default()
+    }];
+    assert!(
+        team.validation_errors().is_empty(),
+        "{:?}",
+        team.validation_errors()
+    );
+    assert_eq!(specs::principal_spec(&team).envelope.delegation_depth, 3);
+    assert_eq!(
+        specs::run_spec(&team, "")
+            .unwrap()
+            .envelope
+            .delegation_depth,
+        2
+    );
+    assert_eq!(
+        specs::member_spec(&team, &team.spec.roster[0])
+            .envelope
+            .delegation_depth,
+        2
+    );
+    team.spec.envelope.delegation_depth = 2;
+    assert!(
+        team.validation_errors()
+            .iter()
+            .any(|error| error.contains("ReviewedDelegationDepthInsufficient"))
+    );
+    team.spec.paused = true;
+    assert!(team.validation_errors().is_empty());
+    team.spec.paused = false;
+    team.spec.envelope.delegation_depth = 3;
+    let mut restricted = specs::member_spec(&team, &team.spec.roster[0]).envelope;
+    restricted.delegation_depth = 1;
+    team.spec.roster[0].envelope = Some(restricted);
+    assert!(
+        team.validation_errors().iter().any(
+            |error| error.contains("roster role 'writer': ReviewedDelegationDepthInsufficient")
+        )
+    );
+    team.spec.roster[0].blueprint = Some(TaskBlueprint::default());
+    assert!(team.validation_errors().is_empty());
+    team.spec.roster[0].blueprint = team.spec.blueprint.clone();
+    assert!(
+        team.validation_errors().iter().any(
+            |error| error.contains("roster role 'writer': ReviewedDelegationDepthInsufficient")
+        )
+    );
+    team.spec.roster[0]
+        .envelope
+        .as_mut()
+        .unwrap()
+        .delegation_depth = 2;
+    assert!(
+        team.validation_errors().is_empty(),
+        "{:?}",
+        team.validation_errors()
+    );
+}
+
 pub(super) fn team() -> KarsTeam {
     let mut team = KarsTeam::new(
         "eng",
@@ -466,6 +537,85 @@ fn cadence_slot_survives_failed_status_write_and_separates_generations() {
         ..Default::default()
     });
     assert_ne!(name, runs::cadence_name(&team).unwrap());
+}
+
+#[test]
+fn generated_task_user_ownership_requires_exact_parent_and_never_transfers() {
+    use kube::Resource;
+    let mut team = team();
+    team.metadata
+        .annotations
+        .get_or_insert_with(Default::default)
+        .insert("kars.azure.com/owner-sub".into(), "customer".into());
+    let mut principal = principal(&team);
+    let original_spec = serde_json::to_value(&principal.spec).unwrap();
+    let original_uid = principal.metadata.uid.clone();
+    assert!(principal.inherit_user_owner(&team).unwrap());
+    assert!(!principal.inherit_user_owner(&team).unwrap());
+    assert_eq!(principal.metadata.uid, original_uid);
+    assert_eq!(
+        serde_json::to_value(&principal.spec).unwrap(),
+        original_spec
+    );
+
+    let mut child = KarsTask::new("phase", principal.spec.clone());
+    child.metadata.namespace = principal.metadata.namespace.clone();
+    child.metadata.owner_references = Some(vec![principal.controller_owner_ref(&()).unwrap()]);
+    assert!(child.inherit_user_owner(&principal).unwrap());
+    assert_eq!(child.annotations()["kars.azure.com/owner-sub"], "customer");
+    for change in [
+        "uid",
+        "name",
+        "kind",
+        "namespace",
+        "second-controller",
+        "owner",
+    ] {
+        let mut foreign = child.clone();
+        match change {
+            "uid" => foreign.metadata.owner_references.as_mut().unwrap()[0].uid = "other".into(),
+            "name" => foreign.metadata.owner_references.as_mut().unwrap()[0].name = "other".into(),
+            "kind" => {
+                foreign.metadata.owner_references.as_mut().unwrap()[0].kind = "KarsTeam".into()
+            }
+            "namespace" => foreign.metadata.namespace = Some("other".into()),
+            "second-controller" => {
+                let reference = foreign.metadata.owner_references.as_ref().unwrap()[0].clone();
+                foreign
+                    .metadata
+                    .owner_references
+                    .as_mut()
+                    .unwrap()
+                    .push(reference);
+            }
+            "owner" => {
+                foreign
+                    .metadata
+                    .annotations
+                    .as_mut()
+                    .unwrap()
+                    .insert("kars.azure.com/owner-sub".into(), "another-customer".into());
+            }
+            _ => unreachable!(),
+        }
+        let before = serde_json::to_value(&foreign).unwrap();
+        assert!(foreign.inherit_user_owner(&principal).is_err(), "{change}");
+        assert_eq!(serde_json::to_value(&foreign).unwrap(), before);
+    }
+    principal
+        .metadata
+        .annotations
+        .as_mut()
+        .unwrap()
+        .remove("kars.azure.com/owner-sub");
+    assert!(child.inherit_user_owner(&principal).is_err());
+    child
+        .metadata
+        .annotations
+        .as_mut()
+        .unwrap()
+        .remove("kars.azure.com/owner-sub");
+    assert!(!child.inherit_user_owner(&principal).unwrap());
 }
 
 #[test]

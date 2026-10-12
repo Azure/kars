@@ -186,6 +186,64 @@ async fn credential_writer_absence_does_not_revoke_current_delivery_authority() 
 }
 
 #[tokio::test]
+async fn credential_writer_consumer_drift_withholds_authority_without_resetting_grant() {
+    let (_server, client, state, mut grant) = fixture().await;
+    let path = "/apis/apps/v1/namespaces/bridge/deployments/bff";
+    let template = json!({"metadata":{"labels":{}},"spec":{
+        "containers":[{"name":"bff","image":"reviewed"}]
+    }});
+    {
+        let mut state = state.lock().unwrap();
+        state.objects.insert(path.into(), json!({
+            "apiVersion":"apps/v1","kind":"Deployment",
+            "metadata":{"name":"bff","namespace":"bridge","uid":"bff-deployment","resourceVersion":"1"},
+            "spec":{"template":template}
+        }));
+        state.objects.get_mut(NAMESPACE).unwrap()["metadata"]["annotations"]["kars.azure.com/private-parent-bff-deployment"] =
+            "a".repeat(64).into();
+        let scope = grant
+            .spec
+            .private_activation
+            .as_mut()
+            .unwrap()
+            .namespaces
+            .iter_mut()
+            .find(|scope| scope.namespace.name == "bridge")
+            .unwrap();
+        scope.consumers = serde_json::from_value(json!([{
+            "kind":"Deployment",
+            "object":{"name":"bff","uid":"bff-deployment","resourceVersion":"1"},
+            "templateDigest":crate::private_activation::test_support::pod_spec_digest(&template)
+        }]))
+        .unwrap();
+        state
+            .objects
+            .insert(GRANT.into(), serde_json::to_value(&grant).unwrap());
+    }
+    reconcile(&client, &grant).await.unwrap();
+    verify(&client, &grant).await.unwrap();
+    {
+        let mut state = state.lock().unwrap();
+        state.objects.get_mut(path).unwrap()["spec"]["template"]["spec"]["containers"][0]["image"] =
+            "changed".into();
+        state.calls.clear();
+    }
+    let (active, error) = authority(&client, &grant, &[]).await;
+    assert!(active.spec.writers.is_empty());
+    assert!(
+        error
+            .unwrap()
+            .contains("reviewed consumer identity or template differs")
+    );
+    super::super::verify(&client, &grant).await.unwrap();
+    let state = state.lock().unwrap();
+    assert_eq!(state.objects[GRANT], serde_json::to_value(grant).unwrap());
+    assert!(state.calls.iter().all(|(method, path, _)| {
+        !(method == "PATCH" || method == "POST") || !path.contains("/roles")
+    }));
+}
+
+#[tokio::test]
 async fn credential_writer_names_are_held_before_native_read_roles_can_be_issued() {
     let (_server, client, state, grant) = fixture().await;
     reconcile(&client, &grant).await.unwrap();

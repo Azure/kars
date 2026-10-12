@@ -88,5 +88,9 @@ pub struct KarsApprovalStatus {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub bound_envelope_digest: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_task_uid: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bound_request: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub decider: Option<String>,
 }

@@ -232,10 +232,16 @@ pub async fn materialize(
         .as_ref()
         .and_then(|s| s.lineage.first().cloned())
         .unwrap_or_else(|| task_name.clone());
-    let attribution = std::collections::BTreeMap::from([
+    let mut attribution = std::collections::BTreeMap::from([
         ("kars.azure.com/task-id".to_string(), task_name.clone()),
         ("kars.azure.com/task-root".to_string(), task_root),
     ]);
+    if !blueprint.skills.is_empty() {
+        attribution.insert(
+            crate::skill_delivery::SELECTION.into(),
+            blueprint.skills.join(","),
+        );
+    }
     apply_dynamic(
         client,
         namespace,
@@ -581,6 +587,11 @@ async fn apply_dynamic(
             }
             object_preconditions(&current)?;
             if ar.kind == "KarsSandbox" {
+                current
+                    .metadata
+                    .annotations
+                    .get_or_insert_default()
+                    .remove(crate::skill_delivery::SELECTION);
                 if current.data["spec"]["suspended"] == true {
                     obj.data["spec"]["suspended"] = true.into();
                 }

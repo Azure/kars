@@ -81,7 +81,7 @@ describe("one compatibility policy for schema writes and rollback", () => {
 describe("automatic Helm failure safety", () => {
   it("puts keep retention on every CRD in the actual chart, without changing its schemas", () => {
     const chart = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
-    const objects = schemaDocuments(execFileSync("helm", ["template", "kars", chart, "--dry-run=client"], { encoding: "utf8" }));
+    const objects = schemaDocuments(execFileSync("helm", ["template", "kars", chart, "-n", "kars-system", "--dry-run=client"], { encoding: "utf8" }));
     const crds = objects.filter(object => object.kind === "CustomResourceDefinition");
     expect(crds).toHaveLength(21);
     expect(crds.every(object => object.metadata.annotations?.[CRD_RETENTION] === "keep")).toBe(true);

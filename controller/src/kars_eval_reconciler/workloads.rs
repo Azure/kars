@@ -126,6 +126,7 @@ pub(super) struct Intent {
     pub request_marker: Option<String>,
     pub request_job: Option<String>,
     pub pod_spec: Value,
+    proxy: Option<super::egress::Target>,
 }
 
 impl Intent {
@@ -170,7 +171,7 @@ impl Intent {
         );
         let pod_spec = super::runner::runner_pod_spec_json(
             &eval.name_any(),
-            &format!("karseval-{}-corpus", eval.name_any()),
+            &super::corpus_configmap_name(&eval.name_any()),
             image,
             router,
             "",
@@ -198,7 +199,19 @@ impl Intent {
             request_marker,
             request_job,
             pod_spec,
+            proxy: None,
         })
+    }
+
+    pub fn with_proxy(mut self, target: super::egress::Target) -> anyhow::Result<Self> {
+        target.configure(&mut self.pod_spec)?;
+        self.digest = content_digest(&serde_json::to_vec(&(
+            &self.digest,
+            &target,
+            &self.pod_spec,
+        ))?);
+        self.proxy = Some(target);
+        Ok(self)
     }
 
     pub fn annotations(&self) -> Value {
@@ -237,6 +250,9 @@ impl Intent {
             "evaluation target identity/spec changed"
         );
         identity(&current.metadata)?;
+        if let Some(proxy) = &self.proxy {
+            proxy.validate(client, eval).await?;
+        }
         Ok(current)
     }
 }

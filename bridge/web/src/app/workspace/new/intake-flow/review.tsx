@@ -8,7 +8,8 @@ import { JourneyRail } from "@/components/journey-rail";
 import { humanizeMcp } from "@/lib/format";
 import { RepoAccess } from "@/components/repo-access";
 import { EnvelopeReveal } from "../envelope-reveal";
-import { CheckMark, CreateButton, EgressEditor, PackageSection } from "./controls";
+import { CreateButton, EgressEditor, PackageSection } from "./controls";
+import { ValidationChecks } from "@/components/validation-checks";
 import { modelKey, moveFallback } from "./helpers";
 import type { ReviewProps } from "./review-types";
 
@@ -230,7 +231,7 @@ export function renderReview({
                   <p className="mt-0.5 text-foreground-muted">
                     {recommendedModel.deployment}
                     {recommendedStats
-                      ? ` — ${Math.round(recommendedStats.acceptance_rate * 100)}% accepted across ${recommendedStats.runs} run${recommendedStats.runs === 1 ? "" : "s"}, ${recommendedStats.tokens_per_outcome.toLocaleString()} tokens/outcome`
+                      ? ` — ${Math.round(recommendedStats.acceptance_rate * 100)}% accepted across ${recommendedStats.runs} run${recommendedStats.runs === 1 ? "" : "s"} on ${recommendedStats.harness || "unrecorded harness"}, ${recommendedStats.tokens_per_outcome?.toLocaleString() ?? "unknown"} tokens/measured delivered outcome`
                       : " — learned from completed runs on this cluster"}
                     {efficiency?.recommended_low_confidence
                       ? " — not selected automatically"
@@ -644,17 +645,7 @@ export function renderReview({
                 You edited the package since this ran — these results are stale. Re-validate to launch.
               </p>
             )}
-            <ul className="mt-3 space-y-1.5">
-              {validation.checks.map((c) => (
-                <li key={c.id} className="flex items-start gap-2 text-sm">
-                  <CheckMark status={c.status} />
-                  <span>
-                    <span className="font-medium">{c.label}</span>
-                    <span className="ml-1.5 text-xs text-foreground-muted">{c.detail}</span>
-                  </span>
-                </li>
-              ))}
-            </ul>
+            <ValidationChecks checks={validation.checks} />
             {validationFresh && !validation.ok && (
               <p className="mt-2 text-xs font-medium text-danger">
                 Fix the failing checks above before launching.

@@ -66,6 +66,32 @@ test("transport, HTTP, and unreadable responses fail closed without exposing ups
   }
 });
 
+test("launch preserves actionable validation reasons and never exposes unknown upstream errors", async () => {
+  const message = "TypedPlanExecutionUnavailable: use fresh filesystem-read/write phases.";
+  for (const [status, code] of [[400, "bad_request"], [409, "conflict"], [422, "rejected"]]) {
+    let request;
+    const actual = await actions(async (...args) => {
+      request = args;
+      return { ok: false, status, json: async () => ({ error: { code, message } }) };
+    }).setLaunch("mission/a", true);
+    assert.equal(actual.error, message);
+    assert.equal(request[0], "/api/namespaces/workspace%2Fa/tasks/mission%2Fa/launch");
+    assert.equal(request[1].body, '{"launch":true}');
+  }
+  for (const fetch of [
+    async () => { throw new Error("private credential"); },
+    async () => ({ ok: false, status: 500, json: async () => ({ error: { code: "bad_request", message: "private credential" } }) }),
+    async () => ({ ok: false, status: 400, json: async () => ({ error: { code: "unknown", message: "private credential" } }) }),
+    async () => ({ ok: false, status: 422, json: async () => { throw new Error("private credential"); } }),
+    async () => ({ ok: false, status: 400, json: async () => null }),
+  ]) {
+    const actual = await actions(fetch).setLaunch("draft", true);
+    assert.ok(actual.error);
+    assert.doesNotMatch(actual.error, /private/);
+  }
+  assert.equal((await actions(async () => ({ ok: true })).setLaunch("draft", true)).error, null);
+});
+
 test("malformed, empty, coerced-status and inconsistent successful responses cannot enable launch", async () => {
   for (const payload of [null, [], {}, { ok: true, checks: [] },
     { ok: "true", checks: result().checks }, { ok: true, checks: [null] },
@@ -79,6 +105,10 @@ test("malformed, empty, coerced-status and inconsistent successful responses can
 });
 
 const statusModule = load("components/mission-status.tsx");
+const validationChecks = load("components/validation-checks.tsx");
+const missionState = load("lib/mission-run-evidence.ts", {
+  "./router-activity": load("lib/router-activity.ts"),
+});
 const draft = { name: "draft", namespace: "workspace", created_at: "2026-10-02T00:00:00Z",
   phase: "Ready", launched: false, envelope: { budget: { tokens: 20000 } },
   envelope_digest: "digest", observed_generation: 1, result: null, activity: [],
@@ -95,10 +125,12 @@ function nodes(node, predicate) {
 }
 
 // Run the production component with controllable hook commits and network replies.
-function panel(initial = draft) {
+function panel(initial = draft, { launchResponse } = {}) {
   let task = initial, cursor = 0, tree, pending = false;
   const slots = [], effects = [], requests = [], launches = [], runs = [], transitions = [];
-  const router = { refresh() {} };
+  let refreshes = 0, intervalId = 0;
+  const intervals = new Map();
+  const router = { refresh() { refreshes++; } };
   const react = {
     useState(initialValue) {
       const index = cursor++;
@@ -121,14 +153,23 @@ function panel(initial = draft) {
     react, "next/navigation": { useRouter: () => router },
     "@/components/status-badge": { StatusBadge: ({ label }) => jsx("span", { children: label }) },
     "@/components/mission-status": statusModule,
+    "@/components/validation-checks": validationChecks,
+    "@/lib/mission-run-evidence": missionState,
     "@/lib/run-mission-client": { runMissionClient: async (...args) => { runs.push(args); return { error: null }; } },
     "./launch-actions": {
       validateTask: name => { const request = { name, ...deferred() }; requests.push(request); return request.promise; },
-      setLaunch: async (...args) => { launches.push(args); return { error: null }; },
+      setLaunch: async (...args) => { launches.push(args); return launchResponse ?? { error: null }; },
     },
-  }, { window: { setTimeout() {}, setInterval() { return 1; }, clearInterval() {} } });
+  }, { window: {
+    setTimeout() {},
+    setInterval(callback) { intervals.set(++intervalId, callback); return intervalId; },
+    clearInterval(id) { intervals.delete(id); },
+  } });
   const harness = {
     requests, launches, runs,
+    poll() { for (const callback of intervals.values()) callback(); },
+    refreshes: () => refreshes,
+    intervalCount: () => intervals.size,
     render(next = task) {
       task = next; cursor = 0; tree = ExecutionPanel({ task });
       while (effects.length) effects.shift()();
@@ -158,6 +199,61 @@ test("a Ready draft starts checking, blocks failed validation, and explicitly re
   await ui.settle(1, result("warn"));
   assert.equal(ui.button("Launch").disabled, false);
   assert.match(ui.text(), /completed with warnings/);
+});
+
+test("validation puts every failure first and retains warnings and passing details behind native disclosures", () => {
+  const checks = [
+    { id: "dns", status: "pass", label: "Host resolves", detail: "Not a tool execution proof" },
+    { id: "budget", status: "fail", label: "Budget contract missing", detail: "Enroll supported bounds" },
+    { id: "runtime", status: "warn", label: "Runtime unqualified", detail: "No retained execution proof" },
+  ];
+  const tree = validationChecks.ValidationChecks({ checks });
+  assert.ok(text(tree).indexOf("Budget contract missing") < text(tree).indexOf("Runtime unqualified"));
+  const disclosures = nodes(tree, node => node.type === "details");
+  assert.equal(disclosures.length, 2);
+  assert.ok(disclosures.every(node => !node.props.open));
+  assert.match(text(disclosures[0]), /1 warning to review.*No retained execution proof/);
+  assert.match(text(disclosures[1]), /1 check passed.*Not a tool execution proof/);
+  assert.ok(disclosures.every(node => !text(node).includes("Budget contract missing")));
+});
+
+test("a held reviewed run never claims it is running or keeps polling for a missing root assignment", () => {
+  const ui = panel({ ...draft, launched: true, current_run_nonce: "held",
+    execution_phase: "Degraded", execution_detail: "A reviewed phase failed; synthesis prohibited." });
+  assert.match(ui.text(), /Execution blocked/);
+  assert.match(ui.text(), /A reviewed phase failed; synthesis prohibited/);
+  assert.doesNotMatch(ui.text(), /Running the mission|waiting for readiness or dispatch/);
+  assert.equal(ui.intervalCount(), 0);
+  assert.equal(ui.button("Stop").disabled, false);
+});
+
+test("execution blockage uses its diagnostic, never a successful admission condition", () => {
+  assert.equal(statusModule.missionBlockReason({
+    phase: "Ready", execution_phase: "Degraded",
+    status_message: "trust envelope validated and digested", execution_detail: "Missing required handoff.",
+  }), "Missing required handoff.");
+  assert.equal(statusModule.missionBlockReason({
+    phase: "Ready", execution_phase: "Degraded", status_message: "trust envelope validated and digested",
+  }), "Execution is blocked; no diagnostic detail has been recorded.");
+  assert.equal(statusModule.missionBlockReason({
+    phase: "Degraded", execution_phase: "Idle", status_message: "Authority rejected.",
+  }), "Authority rejected.");
+  assert.equal(statusModule.missionBlockReason({ phase: "Ready", execution_phase: "Running" }), null);
+});
+
+test("a halted mission's unfinished nonce is history, not an active request or polling authority", () => {
+  const ui = panel({ ...draft, current_run_nonce: "stopped-run",
+    assignment: { task_id: "stopped-run", state: "Running", completed_at: null } });
+  assert.doesNotMatch(ui.text(), /awaiting a current terminal result/);
+  assert.match(ui.text(), /Review the trust envelope/);
+  assert.equal(ui.intervalCount(), 0);
+  assert.equal(ui.requests.length, 1);
+});
+
+test("a readiness wait does not blame or recommend replacing a harness without evidence", () => {
+  const ui = panel({ ...draft, launched: true });
+  assert.match(ui.text(), /waiting for readiness or dispatch/);
+  assert.doesNotMatch(ui.text(), /chat-gateway|re-compose|Hermes|OpenClaw/);
 });
 
 test("admission must also be Ready and unrelated activity does not retrigger validation", async () => {
@@ -201,6 +297,48 @@ test("validated Launch uses the original action only after the fresh check passe
   assert.ok(ui.button("Stop"));
 });
 
+test("a launch still awaiting its response never labels the stop control as stopping", async () => {
+  const response = deferred();
+  const ui = panel(draft, { launchResponse: response.promise });
+  await ui.settle(0);
+  ui.button("Launch").onClick();
+  await ui.settle(1);
+  ui.render({ ...draft, launched: true, observed_generation: 2 });
+  assert.equal(ui.button("Stop")?.disabled, true);
+  assert.doesNotMatch(ui.text(), /Stopping/);
+  assert.deepEqual(ui.launches, [["draft", true]]);
+  response.resolve({ error: null });
+  await ui.finish();
+});
+
+test("a stop still awaiting its response never labels the launch control as launching", async () => {
+  const response = deferred();
+  const ui = panel({ ...draft, launched: true }, { launchResponse: response.promise });
+  ui.button("Stop").onClick();
+  ui.render({ ...draft, launched: false, observed_generation: 2 });
+  assert.equal(ui.button("Launch")?.disabled, true);
+  assert.doesNotMatch(ui.text(), /Validating \/ launching/);
+  assert.deepEqual(ui.launches, [["draft", false]]);
+  response.resolve({ error: null });
+  await ui.finish();
+});
+
+test("Stop refreshes through controller acknowledgement, then releases the optimistic launch override", async () => {
+  const initial = { ...draft, phase: "Degraded", launched: true, observed_generation: 2 };
+  const ui = panel(initial);
+  ui.button("Stop").onClick(); await ui.finish();
+  ui.render({ ...initial, launched: false });
+  assert.equal(ui.intervalCount(), 1);
+  ui.poll();
+  assert.equal(ui.refreshes(), 1);
+  ui.render({ ...draft, observed_generation: 3 });
+  ui.render({ ...draft, observed_generation: 3 });
+  assert.equal(ui.intervalCount(), 0);
+  ui.render({ ...draft, launched: true, observed_generation: 4 });
+  assert.ok(ui.button("Stop"), "later server state must not be masked by the old stop");
+  ui.unmount();
+});
+
 test("package change while action validation is in flight discards the launch attempt", async () => {
   const ui = panel();
   await ui.settle(0);
@@ -231,12 +369,27 @@ test("Stop and delivered reruns remain independent of draft validation", async (
   running.button("Stop").onClick(); await running.finish();
   assert.deepEqual(running.launches, [["draft", false]]);
   const delivered = panel({ ...draft, launched: true, execution_phase: "Running",
-    result: { status: "success", finished_at: "now", output: "Useful work" } });
+    current_run_nonce: "run-1",
+    result: { assignment_nonce: "run-1", status: "ok", finished_at: "now", output: "Useful work" } });
   assert.match(delivered.text(), /Delivered/);
   assert.equal(delivered.requests.length, 0);
   delivered.button("Run again").onClick(); await delivered.finish();
   assert.deepEqual(delivered.runs, [["workspace", "draft"]]);
-  assert.match(delivered.text(), /corrected rerun is in progress/);
+  assert.match(delivered.text(), /run is requested and awaiting a current terminal result/);
+});
+
+test("current terminal evidence ends pending status even without a matching live assignment", () => {
+  const task = { ...draft, launched: true, execution_phase: "Running", current_run_nonce: "run-2",
+    assignment: { task_id: "old-run", state: "Running", completed_at: null },
+    result: { assignment_nonce: "run-2", status: "ok", output: "Revised work", finished_at: "later" } };
+  const ui = panel(task);
+  assert.match(ui.text(), /Delivered/);
+  assert.doesNotMatch(ui.text(), /awaiting a current terminal result/);
+  ui.render({ ...task, current_run_nonce: "run-3" });
+  assert.match(ui.text(), /awaiting a current terminal result/);
+  ui.render({ ...task, launched: false, execution_phase: null, assignment: null });
+  assert.match(ui.text(), /Delivered/);
+  assert.doesNotMatch(ui.text(), /awaiting a current terminal result/);
 });
 
 test("draft naming does not override blocked, failed, delivered or active execution precedence", () => {

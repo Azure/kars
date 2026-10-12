@@ -30,6 +30,7 @@ fn spec() -> KarsTaskSpec {
             instructions: Some("Report findings".into()),
             tool_policy: Some("read-only".into()),
             mcp_servers: vec!["docs".into()],
+            skills: Vec::new(),
             egress: vec![TaskEgress {
                 host: "api.example.com".into(),
                 port: Some(443),

@@ -40,6 +40,23 @@ import type {
 
 const init: ProviderState = { error: null, ok: null };
 
+export function providerEndpointError(value: string): string | null {
+  try {
+    const endpoint = new URL(value.trim());
+    if (["http:", "https:"].includes(endpoint.protocol) && !endpoint.username && !endpoint.password) return null;
+  } catch {
+    // URL parsing failures are surfaced beside the connection input.
+  }
+  return "Enter an absolute HTTP or HTTPS URL without embedded credentials.";
+}
+
+export function providerTagError(value: string): string | null {
+  const tag = value.trim();
+  return tag.length <= 63 && /^[a-z0-9]([-a-z0-9]*[a-z0-9])?$/.test(tag)
+    ? null
+    : "Use 1–63 lowercase letters, digits or hyphens; start and end with a letter or digit.";
+}
+
 type Kind = "github-copilot" | "github-models" | "azure-openai" | "foundry" | "custom" | "local";
 type Target = "default" | "additional";
 
@@ -136,7 +153,7 @@ function StepRail({ step }: { step: number }) {
   );
 }
 
-function ProviderCard({ p }: { p: AdditionalProvider }) {
+function ProviderCard({ p, onEditModels }: { p: AdditionalProvider; onEditModels?: () => void }) {
   const isLocal = p.tag.startsWith("local-");
   const isFoundry = p.tag === "foundry";
   const [removeState, removeAction, removePending] = useActionState(removeAdditionalProviderAction, { error: null, ok: null } as AdditionalProviderState);
@@ -153,12 +170,13 @@ function ProviderCard({ p }: { p: AdditionalProvider }) {
       <div className="flex items-center justify-between gap-3">
         <span className="flex min-w-0 items-center gap-2">
           <Icon name={isLocal ? "box" : isFoundry ? "database" : "link"} size={13} />
-          <span className="font-medium">{p.tag}</span>
+          <span className="font-medium">{p.tag === "azure-foundry" ? "Azure AI Foundry" : p.tag}</span>
           {isLocal && <Badge tone="muted">in-cluster</Badge>}
           {isFoundry && <Badge tone="muted">Foundry</Badge>}
           {p.has_key && <Badge tone="muted">key stored</Badge>}
         </span>
         <span className="flex items-center gap-1.5">
+          {onEditModels && <button type="button" onClick={onEditModels} className="rounded-md border border-border px-2 py-1 text-[11px] font-medium hover:bg-surface-muted">Edit models</button>}
           <form action={removeForm}>
             {!isFoundry && <input type="hidden" name={isLocal ? "name" : "tag"} value={isLocal ? p.tag.replace(/^local-/, "") : p.tag} />}
             <button type="submit" disabled={pending} className="rounded-md border border-border px-2 py-1 text-[11px] font-medium text-foreground-muted hover:border-danger/40 hover:text-danger disabled:opacity-50">
@@ -183,7 +201,7 @@ function ProviderCard({ p }: { p: AdditionalProvider }) {
 /** The cluster's DEFAULT inference provider, rendered as a uniform row (same
  *  shape as an additional ProviderCard) but carrying the "default" badge —
  *  so nothing looks visually bigger/special. Every mission inherits this. */
-function DefaultProviderCard({ p }: { p: { id: string; label: string; note: string; models: string[] } }) {
+export function DefaultProviderCard({ p, onEditModels }: { p: { id: string; label: string; note: string; models: string[] }; onEditModels?: () => void }) {
   const icon: IconName = p.id === "github-copilot" ? "link" : p.id.startsWith("local") ? "box" : "database";
   return (
     <li className="rounded-lg border border-signal/30 bg-signal/[0.04] px-3 py-2.5 text-sm">
@@ -193,7 +211,10 @@ function DefaultProviderCard({ p }: { p: { id: string; label: string; note: stri
           <span className="font-medium">{p.label}</span>
           <Badge tone="info">default</Badge>
         </span>
-        <span className="text-[11px] text-foreground-muted">Every mission inherits this</span>
+        <span className="flex items-center gap-2 text-[11px] text-foreground-muted">
+          Every mission inherits this
+          {onEditModels && <button type="button" onClick={onEditModels} className="rounded-md border border-border px-2 py-1 font-medium hover:bg-surface-muted">Edit models</button>}
+        </span>
       </div>
       <p className="mt-1 max-w-xl text-[11px] text-foreground-muted">{p.note}</p>
       {p.models.length > 0 && (
@@ -291,20 +312,43 @@ function isAiRunwayDefault(
 }
 
 
-export function ProviderWizard({
-  hasDefaultProvider,
-  defaultProvider,
-  additionalProviders,
-  localInferenceStatus,
-  localDeployments,
-  foundryStatus,
-}: {
+type ProviderWizardProps = {
   hasDefaultProvider: boolean;
   defaultProvider: { id: string; label: string; note: string; models: string[] } | null;
   additionalProviders: AdditionalProvider[];
   localInferenceStatus: LocalInferenceStatus | null;
   localDeployments: LocalModelDeployment[];
   foundryStatus: FoundryStatus;
+};
+
+export function ProviderWizard(props: ProviderWizardProps) {
+  const [session, setSession] = useState(0);
+  const [notice, setNotice] = useState<string | null>(null);
+  return (
+    <div>
+      {notice && <p role="status" className="mt-3 rounded-lg border border-border bg-surface-muted/40 px-3 py-2 text-sm">{notice}</p>}
+      <ProviderWizardSession
+        key={session}
+        {...props}
+        onClose={() => { setNotice(null); setSession((value) => value + 1); }}
+        onSaved={(message) => { setNotice(message); setSession((value) => value + 1); }}
+      />
+    </div>
+  );
+}
+
+function ProviderWizardSession({
+  hasDefaultProvider,
+  defaultProvider,
+  additionalProviders,
+  localInferenceStatus,
+  localDeployments,
+  foundryStatus,
+  onClose,
+  onSaved,
+}: ProviderWizardProps & {
+  onClose: () => void;
+  onSaved: (message: string) => void;
 }) {
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState(0);
@@ -330,8 +374,25 @@ export function ProviderWizard({
   // (see model-catalogue.tsx + local-model-deploy.tsx), so no deploy state
   // lives here anymore.
 
-  const [defaultState, defaultAction, defaultPending] = useActionState(onboardProviderAction, init);
-  const [additionalState, additionalAction, additionalPending] = useActionState(addAdditionalProviderAction, init);
+  async function saveProvider(
+    action: typeof onboardProviderAction,
+    previous: ProviderState,
+    form: FormData,
+  ): Promise<ProviderState> {
+    try {
+      const result = await action(previous, form);
+      if (result.ok) onSaved(result.ok);
+      return result;
+    } catch {
+      return { error: "Couldn't confirm the provider update. Your selection is retained; check Configuration before retrying.", ok: null };
+    }
+  }
+  const [defaultState, defaultAction, defaultPending] = useActionState(
+    (previous: ProviderState, form: FormData) => saveProvider(onboardProviderAction, previous, form), init,
+  );
+  const [additionalState, additionalAction, additionalPending] = useActionState(
+    (previous: ProviderState, form: FormData) => saveProvider(addAdditionalProviderAction, previous, form), init,
+  );
   const state = target === "default" ? defaultState : additionalState;
   const pending = target === "default" ? defaultPending : additionalPending;
   const action = target === "default" ? defaultAction : additionalAction;
@@ -350,6 +411,9 @@ export function ProviderWizard({
     if (!c.defaultCapable && target === "default") setTarget("additional");
     setTag(c.tagHint);
     setEndpoint("");
+    setKey("");
+    setModels("");
+    setAuthMode("workload");
     setDiscovered(null);
     setSelectedModels(new Set());
     setDiscoverError(null);
@@ -357,16 +421,7 @@ export function ProviderWizard({
   }
 
   function reset() {
-    setOpen(false);
-    setStep(0);
-    setTag("");
-    setEndpoint("");
-    setAuthMode("workload");
-    setKey("");
-    setModels("");
-    setDiscovered(null);
-    setSelectedModels(new Set());
-    setCopilotSignedIn(false);
+    onClose();
   }
 
   function toggleModel(id: string) {
@@ -378,10 +433,23 @@ export function ProviderWizard({
     });
   }
 
+  function editCopilotModels(provider: AdditionalProvider) {
+    selectKind("github-copilot");
+    setTarget("additional");
+    setCopilotSignedIn(true);
+    setDiscovered(provider.models.map((id) => ({ id, label: null })));
+    setSelectedModels(new Set(provider.models));
+    setStep(3);
+    setOpen(true);
+  }
+
+  const endpointError = cfg.endpointEditable ? providerEndpointError(endpoint) : null;
+  const tagError = target === "additional" ? providerTagError(tag) : null;
   const canDiscover =
     cfg.supportsDiscovery &&
     (kind === "github-models" ||
-      (kind === "azure-openai" && endpoint.trim() && (authMode !== "api" || key.trim())));
+      (kind === "github-copilot" && copilotSignedIn) ||
+      (kind === "azure-openai" && endpointError === null && (authMode !== "api" || key.trim())));
 
   function runDiscover() {
     setDiscoverError(null);
@@ -391,19 +459,24 @@ export function ProviderWizard({
         setDiscoverError(result.error);
         setDiscovered(null);
       } else {
-        setDiscovered(result.models);
+        const models = result.models;
+        setDiscovered(models);
         // Pre-select the recommended pick (currently only Copilot's curated
         // catalog carries this) so the operator isn't forced to hunt for it —
         // mirrors `kars dev`'s picker defaulting to the starred model.
-        const recommended = result.models.filter((m) => m.recommended).map((m) => m.id);
-        setSelectedModels(new Set(recommended));
+        const recommended = models.filter((m) => m.recommended).map((m) => m.id);
+        setSelectedModels((previous) => previous.size
+          ? new Set(Array.from(previous).filter((id) => models.some((model) => model.id === id)))
+          : new Set(recommended));
       }
     });
   }
 
   const modelsValue = Array.from(new Set([...Array.from(selectedModels), ...models.split(",").map((s) => s.trim()).filter(Boolean)])).join(",");
 
-  const step1Valid = isLocal || isFoundry ? true : target === "default" ? cfg.defaultCapable : tag.trim().length > 0 && !usedTags.has(tag.trim());
+  const step1Valid = isLocal || isFoundry || (endpointError === null && (
+    target === "default" ? cfg.defaultCapable : tagError === null && !usedTags.has(tag.trim())
+  ));
   const step2Valid = target === "default" ? authMode !== "api" || key.trim().length > 0 : cfg.id === "github-copilot" ? copilotSignedIn : cfg.id === "github-models" || cfg.id === "custom" ? true : key.trim().length > 0;
   const canGoNext = [true, step1Valid, step2Valid, true][step];
 
@@ -448,12 +521,13 @@ export function ProviderWizard({
       || localDeployments.length > 0
       || !!localInferenceStatus?.available;
     const anyConfigured = !!defaultProvider || additionalToShow.length > 0 || showAiRunway;
+    const copilot = additionalProviders.find((provider) => provider.tag === "github-copilot" && provider.has_key);
     return (
       <div className="mt-4 space-y-3">
         {anyConfigured ? (
           <ul className="space-y-2">
-            {defaultProvider && !defaultIsAiRunway && <DefaultProviderCard p={defaultProvider} />}
-            {additionalToShow.map((p) => <ProviderCard key={p.tag} p={p} />)}
+            {defaultProvider && !defaultIsAiRunway && <DefaultProviderCard p={defaultProvider} onEditModels={defaultProvider.id === "github-copilot" && copilot ? () => editCopilotModels(copilot) : undefined} />}
+            {additionalToShow.map((p) => <ProviderCard key={p.tag} p={p} onEditModels={p.tag === "github-copilot" && p.has_key ? () => editCopilotModels(p) : undefined} />)}
             {showAiRunway && (
               <AiRunwayCard
                 models={localModels}
@@ -501,7 +575,7 @@ export function ProviderWizard({
 
         <div className="flex items-center justify-between border-b border-border pb-3">
           <StepRail step={step} />
-          <button type="button" onClick={reset} className="text-xs text-foreground-muted hover:text-foreground">Cancel</button>
+          <button type="button" disabled={pending} onClick={reset} className="text-xs text-foreground-muted hover:text-foreground disabled:opacity-50">Cancel</button>
         </div>
 
         {/* Step 1: pick a provider kind. */}
@@ -612,13 +686,15 @@ export function ProviderWizard({
                 <div className="grid gap-3 sm:grid-cols-2">
                   <label className="block text-xs text-foreground-muted">
                     Tag
-                    <input value={tag} onChange={(e) => setTag(e.target.value)} readOnly={cfg.id !== "custom"} placeholder="e.g. foundry-eu" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs read-only:opacity-70" />
+                    <input value={tag} onChange={(e) => setTag(e.target.value)} readOnly={cfg.id !== "custom"} aria-invalid={!!tag.trim() && tagError !== null} aria-describedby={tag.trim() && tagError ? "provider-tag-error" : undefined} placeholder="e.g. foundry-eu" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs read-only:opacity-70" />
+                    {tag.trim() && tagError && <span id="provider-tag-error" className="mt-1 block text-[11px] text-danger">{tagError}</span>}
                     {usedTags.has(tag.trim()) && <span className="mt-1 block text-[11px] text-danger">Already connected — pick a different tag.</span>}
                   </label>
                   {cfg.endpointEditable ? (
                     <label className="block text-xs text-foreground-muted">
                       Endpoint
-                      <input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://your-resource.services.ai.azure.com" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs" />
+                      <input type="url" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} aria-invalid={!!endpoint.trim() && endpointError !== null} aria-describedby={endpoint.trim() && endpointError ? "provider-endpoint-error" : undefined} placeholder="https://your-resource.services.ai.azure.com" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs" />
+                      {endpoint.trim() && endpointError && <span id="provider-endpoint-error" className="mt-1 block text-[11px] text-danger">{endpointError}</span>}
                     </label>
                   ) : (
                     <label className="block text-xs text-foreground-muted">
@@ -634,7 +710,8 @@ export function ProviderWizard({
                 <legend className="flex items-center gap-1.5 px-1 text-xs font-medium text-foreground-muted"><Icon name="link" size={13} /> Connection</legend>
                 <label className="block text-xs text-foreground-muted">
                   Endpoint
-                  <input value={endpoint} onChange={(e) => setEndpoint(e.target.value)} placeholder="https://your-resource.services.ai.azure.com" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs" />
+                  <input type="url" value={endpoint} onChange={(e) => setEndpoint(e.target.value)} aria-invalid={!!endpoint.trim() && endpointError !== null} aria-describedby={endpoint.trim() && endpointError ? "provider-endpoint-error" : undefined} placeholder="https://your-resource.services.ai.azure.com" className="mt-1 w-full rounded-lg border border-border bg-surface px-3 py-2 font-mono text-xs" />
+                  {endpoint.trim() && endpointError && <span id="provider-endpoint-error" className="mt-1 block text-[11px] text-danger">{endpointError}</span>}
                 </label>
               </fieldset>
             )}
@@ -691,9 +768,9 @@ export function ProviderWizard({
         {/* Step 4: models + review. */}
         {!isLocal && step === 3 && (
           <div className="space-y-3 pt-4">
-            <fieldset className="rounded-lg border border-border p-3">
+            <fieldset disabled={pending} className="rounded-lg border border-border p-3">
               <legend className="flex items-center gap-1.5 px-1 text-xs font-medium text-foreground-muted"><Icon name="brain" size={13} /> Models to serve</legend>
-              {cfg.supportsDiscovery && cfg.id !== "github-copilot" && (
+              {cfg.supportsDiscovery && (
                 <div className="mb-2 flex items-center justify-between">
                   <span className="text-[11px] text-foreground-muted">Discover the real catalog instead of typing ids.</span>
                   <button type="button" onClick={runDiscover} disabled={!canDiscover || discovering} className="rounded-md bg-signal px-2.5 py-1 text-[11px] font-semibold text-signal-fg disabled:opacity-40">
@@ -702,7 +779,7 @@ export function ProviderWizard({
                 </div>
               )}
               {cfg.id === "github-copilot" && (
-                <p className="mb-2 text-[11px] text-foreground-muted">Your Copilot seat&rsquo;s live models — the flagship tier is pre-selected. Adjust below.</p>
+                <p className="mb-2 text-[11px] text-foreground-muted">GitHub sign-in is complete. Choose which of your seat&rsquo;s models to publish in Kars, then save the selection. This does not change the cluster default.</p>
               )}
               {discoverError && <p className="mb-2 text-[11px] text-danger">{discoverError}</p>}
               {discovered && (
@@ -741,7 +818,7 @@ export function ProviderWizard({
                 <div><dt className="inline text-foreground-muted">Applies to: </dt><dd className="inline font-medium">{target === "default" ? "Cluster default" : "Additional"}</dd></div>
                 {target === "additional" && <div><dt className="inline text-foreground-muted">Tag: </dt><dd className="inline font-mono">{tag || "—"}</dd></div>}
                 <div className="sm:col-span-2"><dt className="inline text-foreground-muted">Endpoint: </dt><dd className="inline font-mono">{endpoint || (cfg.endpointEditable ? "—" : "built-in")}</dd></div>
-                <div><dt className="inline text-foreground-muted">Auth: </dt><dd className="inline">{target === "default" ? authMode : key ? "key/token provided" : "none"}</dd></div>
+                <div><dt className="inline text-foreground-muted">Auth: </dt><dd className="inline">{target === "default" ? authMode : copilotSignedIn ? "GitHub sign-in (stored on cluster)" : key ? "key/token provided" : "none"}</dd></div>
                 <div><dt className="inline text-foreground-muted">Models: </dt><dd className="inline font-mono">{modelsValue || "—"}</dd></div>
               </dl>
             </div>
@@ -750,7 +827,7 @@ export function ProviderWizard({
 
         <div className="mt-4 flex items-center gap-3 border-t border-border pt-3">
           {step > 0 && (
-            <button type="button" onClick={() => setStep((s) => s - 1)} className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted">← Back</button>
+            <button type="button" disabled={pending} onClick={() => setStep((s) => s - 1)} className="rounded-lg border border-border px-3 py-1.5 text-xs font-medium hover:bg-surface-muted disabled:opacity-50">← Back</button>
           )}
           {step < ((isLocal || isFoundry) ? 1 : STEPS.length - 1) ? (
             <button type="button" onClick={() => setStep((s) => s + 1)} disabled={!canGoNext} className="rounded-lg bg-signal px-4 py-1.5 text-xs font-semibold text-signal-fg disabled:opacity-50">Next →</button>
@@ -763,14 +840,13 @@ export function ProviderWizard({
             // in the Model catalogue, so the wizard just needs a way out.
             <button type="button" onClick={reset} className="rounded-lg border border-signal/40 bg-signal/10 px-4 py-2 text-sm font-medium text-signal hover:bg-signal/15">Done</button>
           ) : (
-            <button type="submit" disabled={pending || !modelsValue} className="rounded-lg bg-signal px-4 py-2 text-sm font-semibold text-signal-fg disabled:opacity-50">
-              {pending ? "Connecting…" : target === "default" ? "Set as default provider" : "Connect provider"}
+            <button type="submit" disabled={pending || !modelsValue} className="rounded-lg border border-border-strong bg-surface px-4 py-2 text-sm font-semibold text-foreground transition hover:bg-surface-muted disabled:opacity-50">
+              {pending ? "Saving…" : target === "default" ? "Set as default provider" : kind === "github-copilot" ? "Save model selection" : "Connect provider"}
             </button>
           )}
           {isLocal || isFoundry ? null : (
             <>
-              {state.error && <p className="text-xs text-danger">{state.error}</p>}
-              {state.ok && <p className="text-xs text-ok">{state.ok}</p>}
+              {state.error && <p role="alert" className="text-xs text-danger">{state.error}</p>}
             </>
           )}
         </div>

@@ -17,7 +17,7 @@ export function ArtifactSummary({
       : `possibly ${role.name.replace(/-/g, " ")} · inferred attribution`
     : artifact.source_agent?.trim()
       ? `recorded producer: ${artifact.source_agent} · not attributed to a roster role`
-      : "producer unknown";
+      : "captured for this run · individual producer not recorded";
 
   return (
     <summary className="cursor-pointer px-4 py-3">

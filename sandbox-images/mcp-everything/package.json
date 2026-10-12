@@ -3,14 +3,19 @@
   "version": "0.1.0",
   "private": true,
   "description": "Hermetic image wrapper for the MCP reference everything server",
+  "scripts": {
+    "test": "node --test --test-timeout=30000 image.test.mjs"
+  },
   "dependencies": {
     "@modelcontextprotocol/server-everything": "2026.7.4"
   },
   "overrides": {
     "@hono/node-server": "1.19.15",
-    "fast-uri": "3.1.6",
-    "hono": "4.13.5",
-    "ip-address": "10.3.1",
+    "@modelcontextprotocol/sdk": "1.31.0",
+    "fast-uri": "3.1.8",
+    "hono": "4.13.7",
+    "ip-address": "10.7.1",
+    "proxy-addr": "2.0.8",
     "qs": "6.16.0"
   }
 }

@@ -7,6 +7,17 @@ use axum::{
 };
 
 pub fn denial(error: &anyhow::Error) -> Option<Response> {
+    if let Some(error) = error.downcast_ref::<super::calendar::Error>() {
+        return Some(
+            crate::errors::openai_coded(
+                StatusCode::SERVICE_UNAVAILABLE,
+                error.to_string(),
+                "token_accounting_unavailable",
+                "token_accounting_unavailable",
+            )
+            .into_response(),
+        );
+    }
     let error = error.downcast_ref::<super::client::Error>()?;
     let (status, code) = match error.status {
         Some(429) => (StatusCode::TOO_MANY_REQUESTS, "inference_budget_exhausted"),

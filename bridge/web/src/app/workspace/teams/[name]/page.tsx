@@ -13,6 +13,7 @@ import { TeamEdit } from "./team-edit";
 import { LiveRefresh, LivePulse } from "@/components/live-refresh";
 import { EnvelopeDigest } from "@/components/envelope-digest";
 import {
+  BffError,
   getEngineeringSource,
   getGithubConnection,
   getOptions,
@@ -31,7 +32,6 @@ import {
   type CommonsResponse,
   type EngineeringSource,
   type GithubConnection,
-  type LedgerEvent,
   type TeamChannelsState,
   type TeamDetail,
 } from "@/lib/types";
@@ -43,6 +43,7 @@ import { DeleteTeamControl } from "./delete-control";
 import { TeamTasks } from "./team-tasks";
 import { TeamChannels } from "./team-channels";
 import { DeliverableBody, toPlainPreview } from "@/components/deliverable-view";
+import { RetainedTeamDocuments } from "@/components/retained-team-documents";
 import { TeamRosterEdit } from "./team-roster-edit";
 import { OrgTree } from "@/components/org-tree";
 import { DeployTimeline } from "@/app/workspace/missions/[name]/deploy-timeline";
@@ -58,6 +59,7 @@ import {
   TeamRunHistory,
   TeamValueSummary,
 } from "./team-outcomes";
+import { missingTeamResource, TeamReadError } from "../read-error";
 
 export const dynamic = "force-dynamic";
 
@@ -72,6 +74,7 @@ function HealthChip({ health }: { health: string }) {
     AwaitingReview: "bg-amber-500/10 text-amber-600 border-amber-500/30",
     Unproductive: "bg-amber-500/10 text-amber-600 border-amber-500/30",
     Stalled: "bg-rose-500/10 text-rose-600 border-rose-500/30",
+    Degraded: "bg-rose-500/10 text-rose-600 border-rose-500/30",
     Hibernating: "bg-surface-muted text-foreground-muted border-border",
   };
   const cls = tone[health ?? ""] ?? "bg-surface-muted text-foreground-muted border-border";
@@ -96,35 +99,35 @@ export default async function TeamDetailPage({
   try {
     team = await getTeam(ns, name);
   } catch (err) {
-    const msg = err instanceof Error ? err.message : "";
-    if (msg.includes("not_found") || msg.includes("404")) notFound();
-    return (
-      <HonestState
-        variant="not_wired"
-        title="This team is unavailable"
-        detail="The run environment isn't reachable right now. Try again shortly."
-      />
-    );
+    if (err instanceof BffError && err.status === 404) notFound();
+    return <TeamReadError error={err} />;
   }
 
   const active = !team.paused && team.phase === "Active";
   const runtimeWorking = !team.paused && team.runtime_state === "Working";
   const latestRun =
     (team.current_assignment_nonce ? team.principal_task : null)
-    ?? [...team.generated_tasks].sort().reverse()[0];
+    ?? team.last_generated_task
+    ?? team.generated_tasks[0];
 
   // The latest task-force run's live detail — so the team page can fold out the
   // SAME "watch it work" experience a mission gets: the deploy timeline, the
   // auto-folding agent graph, and the live per-round / per-tool activity feed
   // for the run executing right now. "In flight" = launched and not yet
   // delivered (materializing OR running); "running" once the agent works.
-  const latestRunTask = latestRun
-    ? await getTask(ns, latestRun).catch(() => null)
-    : null;
-  const allLatestRunApprovals = latestRun
-    ? await listTaskApprovals(ns, latestRun).catch(() => [])
-    : [];
-  const latestRunApprovals = allLatestRunApprovals.filter(
+  let runRecords;
+  try {
+    runRecords = latestRun
+      ? await Promise.all([
+        getTask(ns, latestRun).catch(missingTeamResource),
+        listTaskApprovals(ns, latestRun).catch(missingTeamResource),
+      ])
+      : [null, null] as const;
+  } catch (error) {
+    return <TeamReadError error={error} />;
+  }
+  const [latestRunTask, allLatestRunApprovals] = runRecords;
+  const latestRunApprovals = (allLatestRunApprovals ?? []).filter(
     (approval) =>
       approval.run_nonce == null
       || latestRunTask?.current_run_nonce == null
@@ -154,23 +157,16 @@ export default async function TeamDetailPage({
   // phase=Active. Poll any unpaused team with no run yet so the kickoff appears
   // without a manual refresh even while admission is still converging.
   const awaitingFirstRun = !team.paused && team.generated_task_count === 0;
+  const awaitingResume = !team.paused && team.phase === "Hibernating";
   const runActivity = latestRunTask?.activity ?? [];
   const hasRunActivity = runActivity.length > 0;
   const latestRunEvidence = latestRunTask ? analyzeTeamRun(team, latestRunTask) : null;
 
-  let commons: CommonsResponse | null = null;
-  try {
-    commons = await getTeamCommons(ns, name);
-  } catch {
-    commons = null;
-  }
-
-  let ledger: LedgerEvent[] = [];
-  try {
-    ledger = await getTeamLedger(ns, name);
-  } catch {
-    ledger = [];
-  }
+  const [commonsRead, ledgerRead] = await Promise.allSettled([
+    getTeamCommons(ns, name),
+    getTeamLedger(ns, name),
+  ]);
+  const commons: CommonsResponse | null = commonsRead.status === "fulfilled" ? commonsRead.value : null;
 
   let options = null;
   try {
@@ -199,7 +195,7 @@ export default async function TeamDetailPage({
       {/* Refresh aggressively only while a task-force run is changing. Refreshing
           an idle standing team every five seconds resets open edit forms and makes
           the launch package effectively uneditable. */}
-      <LiveRefresh active={runInFlight || runtimeWorking || awaitingFirstRun} intervalMs={5000} />
+      <LiveRefresh active={runInFlight || runtimeWorking || awaitingFirstRun || awaitingResume} intervalMs={5000} />
 
       <div className="flex items-start justify-between gap-4">
         <div>
@@ -217,7 +213,12 @@ export default async function TeamDetailPage({
         )}
         </div>
         <div className="flex shrink-0 items-center gap-2">
-          <RunNowControl team={team.name} paused={team.paused} inFlight={runInFlight} />
+          {team.phase === "Degraded" ? <HealthChip health="Degraded" /> : <RunNowControl
+            team={team.name}
+            paused={team.paused}
+            inFlight={runInFlight}
+            runKey={team.current_assignment_nonce ?? latestRun ?? null}
+          />}
           <DeleteTeamControl team={team.name} />
         </div>
       </div>
@@ -232,7 +233,10 @@ export default async function TeamDetailPage({
       {/* "Now" hero — the single answer to "what is this team doing right now". */}
       <NowHero
         teamName={team.name}
+        phase={team.phase}
+        detail={team.detail}
         health={team.paused ? "Hibernating" : team.health}
+        paused={team.paused}
         active={active}
         runRunning={runRunning}
         runInFlight={runInFlight}
@@ -364,7 +368,7 @@ export default async function TeamDetailPage({
         <section className="rounded-xl border border-border bg-surface p-5 md:col-span-2">
           <div className="flex items-start justify-between gap-3">
             <h2 className="text-sm font-semibold">Charter</h2>
-            {team.health && <HealthChip health={team.paused ? "Hibernating" : team.health} />}
+            {(team.phase === "Degraded" || team.health) && <HealthChip health={team.phase === "Degraded" ? "Degraded" : team.paused ? "Hibernating" : team.health ?? team.phase} />}
           </div>
           <p className="mt-2 text-sm leading-relaxed text-foreground">{team.charter}</p>
           <div className="mt-4 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-foreground-muted">
@@ -432,7 +436,7 @@ export default async function TeamDetailPage({
                   initialSource={engineeringSource}
                   connection={githubConnection}
                 />
-                <TeamTasks team={team.name} tasks={team.tasks} paused={team.paused} />
+                <TeamTasks team={team.name} tasks={team.tasks} paused={team.paused} reviews={team.work_reviews ?? []} />
               </div>
             ),
           },
@@ -593,7 +597,7 @@ export default async function TeamDetailPage({
           {
             id: "knowledge",
             label: "Memory",
-            badge: commons?.count ?? 0,
+            badge: commons?.count,
             node: (
               <div className="space-y-6">
       {/* Shared memory — the team's knowledge commons */}
@@ -602,28 +606,31 @@ export default async function TeamDetailPage({
           <div>
             <h2 className="text-sm font-semibold">Shared memory</h2>
             <p className="mt-0.5 text-xs text-foreground-muted">
-              The team&apos;s knowledge commons — what each run learned, accumulated with
-              provenance. New runs build on this instead of starting cold.
+              Run summaries and verified document archives with provenance.
+              Older entries may retain only a summary. Recall uses complete recent
+              bundles within the bounded memory allowance.
             </p>
           </div>
           <span className="rounded-full bg-surface-muted px-2.5 py-1 text-xs font-medium text-foreground-muted">
-            {commons?.count ?? 0} entries
+            {commons ? `${commons.count} entries` : "Unverified"}
           </span>
         </div>
-        {!commons || commons.entries.length === 0 ? (
+        {commonsRead.status === "rejected" ? (
+          <TeamReadError error={commonsRead.reason} />
+        ) : commonsRead.value.entries.length === 0 ? (
           <p className="mt-4 text-xs text-foreground-muted">
             No shared knowledge yet. The first standing-operation run to complete will deposit what
             it learned here.
           </p>
         ) : (
           <>
-          {commons.count > commons.entries.length && (
+          {commonsRead.value.count > commonsRead.value.entries.length && (
             <p className="mt-3 text-[11px] text-foreground-muted">
-              Showing the {commons.entries.length} most recent of {commons.count} entries.
+              Showing the {commonsRead.value.entries.length} most recent of {commonsRead.value.count} entries.
             </p>
           )}
           <ul className="mt-4 space-y-3">
-            {commons.entries.map((e) => (
+            {commonsRead.value.entries.map((e) => (
               <li key={e.id}>
                 <details className="group rounded-lg border border-border bg-surface-muted/40">
                   <summary className="cursor-pointer list-none p-4">
@@ -652,6 +659,13 @@ export default async function TeamDetailPage({
                   {e.content && (
                     <div className="border-t border-border bg-surface px-4 py-4">
                       <DeliverableBody output={e.content} />
+                      {e.archive && <div className="mt-4"><RetainedTeamDocuments archive={e.archive} /></div>}
+                      {e.stored_digest && e.stored_digest !== e.digest && (
+                        <p className="mt-3 break-all text-xs text-foreground-muted">
+                          Stored record: <code>{e.stored_digest}</code> · {e.stored_size_bytes} bytes.
+                          The heading digest identifies the readable content above.
+                        </p>
+                      )}
                     </div>
                   )}
                 </details>
@@ -677,10 +691,12 @@ export default async function TeamDetailPage({
           Low-level deliveries, failures, knowledge writes, token evidence, and digests. Use the
           Outcomes tab for the customer-facing record.
         </p>
-        {ledger.length === 0 ? (
+        {ledgerRead.status === "rejected" ? (
+          <TeamReadError error={ledgerRead.reason} />
+        ) : ledgerRead.value.length === 0 ? (
           <p className="mt-4 text-xs text-foreground-muted">No activity recorded yet.</p>
         ) : (
-          <TeamLedger team={team.name} ledger={ledger} />
+          <TeamLedger team={team.name} ledger={ledgerRead.value} />
         )}
       </section>
 

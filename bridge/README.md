@@ -53,6 +53,22 @@ resources and customer data. Repository co-location does not change this boundar
 These are separate persona boundaries. Workspace links do not depend on Console
 routes, and Audit is self-contained.
 
+Audit separates **recorded claims**, **whole-log integrity**, and **per-receipt
+cryptographic checks**. "Claims pass" requires passing integrity, conformance,
+and completeness claims; a missing or omitted required claim remains partial.
+Only regulatory maturity is advisory. A recorded log position is not membership
+proof, and a valid checkpoint does not verify each receipt or prove that controls
+were enforced. Expand a receipt and select **Verify now** to inspect its checks
+and evidence. Cluster-published anchors share the log's trust domain; even a
+pinned signature does not establish snapshot freshness. Witness metadata is
+shown separately from verified evidence.
+
+Safety eval summaries describe whether cases matched their declared expectations,
+not whether every failed case was an unblocked attack. A blocked request can
+still fail policy-attribution, reason, or required-observation checks. Inspect
+the detailed report's expected/actual decisions and failure reason before
+diagnosing a policy bypass; errored cases remain inconclusive.
+
 ## Architecture
 
 ```mermaid
@@ -70,6 +86,32 @@ flowchart LR
 - Kars controllers and routers remain the runtime enforcement layer.
 
 ## Qualification
+
+### Efficiency evidence
+
+`/api/efficiency` and compose share one model × harness frontier. Modern usage
+and rounds come from the validated terminal `evidence.json`, not absent flattened
+fields. Historical harness and repeat identity come only from the same retained
+attempt's custody-checked candidate, assignment, and terminal journal. Repeat
+keys hash the complete input and reviewed contract; today's Task objective and
+200-character prefixes are not repeat evidence.
+
+Human acceptance belongs only to the reviewed Task UID and run nonce; approving
+a parent does not approve its specialist phases. Legacy rows remain visible with
+their verified-run count but cannot select an execution route. Unknown metrics
+are `null`/`—`, including whole-run tool counts when only partial router activity
+exists. Terminal phase counters provide measured tool attempts/failures; modern
+wall time is terminal start-to-finish, not inferred compute time. Cache and
+time-to-first-action remain unknown without complete measurements.
+
+Token and configured-price costs are per **measured delivered** run, not accepted
+outcome or total spend. `measured_token_runs` supplies coverage and
+`measured_tokens` supplies the actual delivered-token subtotal. Recommendations
+require validated history, a recorded harness, and complete delivered-token
+coverage; ranking is acceptance, repeated-package reliability, delivery, then
+token cost, with the exact selected pair and sparse-evidence caveats retained.
+This is descriptive retained evidence, not a controlled model benchmark or live
+qualification.
 
 The Bridge CI workflow checks the BFF, web, Teams gateway, dependency locks,
 security configuration and additive install/removal behavior. The native

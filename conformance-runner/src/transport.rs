@@ -33,6 +33,7 @@
 //! `X-Azureclaw-Decision-By`, the transport will prefer that header.
 
 use crate::outcome::ReplayError;
+use crate::pod_proxy::PodProxy;
 use anyhow::Context;
 use kars_eval_corpus::{Decision, PolicyKindRef};
 use reqwest::{Response, StatusCode};
@@ -122,11 +123,18 @@ pub struct Transport {
     client: reqwest::Client,
     base: String,
     forward_proxy_addr: Option<String>,
+    pod_proxy: Option<PodProxy>,
     timeout: Duration,
 }
 
 impl Transport {
     pub fn new(base: impl Into<String>, timeout: Duration) -> anyhow::Result<Self> {
+        if rustls::crypto::aws_lc_rs::default_provider()
+            .install_default()
+            .is_err()
+        {
+            tracing::debug!("rustls CryptoProvider already installed");
+        }
         let client = reqwest::Client::builder()
             .timeout(timeout)
             .redirect(reqwest::redirect::Policy::none())
@@ -138,6 +146,7 @@ impl Transport {
             client,
             base,
             forward_proxy_addr: None,
+            pod_proxy: None,
             timeout,
         })
     }
@@ -149,6 +158,27 @@ impl Transport {
         self
     }
 
+    pub(crate) fn with_pod_proxy(mut self, proxy: PodProxy) -> Self {
+        self.pod_proxy = Some(proxy);
+        self
+    }
+
+    pub async fn egress_connect(
+        &self,
+        host: &str,
+        port: u16,
+        case_id: &str,
+    ) -> anyhow::Result<ActualParts> {
+        if let Some(proxy) = &self.pod_proxy {
+            Ok(observe_connect(proxy.connect(host, port, case_id), self.timeout).await?)
+        } else if let Some(address) = &self.forward_proxy_addr {
+            Ok(egress_connect_via_proxy(address, host, port, case_id, self.timeout).await?)
+        } else {
+            Err(ReplayError::Transport)
+                .context("egress evaluation requires --forward-proxy or --forward-proxy-pod")
+        }
+    }
+
     #[cfg_attr(not(test), allow(dead_code))]
     pub fn base(&self) -> &str {
         &self.base
@@ -156,16 +186,6 @@ impl Transport {
 
     pub fn client(&self) -> &reqwest::Client {
         &self.client
-    }
-
-    /// `host:port` for `EgressConnect` HTTP CONNECT, or `None` if the
-    /// caller did not configure one.
-    pub fn forward_proxy_addr(&self) -> Option<&str> {
-        self.forward_proxy_addr.as_deref()
-    }
-
-    pub fn timeout(&self) -> Duration {
-        self.timeout
     }
 
     pub fn url(&self, path: &str) -> String {
@@ -326,12 +346,18 @@ pub async fn egress_connect_via_proxy(
     case_id: &str,
     timeout: Duration,
 ) -> Result<ActualParts, ReplayError> {
-    match tokio::time::timeout(
-        timeout,
+    observe_connect(
         send_connect(proxy_addr, target_host, target_port, case_id),
+        timeout,
     )
     .await
-    {
+}
+
+async fn observe_connect(
+    connect: impl std::future::Future<Output = anyhow::Result<(u16, String)>>,
+    timeout: Duration,
+) -> Result<ActualParts, ReplayError> {
+    match tokio::time::timeout(timeout, connect).await {
         Ok(Ok((status, reason_phrase))) => {
             let decision = decision_from_status(
                 StatusCode::from_u16(status).map_err(|_| ReplayError::Protocol)?,
@@ -371,6 +397,15 @@ async fn send_connect(
     let mut stream = TcpStream::connect(proxy_addr)
         .await
         .with_context(|| format!("TCP connect to forward proxy {proxy_addr}"))?;
+    send_connect_on_stream(&mut stream, target_host, target_port, case_id).await
+}
+
+pub(crate) async fn send_connect_on_stream(
+    stream: &mut (impl tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin),
+    target_host: &str,
+    target_port: u16,
+    case_id: &str,
+) -> anyhow::Result<(u16, String)> {
     let req = format!(
         "CONNECT {host}:{port} HTTP/1.1\r\nHost: {host}:{port}\r\n{case_hdr}: {case_id}\r\n\r\n",
         host = target_host,

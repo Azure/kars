@@ -3,6 +3,8 @@
 
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { execa } from "execa";
+import { fileURLToPath } from "node:url";
+import { parseAllDocuments } from "yaml";
 import type { Execute } from "./sre-authority.js";
 import { listSreHelmReleases, sreHelmStageWait } from "./sre-helm.js";
 
@@ -14,6 +16,21 @@ const unsupported = () => Object.assign(new Error("Helm flag rejected"), {
 afterEach(() => vi.restoreAllMocks());
 
 describe("SRE Helm release inventory compatibility", () => {
+  it("renders channel-free governed health sweeps without obsolete polling modes", async () => {
+    const chart = fileURLToPath(new URL("../../../deploy/helm/kars", import.meta.url));
+    const { stdout } = await execa("helm", [
+      "template", "kars", chart, "--namespace", "kars-system",
+      "--set", "sre.enabled=true", "--show-only", "templates/sre.yaml",
+    ]);
+    const documents = parseAllDocuments(stdout);
+    expect(documents.flatMap(document => document.errors)).toEqual([]);
+    const sandbox = documents.map(document => document.toJSON())
+      .find(document => document?.kind === "KarsSandbox" && document.metadata.name === "sre");
+    expect(sandbox.spec.runtime.kind).toBe("Hermes");
+    expect(sandbox.spec.runtime.hermes.extraEnv.SRE_WATCHER_ENABLED).toBe("true");
+    expect(sandbox.spec.runtime.hermes.extraEnv).not.toHaveProperty("SRE_WATCHER_MODE");
+  });
+
   it("handles the installed Helm flag parser without contacting a cluster", async () => {
     vi.spyOn(console, "warn").mockImplementation(() => {});
     // Help keeps listing offline, but still rejects unsupported flags.

@@ -292,9 +292,9 @@ impl StreamUsage {
         }
     }
 
-    /// Only a cleanly completed transport with a terminal provider event is
-    /// eligible for a refund. Client disconnect/drop uses None instead.
-    pub fn finish(self) -> Option<Usage> {
+    /// Settle before forwarding the terminal event: clients may stop reading
+    /// immediately on that event rather than polling the transport to EOF.
+    pub fn complete(&self) -> Option<Usage> {
         if self.invalid
             || !self.terminal
             || !self.buffer.iter().all(u8::is_ascii_whitespace)
@@ -302,7 +302,15 @@ impl StreamUsage {
         {
             return None;
         }
-        self.usage
+        self.usage.clone()
+    }
+
+    pub fn finish(self) -> Option<Usage> {
+        self.complete()
+    }
+
+    pub fn finished_or_invalid(&self) -> bool {
+        self.terminal || self.invalid
     }
 }
 

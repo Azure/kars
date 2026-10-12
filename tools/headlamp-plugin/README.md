@@ -67,11 +67,21 @@ npm install
 npm run build       # → dist/main.js
 ```
 
-The CLI's `kars dev --target local-k8s` builds this
-automatically and side-loads `dist/` into the Headlamp pod via
-`kubectl cp` to `/headlamp/plugins/kars/`.
+The Core Helm installation packages this plugin into the AL3 Headlamp image.
+Build `sandbox-images/headlamp/Dockerfile` from the repository root; update that
+image through the owning Core release, not by copying files into a running pod.
+The CLI preserves this bundled plugin when it detects a Core-owned Headlamp.
+See [AL3 Headlamp packaging](../../sandbox-images/headlamp/README.md) for access
+and authentication requirements.
+
+For standalone CLI installations, `kars dev --target local-k8s` builds the plugin
+and mounts it through a ConfigMap. That legacy installation is separate from the
+Core-owned immutable image.
 
 ## Standalone install (manual)
+
+Only use this on an independently managed, writable Headlamp installation.
+It is not supported on the Core chart's read-only AL3 image.
 
 ```bash
 # Build
@@ -122,7 +132,7 @@ with it are sub-agents fanned out under their parent.
 
 The `sandbox=<name>` label on every per-sandbox metric is added at
 **scrape time** by the `kars-sandbox-router` PodMonitor in
-`deploy/monitoring/podmonitor-sandbox-router.yaml` (relabel:
+`deploy/helm/kars/templates/monitoring-podmonitor.yaml` (relabel:
 `__meta_kubernetes_pod_label_kars_azure_com_sandbox` →
 `sandbox`). The Rust router exports plain `IntCounter`s — no
 in-process per-sandbox cardinality.
@@ -187,9 +197,26 @@ The Overview page and each KarsSandbox detail page also render a
 
 The sandbox → policy link uses
 `KarsSandbox.spec.inferenceRef.name`.
+The rolling 24-hour Prometheus estimate is not the router's calendar ledger or
+proof of policy enforcement. Loading, failed, malformed and non-finite telemetry
+is displayed as unavailable, not zero consumption. An empty token-query result
+is displayed as missing samples rather than a zero-used budget.
 
-### Prometheus base URL
+### Prometheus connection
 
-By default the plugin queries `http://127.0.0.1:19091`. Override at
-runtime by setting `window.KARS_PROMETHEUS_URL = '...'` (e.g.
-via a small Headlamp banner / browser DevTools).
+By default the plugin queries the existing standalone stack's
+`monitoring/kps-kube-prometheus-stack-prometheus:9090` Service through Headlamp's
+authenticated Kubernetes API proxy, pinned to the selected cluster. The logged-in
+operator needs `get` on `services/proxy` for that Service in `monitoring`; the
+Headlamp pod's ServiceAccount is not granted this access on the operator's behalf.
+Switching clusters invalidates the previous telemetry, including late responses.
+
+For a separately managed endpoint, explicitly set
+`window.KARS_PROMETHEUS_URL = 'https://...'` (or `http://127.0.0.1:19091` for an
+intentional local forward). External requests do not receive Kubernetes
+credentials and require the endpoint's normal browser/CORS access.
+
+Core-managed Headlamp does not currently install Prometheus; the separate
+standalone observability installer supplies it. Missing Services, denied proxy
+access and unavailable endpoints remain explicit telemetry failures. There is no
+automatic fallback to a local forward or a different cluster.

@@ -3,7 +3,7 @@ Licensed under the MIT License. */}}# Namespace-wide deny and separate operator 
 #
 # The default-deny policy isolates every Pod. The additive operator allow policy
 # preserves existing API, mesh, router, IMDS and metrics access, but excludes the
-# schema helper: its dedicated API-only policy must be its only chart allowance.
+# schema helper and metrics server, which have their own dedicated allowances.
 #
 # This is the *operator* namespace policy, distinct from the
 # per-sandbox default-deny that the controller renders inline in
@@ -37,6 +37,9 @@ spec:
       - key: app.kubernetes.io/component
         operator: NotIn
         values: [schema-hook]
+      - key: kars.azure.com/metrics-managed
+        operator: NotIn
+        values: ["true"]
   policyTypes:
     - Ingress
     - Egress
@@ -46,6 +49,12 @@ spec:
         - namespaceSelector:
             matchLabels:
               kars.azure.com/inference-budget: v1
+          podSelector:
+            matchLabels:
+              kars.azure.com/component: sandbox
+        - namespaceSelector:
+            matchLabels:
+              kars.azure.com/calendar-budget: v1
           podSelector:
             matchLabels:
               kars.azure.com/component: sandbox

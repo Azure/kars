@@ -83,6 +83,13 @@ sequenceDiagram
 
 ## What you provision
 
+For clusters newly created by the CLI, each verified Kind node gets a
+128 MiB runtime journal limit (16 MiB per file). This prevents RAM-backed
+system logs from consuming a large share of a bounded node's memory.
+CPU and memory limits, log levels and rate limits are unchanged. Existing
+clusters are reused without changing their journal configuration or history;
+plain `kind create cluster` does not apply this CLI setting.
+
 ```bash
 # 1. Build images locally (one-time per change to controller / router / sandbox).
 make image-controller image-inference-router
@@ -103,15 +110,21 @@ kars dev down --keep-cluster       # only stop port-forward
 
 The CLI handles:
 
+- Both default harness images: OpenClaw and Hermes are built locally or pulled from the selected release, then loaded alongside the controller, router and metrics server. Missing required images or images that do not match the host architecture stop installation before Core is applied. A selected release must include native images for both harnesses; the installer does not silently run an emulated runtime.
+- OpenClaw manifests from `kars add` and local-Kubernetes dev share the packaged `2026.9.8` baseline. The Docker dev summary labels it as a baseline, not a detected version of an arbitrary image override. Regression checks bind this default to the existing Docker and plugin pins; changing the metadata does not rebuild or upgrade an installed image.
+- Explicit local Hermes configuration through `values-local-dev.yaml` (`runtimes.hermes.image: kars-runtime-hermes:latest`), so the composer does not depend on access to the controller's private-registry fallback. Existing private-named local Hermes images can be retagged during loading. This makes the harness selectable; it does not certify completed work or inter-harness collaboration.
+- With explicit `--no-build`, building and image loading remain skipped: the caller must already have loaded the exact configured images into Kind.
+- The public release workflow builds Hermes on native AMD64 and ARM64 runners, then merges and signs its multi-architecture manifest using the existing sandbox release stage. Per-architecture SBOMs remain separate. These build records are not a substitute for installed inter-harness acceptance.
 - Kind cluster create (idempotent — re-runs reuse).
-- Cross-arch image load (kind load → fallback `<runtime> save | ctr images import`).
+- Native image load with exact CRI identity verification on every node returned by the selected Kind cluster, including workers. Missing or stale images trigger a sequential `<runtime> save | ctr images import` fallback only on the affected node; a failed worker verification stops installation. An empty or invalid node inventory is an error, not a successful load.
 - Container runtime auto-detection (docker → podman → nerdctl, in order of preference). Override with `KARS_DEV_RUNTIME=docker|podman|nerdctl`. kind is invoked with `KIND_EXPERIMENTAL_PROVIDER` set automatically when needed.
 - Node label `kars.azure.com/pool=sandbox` so sandboxes schedule on the single node.
 - Helm chart render with a per-run overlay containing the dev secret name.
 - Headlamp install via official chart.
 - Build + ConfigMap-mount the kars Headlamp plugin.
 - Detached `kubectl port-forward` for Headlamp on `:4466` (survives CLI exit).
-- Browser open + 24h ServiceAccount token print.
+- Monitoring links are discovered in the selected context. Grafana is optional: when its service is absent, the CLI reports it as not installed instead of advertising a broken URL or anonymous access. Missing monitoring services do not trigger port-forward replacement; discovery permission and connection failures remain errors.
+- Browser open with the configured Core Headlamp sign-in instructions, or a 24h ServiceAccount token for a standalone Headlamp installation.
 
 ## What is unique
 

@@ -1,7 +1,16 @@
 # Copyright (c) Microsoft Corporation.
 # Licensed under the MIT License.
 
+{{ include "kars-bridge.privateConsumerGuard" (dict "root" . "name" "kars-bridge-bff") }}
 {{ $qualification := .Values.bff.routeQualification | default dict -}}
+{{- $headlamp := .Values.headlamp | default dict -}}
+{{- if $headlamp.url -}}
+{{- range .Values.bff.extraEnv -}}
+{{- if eq .name "BRIDGE_HEADLAMP_URL" -}}
+{{- fail "headlamp.url conflicts with bff.extraEnv BRIDGE_HEADLAMP_URL" -}}
+{{- end -}}
+{{- end -}}
+{{- end -}}
 {{- $mode := "required" -}}
 {{- if hasKey $qualification "mode" -}}
 {{- $mode = get $qualification "mode" -}}
@@ -69,6 +78,10 @@ spec:
               value: {{ include "kars-bridge.coreNamespace" . | quote }}
             - name: BRIDGE_INSTALL_NAMESPACE
               value: {{ include "kars-bridge.namespace" . | quote }}
+            {{- if $headlamp.url }}
+            - name: BRIDGE_HEADLAMP_URL
+              value: {{ $headlamp.url | quote }}
+            {{- end }}
             - name: BRIDGE_LOG_JSON
               value: "true"
             - name: BRIDGE_ROUTE_QUALIFICATION_MODE

@@ -3,10 +3,10 @@
 
 # kars OpenClaw Sandbox Image
 # Slim overlay on top of kars-sandbox-base — adds only the router binary,
-# kars plugin, vendored SDK, and entrypoint.
+# kars plugin, pinned official AGT SDK, and entrypoint.
 #
 # Base image (Dockerfile.base) contains: OS, Node.js, Python, Go tools, OpenClaw.
-# This image adds: router binary, plugin code, SDK patches, entrypoint.
+# This image adds: router binary, current-source plugin code, SDK, entrypoint.
 #
 # Dev:  docker build -f sandbox-images/openclaw/Dockerfile .
 # Prod: docker build --platform linux/amd64 -f sandbox-images/openclaw/Dockerfile .
@@ -30,23 +30,33 @@ FROM ${INFERENCE_ROUTER_IMAGE} AS router-bin
 FROM ${SANDBOX_BASE_IMAGE} AS cli-builder
 
 WORKDIR /build
-# mesh-plugin is a file: dep of runtimes/openclaw (npm resolves
-# `@kars/mesh` to `../../mesh-plugin`). It must be present at
-# /build/mesh-plugin BEFORE `npm ci` runs, or tsc fails to resolve
-# the import. We copy the pre-built dist so npm doesn't need to run
-# mesh-plugin's `prepare` script (which needs tsc as a devDep).
-COPY mesh-plugin/package.json mesh-plugin/package-lock.json ./mesh-plugin/
-COPY mesh-plugin/dist/ ./mesh-plugin/dist/
+# Preserve file: dependency paths for both consumers of the same pinned SDK.
+COPY vendor/agt/*.tgz vendor/agt/SHA256SUMS ./vendor/agt/
+COPY mesh-plugin/package.json mesh-plugin/package-lock.json mesh-plugin/tsconfig.json mesh-plugin/openclaw.plugin.json ./mesh-plugin/
+COPY mesh-plugin/src/ ./mesh-plugin/src/
+COPY mesh-plugin/skills/ ./mesh-plugin/skills/
 COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/tsconfig.json ./runtimes/openclaw/
 COPY runtimes/openclaw/src/ ./runtimes/openclaw/src/
-# NPM_CONFIG_IGNORE_SCRIPTS=true propagates to nested installs of
-# file: deps; --ignore-scripts on the outer command alone does not.
-# Belt-and-braces: also strip mesh-plugin's `prepare` script, which
-# would otherwise try to invoke tsc (missing in this stage).
-RUN node -e "const f='./mesh-plugin/package.json'; const p=require(f); delete p.scripts.prepare; require('fs').writeFileSync(f, JSON.stringify(p,null,2));" && \
-    cd runtimes/openclaw && \
-    NPM_CONFIG_IGNORE_SCRIPTS=true npm ci --ignore-scripts && \
-    npm run build
+
+# Older callers may stage the canonical tarball; never replace the locked SDK.
+ARG MESH_PROVIDER=agt
+ARG AGT_SDK_TARBALL=
+COPY .agt-sdk/ ./legacy-agt-sdk/
+RUN test "$MESH_PROVIDER" = agt && \
+    cd /build/vendor/agt && sha256sum -c SHA256SUMS && \
+    if [ -n "$AGT_SDK_TARBALL" ]; then \
+      test "$AGT_SDK_TARBALL" = "$(basename "$AGT_SDK_TARBALL")" && \
+      cmp "/build/legacy-agt-sdk/$AGT_SDK_TARBALL" "/build/vendor/agt/$AGT_SDK_TARBALL"; \
+    fi
+
+# Build both adapters from source, then retain only their production dependency
+# graphs. IGNORE_SCRIPTS also propagates to npm's nested file: dependency work.
+RUN --mount=type=secret,id=npmrc,target=/root/.npmrc \
+    export NPM_CONFIG_IGNORE_SCRIPTS=true && \
+    cd /build/mesh-plugin && npm ci --ignore-scripts && npm run build && \
+    cd /build/runtimes/openclaw && npm ci --ignore-scripts && npm run build && \
+    npm prune --omit=dev --ignore-scripts && \
+    cd /build/mesh-plugin && npm prune --omit=dev --ignore-scripts
 
 # ─── Runtime Stage (overlay on base) ─────────────────────────────────────────
 
@@ -63,51 +73,17 @@ COPY --from=cli-builder /build/runtimes/openclaw/dist/ /opt/kars-plugin/
 COPY runtimes/openclaw/package.json runtimes/openclaw/package-lock.json runtimes/openclaw/openclaw.plugin.json /opt/kars-plugin/
 COPY runtimes/openclaw/skills/ /opt/kars-plugin/skills/
 
-# mesh-plugin is referenced by the runtime as a `file:../../mesh-plugin` dep.
-# `npm ci` below creates a symlink at
-# /opt/kars-plugin/node_modules/@kars/mesh → ../../../../mesh-plugin
-# which resolves to /mesh-plugin. Stage the prebuilt mesh-plugin there so the
-# symlink is not dangling at runtime. Without this the runtime falls back to
-# the vendored SDK silently (`mesh provider swap failed, staying on vendored`).
-COPY mesh-plugin/package.json /mesh-plugin/package.json
-COPY mesh-plugin/dist/ /mesh-plugin/dist/
-RUN node -e "const f='/mesh-plugin/package.json'; const p=require(f); delete p.scripts.prepare; require('fs').writeFileSync(f, JSON.stringify(p,null,2));"
-
-# Install plugin runtime dependencies
-RUN cd /opt/kars-plugin && npm ci --omit=dev --ignore-scripts
-
-# Optional: install upstream Microsoft AGT SDK when MESH_PROVIDER=agt build arg
-# is passed. Not installed by default so vendored builds stay slim and offline.
-# AGT_SDK_TARBALL: when set (dev mode pinning a locally-patched AGT branch) the
-# build context must contain `.agt-sdk/<tarball-name>`. The CLI stages this for
-# `kars dev --mesh-provider agt --build`. The directory always exists with
-# at least a .keep file so the COPY never fails.
-ARG MESH_PROVIDER=vendored
-ARG AGT_SDK_TARBALL=
-COPY .agt-sdk/ /opt/kars-agt-sdk/
-RUN cd /opt/kars-plugin && \
-    if [ -n "$AGT_SDK_TARBALL" ]; then \
-      if [ ! -f "/opt/kars-agt-sdk/$AGT_SDK_TARBALL" ]; then \
-        echo "::error:: AGT_SDK_TARBALL=$AGT_SDK_TARBALL was requested but" >&2; \
-        echo "  /opt/kars-agt-sdk/$AGT_SDK_TARBALL is missing from the build context." >&2; \
-        echo "  The patched POP-aware SDK would NOT be installed and the mesh" >&2; \
-        echo "  would silently fall back to the unpatched npm SDK (relay flood)." >&2; \
-        echo "  Stage the tarball into <build-context-root>/.agt-sdk/ before building." >&2; \
-        exit 1; \
-      fi; \
-      echo "Installing AGT SDK from local tarball: $AGT_SDK_TARBALL" && \
-      npm install --omit=dev --ignore-scripts --no-save \
-        "/opt/kars-agt-sdk/$AGT_SDK_TARBALL" ; \
-    else \
-      echo "Installing AGT SDK from npm: @microsoft/agent-governance-sdk@^3.5.0" && \
-      npm install --omit=dev --ignore-scripts --no-save \
-        '@microsoft/agent-governance-sdk@^3.5.0' ; \
-    fi
+# The runtime's @kars/mesh symlink resolves to /mesh-plugin. Its own dependency
+# tree must travel with it; sibling runtime node_modules cannot satisfy imports.
+COPY --from=cli-builder /build/mesh-plugin/package.json /mesh-plugin/package.json
+COPY --from=cli-builder /build/mesh-plugin/dist/ /mesh-plugin/dist/
+COPY --from=cli-builder /build/mesh-plugin/node_modules/ /mesh-plugin/node_modules/
+COPY --from=cli-builder /build/runtimes/openclaw/node_modules/ /opt/kars-plugin/node_modules/
 
 # Harden image-level code: root-owned, read-only — prevents agent from tampering
 # with the canonical copy that gets re-installed on every container start.
-RUN chmod -R a-w /opt/kars-plugin && \
-    chmod -R a+rX /opt/kars-plugin
+RUN chmod -R a-w /opt/kars-plugin /mesh-plugin && \
+    chmod -R a+rX /opt/kars-plugin /mesh-plugin
 
 # Build a pruned dist-runtime/extensions/ tree mirroring dist/, but containing
 # only the 3 always-required runtime cores. Files are hardlinked (`cp -al`)

@@ -74,6 +74,16 @@ without evidence cannot launch in this mode.
 
 For a reviewed development qualification run, explicitly configure Bridge:
 
+Runtime preflight also needs truthful pull-coverage metadata. The existing
+controller `IMAGE_PULL_REGISTRIES` environment variable, configured through
+`controller.extraEnv`, lists exact registry hosts (including ports) whose pull
+path the operator has verified. It does not configure authentication or mirrors.
+For an anonymous local Kind registry, verify the containerd mirror on **every**
+node and anonymous access to the exact pinned runtime manifests before declaring
+that host. Negotiate OCI and Docker manifest media types when probing a registry.
+Do not invent a pull Secret or declare a private registry covered without its
+actual credential or node-identity configuration.
+
 ```yaml
 bff:
   routeQualification:

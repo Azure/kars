@@ -18,7 +18,11 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["secrets"]
-    resourceNames: ["kars-mission-dispatcher-identity"]
+    resourceNames:
+      - kars-mission-dispatcher-identity
+      {{- if eq $mission.authMode "entra" }}
+      - kars-mission-dispatcher-entra
+      {{- end }}
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
@@ -119,6 +123,13 @@ spec:
           env:
             - name: KARS_MISSION_AUTH_MODE
               value: {{ $mission.authMode | quote }}
+            {{- if eq $mission.authMode "entra" }}
+            {{- $s := include "kars.authConfig.spec" . | fromJson }}
+            - name: KARS_MISSION_TENANT_ID
+              value: {{ $s.tenant.tenantId | quote }}
+            - name: KARS_MISSION_BLUEPRINT_ID
+              value: {{ $s.agentId.blueprintClientId | quote }}
+            {{- end }}
             - name: KARS_MISSION_DISPATCHER_DEPLOYMENT
               value: kars-mission-dispatcher
             - name: KARS_MISSION_DISPATCHER_RELEASE

@@ -31,6 +31,116 @@ fn valid_envelope_passes() {
     assert!(matches!(check_envelope(&task), EnvelopeCheck::Valid));
 }
 
+#[tokio::test]
+async fn retained_task_bursts_are_bounded_and_drain_without_dropping_work() {
+    use kube::runtime::{controller::applier, reflector, watcher::Event};
+    use tokio::sync::{Semaphore, mpsc};
+    use tokio::time::timeout;
+
+    let (store, mut writer) = reflector::store();
+    writer.apply_watcher_event(&Event::Init);
+    let mut requests = Vec::new();
+    for index in 0..58 {
+        let mut task = task_with(3, 3, 2);
+        task.metadata.name = Some(format!("retained-{index}"));
+        writer.apply_watcher_event(&Event::InitApply(task.clone()));
+        requests.push(Ok::<_, std::io::Error>(reflector::ObjectRef::from_obj(
+            &task,
+        )));
+    }
+    writer.apply_watcher_event(&Event::InitDone);
+    let permits = Arc::new(Semaphore::new(0));
+    let gate = permits.clone();
+    let (started, mut receiver) = mpsc::unbounded_channel();
+    let runner = tokio::spawn(async move {
+        applier(
+            move |task: Arc<KarsTask>, _: Arc<()>| {
+                let gate = gate.clone();
+                let started = started.clone();
+                Box::pin(async move {
+                    started.send(task.name_any()).unwrap();
+                    gate.acquire().await.unwrap().forget();
+                    Ok::<_, std::io::Error>(Action::await_change())
+                })
+            },
+            |_, _, _| Action::await_change(),
+            Arc::new(()),
+            store,
+            futures::stream::iter(requests).chain(futures::stream::pending()),
+            reconciliation_config(),
+        )
+        .take(58)
+        .collect::<Vec<_>>()
+        .await
+    });
+    for _ in 0..4 {
+        assert!(
+            timeout(Duration::from_secs(5), receiver.recv())
+                .await
+                .unwrap()
+                .is_some()
+        );
+    }
+    assert!(
+        timeout(Duration::from_millis(50), receiver.recv())
+            .await
+            .is_err(),
+        "a fifth lineage must wait for an available reconciliation slot"
+    );
+    permits.add_permits(1);
+    assert!(
+        timeout(Duration::from_secs(5), receiver.recv())
+            .await
+            .unwrap()
+            .is_some()
+    );
+    permits.add_permits(57);
+    let results = timeout(Duration::from_secs(5), runner)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(results.len(), 58);
+    assert!(results.iter().all(Result::is_ok));
+    let completed = results
+        .into_iter()
+        .map(|result| result.unwrap().0.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(completed.len(), 58);
+}
+
+#[test]
+fn retired_funded_phases_use_idle_polling_without_changing_live_admission() {
+    let mut task = task_with(3, 3, 2);
+    task.spec.envelope.budget = Some(
+        serde_json::from_value(json!({"tokens": 150000, "scope": "GovernedInference"})).unwrap(),
+    );
+    task.spec.execution = Some(crate::kars_task::TaskExecution {
+        launch: true,
+        runtime: None,
+    });
+    let mut status = ready_status(None, Some(1), task.envelope_digest(), vec![]);
+    status.execution_phase = Some("Idle".into());
+    assert_eq!(requeue_delay(&task, &status), REQUEUE_IDLE);
+    task.spec.execution.as_mut().unwrap().launch = false;
+    assert_eq!(requeue_delay(&task, &status), REQUEUE_IDLE);
+
+    task.spec.execution.as_mut().unwrap().launch = true;
+    for phase in ["Running", "Launching", "Stopping", PHASE_DEGRADED] {
+        status.execution_phase = Some(phase.into());
+        assert_eq!(requeue_delay(&task, &status), REQUEUE_PENDING, "{phase}");
+    }
+    status.execution_phase = Some("Idle".into());
+    status.sandbox_ref = Some(crate::mcp_server::LocalObjectRef {
+        name: "still-present".into(),
+    });
+    assert_eq!(requeue_delay(&task, &status), REQUEUE_PENDING);
+    status.sandbox_ref = None;
+    for phase in [PHASE_PENDING, PHASE_DEGRADED] {
+        status.phase = Some(phase.into());
+        assert_eq!(requeue_delay(&task, &status), REQUEUE_PENDING, "{phase}");
+    }
+}
+
 #[test]
 fn root_policy_conflict_never_becomes_ready() {
     let mut task = task_with(3, 3, 2);
@@ -119,6 +229,202 @@ fn completeness_floor_is_not_inferred_from_resource_names() {
     assert!(!completeness.exec_ban_vap);
     assert!(!completeness.posture_lock_vap);
     assert!(!completeness.default_deny_egress);
+}
+
+#[tokio::test]
+async fn reviewed_wait_and_outage_preserve_accepted_sandbox_without_materialization_or_teardown() {
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+    for unavailable in [false, true] {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("reviewed_execution/protocol-fixture.json")).unwrap();
+        let mut resources = fixture["resources"].as_object().unwrap().clone();
+        let root_path = "/apis/kars.azure.com/v1alpha1/namespaces/default/karstasks/report";
+        resources.get_mut(root_path).unwrap()["status"]["sandboxRef"] =
+            json!({"name":"retained-runtime"});
+        if unavailable {
+            resources.remove(&format!(
+                "/api/v1/namespaces/default/configmaps/{}",
+                fixture["synthesisGrant"]["authority"]["stateName"]
+                    .as_str()
+                    .unwrap()
+            ));
+        } else {
+            let phase = resources
+                .get_mut(&format!(
+                    "/apis/kars.azure.com/v1alpha1/namespaces/default/karstasks/{}",
+                    fixture["phaseName"].as_str().unwrap()
+                ))
+                .unwrap();
+            phase["metadata"]["annotations"]
+                .as_object_mut()
+                .unwrap()
+                .remove("kars.azure.com/run-completed");
+        }
+        let task: KarsTask = serde_json::from_value(resources[root_path].clone()).unwrap();
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::path_regex(".*")).respond_with(move |request: &Request| {
+            assert_eq!(request.method, "GET", "held work must not be mutated");
+            resources.get(request.url.path()).map_or_else(|| ResponseTemplate::new(404).set_body_json(json!({
+                "apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404,"message":"fixture unavailable"
+            })), |object| ResponseTemplate::new(200).set_body_json(object))
+        }).mount(&server).await;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client =
+            kube::Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        let mut status = task.status.clone().unwrap();
+        status.sandbox_ref = None;
+        reconcile_execution(&client, "default", &task, &mut status).await;
+        assert_eq!(
+            status.execution_phase.as_deref(),
+            Some(if unavailable { "Degraded" } else { "Launching" })
+        );
+        assert_eq!(
+            status.sandbox_ref.as_ref().unwrap().name,
+            "retained-runtime"
+        );
+        assert_eq!(status.phase.as_deref(), Some(PHASE_READY));
+        assert!(
+            !server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| request.url.path().contains("karssandboxes"))
+        );
+    }
+}
+
+#[tokio::test]
+async fn stopped_reviewed_root_retires_only_owned_phase_compute_and_retries_cleanup() {
+    use kube::Resource;
+    use std::sync::Mutex;
+    use wiremock::{Mock, MockServer, Request, ResponseTemplate};
+    for mode in ["stopped", "foreign-root", "denied", "root-race"] {
+        let fixture: serde_json::Value =
+            serde_json::from_str(include_str!("reviewed_execution/protocol-fixture.json")).unwrap();
+        let mut resources = fixture["resources"].as_object().unwrap().clone();
+        let root_path = "/apis/kars.azure.com/v1alpha1/namespaces/default/karstasks/report";
+        resources.get_mut(root_path).unwrap()["spec"]["execution"]["launch"] = json!(false);
+        if mode == "foreign-root" {
+            resources.get_mut(root_path).unwrap()["metadata"]["uid"] = json!("replacement-root");
+        }
+        let name = fixture["phaseName"].as_str().unwrap();
+        let task: KarsTask = serde_json::from_value(
+            resources
+                [&format!("/apis/kars.azure.com/v1alpha1/namespaces/default/karstasks/{name}")]
+                .clone(),
+        )
+        .unwrap();
+        let records = resources.clone();
+        for (kind, plural, resource_name) in [
+            ("KarsSandbox", "karssandboxes", name.to_string()),
+            (
+                "InferencePolicy",
+                "inferencepolicies",
+                format!("{name}-inference"),
+            ),
+        ] {
+            resources.insert(
+                format!("/apis/kars.azure.com/v1alpha1/namespaces/default/{plural}/{resource_name}"),
+                json!({"apiVersion":"kars.azure.com/v1alpha1","kind":kind,"metadata":{
+                    "name":resource_name,"namespace":"default","uid":format!("{kind}-uid"),
+                    "resourceVersion":"42","ownerReferences":[task.controller_owner_ref(&()).unwrap()]
+                },"spec":{}}),
+            );
+        }
+        let store = Arc::new(Mutex::new(resources));
+        let responder_store = store.clone();
+        let reads = Arc::new(Mutex::new(0));
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::path_regex(".*"))
+            .respond_with(move |request: &Request| {
+                let mut values = responder_store.lock().unwrap();
+                let path = request.url.path();
+                let failure = |code, reason| {
+                    ResponseTemplate::new(code).set_body_json(json!({
+                        "apiVersion":"v1","kind":"Status","status":"Failure","reason":reason,
+                        "code":code,"message":reason
+                    }))
+                };
+                match request.method.as_str() {
+                    "GET" => {
+                        if mode == "root-race" && path == root_path {
+                            let mut reads = reads.lock().unwrap();
+                            *reads += 1;
+                            if *reads == 2 {
+                                values.get_mut(path).unwrap()["metadata"]["resourceVersion"] =
+                                    json!("changed");
+                            }
+                        }
+                        values.get(path).map_or_else(
+                            || failure(404, "NotFound"),
+                            |value| ResponseTemplate::new(200).set_body_json(value),
+                        )
+                    }
+                    "DELETE" => {
+                        assert!(
+                            path.contains("/karssandboxes/")
+                                || path.contains("/inferencepolicies/")
+                        );
+                        let body: serde_json::Value =
+                            serde_json::from_slice(&request.body).unwrap();
+                        let value = values.get(path).unwrap();
+                        assert_eq!(body["preconditions"]["uid"], value["metadata"]["uid"]);
+                        assert_eq!(body["preconditions"]["resourceVersion"], "42");
+                        if mode == "denied" {
+                            return failure(403, "Forbidden");
+                        }
+                        values.remove(path);
+                        ResponseTemplate::new(200).set_body_json(json!({
+                            "apiVersion":"v1","kind":"Status","status":"Success"
+                        }))
+                    }
+                    other => panic!("unexpected mutation: {other} {path}"),
+                }
+            })
+            .mount(&server)
+            .await;
+        let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
+        let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+        let mut status = task.status.clone().unwrap();
+        reconcile_execution(&client, "default", &task, &mut status).await;
+        assert_eq!(
+            status.execution_phase.as_deref(),
+            Some(match mode {
+                "stopped" => "Idle",
+                "denied" => "Stopping",
+                _ => "Degraded",
+            }),
+            "{mode}: {:?}",
+            status.execution_detail
+        );
+        let deletes = server
+            .received_requests()
+            .await
+            .unwrap()
+            .into_iter()
+            .filter(|request| request.method == "DELETE")
+            .count();
+        assert_eq!(
+            deletes,
+            match mode {
+                "stopped" => 2,
+                "denied" => 1,
+                _ => 0,
+            }
+        );
+        for (path, record) in records {
+            if mode == "root-race" && path == root_path {
+                continue;
+            }
+            assert_eq!(store.lock().unwrap().get(&path), Some(&record), "{path}");
+        }
+        if mode == "stopped" {
+            assert!(status.sandbox_ref.is_none());
+            reconcile_execution(&client, "default", &task, &mut status).await;
+            assert_eq!(status.execution_phase.as_deref(), Some("Idle"));
+        }
+    }
 }
 
 #[tokio::test]

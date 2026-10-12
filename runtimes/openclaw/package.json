@@ -35,7 +35,7 @@
     "ws": "^8.18.0"
   },
   "optionalDependencies": {
-    "@microsoft/agent-governance-sdk": "file:../../vendor/agt/microsoft-agent-governance-sdk-4.0.0-agt-3322175d.tgz"
+    "@microsoft/agent-governance-sdk": "file:../../vendor/agt/microsoft-agent-governance-sdk-5.0.0-agt-f68f2cf3.tgz"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
@@ -51,7 +51,6 @@
     "access": "public"
   },
   "overrides": {
-    "esbuild": "^0.28.1",
-    "js-yaml": "4.3.2"
+    "esbuild": "^0.28.1"
   }
 }

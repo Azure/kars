@@ -36,6 +36,7 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use crate::kars_team::KarsTeam;
 use crate::providers::signing::content_digest;
+use crate::team_memory::{RunArchive, archive_key};
 
 #[path = "team_commons_prompt.rs"]
 mod prompt;
@@ -43,11 +44,12 @@ mod prompt;
 /// Soft cap on retained entries (oldest pruned first) to stay within the
 /// ConfigMap ~1 MiB budget with headroom for content.
 const MAX_ENTRIES: usize = 64;
-/// Per-entry content cap (characters). Deliverables larger than this are stored
-/// truncated in the commons — the full artifact lives in the run's own output.
+/// Per-entry summary cap (characters). Verified full documents live separately
+/// in the companion archive and are never truncated.
 const MAX_ENTRY_CHARS: usize = 4096;
 /// How many recent entries to surface as prior knowledge on the next run.
 const PRIOR_KNOWLEDGE_ENTRIES: usize = 5;
+const MAX_STORE_BYTES: usize = 900 * 1024;
 
 /// One provenance-tracked record in a team's knowledge commons.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -209,6 +211,16 @@ fn read_index(cm: &ConfigMap) -> Result<Vec<CommonsEntry>> {
         );
         chrono::DateTime::parse_from_rfc3339(&entry.created_at)
             .context("invalid commons entry timestamp")?;
+        if let Some(raw) = data.get(&archive_key(&entry.id)) {
+            let archive: RunArchive = serde_json::from_str(raw)?;
+            archive.validate()?;
+            ensure!(
+                archive.documents[0].source.task_name == entry.source_task
+                    && archive.documents[0].source.namespace
+                        == cm.metadata.namespace.as_deref().unwrap_or_default(),
+                "commons archive source differs from its index or namespace"
+            );
+        }
     }
     ensure!(
         data.keys()
@@ -216,7 +228,81 @@ fn read_index(cm: &ConfigMap) -> Result<Vec<CommonsEntry>> {
             .all(|key| keys.contains(key)),
         "commons contains unindexed entry content"
     );
+    let archive_keys: BTreeSet<_> = index.iter().map(|entry| archive_key(&entry.id)).collect();
+    ensure!(
+        data.keys()
+            .filter(|key| key.starts_with("archive-"))
+            .all(|key| archive_keys.contains(key)),
+        "commons contains an unindexed run archive"
+    );
     Ok(index)
+}
+
+pub(crate) async fn retained_archive(
+    client: &Client,
+    team: &KarsTeam,
+    id: &str,
+) -> Result<Option<RunArchive>> {
+    let identity = CommonsIdentity::for_team(team)?;
+    let cm = Api::<ConfigMap>::namespaced(client.clone(), &identity.namespace)
+        .get(&identity.name)
+        .await?;
+    identity.validate(&cm)?;
+    read_index(&cm)?;
+    cm.data
+        .as_ref()
+        .and_then(|data| data.get(&archive_key(id)))
+        .map(|raw| serde_json::from_str(raw).map_err(Into::into))
+        .transpose()
+}
+
+/// Whole recent run bundles only; leave half the installed 64KiB input allowance
+/// for the new run's peer handoffs. Never truncate a document or its provenance.
+pub(crate) async fn prior_documents(
+    client: &Client,
+    team: &KarsTeam,
+) -> Result<Vec<crate::team_memory::Document>> {
+    let identity = CommonsIdentity::for_team(team)?;
+    let cm = Api::<ConfigMap>::namespaced(client.clone(), &identity.namespace)
+        .get(&identity.name)
+        .await?;
+    identity.validate(&cm)?;
+    let index = read_index(&cm)?;
+    select_documents(&cm, &index)
+}
+
+fn select_documents(
+    cm: &ConfigMap,
+    index: &[CommonsEntry],
+) -> Result<Vec<crate::team_memory::Document>> {
+    let data = cm.data.as_ref().context("commons data is missing")?;
+    let mut result = Vec::new();
+    for (position, entry) in index.iter().rev().take(PRIOR_KNOWLEDGE_ENTRIES).enumerate() {
+        let Some(raw) = data.get(&archive_key(&entry.id)) else {
+            continue;
+        };
+        let archive: RunArchive = serde_json::from_str(raw)?;
+        archive.validate()?;
+        let mut proposed = result.clone();
+        for (kind, documents) in [
+            ("document", archive.documents),
+            ("handoff", archive.handoffs),
+        ] {
+            for (number, mut document) in documents.into_iter().enumerate() {
+                document.name = format!("memory-{position}-{kind}-{number}.md");
+                proposed.push(document);
+            }
+        }
+        if proposed.len() > 8 || serde_json::to_vec(&proposed)?.len() > 32768 {
+            ensure!(
+                !result.is_empty(),
+                "latest complete Team memory exceeds the 8-file/32KiB allowance; refusing truncated recall"
+            );
+            break;
+        }
+        result = proposed;
+    }
+    Ok(result)
 }
 
 /// Create only when absent. A naming collision never adopts another team's data.
@@ -241,10 +327,9 @@ pub async fn ensure_commons(client: &Client, team: &KarsTeam) -> Result<()> {
     Ok(())
 }
 
-/// Append a provenance-tracked entry to the commons, unless an entry with the
-/// same `id` already exists (a run contributes at most once). Returns `true`
-/// when a new entry was written.
-pub async fn record_entry(
+/// Append a summary or enrich its verified archive without rewriting audited
+/// summary bytes. Returns `true` when either record was written.
+pub(crate) async fn record_run(
     client: &Client,
     team: &KarsTeam,
     id: &str,
@@ -252,6 +337,7 @@ pub async fn record_entry(
     author: &str,
     source_task: &str,
     content: &str,
+    archive: Option<&RunArchive>,
 ) -> Result<bool> {
     let identity = CommonsIdentity::for_team(team)?;
     let cms: Api<ConfigMap> = Api::namespaced(client.clone(), &identity.namespace);
@@ -259,7 +345,7 @@ pub async fn record_entry(
         .get(&identity.name)
         .await
         .context("get commons ConfigMap for append")?;
-    let Some(updated) = prepare_entry_update(
+    let base = prepare_entry_update(
         &identity,
         &existing,
         id,
@@ -267,8 +353,12 @@ pub async fn record_entry(
         author,
         source_task,
         content,
-    )?
-    else {
+    )?;
+    let updated = match archive {
+        Some(archive) => prepare_archive_update(&existing, base, id, source_task, archive)?,
+        None => base,
+    };
+    let Some(updated) = updated else {
         return Ok(false);
     };
     cms.replace(&identity.name, &PostParams::default(), &updated)
@@ -277,6 +367,55 @@ pub async fn record_entry(
             "replace commons ConfigMap; resourceVersion conflicts require a fresh reconcile",
         )?;
     Ok(true)
+}
+
+fn prepare_archive_update(
+    existing: &ConfigMap,
+    base: Option<ConfigMap>,
+    id: &str,
+    source_task: &str,
+    archive: &RunArchive,
+) -> Result<Option<ConfigMap>> {
+    archive.validate()?;
+    ensure!(
+        archive.documents[0].source.task_name == source_task
+            && archive.documents[0].source.namespace
+                == existing.metadata.namespace.as_deref().unwrap_or_default(),
+        "archive does not belong to this commons entry"
+    );
+    let key = archive_key(id);
+    if let Some(prior) = existing.data.as_ref().and_then(|data| data.get(&key)) {
+        ensure!(
+            serde_json::from_str::<RunArchive>(prior)? == *archive,
+            "retained archive cannot be replaced"
+        );
+        return Ok(base);
+    }
+    let mut updated = base.unwrap_or_else(|| existing.clone());
+    let data = updated.data.as_mut().context("commons data is missing")?;
+    data.insert(key, serde_json::to_string(archive)?);
+    prune_to_budget(&mut updated, id)?;
+    Ok(Some(updated))
+}
+
+fn prune_to_budget(updated: &mut ConfigMap, id: &str) -> Result<()> {
+    let data = updated.data.as_mut().context("commons data is missing")?;
+    let mut index: Vec<CommonsEntry> = serde_json::from_str(&data["index.json"])?;
+    while data
+        .iter()
+        .map(|(key, value)| key.len() + value.len())
+        .sum::<usize>()
+        > MAX_STORE_BYTES
+    {
+        let oldest = index.first().context("entry exceeds commons byte budget")?;
+        ensure!(oldest.id != id, "updated entry exceeds commons byte budget");
+        let dropped = index.remove(0);
+        data.remove(&content_key(&dropped.id));
+        data.remove(&archive_key(&dropped.id));
+        data.insert("index.json".into(), serde_json::to_string(&index)?);
+    }
+    read_index(updated)?;
+    Ok(())
 }
 
 fn prepare_entry_update(
@@ -355,11 +494,13 @@ fn prepare_entry_update(
     while index.len() > MAX_ENTRIES {
         let dropped = index.remove(0);
         data.remove(&content_key(&dropped.id));
+        data.remove(&archive_key(&dropped.id));
     }
     data.insert(
         "index.json".into(),
         serde_json::to_string(&index).context("encode commons index")?,
     );
+    prune_to_budget(&mut updated, id)?;
     Ok(Some(updated))
 }
 

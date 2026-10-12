@@ -5,7 +5,7 @@ import { readFileSync } from "node:fs";
 import { describe, expect, it } from "vitest";
 
 const dockerfile = readFileSync(new URL("../../bff/Dockerfile", import.meta.url), "utf8");
-const ignored = readFileSync(new URL("../../bff/.dockerignore", import.meta.url), "utf8");
+const ignored = readFileSync(new URL("../../bff/Dockerfile.dockerignore", import.meta.url), "utf8");
 
 describe("Private BFF image build contract", () => {
   it("compiles real sources once with a locked, fail-closed build", () => {
@@ -17,14 +17,20 @@ describe("Private BFF image build contract", () => {
     expect(builder).toMatch(/RUN cargo build --release --locked && strip target\/release\/kars-bridge-bff/);
     expect(builder).not.toMatch(/\|\|\s*true/);
     expect(builder).not.toContain("fn main() {}");
-    expect(builder.indexOf("COPY . .")).toBeGreaterThanOrEqual(0);
-    expect(builder.indexOf("COPY . .")).toBeLessThan(builder.indexOf("cargo build"));
+    for (const input of ["COPY bridge/bff/ bridge/bff/", "COPY shared/ shared/"]) {
+      expect(builder.indexOf(input)).toBeGreaterThanOrEqual(0);
+      expect(builder.indexOf(input)).toBeLessThan(builder.indexOf("cargo build"));
+    }
+    expect(builder).toContain("WORKDIR /src/bridge/bff");
   });
 
   it("uses the resulting non-root binary, not host build artifacts", () => {
-    expect(ignored.split(/\r?\n/)).toContain("target/");
+    const exclusions = ignored.split(/\r?\n/);
+    for (const pattern of ["**", "!bridge/bff/**", "!shared/**", "**/target", "**/.env*"]) {
+      expect(exclusions).toContain(pattern);
+    }
     expect(dockerfile).toContain(
-      "COPY --from=build /src/target/release/kars-bridge-bff /usr/local/bin/kars-bridge-bff",
+      "COPY --from=build /src/bridge/bff/target/release/kars-bridge-bff /usr/local/bin/kars-bridge-bff",
     );
     expect(dockerfile).toMatch(/^USER 10001:10001$/m);
     expect(dockerfile).toContain("FROM ${AZURELINUX_DISTROLESS} AS runtime");

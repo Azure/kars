@@ -2,10 +2,7 @@
 // Licensed under the MIT License.
 
 // kars Bridge Operator Console — Access & roles. The multi-user surface: the four
-// differentiated permission sets, what each can do, the current principal, and an
-// honest disclosure that there is no SSO yet (the real boundary is the Bridge's
-// Kubernetes ServiceAccount RBAC). Switching identity is done from the header
-// role menu; this page documents and reflects the model.
+// differentiated permission sets, current principal and deployment identity mode.
 
 import { PageHeader, Section } from "@/components/ui";
 import { ALL_ROLES, ROLE_META, type Role } from "@/lib/config";
@@ -22,14 +19,13 @@ const CAPABILITIES: { area: string; cap: string; roles: Role[] }[] = [
   { area: "Workspace", cap: "Start & review missions and teams", roles: ["user", "operator", "admin"] },
   { area: "Workspace", cap: "Connect GitHub & channels", roles: ["user", "operator", "admin"] },
   { area: "Workspace", cap: "Approve / request changes on deliverables", roles: ["user", "operator", "admin"] },
-  { area: "Auditor", cap: "Read receipts, evidence, tamper-evident log", roles: ["auditor", "operator", "admin"] },
-  { area: "Auditor", cap: "Verify a receipt independently", roles: ["auditor", "operator", "admin"] },
+  { area: "Auditor", cap: "Read the audit log", roles: ["auditor", "admin"] },
+  { area: "Evidence", cap: "Read and verify accessible receipts", roles: ["user", "auditor", "operator", "admin"] },
   { area: "Console", cap: "Manage tool / inference policies, skills, MCP", roles: ["operator", "admin"] },
   { area: "Console", cap: "Approve egress grants, run safety evals", roles: ["operator", "admin"] },
   { area: "Console", cap: "View fleet, sandboxes, insights", roles: ["operator", "admin"] },
-  { area: "Admin", cap: "Raise cluster / workspace inference budgets", roles: ["admin"] },
-  { area: "Admin", cap: "Cluster & provider configuration", roles: ["admin"] },
-  { area: "Admin", cap: "Manage roles & access", roles: ["admin"] },
+  { area: "Console", cap: "Cluster & provider configuration", roles: ["operator", "admin"] },
+  { area: "Admin", cap: "Manage inference budgets & retention policy", roles: ["admin"] },
 ];
 
 function Check({ on }: { on: boolean }) {
@@ -47,7 +43,7 @@ export default async function AccessPage() {
     <div className="space-y-6">
       <PageHeader
         title="Access & roles"
-        lead="kars Bridge is partitioned into four differentiated permission sets. Each surface is role-gated; a role holds exactly the capabilities below (privilege is cumulative — admin ⊇ operator ⊇ user, and admin ⊇ auditor)."
+        lead="kars Bridge has four permission sets. Signed-in roles are checked by the web tier and independently by the API; resource policies and Kubernetes RBAC can further constrain an operation. Admin includes operator and auditor permissions; operator includes workspace user permissions."
       />
 
       <Section title="You" subtitle="The principal this session is acting as.">
@@ -80,19 +76,18 @@ export default async function AccessPage() {
           {principal.ssoSignedIn ? (
             <>
               Your roles came from your identity provider&rsquo;s group claims at login, mapped via{" "}
-              <code className="rounded bg-surface-muted px-1">BRIDGE_OIDC_ROLE_MAP</code>. The REAL boundary
-              remains the Bridge&rsquo;s Kubernetes ServiceAccount under a least-privilege RBAC role (
-              <code className="rounded bg-surface-muted px-1">deploy/rbac.yaml</code>) — SSO only decides which
-              UI affordances render, never what the cluster actually permits.
+              <code className="rounded bg-surface-muted px-1">BRIDGE_OIDC_ROLE_MAP</code>. The API independently
+              verifies your signed Bridge session and checks the required role for each route. The
+              Bridge&rsquo;s Kubernetes ServiceAccount RBAC is a separate cluster-permission ceiling;
+              visible controls cannot grant permissions beyond either boundary.
             </>
           ) : (
             <>
-              There is no per-user sign-in yet on this session. Roles come from the header role menu (a dev
-              identity switch) or the <code className="rounded bg-surface-muted px-1">BRIDGE_ROLES</code> env,
-              and the REAL boundary is the Bridge&rsquo;s Kubernetes ServiceAccount under a least-privilege RBAC
-              role (<code className="rounded bg-surface-muted px-1">deploy/rbac.yaml</code>). Once SSO is
-              configured (below) every gate on this page holds unchanged — it only changes where the role comes
-              from.
+              This session has no verified per-user sign-in. Local development roles come from
+              <code className="rounded bg-surface-muted px-1">BRIDGE_ROLES</code>; a simulated view is not
+              proof of an independently authenticated role. Configure SSO and the shared session secret
+              on both web and API for per-user enforcement. Kubernetes ServiceAccount RBAC remains
+              a separate cluster-permission ceiling.
             </>
           )}
         </p>
@@ -140,6 +135,11 @@ export default async function AccessPage() {
       </Section>
 
       <Section title="The four roles" subtitle="Separate products, separate permission sets.">
+        <p className="mb-3 text-sm text-foreground-muted">
+          Role membership is managed by your identity provider and the deployment&rsquo;s{" "}
+          <code>BRIDGE_OIDC_ROLE_MAP</code>, not on this page. Sign in again after changes to refresh
+          your session roles.
+        </p>
         <div className="grid gap-3 sm:grid-cols-2">
           {ALL_ROLES.map((r) => {
             const m = ROLE_META[r];
@@ -165,15 +165,15 @@ export default async function AccessPage() {
         </div>
       </Section>
 
-      <Section title="Capability matrix" subtitle="Exactly what each role can do — the wired gates.">
-        <div className="overflow-hidden rounded-lg border border-border">
+      <Section title="Capability matrix" subtitle="Role-level access; individual operations also require their resource and policy checks.">
+        <div className="overflow-x-auto rounded-lg border border-border">
           <table className="w-full text-sm">
             <thead>
               <tr className="border-b border-border bg-surface-muted/40 text-left text-xs text-foreground-muted">
-                <th className="px-4 py-2 font-medium">Area</th>
-                <th className="px-3 py-2 font-medium">Capability</th>
+                <th scope="col" className="px-4 py-2 font-medium">Area</th>
+                <th scope="col" className="px-3 py-2 font-medium">Capability</th>
                 {ALL_ROLES.map((r) => (
-                  <th key={r} className="px-3 py-2 text-center font-medium" title={ROLE_META[r].label}>
+                  <th key={r} scope="col" className="px-3 py-2 text-center font-medium" title={ROLE_META[r].label} aria-label={ROLE_META[r].label}>
                     <Icon name={ROLE_META[r].glyph} size={14} className="inline" />
                   </th>
                 ))}

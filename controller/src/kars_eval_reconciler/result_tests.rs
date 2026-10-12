@@ -3,9 +3,87 @@
 
 use super::*;
 mod drift_tests;
+mod egress_tests;
 mod fixture;
 mod request_tests;
 mod transition_tests;
+
+#[tokio::test]
+async fn long_eval_names_preserve_workload_intent_and_report_attribution() {
+    for name in [
+        "beta-egress-strict-r88-egress-known-bad".to_string(),
+        "a".repeat(253),
+    ] {
+        let mut f = fixture::setup().await;
+        f.eval.metadata.name = Some(name.clone());
+        {
+            let mut store = f.store.lock().unwrap();
+            store.jobs.clear();
+            store.pods.clear();
+            store.cms.clear();
+        }
+        let job = f.request().await;
+        assert!(job.len() <= 63);
+        ensure_corpus_configmap(
+            &Api::<ConfigMap>::namespaced(f.client.clone(), "tenant"),
+            &corpus_configmap_name(&name),
+            &f.eval,
+            &f.corpus,
+        )
+        .await
+        .unwrap();
+        ensure_cronjob(
+            &Api::<CronJob>::namespaced(f.client.clone(), "tenant"),
+            &cron_job_name(&name),
+            &f.eval,
+            &f.intent,
+            "0 * * * *",
+        )
+        .await
+        .unwrap();
+        f.complete(&job);
+        let result = observation::observe(&f.client, &f.eval, &f.intent, &f.corpus)
+            .await
+            .unwrap();
+        assert_eq!(result.state, "AllPassed");
+        assert_eq!(result.result.unwrap().job_name, job);
+        let stored = f.store.lock().unwrap();
+        for object in stored
+            .jobs
+            .values()
+            .chain(stored.crons.values())
+            .chain(stored.cms.values())
+        {
+            assert_eq!(object["metadata"]["ownerReferences"][0]["name"], name);
+            assert_eq!(object["metadata"]["ownerReferences"][0]["uid"], "eval-uid");
+            assert_eq!(
+                object["metadata"]["labels"][LABEL_KEY_CLAW_EVAL],
+                bounded_name(&name, 63)
+            );
+        }
+        assert_eq!(
+            stored.jobs[&job]["spec"]["template"]["spec"]["volumes"][0]["configMap"]["name"],
+            corpus_configmap_name(&name)
+        );
+        assert!(stored.cms.contains_key(&evidence::name(&f.eval)));
+        drop(stored);
+        let selector = format!("{LABEL_KEY_CLAW_EVAL}={}", bounded_name(&name, 63));
+        assert!(
+            f._server
+                .received_requests()
+                .await
+                .unwrap()
+                .iter()
+                .any(|request| {
+                    request.url.path().ends_with("/jobs")
+                        && request
+                            .url
+                            .query_pairs()
+                            .any(|(key, value)| key == "labelSelector" && value == selector)
+                })
+        );
+    }
+}
 
 #[tokio::test]
 async fn current_owned_producer_report_is_persisted_before_readiness_and_retries_are_idempotent() {
@@ -174,10 +252,6 @@ async fn actual_cronjob_template_and_native_owner_chain_are_required_for_schedul
         &f.eval,
         &f.intent,
         "*/15 * * * *",
-        "karseval-eval-corpus",
-        "custom-numeric-user:latest",
-        &f.intent.router,
-        &f.corpus.label,
     )
     .await
     .unwrap();

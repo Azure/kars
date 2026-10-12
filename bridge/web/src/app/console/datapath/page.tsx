@@ -69,7 +69,7 @@ export default async function DatapathWitnessPage() {
           )}
         </div>
       )}
-      {isAdmin ? <DatapathSetup /> : (
+      {isAdmin ? <DatapathSetup ownerRelease={witness?.owner_release} /> : (
         <p className="text-sm text-foreground-muted">
           Ask a Bridge admin for setup details. Enablement and removal must be performed by a cluster operator outside Bridge.
         </p>

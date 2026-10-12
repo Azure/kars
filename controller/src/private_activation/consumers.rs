@@ -91,7 +91,7 @@ fn private_material_in(pod: &Pod, namespace: Option<&Namespace>) -> bool {
         })
 }
 
-fn consumes_private_authority(pod: &Pod, namespace: &Namespace) -> Result<bool, String> {
+pub(super) fn consumes_private_authority(pod: &Pod, namespace: &Namespace) -> Result<bool, String> {
     if private_material_in(pod, Some(namespace)) {
         return Ok(true);
     }

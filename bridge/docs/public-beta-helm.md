@@ -8,8 +8,13 @@ The public integration source is
 It is not the normal release channel. Publishing this branch does **not**
 publish its images or qualify an arbitrary existing cluster.
 
-This guide separates a fresh Helm installation from functional acceptance.
+This guide separates the **unqualified Helm-only first-install preview** from
+functional acceptance and the older CLI-assisted compatibility procedure.
 Kars core is independently usable; Bridge is an optional second Helm release.
+The beta gate requires exactly those two product releases, without raw-manifest
+product bootstrap or a separate `kars schemas prepare` command. Passing existing
+CLI-assisted installation checks does not satisfy that gate.
+
 Do not uninstall an existing customer installation to follow a fresh-install
 example. Read the [core upgrade and schema rules](../../docs/how-to/helm-installation.md)
 and [namespace ownership rules](../../docs/how-to/namespace-ownership.md) first.
@@ -78,6 +83,7 @@ process. Core and Bridge have separate values contracts:
 | Inference | Reachable, authorized backend; preserve Content Safety and Prompt Shields |
 | Governed credentials | Matching CRDs/controller and the reviewed private-enrollment prerequisites |
 | Finite budgets | Genuine provider contracts, bounds, accounting and operator-owned budget TLS/CA |
+| Headlamp | Core `headlamp.image` must be built/qualified from `sandbox-images/headlamp`; Bridge `headlamp.url` is the operator's browser-reachable URL |
 
 For image objects with separate repository and tag fields, keep the repository
 separate and use an immutable `latest@sha256:...` tag value. Fully qualified
@@ -97,7 +103,73 @@ untracked ServiceAccount patch for a qualified, reproducible installation.
 
 ## 3. Install core, then Bridge
 
-The following is the Helm 4 command sequence used for the beta installation.
+### Helm-only first-install preview — the beta acceptance path
+
+Use the [Core schema bootstrap guide](../../cli/schema-hook/README.md) for the
+full first-install contract. This path is **not yet an installed or released
+beta**: a matching built helper image and the actual Helm/admission/CNI lifecycle
+remain to be qualified. No qualified helper image digest is supplied by this
+source change.
+
+For the first, non-Entra Kind gate:
+
+- Use Helm **4.1.3**, Kubernetes **1.35**, and an enforced NetworkPolicy-capable
+  CNI. The existing Kubernetes 1.31 CI fixtures do not qualify this new path.
+- Use a fresh, dedicated `kars-system` namespace and original revision-one Core
+  release, not an existing release, replacement or upgrade.
+- In the reviewed Core values, enable `schemaHook`, supply its exact image
+  repository/digest/architecture and API destination pairs, and leave
+  `entraSidecar.enabled` and `policyPrototype.enabled` false.
+- Use the generic non-Azure Core profile with reviewed images, scheduling,
+  inference credentials and Microsoft AGT AgentMesh configuration.
+- Configure Bridge for `namespace: kars-system`, `core.namespace: kars-system`
+  and `createNamespace: false`. Use genuine non-Entra OIDC authentication, such
+  as the qualified Dex integration; do not enable development-role fallback.
+
+With the private values and explicit context prepared, the intended product
+installation is only these two Helm operations:
+
+```bash
+set -euo pipefail
+umask 077
+export KUBECONFIG=/absolute/path/to/operator.kubeconfig
+CONTEXT=my-fresh-kind-cluster
+CORE_VALUES=/absolute/path/to/core-values.yaml
+BRIDGE_VALUES=/absolute/path/to/bridge-values.yaml
+
+helm --kubeconfig "$KUBECONFIG" --kube-context "$CONTEXT" \
+  install kars deploy/helm/kars \
+  --namespace kars-system --create-namespace \
+  --values deploy/helm/kars/values-generic.yaml --values "$CORE_VALUES" \
+  --wait --wait-for-jobs --timeout 10m
+
+helm --kubeconfig "$KUBECONFIG" --kube-context "$CONTEXT" \
+  install kars-bridge bridge/deploy/helm/kars-bridge \
+  --namespace kars-system --values "$BRIDGE_VALUES" \
+  --wait --wait-for-jobs --timeout 15m
+```
+
+Do not prepend the compatibility Namespace CREATE or schema-preparation commands
+below. Do not add automatic failure-uninstall/rollback flags to the first-install
+hook. A failed install requires inspection of that exact attempt's Helm state,
+retained resources and helper termination, not blind replacement or CRD deletion.
+In particular, the historical Namespace conflict below must be checked against
+this exact installer/chart combination; its raw-manifest workaround is not a
+Helm-only beta solution.
+
+After both releases install, complete the functional acceptance below. Ready Pods
+are not agent delivery. The AKS gate additionally requires genuine Entra Agent ID
+and the same customer journeys. Core schema establishment with Entra disabled
+alone does not satisfy it; identity activation is a separate reviewed operation
+on the **same Core release**, with `schemaHook.enabled` turned off. Do not enable
+the first-install hook and Entra sidecar simultaneously or count an anonymous
+AgentMesh installation as Entra qualification.
+
+### CLI-assisted compatibility procedure — not the beta acceptance path
+
+The following preserves the older Helm 4 procedure and historical recovery
+context for existing installation tooling. It requires raw Namespace creation
+and CLI schema staging, so it is **not** evidence of the Helm-only beta gate.
 For Helm 3, use the documented `--atomic` counterpart consistently in both the
 schema stage and Helm; see the [core Helm guide](../../docs/how-to/helm-installation.md).
 Choose explicit absolute file paths and the intended context:

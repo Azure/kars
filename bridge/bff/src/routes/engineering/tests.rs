@@ -38,11 +38,15 @@ fn task(id: &str, status: &str) -> TeamTaskDto {
         acceptance_criteria: Vec::new(),
         review_required: false,
         status: status.into(),
-        run: (status == "active").then(|| "run-1".into()),
+        run: matches!(status, "active" | "awaiting_review" | "done").then(|| "run-1".into()),
+        run_uid: matches!(status, "active" | "awaiting_review" | "done")
+            .then(|| "run-uid-1".into()),
         created_at: Some("2026-07-20T00:00:00Z".into()),
-        done_at: (status == "done").then(|| "2026-07-20T01:00:00Z".into()),
+        done_at: matches!(status, "done" | "retired").then(|| "2026-07-20T01:00:00Z".into()),
         stuck_since: (status == "active").then(|| "2026-07-20T00:30:00Z".into()),
-        assignment_nonce: None,
+        assignment_nonce: matches!(status, "active" | "awaiting_review" | "done")
+            .then(|| "nonce-1".into()),
+        ..Default::default()
     }
 }
 
@@ -321,34 +325,42 @@ fn dedupe_preserves_existing_active_and_done_tasks() {
     assert_eq!(merged[0].status, "active");
     assert_eq!(merged[0].run, active.run);
     assert_eq!(merged[0].assignment_nonce, active.assignment_nonce);
-    assert!(merged[0].review_required);
+    assert_eq!(merged[0], active);
     assert_eq!(merged[1].status, "done");
     assert_eq!(merged[1].done_at, done.done_at);
-    assert!(merged[1].review_required);
+    assert_eq!(merged[1], done);
 }
 
 #[test]
-fn changed_open_security_alert_requeues_completed_work() {
+fn changed_open_security_alert_creates_distinct_work_without_rewriting_completion() {
     let mut completed = task("code-scanning-alert-abc", "done");
     completed.description = "updated_at=old".into();
     let mut rediscovered = task("code-scanning-alert-abc", "pending");
     rediscovered.description = "updated_at=new".into();
-    let (merged, queued) = merge_discovered_tasks(vec![completed], vec![rediscovered.clone()]);
+    let (merged, queued) =
+        merge_discovered_tasks(vec![completed.clone()], vec![rediscovered.clone()]);
     assert_eq!(queued, 1);
-    assert_eq!(merged[0].status, "pending");
-    assert_eq!(merged[0].description, rediscovered.description);
-    assert!(merged[0].run.is_none());
-    assert!(merged[0].done_at.is_none());
+    assert_eq!(merged[0], completed);
+    assert_eq!(merged[1].status, "pending");
+    assert_ne!(merged[1].id, completed.id);
+    assert_eq!(merged[1].description, rediscovered.description);
+    assert!(merged[1].run.is_none());
+    assert!(merged[1].run_uid.is_none());
+    assert!(merged[1].assignment_nonce.is_none());
+    assert!(merged[1].done_at.is_none());
+    crate::routes::teams::work::validate(&merged).unwrap();
 
     let (unchanged, queued) = merge_discovered_tasks(merged, vec![rediscovered]);
     assert_eq!(queued, 0);
-    assert_eq!(unchanged[0].status, "pending");
+    assert_eq!(unchanged[0], completed);
+    assert_eq!(unchanged[1].status, "pending");
 
     let mut refreshed = task("code-scanning-alert-abc", "pending");
     refreshed.description = "updated_at=newer".into();
     let (refreshed_tasks, queued) = merge_discovered_tasks(unchanged, vec![refreshed.clone()]);
-    assert_eq!(queued, 0);
-    assert_eq!(refreshed_tasks[0].description, refreshed.description);
+    assert_eq!(queued, 1);
+    assert_eq!(refreshed_tasks[0], completed);
+    assert_eq!(refreshed_tasks[2].description, refreshed.description);
 }
 
 #[test]
@@ -375,34 +387,59 @@ fn changed_pending_alert_flows_through_without_using_queue_capacity() {
 }
 
 #[test]
-fn changed_active_alert_refreshes_source_facts_without_restarting_run() {
+fn changed_active_alert_preserves_claim_and_queues_dependent_source_revision() {
     let mut existing = task("dependabot-alert-abc", "active");
     existing.description = "old source facts".into();
     existing.run = Some("run-in-progress".into());
     let mut refreshed = task("dependabot-alert-abc", "pending");
     refreshed.description =
         "AUTHORITATIVE SOURCE FACTS: manifest_path=tests/compat/package-lock.json".into();
-    let (merged, queued) = merge_discovered_tasks(vec![existing], vec![refreshed.clone()]);
+    let (merged, queued) = merge_discovered_tasks(vec![existing.clone()], vec![refreshed.clone()]);
+    assert_eq!(queued, 1);
+    assert_eq!(merged[0], existing);
+    assert_eq!(merged[1].description, refreshed.description);
+    assert_eq!(merged[1].depends_on, [existing.id.clone()]);
+    assert!(crate::routes::teams::work::next_pending(&merged).is_none());
+    crate::routes::teams::work::validate(&merged).unwrap();
+    let (again, queued) = merge_discovered_tasks(merged.clone(), vec![refreshed.clone()]);
     assert_eq!(queued, 0);
-    assert_eq!(merged[0].status, "active");
-    assert_eq!(merged[0].run.as_deref(), Some("run-in-progress"));
-    assert_eq!(merged[0].description, refreshed.description);
+    assert_eq!(again, merged);
+    let mut candidates = Vec::new();
+    let mut known = BTreeMap::from([(existing.id.clone(), existing)]);
+    let mut slots = 0;
+    assert!(append_bounded_tasks(
+        &mut candidates,
+        &mut known,
+        vec![refreshed.clone()],
+        &mut slots,
+        0
+    ));
+    assert!(candidates.is_empty());
+    assert!(!append_bounded_tasks(
+        &mut candidates,
+        &mut known,
+        vec![refreshed],
+        &mut slots,
+        1
+    ));
+    assert_eq!(slots, 1);
 }
 
 #[test]
 fn covered_pending_alert_is_retired_without_touching_active_run() {
     let mut pending = task("dependabot-alert-pending", "pending");
-    let mut retirement = task("dependabot-alert-pending", "done");
+    let mut retirement = task("dependabot-alert-pending", "retired");
     retirement.description = "Covered by existing open PR #42".into();
     retirement.done_at = Some("2026-07-23T00:00:00Z".into());
     let (merged, queued) = merge_discovered_tasks(vec![pending.clone()], vec![retirement]);
     assert_eq!(queued, 0);
-    assert_eq!(merged[0].status, "done");
+    assert_eq!(merged[0].status, "retired");
     assert!(merged[0].run.is_none());
+    crate::routes::teams::work::validate(&merged).unwrap();
 
     pending.status = "active".into();
     pending.run = Some("run-in-progress".into());
-    let mut covered = task("dependabot-alert-pending", "done");
+    let mut covered = task("dependabot-alert-pending", "retired");
     covered.description = "Covered by existing open PR #42".into();
     let (active, queued) = merge_discovered_tasks(vec![pending], vec![covered]);
     assert_eq!(queued, 0);
@@ -411,14 +448,12 @@ fn covered_pending_alert_is_retired_without_touching_active_run() {
 }
 
 #[test]
-fn repeated_human_review_decision_requeues_completed_task() {
+fn repeated_human_review_decision_does_not_replay_completed_work() {
     let completed = task("github-pr-merge-abc", "done");
     let decision = task("github-pr-merge-abc", "pending");
-    let (merged, queued) = merge_discovered_tasks(vec![completed], vec![decision]);
-    assert_eq!(queued, 1);
-    assert_eq!(merged[0].status, "pending");
-    assert!(merged[0].run.is_none());
-    assert!(merged[0].done_at.is_none());
+    let (merged, queued) = merge_discovered_tasks(vec![completed.clone()], vec![decision]);
+    assert_eq!(queued, 0);
+    assert_eq!(merged, vec![completed]);
 }
 
 #[test]

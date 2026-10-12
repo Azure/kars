@@ -10,6 +10,7 @@ use serde::Serialize;
 use serde_json::Value;
 
 use crate::error::{AppError, AppResult};
+use crate::eval_names::bounded_name;
 use crate::state::AppState;
 
 use super::{created_of, name_of, ns_of, require_cluster, s, spec, status, upstream};
@@ -113,8 +114,8 @@ pub struct CreateEvalRequest {
     pub corpus: String,
     /// Optional cron schedule for a recurring eval; one-shot when omitted.
     pub schedule: Option<String>,
-    /// Runner image override. On a dev cluster this must be the locally-loaded
-    /// `kars-conformance-runner:dev`; in prod the controller default applies.
+    /// Optional per-eval image override. Omit to inherit the Core-configured
+    /// runner, including the image loaded by the local Kind installer.
     pub runner_image: Option<String>,
     /// Human label.
     pub display_name: Option<String>,
@@ -236,12 +237,12 @@ pub async fn eval_report(
     let cluster = require_cluster(&state)?;
     // Corpus definitions (what each case tests).
     let corpus_raw = cluster
-        .configmap_data(&format!("karseval-{name}-corpus"))
+        .configmap_data(&bounded_name(&format!("karseval-{name}-corpus"), 253))
         .await
         .and_then(|d| d.get("corpus.json").cloned());
     // Per-case verdicts from the last run (may be absent before first run).
     let report_raw = cluster
-        .configmap_data(&format!("karseval-{name}-report"))
+        .configmap_data(&bounded_name(&format!("karseval-{name}-report"), 253))
         .await
         .and_then(|d| d.get("report.json").cloned());
 

@@ -1,7 +1,8 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { createHash } from "node:crypto";
 import { createServer, type Server, type ServerResponse } from "node:http";
 import { join } from "node:path";
 import { mkdtemp, readFile, rm, access, writeFile, symlink } from "node:fs/promises";
@@ -11,7 +12,8 @@ import { MissionReceiver, type MissionReceiverOptions } from "./mission-receiver
 import { missionObjectiveDigest } from "@kars/mesh/dist/mission-admission.js";
 import { missionContract, parseMissionMessage, type MissionReply } from "@kars/mesh/dist/mission-protocol.js";
 import { missionInputContentDigest } from "@kars/mesh/dist/mission-inputs.js";
-import { TASK_INPUT_ROOT, TaskInputFiles } from "./task-filesystem.js";
+import { TASK_INPUT_ROOT, TASK_SKILL_ROOT, TaskInputFiles, TaskSkillFiles } from "./task-filesystem.js";
+import * as taskFilesystem from "./task-filesystem.js";
 
 const log = { info: vi.fn(), warn: vi.fn() };
 const deps: TaskLoopDeps = { meshClient: () => null, isInterruptRequested: () => false, interruptReason: () => "", setInterrupt: () => {} };
@@ -22,6 +24,7 @@ const final = (content: unknown = "A useful briefing", finish_reason = "stop", m
 let server: Server | undefined;
 let requests: Record<string, any>[];
 let policyRequests: Record<string, any>[];
+let toolReports: Record<string, any>[];
 const tempDirectories: string[] = [];
 async function workspace() {
   const directory = await mkdtemp("/tmp/kars-mission-artifacts-");
@@ -30,13 +33,14 @@ async function workspace() {
 }
 let observationRequests: { url: string; scope: string | string[] | undefined }[];
 async function router(responses: unknown[], policyStatus = 200, policyBody: unknown = { allowed: false }, observations?: unknown) {
-  requests = []; policyRequests = []; observationRequests = [];
+  requests = []; policyRequests = []; observationRequests = []; toolReports = [];
   let index = 0;
   server = createServer((req, res) => {
     if (req.method === "GET" && req.url?.startsWith("/telemetry/trace?")) {
       observationRequests.push({ url: req.url, scope: req.headers["x-kars-service-scope"] });
-      res.writeHead(observations ? 200 : 404, { "content-type": "application/json" });
-      res.end(JSON.stringify(observations ?? {}));
+      const selected = typeof observations === "function" ? observations(req.url) : observations;
+      res.writeHead(selected ? 200 : 404, { "content-type": "application/json" });
+      res.end(JSON.stringify(selected ?? {}));
       return;
     }
     let body = "";
@@ -46,6 +50,10 @@ async function router(responses: unknown[], policyStatus = 200, policyBody: unkn
         policyRequests.push(JSON.parse(body));
         res.writeHead(policyStatus, { "content-type": "application/json" });
         res.end(typeof policyBody === "string" ? policyBody : JSON.stringify(policyBody));
+      } else if (req.url === "/telemetry/tool") {
+        toolReports.push(JSON.parse(body));
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify({ recorded: true, source: "harness-reported", enforcement_changed: false }));
       } else {
         requests.push(JSON.parse(body));
         const response = responses[Math.min(index++, responses.length - 1)];
@@ -103,6 +111,47 @@ describe("router observations in completed task handoffs", () => {
   };
   const filename = "kars-router-observations.json";
 
+  it("emits a selected snapshot while the next response is still pending, without artifact negotiation", async () => {
+    let finishResponse: ServerResponse | undefined;
+    const snapshots: string[] = [];
+    const proposed = { kind: "tool_proposed", scope_id: "scope-a", round: 1, seq: 2,
+      source: "model-proposed", call_id: "call-1", name: "mesh_inbox", ok: null };
+    const firstSelection = { ...selection, rounds: [1], events: [
+      { ...selection.events[0], finish_reason: "tool_calls", tool_calls_observed: 1 }, proposed,
+    ] };
+    const cumulativeSelection = { ...selection, events: [...firstSelection.events,
+      { ...proposed, kind: "tool_result", seq: 3, source: "harness-reported", reported_in_round: 2 },
+      { ...selection.events[1], seq: 4 },
+    ] };
+    await router([
+      correlated(1, tool()),
+      (res: ServerResponse) => { finishResponse = res; },
+    ], 200, { allowed: true }, (url: string) => url === "/telemetry/trace?rounds=1" ? firstSelection : cumulativeSelection);
+    let completed = false;
+    const execution = executeTaskWithEvidence("task", { ...deps, liveActivityEnabled: true,
+      onEvidence: (_evidence, snapshot) => { if (snapshot) snapshots.push(snapshot); },
+    }, log, false).then(result => { completed = true; return result; });
+    try {
+      await vi.waitFor(() => expect(finishResponse).toBeDefined());
+      expect(completed).toBe(false);
+      expect(snapshots).toHaveLength(1);
+      expect(JSON.parse(snapshots[0])).toMatchObject({ state: "observed", rounds: [1], trace: firstSelection });
+      expect(observationRequests).toEqual([{ url: "/telemetry/trace?rounds=1", scope: "scope-a" }]);
+    } finally {
+      if (finishResponse) correlated(2, final())(finishResponse);
+    }
+    const result = await execution;
+    expect(result.artifacts).toBeUndefined();
+    expect(result.rounds).toBe(2);
+    expect(snapshots).toHaveLength(2);
+    expect(JSON.parse(snapshots[1])).toMatchObject({ state: "observed", responses: 2, rounds: [1, 2], trace: cumulativeSelection });
+    expect(JSON.parse(snapshots[1]).trace.events.slice(0, 2)).toEqual(JSON.parse(snapshots[0]).trace.events);
+    expect(observationRequests).toEqual([
+      { url: "/telemetry/trace?rounds=1", scope: "scope-a" },
+      { url: "/telemetry/trace?rounds=1,2", scope: "scope-a" },
+    ]);
+  });
+
   it("attaches selected existing router records alongside the actual useful file", async () => {
     const path = join(await workspace(), "briefing.md");
     await router([
@@ -118,6 +167,28 @@ describe("router observations in completed task handoffs", () => {
     expect(observationRequests).toEqual([{ url: "/telemetry/trace?rounds=1,2", scope: "scope-a" }]);
     expect(result.usage?.totalTokens).toBe(22);
     expect(result.rounds).toBe(2);
+    expect(toolReports).toHaveLength(1);
+    expect(toolReports[0]).toMatchObject({
+      scope_id: "scope-a", call_id: "call-1", ok: true,
+      result_summary: { kind: "file_write", bytes: Buffer.byteLength("Useful briefing\r\n✓"), artifact_name: "briefing.md" },
+    });
+    expect(Number.isSafeInteger(toolReports[0].latency_ms)).toBe(true);
+    expect(JSON.stringify(toolReports)).not.toContain("Useful briefing");
+    expect(policyRequests[0].context.scope_id).toBe("scope-a");
+  });
+
+  it("reports a real refused filesystem write without inventing success or copying error contents", async () => {
+    const directory = await workspace();
+    await router([
+      correlated(1, tool("file_write", { path: directory, content: "private-content" })),
+      correlated(2, final()),
+    ], 200, { allowed: true }, selection);
+    await executeTaskWithEvidence("task", deps, log, true, reviewedPhase({ minToolCalls: 0 }));
+    expect(toolReports).toHaveLength(1);
+    expect(toolReports[0]).toMatchObject({ ok: false,
+      result_summary: { kind: "failure", reason: "filesystem_operation_failed" } });
+    expect(JSON.stringify(toolReports)).not.toContain(directory);
+    expect(JSON.stringify(toolReports)).not.toContain("private-content");
   });
 
   it("does not fetch or export observations when execution fails after a real write", async () => {
@@ -163,6 +234,70 @@ describe("router observations in completed task handoffs", () => {
     const result = await executeTaskWithEvidence("task", deps, log, false);
     expect(result.artifacts).toBeUndefined();
     expect(observationRequests).toEqual([]);
+  });
+});
+
+describe("selected Skills in measured reviewed execution", () => {
+  const path = `${TASK_SKILL_ROOT}/checklist/references/check.md`;
+  let restore: () => void;
+  beforeEach(async () => {
+    const files = JSON.parse(await readFile(new URL("../../../../tests/fixtures/skill-package.json", import.meta.url), "utf8"));
+    const raw = Buffer.from(JSON.stringify({ schema: 1, sandboxUid: "sandbox-uid", skills: [{
+      name: "checklist", uid: "skill-uid", generation: 2, versionDigest: `sha256:${"a".repeat(32)}`,
+      summary: "Review local evidence", recipe: null,
+      packageDigest: "sha256:ff733becaecde141e87b4b8223ca99091bb181295398a1ddace419976dd16615", files,
+    }] }));
+    const skills = new TaskSkillFiles(raw, `sha256:${createHash("sha256").update(raw).digest("hex")}`);
+    const spy = vi.spyOn(TaskSkillFiles, "load").mockReturnValue(skills);
+    restore = () => spy.mockRestore();
+  });
+  afterEach(() => restore());
+
+  it.each([undefined, reviewedPhase(), reviewedPhase({ capabilities: ["filesystem-read"], minToolCalls: 0, maxToolCalls: 0 })])(
+    "requires an actual reviewed read allowance before model or policy (%#)", async phase => {
+      await router([final()], 200, { allowed: true });
+      await expect(executeTaskWithEvidence("Review", deps, log, true, phase)).rejects.toMatchObject({
+        message: expect.stringContaining("Selected skill packages require"), evidence: { rounds: 0 },
+      });
+      expect(requests).toEqual([]);
+      expect(policyRequests).toEqual([]);
+    });
+
+  it("reads exact package bytes under policy and exports only the explicit reviewed output", async () => {
+    const output = join(await workspace(), "quality-review.md");
+    await router([tool("file_read", { path }), tool("file_write", {
+      path: output, content: "PASS: Consent evidence inspected.", artifact_name: "quality-review.md",
+    }), final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Review the selected checklist", deps, log, true,
+      reviewedPhase({ capabilities: ["filesystem-read", "filesystem-write"], minToolCalls: 2 }));
+    expect(requests[0].messages[0].content).toContain(`${TASK_SKILL_ROOT}/checklist/SKILL.md`);
+    expect(requests[0].messages[0].content).not.toContain("Consent: café");
+    expect(JSON.parse(requests[1].messages.at(-1).content)).toMatchObject({ content: "Consent: café ✓\n" });
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 2, successfulToolCalls: 2 });
+    expect(result.artifacts).toEqual({ "quality-review.md": "PASS: Consent evidence inspected." });
+    expect(await readFile(output, "utf8")).toBe("PASS: Consent evidence inspected.");
+    expect(policyRequests).toHaveLength(2);
+  });
+
+  it.each(["file_write", "file_read"])("does not grant writes or unknown files through %s", async name => {
+    const args = name === "file_read" ? { path: `${path}.missing` } : { path, content: "Must not mutate" };
+    await router([tool(name, args), final()],
+      200, { allowed: true });
+    await expect(executeTaskWithEvidence("Review", deps, log, true,
+      reviewedPhase({ capabilities: ["filesystem-read", "filesystem-write"] }))).rejects.toMatchObject({
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 0 },
+    });
+    expect(policyRequests).toHaveLength(1);
+  });
+
+  it("reports invalid controller-bound content as measured failure before inference", async () => {
+    vi.spyOn(TaskSkillFiles, "load").mockImplementation(() => { throw new Error("Invalid controller-bound skill catalog"); });
+    await router([final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Review", deps, log, true,
+      reviewedPhase({ capabilities: ["filesystem-read"] }))).rejects.toMatchObject({
+      message: "Invalid controller-bound skill catalog", evidence: { rounds: 0 },
+    });
+    expect(requests).toEqual([]);
   });
 });
 
@@ -241,12 +376,14 @@ describe("reviewed filesystem phase execution", () => {
       }));
     } catch (error) { failure = error; }
     expect(failure).toBeInstanceOf(TaskExecutionError);
+    const rounds = 2;
     expect(failure).toMatchObject({ phase: { attemptedToolCalls: 1, successfulToolCalls: 0 },
-      evidence: { rounds: 2, usage: { totalTokens: 22 } } });
+      evidence: { rounds, usage: { totalTokens: rounds * 11 } } });
     expect(failure).not.toHaveProperty("artifacts");
     expect(policyRequests).toHaveLength(1);
-    expect(requests).toHaveLength(2);
-    expect(requests[1].messages.at(-1).content).toContain(`${name} error:`);
+    expect(requests).toHaveLength(rounds);
+    if (name === "file_write") expect((failure as TaskExecutionError).message).toContain("Explicit file_write export failed: file_write error:");
+    else expect(requests[1].messages.at(-1).content).toContain("file_read error:");
     expect(JSON.stringify(requests)).not.toContain(sensitive);
     expect(await readFile(externalPath, "utf8")).toBe(sensitive);
   });
@@ -259,6 +396,95 @@ describe("reviewed filesystem phase execution", () => {
       podUid: "upstream-pod", runNonce: "upstream-run", assignmentId: "upstream-assignment", agentDid: `did:mesh:${"a".repeat(32)}`, artifactName: "draft.md",
     } });
     const readPhase = (overrides = {}) => reviewedPhase({ capabilities: ["filesystem-read"], ...overrides });
+
+    it("rejects the installed two-input/two-export starvation before any model call", async () => {
+      await router([final()], 200, { allowed: true });
+      await expect(executeTaskWithEvidence("Synthesize both handoffs", deps, log, true,
+        readPhase({ capabilities: ["filesystem-read", "filesystem-write"], minToolCalls: 0 }),
+        [input(), { ...input(), name: "second.md" }], ["brief.md", "checklist.md"])).rejects.toMatchObject({
+        message: expect.stringContaining("insufficient remaining reviewed tool calls"),
+        evidence: { rounds: 0, usage: null }, phase: { attemptedToolCalls: 0, maxToolCalls: 2 },
+      });
+      expect(requests).toEqual([]);
+      expect(policyRequests).toEqual([]);
+    });
+
+    it("requires both complete handoffs before exporting within the exact four-call ceiling", async () => {
+      const directory = await workspace();
+      await router([tool("file_read", { path, max_bytes: 65536 }),
+        tool("file_read", { path: `${TASK_INPUT_ROOT}/second.md`, max_bytes: 65536 }),
+        tool("file_write", { path: join(directory, "brief.md"), content: "Combined findings", artifact_name: "brief.md" }),
+        tool("file_write", { path: join(directory, "checklist.md"), content: "Combined actions", artifact_name: "checklist.md" }),
+        final()], 200, { allowed: true });
+      const result = await executeTaskWithEvidence("Synthesize both handoffs", deps, log, true,
+        readPhase({ capabilities: ["filesystem-read", "filesystem-write"], minToolCalls: 0, maxToolCalls: 4 }),
+        [input(), { ...input(), name: "second.md" }], ["brief.md", "checklist.md"]);
+      expect(result.phase).toMatchObject({ attemptedToolCalls: 4, successfulToolCalls: 4, maxToolCalls: 4 });
+      expect(requests.map(request => request.tool_choice)).toEqual([
+        { type: "function", function: { name: "file_read" } },
+        { type: "function", function: { name: "file_read" } },
+        { type: "function", function: { name: "file_write" } },
+        { type: "function", function: { name: "file_write" } }, "none",
+      ]);
+      expect(requests[1].tools[0].function.parameters.properties.path.enum).toEqual([`${TASK_INPUT_ROOT}/second.md`]);
+      expect(requests[0].messages.at(-1).content).toContain(`Next, call file_read with path "${TASK_INPUT_ROOT}" and max_bytes 65536`);
+      expect(requests[1].messages.at(-1).content).toContain(`Unread immutable inputs remaining: ["${TASK_INPUT_ROOT}/second.md"]`);
+      expect(requests[1].messages.at(-1).content).not.toContain(path);
+      expect(requests[1].messages.at(-1).content).toContain("One complete read and 2 required exports must fit within the 3 remaining reviewed tool calls");
+      expect(requests[2].messages.at(-1).content).not.toContain("Unread immutable inputs remaining:");
+      expect(result.artifacts).toEqual({ "brief.md": "Combined findings", "checklist.md": "Combined actions" });
+    });
+
+    it.each([4, 10])("reads eight complete inputs and exports three outputs within %s calls", async maxToolCalls => {
+      const directory = await workspace();
+      const inputs = Array.from({ length: 8 }, (_, i) => ({ ...input(), name: `input-${i}.md` }));
+      const outputs = ["brief.md", "checklist.md", "decisions.md"];
+      await router([tool("file_read", { path: TASK_INPUT_ROOT, max_bytes: 65536 }),
+        ...outputs.map(name => tool("file_write", {
+          path: join(directory, name), content: `Substantive synthesis for ${name}`, artifact_name: name,
+        })), final()], 200, { allowed: true });
+      const result = await executeTaskWithEvidence("Synthesize complete historical memory and both handoffs", deps, log, true,
+        readPhase({ capabilities: ["filesystem-read", "filesystem-write"], minToolCalls: 2, maxToolCalls }),
+        inputs, outputs);
+      expect(result.phase).toMatchObject({ attemptedToolCalls: 4, successfulToolCalls: 4, maxToolCalls });
+      expect(requests).toHaveLength(5);
+      expect(policyRequests).toHaveLength(4);
+      expect(requests[0].tools[0].function.parameters.properties.path.enum).toEqual([TASK_INPUT_ROOT]);
+      const readMessage = requests[1].messages.find((message: { role: string }) => message.role === "tool");
+      expect(JSON.parse(JSON.parse(readMessage.content).content)).toEqual(inputs);
+      expect(Object.keys(result.artifacts!).sort()).toEqual(outputs.sort());
+    });
+
+    it("does not count a policy-denied bundle as consumed evidence", async () => {
+      await router([tool("file_read", { path: TASK_INPUT_ROOT, max_bytes: 65536 }), final()], 200, { allowed: false });
+      await expect(executeTaskWithEvidence("Read the supplied evidence", deps, log, true,
+        readPhase(), [input(), { ...input(), name: "second.md" }])).rejects.toMatchObject({
+        message: expect.stringContaining("Unread immutable inputs"),
+        phase: { attemptedToolCalls: 1, successfulToolCalls: 0 },
+      });
+      expect(policyRequests).toHaveLength(1);
+    });
+
+    it("does not count a partial input read as completed collaboration", async () => {
+      await router([tool("file_read", { path, max_bytes: 4 }), final()], 200, { allowed: true });
+      await expect(executeTaskWithEvidence("Review the entire input", deps, log, true,
+        readPhase(), [input()])).rejects.toMatchObject({
+        message: expect.stringContaining("Unread immutable inputs"),
+        phase: { attemptedToolCalls: 1, successfulToolCalls: 1 },
+      });
+    });
+
+    it("blocks output before input even when the provider ignores the forced read tool", async () => {
+      const output = join(await workspace(), "review.md");
+      await router([tool("file_write", { path: output, content: "Unread synthesis", artifact_name: "review.md" }),
+        final()], 200, { allowed: true });
+      await expect(executeTaskWithEvidence("Review supplied evidence", deps, log, true,
+        readPhase({ capabilities: ["filesystem-read", "filesystem-write"], maxToolCalls: 4 }),
+        [input()], ["review.md"])).rejects.toBeInstanceOf(TaskExecutionError);
+      await expect(access(output)).rejects.toThrow();
+      expect(requests[1].messages.some((message: { content?: string }) =>
+        message.content?.includes("Read all immutable inputs completely"))).toBe(true);
+    });
 
     it("reads captured bytes through the authorized tool, not system instructions, without automatic export", async () => {
       const original = input(); const caller = [structuredClone(original)];
@@ -307,7 +533,7 @@ describe("reviewed filesystem phase execution", () => {
       await router([tool("file_read", { path: alias }), final()], 200, { allowed: true });
       await expect(executeTaskWithEvidence("task", deps, log, true, readPhase(), [input()])).rejects.toMatchObject({ phase: { attemptedToolCalls: 1, successfulToolCalls: 0 } });
       expect(JSON.stringify(requests)).not.toContain("Untrusted upstream draft");
-      expect(requests[1].messages.at(-1).content).toContain("file_read error");
+      expect(requests[1].messages.findLast((message: { role: string }) => message.role === "tool").content).toContain("file_read error");
     });
 
     it("reads upstream data then attaches only explicitly written downstream output", async () => {
@@ -428,6 +654,28 @@ describe("reviewed filesystem phase execution", () => {
     });
   });
 
+  it("requires useful tools until the measured minimum is met after a failed read and export", async () => {
+    const directory = await workspace();
+    const path = join(directory, "handoff.md");
+    const content = "Verified clinic capacity findings";
+    await router([
+      tool("file_read", { path: join(directory, "missing.md") }),
+      tool("file_write", { path, content, artifact_name: "handoff.md" }),
+      tool("file_read", { path }),
+      final("Exported and verified handoff.md"),
+    ], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("The clinic facts are supplied inline.", deps, log, true,
+      reviewedPhase({ capabilities: ["filesystem-read", "filesystem-write"], minToolCalls: 2, maxToolCalls: 8 }),
+      undefined, ["handoff.md"]);
+    expect(requests.map(request => request.tool_choice)).toEqual(["required", "required", "required", undefined]);
+    expect(requests[2].messages[0].content).toContain("requires 1 successful authorized tool calls; 6 attempts remain");
+    expect(requests[0].messages[0].content).toContain("No immutable input files were supplied");
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 3, successfulToolCalls: 2, maxToolCalls: 8 });
+    expect(result.usage?.totalTokens).toBe(44);
+    expect(result.artifacts).toEqual({ "handoff.md": content });
+    expect(await readFile(path, "utf8")).toBe(content);
+  });
+
   it("preserves successful-call counts and ambiguous spend on later transport failure", async () => {
     const path = join(await workspace(), "briefing");
     await router([tool("file_write", { path, content: "Useful evidence" }), (res: ServerResponse) => res.destroy()], 200, { allowed: true });
@@ -469,7 +717,8 @@ describe("reviewed filesystem phase execution", () => {
     else await expect(execution).rejects.toMatchObject({ evidence: { rounds: 2, phase: { attemptedToolCalls: 3, successfulToolCalls: 0 } } });
     const successful = allowed ? 1 : 0;
     expect(progress.map(event => [event.rounds, event.phase?.attemptedToolCalls, event.phase?.successfulToolCalls, event.usage?.totalTokens])).toEqual([
-      [1, 0, 0, 11], [1, 3, 0, 11], [1, 3, 0, 11], [1, 3, 0, 11], [1, 3, successful, 11], [2, 3, successful, 22],
+      [1, 0, 0, 11], [1, 3, 0, 11], [1, 3, 0, 11], [1, 3, 0, 11], [1, 3, successful, 11],
+      [2, 3, successful, 22],
     ]);
     expect(policyRequests).toHaveLength(1);
     expect(requests).toHaveLength(2);
@@ -545,7 +794,549 @@ describe("reviewed filesystem phase execution", () => {
   });
 });
 
+describe("required reviewed exports", () => {
+  const args = { path: "/sandbox/handoff.md", content: "Measured phase findings — 日本語", artifact_name: "handoff.md" };
+  const mockWrite = () => vi.spyOn(taskFilesystem, "writeTaskFile").mockImplementation(async (_path, content) => Buffer.byteLength(content));
+  afterEach(() => vi.restoreAllMocks());
+
+  it("passes the typed phase output contract into the system prompt and retains exact exports", async () => {
+    mockWrite();
+    await router([tool("file_write", args), final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Overall task requests final-report.md", deps, log, true, reviewedPhase(), undefined, ["handoff.md"]);
+    expect(result.artifacts).toEqual({ "handoff.md": args.content });
+    expect(requests[0].messages[0].content).toContain('Required named UTF-8 outputs for this phase: ["handoff.md"]');
+    expect(requests[0].messages[0].content).toContain("Execute only this reviewed phase");
+    expect(requests[0].messages[0].content).not.toContain("Choose inline-only delivery");
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 1, successfulToolCalls: 1 });
+  });
+
+  it("permits an explicit export after a scratch-only final answer within unchanged limits", async () => {
+    const write = mockWrite();
+    await router([tool("file_write", { ...args, artifact_name: null }), final("The handoff is saved locally."),
+      tool("file_write", args), final("Handoff attached.")], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Prepare phase findings", deps, log, true, reviewedPhase(), undefined, ["handoff.md"]);
+    expect(result.artifacts).toEqual({ "handoff.md": args.content });
+    expect(result).toMatchObject({ rounds: 4, usage: { totalTokens: 44 }, phase: { attemptedToolCalls: 2, successfulToolCalls: 2, maxToolCalls: 2 } });
+    expect(requests[2].messages.at(-1).content).toContain("Only 1 reviewed tool calls remain");
+    expect(write).toHaveBeenCalledTimes(2);
+  });
+
+  it("never harvests a private file or increases the ceiling when the export allowance is exhausted", async () => {
+    const write = mockWrite();
+    await router([tool("file_write", { ...args, artifact_name: null }), final(args.content)], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Prepare phase findings", deps, log, true,
+      reviewedPhase({ maxToolCalls: 1 }), undefined, ["handoff.md"])).rejects.toMatchObject({
+      message: "Missing required named mission output: handoff.md; insufficient remaining reviewed tool calls",
+      evidence: { rounds: 1, usage: { totalTokens: 11 } },
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 1, maxToolCalls: 1 },
+    });
+    expect(requests).toHaveLength(1);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("reserves the last allowed call for an explicit named export without widening authority", async () => {
+    mockWrite();
+    await router([tool("file_write", { ...args, artifact_name: null }), tool("file_write", args), final()],
+      200, { allowed: true });
+    const result = await executeTaskWithEvidence("Prepare phase findings", deps, log, true,
+      reviewedPhase({ capabilities: ["filesystem-read", "filesystem-write"] }), undefined, ["handoff.md"]);
+    expect(requests.every(request => request.parallel_tool_calls === false)).toBe(true);
+    expect(requests[0].tool_choice).toBe("required");
+    expect(requests[1].tool_choice).toEqual({ type: "function", function: { name: "file_write" } });
+    expect(requests[1].tools.map((entry: any) => entry.function.name)).toEqual(["file_write"]);
+    expect(requests[1].tools[0].function.parameters.properties.artifact_name).toMatchObject({
+      type: "string", enum: ["handoff.md"],
+    });
+    expect(requests[2].tools).toEqual([]);
+    expect(requests[2].tool_choice).toBe("none");
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 2, successfulToolCalls: 2, maxToolCalls: 2 });
+    expect(result.artifacts).toEqual({ "handoff.md": args.content });
+  });
+
+  it("narrows the required export choice after each committed output", async () => {
+    mockWrite();
+    await router([tool("file_write", args),
+      tool("file_write", { ...args, path: "/sandbox/checklist.md", artifact_name: "checklist.md" }), final()],
+      200, { allowed: true });
+    const result = await executeTaskWithEvidence("Prepare two outputs", deps, log, true,
+      reviewedPhase(), undefined, ["handoff.md", "checklist.md"]);
+    expect(requests[0].tools[0].function.parameters.properties.artifact_name.enum).toEqual(["checklist.md", "handoff.md"]);
+    expect(requests[1].tools[0].function.parameters.properties.artifact_name.enum).toEqual(["checklist.md"]);
+    expect(Object.keys(result.artifacts ?? {}).sort()).toEqual(["checklist.md", "handoff.md"]);
+  });
+
+  it("rejects an impossible output count before model or filesystem access", async () => {
+    const write = mockWrite();
+    await router([final()]);
+    await expect(executeTaskWithEvidence("Prepare two outputs", deps, log, true,
+      reviewedPhase({ maxToolCalls: 1 }), undefined, ["handoff.md", "checklist.md"])).rejects.toMatchObject({
+      message: expect.stringContaining("insufficient remaining reviewed tool calls"),
+      evidence: { rounds: 0, usage: null },
+    });
+    expect(requests).toHaveLength(0);
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("rejects an output contract without write capability before spending tokens", async () => {
+    await router([final()]);
+    await expect(executeTaskWithEvidence("Prepare phase findings", deps, log, true,
+      reviewedPhase({ capabilities: ["filesystem-read"] }), undefined, ["handoff.md"])).rejects.toMatchObject({
+      message: expect.stringContaining("Required named outputs need a reviewed filesystem-write phase"),
+      evidence: { rounds: 0, usage: null },
+    });
+    expect(requests).toHaveLength(0);
+  });
+
+  it("bounds repeated non-exporting final answers by the existing model-round limit", async () => {
+    await router([final()]);
+    await expect(executeTaskWithEvidence("Prepare phase findings", deps, log, true,
+      reviewedPhase(), undefined, ["handoff.md"])).rejects.toMatchObject({
+      message: expect.stringContaining("maximum tool-calling rounds (25)"),
+      evidence: { rounds: 25, usage: { totalTokens: 275 } },
+      phase: { attemptedToolCalls: 0, successfulToolCalls: 0 },
+    });
+    expect(requests).toHaveLength(25);
+  });
+
+  it("freezes the output contract and retains final validation as a separate boundary", () => {
+    const names = ["handoff.md"];
+    const ledger = new TaskCompletionLedger("model", true, names);
+    names[0] = "different.md";
+    expect(Object.isFrozen(ledger.requiredOutputs)).toBe(true);
+    ledger.record(final());
+    expect(() => ledger.finish(final().choices[0])).toThrow("Missing required named mission output: handoff.md");
+    ledger.commitArtifacts(ledger.prepareArtifact("handoff.md", args.content));
+    expect(ledger.finish(final().choices[0])).toBe("A useful briefing");
+    expect(() => new TaskCompletionLedger("model", false, ["handoff.md"])).toThrow("negotiated artifact delivery");
+    expect(() => new TaskCompletionLedger("model", true, ["../secret"])).toThrow("Invalid required mission output names");
+  });
+});
+
+describe("explicit export failure completion", () => {
+  const path = "/sandbox/.openclaw/workspace/briefing.md";
+  const args = { path, content: "Actual briefing 🌍", artifact_name: "briefing.md" };
+  const mockWrite = () => vi.spyOn(taskFilesystem, "writeTaskFile").mockImplementation(async (_path, content) => Buffer.byteLength(content));
+  afterEach(() => vi.restoreAllMocks());
+
+  it("allows a failed export to succeed after a same-name committed retry", async () => {
+    const write = mockWrite().mockRejectedValueOnce(new Error("disk full"));
+    await router([tool("file_write", args), tool("file_write", args), final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase());
+    expect(result.artifacts).toEqual({ "briefing.md": args.content });
+    expect(result).toMatchObject({ rounds: 3, usage: { totalTokens: 33 }, phase: { attemptedToolCalls: 2, successfulToolCalls: 1 } });
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(requests[1].messages.at(-1).content).toContain("disk full");
+    expect(requests[2].messages.at(-1).content).toContain("attached as briefing.md");
+  });
+
+  it("does not clear a failed export when a different named export succeeds", async () => {
+    const write = mockWrite().mockRejectedValueOnce(new Error("disk full"));
+    await router([tool("file_write", args), tool("file_write", { ...args, artifact_name: "other.md" }), final()], 200, { allowed: true });
+    const failure = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase()).catch(error => error);
+    expect(failure).toBeInstanceOf(TaskExecutionError);
+    expect(failure).toMatchObject({ evidence: { rounds: 3, usage: { totalTokens: 33 } }, phase: { attemptedToolCalls: 2, successfulToolCalls: 1 } });
+    expect(failure).not.toHaveProperty("artifacts");
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(requests[2].messages.at(-1).content).toContain("attached as other.md");
+  });
+
+  it("delivers only the later committed replacement after an overwrite retry", async () => {
+    const write = mockWrite().mockResolvedValueOnce(Buffer.byteLength(args.content)).mockRejectedValueOnce(new Error("write failed"));
+    await router([
+      tool("file_write", args), tool("file_write", { ...args, content: "Failed replacement" }),
+      tool("file_write", { ...args, content: "Repaired replacement 🌍" }), final(),
+    ], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase({ maxToolCalls: 3 }));
+    expect(result.artifacts).toEqual({ "briefing.md": "Repaired replacement 🌍" });
+    expect(result).toMatchObject({ rounds: 4, phase: { attemptedToolCalls: 3, successfulToolCalls: 2 } });
+    expect(write).toHaveBeenCalledTimes(3);
+  });
+
+  it("permits a same-name committed retry later in the same batch", async () => {
+    const write = mockWrite().mockRejectedValueOnce(new Error("write failed"));
+    await router([batch(tool("file_write", args), tool("file_write", args)), final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase());
+    expect(result.artifacts).toEqual({ "briefing.md": args.content });
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 2, successfulToolCalls: 1 });
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(requests).toHaveLength(2);
+  });
+
+  it("keeps every failed name pending until each is repaired", async () => {
+    const write = mockWrite().mockRejectedValueOnce(new Error("first failed")).mockRejectedValueOnce(new Error("second failed"));
+    await router([
+      batch(tool("file_write", args), tool("file_write", { ...args, artifact_name: "second.md" })),
+      tool("file_write", args), final(),
+    ], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log, true)).rejects.toMatchObject({
+      message: "Explicit file_write export failed: file_write error: second failed (1 unresolved export(s))",
+      evidence: { rounds: 3, usage: { totalTokens: 33 } },
+    });
+    expect(write).toHaveBeenCalledTimes(3);
+  });
+
+  it("permits a denied export to retry when the later policy evaluation allows it", async () => {
+    const write = mockWrite();
+    const policy = { allowed: false };
+    await router([tool("file_write", args), (res: ServerResponse) => {
+      policy.allowed = true;
+      res.end(JSON.stringify(tool("file_write", args)));
+    }, final()], 200, policy);
+    const result = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase());
+    expect(result.artifacts).toEqual({ "briefing.md": args.content });
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 2, successfulToolCalls: 1 });
+    expect(requests[1].messages.at(-1).content).toContain("Blocked by policy");
+    expect(policyRequests).toHaveLength(2);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("permits corrected phase arguments for the same valid export name", async () => {
+    const write = mockWrite();
+    await router([tool("file_write", { ...args, content: 1 }), tool("file_write", args), final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase());
+    expect(result.artifacts).toEqual({ "briefing.md": args.content });
+    expect(requests[1].messages.at(-1).content).toContain("Blocked by reviewed phase");
+    expect(policyRequests).toHaveLength(1);
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("clears a failed commit only after a later same-name commit succeeds", async () => {
+    const write = mockWrite();
+    const commit = vi.spyOn(TaskCompletionLedger.prototype, "commitArtifacts")
+      .mockImplementationOnce(() => { throw new Error("commit rejected"); });
+    await router([tool("file_write", args), tool("file_write", { ...args, content: "Committed retry" }), final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase());
+    expect(result.artifacts).toEqual({ "briefing.md": "Committed retry" });
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 2, successfulToolCalls: 1 });
+    expect(requests[1].messages.at(-1).content).toContain("commit rejected");
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(commit).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([42, {}, "../secret.md"])("does not clear invalid name %j with a valid different-name commit", async artifact_name => {
+    const write = mockWrite();
+    await router([
+      tool("file_write", { ...args, artifact_name }),
+      tool("file_write", { ...args, artifact_name: "42" }), final(),
+    ], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log, true)).rejects.toMatchObject({
+      message: expect.stringContaining("Explicit file_write export failed"), evidence: { rounds: 3 },
+    });
+    expect(write).toHaveBeenCalledTimes(1);
+    expect(requests[2].messages.at(-1).content).toContain("attached as 42");
+  });
+
+  it.each([null, undefined])("does not clear a pending export with a successful scratch write (%j)", async artifact_name => {
+    const write = mockWrite().mockRejectedValueOnce(new Error("export failed"));
+    await router([tool("file_write", args), tool("file_write", { ...args, artifact_name }), final(args.content)], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log, true, reviewedPhase())).rejects.toMatchObject({
+      message: expect.stringContaining("export failed"), evidence: { rounds: 3 },
+      phase: { attemptedToolCalls: 2, successfulToolCalls: 1 },
+    });
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(requests[2].messages.at(-1).content).toContain("local only");
+  });
+
+  it("does not extend the reviewed attempt ceiling to repair exports", async () => {
+    const write = mockWrite().mockRejectedValue(new Error("export failed"));
+    await router([tool("file_write", args)], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log, true, reviewedPhase({ maxToolCalls: 1 }))).rejects.toMatchObject({
+      message: expect.stringContaining("exceeds maxToolCalls (1)"),
+      evidence: { rounds: 2, usage: { totalTokens: 22 } },
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 0 },
+    });
+    expect(write).toHaveBeenCalledTimes(1);
+  });
+
+  it("bounds repeated failed export retries by the existing model round limit", async () => {
+    const write = mockWrite().mockRejectedValue(new Error("export failed"));
+    await router([tool("file_write", args)], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log, true)).rejects.toMatchObject({
+      message: expect.stringContaining("maximum tool-calling rounds (25)"),
+      evidence: { rounds: 25, usage: { totalTokens: 275 } },
+    });
+    expect(write).toHaveBeenCalledTimes(25);
+    expect(requests).toHaveLength(25);
+  });
+
+  it("isolates unresolved exports between executions", async () => {
+    mockWrite().mockRejectedValueOnce(new Error("export failed"));
+    await router([tool("file_write", args), final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log, true)).rejects.toBeInstanceOf(TaskExecutionError);
+    const result = await executeTaskWithEvidence("Inline-only revision", deps, log, true);
+    expect(result.output).toBe("A useful briefing");
+    expect(result.artifacts).toBeUndefined();
+    expect(result.rounds).toBe(1);
+  });
+
+  it("fails a requested export even after the phase minimum was satisfied", async () => {
+    const write = mockWrite().mockResolvedValueOnce(7).mockRejectedValueOnce(new Error("disk full"));
+    await router([
+      tool("file_write", { path, content: "scratch", artifact_name: null }),
+      tool("file_write", args), final("Attached briefing.md"),
+    ], 200, { allowed: true });
+    const failure = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase()).catch(error => error);
+    expect(failure).toBeInstanceOf(TaskExecutionError);
+    expect(failure).toMatchObject({
+      message: expect.stringContaining("Explicit file_write export failed"),
+      evidence: { rounds: 3, usage: { promptTokens: 21, completionTokens: 12, totalTokens: 33 } },
+      phase: { attemptedToolCalls: 2, successfulToolCalls: 1 },
+    });
+    expect(failure.message).toContain("disk full");
+    expect(failure).not.toHaveProperty("artifacts");
+    expect(failure).not.toHaveProperty("output");
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(requests).toHaveLength(3);
+  });
+
+  it.each([
+    { status: 200, policy: { allowed: false }, phase: undefined },
+    { status: 200, policy: { allowed: false }, phase: reviewedPhase({ minToolCalls: 0 }) },
+    { status: 503, policy: { allowed: true }, phase: undefined },
+    { status: 200, policy: "invalid-json", phase: undefined },
+  ])("rejects terminal success after unresolved denied or unavailable-policy exports (%#)", async ({ status, policy, phase }) => {
+    const write = mockWrite();
+    await router([tool("file_write", args), final("Attached briefing.md")], status, policy);
+    await expect(executeTaskWithEvidence("Write", deps, log, true, phase)).rejects.toMatchObject({
+      message: expect.stringContaining("Explicit file_write export failed: Blocked by policy"),
+      evidence: { rounds: 2, usage: { totalTokens: 22 } },
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages.at(-1).content).toContain("Blocked by policy");
+    expect(policyRequests).toHaveLength(1);
+  });
+
+  it.each([
+    { capabilities: ["filesystem-read"], minToolCalls: 0 },
+    { capabilities: [], minToolCalls: 0, maxToolCalls: 0 },
+  ])("cannot disguise an out-of-phase export as inline success (%#)", async overrides => {
+    const write = mockWrite();
+    await router([tool("file_write", args), final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log, true, reviewedPhase(overrides))).rejects.toBeInstanceOf(TaskExecutionError);
+    expect(write).not.toHaveBeenCalled();
+    expect(policyRequests).toEqual([]);
+    expect(requests).toHaveLength(overrides.maxToolCalls === 0 ? 1 : 2);
+  });
+
+  it.each([
+    { path: "/outside/briefing.md" }, { artifact_name: "response.md" },
+    { artifact_name: "../secret.md" }, { artifact_name: "__proto__" },
+    { artifact_name: "kars-router-observations.json" }, { artifact_name: "" },
+    { artifact_name: 42 }, { artifact_name: {} },
+    { content: "  \n" }, { content: "🌍".repeat(33 * 1024) },
+  ])("cannot forget invalid explicit exports (%#)", async override => {
+    const write = mockWrite();
+    await router([tool("file_write", { ...args, ...override }), final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log, true)).rejects.toMatchObject({
+      message: expect.stringContaining("Explicit file_write export failed"),
+      evidence: { rounds: 2, usage: { totalTokens: 22 } },
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect(requests).toHaveLength(2);
+  });
+
+  it("fails a parsed explicit export rejected by phase argument validation", async () => {
+    const write = mockWrite();
+    await router([tool("file_write", { ...args, content: 1 }), final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log, true, reviewedPhase({ minToolCalls: 0 }))).rejects.toMatchObject({
+      message: expect.stringContaining("Explicit file_write export failed: Blocked by reviewed phase"),
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 0 },
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect(policyRequests).toEqual([]);
+  });
+
+  it("fails unnegotiated explicit exports rather than returning attachment claims", async () => {
+    const write = mockWrite();
+    await router([tool("file_write", args), final("Attached briefing.md")], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log)).rejects.toMatchObject({
+      message: expect.stringContaining("Dispatcher does not support named artifacts"),
+      evidence: { rounds: 2, usage: { totalTokens: 22 } },
+    });
+    expect(write).not.toHaveBeenCalled();
+    expect(requests).toHaveLength(2);
+  });
+
+  it("does not deliver stale committed bytes after an explicit overwrite fails", async () => {
+    const write = mockWrite().mockResolvedValueOnce(Buffer.byteLength(args.content)).mockRejectedValueOnce(new Error("write failed"));
+    const ledger = new TaskCompletionLedger("gpt-5.4-mini", true);
+    await router([tool("file_write", args), tool("file_write", { ...args, content: "Replacement" }), final()], 200, { allowed: true });
+    await expect(processTaskWithTools("Write", deps, log, ledger)).rejects.toMatchObject({
+      message: expect.stringContaining("Explicit file_write export failed"),
+      evidence: { rounds: 3, usage: { totalTokens: 33 } },
+    });
+    expect(ledger.artifactSnapshot()).toEqual({ artifacts: { "briefing.md": args.content } });
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(requests).toHaveLength(3);
+  });
+
+  it("fails if written bytes cannot be committed as an export", async () => {
+    const write = mockWrite();
+    vi.spyOn(TaskCompletionLedger.prototype, "commitArtifacts").mockImplementationOnce(() => { throw new Error("commit rejected"); });
+    const progress: TaskExecutionEvidence[] = [];
+    await router([tool("file_write", args), final()], 200, { allowed: true });
+    const failure = await executeTaskWithEvidence("Write", { ...deps, onEvidence: event => { progress.push(event); } }, log, true, reviewedPhase()).catch(error => error);
+    expect(failure).toBeInstanceOf(TaskExecutionError);
+    expect(failure).toMatchObject({
+      message: "Explicit file_write export failed: file_write error: commit rejected (1 unresolved export(s))",
+      phase: { attemptedToolCalls: 1, successfulToolCalls: 0 },
+      evidence: { rounds: 2, usage: { totalTokens: 22 } },
+    });
+    expect(failure).not.toHaveProperty("artifacts");
+    expect(progress.at(-1)?.phase).toMatchObject({ attemptedToolCalls: 1, successfulToolCalls: 0 });
+    expect(write).toHaveBeenCalledWith(path, args.content);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages.at(-1).content).toContain("commit rejected");
+  });
+
+  it("continues a batch after a failed export but rejects unresolved terminal success", async () => {
+    const write = mockWrite().mockRejectedValueOnce(new Error("write failed"));
+    await router([batch(tool("file_write", args), tool("file_write", { ...args, artifact_name: "second.md" })), final()], 200, { allowed: true });
+    await expect(executeTaskWithEvidence("Write", deps, log, true, reviewedPhase({ minToolCalls: 0 }))).rejects.toMatchObject({
+      message: expect.stringContaining("Explicit file_write export failed"),
+      phase: { attemptedToolCalls: 2, successfulToolCalls: 1 },
+    });
+    expect(write).toHaveBeenCalledTimes(2);
+    expect(policyRequests).toHaveLength(2);
+    expect(requests).toHaveLength(2);
+    expect(requests[1].messages.slice(-2).map((message: any) => message.content)).toEqual([
+      "file_write error: write failed", expect.stringContaining("attached as second.md"),
+    ]);
+  });
+
+  it("fails capacity overflow without committing or delivering the seventeenth export", async () => {
+    const write = mockWrite();
+    const ledger = new TaskCompletionLedger("gpt-5.4-mini", true);
+    await router([...Array.from({ length: 17 }, (_, i) => tool("file_write", { ...args, artifact_name: `${i}.md` })), final()], 200, { allowed: true });
+    await expect(processTaskWithTools("Write", deps, log, ledger)).rejects.toMatchObject({
+      message: expect.stringContaining("Explicit file_write export failed"),
+      evidence: { rounds: 18, usage: { totalTokens: 198 } },
+    });
+    expect(Object.keys(ledger.artifactSnapshot().artifacts!)).toHaveLength(16);
+    expect(write).toHaveBeenCalledTimes(16);
+    expect(requests).toHaveLength(18);
+  });
+
+  it.each([null, undefined])("permits failed private scratch followed by real exports (%j)", async artifact_name => {
+    const write = mockWrite().mockRejectedValueOnce(new Error("scratch write failed"));
+    await router([
+      tool("file_write", { path, content: "private", artifact_name }),
+      tool("file_write", args),
+      tool("file_write", { ...args, content: "Private revision", artifact_name: null }), final(),
+    ], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase({ maxToolCalls: 3 }));
+    expect(result.artifacts).toEqual({ "briefing.md": args.content });
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 3, successfulToolCalls: 2 });
+    expect(result.rounds).toBe(4);
+    expect(write).toHaveBeenCalledTimes(3);
+  });
+
+  it.each([false, true])("does not infer exports from objective or final prose (negotiated %j)", async enabled => {
+    const write = mockWrite();
+    await router([final("Full inline content mentioning briefing.md")]);
+    const result = await executeTaskWithEvidence("Write a briefing.md deliverable", deps, log, enabled);
+    expect(result.output).toBe("Full inline content mentioning briefing.md");
+    expect(result.artifacts).toBeUndefined();
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("does not extract export intent from malformed JSON", async () => {
+    const write = mockWrite();
+    const malformed = tool("file_write");
+    malformed.choices[0].message.tool_calls[0].function.arguments = '{"artifact_name":"briefing.md",';
+    await router([malformed, final("Full inline content")], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write", deps, log, true);
+    expect(result.output).toBe("Full inline content");
+    expect(result.artifacts).toBeUndefined();
+    expect(write).not.toHaveBeenCalled();
+    expect(policyRequests).toEqual([]);
+  });
+
+  it.each([1, 2, 3])("still commits explicit Unicode exports across wire split %i", async split => {
+    const write = mockWrite();
+    const response = Buffer.from(JSON.stringify(tool("file_write", args)));
+    const boundary = response.indexOf(Buffer.from("🌍")) + split;
+    await router([(res: ServerResponse) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write(response.subarray(0, boundary));
+      setTimeout(() => res.end(response.subarray(boundary)), 10);
+    }, final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase());
+    expect(write).toHaveBeenCalledWith(path, args.content);
+    expect(result.artifacts).toEqual({ "briefing.md": args.content });
+    expect(result.phase).toMatchObject({ attemptedToolCalls: 1, successfulToolCalls: 1 });
+  });
+});
+
 describe("explicit mission attachments", () => {
+  it.each([false, true])("commits a same-name retry after a real filesystem failure (older commit %j)", async olderCommit => {
+    const directory = await workspace();
+    const path = `${directory}/briefing.md`;
+    const args = { path, content: "Older commit", artifact_name: "briefing.md" };
+    const repaired = "# Repaired briefing\r\nCafé — 日本語 🌍\n";
+    await router([
+      ...(olderCommit ? [tool("file_write", args)] : []),
+      tool("file_write", { ...args, path: directory, content: "Cannot replace a directory" }),
+      tool("file_write", { ...args, content: repaired }), final("Attached briefing.md"),
+    ], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase({ maxToolCalls: 3 }));
+    expect(result.artifacts).toEqual({ "briefing.md": repaired });
+    expect(await readFile(path, "utf8")).toBe(repaired);
+    expect(result).toMatchObject({ rounds: olderCommit ? 4 : 3, phase: { attemptedToolCalls: olderCommit ? 3 : 2, successfulToolCalls: olderCommit ? 2 : 1 } });
+    expect(requests[olderCommit ? 2 : 1].messages.at(-1).content).toContain("file_write error:");
+    expect(requests.at(-1)!.messages.at(-1).content).toContain("attached as briefing.md");
+  });
+
+  it.each([false, true])("does not repair a real failed export with a different named commit (older commit %j)", async olderCommit => {
+    const directory = await workspace();
+    const path = `${directory}/briefing.md`;
+    const args = { path, content: "Older commit", artifact_name: "briefing.md" };
+    const other = { path: `${directory}/other.md`, content: "Another export 🌍", artifact_name: "other.md" };
+    await router([
+      ...(olderCommit ? [tool("file_write", args)] : []),
+      tool("file_write", { ...args, path: directory, content: "Cannot replace a directory" }),
+      tool("file_write", other), final("Full inline fallback"),
+    ], 200, { allowed: true });
+    const failure = await executeTaskWithEvidence("Write", deps, log, true, reviewedPhase({ maxToolCalls: 3 })).catch(error => error);
+    expect(failure).toBeInstanceOf(TaskExecutionError);
+    expect(failure).toMatchObject({ message: expect.stringContaining("Explicit file_write export failed"), evidence: { rounds: olderCommit ? 4 : 3 } });
+    expect(failure).not.toHaveProperty("artifacts");
+    expect(failure).not.toHaveProperty("output");
+    expect(await readFile(other.path, "utf8")).toBe(other.content);
+    if (olderCommit) expect(await readFile(path, "utf8")).toBe(args.content);
+    else await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(requests.at(-1)!.messages.at(-1).content).toContain("attached as other.md");
+  });
+
+  it.each([1, 2, 3])("preserves UTF-8 artifact bytes split after emoji byte %i on the response wire", async split => {
+    const path = `${await workspace()}/briefing.md`;
+    const content = "# Briefing\r\n🌍 Café — 日本語\n";
+    const response = Buffer.from(JSON.stringify(tool("file_write", { path, content, artifact_name: "briefing.md" })));
+    const boundary = response.indexOf(Buffer.from("🌍")) + split;
+    await router([(res: ServerResponse) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write(response.subarray(0, boundary));
+      setTimeout(() => res.end(response.subarray(boundary)), 10);
+    }, final()], 200, { allowed: true });
+    const result = await executeTaskWithEvidence("Write a briefing", deps, log, true);
+    expect(result.artifacts).toEqual({ "briefing.md": content });
+    expect(await readFile(path, "utf8")).toBe(content);
+    expect(policyRequests[0].context.arguments.content).toBe(content);
+  });
+
+  it("preserves a split multibyte character in the inline deliverable", async () => {
+    const content = "# Briefing\r\nCafé — 日本語 🌍\n";
+    const response = Buffer.from(JSON.stringify(final(content)));
+    const boundary = response.indexOf(Buffer.from("é")) + 1;
+    await router([(res: ServerResponse) => {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.write(response.subarray(0, boundary));
+      setTimeout(() => res.end(response.subarray(boundary)), 10);
+    }]);
+    expect((await executeTaskWithEvidence("Write a briefing", deps, log)).output).toBe(content);
+  });
+
   it("delivers exact written text after policy authorization with a strict negotiated schema", async () => {
     const directory = await workspace();
     const args = { path: `${directory}/briefing.md`, content: "# Briefing\r\nCafé — 日本語 🌍\n", artifact_name: "briefing.md" };
@@ -569,38 +1360,41 @@ describe("explicit mission attachments", () => {
     expect(await readFile(args.path, "utf8")).toBe(args.content);
     expect(requests[1].messages.at(-1).content).toContain("local only");
   });
-  it("does not write or attach denied content", async () => {
+  it("fails without writing or attaching denied content", async () => {
     const path = `${await workspace()}/denied.md`;
     await router([tool("file_write", { path, content: "denied", artifact_name: "denied.md" }), final()]);
-    expect(await executeTaskWithEvidence("Write", deps, log, true)).not.toHaveProperty("artifacts");
+    await expect(executeTaskWithEvidence("Write", deps, log, true)).rejects.toMatchObject({ message: expect.stringContaining("Explicit file_write export failed") });
     await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
+    expect(requests).toHaveLength(2);
   });
   it.each(["response.md", "../secret.md", "__proto__"])("does not write invalid attachment %s", async artifact_name => {
     const path = `${await workspace()}/invalid.md`;
     await router([tool("file_write", { path, content: "draft", artifact_name }), final()], 200, { allowed: true });
-    expect(await executeTaskWithEvidence("Write", deps, log, true)).not.toHaveProperty("artifacts");
+    await expect(executeTaskWithEvidence("Write", deps, log, true)).rejects.toMatchObject({ message: expect.stringContaining("Explicit file_write export failed: file_write error:") });
     await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(requests[1].messages.at(-1).content).toContain("file_write error:");
+    expect(requests).toHaveLength(2);
   });
   it.each(["  \n", "🌍".repeat(33 * 1024)])("rejects invalid attachment content before writing (%#)", async content => {
     const path = `${await workspace()}/invalid.md`;
     await router([tool("file_write", { path, content, artifact_name: "invalid.md" }), final()], 200, { allowed: true });
-    expect(await executeTaskWithEvidence("Write", deps, log, true)).not.toHaveProperty("artifacts");
+    await expect(executeTaskWithEvidence("Write", deps, log, true)).rejects.toMatchObject({ message: expect.stringContaining("Explicit file_write export failed: file_write error:") });
     await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(requests[1].messages.at(-1).content).toContain("file_write error:");
+    expect(requests).toHaveLength(2);
   });
-  it("rejects the seventeenth attachment before writing while retaining the first sixteen", async () => {
+  it("fails the seventeenth attachment before writing without delivering a partial set", async () => {
     const directory = await workspace();
     await router([...Array.from({ length: 17 }, (_, i) => tool("file_write", {
       path: `${directory}/${i}.md`, content: `document ${i}`, artifact_name: `${i}.md`,
     })), final()], 200, { allowed: true });
-    const result = await executeTaskWithEvidence("Write", deps, log, true);
-    expect(result.artifacts).toEqual(Object.fromEntries(Array.from({ length: 16 }, (_, i) => [`${i}.md`, `document ${i}`])));
+    const failure = await executeTaskWithEvidence("Write", deps, log, true).catch(error => error);
+    expect(failure).toBeInstanceOf(TaskExecutionError);
+    expect(failure.message).toContain("Explicit file_write export failed: file_write error:");
+    expect(failure).not.toHaveProperty("artifacts");
     expect(await readFile(`${directory}/15.md`, "utf8")).toBe("document 15");
     await expect(access(`${directory}/16.md`)).rejects.toMatchObject({ code: "ENOENT" });
-    expect(requests[17].messages.at(-1).content).toContain("file_write error:");
+    expect(requests).toHaveLength(18);
   });
-  it("keeps the last successful explicitly attached write, not failed or scratch writes", async () => {
+  it("keeps successful writes on disk but fails delivery after an explicit overwrite fails", async () => {
     const directory = await workspace();
     const path = `${directory}/briefing.md`;
     await router([
@@ -609,9 +1403,9 @@ describe("explicit mission attachments", () => {
       tool("file_write", { path: directory, content: "failed overwrite", artifact_name: "briefing.md" }),
       tool("file_write", { path, content: "private scratch", artifact_name: null }), final(),
     ], 200, { allowed: true });
-    expect((await executeTaskWithEvidence("Write", deps, log, true)).artifacts).toEqual({ "briefing.md": "second 🌍" });
+    await expect(executeTaskWithEvidence("Write", deps, log, true)).rejects.toMatchObject({ message: expect.stringContaining("Explicit file_write export failed: file_write error:") });
     expect(await readFile(path, "utf8")).toBe("private scratch");
-    expect(requests[3].messages.at(-1).content).toContain("file_write error:");
+    expect(requests).toHaveLength(5);
   });
   it("isolates artifacts between executions and excludes them from failed evidence", async () => {
     const path = `${await workspace()}/briefing.md`;
@@ -625,7 +1419,8 @@ describe("explicit mission attachments", () => {
   it("does not advertise or accept attachments without negotiation", async () => {
     const path = `${await workspace()}/briefing.md`;
     await router([tool("file_write", { path, content: "draft", artifact_name: "briefing.md" }), final()], 200, { allowed: true });
-    expect(await executeTaskWithEvidence("Write", deps, log)).not.toHaveProperty("artifacts");
+    await expect(executeTaskWithEvidence("Write", deps, log)).rejects.toMatchObject({ message: expect.stringContaining("Explicit file_write export failed") });
+    expect(requests).toHaveLength(2);
     expect(requests[0].tools.find((entry: any) => entry.function.name === "file_write").function.parameters.properties).not.toHaveProperty("artifact_name");
     await expect(access(path)).rejects.toMatchObject({ code: "ENOENT" });
   });

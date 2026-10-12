@@ -12,7 +12,7 @@ use crate::error::{AppError, AppResult};
 use crate::providers::signing::sha256;
 use crate::routes::github::connection_config_map_name;
 use crate::routes::tasks::require_cluster;
-use crate::routes::teams::{read_task_list, require_owned_team};
+use crate::routes::teams::{read_tasks, require_owned_team};
 use crate::state::AppState;
 
 use super::config::{
@@ -269,7 +269,7 @@ pub async fn decide_review_item(
     Json(request): Json<EngineeringReviewDecisionRequest>,
 ) -> AppResult<Json<serde_json::Value>> {
     let cluster = require_cluster(&state)?;
-    require_owned_team(cluster, &ns, &name, &principal).await?;
+    let team = require_owned_team(cluster, &ns, &name, &principal).await?;
     let decision = request.decision.trim();
     if decision != "request_changes" {
         return Err(AppError::BadRequest(
@@ -346,16 +346,18 @@ pub async fn decide_review_item(
         done_at: None,
         stuck_since: None,
         assignment_nonce: None,
+        ..Default::default()
     };
     let task_id = task.id.clone();
-    let queued = merge_into_backlog(cluster, &name, vec![task])
+    let queued = merge_into_backlog(cluster, &team, vec![task])
         .await
         .map_err(AppError::Upstream)?;
-    let pending = read_task_list(&cluster.read_team_tasks(&name).await)
+    let pending = read_tasks(cluster, &team)
+        .await?
         .iter()
         .any(|task| task.id == task_id && task.status == "pending");
     let run_requested = if pending {
-        request_team_run(cluster, &ns, &name)
+        request_team_run(cluster, &team)
             .await
             .map_err(AppError::Upstream)?
     } else {

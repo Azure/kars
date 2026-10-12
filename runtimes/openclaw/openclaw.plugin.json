@@ -21,6 +21,9 @@
       "kars_handoff_request",
       "kars_handoff_confirm",
       "kars_handoff_status",
+      "kars_mcp_list",
+      "kars_mcp_call",
+      "github_actions_job_logs",
       "http_fetch",
       "foundry_code_execute",
       "foundry_image_generation",
@@ -63,6 +66,10 @@
         "type": "string",
         "description": "Name for the sandbox",
         "default": "dev-agent"
+      },
+      "systemPrompt": {
+        "type": "string",
+        "description": "Authoritative Kars agent instructions supplied through before_prompt_build"
       }
     },
     "additionalProperties": false

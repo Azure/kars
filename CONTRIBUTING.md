@@ -120,6 +120,12 @@ This keeps users safe while we ship the fix, and makes sure you get the recognit
 
 ### TypeScript CLI (Node.js 22+)
 
+The CLI bundles the Core chart with its locked dependencies. Keep `Chart.lock`
+and the matching `deploy/helm/kars/charts/*.tgz` archives together. If the
+archives are absent, run `helm dependency build deploy/helm/kars` from the
+repository root before building the CLI; bundling refuses incomplete or
+mismatched dependency inputs instead of producing an unusable package.
+
 ```bash
 cd cli
 npm ci && npm run build && npm link   # compile + link the global `kars` command
@@ -136,6 +142,14 @@ cargo test --all          # 205 unit tests (74 controller + 105 router + 26 inte
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all           # format
 ```
+
+Release builds use ThinLTO instead of fat LTO to avoid merging the entire
+program into one optimization module. The controller uses 16 codegen units
+to split its LLVM optimization work; other packages retain one unit. On
+memory-constrained machines, set `CARGO_BUILD_JOBS=1` to limit concurrent
+compilation; the final binary still needs sufficient memory within the host
+or container's limit. Controller and router images reuse these release
+binaries rather than compiling them again.
 
 ### Local sandbox (kind-first)
 

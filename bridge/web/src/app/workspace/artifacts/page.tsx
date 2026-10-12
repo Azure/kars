@@ -15,6 +15,7 @@ import { HonestState } from "@/components/honest-state";
 import { Icon, type IconName } from "@/components/icon";
 import { BffError, getArtifacts } from "@/lib/bff";
 import type { MissionArtifacts } from "@/lib/types";
+import { isSystemEvidenceArtifact } from "@/lib/router-activity";
 
 export const dynamic = "force-dynamic";
 
@@ -42,6 +43,7 @@ function dedupeByName<T extends { name: string }>(files: T[]): T[] {
 function isInternalArtifact(name: string): boolean {
   const normalized = name.toLowerCase();
   return (
+    isSystemEvidenceArtifact(name) ||
     normalized.includes("collaboration.jsonl") ||
     normalized.endsWith("role-plan.json") ||
     normalized.endsWith("research-evidence.jsonl") ||
@@ -85,13 +87,15 @@ export default async function ArtifactsPage({
   const allMissions = index?.missions ?? [];
   const query = q.trim().toLowerCase();
   const filteredMissions = allMissions.filter((mission) => {
-    if (view !== "all" && mission.status === "error") return false;
+    if (view !== "all" && (mission.status === "error" || mission.parent)) return false;
     if (!query) return true;
     return [
+      mission.task,
       mission.display_name,
       mission.objective,
       mission.excerpt,
       mission.team,
+      ...mission.files.map((file) => file.name),
       ...mission.pull_requests.map((pr) => `${pr.repo} #${pr.number}`),
     ].some((value) => value?.toLowerCase().includes(query));
   });
@@ -111,9 +115,10 @@ export default async function ArtifactsPage({
         <input
           type="search"
           name="q"
+          aria-label="Search deliverables"
           defaultValue={q}
           placeholder="Search deliverables, teams, repositories, or PRs"
-          className="min-w-64 flex-1 rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-signal"
+          className="min-w-0 flex-1 basis-64 rounded-lg border border-border bg-surface px-3 py-2 text-sm outline-none focus:border-signal"
         />
         <input type="hidden" name="view" value={view} />
         <input type="hidden" name="limit" value={limit} />
@@ -188,7 +193,7 @@ function MissionArtifactsCard({
 }) {
   const ok = m.status !== "error";
   const historicalNonTeam = Boolean(
-    !m.team && m.evidence_key && m.evidence_key !== m.task,
+    !m.team && !m.current,
   );
   const detailHref = m.team
     ? m.evidence_key && m.evidence_key !== m.task
@@ -199,14 +204,13 @@ function MissionArtifactsCard({
   const internalCount = allFiles.filter((file) => isInternalArtifact(file.name)).length;
   const files = showInternal ? allFiles : allFiles.filter((file) => !isInternalArtifact(file.name));
   const fileCount = files.length;
-  // Deliverable kind (audit f14): the dominant file type, or a text deliverable
-  // when the run produced prose only — so the index reads as a typed gallery.
-  const kind = fileCount > 0 ? fileMeta(files[0].name).kind : "Text deliverable";
+  const representativeFile = allFiles.find((file) => !isInternalArtifact(file.name)) ?? allFiles[0];
+  const kind = representativeFile ? fileMeta(representativeFile.name).kind : "Text deliverable";
   return (
     <li className={`rounded-xl border bg-surface p-5 ${hero ? "border-signal/40 bg-signal/5 kb-card-hover" : "border-border"}`}>
-      <div className="flex items-start justify-between gap-4">
+      <div className="flex flex-col items-start justify-between gap-4 sm:flex-row">
         <div className="min-w-0">
-          <div className="flex items-center gap-2">
+          <div className="flex flex-wrap items-center gap-2">
             <span className="rounded-full border border-accent/30 bg-accent/10 px-2 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent">{kind}</span>
             {hero && <span className="text-[10px] font-semibold uppercase tracking-wide text-signal">Latest</span>}
           </div>
@@ -231,7 +235,7 @@ function MissionArtifactsCard({
             <p className="mt-0.5 line-clamp-2 text-xs text-foreground-muted">{m.objective}</p>
           ) : null}
         </div>
-        <div className="flex shrink-0 items-center gap-2">
+        <div className="flex flex-wrap items-center gap-2 sm:shrink-0">
           {!ok && (
             <span className="rounded-full bg-rose-500/10 px-2 py-0.5 text-xs font-medium text-rose-500">
               error
@@ -240,6 +244,11 @@ function MissionArtifactsCard({
           {m.archived && (
             <span className="rounded-full border border-border bg-surface-muted px-2.5 py-0.5 text-xs font-medium text-foreground-muted">
               Archived
+            </span>
+          )}
+          {!m.current && !m.archived && (
+            <span className="rounded-full border border-border bg-surface-muted px-2.5 py-0.5 text-xs font-medium text-foreground-muted">
+              Historical revision
             </span>
           )}
           {m.review_status === "approved" && (
@@ -270,13 +279,13 @@ function MissionArtifactsCard({
             return (
               <li
                 key={`${f.name}-${idx}`}
-                className="inline-flex items-center gap-2 rounded-lg border border-border bg-surface-muted/40 px-2.5 py-1.5"
+                className="inline-flex max-w-full items-center gap-2 rounded-lg border border-border bg-surface-muted/40 px-2.5 py-1.5"
                 title={meta.kind}
               >
-                <span aria-hidden className="text-sm leading-none"><Icon name={meta.glyph} size={14} /></span>
-                <span className="font-mono text-xs">{f.name}</span>
+                <span aria-hidden className="shrink-0 text-sm leading-none"><Icon name={meta.glyph} size={14} /></span>
+                <span className="min-w-0 break-all font-mono text-xs">{f.name}</span>
                 {f.size_bytes != null && (
-                  <span className="text-[11px] text-foreground-muted">· {fmtSize(f.size_bytes)}</span>
+                  <span className="shrink-0 whitespace-nowrap text-[11px] text-foreground-muted">· {fmtSize(f.size_bytes)}</span>
                 )}
               </li>
             );
