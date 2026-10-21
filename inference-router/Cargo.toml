@@ -63,7 +63,7 @@ tokio-stream = "0.1.18"
 kars-a2a-core = { path = "../kars-a2a-core", version = "0.1.0" }
 
 # Handoff encryption (AES-256-GCM + HKDF key derivation + SHA-256 verification)
-aes-gcm = "0.10"
+aes-gcm = "0.11"
 hkdf = "0.12"
 sha2 = "0.10"
 rand = "0.9"
