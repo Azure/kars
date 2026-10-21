@@ -78,7 +78,8 @@ ed25519-dalek = { version = "2", features = ["rand_core"] }
 rand = "0.9"
 sha2 = "0.10"
 bs58 = "0.5"
-base64 = "0.22"
+# Keep JWS and protocol encoding paths off base64's default-on unsafe SIMD backend.
+base64 = { version = "0.23", default-features = false, features = ["std"] }
 hex = "0.4"
 
 # WebSocket (relay connection)
