@@ -19,7 +19,12 @@
  *     These are the high-value skips on resume.
  */
 
-import { loadContext, saveContext, type DeploymentContext, type UpPhase } from "../../config.js";
+import {
+  loadContext,
+  saveContext,
+  type DeploymentContext,
+  type UpPhase,
+} from "../../config.js";
 
 /** Linear order of phases; index() comparison drives skip-logic. */
 const PHASE_ORDER: UpPhase[] = [
@@ -66,12 +71,13 @@ export interface ResumeState {
 
 /**
  * Returns true if the saved context's topology matches the current run.
- * If a saved field is unset, it is treated as "compatible" (older context).
+ * Subscription must match exactly; unset legacy subscriptions are unsafe to
+ * resume. Other unset saved fields remain compatible with older contexts.
  */
 function topologyMatches(saved: DeploymentContext, current: ResumeTopology): boolean {
   const cmp = (a?: string, b?: string): boolean => !a || !b || a === b;
   return (
-    cmp(saved.subscription, current.subscription) &&
+    saved.subscription === current.subscription &&
     cmp(saved.region, current.region) &&
     cmp(saved.resourceGroup, current.resourceGroup) &&
     cmp(saved.aksCluster, current.aksCluster) &&
@@ -99,6 +105,14 @@ export function loadResumeState(
   const ageMs = ctx.savedAt ? Date.now() - new Date(ctx.savedAt).getTime() : Number.POSITIVE_INFINITY;
   if (!Number.isFinite(ageMs) || ageMs < 0 || ageMs > RESUME_TTL_MS) return null;
   return { resumeFromPhase: ctx.phase, ctx, ageMs };
+}
+
+/** Rollback-owned resource groups are deleted on failure, so never persist
+ * resumable phase state for those invocations. */
+export function shouldPersistResumeState(
+  rollbackOnFailure?: boolean,
+): boolean {
+  return !rollbackOnFailure;
 }
 
 /**

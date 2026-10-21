@@ -1,17 +1,28 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { Command } from "commander";
+import { Command, InvalidArgumentError } from "commander";
 import chalk from "chalk";
 import { existsSync } from "fs";
-import * as path from "path";
 import * as os from "node:os";
 import { Stepper, banner } from "../stepper.js";
 import { isValidAzureHost } from "./up/preflight.js";
 import { acquireImages } from "./up/images.js";
 import { requireBundledAsset } from "../lib/repo-assets.js";
-import { resolveVmSizes } from "../lib/vm-size.js";
 import { cliReleaseTag } from "../lib/version.js";
+import {
+  buildProjectedBicepParameters,
+  createAzureRunner,
+  ensureResourceGroup,
+  findRecoverableDeletedKeyVault,
+  parsePositiveInteger,
+  releaseResourceGroupOwnership,
+  validateInfrastructureMode,
+  type AzureRunner,
+  type CleanupContext,
+  type ResourceGroupOwnershipProof,
+} from "./up/orchestration.js";
+import { reportDeploymentFailure } from "./up/deployment_failure.js";
 
 export function upCommand(): Command {
   const cmd = new Command("up");
@@ -39,6 +50,15 @@ export function upCommand(): Command {
     .option("-g, --resource-group <name>", "Resource group name")
     .option("--node-vm-size <sku>", "VM size for the sandbox (user) node pool. Default: auto-pick a size available to your subscription (D4s/D4as family).")
     .option("--system-vm-size <sku>", "VM size for the system node pool. Default: auto-pick a size available to your subscription (D2as/D2s family).")
+    .option("--kata-vm-size <sku>", "Advanced: VM size for a new confidential Kata node pool. Existing pool SKU changes require migration.")
+    .option("--kubernetes-version <version>", "Kubernetes version for a new AKS cluster. Existing clusters preserve their current version and use a dedicated upgrade workflow.")
+    .option("--node-count <count>", "Sandbox user-pool node count (1-100). Default is resolved during preflight from available quota.", (value) => {
+      try {
+        return parsePositiveInteger(value);
+      } catch {
+        throw new InvalidArgumentError("must be an integer from 1 to 100");
+      }
+    })
     .option("--require-prompt-shields", "Fail-closed if a model response lacks Azure Prompt Shields annotations (prompt_filter_results). Only enable when your Foundry/AOAI deployment has a Content Filter that emits them — bare deployments don't, and every response would be blocked. Default off.", false)
     // ── Infrastructure ────────────────────────────────────────────────
     .option("--skip-infra", "Skip infrastructure provisioning (reuse existing cluster)", false)
@@ -78,20 +98,22 @@ export function upCommand(): Command {
     )
     .option("--upgrade", "Fast upgrade: skip prompts, reuse cached context, just re-run Helm + RBAC", false)
     .option("--from-scratch", "Ignore any partial state from a prior failed run and start over", false)
+    .option("--rollback-on-failure", "Use a unique resource group generated for this invocation, then delete it after a deployment failure and best-effort purge derived Key Vault/Azure AI names. Cannot be combined with an explicit or cached resource group.", false)
     .addHelpText("after", `
 Flag groups:
   Identity:           --name, --model, --policy
-  Cluster / region:   --region, --cluster-name, --isolation, --resource-group
+  Cluster / region:   --region, --cluster-name, --isolation, --resource-group, --kubernetes-version, --node-count, --node-vm-size, --system-vm-size, --kata-vm-size
   Infrastructure:     --skip-infra, --force-infra, --skip-preflight
   Images:             --source-acr, --build, --skip-runtime-images
   Foundry:            --foundry-endpoint, --openai-endpoint
   Mesh federation:    --mesh-peer / --no-mesh-peer, --global-registry, --expose-registry, --mesh-trust=anonymous|entra
-  Output / lifecycle: --dry-run, --upgrade, --from-scratch
+  Output / lifecycle: --dry-run, --upgrade, --from-scratch, --rollback-on-failure
 
 Examples:
   kars up                                       # Full provision with defaults
   kars up --name myagent --region westus3       # Pick a name + region
   kars up --skip-infra                          # Reuse existing AKS cluster
+  kars up --node-count 1 --rollback-on-failure # Generate a unique RG with failure cleanup
   kars up --upgrade                             # Fast Helm-only redeploy
   kars up --from-scratch                        # Discard any partial state from a previous failed run
 
@@ -113,6 +135,17 @@ Auto-resume:
       const policyPresets = ["minimal", "developer", "web", "azure"];
       if (options.policy && !policyPresets.includes(options.policy)) {
         console.error(chalk.red(`\n  Error: --policy must be one of: ${policyPresets.join(" | ")} (got "${options.policy}").\n`));
+        process.exit(1);
+      }
+      try {
+        validateInfrastructureMode({
+          skipInfra: Boolean(options.skipInfra),
+          forceInfra: Boolean(options.forceInfra),
+        });
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : String(error);
+        console.error(chalk.red(`\n  Error: ${message}.\n`));
         process.exit(1);
       }
 
@@ -159,7 +192,8 @@ Auto-resume:
       if (preflightResult === null) {
         return;
       }
-      const { rg } = preflightResult;
+      const { rg, subscriptionId } = preflightResult;
+      const runAzure: AzureRunner = createAzureRunner(execa, subscriptionId);
 
 
       banner("kars · Production Deploy", "Secure AI Agent Runtime on Azure");
@@ -167,15 +201,30 @@ Auto-resume:
       const clusterName = options.clusterName ?? "kars";
       const baseName = clusterName.replace(/-aks$/, "");
       let acrName = ""; // resolved from Bicep output after deployment
+      let resourceGroupOwnership: ResourceGroupOwnershipProof | undefined;
+      let cleanupContext: CleanupContext | undefined;
 
       // ── Auto-resume from prior partial run ──────────────────────────
       // Inspects ~/.kars/context.json. Returns null when there's no
-      // partial state, when topology (region / RG / cluster / sandbox /
-      // source-acr) changed, when the saved state is stale, or when the
-      // user passed --from-scratch.
-      const { loadResumeState, isPhaseSkippable, markPhaseDone, formatAge } =
+      // partial state, when topology (subscription / region / RG / cluster /
+      // sandbox / source-acr) changed, when the saved state is stale, or
+      // when the user passed --from-scratch.
+      const {
+        loadResumeState,
+        isPhaseSkippable,
+        markPhaseDone,
+        shouldPersistResumeState,
+        formatAge,
+      } =
         await import("./up/resume.js");
+      const persistResumeState = shouldPersistResumeState(
+        options.rollbackOnFailure,
+      );
+      const recordPhaseDone: typeof markPhaseDone = (...args) => {
+        if (persistResumeState) markPhaseDone(...args);
+      };
       const resumeTopology = {
+        subscription: subscriptionId,
         region: options.region,
         resourceGroup: rg,
         aksCluster: `${baseName}-aks`,
@@ -247,20 +296,65 @@ Auto-resume:
         // ── Step 1: Create resource group ────────────────────────────
         stepper.step(`Setting up resource group '${rg}'...`);
 
-        // Check if RG already exists
-        let rgExists = false;
-        try {
-          const { stdout: rgCheck } = await execa("az", [
-            "group", "show", "--name", rg, "--query", "properties.provisioningState", "-o", "tsv",
-          ], { stdio: "pipe" });
-          if (rgCheck.trim() === "Succeeded") rgExists = true;
-        } catch { /* doesn't exist */ }
+        const resourceGroup = await ensureResourceGroup(
+          rg,
+          options.region,
+          subscriptionId,
+          runAzure,
+          {
+            createIfMissing: !options.skipInfra,
+            generatedForRollback:
+              options.resourceGroupGeneratedForRollback === true,
+          },
+        );
+        resourceGroupOwnership = resourceGroup.ownershipProof;
+        cleanupContext = {
+          resourceGroup: rg,
+          baseName,
+          clusterName,
+          location: resourceGroup.location,
+          subscriptionId,
+          kubernetesVersion: String(options.kubernetesVersion),
+          nodeCount: Number(options.nodeCount),
+          ownershipProof: resourceGroupOwnership,
+        };
+        stepper.detail(
+          resourceGroup.created ? "new" : "ok",
+          `Resource group '${rg}' — ${resourceGroup.created ? "created" : "exists (customer tags preserved)"}`,
+        );
+        if (resourceGroupOwnership) {
+          stepper.detail(
+            "info",
+            `Rollback lease '${resourceGroupOwnership.lockName}' protects the generated resource group`,
+          );
+          console.log(
+            chalk.dim(
+              `  If this command is interrupted, remove the generated deployment with:\n` +
+                `    kars destroy --all --yes --resource-group ${rg} --subscription ${subscriptionId} --region ${resourceGroup.location}\n`,
+            ),
+          );
+        }
 
-        await execa("az", [
-          "group", "create", "--name", rg, "--location", options.region, "--output", "none",
-        ], { stdio: "pipe" });
-        stepper.detail(rgExists ? "ok" : "new", `Resource group '${rg}' — ${rgExists ? "exists" : "created"}`);
-
+        const recoverableKeyVault = options.skipInfra
+          ? undefined
+          : await findRecoverableDeletedKeyVault(
+              {
+                resourceGroup: rg,
+                baseName,
+                location: options.region,
+                subscriptionId,
+              },
+              runAzure,
+            );
+        if (recoverableKeyVault) {
+          const purgeDetail = recoverableKeyVault.scheduledPurgeDate
+            ? `; scheduled purge ${recoverableKeyVault.scheduledPurgeDate}`
+            : "";
+          stepper.detail(
+            "info",
+            `Key Vault '${recoverableKeyVault.name}' is soft-deleted in ${recoverableKeyVault.location}${purgeDetail}; this deployment will recover it`,
+          );
+        }
 
         // ── Step 2b: Detect caller IP for firewall rules ─────────────
         stepper.update("Detecting your public IP for firewall rules...");
@@ -279,56 +373,41 @@ Auto-resume:
         // ── Step 2c: Register required preview features ──────────
         stepper.update("Registering preview features...");
         // EncryptionAtHost is required for clawpool
-        await execa("az", [
+        await runAzure([
           "feature", "register",
           "--namespace", "Microsoft.Compute",
           "--name", "EncryptionAtHost",
           "--output", "none",
-        ], { stdio: "pipe" }).catch(() => {
+        ]).catch(() => {
           // Already registered — OK
         });
 
         if (options.isolation === "confidential") {
           // Install aks-preview extension for Kata workload runtime
-          await execa("az", [
+          await runAzure([
             "extension", "add", "--name", "aks-preview", "--upgrade",
-          ], { stdio: "pipe" }).catch(() => {});
+          ]).catch(() => {});
 
-          await execa("az", [
+          await runAzure([
             "feature", "register",
             "--namespace", "Microsoft.ContainerService",
             "--name", "KataVMIsolationPreview",
             "--output", "none",
-          ], { stdio: "pipe" }).catch(() => {});
+          ]).catch(() => {});
         }
 
         // Propagate feature registrations
-        await execa("az", ["provider", "register", "-n", "Microsoft.Compute", "--output", "none"], { stdio: "pipe" }).catch(() => {});
-        await execa("az", ["provider", "register", "-n", "Microsoft.ContainerService", "--output", "none"], { stdio: "pipe" }).catch(() => {});
+        await runAzure(["provider", "register", "-n", "Microsoft.Compute", "--output", "none"]).catch(() => {});
+        await runAzure(["provider", "register", "-n", "Microsoft.ContainerService", "--output", "none"]).catch(() => {});
 
         stepper.done(`Resource group '${rg}' ready${callerIp ? ` (IP: ${callerIp})` : ""}`);
-        markPhaseDone("rg", {}, resumeTopology);
+        recordPhaseDone("rg", {}, resumeTopology);
 
         // ── Step 3: Deploy Bicep (AKS + ACR + KV + AOAI + Monitor + WI) ─
         let acrLoginServer: string;
         let openAiEndpoint: string;
         let wiClientId: string;
         let kvName: string;
-
-        if (!options.skipInfra && !options.forceInfra) {
-          // Auto-detect: if AKS cluster already exists, skip Bicep (saves ~8 min)
-          try {
-            const { stdout: aksCheck } = await execa("az", [
-              "aks", "show", "-g", rg, "-n", `${baseName}-aks`,
-              "--query", "provisioningState", "-o", "tsv",
-            ], { stdio: "pipe" });
-            if (aksCheck.trim() === "Succeeded") {
-              options.skipInfra = true;
-            }
-          } catch {
-            // Cluster doesn't exist — proceed with Bicep
-          }
-        }
 
         if (!options.skipInfra) {
           stepper.step(`Provisioning Azure resources in ${options.region}...`);
@@ -345,24 +424,21 @@ Auto-resume:
           }
           stepper.detail("info", `This takes 5–10 minutes. Deploying now...`);
 
-          // Resolve VM sizes that are actually available to this subscription in
-          // this region (subscriptions commonly gate specific SKUs). Auto-picks a
-          // working size or honours --node-vm-size / --system-vm-size.
-          const vmSizes = await resolveVmSizes(
-            options.region,
-            options.nodeVmSize,
-            options.systemVmSize,
-          );
-          if (vmSizes.checked) {
-            stepper.detail("info", `Node SKUs: system=${vmSizes.system}, sandbox=${vmSizes.node}`);
-          }
-
-          const bicepParams = [
-            `location=${options.region}`,
-            `baseName=${baseName}`,
-            `vmSize=${vmSizes.node}`,
-            `systemVmSize=${vmSizes.system}`,
-          ];
+          const bicepParams = buildProjectedBicepParameters({
+            location: options.region,
+            baseName,
+            recoverKeyVault: recoverableKeyVault !== undefined,
+            nodeVmSize: options.nodeVmSize,
+            systemVmSize: options.systemVmSize,
+            kataVmSize: options.kataVmSize,
+            kubernetesVersion: options.kubernetesVersion,
+            systemNodeCount: options.systemNodeCount,
+            nodeCount: options.nodeCount,
+            kataNodeCount: options.kataNodeCount,
+            systemPoolName: options.systemPoolName,
+            sandboxPoolName: options.sandboxPoolName,
+            kataPoolName: options.kataPoolName,
+          });
           if (options.isolation === "confidential") {
             bicepParams.push("enableKata=true");
           }
@@ -383,13 +459,13 @@ Auto-resume:
           if (!options.skipValidate) {
             stepper.update("Validating deployment (Azure ARM preflight — no resources created yet)...");
             try {
-              await execa("az", [
+              await runAzure([
                 "deployment", "group", "validate",
                 "--resource-group", rg,
                 "--template-file", bicepPath,
                 "--parameters", ...bicepParams,
                 "--output", "none",
-              ], { stdio: "pipe" });
+              ]);
             } catch (vErr: unknown) {
               const e = vErr as { stderr?: string; message?: string };
               const msg = String(e.stderr || e.message || vErr).trim();
@@ -420,14 +496,14 @@ Auto-resume:
           }, 30000);
 
           try {
-            const { stdout: deployOutput } = await execa("az", [
+            const { stdout: deployOutput } = await runAzure([
               "deployment", "group", "create",
               "--resource-group", rg,
               "--template-file", bicepPath,
               "--parameters", ...bicepParams,
               "--output", "json",
               "--query", "properties.outputs",
-            ], { stdio: "pipe" });
+            ]);
 
             clearInterval(ticker);
 
@@ -448,7 +524,7 @@ Auto-resume:
             }
 
             stepper.done("Azure resources provisioned");
-            markPhaseDone(
+            recordPhaseDone(
               "infra",
               { acrLoginServer, acrName, foundryEndpoint: options.foundryEndpoint, wiClientId, keyVaultName: kvName },
               resumeTopology,
@@ -460,21 +536,21 @@ Auto-resume:
         } else {
           // Read outputs from existing deployment
           stepper.step("Verifying existing infrastructure...");
-          const { stdout: existingOutput } = await execa("az", [
+          const { stdout: existingOutput } = await runAzure([
             "deployment", "group", "show",
             "--resource-group", rg,
             "--name", "main",
             "--output", "json",
             "--query", "properties.outputs",
-          ], { stdio: "pipe" }).catch(async () => {
+          ]).catch(async () => {
             // Fallback: try module deployment name
-            return execa("az", [
+            return runAzure([
               "deployment", "group", "show",
               "--resource-group", rg,
               "--name", `${baseName}-aks`,
               "--output", "json",
               "--query", "properties.outputs",
-            ], { stdio: "pipe" });
+            ]);
           });
 
           const outputs = JSON.parse(existingOutput);
@@ -495,7 +571,7 @@ Auto-resume:
           stepper.detail("ok", `Workload Identity — ${wiClientId.slice(0, 8)}...`);
 
           stepper.done("Infrastructure verified (Bicep skipped)");
-          markPhaseDone(
+          recordPhaseDone(
             "infra",
             { acrLoginServer, acrName, foundryEndpoint: options.foundryEndpoint, wiClientId, keyVaultName: kvName },
             resumeTopology,
@@ -511,13 +587,13 @@ Auto-resume:
         stepper.step("Configuring network access & firewalls...");
         if (callerIp) {
           stepper.update("Updating AKS API server authorized IPs...");
-          await execa("az", [
+          await runAzure([
             "aks", "update",
             "--name", `${baseName}-aks`,
             "--resource-group", rg,
             "--api-server-authorized-ip-ranges", `${callerIp}/32`,
             "--output", "none",
-          ], { stdio: "pipe" }).then(() => {
+          ]).then(() => {
             stepper.detail("ok", `AKS API server — ${callerIp}/32 authorized`);
           }).catch(() => {
             stepper.detail("ok", `AKS API server — IP already authorized`);
@@ -528,43 +604,43 @@ Auto-resume:
         stepper.update("Adding AKS egress IP to service firewalls...");
         try {
           // Get AKS egress (outbound) IP
-          const { stdout: egressIpId } = await execa("az", [
+          const { stdout: egressIpId } = await runAzure([
             "aks", "show",
             "--name", `${baseName}-aks`,
             "--resource-group", rg,
             "--query", "networkProfile.loadBalancerProfile.effectiveOutboundIPs[0].id",
             "--output", "tsv",
-          ], { stdio: "pipe" });
+          ]);
           const cleanIpId = egressIpId.trim().split("\n").pop()?.trim();
           if (cleanIpId && cleanIpId.startsWith("/subscriptions")) {
-            const { stdout: egressIpRaw } = await execa("az", [
+            const { stdout: egressIpRaw } = await runAzure([
               "network", "public-ip", "show",
               "--ids", cleanIpId,
               "--query", "ipAddress",
               "--output", "tsv",
-            ], { stdio: "pipe" });
+            ]);
             const aksEgress = egressIpRaw.trim();
             if (aksEgress && /^\d{1,3}(\.\d{1,3}){3}$/.test(aksEgress)) {
               // Add AKS egress to ACR firewall
-              await execa("az", [
+              await runAzure([
                 "acr", "network-rule", "add",
                 "--name", acrName,
                 "--ip-address", aksEgress,
                 "--output", "none",
-              ], { stdio: "pipe" }).then(() => {
+              ]).then(() => {
                 stepper.detail("ok", `ACR firewall — ${aksEgress} allowed`);
               }).catch(() => {
                 stepper.detail("ok", `ACR firewall — already configured`);
               });
               // Add AKS egress to AOAI firewall (only when AOAI is deployed in this RG)
               if (!options.foundryEndpoint) {
-                await execa("az", [
+                await runAzure([
                   "cognitiveservices", "account", "network-rule", "add",
                   "--name", `${baseName}-aoai`,
                   "--resource-group", rg,
                   "--ip-address", aksEgress,
                   "--output", "none",
-                ], { stdio: "pipe" }).then(() => {
+                ]).then(() => {
                   stepper.detail("ok", `AOAI firewall — ${aksEgress} allowed`);
                 }).catch(() => {
                   stepper.detail("ok", `AOAI firewall — already configured`);
@@ -578,13 +654,13 @@ Auto-resume:
 
         // ── Step 3c: Attach ACR to AKS ──────────────────────────────
         stepper.update("Attaching ACR to AKS...");
-        await execa("az", [
+        await runAzure([
           "aks", "update",
           "--name", `${baseName}-aks`,
           "--resource-group", rg,
           "--attach-acr", acrName,
           "--output", "none",
-        ], { stdio: "pipe" }).then(() => {
+        ]).then(() => {
           stepper.detail("ok", `ACR attachment — ${acrName} → AKS`);
         }).catch(() => {
           stepper.detail("ok", `ACR attachment — already attached`);
@@ -592,19 +668,19 @@ Auto-resume:
 
         stepper.done("Network access configured");
         }
-        markPhaseDone("network", {}, resumeTopology);
+        recordPhaseDone("network", {}, resumeTopology);
 
         // ── Step 5: Get AKS credentials ──────────────────────────────
         stepper.step("Configuring kubectl...");
-        await execa("az", [
+        await runAzure([
           "aks", "get-credentials",
           "--name", `${baseName}-aks`,
           "--resource-group", rg,
           "--overwrite-existing",
           "--output", "none",
-        ], { stdio: "pipe" });
+        ]);
         stepper.done("kubectl configured");
-        markPhaseDone("kubectl", {}, resumeTopology);
+        recordPhaseDone("kubectl", {}, resumeTopology);
 
         // ── Step 6: Get images into ACR ──────────────────────────────
         const acr = acrLoginServer.replace(".azurecr.io", "");
@@ -616,6 +692,8 @@ Auto-resume:
           repoRoot,
           resumeFromPhase,
           resumeTopology,
+          persistResumeState,
+          runAzure,
         });
 
         // ── Step 6: Install / upgrade Helm chart ─────────────────────
@@ -685,23 +763,23 @@ Auto-resume:
         let imdsClientId = "";
         if (foundryEndpoint) {
           try {
-            const { stdout: kubeletId } = await execa("az", [
+            const { stdout: kubeletId } = await runAzure([
               "aks", "show",
               "--name", `${baseName}-aks`,
               "--resource-group", rg,
               "--query", "identityProfile.kubeletidentity.clientId",
               "--output", "tsv",
-            ], { stdio: "pipe" });
+            ]);
             imdsClientId = kubeletId.trim().split("\n").pop()?.trim() || "";
 
             // Assign Cognitive Services User to kubelet MI via Bicep (bypasses CLI CA policy)
-            const { stdout: kubeletPrincipal } = await execa("az", [
+            const { stdout: kubeletPrincipal } = await runAzure([
               "aks", "show",
               "--name", `${baseName}-aks`,
               "--resource-group", rg,
               "--query", "identityProfile.kubeletidentity.objectId",
               "--output", "tsv",
-            ], { stdio: "pipe" });
+            ]);
             const principalId = kubeletPrincipal.trim().split("\n").pop()?.trim() || "";
             if (principalId) {
               stepper.update("Assigning Cognitive Services roles to kubelet MI (via Bicep)...");
@@ -731,13 +809,13 @@ Auto-resume:
               const tmpBicep = path.join(tmpDir, "role-assignments.bicep");
               try {
                 fs.writeFileSync(tmpBicep, bicepRole, { encoding: "utf8", mode: 0o600 });
-                await execa("az", [
+                await runAzure([
                   "deployment", "sub", "create",
                   "--location", options.region,
                   "--template-file", tmpBicep,
                   "--parameters", `pid=${principalId}`,
                   "--output", "none",
-                ], { stdio: "pipe" }).catch(() => {});
+                ]).catch(() => {});
               } finally {
                 fs.rmSync(tmpDir, { recursive: true, force: true });
               }
@@ -783,7 +861,7 @@ Auto-resume:
           // exceeded" while k8s is still legitimately rolling out.
           "--timeout", "10m",
           // Take ownership of fields previously written by `kubectl apply`
-          // or `kubectl patch` (e.g. CRDs / ClusterRoles touched out-of-band
+          // or modified out-of-band (e.g. CRDs / ClusterRoles
           // during prior debugging). Without this, Helm's server-side apply
           // refuses with "conflict with kubectl-client-side-apply" and the
           // whole `kars up` flow fails after the 18-min image build.
@@ -805,20 +883,20 @@ Auto-resume:
         if (foundryEndpoint) {
           try {
             const accountName = new URL(foundryEndpoint).hostname.split(".")[0];
-            const { stdout: rgOut } = await execa("az", [
+            const { stdout: rgOut } = await runAzure([
               "cognitiveservices", "account", "list",
               "--query", `[?name=='${accountName}'].resourceGroup | [0]`,
               "--output", "tsv",
-            ], { stdio: "pipe", timeout: 15000 });
+            ], { timeout: 15000 });
             const foundryRg = rgOut.trim();
             if (foundryRg) {
-              const { stdout } = await execa("az", [
+              const { stdout } = await runAzure([
                 "cognitiveservices", "account", "deployment", "list",
                 "--name", accountName,
                 "--resource-group", foundryRg,
                 "--query", "[].name",
                 "--output", "json",
-              ], { stdio: "pipe", timeout: 30000 });
+              ], { timeout: 30000 });
               const deps = JSON.parse(stdout || "[]");
               if (Array.isArray(deps) && deps.length > 0) {
                 discoveredDeployments = JSON.stringify(deps);
@@ -835,19 +913,16 @@ Auto-resume:
 
         // Pass federated credential config so controller can auto-create fedcreds for sub-agents
         try {
-          const { stdout: oidcIssuerUrl } = await execa("az", [
+          const { stdout: oidcIssuerUrl } = await runAzure([
             "aks", "show",
             "--name", `${baseName}-aks`,
             "--resource-group", rg,
             "--query", "oidcIssuerProfile.issuerUrl",
             "--output", "tsv",
-          ], { stdio: "pipe", timeout: 15000 });
-          const { stdout: subIdRaw } = await execa("az", [
-            "account", "show", "--query", "id", "--output", "tsv",
-          ], { stdio: "pipe", timeout: 10000 });
-          if (oidcIssuerUrl.trim() && subIdRaw.trim()) {
+          ], { timeout: 15000 });
+          if (oidcIssuerUrl.trim()) {
             helmArgs.push(
-              "--set", `fedcred.subscriptionId=${subIdRaw.trim()}`,
+              "--set", `fedcred.subscriptionId=${subscriptionId}`,
               "--set", `fedcred.identityName=${baseName}-aks-sandbox-wi`,
               "--set", `fedcred.identityResourceGroup=${rg}`,
               "--set", `fedcred.oidcIssuerUrl=${oidcIssuerUrl.trim()}`,
@@ -872,7 +947,7 @@ Auto-resume:
         ], { stdio: "pipe" }).catch(() => {});
 
         stepper.done(`Controller ${helmExists ? "upgraded" : "deployed"}`);
-        markPhaseDone("helm", {}, resumeTopology);
+        recordPhaseDone("helm", {}, resumeTopology);
 
         // ── Step 6b: Entra Agent ID trust anchor (idempotent) ────────
         // Only fires when --mesh-trust=entra (default is 'anonymous').
@@ -884,7 +959,7 @@ Auto-resume:
         // skipped — the cluster runs without per-sandbox Entra
         // identities and the relay accepts unverified WebSocket
         // connects. Operators can opt in later via
-        // `kars mesh setup-trust` followed by patching
+        // `kars mesh setup-trust` followed by updating
         // KarsAuthConfig.spec.meshAuthBackend=EntraAgentIdentity.
         let entraVerifyForMesh: { audience: string; tenantId: string } | undefined;
         const meshTrustMode = (options as { meshTrust?: string }).meshTrust ?? "anonymous";
@@ -918,6 +993,7 @@ Auto-resume:
               stepper.step("Provisioning Entra Agent ID trust anchor (--mesh-trust=entra)...");
               const result = await ensureAgentIdTrustAutoFallback({
                 clusterName: baseName,
+                subscriptionId,
                 resourceGroup: rg,
                 region: options.region,
                 serviceTree: (options as { serviceTree?: string }).serviceTree,
@@ -959,7 +1035,16 @@ Auto-resume:
         // (S15.d.3: extracted to ./up/agentmesh_deploy.ts)
         const { deployAgentMesh } = await import("./up/agentmesh_deploy.js");
         const meshResult = await deployAgentMesh(
-          { repoRoot, acr, acrLoginServer, baseName, rg, stepper, entraVerify: entraVerifyForMesh },
+          {
+            repoRoot,
+            acr,
+            acrLoginServer,
+            baseName,
+            rg,
+            subscriptionId,
+            stepper,
+            entraVerify: entraVerifyForMesh,
+          },
           {
             globalRegistry: options.globalRegistry,
             exposeRegistry: options.exposeRegistry,
@@ -969,7 +1054,7 @@ Auto-resume:
         const registryMode = meshResult.registryMode;
         const globalRegistryUrl = meshResult.globalRegistryUrl;
         const globalRelayUrl = meshResult.globalRelayUrl;
-        markPhaseDone("mesh", { registryMode, globalRegistryUrl, globalRelayUrl }, resumeTopology);
+        recordPhaseDone("mesh", { registryMode, globalRegistryUrl, globalRelayUrl }, resumeTopology);
 
         // ── Step 7+8: Sandbox bring-up (S15.d.4: extracted to ./up/sandbox_bringup.ts) ──
         // Federated credentials, MI Contributor, Foundry RBAC, KarsSandbox CR,
@@ -981,8 +1066,19 @@ Auto-resume:
           acrLoginServer, foundryEndpoint, openAiEndpoint, kvName,
           wiClientId, imdsClientId,
           repoRoot, stepper,
+          subscriptionId, runAzure,
           registryMode, globalRegistryUrl, globalRelayUrl,
         });
+
+        const release = await releaseResourceGroupOwnership(
+          rg,
+          subscriptionId,
+          resourceGroupOwnership,
+          runAzure,
+        );
+        if (!release.released && release.warning) {
+          console.warn(chalk.yellow(`  Warning: ${release.warning}`));
+        }
 
         // Explicit success exit. Some `az`/REST calls leave keep-alive sockets
         // (and we spawn a detached kubectl port-forward), so the event loop
@@ -991,22 +1087,10 @@ Auto-resume:
         process.exit(0);
 
       } catch (error) {
-        stepper.stop();
-        console.error(chalk.red(`\n  Deployment failed`));
-        const message =
-          error instanceof Error ? error.message : String(error);
-        console.error(chalk.red(`  ${message}\n`));
-
-        // Helpful diagnostics
-        if (message.includes("EncryptionAtHost")) {
-          console.log(chalk.yellow("  Tip: EncryptionAtHost requires registering the feature:"));
-          console.log(chalk.cyan("  az feature register --namespace Microsoft.Compute --name EncryptionAtHost"));
-          console.log(chalk.cyan("  az provider register -n Microsoft.Compute\n"));
-        }
-        if (message.includes("quota") || message.includes("Quota")) {
-          console.log(chalk.yellow("  Tip: Insufficient quota. Try a different region or VM size:"));
-          console.log(chalk.cyan(`  kars up --region westus3\n`));
-        }
+        await reportDeploymentFailure({
+          error, stepper, resourceGroup: rg,
+          cleanupContext, resourceGroupOwnership, runAzure,
+        });
         process.exit(1);
       }
     });

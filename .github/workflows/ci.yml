@@ -387,7 +387,13 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Install pinned Bicep compiler
+        run: |
+          az bicep uninstall
+          az bicep install --version v0.44.1
       - run: az bicep build --file deploy/bicep/main.bicep
+      - name: Verify generated ARM template is current
+        run: git diff --exit-code -- deploy/bicep/main.json
       # Regression gate: every role assignment must be idempotent (principalId in
       # the name GUID) so identity rotation can't trigger RoleAssignmentUpdateNotPermitted.
       - name: RBAC idempotency gate

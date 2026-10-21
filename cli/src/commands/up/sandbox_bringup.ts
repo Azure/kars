@@ -15,7 +15,10 @@ import { writeFileSync, unlinkSync } from "node:fs";
 import chalk from "chalk";
 import type { Stepper } from "../../stepper.js";
 import { section, kvLine, checkLine } from "../../stepper.js";
-import { saveContext } from "../../config.js";
+import {
+  saveContext,
+  type DeploymentContext,
+} from "../../config.js";
 import {
   buildInferencePolicy,
   buildToolPolicy,
@@ -23,6 +26,10 @@ import {
   inferenceRefName,
   toolPolicyRefName,
 } from "../../refs.js";
+import {
+  createSubscriptionPinnedExeca,
+  type AzureRunner,
+} from "./orchestration.js";
 
 export interface SandboxBringUpContext {
   options: {
@@ -42,9 +49,28 @@ export interface SandboxBringUpContext {
   imdsClientId: string;
   repoRoot: string;
   stepper: Stepper;
+  subscriptionId: string;
+  runAzure: AzureRunner;
   registryMode: "local" | "global";
   globalRegistryUrl?: string;
   globalRelayUrl?: string;
+}
+
+export function saveFinalDeploymentContext(
+  context: DeploymentContext,
+  rollbackOnFailure: boolean,
+  persist: (context: DeploymentContext) => void = saveContext,
+): void {
+  try {
+    persist(context);
+  } catch (error) {
+    if (rollbackOnFailure) {
+      throw new Error(
+        "Deployment completed but the local deployment context could not be saved; rolling back the generated resource group to avoid an unmanageable deployment.",
+        { cause: error },
+      );
+    }
+  }
 }
 
 /**
@@ -60,8 +86,13 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     options, baseName, rg,
     acrLoginServer, foundryEndpoint, openAiEndpoint, kvName,
     wiClientId, imdsClientId, repoRoot, stepper,
+    subscriptionId, runAzure,
     registryMode, globalRegistryUrl, globalRelayUrl,
   } = ctx;
+  const subscriptionPinnedExeca = createSubscriptionPinnedExeca(
+    execa,
+    subscriptionId,
+  );
 
   // ── Step 7: Create KarsSandbox CR ────────────────────────────
   stepper.step(`Creating sandbox '${options.name}'...`);
@@ -69,15 +100,15 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
 
   // Create federated identity credential for this sandbox's namespace
   stepper.update(`Setting up Workload Identity for ${sandboxNs}...`);
-  const { stdout: oidcIssuer } = await execa("az", [
+  const { stdout: oidcIssuer } = await runAzure([
     "aks", "show",
     "--name", `${baseName}-aks`,
     "--resource-group", rg,
     "--query", "oidcIssuerProfile.issuerUrl",
     "--output", "tsv",
-  ], { stdio: "pipe" });
+  ]);
 
-  await execa("az", [
+  await runAzure([
     "identity", "federated-credential", "create",
     "--identity-name", `${baseName}-aks-sandbox-wi`,
     "--resource-group", rg,
@@ -86,14 +117,14 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     "--subject", `system:serviceaccount:${sandboxNs}:sandbox`,
     "--audiences", "api://AzureADTokenExchange",
     "--output", "none",
-  ], { stdio: "pipe" }).then(() => {
+  ]).then(() => {
     stepper.detail("new", `Federated credential — ${sandboxNs}:sandbox`);
   }).catch(() => {
     stepper.detail("ok", `Federated credential — already exists`);
   });
 
   // Ensure controller SA has a fedcred too (so it can get ARM tokens via WI to create sandbox fedcreds)
-  await execa("az", [
+  await runAzure([
     "identity", "federated-credential", "create",
     "--identity-name", `${baseName}-aks-sandbox-wi`,
     "--resource-group", rg,
@@ -102,7 +133,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     "--subject", `system:serviceaccount:kars-system:kars-controller`,
     "--audiences", "api://AzureADTokenExchange",
     "--output", "none",
-  ], { stdio: "pipe" }).then(() => {
+  ]).then(() => {
     stepper.detail("new", `Federated credential — controller SA`);
   }).catch(() => {
     // Already exists — fine
@@ -111,25 +142,22 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   // Grant the sandbox MI "Managed Identity Contributor" on itself so the controller
   // can create/delete fedcreds for dynamically spawned sandboxes
   try {
-    const { stdout: subIdForMi } = await execa("az", [
-      "account", "show", "--query", "id", "--output", "tsv",
-    ], { stdio: "pipe", timeout: 10000 });
-    const miScope = `/subscriptions/${subIdForMi.trim()}/resourceGroups/${rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${baseName}-aks-sandbox-wi`;
-    const { stdout: miPid } = await execa("az", [
+    const miScope = `/subscriptions/${subscriptionId}/resourceGroups/${rg}/providers/Microsoft.ManagedIdentity/userAssignedIdentities/${baseName}-aks-sandbox-wi`;
+    const { stdout: miPid } = await runAzure([
       "identity", "show",
       "--name", `${baseName}-aks-sandbox-wi`,
       "--resource-group", rg,
       "--query", "principalId",
       "--output", "tsv",
-    ], { stdio: "pipe" });
-    await execa("az", [
+    ]);
+    await runAzure([
       "role", "assignment", "create",
       "--assignee-object-id", miPid.trim(),
       "--assignee-principal-type", "ServicePrincipal",
       "--role", "Managed Identity Contributor",
       "--scope", miScope,
       "--output", "none",
-    ], { stdio: "pipe" });
+    ]);
     stepper.detail("new", `MI Contributor — self-scoped for fedcred management`);
   } catch {
     // Already exists or user lacks Owner — non-fatal
@@ -148,7 +176,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     // MI). All idempotent + non-fatal — see foundry_setup.ts.
     const { setupFoundryForKars } = await import("./foundry_setup.js");
     const foundrySetup = await setupFoundryForKars({
-      execa, stepper, foundryEndpoint,
+      execa: subscriptionPinnedExeca, stepper, foundryEndpoint,
     }).catch(() => null);
 
     // Adopt the best deployed chat model unless the user explicitly set --model.
@@ -176,11 +204,11 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
     let foundryResourceId = foundrySetup?.accountResourceId || "";
     let foundryRg = foundrySetup?.resourceGroup || "";
     if (!foundryResourceId || !foundryRg) {
-      const { stdout: foundryAccountJson } = await execa("az", [
+      const { stdout: foundryAccountJson } = await runAzure([
         "cognitiveservices", "account", "list",
         "--query", `[?name=='${foundryAccountName}'].{id:id, rg:resourceGroup} | [0]`,
         "--output", "json",
-      ], { stdio: "pipe" }).catch(() => ({ stdout: "{}" }));
+      ]).catch(() => ({ stdout: "{}" }));
       const foundryAccount = JSON.parse(foundryAccountJson.trim() || "{}");
       foundryResourceId = foundryAccount.id || "";
       foundryRg = foundryAccount.rg || "";
@@ -195,13 +223,13 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       // Get the sandbox workload identity principal ID
       let sandboxWiPrincipalId = "";
       try {
-        const { stdout: wiPid } = await execa("az", [
+        const { stdout: wiPid } = await runAzure([
           "identity", "show",
           "--name", `${baseName}-aks-sandbox-wi`,
           "--resource-group", rg,
           "--query", "principalId",
           "--output", "tsv",
-        ], { stdio: "pipe" });
+        ]);
         sandboxWiPrincipalId = wiPid.trim().split("\n").pop()?.trim() || "";
       } catch {
         // Non-fatal
@@ -210,13 +238,13 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       // Get the AKS kubelet managed identity principal ID (used by IMDS for sub-agents)
       let kubeletMiPrincipalId = "";
       try {
-        const { stdout: kubePid } = await execa("az", [
+        const { stdout: kubePid } = await runAzure([
           "aks", "show",
           "--name", `${baseName}-aks`,
           "--resource-group", rg,
           "--query", "identityProfile.kubeletidentity.objectId",
           "--output", "tsv",
-        ], { stdio: "pipe" });
+        ]);
         kubeletMiPrincipalId = kubePid.trim().split("\n").pop()?.trim() || "";
       } catch {
         // Non-fatal — older AKS may not expose this
@@ -336,7 +364,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
 
       try {
         stepper.update("Deploying Foundry RBAC (Bicep)...");
-        await execa("az", [
+        await runAzure([
           "deployment", "group", "create",
           "--resource-group", foundryRg,
           "--template-file", tmpBicep,
@@ -346,7 +374,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
           `kubeletMiPrincipalId=${kubeletMiPrincipalId}`,
           `blueprintSpPrincipalId=${blueprintSpPrincipalId}`,
           "--output", "none",
-        ], { stdio: "pipe" });
+        ]);
 
         if (blueprintSpPrincipalId) {
           console.log(
@@ -408,13 +436,13 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       }
     } else if (foundryResourceId) {
       // Fallback for non-project endpoints (plain AOAI): assign sandbox WI on the resource
-      const { stdout: wiPid } = await execa("az", [
+      const { stdout: wiPid } = await runAzure([
         "identity", "show",
         "--name", `${baseName}-aks-sandbox-wi`,
         "--resource-group", rg,
         "--query", "principalId",
         "--output", "tsv",
-      ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+      ]).catch(() => ({ stdout: "" }));
 
       if (wiPid.trim()) {
         const tmpBicep = path.join(repoRoot, ".tmp-foundry-rbac.bicep");
@@ -434,13 +462,13 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
           "}",
         ].join("\n"));
         try {
-          await execa("az", [
+          await runAzure([
             "deployment", "group", "create",
             "--resource-group", foundryRg || rg,
             "--template-file", tmpBicep,
             "--parameters", `pid=${wiPid.trim().split("\n").pop()?.trim()}`,
             "--output", "none",
-          ], { stdio: "pipe" }).catch(() => {});
+          ]).catch(() => {});
         } finally {
           try { unlinkSync(tmpBicep); } catch {}
         }
@@ -459,7 +487,7 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       // managed keyless path works. Purely advisory — never aborts the deploy,
       // and never touches a connection whose Bing resource is still alive.
       await removeDanglingBingConnections({
-        execa,
+        runAzure,
         stepper,
         foundryResourceId,
         foundryProjectName,
@@ -668,8 +696,8 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
   // Cache deployment context for subsequent commands (add, status, list, push,
   // etc.). Setting phase: "complete" also marks the auto-resume state as fully
   // consumed so the next `kars up` starts fresh.
-  try {
-    saveContext({
+  saveFinalDeploymentContext({
+      subscription: subscriptionId,
       region: options.region,
       resourceGroup: rg,
       aksCluster: `${baseName}-aks`,
@@ -689,8 +717,9 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
       phase: "complete",
       sandboxName: options.name,
       sourceAcr: typeof options.sourceAcr === "string" ? options.sourceAcr : undefined,
-    });
-  } catch { /* non-critical */ }
+    },
+    options.rollbackOnFailure === true,
+  );
 
   console.log();
 }
@@ -710,21 +739,21 @@ export async function bringUpSandbox(ctx: SandboxBringUpContext): Promise<void> 
  * caller, and a connection whose Bing resource is still alive is left untouched.
  */
 async function removeDanglingBingConnections(ctx: {
-  execa: typeof import("execa").execa;
+  runAzure: AzureRunner;
   stepper: Stepper;
   /** Full ARM id of the Foundry (CognitiveServices) account. */
   foundryResourceId: string;
   /** Project name (the `…/api/projects/<name>` segment). */
   foundryProjectName: string;
 }): Promise<void> {
-  const { execa, stepper, foundryResourceId, foundryProjectName } = ctx;
+  const { runAzure, stepper, foundryResourceId, foundryProjectName } = ctx;
   if (!foundryResourceId || !foundryProjectName) return;
 
   const connectionsUrl =
     `${foundryResourceId}/projects/${foundryProjectName}/connections?api-version=2025-06-01`;
-  const { stdout: connsJson } = await execa("az", [
+  const { stdout: connsJson } = await runAzure([
     "rest", "--method", "get", "--url", connectionsUrl,
-  ], { stdio: "pipe" }).catch(() => ({ stdout: "" }));
+  ]).catch(() => ({ stdout: "" }));
   if (!connsJson.trim()) return;
 
   let connections: Array<{
@@ -749,10 +778,10 @@ async function removeDanglingBingConnections(ctx: {
 
     // Does the backing Bing resource still resolve? A 404 / ResourceGroupNotFound
     // (e.g. the RG was deleted) marks the connection as dangling.
-    const probe = await execa("az", [
+    const probe = await runAzure([
       "rest", "--method", "get",
       "--url", `${bingResourceId}?api-version=2020-06-10`,
-    ], { stdio: "pipe" }).then(() => ({ ok: true, err: "" }))
+    ]).then(() => ({ ok: true, err: "" }))
       .catch((e: { stderr?: string; message?: string }) => ({
         ok: false,
         err: String(e.stderr || e.message || ""),
@@ -768,8 +797,8 @@ async function removeDanglingBingConnections(ctx: {
       `${foundryResourceId}/projects/${foundryProjectName}/connections/${connName}?api-version=2025-06-01`;
     const acctConnUrl =
       `${foundryResourceId}/connections/${connName}?api-version=2025-06-01`;
-    await execa("az", ["rest", "--method", "delete", "--url", projConnUrl], { stdio: "pipe" }).catch(() => {});
-    await execa("az", ["rest", "--method", "delete", "--url", acctConnUrl], { stdio: "pipe" }).catch(() => {});
+    await runAzure(["rest", "--method", "delete", "--url", projConnUrl]).catch(() => {});
+    await runAzure(["rest", "--method", "delete", "--url", acctConnUrl]).catch(() => {});
 
     stepper.detail(
       "info",

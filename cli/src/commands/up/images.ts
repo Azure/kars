@@ -23,6 +23,7 @@ import * as path from "path";
 import type { Stepper } from "../../stepper.js";
 import { ensureAgtRepo, ensureAgtWheels } from "../../lib/agt-bootstrap.js";
 import { stageRustBinaries } from "../../lib/stage-rust-bin.js";
+import type { AzureRunner } from "./orchestration.js";
 import { isPhaseSkippable, markPhaseDone, type ResumeTopology } from "./resume.js";
 
 export interface AcquireImagesContext {
@@ -41,11 +42,23 @@ export interface AcquireImagesContext {
   repoRoot: string;
   resumeFromPhase: Parameters<typeof isPhaseSkippable>[1];
   resumeTopology: ResumeTopology;
+  persistResumeState?: boolean;
+  runAzure: AzureRunner;
 }
 
 /** Acquire all kars images into the user's ACR per the chosen source. */
 export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
-  const { stepper, options, acrLoginServer, acr, repoRoot, resumeFromPhase, resumeTopology } = ctx;
+  const {
+    stepper,
+    options,
+    acrLoginServer,
+    acr,
+    repoRoot,
+    resumeFromPhase,
+    resumeTopology,
+    persistResumeState = true,
+    runAzure,
+  } = ctx;
 
   // --release [version]: pull the PUBLIC signed GHCR release images
   // instead of building or importing from a private source ACR. Bare
@@ -100,13 +113,13 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     for (const img of releaseImages) {
       stepper.update(`Importing ${img.target} from ${img.src}...`);
       try {
-        await execa("az", [
+        await runAzure([
           "acr", "import",
           "--name", acr,
           "--source", img.src,
           "--image", img.target,
           "--force",
-        ], { stdio: "pipe" });
+        ]);
         stepper.detail("ok", img.target);
       } catch (e) {
         const msg = ((e as { message?: string }).message ?? "").split("\n")[0].slice(0, 90);
@@ -130,7 +143,7 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     // Developer mode: build locally and push
     stepper.step("Building and pushing images...");
     stepper.update("Logging into ACR...");
-    await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
+    await runAzure(["acr", "login", "--name", acr]);
 
     const buildPush = async (dockerfile: string, tag: string, buildArgs: string[] = [], context?: string) => {
       stepper.update(`Building ${tag}...`);
@@ -147,7 +160,7 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
       for (let attempt = 1; attempt <= 3; attempt++) {
         try {
           stepper.update(`Pushing ${tag}${attempt > 1 ? ` (retry ${attempt}/3)` : ""}...`);
-          if (attempt > 1) await execa("az", ["acr", "login", "--name", acr], { stdio: "pipe" });
+          if (attempt > 1) await runAzure(["acr", "login", "--name", acr]);
           await execa("docker", ["push", `${acrLoginServer}/${tag}`], { stdio: "pipe" });
           break;
         } catch (e: unknown) {
@@ -237,13 +250,13 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     // references them by tag.
     for (const tag of ["agentmesh-relay-agt:latest", "agentmesh-registry-agt:latest"]) {
       stepper.update(`Importing ${tag} from ${options.sourceAcr}...`);
-      await execa("az", [
+      await runAzure([
         "acr", "import",
         "--name", acr,
         "--source", `${options.sourceAcr}/${tag}`,
         "--image", tag,
         "--force",
-      ], { stdio: "pipe" }).then(() => {
+      ]).then(() => {
         stepper.detail("ok", tag);
       }).catch((e: { message?: string }) => {
         stepper.detail("skip", `${tag} — import failed (${(e.message ?? "").split("\n")[0].slice(0, 80)})`);
@@ -282,13 +295,13 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
     for (const img of images) {
       stepper.update(`Importing ${img.target}...`);
       try {
-        await execa("az", [
+        await runAzure([
           "acr", "import",
           "--name", acr,
           "--source", img.source,
           "--image", img.target,
           "--force",
-        ], { stdio: "pipe" });
+        ]);
         stepper.detail("ok", img.target);
       } catch (e) {
         const msg = ((e as { message?: string }).message ?? "").split("\n")[0].slice(0, 90);
@@ -311,5 +324,7 @@ export async function acquireImages(ctx: AcquireImagesContext): Promise<void> {
 
     stepper.done("Images available in ACR");
   }
-  markPhaseDone("images", {}, resumeTopology);
+  if (persistResumeState) {
+    markPhaseDone("images", {}, resumeTopology);
+  }
 }

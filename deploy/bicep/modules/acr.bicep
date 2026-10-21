@@ -13,7 +13,7 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
   name: name
   location: location
   sku: {
-    name: 'Premium'   // Required for geo-replication, content trust, and firewall rules
+    name: 'Premium'   // Required for geo-replication and firewall rules
   }
   properties: {
     adminUserEnabled: false
@@ -27,10 +27,6 @@ resource acr 'Microsoft.ContainerRegistry/registries@2023-07-01' = {
       }]
     }
     policies: {
-      trustPolicy: {
-        type: 'Notary'
-        status: 'enabled'
-      }
       quarantinePolicy: {
         status: 'disabled'  // Requires external scanner integration; enable when ready
       }

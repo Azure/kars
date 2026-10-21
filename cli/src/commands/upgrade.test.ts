@@ -1,9 +1,13 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-import { describe, it, expect } from "vitest";
+import { describe, it, expect, vi } from "vitest";
 import {
+  acrImport,
+  getUpgradeAksCredentials,
   isFoundryProjectHost,
+  reconcileUpgradeFoundryMemoryRbac,
+  resolveUpgradeSubscription,
   resolveTargetVersion,
   buildHelmUpgradeArgs,
   detectCurrentVersion,
@@ -12,6 +16,246 @@ import {
   parseHelmFieldConflicts,
   suggestConflictRemediation,
 } from "./upgrade.js";
+
+describe("kars upgrade Azure subscription pinning", () => {
+  it("uses the cached deployment subscription without ambient account discovery", async () => {
+    const execa = vi.fn() as unknown as Execa;
+
+    await expect(resolveUpgradeSubscription(execa, {
+      subscription: "  cached-sub  ",
+      resourceGroup: "kars-rg",
+      aksCluster: "kars-aks",
+    })).resolves.toBe("cached-sub");
+    expect(execa).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    "ResourceNotFound",
+    "ResourceGroupNotFound",
+    "ManagedClusterNotFound",
+    "ParentResourceNotFound",
+  ])("continues after explicit %s and finds one unique legacy subscription", async (code) => {
+    const execa = vi.fn(async (_file: string, args: readonly string[]) => {
+      if (args.slice(0, 2).join(" ") === "account list") {
+        return { stdout: JSON.stringify(["sub-a", "sub-b"]) };
+      }
+      const subscription = args[args.indexOf("--subscription") + 1];
+      if (subscription === "sub-a") {
+        throw {
+          stderr: `(${code}) The cached managed cluster was not found.`,
+        };
+      }
+      return { stdout: JSON.stringify({ name: "kars-aks", resourceGroup: "kars-rg" }) };
+    }) as unknown as Execa;
+
+    await expect(resolveUpgradeSubscription(execa, {
+      resourceGroup: "kars-rg",
+      aksCluster: "kars-aks",
+    })).resolves.toBe("sub-b");
+
+    expect(vi.mocked(execa).mock.calls).toEqual([
+      [
+        "az",
+        [
+          "account", "list",
+          "--query", "[?state=='Enabled'].id",
+          "--output", "json",
+        ],
+        { stdio: "pipe", timeout: 15000 },
+      ],
+      [
+        "az",
+        [
+          "aks", "show",
+          "--resource-group", "kars-rg",
+          "--name", "kars-aks",
+          "--query", "{name:name,resourceGroup:resourceGroup}",
+          "--output", "json",
+          "--subscription", "sub-a",
+        ],
+        { stdio: "pipe", timeout: 30000 },
+      ],
+      [
+        "az",
+        [
+          "aks", "show",
+          "--resource-group", "kars-rg",
+          "--name", "kars-aks",
+          "--query", "{name:name,resourceGroup:resourceGroup}",
+          "--output", "json",
+          "--subscription", "sub-b",
+        ],
+        { stdio: "pipe", timeout: 30000 },
+      ],
+    ]);
+  });
+
+  it("fails closed when the exact legacy pair collides across subscriptions", async () => {
+    const execa = vi.fn(async (_file: string, args: readonly string[]) => {
+      if (args.slice(0, 2).join(" ") === "account list") {
+        return { stdout: JSON.stringify(["sub-a", "sub-b"]) };
+      }
+      return {
+        stdout: JSON.stringify({
+          name: "kars-aks",
+          resourceGroup: "kars-rg",
+        }),
+      };
+    }) as unknown as Execa;
+
+    await expect(resolveUpgradeSubscription(execa, {
+      resourceGroup: "kars-rg",
+      aksCluster: "kars-aks",
+    })).rejects.toThrow("exists in multiple enabled Azure subscriptions");
+
+    const clusterCalls = vi.mocked(execa).mock.calls.filter(([, args]) =>
+      (args as string[]).slice(0, 2).join(" ") === "aks show"
+    );
+    expect(clusterCalls).toHaveLength(2);
+  });
+
+  it.each([
+    {
+      name: "authorization",
+      failure: {
+        stderr: "(AuthorizationFailed) The client does not have authorization.",
+      },
+    },
+    {
+      name: "timeout",
+      failure: {
+        message: "Command timed out after 30000 milliseconds",
+        timedOut: true,
+      },
+    },
+  ])("aborts legacy discovery on $name failure", async ({ failure }) => {
+    const execa = vi.fn(async (_file: string, args: readonly string[]) => {
+      if (args.slice(0, 2).join(" ") === "account list") {
+        return { stdout: JSON.stringify(["sub-a", "sub-b"]) };
+      }
+      throw failure;
+    }) as unknown as Execa;
+
+    await expect(resolveUpgradeSubscription(execa, {
+      resourceGroup: "kars-rg",
+      aksCluster: "kars-aks",
+    })).rejects.toBe(failure);
+
+    const clusterCalls = vi.mocked(execa).mock.calls.filter(([, args]) =>
+      (args as string[]).slice(0, 2).join(" ") === "aks show"
+    );
+    expect(clusterCalls).toHaveLength(1);
+    for (const [, args] of clusterCalls) {
+      const argv = args as string[];
+      expect(argv.filter((arg) =>
+        arg === "--subscription" || arg.startsWith("--subscription=")
+      )).toEqual(["--subscription"]);
+    }
+  });
+
+  it("pins ACR imports exactly once to the resolved deployment subscription", async () => {
+    const execa = vi.fn().mockResolvedValue({ stdout: "" }) as unknown as Execa;
+
+    await expect(acrImport(
+      execa,
+      "deployment-sub",
+      "karsacr",
+      "ghcr.io/azure/kars-controller:v1.2.3",
+      "kars-controller:v1.2.3",
+    )).resolves.toBe(true);
+
+    expect(execa).toHaveBeenCalledExactlyOnceWith(
+      "az",
+      [
+        "acr", "import",
+        "--name", "karsacr",
+        "--source", "ghcr.io/azure/kars-controller:v1.2.3",
+        "--image", "kars-controller:v1.2.3",
+        "--force",
+        "--subscription", "deployment-sub",
+      ],
+      { stdio: "pipe" },
+    );
+  });
+
+  it("pins the exact AKS credentials command to the deployment subscription", async () => {
+    const execa = vi.fn().mockResolvedValue({ stdout: "" }) as unknown as Execa;
+
+    await getUpgradeAksCredentials(
+      execa,
+      "deployment-sub",
+      "kars-aks",
+      "kars-rg",
+    );
+
+    expect(execa).toHaveBeenCalledExactlyOnceWith(
+      "az",
+      [
+        "aks", "get-credentials",
+        "--name", "kars-aks",
+        "--resource-group", "kars-rg",
+        "--overwrite-existing",
+        "--output", "none",
+        "--subscription", "deployment-sub",
+      ],
+      { stdio: "pipe" },
+    );
+  });
+
+  it("pins downstream Foundry identity and role calls without changing non-Azure commands", async () => {
+    const execa = vi.fn().mockResolvedValue({ stdout: "" }) as unknown as Execa;
+    const reconcile = async ({ execa: downstreamExeca }: { execa: Execa }) => {
+      await downstreamExeca("az", [
+        "identity", "show",
+        "--name", "foundry-project-mi",
+        "--resource-group", "foundry-rg",
+      ]);
+      await downstreamExeca("az", [
+        "role", "assignment", "create",
+        "--assignee-object-id", "project-principal",
+        "--scope", "/subscriptions/deployment-sub/resourceGroups/foundry-rg",
+      ]);
+      await downstreamExeca("kubectl", ["get", "pods", "-n", "kars-system"]);
+      return {
+        granted: true,
+        projectMiPrincipalId: "project-principal",
+        notes: [],
+      };
+    };
+
+    await reconcileUpgradeFoundryMemoryRbac(
+      execa,
+      "deployment-sub",
+      undefined as never,
+      "https://account.services.ai.azure.com/api/projects/project",
+      reconcile as never,
+    );
+
+    expect(vi.mocked(execa).mock.calls).toEqual([
+      [
+        "az",
+        [
+          "identity", "show",
+          "--name", "foundry-project-mi",
+          "--resource-group", "foundry-rg",
+          "--subscription", "deployment-sub",
+        ],
+        undefined,
+      ],
+      [
+        "az",
+        [
+          "role", "assignment", "create",
+          "--assignee-object-id", "project-principal",
+          "--scope", "/subscriptions/deployment-sub/resourceGroups/foundry-rg",
+          "--subscription", "deployment-sub",
+        ],
+        undefined,
+      ],
+      ["kubectl", ["get", "pods", "-n", "kars-system"], undefined],
+    ]);
+  });
+});
 
 describe("isFoundryProjectHost", () => {
   it("accepts a real Foundry project endpoint", () => {
