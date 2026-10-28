@@ -7,7 +7,8 @@
 //! (malware C2, phishing, cryptojacking, etc.). It combines:
 //!
 //! - **Seed file**: loaded from ConfigMap at startup (always available, even offline)
-//! - **Live feeds**: refreshed in background from OISD and URLhaus on a timer
+//! - **Live feeds**: refreshed in background from OISD and the NetAPI compromised domain
+//!   list on a timer
 //! - **High-risk TLDs**: blocked unconditionally (.tk, .ml, .ga, .cf, .gq — free TLDs
 //!   abused by >80% of phishing campaigns per APWG data)
 //! - **IP-direct blocking**: bare IP addresses in URLs are suspicious and blocked
@@ -38,7 +39,10 @@ const MAX_DOMAINS_PER_FEED: usize = 500_000;
 
 /// Well-known threat intelligence feed URLs.
 const OISD_SMALL_URL: &str = "https://small.oisd.nl/domainswild";
-const URLHAUS_URL: &str = "https://urlhaus.abuse.ch/downloads/hostfile/";
+/// NetAPI compromised domain list in hosts format ("0.0.0.0 domain"), CC BY 4.0, no key.
+/// Replaces the URLhaus hostfile, which abuse.ch retired on 2026-10-21 (HTTP 410).
+const NETAPI_COMPROMISED_URL: &str =
+    "https://netapi.com/api2/?method=compromised&dataset_type=url&format=hosts";
 
 /// Thread-safe blocklist that can be shared across handlers and updated in background.
 #[derive(Clone)]
@@ -168,7 +172,7 @@ impl Blocklist {
     }
 
     /// Start the background refresh task. Call once at startup.
-    /// Fetches from OISD + URLhaus every `refresh_interval` seconds.
+    /// Fetches from OISD + NetAPI every `refresh_interval` seconds.
     pub fn start_refresh_task(
         &self,
         client: reqwest::Client,
@@ -221,14 +225,14 @@ impl Blocklist {
                     }
                 }
 
-                // Fetch URLhaus (hostfile format: "127.0.0.1 domain")
-                match fetch_feed(&client, URLHAUS_URL).await {
+                // Fetch the NetAPI compromised domain list (hostfile format: "0.0.0.0 domain")
+                match fetch_feed(&client, NETAPI_COMPROMISED_URL).await {
                     Ok(content) => {
                         let count = parse_hostfile(&content, &mut new_domains);
-                        tracing::info!(count, "Blocklist: loaded URLhaus feed");
+                        tracing::info!(count, "Blocklist: loaded NetAPI feed");
                     }
                     Err(e) => {
-                        tracing::warn!(error = %e, "Blocklist: URLhaus fetch failed — keeping existing");
+                        tracing::warn!(error = %e, "Blocklist: NetAPI fetch failed — keeping existing");
                     }
                 }
 

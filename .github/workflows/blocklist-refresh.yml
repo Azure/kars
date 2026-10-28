@@ -20,7 +20,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Fetch OISD + URLhaus → seed-domains.txt
+      - name: Fetch OISD → seed-domains.txt
         run: |
           set -euo pipefail
           OUT="cli/blocklists/seed-domains.txt"
@@ -28,7 +28,7 @@ jobs:
 
           echo "# Kars Domain Blocklist — Auto-refreshed Seed File"  > "$TMP/merged.txt"
           echo "# Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"            >> "$TMP/merged.txt"
-          echo "# Sources: OISD small, URLhaus hostfile, manual entries"  >> "$TMP/merged.txt"
+          echo "# Sources: OISD small, manual entries"  >> "$TMP/merged.txt"
           echo "#"                                                        >> "$TMP/merged.txt"
 
           # ── Preserve manual entries (lines between markers) ──
@@ -48,21 +48,6 @@ jobs:
           else
             echo "# OISD fetch failed — skipped" >> "$TMP/merged.txt"
             echo "::warning::OISD fetch failed"
-          fi
-
-          # ── URLhaus (hostfile format → domain-only) ──
-          echo "" >> "$TMP/merged.txt"
-          echo "# === URLhaus feed ===" >> "$TMP/merged.txt"
-          if curl -sfL --max-time 120 --max-filesize 52428800 \
-               "https://urlhaus.abuse.ch/downloads/hostfile/" -o "$TMP/urlhaus.txt"; then
-            grep '^127\.0\.0\.1' "$TMP/urlhaus.txt" | awk '{print $2}' > "$TMP/urlhaus-domains.txt"
-            UH_COUNT=$(wc -l < "$TMP/urlhaus-domains.txt" | tr -d ' ')
-            echo "# $UH_COUNT domains from URLhaus" >> "$TMP/merged.txt"
-            cat "$TMP/urlhaus-domains.txt" >> "$TMP/merged.txt"
-            echo "::notice::URLhaus: $UH_COUNT domains fetched"
-          else
-            echo "# URLhaus fetch failed — skipped" >> "$TMP/merged.txt"
-            echo "::warning::URLhaus fetch failed"
           fi
 
           # ── Deduplicate + sort ──
@@ -119,7 +104,7 @@ jobs:
           DOMAINS=$(grep -cv '^#\|^$' cli/blocklists/seed-domains.txt || echo 0)
           git commit -m "chore(blocklist): auto-refresh seed — $DOMAINS domains
 
-          Sources: OISD small, URLhaus hostfile
+          Sources: OISD small
           Generated: $(date -u +%Y-%m-%dT%H:%M:%SZ)"
           git push --force origin "$BRANCH"
 
@@ -133,7 +118,7 @@ jobs:
           # Use REST API instead of GraphQL — works with limited GITHUB_TOKEN
           gh api repos/${{ github.repository }}/pulls \
             -f title="chore(blocklist): auto-refresh seed — $DOMAINS domains" \
-            -f body="Automated daily blocklist refresh from OISD + URLhaus feeds." \
+            -f body="Automated daily blocklist refresh from the OISD feed." \
             -f head="$BRANCH" \
             -f base="main" \
             2>/dev/null || echo "::warning::Could not create PR (enterprise token restriction). Branch $BRANCH pushed — create PR manually."

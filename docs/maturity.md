@@ -38,7 +38,7 @@ closed — not that the field merely exists on a CRD.
 | Kubernetes NetworkPolicy default-deny egress | ✅ Enforced | Controller reconciles from `KarsSandbox` spec |
 | Router L7 allowlist on every outbound CONNECT | ✅ Enforced | Inline `allowedEndpoints` is the source of truth today |
 | `EgressApproval` time-boxed exceptions | ✅ Enforced | Router consults active `EgressApproval` CRs per request |
-| Auto-refreshing malicious-domain blocklist (OISD + URLhaus) | ✅ Enforced | [egress-proxy.md](egress-proxy.md) |
+| Auto-refreshing malicious-domain blocklist (OISD + NetAPI) | ✅ Enforced | [egress-proxy.md](egress-proxy.md) |
 | Signed-OCI allowlist as the L7 egress source of truth | ✅ Enforced | The router loads the cosign-verified, controller-resolved bundle and the forward proxy denies any host not in it (`egress_allowlist_loader.rs`, `forward_proxy.rs`). Default-deny in `egressMode: Strict`; the default `Learn` mode records non-blocklisted hosts instead of denying. Active `EgressApproval` CRs are unioned in. |
 
 ## Kernel & container hardening
