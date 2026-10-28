@@ -72,7 +72,7 @@ Implemented in `runtimes/hermes/src/kars_runtime_hermes/plugin/handoff.py`. `kar
 
 | Tool | What it does |
 |---|---|
-| `http_fetch` | Single outbound HTTP fetch, governance-gated. Subject to the L7 egress allowlist (`KarsSandbox.spec.networkPolicy.allowlistRef`) + the auto-refreshing OISD + URLhaus blocklist + any active `EgressApproval` overlay. Hermes' own `web_fetch` built-in is deregistered so this is the only path. |
+| `http_fetch` | Single outbound HTTP fetch, governance-gated. Subject to the L7 egress allowlist (`KarsSandbox.spec.networkPolicy.allowlistRef`) + the auto-refreshing OISD + NetAPI blocklist + any active `EgressApproval` overlay. Hermes' own `web_fetch` built-in is deregistered so this is the only path. |
 
 ### Hooks (governance + telemetry) — parity with OpenClaw
 

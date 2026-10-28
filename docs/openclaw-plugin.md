@@ -44,7 +44,7 @@ Authoritative source: `runtimes/openclaw/openclaw.plugin.json` → `contracts.to
 
 | Tool | What it does |
 |---|---|
-| `http_fetch` | Single outbound HTTP fetch, governance-gated. Subject to the L7 egress allowlist (`KarsSandbox.spec.networkPolicy.allowlistRef`) + the auto-refreshing OISD + URLhaus blocklist + any active `EgressApproval` overlay. |
+| `http_fetch` | Single outbound HTTP fetch, governance-gated. Subject to the L7 egress allowlist (`KarsSandbox.spec.networkPolicy.allowlistRef`) + the auto-refreshing OISD + NetAPI blocklist + any active `EgressApproval` overlay. |
 
 ### Foundry data plane (10)
 

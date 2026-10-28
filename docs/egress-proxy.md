@@ -326,7 +326,7 @@ The blocklist engine combines multiple layers of threat intelligence:
 |--------|-------------|-----------------|
 | **Seed file** | Curated domain list loaded from ConfigMap at startup | On pod restart |
 | **OISD** | Community-maintained blocklist (50k+ domains) | Every 6 hours |
-| **URLhaus** | abuse.ch malware URL database (hostfile format) | Every 6 hours |
+| **NetAPI** | Compromised domain list (hosts format, CC BY 4.0) | Every 6 hours |
 | **High-risk TLDs** | `.tk`, `.ml`, `.ga`, `.cf`, `.gq`, `.top`, `.buzz`, `.surf`, `.rest`, `.onion` | Static |
 | **Bare IP blocking** | URLs with IP addresses instead of domains | Static |
 
@@ -342,8 +342,8 @@ The blocklist stays current through multiple refresh mechanisms:
 
 | Mechanism | Frequency | Source |
 |-----------|-----------|--------|
-| Router background task | Every 6 hours | Fetches latest feeds from [OISD](https://oisd.nl/) and [URLhaus](https://urlhaus.abuse.ch/) |
-| K8s CronJob | Every 6 hours | Updates the ConfigMap mounted at `/etc/kars/blocklist/domains.txt` |
+| Router background task | Every 6 hours | Fetches latest feeds from [OISD](https://oisd.nl/) and [NetAPI](https://netapi.com/compromised-urls/) |
+| K8s CronJob | Every 6 hours | Updates the ConfigMap mounted at `/etc/kars/blocklist/domains.txt` (OISD only, ConfigMaps are capped at 1 MiB) |
 | GitHub Actions CI | Daily | Refreshes the seed file in the repository (≤ 24h old) |
 
 **Safe refresh:** If all upstream feeds fail, the previous entries are preserved — no wipe-on-failure. The router logs a warning and retries on the next cycle.
