@@ -137,9 +137,11 @@ impl Cluster {
             })
             .unwrap_or(0);
         // Uptime from the pod start time.
-        let uptime_seconds = status
-            .and_then(|s| s.start_time.as_ref())
-            .map(|t| (chrono::Utc::now() - t.0).num_seconds().max(0));
+        let uptime_seconds = status.and_then(|s| s.start_time.as_ref()).map(|t| {
+            (chrono::Utc::now() - crate::kars::time::to_chrono(t.0))
+                .num_seconds()
+                .max(0)
+        });
         // A container stuck waiting (e.g. CrashLoopBackOff) is the honest
         // unhealthy signal — surface the reason.
         let waiting_reason = status.and_then(|status| {

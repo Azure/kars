@@ -12,8 +12,8 @@
 
 mod additional_providers;
 mod audit;
-mod copilot_login;
 mod component_models;
+mod copilot_login;
 mod copilot_transport;
 mod diagnostics;
 mod evals;
@@ -25,8 +25,8 @@ mod skills_profiles;
 
 pub use additional_providers::*;
 pub use audit::*;
-pub use copilot_login::*;
 pub use component_models::*;
+pub use copilot_login::*;
 pub use diagnostics::*;
 pub use evals::*;
 pub use local_inference::*;
@@ -69,7 +69,7 @@ fn created_of(o: &DynamicObject) -> Option<String> {
     o.metadata
         .creation_timestamp
         .as_ref()
-        .map(|t| t.0.to_rfc3339())
+        .map(|t| crate::kars::time::to_chrono(t.0).to_rfc3339())
 }
 fn spec(o: &DynamicObject) -> &Value {
     o.data.get("spec").unwrap_or(&Value::Null)

@@ -1,10 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::providers::signing::sha256_hex;
 use chrono::{DateTime, Utc};
 use kube::ResourceExt;
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 
 use crate::auth::Principal;
 use crate::error::{AppError, AppResult};
@@ -88,10 +88,7 @@ fn package_sha256(task: &KarsTask) -> String {
         "envelope": task.spec.envelope, "blueprint": blueprint,
         "execution_runtime": task.spec.execution.as_ref().and_then(|execution| execution.runtime.as_deref()),
     });
-    format!(
-        "sha256:{:x}",
-        Sha256::digest(package.to_string().as_bytes())
-    )
+    format!("sha256:{}", sha256_hex(package.to_string().as_bytes()))
 }
 
 pub(crate) fn stamp(

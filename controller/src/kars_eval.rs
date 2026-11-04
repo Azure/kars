@@ -344,8 +344,8 @@ mod tests {
             display_name: Some("Daily jailbreak check".into()),
             runner_image: None,
         };
-        let yaml = serde_yaml::to_string(&spec).unwrap();
-        let parsed: KarsEvalSpec = serde_yaml::from_str(&yaml).unwrap();
+        let yaml = serde_saphyr::to_string(&spec).unwrap();
+        let parsed: KarsEvalSpec = serde_saphyr::from_str(&yaml).unwrap();
         assert_eq!(parsed.target_sandbox_ref.name, "agent-001");
         assert_eq!(parsed.corpus.builtin.as_deref(), Some("jailbreak-baseline"));
         assert!(parsed.corpus.bundle_ref.is_none());

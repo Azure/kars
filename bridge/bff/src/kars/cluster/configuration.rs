@@ -545,12 +545,16 @@ impl Cluster {
                 Err(e) => return Err(e),
             }
         }
-        Err(kube::Error::Api(kube::core::ErrorResponse {
-            status: "Failure".into(),
-            message: format!("exhausted optimistic-concurrency retries writing {name}"),
-            reason: "Conflict".into(),
-            code: 409,
-        }))
+        Err(kube::Error::Api(
+            kube::core::Status {
+                status: Some(kube::core::response::StatusSummary::Failure),
+                message: format!("exhausted optimistic-concurrency retries writing {name}"),
+                reason: "Conflict".into(),
+                code: 409,
+                ..Default::default()
+            }
+            .boxed(),
+        ))
     }
 
     /// Read all team digest logs (`kars-team-digest-*`) across teams, flattened

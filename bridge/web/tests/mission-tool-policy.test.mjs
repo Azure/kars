@@ -127,15 +127,24 @@ test("Mission configuration labels baseline egress without denying temporary gra
 });
 
 test("network panel does not turn an unreported baseline into proof of no egress", () => {
-  const { NetworkMode } = load("app/workspace/missions/[name]/network-mode.tsx", {
-    react: { useEffect: () => {}, useState: value => [value, () => {}] },
-    "next/navigation": { useRouter: () => ({}) }, "@/components/icon": {},
-  });
-  const output = JSON.stringify(NetworkMode({ ns: "test", task: "mission", mode: "Strict" }));
-  assert.match(output, /Reported baseline destinations/);
-  assert.match(output, /excludes temporary grants/);
-  assert.match(output, /No baseline destinations reported/);
-  assert.doesNotMatch(output, /all other egress denied/);
+  for (const [data, loading, message] of [
+    [null, true, /Reading network evidence/],
+    [{ available: false }, false, /Missing data does not prove no traffic or successful enforcement/],
+    [{ available: true, enforced: [] }, false, /No baseline destinations reported/],
+  ]) {
+    const states = [data, loading];
+    let cursor = 0;
+    const { NetworkMode } = load("app/workspace/missions/[name]/network-mode.tsx", {
+      react: { useEffect: () => {}, useState: () => [states[cursor++], () => {}] },
+      "@/components/icon": {},
+    });
+    const output = JSON.stringify(NetworkMode({ ns: "test", task: "mission", mode: "Strict" }));
+    assert.match(output, /Reported baseline destinations/);
+    assert.match(output, /excludes temporary grants/);
+    assert.match(output, message);
+    assert.doesNotMatch(output, /all other egress denied/);
+    if (data?.available !== true) assert.doesNotMatch(output, /No baseline destinations reported/);
+  }
 });
 
 test("Mission and Inbox copy does not promise in-place autonomy widening", () => {

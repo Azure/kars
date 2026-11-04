@@ -119,8 +119,11 @@ pub async fn create_team(
     if git_write.is_some() {
         crate::routes::github::validate_bound_github_egress(
             b.egress.iter().map(|entry| entry.host.trim()).chain(
-                b.roles.iter().filter_map(|role| role.resources.as_ref())
-                    .flat_map(|resources| &resources.egress).map(|entry| entry.host.trim()),
+                b.roles
+                    .iter()
+                    .filter_map(|role| role.resources.as_ref())
+                    .flat_map(|resources| &resources.egress)
+                    .map(|entry| entry.host.trim()),
             ),
         )?;
     }
@@ -264,7 +267,13 @@ pub async fn create_team(
                 .collect::<Vec<_>>()
         );
     }
-    apply_team_git_write(&mut spec, git_write.as_ref().filter(|(_, binding)| binding.write).map(|(config, _)| config))?;
+    apply_team_git_write(
+        &mut spec,
+        git_write
+            .as_ref()
+            .filter(|(_, binding)| binding.write)
+            .map(|(config, _)| config),
+    )?;
     if let Some((_, binding)) = &git_write {
         spec["blueprint"]["githubBinding"] =
             serde_json::to_value(binding).map_err(|error| AppError::Upstream(error.to_string()))?;
@@ -690,11 +699,17 @@ pub async fn update_team(
     });
     if let Some(repos) = repositories {
         let write = super::validation::team_github_write_enabled(
-            b.execution_plan.as_ref(), team.spec.blueprint.as_ref(),
+            b.execution_plan.as_ref(),
+            team.spec.blueprint.as_ref(),
         );
-        let git_write =
-            crate::routes::github::authorize_github_access(cluster, &ns, &principal, Some(repos), write)
-                .await?;
+        let git_write = crate::routes::github::authorize_github_access(
+            cluster,
+            &ns,
+            &principal,
+            Some(repos),
+            write,
+        )
+        .await?;
         blueprint.insert(
             "githubBinding".into(),
             git_write

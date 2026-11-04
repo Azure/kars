@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Genuine pinned OpenClaw host verification
 
 This opt-in test starts the **actual installed OpenClaw gateway**. Its ordinary

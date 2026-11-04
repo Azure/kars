@@ -198,7 +198,9 @@ fn model_default_selection_is_provider_qualified_and_preserves_every_configured_
     }
 }
 
-pub(crate) async fn build_available_options(cluster: &crate::kars::cluster::Cluster) -> AppResult<Options> {
+pub(crate) async fn build_available_options(
+    cluster: &crate::kars::cluster::Cluster,
+) -> AppResult<Options> {
     // Models: the controller-configured default + catalog, deduped against any
     // distinct models already pinned on existing InferencePolicies (real,
     // in-use facts). Order: default first, then catalog, then discovered.

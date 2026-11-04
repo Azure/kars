@@ -1717,9 +1717,10 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
                     &error.to_string(),
                 );
                 let current = serde_json::to_value(&sandbox.status)?;
-                if patch["status"].as_object().is_some_and(|fields| {
-                    fields.iter().any(|(key, value)| current[key] != *value)
-                }) {
+                if patch["status"]
+                    .as_object()
+                    .is_some_and(|fields| fields.iter().any(|(key, value)| current[key] != *value))
+                {
                     Api::<KarsSandbox>::namespaced(
                         client.clone(),
                         &sandbox.namespace().unwrap_or_default(),
@@ -1731,7 +1732,7 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
             }
             Err(governed_services::credentials::IssuanceError::Rejected(detail)) => {
                 degrade!("GovernedServicePrivacyNotReady", detail)
-            },
+            }
         };
         let mut router_env = vec![
             json!({"name": "AZURE_OPENAI_ENDPOINT", "value": &ctx.openai_endpoint}),
@@ -2165,14 +2166,15 @@ async fn reconcile(sandbox: Arc<KarsSandbox>, ctx: Arc<Context>) -> Result<Actio
 
         service_identity.mount(&mut pod_spec);
         if builtin_memory_enabled {
-            if let Err(error) = service_identity.ensure_builtin_memory(
-                client,
-                &sandbox,
-                owned_namespace.as_ref().ok_or_else(|| {
-                    ReconcileError::Configuration("Sandbox namespace is absent".into())
-                })?,
-            )
-            .await
+            if let Err(error) = service_identity
+                .ensure_builtin_memory(
+                    client,
+                    &sandbox,
+                    owned_namespace.as_ref().ok_or_else(|| {
+                        ReconcileError::Configuration("Sandbox namespace is absent".into())
+                    })?,
+                )
+                .await
             {
                 if error.is::<crate::reviewed_execution::TaskSnapshotChanged>()
                     || error.is::<builtin_memory::CredentialEpochChanged>()

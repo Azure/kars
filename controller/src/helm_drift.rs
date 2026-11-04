@@ -159,7 +159,6 @@ mod tests {
     #[test]
     fn helm_sandbox_retains_standard_condition_observed_generation() {
         use kube::CustomResourceExt;
-        use serde::Deserialize;
 
         let chart = concat!(env!("CARGO_MANIFEST_DIR"), "/../deploy/helm/kars");
         let output = std::process::Command::new("helm")
@@ -176,11 +175,7 @@ mod tests {
             .expect("Helm is required for Sandbox condition drift detection");
         assert!(output.status.success(), "Helm failed to render Sandbox CRD");
         let documents: Vec<serde_json::Value> =
-            serde_yaml::Deserializer::from_slice(&output.stdout)
-                .map(|document| {
-                    serde_json::Value::deserialize(document).expect("rendered CRD YAML")
-                })
-                .collect();
+            serde_saphyr::from_slice_multiple(&output.stdout).expect("rendered CRD YAML");
         let helm = documents
             .iter()
             .find(|document| document["metadata"]["name"] == "karssandboxes.kars.azure.com")
@@ -216,7 +211,7 @@ mod tests {
             return;
         }
         let crd = mcp_server_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -230,7 +225,7 @@ mod tests {
             return;
         }
         let crd = tool_policy_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -244,7 +239,7 @@ mod tests {
             return;
         }
         let crd = a2a_agent_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -264,7 +259,7 @@ mod tests {
             helm_text
         };
         let helm_crd: serde_json::Value =
-            serde_yaml::from_str(&helm_text).expect("helm crd YAML must parse as JSON value");
+            serde_saphyr::from_str(&helm_text).expect("helm crd YAML must parse as JSON value");
 
         let helm_canonical = canonical_form(&helm_crd);
         let rust_canonical = canonical_form(&rust_value);
@@ -309,7 +304,7 @@ mod tests {
             return;
         }
         let crd = inference_policy_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -334,7 +329,7 @@ mod tests {
             return;
         }
         let crd = kars_memory_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -355,7 +350,7 @@ mod tests {
             return;
         }
         let crd = kars_eval_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -376,7 +371,7 @@ mod tests {
             return;
         }
         let crd = kars_task_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -397,7 +392,7 @@ mod tests {
             return;
         }
         let crd = kars_team_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -414,7 +409,7 @@ mod tests {
             return;
         }
         let crd = kars_skill_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -431,7 +426,7 @@ mod tests {
             return;
         }
         let crd = kars_profile_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -452,7 +447,7 @@ mod tests {
             return;
         }
         let crd = kars_receipt_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -473,7 +468,7 @@ mod tests {
             return;
         }
         let crd = kars_approval_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -494,7 +489,7 @@ mod tests {
             return;
         }
         let crd = trust_graph_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -515,7 +510,7 @@ mod tests {
             return;
         }
         let crd = egress_approval_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 
@@ -540,7 +535,7 @@ mod tests {
             return;
         }
         let crd = kars_sre_action_crd();
-        let yaml = serde_yaml::to_string(&crd).expect("serialize crd to YAML");
+        let yaml = serde_saphyr::to_string(&crd).expect("serialize crd to YAML");
         println!("---\n{yaml}");
     }
 

@@ -225,7 +225,11 @@ mod tests {
                     .iter()
                     .map(|class| claim(class, if *class == incomplete { status } else { "OK" }))
                     .collect();
-                assert_eq!(receipt_verdict(&claims), "partial", "{incomplete}: {status}");
+                assert_eq!(
+                    receipt_verdict(&claims),
+                    "partial",
+                    "{incomplete}: {status}"
+                );
             }
         }
         let mut claims: Vec<_> = classes.iter().map(|class| claim(class, "OK")).collect();

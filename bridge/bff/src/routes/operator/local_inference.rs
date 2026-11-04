@@ -359,7 +359,10 @@ pub async fn delete_local_model_deployment(
 ) -> AppResult<Json<serde_json::Value>> {
     let cluster = require_cluster(&state)?;
     let tag = format!("local-{name}");
-    cluster.require_provider_removable(&tag).await.map_err(AppError::from)?;
+    cluster
+        .require_provider_removable(&tag)
+        .await
+        .map_err(AppError::from)?;
     cluster
         .delete_model_deployment(&name)
         .await

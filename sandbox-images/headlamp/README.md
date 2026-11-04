@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Headlamp on Azure Linux 3
 
 Build from the repository root with `make image-headlamp` or:

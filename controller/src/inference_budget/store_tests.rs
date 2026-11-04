@@ -168,19 +168,31 @@ impl Respond for Server {
         const HISTORY: &str = "/api/v1/namespaces/kars-system/configmaps";
         match (request.method.as_str(), request.url.path()) {
             ("POST", HISTORY) => {
-                if state.fail_history { return failure(503); }
-                let mut object: k8s_openapi::api::core::v1::ConfigMap = serde_json::from_slice(&request.body).unwrap();
+                if state.fail_history {
+                    return failure(503);
+                }
+                let mut object: k8s_openapi::api::core::v1::ConfigMap =
+                    serde_json::from_slice(&request.body).unwrap();
                 let name = object.name_any();
-                if state.history.contains_key(&name) { return failure(409); }
+                if state.history.contains_key(&name) {
+                    return failure(409);
+                }
                 object.metadata.uid = Some(format!("page-{}", state.history.len()));
                 object.metadata.resource_version = Some("1".into());
                 state.history.insert(name, object.clone());
                 ResponseTemplate::new(201).set_body_json(object)
             }
             ("GET", path) if path.starts_with(&format!("{HISTORY}/")) => {
-                if state.fail_history { return failure(503); }
-                state.history.get(path.rsplit('/').next().unwrap())
-                    .map_or_else(|| failure(404), |object| ResponseTemplate::new(200).set_body_json(object))
+                if state.fail_history {
+                    return failure(503);
+                }
+                state
+                    .history
+                    .get(path.rsplit('/').next().unwrap())
+                    .map_or_else(
+                        || failure(404),
+                        |object| ResponseTemplate::new(200).set_body_json(object),
+                    )
             }
             ("GET", OBJECT) if matches!(state.fault, Fault::FailRead) => failure(503),
             ("GET", OBJECT) => state

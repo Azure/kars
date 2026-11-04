@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Copyright (c) Microsoft Corporation. Licensed under the MIT License.
 # Pass BEFORE reviewed private operator values to the ordinary Core helm install.
 # Deliberately incomplete: templates reject missing identity, funding, CNI and images.

@@ -77,14 +77,14 @@ test("digest cards preserve nullable scoped usage at report time", () => {
   const { outputText } = ts.transpileModule(`${source}\nexport { DigestCard };`, {
     compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022, jsx: ts.JsxEmit.ReactJSX },
   });
-  const module = {};
-  vm.runInNewContext(outputText, { exports: module, Intl, Number, require(name) {
+  const digestModule = {};
+  vm.runInNewContext(outputText, { exports: digestModule, Intl, Number, require(name) {
     if (name === "react/jsx-runtime") return { jsx, jsxs: jsx };
     if (name === "@/components/navigation-link") return { default: "a" };
     if (name.startsWith("@/")) return {};
     assert.fail(`Unexpected import: ${name}`);
   } });
-  const card = (tokens, scope = "GovernedInferenceLifetime") => text(module.DigestCard({ d: {
+  const card = (tokens, scope = "GovernedInferenceLifetime") => text(digestModule.DigestCard({ d: {
     team: "team", health: "Healthy", at: "2026-10-15T00:00:00Z", tokens_spent: tokens, tokens_spent_scope: scope,
   } }));
   assert.match(card(86793), /86,793 lifetime settled governed-inference tokens \(at report time\)/);

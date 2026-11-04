@@ -10,8 +10,8 @@ pub(crate) mod credential_bindings;
 #[cfg(test)]
 mod persistence_tests;
 mod promotion;
-pub(crate) mod requests;
 mod qualification;
+pub(crate) mod requests;
 mod runs;
 pub(crate) mod specs;
 #[cfg(test)]
@@ -130,7 +130,8 @@ async fn reconcile_inner(team: Arc<KarsTeam>, ctx: Arc<Ctx>) -> Result<Action, R
     }
 
     if qualification::recover_consumption(&ctx.client, &teams, &tasks_api, &team).await?
-        || qualification::pause_finished(&teams, &tasks_api, &team).await? {
+        || qualification::pause_finished(&teams, &tasks_api, &team).await?
+    {
         return Ok(Action::requeue(Duration::from_secs(1)));
     }
     let effective = match capabilities::effective_team(&ctx.client, &team).await {
@@ -383,7 +384,10 @@ async fn reconcile_valid(
         }
     }
     let detail = if team.spec.paused {
-        format!("Scheduling paused — no new runs will start. {} current run(s) may finish with normal usage accounting; Resume enables future scheduling, not replay.", stats.active)
+        format!(
+            "Scheduling paused — no new runs will start. {} current run(s) may finish with normal usage accounting; Resume enables future scheduling, not replay.",
+            stats.active
+        )
     } else if let Some(error) = &budget_error {
         format!(
             "Governed inference admissions paused: {error}. No new cadence or launch is admitted; existing Task UIDs and funded work are retained."

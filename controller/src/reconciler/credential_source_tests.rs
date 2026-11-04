@@ -519,8 +519,7 @@ fn chart_schema_and_generated_reference_contract_agree() {
         .split_once("                runtime:\n")
         .unwrap()
         .0;
-    let chart: serde_yaml::Value = serde_yaml::from_str(contract).unwrap();
-    let chart = serde_json::to_value(chart).unwrap();
+    let chart: serde_json::Value = serde_saphyr::from_str(contract).unwrap();
     let generated = serde_json::to_value(KarsSandbox::crd()).unwrap();
     let path = "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/credentialsRef";
     for key in ["name", "uid"] {

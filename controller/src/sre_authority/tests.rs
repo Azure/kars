@@ -242,7 +242,10 @@ pub(super) async fn fixture() -> (MockServer, Client, Arc<Mutex<State>>) {
         ResponseTemplate::new(200).set_body_json(value)
     }).mount(&server).await;
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client = Client::try_from(kube::Config::new(server.uri().parse().unwrap())).unwrap();
+    let config = crate::kube_client_config::preserve_request_semantics(kube::Config::new(
+        server.uri().parse().unwrap(),
+    ));
+    let client = Client::try_from(config).unwrap();
     (server, client, state)
 }
 
@@ -393,6 +396,22 @@ async fn admission_requires_observed_enforced_policies_without_type_warnings() {
             "metadata":{"name":name},"spec":{"policyName":name,"validationActions":["Deny","Audit"]}}));
     }
     admission::verify(&client).await.unwrap();
+    let binding = format!(
+        "{path}/validatingadmissionpolicybindings/{}",
+        admission::POLICIES[0]
+    );
+    let original = state.lock().unwrap().objects[&binding].clone();
+    for spec in [
+        json!({}),
+        json!({"policyName":admission::POLICIES[0],"validationActions":[]}),
+        json!({"policyName":admission::POLICIES[0],"validationActions":["Audit"]}),
+        json!({"policyName":"wrong-policy","validationActions":["Deny"]}),
+    ] {
+        state.lock().unwrap().objects.get_mut(&binding).unwrap()["spec"] = spec;
+        assert!(admission::verify(&client).await.is_err());
+    }
+    state.lock().unwrap().objects.insert(binding, original);
+    admission::verify(&client).await.unwrap();
     let policy = format!(
         "{path}/validatingadmissionpolicies/{}",
         admission::POLICIES[0]
@@ -489,6 +508,42 @@ async fn credentials_are_private_bound_and_renewable_without_agent_jwt() {
         decode(&locked.objects[private_path], "agent-token"),
         decode(&locked.objects[agent_path], "token")
     );
+}
+
+#[tokio::test]
+async fn incomplete_token_responses_never_publish_private_credentials() {
+    for field in ["token", "expirationTimestamp"] {
+        let (server, client, state) = fixture().await;
+        let reg = registration();
+        let authority = live::verify(&client, &reg).await.unwrap();
+        let sa = credentials::ensure_service_account(&client, &reg, &authority)
+            .await
+            .unwrap();
+        let mut status = json!({"token":"test-token","expirationTimestamp":
+            (chrono::Utc::now()+chrono::Duration::hours(1)).to_rfc3339()});
+        status.as_object_mut().unwrap().remove(field);
+        Mock::given(wiremock::matchers::method("POST"))
+            .and(wiremock::matchers::path(format!(
+                "/api/v1/namespaces/{RUNTIME_NAMESPACE}/serviceaccounts/{ROUTER_SA}/token"
+            )))
+            .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+                "apiVersion":"authentication.k8s.io/v1","kind":"TokenRequest",
+                "spec":{"audiences":[]},"status":status
+            })))
+            .with_priority(1)
+            .expect(1)
+            .mount(&server)
+            .await;
+        let error = credentials::ensure_for_test(&client, &reg, &authority, &sa)
+            .await
+            .unwrap_err();
+        assert!(error.contains("TokenRequest omitted"), "{error}");
+        assert!(!error.contains("test-token"));
+        let locked = state.lock().unwrap();
+        let private =
+            &locked.objects["/api/v1/namespaces/kars-sre/secrets/sre-api-router-identity"];
+        assert!(private["data"].get("kube-token").is_none());
+    }
 }
 
 #[tokio::test]
@@ -674,21 +729,33 @@ async fn retired_control_without_a_deployment_requires_verified_absent_consumers
 #[tokio::test]
 async fn newly_issued_control_without_deployment_preserves_only_qualified_empty_state() {
     for problem in [
-        "none", "unqualified", "old-epoch", "invalid-token", "false-retired-marker",
-        "changed-claim", "pod", "pods-api", "allowed",
+        "none",
+        "unqualified",
+        "old-epoch",
+        "invalid-token",
+        "false-retired-marker",
+        "changed-claim",
+        "pod",
+        "pods-api",
+        "allowed",
     ] {
         let (server, client, state) = fixture().await;
         let mut reg = registration();
-        reg.status = Some(serde_json::from_value(json!({
-            "phase":"Ready", "observedGeneration":1,
-            "legacySecretAccessDenied":true,
-            "privacyRevision":crate::sre_privacy::REVISION,
-            "privacyEpoch":reg.epoch()
-        })).unwrap());
+        reg.status = Some(
+            serde_json::from_value(json!({
+                "phase":"Ready", "observedGeneration":1,
+                "legacySecretAccessDenied":true,
+                "privacyRevision":crate::sre_privacy::REVISION,
+                "privacyEpoch":reg.epoch()
+            }))
+            .unwrap(),
+        );
         control_consumer(&state, &reg, 1);
         {
             let mut locked = state.lock().unwrap();
-            locked.objects.remove("/apis/apps/v1/namespaces/kars-sre/deployments/sre");
+            locked
+                .objects
+                .remove("/apis/apps/v1/namespaces/kars-sre/deployments/sre");
             let secret = &mut locked.objects.get_mut("/api/v1/secrets").unwrap()["items"][0];
             secret["data"] = json!({"control-token":base64::engine::general_purpose::STANDARD.encode("a".repeat(64))});
             if problem == "old-epoch" {
@@ -698,13 +765,18 @@ async fn newly_issued_control_without_deployment_preserves_only_qualified_empty_
                 secret["data"] = json!({});
             }
             if problem == "false-retired-marker" {
-                secret["metadata"]["annotations"][crate::reconciler::governed_services::credentials::RETIRED] = "false".into();
+                secret["metadata"]["annotations"]
+                    [crate::reconciler::governed_services::credentials::RETIRED] = "false".into();
             }
             if problem != "pod" {
-                locked.objects.get_mut("/api/v1/namespaces/kars-sre/pods").unwrap()["items"] = json!([]);
+                locked
+                    .objects
+                    .get_mut("/api/v1/namespaces/kars-sre/pods")
+                    .unwrap()["items"] = json!([]);
             }
             if problem == "changed-claim" {
-                locked.namespace["metadata"]["annotations"]["kars.azure.com/sandbox-uid"] = "replacement".into();
+                locked.namespace["metadata"]["annotations"]["kars.azure.com/sandbox-uid"] =
+                    "replacement".into();
             }
             locked.allowed = problem == "allowed";
         }
@@ -716,7 +788,8 @@ async fn newly_issued_control_without_deployment_preserves_only_qualified_empty_
                 .and(wiremock::matchers::path("/api/v1/namespaces/kars-sre/pods"))
                 .respond_with(api_error(403))
                 .with_priority(1)
-                .mount(&server).await;
+                .mount(&server)
+                .await;
         }
         let before = state.lock().unwrap().objects.clone();
         let result = migration::rotate_owned_control_credentials(&client, &reg).await;

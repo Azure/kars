@@ -1,7 +1,5 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
-{{- $existing := lookup "v1" "Namespace" "" "kars-system" -}}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- $existing := lookup "v1" "Namespace" "" "kars-system" -}}
 {{- $render := true -}}
 {{- if $existing -}}
 {{- $metadata := $existing.metadata | default dict -}}

@@ -2,13 +2,14 @@
 # Licensed under the MIT License.
 
 import hashlib
+import json
 from pathlib import Path
 import shutil
 import tempfile
 import unittest
 from unittest import mock
 
-from contracts import LOCK_FILES
+from contracts import LOCK_FILES, check_modules, json_stream
 from test_baselines import artifact_log, import_locks
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -19,9 +20,31 @@ class NTLMSecurityUpdateContracts(unittest.TestCase):
     def test_ntlm_fix_and_released_crypto_keep_pinned_compiler(self):
         requested = (ROOT / "locks/requests.txt").read_text().splitlines()
         self.assertEqual(requested.count(NTLM_REQUEST), 1)
-        self.assertIn("golang.org/x/crypto@v0.57.0", requested)
+        self.assertIn("golang.org/x/crypto@v0.58.0", requested)
+        self.assertIn("golang.org/x/net@v0.62.0", requested)
+        self.assertIn("golang.org/x/text@v0.43.0", requested)
         self.assertIn("GO_VERSION=go1.27.3", (ROOT / "locks/inputs.lock").read_text())
         self.assertEqual(len(requested), len(set(requested)))
+
+    def test_nested_api_rejects_stale_network_dependencies_with_valid_checksums(self):
+        for dependency in ("golang.org/x/net", "golang.org/x/crypto", "golang.org/x/text"):
+            with self.subTest(dependency=dependency), tempfile.TemporaryDirectory() as temporary:
+                root = Path(temporary)
+                shutil.copytree(ROOT / "locks", root / "locks")
+                generated = root / "locks/generated"
+                inventory = generated / "api-modules.json"
+                modules = list(json_stream(inventory.read_text()))
+                selected = next(module for module in modules if module["Path"] == dependency)
+                selected["Version"] = "v0.1.0"
+                inventory.write_text("\n".join(json.dumps(module) for module in modules) + "\n")
+                digest = hashlib.sha256(inventory.read_bytes()).hexdigest()
+                checksums = generated / "SHA256SUMS"
+                checksums.write_text("\n".join(
+                    f"{digest}  ./api-modules.json" if line.endswith("  ./api-modules.json") else line
+                    for line in checksums.read_text().splitlines()
+                ) + "\n")
+                with self.assertRaisesRegex(ValueError, "nested API unreviewed selection"):
+                    check_modules(root)
 
     def test_runtime_inventory_is_retained_and_checked_without_filtering_packages(self):
         build = (ROOT / "scripts/build.sh").read_text()

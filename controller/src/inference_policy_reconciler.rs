@@ -888,18 +888,29 @@ pub async fn run(client: Client) -> Result<()> {
     // inferenceRef from sandbox) still rely on the periodic resync.
     let sandboxes: Api<crate::crd::KarsSandbox> = Api::all(client.clone());
     let defaults = Api::<k8s_openapi::api::core::v1::Secret>::namespaced(
-        client, crate::inference_policy_defaults::NAMESPACE,
+        client,
+        crate::inference_policy_defaults::NAMESPACE,
     );
     let controller = Controller::new(policies, crate::watch_config::bounded());
     let store = controller.store();
     controller
         .watches(
             defaults,
-            crate::watch_config::bounded().fields(&format!("metadata.name={}", crate::inference_policy_defaults::REGISTRY)),
-            move |_| store.state().iter()
-                .filter(|policy| crate::inference_policy_defaults::inherits(policy))
-                .map(|policy| ObjectRef::<InferencePolicy>::new(&policy.name_any()).within(crate::inference_policy_defaults::NAMESPACE))
-                .collect::<Vec<_>>(),
+            crate::watch_config::bounded().fields(&format!(
+                "metadata.name={}",
+                crate::inference_policy_defaults::REGISTRY
+            )),
+            move |_| {
+                store
+                    .state()
+                    .iter()
+                    .filter(|policy| crate::inference_policy_defaults::inherits(policy))
+                    .map(|policy| {
+                        ObjectRef::<InferencePolicy>::new(&policy.name_any())
+                            .within(crate::inference_policy_defaults::NAMESPACE)
+                    })
+                    .collect::<Vec<_>>()
+            },
         )
         .watches(
             sandboxes,

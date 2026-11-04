@@ -358,7 +358,9 @@ pub async fn create_task(
     .await?;
     if git_access.is_some() {
         crate::routes::github::validate_bound_github_egress(
-            req.blueprint.iter().flat_map(|blueprint| &blueprint.egress)
+            req.blueprint
+                .iter()
+                .flat_map(|blueprint| &blueprint.egress)
                 .map(|entry| entry.host.as_str()),
         )?;
     }

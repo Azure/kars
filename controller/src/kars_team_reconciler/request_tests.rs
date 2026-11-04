@@ -150,15 +150,20 @@ async fn retained_input_preflight_rejects_legacy_staging_before_recovery_or_disp
         plan.roles[0].phases[0].capabilities = vec!["filesystem-write".into()];
         plan.synthesis.execution_mode = Some("native".into());
         team.spec.roster = vec![crate::kars_team::TeamRole {
-            name: plan.roles[0].name.clone(), ..Default::default()
+            name: plan.roles[0].name.clone(),
+            ..Default::default()
         }];
         team.spec.blueprint = Some(crate::kars_task::TaskBlueprint {
-            runtime: Some(runtime.into()), execution_plan: Some(plan), ..Default::default()
+            runtime: Some(runtime.into()),
+            execution_plan: Some(plan),
+            ..Default::default()
         });
         let (server, client, store) = setup(&team).await;
         let mut prepared = stage(&client, &store).await;
         // Model a correctly sealed staged Task persisted by an older controller.
-        let mut task: KarsTask = serde_json::from_value(store.lock().unwrap().tasks[&prepared.record.task_name].clone()).unwrap();
+        let mut task: KarsTask =
+            serde_json::from_value(store.lock().unwrap().tasks[&prepared.record.task_name].clone())
+                .unwrap();
         let content = "Retained source material";
         task.annotations_mut().insert(crate::reviewed_execution::TEAM_MEMORY.into(), json!([{
             "name":"prior.md", "content":content, "sha256":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(content.as_bytes())),
@@ -167,17 +172,46 @@ async fn retained_input_preflight_rejects_legacy_staging_before_recovery_or_disp
                 "assignmentId":"prior-assignment","agentDid":"did:agt:prior","artifactName":"prior.md"}
         }]).to_string());
         prepared.record.task_spec_digest = requests::task_digest(&task).unwrap();
-        task.annotations_mut().insert("kars.azure.com/team-request-spec".into(), prepared.record.task_spec_digest.clone());
-        store.lock().unwrap().tasks.insert(prepared.record.task_name.clone(), json!(task));
+        task.annotations_mut().insert(
+            "kars.azure.com/team-request-spec".into(),
+            prepared.record.task_spec_digest.clone(),
+        );
+        store
+            .lock()
+            .unwrap()
+            .tasks
+            .insert(prepared.record.task_name.clone(), json!(task));
         let persisted = reserve(&client, &store, &prepared).await;
         let before = server.received_requests().await.unwrap().len();
         let snapshot = store.lock().unwrap().tasks.clone();
-        let result = requests::prepare(&client, &Api::namespaced(client.clone(), "tenant-a"), &persisted, true).await;
-        assert!(result.err().unwrap().to_string().contains("ReviewedInputCapabilityRequired"));
-        assert!(finish(&client, &persisted, &prepared).await.unwrap_err().to_string().contains("ReviewedInputCapabilityRequired"));
+        let result = requests::prepare(
+            &client,
+            &Api::namespaced(client.clone(), "tenant-a"),
+            &persisted,
+            true,
+        )
+        .await;
+        assert!(
+            result
+                .err()
+                .unwrap()
+                .to_string()
+                .contains("ReviewedInputCapabilityRequired")
+        );
+        assert!(
+            finish(&client, &persisted, &prepared)
+                .await
+                .unwrap_err()
+                .to_string()
+                .contains("ReviewedInputCapabilityRequired")
+        );
         assert_eq!(store.lock().unwrap().tasks, snapshot);
         assert!(store.lock().unwrap().activation_reservations.is_empty());
-        assert!(server.received_requests().await.unwrap()[before..].iter().all(|request| request.method.as_str() == "GET"));
+        assert!(
+            server.received_requests().await.unwrap()[before..]
+                .iter()
+                .all(|request| request.method.as_str() == "GET")
+        );
     }
 }
 

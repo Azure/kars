@@ -34,10 +34,10 @@ use crate::status::phase::{PHASE_DEGRADED, PHASE_PENDING, PHASE_READY};
 const FIELD_MANAGER: &str = crate::field_managers::CLAW_TASK;
 #[path = "kars_task_halt.rs"]
 pub(crate) mod halt;
-#[path = "kars_task_rebind.rs"]
-pub(crate) mod rebind;
 #[path = "kars_task_promotion.rs"]
 pub(crate) mod promotion;
+#[path = "kars_task_rebind.rs"]
+pub(crate) mod rebind;
 const FINALIZER: &str = "kars.azure.com/karstask-cleanup";
 /// Server-Side Apply field manager for Governance Receipt writes.
 const RECEIPT_FIELD_MANAGER: &str = "kars-controller/receipt";

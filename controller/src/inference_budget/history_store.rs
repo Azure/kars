@@ -10,10 +10,10 @@ use crate::inference_budget_contract::{
     ledger::{HistoryRecord, Ledger},
     valid_digest, valid_uid,
 };
+use crate::providers::signing::sha256_hex;
 use k8s_openapi::api::core::v1::ConfigMap;
 use kube::{Api, ResourceExt, api::PostParams};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::{
     collections::{BTreeMap, BTreeSet},
     future::Future,
@@ -79,11 +79,11 @@ struct Page {
 }
 
 fn digest(bytes: &[u8]) -> String {
-    format!("sha256:{:x}", Sha256::digest(bytes))
+    format!("sha256:{}", sha256_hex(bytes))
 }
 
 fn route(key: &str) -> String {
-    format!("{:x}", Sha256::digest(key.as_bytes()))
+    sha256_hex(key.as_bytes())
 }
 
 fn name(hash: &str) -> String {

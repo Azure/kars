@@ -96,15 +96,29 @@ pub async fn resolve_access(
         return Err("required memory scope binding is unavailable".into());
     }
     let sanitize = |value: &str| -> String {
-        value.chars().map(|c| if c.is_ascii_alphanumeric() || "_-.%+@/".contains(c) { c } else { '_' }).collect()
+        value
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() || "_-.%+@/".contains(c) {
+                    c
+                } else {
+                    '_'
+                }
+            })
+            .collect()
     };
     let sandbox = sanitize(sandbox.trim());
-    let scope = match std::env::var("CLUSTER_NAME").ok().filter(|c| !c.trim().is_empty()) {
+    let scope = match std::env::var("CLUSTER_NAME")
+        .ok()
+        .filter(|c| !c.trim().is_empty())
+    {
         Some(cluster) => format!("agent_{}_{}", sanitize(cluster.trim()), sandbox),
         None => format!("agent_{sandbox}"),
     };
     let access = crate::memory_access::MemoryAccess {
-        store_name: fallback_store.to_string(), scope, shared_scopes: Vec::new(),
+        store_name: fallback_store.to_string(),
+        scope,
+        shared_scopes: Vec::new(),
     };
     access.validate().map_err(String::from)?;
     Ok(access)
@@ -220,7 +234,12 @@ pub fn load_memory_binding_from_dir(
 
     let access = serde_json::from_value::<crate::memory_access::MemoryAccess>(parsed.clone())
         .map_err(|error| error.to_string())
-        .and_then(|access| access.validate().map(|()| access.clone()).map_err(String::from));
+        .and_then(|access| {
+            access
+                .validate()
+                .map(|()| access.clone())
+                .map_err(String::from)
+        });
     let access = match access {
         Ok(access) => access,
         Err(message) => {
@@ -271,19 +290,24 @@ pub async fn load_and_install(
     policy_status: &PolicyStatusRegistry,
     handle: &LoadedMemoryBindingHandle,
 ) -> LoadOutcome {
-    load_and_install_required(dir, policy_status, handle,
-        std::env::var("MEMORY_BINDING_REQUIRED").as_deref() == Ok("true")).await
+    load_and_install_required(
+        dir,
+        policy_status,
+        handle,
+        std::env::var("MEMORY_BINDING_REQUIRED").as_deref() == Ok("true"),
+    )
+    .await
 }
 
 async fn load_and_install_required(
-    dir: &str, policy_status: &PolicyStatusRegistry,
-    handle: &LoadedMemoryBindingHandle, required: bool,
+    dir: &str,
+    policy_status: &PolicyStatusRegistry,
+    handle: &LoadedMemoryBindingHandle,
+    required: bool,
 ) -> LoadOutcome {
     let mut outcome = load_memory_binding_from_dir(dir, policy_status);
     let mut current = handle.write().await;
-    if matches!(outcome, LoadOutcome::NoBinding)
-        && (required || !matches!(*current, Ok(None)))
-    {
+    if matches!(outcome, LoadOutcome::NoBinding) && (required || !matches!(*current, Ok(None))) {
         let message = "required memory scope binding is unavailable".to_string();
         policy_status.record_error(PolicyKind::Memory, dir, &message);
         outcome = LoadOutcome::Error(message);
@@ -475,7 +499,10 @@ mod tests {
         )
         .unwrap();
         let reg = PolicyStatusRegistry::new();
-        assert!(matches!(load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg), LoadOutcome::Error(_)));
+        assert!(matches!(
+            load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg),
+            LoadOutcome::Error(_)
+        ));
         assert!(reg.get(PolicyKind::Memory).unwrap().digest.is_none());
     }
 
@@ -488,7 +515,10 @@ mod tests {
         let handle = empty_handle();
         let _ = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
         let snapshot = handle.read().await.clone();
-        assert!(snapshot.as_ref().unwrap().is_some(), "handle should be populated");
+        assert!(
+            snapshot.as_ref().unwrap().is_some(),
+            "handle should be populated"
+        );
         assert_eq!(snapshot.unwrap().unwrap().store_name, "s");
     }
 
@@ -499,7 +529,10 @@ mod tests {
         let reg = PolicyStatusRegistry::new();
         let handle = empty_handle();
         let _ = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
-        assert!(handle.read().await.is_err(), "parse error must make memory unavailable");
+        assert!(
+            handle.read().await.is_err(),
+            "parse error must make memory unavailable"
+        );
     }
 
     #[test]
@@ -518,7 +551,10 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("binding.json"), br#"{"version":1}"#).unwrap();
         let reg = PolicyStatusRegistry::new();
-        assert!(matches!(load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg), LoadOutcome::Error(_)));
+        assert!(matches!(
+            load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg),
+            LoadOutcome::Error(_)
+        ));
         assert!(reg.get(PolicyKind::Memory).unwrap().digest.is_none());
     }
 
@@ -540,13 +576,23 @@ mod tests {
         else {
             panic!("expected initial Loaded");
         };
-        assert!(handle.read().await.as_ref().unwrap().is_some(), "handle must be populated");
+        assert!(
+            handle.read().await.as_ref().unwrap().is_some(),
+            "handle must be populated"
+        );
 
         std::fs::remove_file(dir.path().join("binding.json")).unwrap();
         let outcome = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
         assert!(matches!(outcome, LoadOutcome::Error(_)));
-        assert!(handle.read().await.is_err(), "missing binding must not fall back");
-        assert!(resolve_access(Some(&handle), "test", "fallback").await.is_err());
+        assert!(
+            handle.read().await.is_err(),
+            "missing binding must not fall back"
+        );
+        assert!(
+            resolve_access(Some(&handle), "test", "fallback")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -567,7 +613,11 @@ mod tests {
         let outcome = load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
         assert!(matches!(outcome, LoadOutcome::Error(_)));
         assert!(handle.read().await.is_err());
-        assert!(resolve_access(Some(&handle), "test", "fallback").await.is_err());
+        assert!(
+            resolve_access(Some(&handle), "test", "fallback")
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
@@ -575,8 +625,15 @@ mod tests {
         let dir = tempdir().unwrap();
         let reg = PolicyStatusRegistry::new();
         let handle = empty_handle();
-        assert!(matches!(load_and_install_required(dir.path().to_str().unwrap(), &reg, &handle, true).await, LoadOutcome::Error(_)));
-        assert!(resolve_access(Some(&handle), "test", "fallback").await.is_err());
+        assert!(matches!(
+            load_and_install_required(dir.path().to_str().unwrap(), &reg, &handle, true).await,
+            LoadOutcome::Error(_)
+        ));
+        assert!(
+            resolve_access(Some(&handle), "test", "fallback")
+                .await
+                .is_err()
+        );
         assert!(reg.get(PolicyKind::Memory).unwrap().digest.is_none());
     }
 
@@ -586,13 +643,29 @@ mod tests {
         let file = dir.path().join("binding.json");
         let reg = PolicyStatusRegistry::new();
         let handle = empty_handle();
-        std::fs::write(&file, br#"{"storeName":"bound","scope":"private","sharedScopes":["team"]}"#).unwrap();
+        std::fs::write(
+            &file,
+            br#"{"storeName":"bound","scope":"private","sharedScopes":["team"]}"#,
+        )
+        .unwrap();
         load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
         let before = reg.get(PolicyKind::Memory).unwrap().digest;
-        assert!(resolve_access(Some(&handle), "test", "fallback").await.unwrap().authorize("team").is_ok());
-        std::fs::write(&file, br#"{"storeName":"bound","scope":"private","sharedScopes":[]}"#).unwrap();
+        assert!(
+            resolve_access(Some(&handle), "test", "fallback")
+                .await
+                .unwrap()
+                .authorize("team")
+                .is_ok()
+        );
+        std::fs::write(
+            &file,
+            br#"{"storeName":"bound","scope":"private","sharedScopes":[]}"#,
+        )
+        .unwrap();
         load_and_install(dir.path().to_str().unwrap(), &reg, &handle).await;
-        let policy = resolve_access(Some(&handle), "test", "fallback").await.unwrap();
+        let policy = resolve_access(Some(&handle), "test", "fallback")
+            .await
+            .unwrap();
         assert!(policy.authorize("team").is_err());
         assert!(policy.authorize("private").is_ok());
         assert_ne!(before, reg.get(PolicyKind::Memory).unwrap().digest);
@@ -602,10 +675,21 @@ mod tests {
     fn invalid_memory_grants_never_register_success() {
         let dir = tempdir().unwrap();
         let reg = PolicyStatusRegistry::new();
-        for grants in [serde_json::json!(["*"]), serde_json::json!(["private"]), serde_json::json!(["team", "team"]), serde_json::json!(["../other"]), serde_json::json!([42]), serde_json::json!(null)] {
-            let body = serde_json::json!({"storeName":"bound","scope":"private","sharedScopes":grants});
+        for grants in [
+            serde_json::json!(["*"]),
+            serde_json::json!(["private"]),
+            serde_json::json!(["team", "team"]),
+            serde_json::json!(["../other"]),
+            serde_json::json!([42]),
+            serde_json::json!(null),
+        ] {
+            let body =
+                serde_json::json!({"storeName":"bound","scope":"private","sharedScopes":grants});
             std::fs::write(dir.path().join("binding.json"), body.to_string()).unwrap();
-            assert!(matches!(load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg), LoadOutcome::Error(_)));
+            assert!(matches!(
+                load_memory_binding_from_dir(dir.path().to_str().unwrap(), &reg),
+                LoadOutcome::Error(_)
+            ));
             assert!(reg.get(PolicyKind::Memory).unwrap().digest.is_none());
         }
     }
@@ -641,7 +725,15 @@ mod tests {
         let reg = PolicyStatusRegistry::new();
         let handle = empty_handle();
         let _ = load_and_install(&dir_path, &reg, &handle).await;
-        let digest_v1 = handle.read().await.as_ref().unwrap().as_ref().unwrap().digest.clone();
+        let digest_v1 = handle
+            .read()
+            .await
+            .as_ref()
+            .unwrap()
+            .as_ref()
+            .unwrap()
+            .digest
+            .clone();
 
         // Safety: tests run sequentially within this module; setting
         // a process-wide env var is fine because no other test in
@@ -667,7 +759,15 @@ mod tests {
 
         for _ in 0..40 {
             tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-            let current = handle.read().await.as_ref().unwrap().as_ref().unwrap().digest.clone();
+            let current = handle
+                .read()
+                .await
+                .as_ref()
+                .unwrap()
+                .as_ref()
+                .unwrap()
+                .digest
+                .clone();
             if current != digest_v1 {
                 return; // success — watcher detected the change
             }

@@ -172,31 +172,77 @@ async fn memory_rest_denials_precede_provider_io_and_cannot_use_foreign_updates(
     config.foundry_endpoint = Some(provider.uri());
     config.foundry_project_endpoint = Some(provider.uri());
     *state.memory_binding.write().await = Ok(Some(LoadedMemoryBinding {
-        digest: "test".into(), source_path: "binding.json".into(), store_name: "bound".into(),
-        scope: "private".into(), shared_scopes: vec!["team".into()], raw: json!({}),
+        digest: "test".into(),
+        source_path: "binding.json".into(),
+        store_name: "bound".into(),
+        scope: "private".into(),
+        shared_scopes: vec!["team".into()],
+        raw: json!({}),
     }));
     let app = app(state);
     let mut cases = vec![
         ("GET", "/memory_stores".to_string(), json!({})),
         ("GET", "/memory_stores/other".to_string(), json!({})),
         ("DELETE", "/memory_stores/bound".to_string(), json!({})),
-        ("GET", "/memory_stores/bound/updates/foreign-id".to_string(), json!({})),
-        ("POST", "/memory_stores".to_string(), json!({"name":"other"})),
+        (
+            "GET",
+            "/memory_stores/bound/updates/foreign-id".to_string(),
+            json!({}),
+        ),
+        (
+            "POST",
+            "/memory_stores".to_string(),
+            json!({"name":"other"}),
+        ),
     ];
     for op in ["search_memories", "update_memories", "delete_scope"] {
-        for scope in ["other-sandbox", "tenant:other-tenant", "system", "*", "../other", "%70rivate", " private", "team/child"] {
-            cases.push(("POST", format!("/memory_stores/bound:{op}"), json!({"scope":scope})));
+        for scope in [
+            "other-sandbox",
+            "tenant:other-tenant",
+            "system",
+            "*",
+            "../other",
+            "%70rivate",
+            " private",
+            "team/child",
+        ] {
+            cases.push((
+                "POST",
+                format!("/memory_stores/bound:{op}"),
+                json!({"scope":scope}),
+            ));
         }
-        cases.push(("POST", format!("/memory_stores/other:{op}"), json!({"scope":"private"})));
+        cases.push((
+            "POST",
+            format!("/memory_stores/other:{op}"),
+            json!({"scope":"private"}),
+        ));
     }
     for (method, uri, body) in cases {
-        let response = app.clone().oneshot(Request::builder().method(method).uri(&uri)
-            .header("content-type", "application/json").header("x-kars-platform-mcp", "1")
-            .body(Body::from(body.to_string())).unwrap()).await.unwrap();
-        assert_eq!(response.status(), StatusCode::FORBIDDEN, "{method} {uri} {body}");
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&uri)
+                    .header("content-type", "application/json")
+                    .header("x-kars-platform-mcp", "1")
+                    .body(Body::from(body.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{method} {uri} {body}"
+        );
         assert_eq!(response.headers()["x-kars-decision-by"], "KarsMemory");
         assert_eq!(
-            response.headers()["x-kars-decision-reason"].to_str().unwrap().contains("scope"),
+            response.headers()["x-kars-decision-reason"]
+                .to_str()
+                .unwrap()
+                .contains("scope"),
             uri.starts_with("/memory_stores/bound:"),
             "wrong-store or update-ownership denials must not qualify scope isolation: {method} {uri}"
         );
@@ -208,9 +254,16 @@ async fn memory_rest_denials_precede_provider_io_and_cannot_use_foreign_updates(
 async fn memory_rest_unavailable_binding_never_falls_back_or_claims_policy_denial() {
     let state = test_state();
     *state.memory_binding.write().await = Err("invalid memory scope binding".into());
-    let response = app(state).oneshot(Request::builder().method("POST")
-        .uri("/memory_stores/memory-sb-test:search_memories")
-        .body(Body::from(r#"{"scope":"agent_sb-test"}"#)).unwrap()).await.unwrap();
+    let response = app(state)
+        .oneshot(
+            Request::builder()
+                .method("POST")
+                .uri("/memory_stores/memory-sb-test:search_memories")
+                .body(Body::from(r#"{"scope":"agent_sb-test"}"#))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert!(!response.headers().contains_key("x-kars-decision"));
 }

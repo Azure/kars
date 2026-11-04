@@ -540,8 +540,13 @@ fn selected_rounds_keep_immediate_results_after_large_requests_and_final_tools()
     assert!(telemetry.authorize_harness_tool("scope-a", "unmatched", "read_file"));
     assert!(telemetry.complete_harness_tool("scope-a", "unmatched", true, 7));
     let result = |rounds: &[u64]| {
-        telemetry.selected_snapshot("scope-a", rounds).unwrap()["events"].as_array().unwrap()
-            .iter().filter(|event| event["kind"] == "tool_result").cloned().collect::<Vec<_>>()
+        telemetry.selected_snapshot("scope-a", rounds).unwrap()["events"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|event| event["kind"] == "tool_result")
+            .cloned()
+            .collect::<Vec<_>>()
     };
     let immediate = result(&[1]);
     assert_eq!(immediate.len(), 1);
@@ -549,8 +554,12 @@ fn selected_rounds_keep_immediate_results_after_large_requests_and_final_tools()
     assert_eq!(immediate[0]["ok"], true);
     assert!(immediate[0].get("reported_in_round").is_none());
     let large = serde_json::to_vec(&json!({"messages":[{"role":"tool", "tool_call_id":"read-1",
-        "content":"x".repeat(65_536)}]})).unwrap();
-    telemetry.begin("chat/completions", "provider", "model", &large).unwrap().buffered(200, b"{}");
+        "content":"x".repeat(65_536)}]}))
+    .unwrap();
+    telemetry
+        .begin("chat/completions", "provider", "model", &large)
+        .unwrap()
+        .buffered(200, b"{}");
     assert_eq!(result(&[1, 2]), immediate);
     assert!(result(&[2]).is_empty());
     telemetry.begin("chat/completions", "provider", "model",

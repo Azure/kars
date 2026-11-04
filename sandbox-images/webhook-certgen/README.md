@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Admission certificate helper on Azure Linux 3
 
 This keeps `jkroepke/kube-webhook-certgen` `1.8.3`, selected by the maintained

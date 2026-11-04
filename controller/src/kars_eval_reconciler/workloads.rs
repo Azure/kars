@@ -206,9 +206,16 @@ impl Intent {
     }
 
     pub fn with_memory(mut self, target: super::memory::Target) -> anyhow::Result<Self> {
-        ensure!(self.target_uid.as_ref() == Some(&target.sandbox_uid), "memory evaluation target changed");
+        ensure!(
+            self.target_uid.as_ref() == Some(&target.sandbox_uid),
+            "memory evaluation target changed"
+        );
         target.configure(&mut self.pod_spec)?;
-        self.digest = content_digest(&serde_json::to_vec(&(&self.digest, &target, &self.pod_spec))?);
+        self.digest = content_digest(&serde_json::to_vec(&(
+            &self.digest,
+            &target,
+            &self.pod_spec,
+        ))?);
         self.memory = Some(target);
         Ok(self)
     }

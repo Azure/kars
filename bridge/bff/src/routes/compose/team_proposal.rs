@@ -171,7 +171,10 @@ pub(super) fn parse_and_validate_team(
         resource_errors.push("Standing Teams use Strict egress; review external hosts or request access during a run. Learning is not supported for governed Team tasks.".into());
     }
     if json.get("memory").is_some_and(|value| !value.is_null())
-        && !memory.as_ref().is_some_and(|name| o.memories.iter().any(|option| option.name == *name)) {
+        && !memory
+            .as_ref()
+            .is_some_and(|name| o.memories.iter().any(|option| option.name == *name))
+    {
         resource_errors.push("Explicit memory binding is malformed or unavailable; it cannot be replaced by the default backend. Select a listed binding or explicitly review memory=null.".into());
     }
     let mut roles = json

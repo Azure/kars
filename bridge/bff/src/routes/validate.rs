@@ -163,17 +163,32 @@ pub async fn validate_package(
     )
     .await;
     let github_checks = github::check(
-        cluster, &ns, &principal, req.git_write_repos.as_deref(),
+        cluster,
+        &ns,
+        &principal,
+        req.git_write_repos.as_deref(),
         github::write_enabled(req.workload.as_deref(), &bp),
-        bp.egress.iter().map(|entry| {
-            // Team creation trims host entries before persisting its blueprint.
-            if req.workload.as_deref() == Some("team") { entry.host.trim() } else { entry.host.as_str() }
-        }).chain(
-            roster.iter().flatten().filter_map(|role| role.blueprint.as_ref())
-                .flat_map(|blueprint| &blueprint.egress).map(|entry| entry.host.as_str()),
-        ),
+        bp.egress
+            .iter()
+            .map(|entry| {
+                // Team creation trims host entries before persisting its blueprint.
+                if req.workload.as_deref() == Some("team") {
+                    entry.host.trim()
+                } else {
+                    entry.host.as_str()
+                }
+            })
+            .chain(
+                roster
+                    .iter()
+                    .flatten()
+                    .filter_map(|role| role.blueprint.as_ref())
+                    .flat_map(|blueprint| &blueprint.egress)
+                    .map(|entry| entry.host.as_str()),
+            ),
         None,
-    ).await;
+    )
+    .await;
     for check in github_checks {
         result.ok &= check.status != CheckStatus::Fail;
         result.checks.push(check);

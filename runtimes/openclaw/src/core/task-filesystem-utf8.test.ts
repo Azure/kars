@@ -1,3 +1,6 @@
+// Copyright (c) Microsoft Corporation.
+// Licensed under the MIT License.
+
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const helper = vi.hoisted(() => ({ response: {} as Record<string, unknown> }));

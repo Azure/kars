@@ -70,7 +70,10 @@ pub(crate) fn task_digest(task: &KarsTask) -> Result<String, ReconcileError> {
         Some(binding) => digest(&(spec, binding)),
         None => digest(&spec),
     }?;
-    let sealed = match task.annotations().get(super::qualification::contract::RECORD) {
+    let sealed = match task
+        .annotations()
+        .get(super::qualification::contract::RECORD)
+    {
         Some(approval) => digest(&(sealed, approval))?,
         None => sealed,
     };
@@ -88,7 +91,10 @@ pub(crate) fn task_digest(task: &KarsTask) -> Result<String, ReconcileError> {
         Some(memory) => digest(&(sealed, memory))?,
         None => sealed,
     };
-    match task.annotations().get(crate::reviewed_execution::TEAM_REVISION) {
+    match task
+        .annotations()
+        .get(crate::reviewed_execution::TEAM_REVISION)
+    {
         Some(revision) => digest(&(sealed, revision)),
         None => Ok(sealed),
     }
@@ -281,8 +287,14 @@ pub(super) async fn prepare(
             let selection = work::select(client, team).await?;
             if let Some(approval) = &qualification {
                 match &selection {
-                    work::Selection::Item(binding, _) => super::qualification::binding(approval, binding)?,
-                    _ => return Err(invalid("Qualification requires its exact pending backlog item")),
+                    work::Selection::Item(binding, _) => {
+                        super::qualification::binding(approval, binding)?
+                    }
+                    _ => {
+                        return Err(invalid(
+                            "Qualification requires its exact pending backlog item",
+                        ));
+                    }
                 }
             }
             if matches!(
@@ -293,8 +305,8 @@ pub(super) async fn prepare(
             }
             work::validate_revision_plan(team, &selection)?;
             let assigned = work::fragment(&selection)?;
-            let remaining = specs::run_history_budget(team, &assigned)
-                .map_err(ReconcileError::Invalid)?;
+            let remaining =
+                specs::run_history_budget(team, &assigned).map_err(ReconcileError::Invalid)?;
             let history = crate::team_commons::prior_knowledge(client, team, remaining).await?;
             let knowledge = format!("{assigned}{history}");
             let mut spec = specs::run_spec(team, &knowledge).map_err(ReconcileError::Invalid)?;
@@ -323,8 +335,12 @@ pub(super) async fn prepare(
                     serde_json::to_string(&binding)?,
                 );
             }
-            if let Some(raw) = team.annotations().get(super::qualification::contract::RECORD) {
-                task.annotations_mut().insert(super::qualification::contract::RECORD.into(), raw.clone());
+            if let Some(raw) = team
+                .annotations()
+                .get(super::qualification::contract::RECORD)
+            {
+                task.annotations_mut()
+                    .insert(super::qualification::contract::RECORD.into(), raw.clone());
             }
             crate::reviewed_execution::seal_team_roles(team, &mut task)?;
             if task

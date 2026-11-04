@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # kube-state-metrics on Azure Linux 3
 
 This rebuilds the existing monitoring chart's `kube-state-metrics` `2.19.0`

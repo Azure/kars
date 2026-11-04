@@ -102,6 +102,9 @@ def check_modules(root):
             "upstream local API replacement is missing")
     api = inventories["api-modules.json"]
     require(api.get("google.golang.org/grpc", {}).get("Version") == "v1.84.0", "nested API gRPC is unpatched")
+    for name in ("golang.org/x/net", "golang.org/x/crypto", "golang.org/x/text"):
+        require(api.get(name, {}).get("Version") == selected[name]["Version"],
+                f"nested API unreviewed selection: {name}")
     for name, minimum in (("go.mod", "1.27.0"), ("api/v2/go.mod", "1.26.0")):
         manifest = (generated / name).read_text()
         require(f"\ngo {minimum}\n" in manifest, f"unexpected Go requirement: {name}")

@@ -31,7 +31,7 @@ function elements(tree, type) {
 
 function component(results, states = [false, false, false, "verify"]) {
   let stateCursor = 0, actionCursor = 0;
-  const module = compile("foundry-onboard.tsx", {
+  const componentModule = compile("foundry-onboard.tsx", {
     react: { ...React,
       useState(initial) { const i = stateCursor++; if (!(i in states)) states[i] = initial; return [states[i], value => { states[i] = typeof value === "function" ? value(states[i]) : value; }]; },
       useActionState() { return [results[actionCursor++] ?? empty, () => {}, false]; },
@@ -40,7 +40,7 @@ function component(results, states = [false, false, false, "verify"]) {
     "@/components/orchestration-cube": { OrchestrationCube: () => null },
     "./foundry-actions": {},
   });
-  return status => { stateCursor = 0; actionCursor = 0; return module.FoundryOnboard({ status }); };
+  return status => { stateCursor = 0; actionCursor = 0; return componentModule.FoundryOnboard({ status }); };
 }
 
 const status = { connected: true, project_endpoint: "https://resource.services.ai.azure.com/api/projects/p", auth: "api" };

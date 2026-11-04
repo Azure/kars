@@ -108,15 +108,29 @@ async fn scan(client: &Client, settings: &Settings) -> Result<(), StoreError> {
         for account in page.items {
             let recovered = reconcile_account(client, &store, &account).await;
             let result = match recovered {
-                Ok(()) if account.annotations().get(BOOTSTRAP).map(String::as_str) == Some("sealed") => {
-                    super::topups::reconcile(client, settings, &store, &account.spec.root,
-                        account.metadata.uid.as_deref().ok_or(StoreError::Missing)?).await
+                Ok(())
+                    if account.annotations().get(BOOTSTRAP).map(String::as_str)
+                        == Some("sealed") =>
+                {
+                    super::topups::reconcile(
+                        client,
+                        settings,
+                        &store,
+                        &account.spec.root,
+                        account.metadata.uid.as_deref().ok_or(StoreError::Missing)?,
+                    )
+                    .await
                 }
                 result => result,
             };
             if let Err(error) = result {
-                let _ = store.refresh_status(&account.spec.root,
-                    account.metadata.uid.as_deref().ok_or(StoreError::Missing)?, Some(&error)).await;
+                let _ = store
+                    .refresh_status(
+                        &account.spec.root,
+                        account.metadata.uid.as_deref().ok_or(StoreError::Missing)?,
+                        Some(&error),
+                    )
+                    .await;
                 tracing::error!(account = %account.name_any(),
                     "Governed inference account recovery/funding failed closed; no balances reset");
             }

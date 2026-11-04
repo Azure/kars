@@ -11,12 +11,6 @@
 pub mod auth;
 pub mod config;
 pub mod error;
-#[path = "../../../shared/sre_privacy.rs"]
-#[allow(dead_code)]
-mod sre_privacy;
-#[path = "../../../shared/sre_report.rs"]
-#[allow(dead_code)]
-mod sre_report;
 #[path = "../../../eval-corpus/src/builtin_names.rs"]
 pub(crate) mod eval_builtin_names;
 #[path = "../../../shared/eval_names.rs"]
@@ -33,6 +27,12 @@ mod providers;
 pub mod routes;
 #[path = "../../../shared/skill_package.rs"]
 pub(crate) mod skill_package;
+#[path = "../../../shared/sre_privacy.rs"]
+#[allow(dead_code)]
+mod sre_privacy;
+#[path = "../../../shared/sre_report.rs"]
+#[allow(dead_code)]
+mod sre_report;
 pub mod state;
 #[path = "../../../shared/team_memory.rs"]
 pub(crate) mod team_memory;

@@ -410,12 +410,12 @@ impl Governance {
         let Ok(yaml) = std::fs::read_to_string(path) else {
             return 1; // fallback: count as 1 file
         };
-        let Ok(value) = serde_yaml::from_str::<serde_yaml::Value>(&yaml) else {
+        let Ok(value) = serde_saphyr::from_str::<serde_json::Value>(&yaml) else {
             return 1;
         };
         value
             .get("policies")
-            .and_then(|p| p.as_sequence())
+            .and_then(|p| p.as_array())
             .map_or(1, |seq| seq.len())
     }
 

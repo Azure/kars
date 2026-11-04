@@ -357,11 +357,10 @@ mod tests {
                 "inline-spec" => memory.spec.shared_scopes = Some(vec!["team".into()]),
                 "missing-uid" => cm.metadata.uid = None,
                 "terminating" => {
-                    memory.metadata.deletion_timestamp = Some(
-                        k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                    memory.metadata.deletion_timestamp =
+                        Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
                             k8s_openapi::jiff::Timestamp::now(),
-                        ),
-                    )
+                        ))
                 }
                 _ => unreachable!(),
             }

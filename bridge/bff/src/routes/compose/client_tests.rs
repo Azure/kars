@@ -334,7 +334,11 @@ async fn native_fixture(
         }
     });
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let config = kube::Config::new(format!("http://{}", listener.local_addr().unwrap()).parse().unwrap());
+    let config = kube::Config::new(
+        format!("http://{}", listener.local_addr().unwrap())
+            .parse()
+            .unwrap(),
+    );
     let cluster = Cluster::for_test_client(kube::Client::try_from(config).unwrap());
     let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     (cluster, requests, server)
@@ -352,9 +356,11 @@ async fn router_candidates_exclude_terminating_and_private_pods_even_when_ready(
         value
     };
     let mut registered = pod("private-router", false, true, "Running");
-    registered["metadata"]["annotations"] = json!({"kars.azure.com/sre-registration-uid":"registration"});
+    registered["metadata"]["annotations"] =
+        json!({"kars.azure.com/sre-registration-uid":"registration"});
     let mut credentialed = pod("credentialed-router", false, true, "Running");
-    credentialed["metadata"]["annotations"] = json!({"kars.azure.com/sre-private-credential-uid":"credential"});
+    credentialed["metadata"]["annotations"] =
+        json!({"kars.azure.com/sre-private-credential-uid":"credential"});
     let mut customer = pod("customer-mission", false, true, "Running");
     customer["metadata"]["labels"]["kars.azure.com/sandbox"] = json!("customer-mission");
     customer["metadata"]["creationTimestamp"] = json!("2026-10-25T19:00:00Z");
@@ -390,23 +396,53 @@ async fn router_candidates_exclude_terminating_and_private_pods_even_when_ready(
 
 #[tokio::test]
 async fn native_fallback_preserves_the_original_router_failure() {
-    let pods = ["first", "second"].into_iter().map(|name| json!({
-        "apiVersion":"v1","kind":"Pod", "metadata":{"name":name,"namespace":"work",
-            "labels":{"kars.azure.com/sandbox":"bridge-orchestrator"}},
-        "status":{"phase":"Running","containerStatuses":[{"name":"inference-router",
-            "image":"router:latest","imageID":"fixture","ready":true,"restartCount":0}]}
-    })).collect();
+    let pods = ["first", "second"]
+        .into_iter()
+        .map(|name| {
+            json!({
+                "apiVersion":"v1","kind":"Pod", "metadata":{"name":name,"namespace":"work",
+                    "labels":{"kars.azure.com/sandbox":"bridge-orchestrator"}},
+                "status":{"phase":"Running","containerStatuses":[{"name":"inference-router",
+                    "image":"router:latest","imageID":"fixture","ready":true,"restartCount":0}]}
+            })
+        })
+        .collect();
     let (cluster, requests, server) = native_fixture(Some(native_source()), pods).await;
-    let error = orchestrator_complete(&cluster, "system", "user", "model", 1024).await.unwrap_err().to_string();
-    assert!(error.contains("work/first: ApiError: original accounting settlement unavailable"), "{error}");
-    assert!(error.contains("work/second: ApiError: subsequent provider unavailable"), "{error}");
-    assert_eq!(requests.lock().unwrap().iter().filter(|entry| entry.0 == Method::POST).count(), 2);
+    let error = orchestrator_complete(&cluster, "system", "user", "model", 1024)
+        .await
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("work/first: ApiError: original accounting settlement unavailable"),
+        "{error}"
+    );
+    assert!(
+        error.contains("work/second: ApiError: subsequent provider unavailable"),
+        "{error}"
+    );
+    assert_eq!(
+        requests
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|entry| entry.0 == Method::POST)
+            .count(),
+        2
+    );
     server.abort();
 }
 
 #[tokio::test]
-async fn native_composition_never_borrows_a_customer_router_when_the_standing_actor_is_unavailable() {
-    for condition in ["absent", "unreconciled", "invalid", "suspended", "warming", "missing-pod"] {
+async fn native_composition_never_borrows_a_customer_router_when_the_standing_actor_is_unavailable()
+{
+    for condition in [
+        "absent",
+        "unreconciled",
+        "invalid",
+        "suspended",
+        "warming",
+        "missing-pod",
+    ] {
         let mut source = native_source();
         if condition == "unreconciled" {
             source["status"] = json!({});
@@ -429,17 +465,30 @@ async fn native_composition_never_borrows_a_customer_router_when_the_standing_ac
             warming["status"]["containerStatuses"][0]["ready"] = json!(false);
             pods.push(warming);
         }
-        let (cluster, requests, server) = native_fixture(
-            (condition != "absent").then_some(source), pods,
-        ).await;
+        let (cluster, requests, server) =
+            native_fixture((condition != "absent").then_some(source), pods).await;
         let error = orchestrator_complete(&cluster, "system", "user", "model", 1024)
-            .await.unwrap_err().to_string();
+            .await
+            .unwrap_err()
+            .to_string();
         if condition == "invalid" {
-            assert!(error.contains("source identity or inference reference is invalid"), "{error}");
+            assert!(
+                error.contains("source identity or inference reference is invalid"),
+                "{error}"
+            );
         } else {
-            assert!(error.contains("no inference path yet"), "{condition}: {error}");
+            assert!(
+                error.contains("no inference path yet"),
+                "{condition}: {error}"
+            );
         }
-        assert!(requests.lock().unwrap().iter().all(|entry| entry.0 == Method::GET));
+        assert!(
+            requests
+                .lock()
+                .unwrap()
+                .iter()
+                .all(|entry| entry.0 == Method::GET)
+        );
         server.abort();
     }
 }
@@ -980,16 +1029,27 @@ async fn funded_orchestrator_composes_only_through_the_bound_router_for_both_wir
 
 #[tokio::test]
 async fn funded_orchestrator_uses_selected_policy_without_mutating_it() {
-    for (model, suffix) in [("selected-chat", "/chat/completions"), ("selected-claude", "/messages")] {
+    for (model, suffix) in [
+        ("selected-chat", "/chat/completions"),
+        ("selected-claude", "/messages"),
+    ] {
         let (cluster, requests, server) = governed_route_fixture(model).await;
-        let (reply, _) = orchestrator_complete(&cluster, "system", "user", "ignored-recommendation", 1024).await.unwrap();
+        let (reply, _) =
+            orchestrator_complete(&cluster, "system", "user", "ignored-recommendation", 1024)
+                .await
+                .unwrap();
         assert_eq!(reply, "funded reply");
         let calls = requests.lock().unwrap();
         let posts: Vec<_> = calls.iter().filter(|call| call.0 == Method::POST).collect();
         assert_eq!(posts.len(), 1);
         assert_eq!(posts[0].2["model"], model);
         assert!(posts[0].1.ends_with(suffix));
-        assert!(calls.iter().filter(|call| call.1.contains("/inferencepolicies/")).all(|call| call.0 == Method::GET));
+        assert!(
+            calls
+                .iter()
+                .filter(|call| call.1.contains("/inferencepolicies/"))
+                .all(|call| call.0 == Method::GET)
+        );
         drop(calls);
         server.abort();
     }

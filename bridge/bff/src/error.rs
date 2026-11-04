@@ -202,13 +202,30 @@ mod tests {
             (409, "CredentialAuthorityUnavailable", StatusCode::CONFLICT),
             (409, "Conflict", StatusCode::BAD_GATEWAY),
             (403, "Forbidden", StatusCode::BAD_GATEWAY),
+            (422, "Invalid", StatusCode::BAD_GATEWAY),
         ] {
-            let error = AppError::from(kube::Error::Api(kube::core::ErrorResponse {
-                code,
-                reason: reason.into(),
-                status: "Failure".into(),
-                message: "private upstream detail".into(),
-            }));
+            let error = AppError::from(kube::Error::Api(
+                kube::core::Status {
+                    code,
+                    reason: reason.into(),
+                    status: Some(kube::core::response::StatusSummary::Failure),
+                    message: "private upstream detail".into(),
+                    details: Some(kube::core::response::StatusDetails {
+                        name: "private upstream detail".into(),
+                        group: String::new(),
+                        kind: String::new(),
+                        uid: String::new(),
+                        causes: vec![kube::core::response::StatusCause {
+                            message: "private upstream detail".into(),
+                            reason: String::new(),
+                            field: String::new(),
+                        }],
+                        retry_after_seconds: 0,
+                    }),
+                    ..Default::default()
+                }
+                .boxed(),
+            ));
             assert_eq!(error.status(), expected);
             assert!(!error.client_message().contains("private upstream detail"));
             if expected == StatusCode::CONFLICT {

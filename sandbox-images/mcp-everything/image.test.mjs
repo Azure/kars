@@ -39,12 +39,12 @@ if (process.argv.includes("--server-fixture")) {
     const lock = await readJson("package-lock.json");
     const installed = await readJson("node_modules/@modelcontextprotocol/sdk/package.json");
     assert.equal(manifest.dependencies["@modelcontextprotocol/server-everything"], "2026.7.4");
-    assert.equal(manifest.overrides["@modelcontextprotocol/sdk"], "1.31.0");
-    assert.equal(lock.packages["node_modules/@modelcontextprotocol/sdk"].version, "1.31.0");
-    assert.equal(installed.version, "1.31.0");
+    assert.equal(manifest.overrides["@modelcontextprotocol/sdk"], "1.32.0");
+    assert.equal(lock.packages["node_modules/@modelcontextprotocol/sdk"].version, "1.32.0");
+    assert.equal(installed.version, "1.32.0");
     assert.equal(
       lock.packages["node_modules/@modelcontextprotocol/sdk"].resolved,
-      "https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.31.0.tgz",
+      "https://registry.npmjs.org/@modelcontextprotocol/sdk/-/sdk-1.32.0.tgz",
     );
   });
 

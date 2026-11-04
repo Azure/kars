@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { createRequire } from "node:module";
 import { runInNewContext } from "node:vm";
 import test from "node:test";
+import { roleBudgetError } from "../src/lib/budget-review.ts";
 
 const ts = createRequire(import.meta.url)("typescript");
 const jsx = (type, props) => ({ type, props });
@@ -13,6 +14,7 @@ const context = { exports: {}, require(name) {
   if (name === "react/jsx-runtime") return { jsx, jsxs: jsx };
   if (name === "./helpers") return { modelKey: (provider, model) => `${provider}::${model}` };
   if (name === "@/components/repo-access") return { missionGithubWriteEnabled: () => false };
+  if (name === "@/lib/budget-review") return { roleBudgetError };
   return {};
 } };
 runInNewContext(ts.transpileModule(readFileSync(new URL(

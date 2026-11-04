@@ -454,8 +454,17 @@ pub(super) async fn apply_governance(
         .to_string();
     let current = cluster.get_kind(&ns, kind, name).await.map_err(apply_err)?;
     if kind == "InferencePolicy"
-        && current.as_ref().and_then(|p| annotation(p, super::MODEL_SOURCE)).as_deref() == Some("cluster")
-        && current.as_ref().map(spec).and_then(|s| s.pointer("/modelPreference/primary")) != req.spec.pointer("/modelPreference/primary") {
+        && current
+            .as_ref()
+            .and_then(|p| annotation(p, super::MODEL_SOURCE))
+            .as_deref()
+            == Some("cluster")
+        && current
+            .as_ref()
+            .map(spec)
+            .and_then(|s| s.pointer("/modelPreference/primary"))
+            != req.spec.pointer("/modelPreference/primary")
+    {
         return Err(AppError::Rejected("This component inherits the cluster default. Change its model under Configuration → Component models, or select an explicit override there first. Other policy fields can still be edited here.".into()));
     }
     let body = governance_manifest(kind, name, &ns, req.spec, current.as_ref())?;
@@ -885,12 +894,16 @@ mod tests {
     }
 
     fn api_err(code: u16, message: &str) -> kube::Error {
-        kube::Error::Api(kube::core::ErrorResponse {
-            status: "Failure".into(),
-            message: message.into(),
-            reason: "".into(),
-            code,
-        })
+        kube::Error::Api(
+            kube::core::Status {
+                status: Some(kube::core::response::StatusSummary::Failure),
+                message: message.into(),
+                reason: "".into(),
+                code,
+                ..Default::default()
+            }
+            .boxed(),
+        )
     }
 
     #[test]

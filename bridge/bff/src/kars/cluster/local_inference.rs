@@ -183,12 +183,16 @@ impl Cluster {
             "spec": spec,
         }))
         .map_err(|e| {
-            kube::Error::Api(kube::core::ErrorResponse {
-                status: "Failure".into(),
-                message: e.to_string(),
-                reason: "BadRequest".into(),
-                code: 400,
-            })
+            kube::Error::Api(
+                kube::core::Status {
+                    status: Some(kube::core::response::StatusSummary::Failure),
+                    message: e.to_string(),
+                    reason: "BadRequest".into(),
+                    code: 400,
+                    ..Default::default()
+                }
+                .boxed(),
+            )
         })?;
         api.patch(
             name,
@@ -400,8 +404,12 @@ impl Cluster {
                 let time = e
                     .last_timestamp
                     .as_ref()
-                    .map(|t| t.0.to_rfc3339())
-                    .or_else(|| e.event_time.as_ref().map(|t| t.0.to_rfc3339()));
+                    .map(|t| crate::kars::time::to_chrono(t.0).to_rfc3339())
+                    .or_else(|| {
+                        e.event_time
+                            .as_ref()
+                            .map(|t| crate::kars::time::to_chrono(t.0).to_rfc3339())
+                    });
                 status.activities.push(DeployActivity {
                     time,
                     reason: e.reason.clone().unwrap_or_default(),

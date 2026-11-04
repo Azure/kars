@@ -135,12 +135,13 @@ fn configured_models(envs: &[EnvVar]) -> (Option<String>, Vec<String>) {
 }
 
 fn incomplete_bootstrap_model() -> kube::Error {
-    kube::Error::Api(kube::core::ErrorResponse {
-        status: "Failure".into(),
+    kube::Error::Api(kube::core::Status {
+        status: Some(kube::core::response::StatusSummary::Failure),
         reason: "InferenceDefaultsUnavailable".into(),
         code: 503,
         message: "Core inference defaults are incomplete or indirect; configure the provider and default model before initializing the Bridge orchestrator".into(),
-    })
+        ..Default::default()
+    }.boxed())
 }
 
 pub(super) fn configured_bootstrap_model(
@@ -315,12 +316,13 @@ impl Cluster {
         }
         let keys = self.additional_provider_keys().await?;
         if !inherited_provider_registered(&envs, &keys) {
-            return Err(kube::Error::Api(kube::error::ErrorResponse {
-                status: "Failure".into(),
+            return Err(kube::Error::Api(kube::core::Status {
+                status: Some(kube::core::response::StatusSummary::Failure),
                 message: "Connect the current default as an additional provider before switching, so its endpoint, credentials and models remain available.".into(),
                 reason: "ProviderRegistrationRequired".into(),
                 code: 409,
-            }));
+                ..Default::default()
+            }.boxed()));
         }
         Ok(())
     }

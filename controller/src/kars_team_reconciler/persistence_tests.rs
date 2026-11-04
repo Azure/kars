@@ -16,10 +16,10 @@ mod budget_interleavings;
 #[path = "harvest_tests.rs"]
 mod harvest;
 
-#[path = "request_tests.rs"]
-mod requests_tests;
 #[path = "qualification_attempt_tests.rs"]
 mod qualification_attempt_tests;
+#[path = "request_tests.rs"]
+mod requests_tests;
 #[path = "work_tests.rs"]
 mod work_tests;
 
@@ -606,7 +606,10 @@ async fn budget_observation_transition_removes_old_finite_limit_without_a_write_
         assert_eq!(budget["unboundedTokens"], true);
     }
     let again = write_status(&teams, &updated, desired).await.unwrap();
-    assert_eq!(again.metadata.resource_version, updated.metadata.resource_version);
+    assert_eq!(
+        again.metadata.resource_version,
+        updated.metadata.resource_version
+    );
 }
 
 #[tokio::test]

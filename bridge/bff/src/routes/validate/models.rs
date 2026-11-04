@@ -153,9 +153,13 @@ pub(super) async fn check_models(
                     );
                     let qualified = qualification.as_ref().copied().unwrap_or(false);
                     let validation_note = if qualification_run {
-                        Some(if workload.is_some_and(|value| value.eq_ignore_ascii_case("team")) {
-                            crate::routes::teams::qualification::contract::NOTE
-                        } else { crate::routes::qualification_runs::NOTE })
+                        Some(
+                            if workload.is_some_and(|value| value.eq_ignore_ascii_case("team")) {
+                                crate::routes::teams::qualification::contract::NOTE
+                            } else {
+                                crate::routes::qualification_runs::NOTE
+                            },
+                        )
                     } else {
                         crate::routes::options::route_validation_note()
                             .ok()
@@ -479,9 +483,13 @@ pub(super) async fn check_models(
                     let route_qualified =
                         known && route_qualification.as_ref().copied().unwrap_or(false);
                     let validation_note = if qualification_run {
-                        Some(if workload.is_some_and(|value| value.eq_ignore_ascii_case("team")) {
-                            crate::routes::teams::qualification::contract::NOTE
-                        } else { crate::routes::qualification_runs::NOTE })
+                        Some(
+                            if workload.is_some_and(|value| value.eq_ignore_ascii_case("team")) {
+                                crate::routes::teams::qualification::contract::NOTE
+                            } else {
+                                crate::routes::qualification_runs::NOTE
+                            },
+                        )
                     } else {
                         crate::routes::options::route_validation_note()
                             .ok()

@@ -33,8 +33,8 @@ mod prompts;
 mod routing;
 mod spending;
 mod team;
-mod team_proposal;
 mod team_profiles;
+mod team_proposal;
 mod team_qualification;
 
 #[cfg(test)]

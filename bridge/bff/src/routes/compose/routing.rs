@@ -57,7 +57,9 @@ pub(super) fn unique_model_for_deployment<'a>(
 ) -> Option<&'a ModelOption> {
     let mut matches = models.iter().filter(|model| model.deployment == deployment);
     let first = matches.next()?;
-    matches.all(|model| model.provider == first.provider).then_some(first)
+    matches
+        .all(|model| model.provider == first.provider)
+        .then_some(first)
 }
 
 pub(super) fn recommendation_is_actionable(
@@ -71,9 +73,11 @@ pub(super) fn select_orchestrator_route(
     options: &crate::routes::options::Options,
     efficiency: &crate::routes::efficiency::EfficiencyDto,
 ) -> Option<(String, String, String)> {
-    if let Some(model) = options.models.iter().find(|model| {
-        model.is_default && orchestrator_quality_score(&model.deployment).is_some()
-    }) {
+    if let Some(model) = options
+        .models
+        .iter()
+        .find(|model| model.is_default && orchestrator_quality_score(&model.deployment).is_some())
+    {
         return Some((
             model.provider.clone(),
             model.deployment.clone(),

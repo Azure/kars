@@ -253,7 +253,7 @@ fn desired_binding(
     Ok(RoleBinding {
         metadata: meta,
         role_ref: k8s_openapi::api::rbac::v1::RoleRef {
-            api_group: "rbac.authorization.k8s.io".into(),
+            api_group: Some("rbac.authorization.k8s.io".into()),
             kind: "Role".into(),
             name: GRANT.into(),
         },

@@ -60,7 +60,13 @@ async fn team_qualification_designation_and_review_reject_nonoperators_before_cl
         State(state()),
         Extension(principal()),
         Path("work".into()),
-        Json(serde_json::from_value(json!({"charter":"review","qualification_run":true})).unwrap()),
+        Json(
+            serde_json::from_value(json!({
+                "charter":"review","qualification_run":true,
+                "spending":{"budget_tokens":null,"role_tokens":{}}
+            }))
+            .unwrap(),
+        ),
     )
     .await;
     assert!(matches!(compose, Err(AppError::Forbidden(_))));

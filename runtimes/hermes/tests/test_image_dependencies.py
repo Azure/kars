@@ -41,7 +41,7 @@ class HermesImageDependenciesTests(unittest.TestCase):
         run = next(run for run in RUNS if "git init -q /opt/hermes" in run)
         self.assertIn("ARG HERMES_COMMIT=f97608f178d1ffeca59860195ab7da295f7c8e5f", DOCKERFILE)
         self.assertIn("1a98d5528c88ddc3d4e32439d3e8322487ce31bc", run)
-        self.assertIn("2c87202b1566e4daed16b1472bc5d5e3651af9f6fd64acc953412f43432fefb0", run)
+        self.assertIn("c5863a93d8ccf31a8eb0c8bf66a35c638966457d79238a6d9486b600b37aac87", run)
         for digest in (
             "6dd85804ac28a0f2d326030e69c4f65a9ae8968478af87d2267d6ad89cc7230a",
             "2eee7bf49d29e6d0b218dcc960a174b99cc177039f6941f0355ebff9a93e33f7",
@@ -67,6 +67,20 @@ class HermesImageDependenciesTests(unittest.TestCase):
                     lock, rf'(?m)^name = "{name}"\nversion = "{re.escape(version)}"$',
                 )
                 self.assertIn(f"{name}=={version}", constraints)
+
+    def test_certifi_distrust_update_is_locked_in_both_python_images(self):
+        patch = (IMAGE / "hermes-dependency-fixes.patch").read_text()
+        lock = (IMAGE / "hermes-uv.lock").read_text()
+        constraints = (IMAGE / "hermes-core-constraints.txt").read_text().splitlines()
+        self.assertIn('+  "certifi==2026.10.23",', patch)
+        self.assertRegex(lock, r'(?m)^name = "certifi"\nversion = "2026\.10\.23"$')
+        self.assertIn("certifi==2026.10.23", constraints)
+        sidecar = (ROOT / "sandbox-images/k8s-sidecar/requirements.lock").read_text()
+        self.assertIn(
+            "certifi==2026.10.23 --hash=sha256:"
+            "e9b54de76e530bb6cf0ccd036787103acb58fd42ba930ea8bf948ddbaa2f61d1",
+            sidecar.splitlines(),
+        )
 
     def test_ui_builds_locked_workspaces_and_selects_prebuilt_paths(self):
         run = next(run for run in RUNS if "npm ci" in run)

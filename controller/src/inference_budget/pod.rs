@@ -125,7 +125,10 @@ pub async fn prepare(
         return Err(BudgetError::Authorization.into());
     }
     let store = Store::new(client.clone(), &settings.accounting_namespace);
-    let account = store.for_task(&bound.task_uid).read(&bound.root, &bound.account.uid).await?;
+    let account = store
+        .for_task(&bound.task_uid)
+        .read(&bound.root, &bound.account.uid)
+        .await?;
     let ledger = account
         .status
         .as_ref()

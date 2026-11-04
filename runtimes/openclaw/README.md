@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # OpenClaw runtime: required Entra mesh admission
 
 Set `MESH_AUTH_BACKEND=EntraAgentIdentity` to require Entra admission through the existing Kars inference router and official AGT transport. This setting is incompatible with `AGT_SKIP_INIT=1`, `AGT_SKIP_ENTRA=1`, and `AGT_SKIP_VERIFY=1`; conflicts stop startup rather than downgrade authentication.
@@ -312,7 +315,7 @@ The single existing transport registers its identity and connects using the fres
 
 The request is `POST /agt/registry/v1/registry/verify` with JSON `{ "amid": "<connected canonical DID>", "verification_token": "<fresh router token>" }`. The transport must remain connected with that same current DID and lifecycle through the POST response; a matching response for an identity that is no longer current is rejected. The token is the same one sent in the relay's `connect.token` frame. Required renewal and reconnect repeat the complete mint/connect/verify sequence.
 
-The selected registry implementation is [`verify_identity`, `agentmesh/registry/app.py`](https://github.com/microsoft/agent-governance-toolkit/blob/f68f2cf312c7e1366d6fd5654c51d8380c815222/agent-governance-python/agent-mesh/src/agentmesh/registry/app.py). Local enforcement is in `src/core/mesh-auth.ts`, `validateMeshVerification` and `RequiredMeshAuth.authenticate`: it requires a matching DID, verified tier, application ID and tenant ID, not merely HTTP success or a timestamp. The AGT 5 SDK is checksum-bound under `vendor/agt`; mesh servers, Python owners and Rust dependencies use the same source revision. Local compatibility does not establish deployed Entra acceptance.
+The selected registry implementation is [`verify_identity`, `agentmesh/registry/app.py`](https://github.com/microsoft/agent-governance-toolkit/blob/17595e649abdfa703962c2f8c241826f68318109/agent-governance-python/agent-mesh/src/agentmesh/registry/app.py). Local enforcement is in `src/core/mesh-auth.ts`, `validateMeshVerification` and `RequiredMeshAuth.authenticate`: it requires a matching DID, verified tier, application ID and tenant ID, not merely HTTP success or a timestamp. The AGT 5 SDK is checksum-bound under `vendor/agt`; mesh servers, Python owners and Rust dependencies use the same source revision. Local compatibility does not establish deployed Entra acceptance.
 
 ## Renewal, readiness, and teardown
 

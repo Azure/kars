@@ -1796,4 +1796,6 @@ pub(crate) async fn grant(client: &Client, task: &KarsTask) -> Result<Option<Gra
 #[cfg(test)]
 mod tests;
 #[cfg(test)]
-pub(crate) use tests::lifecycle_tests::{completed_team_fixture, failed_revision_team_fixture, failed_team_fixture};
+pub(crate) use tests::lifecycle_tests::{
+    completed_team_fixture, failed_revision_team_fixture, failed_team_fixture,
+};

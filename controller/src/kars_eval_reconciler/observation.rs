@@ -408,15 +408,17 @@ async fn verify_job(
     );
     let meta = cron
         .spec
+        .job_template
+        .spec
         .as_ref()
-        .and_then(|spec| spec.job_template.spec.as_ref())
         .and_then(|spec| spec.template.metadata.as_ref())
         .context("CronJob template missing")?;
     ensure!(intent.matches(meta), "CronJob intent changed");
     let job_meta = cron
         .spec
+        .job_template
+        .metadata
         .as_ref()
-        .and_then(|spec| spec.job_template.metadata.as_ref())
         .context("CronJob Job metadata missing")?;
     ensure!(
         intent.matches(job_meta)
@@ -426,8 +428,9 @@ async fn verify_job(
     );
     let spec = cron
         .spec
+        .job_template
+        .spec
         .as_ref()
-        .and_then(|spec| spec.job_template.spec.as_ref())
         .and_then(|spec| spec.template.spec.as_ref())
         .context("CronJob Pod template missing")?;
     ensure!(

@@ -750,9 +750,9 @@ describe("native Mission registration", () => {
       agent: { runEmbeddedAgent, session: { getSessionEntry: vi.fn() } },
     } } as any);
     const entry = registerTool.mock.calls.find(([tool]) => tool.contextVersion === 2);
-    expect(entry?.[1]).toEqual({ optional: true, names: ["kars_mission_access_request", "kars_mission_file_read", "kars_mission_file_write", "kars_mission_http_fetch", "kars_mission_mcp_list", "kars_mission_mcp_call", "kars_mission_foundry_memory", "kars_mission_github_pr", "kars_mission_mesh_send", "kars_mission_discover", "kars_mission_mesh_inbox", "kars_mission_mesh_await"] });
+    expect(entry?.[1]).toEqual({ optional: true, names: ["kars_mission_access_request", "kars_mission_file_read", "kars_mission_file_write", "kars_mission_http_fetch", "kars_mission_mcp_list", "kars_mission_mcp_call", "kars_mission_foundry_memory", "kars_mission_github_pr", "kars_mission_python_execute", "kars_mission_mesh_send", "kars_mission_discover", "kars_mission_mesh_inbox", "kars_mission_mesh_await"] });
     expect(entry?.[0].create({})).toBeNull();
-    expect(mock.api.on.mock.calls.map(([name]) => name)).toEqual(["before_tool_call", "after_tool_call", "agent_end", "model_call_started"]);
+    expect(mock.api.on.mock.calls.map(([name]) => name)).toEqual(["before_tool_call", "after_tool_call", "before_agent_finalize", "agent_end", "model_call_started"]);
     expect(registerWebFetchProvider).toHaveBeenCalledWith(expect.objectContaining({ id: "kars-router", requiresCredential: false }));
     expect(runEmbeddedAgent).not.toHaveBeenCalled();
   });

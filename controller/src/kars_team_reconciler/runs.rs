@@ -117,10 +117,21 @@ pub(super) async fn harvest_and_retire_runs(
             .as_ref()
             .is_some_and(|execution| execution.launch);
         let Some(cm) = cms.get_opt(&format!("kars-mission-output-{run}")).await? else {
-            let retained = if launched && task.spec.blueprint.as_ref().is_some_and(|blueprint| blueprint.execution_plan.is_some()) {
+            let retained = if launched
+                && task
+                    .spec
+                    .blueprint
+                    .as_ref()
+                    .is_some_and(|blueprint| blueprint.execution_plan.is_some())
+            {
                 super::work::retained_failure_digest(client, team, task).await?
-            } else { None };
-            if let Some(data) = crate::reviewed_execution::failed_team_run(client, team, task, retained.as_deref()).await? {
+            } else {
+                None
+            };
+            if let Some(data) =
+                crate::reviewed_execution::failed_team_run(client, team, task, retained.as_deref())
+                    .await?
+            {
                 super::work::harvest(client, team, task, &data, false).await?;
                 tasks::idle(tasks_api, task).await?;
                 stats.barren += 1;

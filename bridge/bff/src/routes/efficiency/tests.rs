@@ -250,23 +250,55 @@ fn retained_runtime_labels_require_matching_attempt_not_flat_fields() {
         let (mut data, cm) = terminal_fixture(runtime);
         data.insert("runtime".into(), "Unrelated current runtime".into());
         let projected = mission_result_with_attempt(&data, Some(&cm));
-        assert_eq!(projected.run_evidence.unwrap().runtime.as_deref(), Some(runtime));
-        assert!(mission_result_with_attempt(&data, None).run_evidence.unwrap().runtime.is_none());
-        let original: Value = serde_json::from_str(&cm.data.as_ref().unwrap()["attempt.json"]).unwrap();
-        for pointer in ["/candidate/taskUid", "/candidate/podUid", "/candidate/runNonce", "/candidate/runtime"] {
+        assert_eq!(
+            projected.run_evidence.unwrap().runtime.as_deref(),
+            Some(runtime)
+        );
+        assert!(
+            mission_result_with_attempt(&data, None)
+                .run_evidence
+                .unwrap()
+                .runtime
+                .is_none()
+        );
+        let original: Value =
+            serde_json::from_str(&cm.data.as_ref().unwrap()["attempt.json"]).unwrap();
+        for pointer in [
+            "/candidate/taskUid",
+            "/candidate/podUid",
+            "/candidate/runNonce",
+            "/candidate/runtime",
+        ] {
             let mut attempt = original.clone();
             *attempt.pointer_mut(pointer).unwrap() = serde_json::json!("wrong");
             let mut changed = cm.clone();
-            changed.data.as_mut().unwrap().insert("attempt.json".into(), attempt.to_string());
+            changed
+                .data
+                .as_mut()
+                .unwrap()
+                .insert("attempt.json".into(), attempt.to_string());
             let result = mission_result_with_attempt(&data, Some(&changed));
             assert!(result.reviewable);
             assert!(result.run_evidence.unwrap().runtime.is_none(), "{pointer}");
         }
         let mut legacy = original;
-        legacy["candidate"].as_object_mut().unwrap().remove("runtime");
+        legacy["candidate"]
+            .as_object_mut()
+            .unwrap()
+            .remove("runtime");
         let mut changed = cm;
-        changed.data.as_mut().unwrap().insert("attempt.json".into(), legacy.to_string());
-        assert!(mission_result_with_attempt(&data, Some(&changed)).run_evidence.unwrap().runtime.is_none());
+        changed
+            .data
+            .as_mut()
+            .unwrap()
+            .insert("attempt.json".into(), legacy.to_string());
+        assert!(
+            mission_result_with_attempt(&data, Some(&changed))
+                .run_evidence
+                .unwrap()
+                .runtime
+                .is_none()
+        );
     }
 }
 

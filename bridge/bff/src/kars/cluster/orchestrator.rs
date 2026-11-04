@@ -36,12 +36,13 @@ fn validate_funding_catalog(catalog: &ConfigMap) -> anyhow::Result<()> {
 }
 
 fn invalid_orchestrator_source() -> kube::Error {
-    kube::Error::Api(kube::core::ErrorResponse {
-        status: "Failure".into(),
+    kube::Error::Api(kube::core::Status {
+        status: Some(kube::core::response::StatusSummary::Failure),
         message: "Existing bridge-orchestrator source identity or inference reference is invalid; startup will not overwrite it".into(),
         reason: "Conflict".into(),
         code: 409,
-    })
+        ..Default::default()
+    }.boxed())
 }
 
 fn verify_orchestrator_source(source: &DynamicObject) -> Result<(), kube::Error> {
@@ -95,7 +96,6 @@ fn verify_orchestrator_source(source: &DynamicObject) -> Result<(), kube::Error>
     }
     Ok(())
 }
-
 
 impl Cluster {
     /// Resolve only the selected actor's governed router. None permits legacy
@@ -258,7 +258,12 @@ impl Cluster {
             return Ok(Vec::new());
         };
         verify_orchestrator_source(&source)?;
-        if source.data.pointer("/spec/suspended").and_then(serde_json::Value::as_bool) == Some(true) {
+        if source
+            .data
+            .pointer("/spec/suspended")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+        {
             return Ok(Vec::new());
         }
         let Some(namespace) = source
@@ -278,7 +283,12 @@ impl Cluster {
             .iter()
             .filter(|p| {
                 if p.metadata.namespace.as_deref() != Some(namespace)
-                    || p.metadata.labels.as_ref().and_then(|labels| labels.get("kars.azure.com/sandbox")).map(String::as_str) != Some("bridge-orchestrator")
+                    || p.metadata
+                        .labels
+                        .as_ref()
+                        .and_then(|labels| labels.get("kars.azure.com/sandbox"))
+                        .map(String::as_str)
+                        != Some("bridge-orchestrator")
                 {
                     return false;
                 }
@@ -450,16 +460,41 @@ impl Cluster {
         .filter(|model| !model.trim().is_empty())
     }
 
-    pub async fn bridge_orchestrator_model_route(&self) -> Result<Option<crate::kars::task::TaskModel>, kube::Error> {
-        let Some(policy) = self.get_kind("kars-system", "InferencePolicy", "bridge-orchestrator-inference").await? else { return Ok(None); };
-        if policy.metadata.annotations.as_ref().and_then(|a| a.get("kars.azure.com/model-default-source")).map(String::as_str) == Some("cluster") {
-            return self.model_default().await?.map(Some).ok_or_else(|| kube::Error::Api(kube::core::ErrorResponse {
-                code: 422, status: "Failure".into(), reason: "ModelDefaultUnavailable".into(),
+    pub async fn bridge_orchestrator_model_route(
+        &self,
+    ) -> Result<Option<crate::kars::task::TaskModel>, kube::Error> {
+        let Some(policy) = self
+            .get_kind(
+                "kars-system",
+                "InferencePolicy",
+                "bridge-orchestrator-inference",
+            )
+            .await?
+        else {
+            return Ok(None);
+        };
+        if policy
+            .metadata
+            .annotations
+            .as_ref()
+            .and_then(|a| a.get("kars.azure.com/model-default-source"))
+            .map(String::as_str)
+            == Some("cluster")
+        {
+            return self.model_default().await?.map(Some).ok_or_else(|| kube::Error::Api(kube::core::Status {
+                code: 422, status: Some(kube::core::response::StatusSummary::Failure), reason: "ModelDefaultUnavailable".into(),
                 message: "The Orchestrator inherits the cluster default, but no default is saved.".into(),
-            }));
+                ..Default::default()
+            }.boxed()));
         }
-        policy.data.pointer("/spec/modelPreference/primary")
-            .map(|value| serde_json::from_value(value.clone()).map_err(|error| kube::Error::SerdeError(error))).transpose()
+        policy
+            .data
+            .pointer("/spec/modelPreference/primary")
+            .map(|value| {
+                serde_json::from_value(value.clone())
+                    .map_err(|error| kube::Error::SerdeError(error))
+            })
+            .transpose()
     }
 
     pub async fn wait_for_bridge_orchestrator_model(
@@ -475,8 +510,18 @@ impl Cluster {
                 == policy.metadata.generation;
             generation_matches
                 && policy.metadata.generation.is_some()
-                && policy.data.pointer("/status/compiledDigest").and_then(serde_json::Value::as_str)
-                    .is_some_and(|digest| !digest.is_empty() && policy.data.pointer("/status/loadedDigest").and_then(serde_json::Value::as_str) == Some(digest))
+                && policy
+                    .data
+                    .pointer("/status/compiledDigest")
+                    .and_then(serde_json::Value::as_str)
+                    .is_some_and(|digest| {
+                        !digest.is_empty()
+                            && policy
+                                .data
+                                .pointer("/status/loadedDigest")
+                                .and_then(serde_json::Value::as_str)
+                                == Some(digest)
+                    })
                 && policy
                     .data
                     .pointer("/spec/modelPreference/primary/provider")

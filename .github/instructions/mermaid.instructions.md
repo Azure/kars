@@ -1,6 +1,9 @@
 ---
 applyTo: "**"
 ---
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Mermaid AI Skills
 
 When the user asks to create, edit, or visualize any diagram, use the Mermaid

@@ -101,6 +101,7 @@ test("operator setup requires reviewed images for both AL3 runtime roles", () =>
 
 async function page(admin, value = report, fails = false) {
   const source = load("../src/app/console/datapath/page.tsx", {
+    "@/components/navigation-link": { default: props => React.createElement("a", props) },
     "@/components/ui": {
       PageHeader: ({ title, lead }) => React.createElement("header", null, title, lead),
       Stat: ({ label, value }) => React.createElement("span", null, label, value),

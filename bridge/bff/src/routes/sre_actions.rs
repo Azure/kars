@@ -91,7 +91,7 @@ fn to_dto(a: &KarsSREAction) -> SreActionDto {
             .meta()
             .creation_timestamp
             .as_ref()
-            .map(|t| t.0.to_rfc3339()),
+            .map(|t| crate::kars::time::to_chrono(t.0).to_rfc3339()),
         actionable,
     }
 }

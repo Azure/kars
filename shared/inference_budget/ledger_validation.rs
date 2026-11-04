@@ -45,20 +45,26 @@ impl Ledger {
         }
         if let Some(history) = &self.history {
             if !valid_digest(&history.root)
-                || history.node_unknown.iter().any(|(uid, count)| {
-                    *count == 0 || !self.nodes.contains_key(uid)
-                })
+                || history
+                    .node_unknown
+                    .iter()
+                    .any(|(uid, count)| *count == 0 || !self.nodes.contains_key(uid))
                 || (history.unknown_usage_attempts > 0 && self.effective_limits()?.finite())
                 || history.node_unknown.keys().any(|uid| {
-                    self.effective_node_limits(uid).map_or(true, |limits| limits.finite())
+                    self.effective_node_limits(uid)
+                        .map_or(true, |limits| limits.finite())
                 })
             {
                 return Err(BudgetError::Corrupt);
             }
         }
-        let mut root_unknown = self.history.as_ref()
+        let mut root_unknown = self
+            .history
+            .as_ref()
             .map_or(0, |history| history.unknown_usage_attempts);
-        let mut node_unknown = self.history.as_ref()
+        let mut node_unknown = self
+            .history
+            .as_ref()
             .map_or_else(BTreeMap::new, |history| history.node_unknown.clone());
         let mut root_reserved = Amounts::default();
         let mut node_reserved = BTreeMap::<String, Amounts>::new();

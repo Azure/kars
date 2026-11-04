@@ -113,9 +113,12 @@ fn memory_item(text: &str) -> Value {
 }
 
 fn memory_policy_denial(output: &ToolCallOutput) -> Option<DispatchError> {
-    (output.extensions.get("karsMemoryPolicyDenied") == Some(&Value::Bool(true))).then(|| DispatchError::PolicyDenied {
-        tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(),
-        reason: "memory scope is no longer authorized".into(),
+    (output.extensions.get("karsMemoryPolicyDenied") == Some(&Value::Bool(true))).then(|| {
+        DispatchError::PolicyDenied {
+            tool: "foundry.memory".into(),
+            policy_kind: "KarsMemory".into(),
+            reason: "memory scope is no longer authorized".into(),
+        }
     })
 }
 
@@ -378,7 +381,10 @@ impl std::fmt::Debug for PlatformDispatcher {
         f.debug_struct("PlatformDispatcher")
             .field("tools_total", &self.catalog.tools().len())
             .field("memory_foundry_configured", &self.memory_foundry_configured)
-            .field("memory_governance_configured", &self.memory_governance.is_some())
+            .field(
+                "memory_governance_configured",
+                &self.memory_governance.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -423,7 +429,8 @@ impl PlatformDispatcher {
                 "text-embedding-3-small",
             ),
             memory_binding: None,
-            memory_foundry_configured: std::env::var("FOUNDRY_PROJECT_ENDPOINT").is_ok_and(|v| !v.trim().is_empty()),
+            memory_foundry_configured: std::env::var("FOUNDRY_PROJECT_ENDPOINT")
+                .is_ok_and(|v| !v.trim().is_empty()),
             memory_backend: Arc::new(tokio::sync::OnceCell::new()),
             memory_governance: None,
             policy_status: None,
@@ -431,7 +438,10 @@ impl PlatformDispatcher {
         }
     }
 
-    pub fn with_memory_governance(mut self, governance: Arc<crate::governance::Governance>) -> Self {
+    pub fn with_memory_governance(
+        mut self,
+        governance: Arc<crate::governance::Governance>,
+    ) -> Self {
         self.memory_governance = Some(governance);
         self
     }
@@ -482,12 +492,19 @@ impl PlatformDispatcher {
 
     async fn memory_target(&self, args: &Value) -> Result<(String, String), DispatchError> {
         let access = crate::memory_binding_loader::resolve_access(
-            self.memory_binding.as_ref(), &self.sandbox_name, &self.memory_store_id,
-        ).await.map_err(|reason| DispatchError::ExecutionFailed {
-            tool: "foundry.memory".into(), reason,
+            self.memory_binding.as_ref(),
+            &self.sandbox_name,
+            &self.memory_store_id,
+        )
+        .await
+        .map_err(|reason| DispatchError::ExecutionFailed {
+            tool: "foundry.memory".into(),
+            reason,
         })?;
         let denied = |reason: &str| DispatchError::PolicyDenied {
-            tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(), reason: reason.into(),
+            tool: "foundry.memory".into(),
+            policy_kind: "KarsMemory".into(),
+            reason: reason.into(),
         };
         let scope = match args.get("scope") {
             None => access.scope.as_str(),
@@ -589,9 +606,18 @@ impl PlatformDispatcher {
             .await
     }
 
-    async fn select_memory_backend(&self, bound: bool, required: bool) -> Result<bool, DispatchError> {
+    async fn select_memory_backend(
+        &self,
+        bound: bool,
+        required: bool,
+    ) -> Result<bool, DispatchError> {
         if !bound && required {
-            return Err(DispatchError::PolicyDenied { tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(), reason: "required memory binding is unavailable; no backend fallback permitted".into() });
+            return Err(DispatchError::PolicyDenied {
+                tool: "foundry.memory".into(),
+                policy_kind: "KarsMemory".into(),
+                reason: "required memory binding is unavailable; no backend fallback permitted"
+                    .into(),
+            });
         }
         let foundry = bound || self.memory_foundry_configured;
         let selected = self.memory_backend.get_or_init(|| async { foundry }).await;
@@ -608,32 +634,59 @@ impl PlatformDispatcher {
         };
         let bound = match binding.as_deref() {
             Some(Ok(Some(_))) => true,
-            Some(Err(reason)) => return Err(DispatchError::PolicyDenied {
-                tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(), reason: reason.clone(),
-            }),
+            Some(Err(reason)) => {
+                return Err(DispatchError::PolicyDenied {
+                    tool: "foundry.memory".into(),
+                    policy_kind: "KarsMemory".into(),
+                    reason: reason.clone(),
+                });
+            }
             _ => false,
         };
-        let foundry = self.select_memory_backend(bound,
-            std::env::var("MEMORY_BINDING_REQUIRED").as_deref() == Ok("true")).await?;
+        let foundry = self
+            .select_memory_backend(
+                bound,
+                std::env::var("MEMORY_BINDING_REQUIRED").as_deref() == Ok("true"),
+            )
+            .await?;
         if !foundry {
             // Hold the binding snapshot while accessing the built-in store so a
             // concurrent required-binding reload cannot broaden this request.
             let denied = |reason: String| DispatchError::PolicyDenied {
-                tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(), reason,
+                tool: "foundry.memory".into(),
+                policy_kind: "KarsMemory".into(),
+                reason,
             };
-            let governance = self.memory_governance.as_ref()
+            let governance = self
+                .memory_governance
+                .as_ref()
                 .ok_or_else(|| denied("built-in memory governance is unavailable".into()))?;
             let operation = match args["operation"].as_str() {
                 Some("search") => "search_memories",
                 Some("update") => "update_memories",
                 Some("delete_scope") => "delete_scope",
-                _ => return Err(DispatchError::InvalidArguments { tool: "foundry.memory".into(), reason: "invalid memory operation".into() }),
+                _ => {
+                    return Err(DispatchError::InvalidArguments {
+                        tool: "foundry.memory".into(),
+                        reason: "invalid memory operation".into(),
+                    });
+                }
             };
-            let decision = governance.evaluate(&self.sandbox_name, &format!("foundry:memory:{operation}"), None);
+            let decision = governance.evaluate(
+                &self.sandbox_name,
+                &format!("foundry:memory:{operation}"),
+                None,
+            );
             if decision["allowed"] != true {
-                return Err(denied(decision["reason"].as_str().unwrap_or("Memory denied by governance").into()));
+                return Err(denied(
+                    decision["reason"]
+                        .as_str()
+                        .unwrap_or("Memory denied by governance")
+                        .into(),
+                ));
             }
-            let value = crate::builtin_memory_client::call(args).await
+            let value = crate::builtin_memory_client::call(args)
+                .await
                 .map_err(|error| denied(format!("built-in memory: {error}")))?;
             return Ok(ToolCallOutput {
                 content: vec![ToolContent::text(value.to_string())],
@@ -644,7 +697,8 @@ impl PlatformDispatcher {
         let mut output = self.foundry_memory(args).await?;
         for content in &mut output.content {
             if let ToolContent::Text { text, .. } = content
-                && let Ok(Value::Object(mut value)) = serde_json::from_str::<Value>(text) {
+                && let Ok(Value::Object(mut value)) = serde_json::from_str::<Value>(text)
+            {
                 value.insert("backend".into(), json!("foundry"));
                 *text = Value::Object(value).to_string();
             }
@@ -764,10 +818,13 @@ impl PlatformDispatcher {
                     // store still 404s. Fall through to record
                     // MemoryStoreMissing so the operator notices.
                 }
-                EnsureOutcome::PolicyDenied => return Err(DispatchError::PolicyDenied {
-                    tool: "foundry.memory".into(), policy_kind: "KarsMemory".into(),
-                    reason: "memory scope changed before store provisioning".into(),
-                }),
+                EnsureOutcome::PolicyDenied => {
+                    return Err(DispatchError::PolicyDenied {
+                        tool: "foundry.memory".into(),
+                        policy_kind: "KarsMemory".into(),
+                        reason: "memory scope changed before store provisioning".into(),
+                    });
+                }
                 EnsureOutcome::AuthFailed(s) => {
                     if let Some(registry) = self.policy_status.as_ref() {
                         let source_path = registry
@@ -1304,8 +1361,12 @@ impl PlatformDispatcher {
                 // The self-router emits these headers locally; its Foundry proxy
                 // never forwards upstream policy headers.
                 let memory_denied = code == 403
-                    && r.headers().get("x-kars-decision").is_some_and(|v| v == "Blocked")
-                    && r.headers().get("x-kars-decision-by").is_some_and(|v| v == "KarsMemory");
+                    && r.headers()
+                        .get("x-kars-decision")
+                        .is_some_and(|v| v == "Blocked")
+                    && r.headers()
+                        .get("x-kars-decision-by")
+                        .is_some_and(|v| v == "KarsMemory");
                 let text = r.text().await.unwrap_or_default();
                 if status.is_success() {
                     (
@@ -1325,8 +1386,13 @@ impl PlatformDispatcher {
                             ))],
                             is_error: true,
                             extensions: if memory_denied {
-                                serde_json::Map::from_iter([("karsMemoryPolicyDenied".into(), Value::Bool(true))])
-                            } else { Default::default() },
+                                serde_json::Map::from_iter([(
+                                    "karsMemoryPolicyDenied".into(),
+                                    Value::Bool(true),
+                                )])
+                            } else {
+                                Default::default()
+                            },
                             ..Default::default()
                         },
                     )
@@ -1705,8 +1771,12 @@ mod tests {
         let d = PlatformDispatcher::with_base_url(server.uri())
             .with_memory_store_id("memstore-test")
             .with_memory_binding(handle);
-        assert!(matches!(AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation": "search"}))
-            .await.unwrap_err(), DispatchError::ExecutionFailed { .. }));
+        assert!(matches!(
+            AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation": "search"}))
+                .await
+                .unwrap_err(),
+            DispatchError::ExecutionFailed { .. }
+        ));
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
@@ -1715,9 +1785,26 @@ mod tests {
         let server = MockServer::start().await;
         let d = dispatcher_for(&server);
         for op in ["search", "update", "delete_scope"] {
-            for scope in [json!("other-sandbox"), json!("tenant:other-tenant"), json!("system"), json!("*"), json!("../other"), json!(null), json!(42), json!("")] {
-                let err = AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation":op,"text":"test","scope":scope})).await.unwrap_err();
-                assert!(matches!(err, DispatchError::PolicyDenied { ref policy_kind, .. } if policy_kind == "KarsMemory"));
+            for scope in [
+                json!("other-sandbox"),
+                json!("tenant:other-tenant"),
+                json!("system"),
+                json!("*"),
+                json!("../other"),
+                json!(null),
+                json!(42),
+                json!(""),
+            ] {
+                let err = AsyncToolDispatcher::invoke(
+                    &d,
+                    "foundry.memory",
+                    &json!({"operation":op,"text":"test","scope":scope}),
+                )
+                .await
+                .unwrap_err();
+                assert!(
+                    matches!(err, DispatchError::PolicyDenied { ref policy_kind, .. } if policy_kind == "KarsMemory")
+                );
             }
         }
         assert!(server.received_requests().await.unwrap().is_empty());
@@ -1727,36 +1814,81 @@ mod tests {
     async fn memory_explicit_shared_grant_works_and_revocation_denies_without_provider_io() {
         use crate::memory_binding_loader::{LoadedMemoryBinding, empty_handle};
         let server = MockServer::start().await;
-        Mock::given(method("POST")).respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"completed"}))).mount(&server).await;
+        Mock::given(method("POST"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status":"completed"})))
+            .mount(&server)
+            .await;
         let handle = empty_handle();
         *handle.write().await = Ok(Some(LoadedMemoryBinding {
-            digest:"test".into(), source_path:"binding.json".into(), store_name:"bound".into(), scope:"private".into(), shared_scopes:vec!["team".into()], raw:json!({}),
+            digest: "test".into(),
+            source_path: "binding.json".into(),
+            store_name: "bound".into(),
+            scope: "private".into(),
+            shared_scopes: vec!["team".into()],
+            raw: json!({}),
         }));
         let d = dispatcher_for(&server).with_memory_binding(handle.clone());
         for op in ["search", "update", "delete_scope"] {
-            let out = AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation":op,"text":"test","scope":"team"})).await.unwrap();
+            let out = AsyncToolDispatcher::invoke(
+                &d,
+                "foundry.memory",
+                &json!({"operation":op,"text":"test","scope":"team"}),
+            )
+            .await
+            .unwrap();
             assert!(!out.is_error);
         }
         let requests = server.received_requests().await.unwrap();
         assert_eq!(requests.len(), 3);
         for request in requests {
-            assert_eq!(serde_json::from_slice::<Value>(&request.body).unwrap()["scope"], "team");
+            assert_eq!(
+                serde_json::from_slice::<Value>(&request.body).unwrap()["scope"],
+                "team"
+            );
             assert!(request.url.path().starts_with("/memory_stores/bound:"));
         }
-        handle.write().await.as_mut().unwrap().as_mut().unwrap().shared_scopes.clear();
-        assert!(matches!(AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation":"search","scope":"team"})).await.unwrap_err(), DispatchError::PolicyDenied { .. }));
+        handle
+            .write()
+            .await
+            .as_mut()
+            .unwrap()
+            .as_mut()
+            .unwrap()
+            .shared_scopes
+            .clear();
+        assert!(matches!(
+            AsyncToolDispatcher::invoke(
+                &d,
+                "foundry.memory",
+                &json!({"operation":"search","scope":"team"})
+            )
+            .await
+            .unwrap_err(),
+            DispatchError::PolicyDenied { .. }
+        ));
         assert_eq!(server.received_requests().await.unwrap().len(), 3);
     }
 
     #[tokio::test]
     async fn memory_local_policy_denial_does_not_report_provider_auth_failure() {
         let server = MockServer::start().await;
-        Mock::given(method("POST")).respond_with(ResponseTemplate::new(403)
-            .insert_header("x-kars-decision", "Blocked").insert_header("x-kars-decision-by", "KarsMemory")
-            .set_body_string("memory scope is no longer authorized")).mount(&server).await;
+        Mock::given(method("POST"))
+            .respond_with(
+                ResponseTemplate::new(403)
+                    .insert_header("x-kars-decision", "Blocked")
+                    .insert_header("x-kars-decision-by", "KarsMemory")
+                    .set_body_string("memory scope is no longer authorized"),
+            )
+            .mount(&server)
+            .await;
         let registry = Arc::new(PolicyStatusRegistry::new());
         let d = dispatcher_for(&server).with_policy_status(registry.clone());
-        assert!(matches!(AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation":"search"})).await.unwrap_err(), DispatchError::PolicyDenied { .. }));
+        assert!(matches!(
+            AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation":"search"}))
+                .await
+                .unwrap_err(),
+            DispatchError::PolicyDenied { .. }
+        ));
         assert!(registry.get(PolicyKind::Memory).is_none());
         assert_eq!(server.received_requests().await.unwrap().len(), 1);
     }
@@ -1845,9 +1977,16 @@ mod tests {
         let d = PlatformDispatcher::with_base_url(server.uri())
             .with_memory_store_id("from-env")
             .with_memory_binding(handle);
-        assert!(matches!(AsyncToolDispatcher::invoke(
-            &d, "foundry.memory", &json!({"operation": "update", "text": "remember"}),
-        ).await.unwrap_err(), DispatchError::ExecutionFailed { .. }));
+        assert!(matches!(
+            AsyncToolDispatcher::invoke(
+                &d,
+                "foundry.memory",
+                &json!({"operation": "update", "text": "remember"}),
+            )
+            .await
+            .unwrap_err(),
+            DispatchError::ExecutionFailed { .. }
+        ));
         assert!(server.received_requests().await.unwrap().is_empty());
     }
 
@@ -2386,13 +2525,9 @@ mod tests {
         let d = PlatformDispatcher::with_base_url(server.uri())
             .with_memory_store_id("store-xyz")
             .with_policy_status(registry.clone());
-        AsyncToolDispatcher::invoke(
-            &d,
-            "foundry.memory",
-            &json!({"operation": "delete_scope"}),
-        )
-        .await
-        .unwrap();
+        AsyncToolDispatcher::invoke(&d, "foundry.memory", &json!({"operation": "delete_scope"}))
+            .await
+            .unwrap();
 
         // No ensure attempt + no MemoryStoreMissing record → status stays clean.
         let entry = registry.get(PolicyKind::Memory).expect("entry present");

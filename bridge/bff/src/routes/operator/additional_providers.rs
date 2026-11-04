@@ -36,7 +36,10 @@ use super::{is_dns1123_label, require_cluster, upstream};
 pub(super) const INFERENCE_PROVIDERS_SECRET: &str = "kars-inference-providers";
 pub(super) const INFERENCE_PROVIDERS_NS: &str = "kars-system";
 
-pub(super) fn bind_copilot_route(keys: &mut std::collections::BTreeMap<String, String>, token: &str) {
+pub(super) fn bind_copilot_route(
+    keys: &mut std::collections::BTreeMap<String, String>,
+    token: &str,
+) {
     keys.insert("COPILOT_GITHUB_TOKEN".into(), token.into());
     keys.insert(
         "KARS_PROVIDER_GITHUB_COPILOT_ENDPOINT".into(),

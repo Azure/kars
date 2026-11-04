@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 - generic [ref=f26e1]:
   - link "Skip to main content" [ref=f26e2] [cursor=pointer]:
     - /url: "#main-content"

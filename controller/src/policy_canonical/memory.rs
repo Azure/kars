@@ -301,7 +301,9 @@ mod tests {
             r#"{"storeName":null,"scope":"agent_x"}"#,
         ] {
             let err = parse(body.as_bytes()).unwrap_err();
-            assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("requires both storeName and scope")));
+            assert!(
+                matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("requires both storeName and scope"))
+            );
         }
     }
 
@@ -310,7 +312,10 @@ mod tests {
         let private = parse(br#"{"storeName":"x","scope":"agent_x"}"#).unwrap();
         assert!(private.shared_scopes.is_none());
         let shared = parse(br#"{"storeName":"x","scope":"agent_x","sharedScopes":["team/sub-team+name@example.org","%61gent_x"]}"#).unwrap();
-        assert_eq!(shared.shared_scopes.unwrap(), ["team/sub-team+name@example.org", "%61gent_x"]);
+        assert_eq!(
+            shared.shared_scopes.unwrap(),
+            ["team/sub-team+name@example.org", "%61gent_x"]
+        );
         let empty = parse(br#"{"storeName":"x","scope":"agent_x","sharedScopes":[]}"#).unwrap();
         assert_eq!(empty.shared_scopes, Some(vec![]));
         let max_grants: Vec<String> = (0..64).map(|i| format!("team_{i}")).collect();
@@ -334,13 +339,22 @@ mod tests {
             ("sharedScopes", serde_json::json!(["*"])),
             ("sharedScopes", serde_json::json!(["a/./b"])),
             ("sharedScopes", serde_json::json!(["agent_x"])),
-            ("sharedScopes", serde_json::json!(["team_beta", "team_beta"])),
+            (
+                "sharedScopes",
+                serde_json::json!(["team_beta", "team_beta"]),
+            ),
             ("sharedScopes", serde_json::json!(["x".repeat(257)])),
-            ("sharedScopes", serde_json::json!((0..65).map(|i| format!("team_{i}")).collect::<Vec<_>>())),
+            (
+                "sharedScopes",
+                serde_json::json!((0..65).map(|i| format!("team_{i}")).collect::<Vec<_>>()),
+            ),
         ] {
             let mut body = serde_json::json!({"storeName":"x","scope":"agent_x"});
             body[key] = value;
-            assert!(parse(&serde_json::to_vec(&body).unwrap()).is_err(), "{body}");
+            assert!(
+                parse(&serde_json::to_vec(&body).unwrap()).is_err(),
+                "{body}"
+            );
         }
     }
 
@@ -437,7 +451,8 @@ mod tests {
 
     #[test]
     fn parse_retention_days_wrong_type_rejected() {
-        let err = parse(br#"{"storeName":"x","scope":"agent_x","retentionDays":"thirty"}"#).unwrap_err();
+        let err =
+            parse(br#"{"storeName":"x","scope":"agent_x","retentionDays":"thirty"}"#).unwrap_err();
         assert!(
             matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("non-negative"))
         );
@@ -445,15 +460,15 @@ mod tests {
 
     #[test]
     fn parse_retention_days_overflow_rejected() {
-        let err = parse(br#"{"storeName":"x","scope":"agent_x","retentionDays":4294967296}"#).unwrap_err();
+        let err = parse(br#"{"storeName":"x","scope":"agent_x","retentionDays":4294967296}"#)
+            .unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("u32")));
     }
 
     #[test]
     fn parse_delete_on_sandbox_delete_wrong_type_rejected() {
-        let err = parse(
-            br#"{"storeName":"x","scope":"agent_x","deleteOnSandboxDelete":"yes"}"#,
-        ).unwrap_err();
+        let err = parse(br#"{"storeName":"x","scope":"agent_x","deleteOnSandboxDelete":"yes"}"#)
+            .unwrap_err();
         assert!(matches!(err, FetchError::CanonicalFormViolation(ref m) if m.contains("boolean")));
     }
 

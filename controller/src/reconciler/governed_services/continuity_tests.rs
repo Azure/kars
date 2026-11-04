@@ -325,14 +325,25 @@ fn assert_report_continuity(state: &State) {
     assert_eq!(state.objects[REPORT]["metadata"]["uid"], "report-target");
     assert_eq!(state.objects[REPORT]["metadata"]["resourceVersion"], "1");
     assert_eq!(
-        state.calls.iter().filter(|(method, path, _)| method == "POST" && path == REPORTS).count(),
+        state
+            .calls
+            .iter()
+            .filter(|(method, path, _)| method == "POST" && path == REPORTS)
+            .count(),
         1
     );
     assert!(
-        !state.calls.iter().any(|(method, path, _)| path == REPORT && method != "GET")
+        !state
+            .calls
+            .iter()
+            .any(|(method, path, _)| path == REPORT && method != "GET")
     );
     assert_eq!(
-        state.calls.iter().filter(|(method, path, _)| method == "PUT" && path == RENEW_ROLE).count(),
+        state
+            .calls
+            .iter()
+            .filter(|(method, path, _)| method == "PUT" && path == RENEW_ROLE)
+            .count(),
         1
     );
 }
@@ -500,7 +511,11 @@ async fn credential_transition_qualifies_before_authority_dependent_sre_availabi
         state.objects.get_mut(pods).unwrap()["items"] = json!([]);
     }
     let reg: KarsSRERegistration = object(&state, REG);
-    assert!(crate::sre_authority::reconcile(&client, &reg).await.is_err());
+    assert!(
+        crate::sre_authority::reconcile(&client, &reg)
+            .await
+            .is_err()
+    );
     {
         let mut state = state.lock().unwrap();
         assert_eq!(state.objects[REG]["status"]["phase"], "Migrating");
@@ -513,7 +528,11 @@ async fn credential_transition_qualifies_before_authority_dependent_sre_availabi
         });
     }
     let reg: KarsSRERegistration = object(&state, REG);
-    assert!(crate::sre_authority::reconcile(&client, &reg).await.is_err());
+    assert!(
+        crate::sre_authority::reconcile(&client, &reg)
+            .await
+            .is_err()
+    );
     {
         let mut state = state.lock().unwrap();
         assert_report_continuity(&state);
@@ -522,7 +541,11 @@ async fn credential_transition_qualifies_before_authority_dependent_sre_availabi
             state.objects["/apis/apps/v1/namespaces/kars-normal/deployments/normal"]["spec"]["replicas"],
             1
         );
-        assert!(state.objects[consumer]["metadata"]["annotations"].get(drain).is_none());
+        assert!(
+            state.objects[consumer]["metadata"]["annotations"]
+                .get(drain)
+                .is_none()
+        );
         assert!(
             state
                 .calls

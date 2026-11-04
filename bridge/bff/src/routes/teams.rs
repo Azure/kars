@@ -575,21 +575,36 @@ mod tests {
             let request = serde_json::json!({
                 "name": "review-board", "charter": "Review the release", "egress_mode": mode
             });
-            assert!(serde_json::from_value::<CreateTeamRequest>(request.clone())
-                .unwrap_err().to_string().contains("Standing Teams use Strict egress"));
-            assert!(serde_json::from_value::<UpdateTeamRequest>(request)
-                .unwrap_err().to_string().contains("Standing Teams use Strict egress"));
+            assert!(
+                serde_json::from_value::<CreateTeamRequest>(request.clone())
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Standing Teams use Strict egress")
+            );
+            assert!(
+                serde_json::from_value::<UpdateTeamRequest>(request)
+                    .unwrap_err()
+                    .to_string()
+                    .contains("Standing Teams use Strict egress")
+            );
         }
-        for mode in [serde_json::Value::Null, serde_json::json!("Strict"), serde_json::json!(" strict ")] {
+        for mode in [
+            serde_json::Value::Null,
+            serde_json::json!("Strict"),
+            serde_json::json!(" strict "),
+        ] {
             let request = serde_json::json!({
                 "name": "review-board", "charter": "Review the release", "egress_mode": mode
             });
             assert!(serde_json::from_value::<CreateTeamRequest>(request.clone()).is_ok());
             assert!(serde_json::from_value::<UpdateTeamRequest>(request).is_ok());
         }
-        assert!(serde_json::from_value::<CreateTeamRequest>(serde_json::json!({
-            "name": "review-board", "charter": "Review the release"
-        })).is_ok());
+        assert!(
+            serde_json::from_value::<CreateTeamRequest>(serde_json::json!({
+                "name": "review-board", "charter": "Review the release"
+            }))
+            .is_ok()
+        );
         assert!(serde_json::from_value::<UpdateTeamRequest>(serde_json::json!({})).is_ok());
     }
 }

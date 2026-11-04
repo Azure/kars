@@ -130,6 +130,12 @@ mod tests {
             schema.get("x-kubernetes-preserve-unknown-fields"),
             Some(&serde_json::json!(true))
         );
-        assert!(schema.get("properties").unwrap().get("tokenTopUps").is_none());
+        assert!(
+            schema
+                .get("properties")
+                .unwrap()
+                .get("tokenTopUps")
+                .is_none()
+        );
     }
 }

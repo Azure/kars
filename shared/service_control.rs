@@ -24,7 +24,9 @@ pub fn server_name(identity: &Value) -> Result<String, &'static str> {
         .filter(|uid| {
             !uid.is_empty()
                 && uid.len() <= 128
-                && uid.bytes().all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
+                && uid
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'-')
         })
         .ok_or("Control TLS Sandbox UID invalid")?;
     Ok(format!("control-{uid}.kars.internal"))
@@ -56,19 +58,33 @@ mod tests {
         let tls = TlsIdentity {
             identity: identity.clone(),
             server_name: server_name(&identity).unwrap(),
-            ca_pem: "ca".into(), certificate_pem: "certificate".into(),
-            private_key_pem: "key".into(), expires_at: 100,
+            ca_pem: "ca".into(),
+            certificate_pem: "certificate".into(),
+            private_key_pem: "key".into(),
+            expires_at: 100,
         };
         assert!(tls.valid_for(&identity, 99));
         assert!(!tls.valid_for(&identity, 100));
-        for (field, value) in [("namespace_uid", json!("replacement")),
-            ("task", json!({"uid":"replacement"})), ("task_generation", json!(2)),
-            ("task_authorization", json!("changed")), ("managed", json!(false))] {
+        for (field, value) in [
+            ("namespace_uid", json!("replacement")),
+            ("task", json!({"uid":"replacement"})),
+            ("task_generation", json!(2)),
+            ("task_authorization", json!("changed")),
+            ("managed", json!(false)),
+        ] {
             let mut changed = identity.clone();
             changed[field] = value;
             assert!(!tls.valid_for(&changed, 99));
         }
-        for uid in ["", "x/path", "x@host", "x:443", "x?query", "x#fragment", "x%2fhost"] {
+        for uid in [
+            "",
+            "x/path",
+            "x@host",
+            "x:443",
+            "x?query",
+            "x#fragment",
+            "x%2fhost",
+        ] {
             assert!(server_name(&json!({"sandbox":{"uid":uid}})).is_err());
         }
         let mut wrong_host = tls.clone();

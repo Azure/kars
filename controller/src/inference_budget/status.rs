@@ -9,7 +9,9 @@ use super::{
     store::{Store, StoreError},
 };
 use crate::{
-    inference_budget_contract::{AccountPhase, Amounts, Limits, MAX_ATTEMPTS, MAX_NODES, MAX_SESSIONS},
+    inference_budget_contract::{
+        AccountPhase, Amounts, Limits, MAX_ATTEMPTS, MAX_NODES, MAX_SESSIONS,
+    },
     status::conditions,
 };
 use kube::ResourceExt;
@@ -122,7 +124,11 @@ fn observe(account: &KarsBudgetAccount, error: Option<&StoreError>) -> Observati
             "Outstanding reservations occupy a declared ceiling; already funded work is retained.",
         );
     }
-    if (!ledger.nodes.is_empty() || ledger.history.as_ref().is_some_and(|history| history.nodes > 0))
+    if (!ledger.nodes.is_empty()
+        || ledger
+            .history
+            .as_ref()
+            .is_some_and(|history| history.nodes > 0))
         && ledger.nodes.values().all(|node| !node.active)
     {
         return blocked(
@@ -186,7 +192,8 @@ pub(super) fn project(
     .collect();
     status.phase = Some(observation.phase);
     status.observed_generation = account.metadata.generation;
-    status.effective_limits = Store::ledger(account).ok()
+    status.effective_limits = Store::ledger(account)
+        .ok()
         .filter(|ledger| !ledger.token_top_ups.is_empty())
         .and_then(|ledger| ledger.effective_limits().ok());
     status

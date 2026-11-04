@@ -228,7 +228,11 @@ mod tests {
 
     #[test]
     fn preserves_nonsecret_urls_without_canonicalizing_arguments() {
-        for url in ["https://example.net", "https://EXAMPLE.net:443/a/../b", "https://example.net/"] {
+        for url in [
+            "https://example.net",
+            "https://EXAMPLE.net:443/a/../b",
+            "https://example.net/",
+        ] {
             let preview = ToolPreview::arguments(&json!({"url": url, "method": "GET"}));
             let shown: Value = serde_json::from_str(&preview.text).unwrap();
             assert_eq!(shown["url"], url);

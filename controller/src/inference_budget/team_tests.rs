@@ -163,7 +163,16 @@ fn team_top_up_preserves_settlement_and_original_envelope_but_restores_admission
     assert_eq!(next.meters.unpriced_attempts, 15);
     assert_eq!(binding::limits(&team.spec.envelope).unwrap(), next.limits);
     assert_eq!(next.effective_limits().unwrap().tokens, Some(87793));
-    let observed = budget_observation(team.status.as_ref().unwrap().inference_budget_account.as_ref().unwrap(), &next).unwrap();
+    let observed = budget_observation(
+        team.status
+            .as_ref()
+            .unwrap()
+            .inference_budget_account
+            .as_ref()
+            .unwrap(),
+        &next,
+    )
+    .unwrap();
     assert_eq!(observed.original_limits.tokens, Some(86793));
     assert_eq!(observed.effective_limits.tokens, Some(87793));
     assert!(!observed.unbounded_tokens);
@@ -271,7 +280,9 @@ async fn unbounded_observation_preserves_original_money_cap_and_exact_usage() {
     };
     Store::ledger(&account).unwrap();
     let (_server, client) = mock_reads(&principal, &account, 200).await;
-    let observed = read_observation(&client, &team, "principal", &settings).await.unwrap();
+    let observed = read_observation(&client, &team, "principal", &settings)
+        .await
+        .unwrap();
     assert_eq!(observed.settled_tokens, 9007199254740993);
     assert!(observed.budget.unbounded_tokens);
     assert_eq!(observed.budget.original_limits.tokens, Some(86793));
@@ -282,7 +293,13 @@ async fn unbounded_observation_preserves_original_money_cap_and_exact_usage() {
     assert_eq!(observed.budget.reserved.tokens, 0);
     assert!(observed.budget.price_coverage_complete);
     let projected = serde_json::to_value(&observed.budget).unwrap();
-    for private in ["nodes", "sessions", "attempts", "unboundedTokensReceipt", "expiresAt"] {
+    for private in [
+        "nodes",
+        "sessions",
+        "attempts",
+        "unboundedTokensReceipt",
+        "expiresAt",
+    ] {
         assert!(projected.get(private).is_none());
     }
 }

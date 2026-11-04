@@ -239,9 +239,18 @@ async fn csv_download_preserves_utf8_quotes_and_crlf_with_its_media_type() {
     let (state, _) = fixture("comparison.csv", bytes, false, false);
     let response = fetch(state, "comparison.csv", "owner", Method::GET).await;
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["content-type"], "text/csv; charset=utf-8");
+    assert_eq!(
+        response.headers()["content-type"],
+        "text/csv; charset=utf-8"
+    );
     assert_eq!(response.headers()["x-content-type-options"], "nosniff");
-    assert_eq!(to_bytes(response.into_body(), 65536).await.unwrap().as_ref(), bytes);
+    assert_eq!(
+        to_bytes(response.into_body(), 65536)
+            .await
+            .unwrap()
+            .as_ref(),
+        bytes
+    );
 }
 
 #[tokio::test]

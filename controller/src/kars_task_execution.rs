@@ -807,31 +807,49 @@ mod tests {
             "metadata":{"name":"task", "namespace":"workspace", "generation":7},
             "spec":{"runtime":{"kind":"BYO","byo":{"image":"pinned:test","contractVersion":"v1"}},
                 "sandbox":{"isolation":"standard"},"inferenceRef":{"name":"inference"}}
-        })).unwrap();
+        }))
+        .unwrap();
         let pending = crate::status::build_pending_status_patch(
-            &sandbox, "GovernedServicePrivacyPending", "Waiting for qualified privacy",
+            &sandbox,
+            "GovernedServicePrivacyPending",
+            "Waiting for qualified privacy",
         );
         let mut observed = observed_sandbox("Pending");
         observed.data["status"] = pending["status"].clone();
         assert_eq!(map_sandbox_phase(&observed).0, "Launching");
-        for (kind, expected) in [("Ready", "False"), ("Degraded", "False"), ("Progressing", "True")] {
-            let condition = pending["status"]["conditions"].as_array().unwrap().iter()
-                .find(|condition| condition["type"] == kind).unwrap();
+        for (kind, expected) in [
+            ("Ready", "False"),
+            ("Degraded", "False"),
+            ("Progressing", "True"),
+        ] {
+            let condition = pending["status"]["conditions"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .find(|condition| condition["type"] == kind)
+                .unwrap();
             assert_eq!(condition["status"], expected);
             assert_eq!(condition["observedGeneration"], 7);
         }
         sandbox.status = Some(serde_json::from_value(pending["status"].clone()).unwrap());
-        assert_eq!(crate::status::build_pending_status_patch(
-            &sandbox, "GovernedServicePrivacyPending", "Waiting for qualified privacy",
-        ), pending);
+        assert_eq!(
+            crate::status::build_pending_status_patch(
+                &sandbox,
+                "GovernedServicePrivacyPending",
+                "Waiting for qualified privacy",
+            ),
+            pending
+        );
         let rejected = crate::status::build_degraded_status_patch(
-            &sandbox, "GovernedServicePrivacyNotReady", "Legacy Secret access is not denied",
+            &sandbox,
+            "GovernedServicePrivacyNotReady",
+            "Legacy Secret access is not denied",
         );
         observed.data["status"] = rejected["status"].clone();
         assert_eq!(map_sandbox_phase(&observed).0, "Degraded");
-        observed.data["status"] = crate::status::build_running_status_patch(
-            &sandbox, "kars-task", "Hermes",
-        )["status"].clone();
+        observed.data["status"] =
+            crate::status::build_running_status_patch(&sandbox, "kars-task", "Hermes")["status"]
+                .clone();
         assert_eq!(map_sandbox_phase(&observed).0, "Running");
     }
 

@@ -10,9 +10,9 @@ use super::models::{MissionResultDto, MissionTelemetryDto};
 use super::presentation::{classify_blocked, deliverable_text, is_real_deliverable};
 
 mod contract;
-pub(crate) mod efficiency;
 #[cfg(test)]
 mod contract_tests;
+pub(crate) mod efficiency;
 pub(crate) mod live;
 
 const MAX_SAFE_INTEGER: i64 = 9_007_199_254_740_991;
@@ -119,7 +119,9 @@ fn terminal(data: &BTreeMap<String, String>) -> Option<(MissionRunEvidenceDto, O
         return None;
     }
     let value: Value = serde_json::from_str(raw).ok()?;
-    if !contract::within_wire_bound(&value) { return None; }
+    if !contract::within_wire_bound(&value) {
+        return None;
+    }
     let reply: Reply = serde_json::from_value(value).ok()?;
     let expected_status = match reply.status.as_str() {
         "succeeded" => "ok",

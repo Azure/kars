@@ -1,7 +1,5 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
-{{- include "kars-bridge.externalOIDCCA.validate" . }}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- include "kars-bridge.externalOIDCCA.validate" . }}
 {{- $oidcCA := (.Values.web.oidc | default dict).caConfigMap | default "" }}
 {{- $headlamp := .Values.headlamp | default dict }}
 {{- if $headlamp.url }}

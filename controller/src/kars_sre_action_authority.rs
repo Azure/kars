@@ -3,7 +3,7 @@
 
 //! Exact-target, per-attempt authority for the maintained SRE action executor.
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use k8s_openapi::{
     api::{
         authentication::v1::TokenRequest,
@@ -245,12 +245,15 @@ pub(super) async fn writer(
     let status = response
         .status
         .ok_or_else(|| anyhow!("writer TokenRequest omitted status"))?;
-    let expires = status.expiration_timestamp.0.as_second();
+    let token = status.token.context("writer TokenRequest omitted token")?;
+    let expires = status
+        .expiration_timestamp
+        .context("writer TokenRequest omitted expiry")?
+        .0
+        .as_second();
     let now = chrono::Utc::now().timestamp();
     ensure!(
-        !status.token.trim().is_empty()
-            && expires > now + 30
-            && expires <= now + TOKEN_TTL_SECONDS + 30,
+        !token.trim().is_empty() && expires > now + 30 && expires <= now + TOKEN_TTL_SECONDS + 30,
         "writer TokenRequest returned unusable token or excessive expiry"
     );
     // Recheck the issuing UID after minting; never use a replacement SA's token.
@@ -262,7 +265,7 @@ pub(super) async fn writer(
         "writer identity changed during TokenRequest"
     );
     let mut config = connection_config(connection);
-    config.auth_info.token = Some(status.token.into());
+    config.auth_info.token = Some(token.into());
     Client::try_from(config).map_err(|_| anyhow!("could not construct isolated writer client"))
 }
 

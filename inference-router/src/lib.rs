@@ -50,6 +50,8 @@ pub mod inference_budget_contract;
 #[path = "../../shared/inference_budget/dispatch.rs"]
 mod inference_budget_dispatch;
 pub mod inference_policy_loader;
+#[path = "../../shared/kube_client_config.rs"]
+mod kube_client_config;
 pub mod mcp;
 #[path = "../../shared/memory_access.rs"]
 pub mod memory_access;
@@ -80,18 +82,16 @@ pub mod sidecar_client;
 pub mod spawn;
 #[path = "../../shared/sre_privacy.rs"]
 mod sre_privacy;
+pub mod sre_proxy;
 #[path = "../../shared/sre_report.rs"]
 #[allow(dead_code)]
 mod sre_report;
-pub mod sre_proxy;
 pub mod task_telemetry;
 pub mod telemetry;
 
-/// Select RustCrypto for JWT signing and verification. Workspace builds also
-/// enable the AWS-LC backend through OCI dependencies, so automatic provider
-/// selection is intentionally unavailable.
+/// Select the workspace's AWS-LC backend for JWT signing and verification.
 pub fn install_jsonwebtoken_crypto_provider() {
-    if jsonwebtoken::crypto::rust_crypto::DEFAULT_PROVIDER
+    if jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER
         .install_default()
         .is_err()
     {

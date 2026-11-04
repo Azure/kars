@@ -198,11 +198,16 @@ pub(super) fn chat_to_responses_body(chat_body: &Bytes) -> Bytes {
         if !effort.is_string() {
             return chat_body.clone();
         }
-        let reasoning = obj.entry("reasoning").or_insert_with(|| serde_json::json!({}));
+        let reasoning = obj
+            .entry("reasoning")
+            .or_insert_with(|| serde_json::json!({}));
         let Some(reasoning) = reasoning.as_object_mut() else {
             return chat_body.clone();
         };
-        if reasoning.get("effort").is_some_and(|existing| existing != &effort) {
+        if reasoning
+            .get("effort")
+            .is_some_and(|existing| existing != &effort)
+        {
             return chat_body.clone();
         }
         reasoning.insert("effort".into(), effort);
@@ -443,8 +448,11 @@ mod tests {
 
     #[test]
     fn test_chat_to_responses_preserves_reasoning_effort() {
-        for reasoning in [None, Some(serde_json::json!({"summary": "auto"})),
-            Some(serde_json::json!({"effort": "medium", "summary": "auto"}))] {
+        for reasoning in [
+            None,
+            Some(serde_json::json!({"summary": "auto"})),
+            Some(serde_json::json!({"effort": "medium", "summary": "auto"})),
+        ] {
             let mut value = serde_json::json!({"model": "gpt-6-astra",
                 "messages": [{"role": "user", "content": "Compare the proposals"}],
                 "max_tokens": 128000, "parallel_tool_calls": false, "reasoning_effort": "medium"});
@@ -453,7 +461,8 @@ mod tests {
             }
             let original_reasoning = value.get("reasoning").cloned();
             let body = Bytes::from(serde_json::to_vec(&value).unwrap());
-            let translated: serde_json::Value = serde_json::from_slice(&chat_to_responses_body(&body)).unwrap();
+            let translated: serde_json::Value =
+                serde_json::from_slice(&chat_to_responses_body(&body)).unwrap();
             assert_eq!(translated["reasoning"]["effort"], "medium");
             assert_eq!(translated["max_output_tokens"], 128000);
             assert_eq!(translated["parallel_tool_calls"], false);
@@ -473,7 +482,10 @@ mod tests {
             serde_json::json!({"reasoning_effort": "medium", "reasoning": {"effort": "high"}}),
         ] {
             let mut value = serde_json::json!({"model": "gpt-6-astra", "messages": []});
-            value.as_object_mut().unwrap().extend(extra.as_object().unwrap().clone());
+            value
+                .as_object_mut()
+                .unwrap()
+                .extend(extra.as_object().unwrap().clone());
             let body = Bytes::from(serde_json::to_vec(&value).unwrap());
             assert_eq!(chat_to_responses_body(&body), body);
         }

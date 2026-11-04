@@ -407,10 +407,30 @@ fn truncated_whitespace_remains_idempotent_without_rewriting_approved_records() 
                 .is_none()
             );
             for (title, author, source, content) in [
-                ("Changed title", author.as_str(), source.as_str(), content.as_str()),
-                (title.as_str(), "Changed author", source.as_str(), content.as_str()),
-                (title.as_str(), author.as_str(), "Changed source", content.as_str()),
-                (title.as_str(), author.as_str(), source.as_str(), "Changed content"),
+                (
+                    "Changed title",
+                    author.as_str(),
+                    source.as_str(),
+                    content.as_str(),
+                ),
+                (
+                    title.as_str(),
+                    "Changed author",
+                    source.as_str(),
+                    content.as_str(),
+                ),
+                (
+                    title.as_str(),
+                    author.as_str(),
+                    "Changed source",
+                    content.as_str(),
+                ),
+                (
+                    title.as_str(),
+                    author.as_str(),
+                    source.as_str(),
+                    "Changed content",
+                ),
             ] {
                 assert!(
                     prepare_entry_update(

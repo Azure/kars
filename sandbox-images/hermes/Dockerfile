@@ -41,7 +41,7 @@
 # runtimes/, sandbox-images/, etc.).
 
 ARG HERMES_RUNTIME_BASE=base
-FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:d1a693353b7db0383e66a61416a049f617fdfb89435dcaac543749fb4f14950a AS base
+FROM mcr.microsoft.com/azurelinux/base/python:3.12@sha256:71a1f5a1821f4c56e45aff52e792ed6c0500631e201cfc140c4c9d22886b29f9 AS base
 
 LABEL org.kars.runtime.contract="v1"
 LABEL org.kars.runtime.kind="Hermes"
@@ -121,7 +121,7 @@ RUN git init -q /opt/hermes \
     && test "$(git -C /opt/hermes hash-object pyproject.toml)" = "1a98d5528c88ddc3d4e32439d3e8322487ce31bc" \
     && git -C /opt/hermes apply /opt/hermes-build/hermes-dependency-fixes.patch \
     && cp /opt/hermes-build/hermes-uv.lock /opt/hermes/uv.lock \
-    && echo "2c87202b1566e4daed16b1472bc5d5e3651af9f6fd64acc953412f43432fefb0  /opt/hermes/pyproject.toml" | sha256sum --check - \
+    && echo "c5863a93d8ccf31a8eb0c8bf66a35c638966457d79238a6d9486b600b37aac87  /opt/hermes/pyproject.toml" | sha256sum --check - \
     && printf '%s\n' \
        "6dd85804ac28a0f2d326030e69c4f65a9ae8968478af87d2267d6ad89cc7230a  /opt/hermes/package.json" \
        "2eee7bf49d29e6d0b218dcc960a174b99cc177039f6941f0355ebff9a93e33f7  /opt/hermes/package-lock.json" \

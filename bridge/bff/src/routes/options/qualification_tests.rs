@@ -14,7 +14,13 @@ use std::collections::BTreeSet;
 fn per_run_qualification_palette_matches_mode_and_fails_closed() {
     const CHILD: &str = "KARS_QUALIFICATION_PALETTE_TEST_CHILD";
     if std::env::var_os(CHILD).is_none() {
-        for mode in [None, Some("required"), Some("validation"), Some("invalid"), Some("")] {
+        for mode in [
+            None,
+            Some("required"),
+            Some("validation"),
+            Some("invalid"),
+            Some(""),
+        ] {
             let mut command = std::process::Command::new(std::env::current_exe().unwrap());
             command
                 .args(["--exact", "routes::options::qualification_tests::per_run_qualification_palette_matches_mode_and_fails_closed"])

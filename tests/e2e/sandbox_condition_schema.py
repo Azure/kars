@@ -260,7 +260,7 @@ def main():
         with kind_proxy(root) as (port, version):
             evidence["apiVersion"] = version
             yaml = command("sandbox-render", [
-                "helm", "template", "condition-schema-proof", str(root / "deploy/helm/kars"),
+                "helm", "template", "kars", str(root / "deploy/helm/kars"),
                 "--namespace", "kars-system", "--show-only", "templates/crd.yaml",
             ], root=root)
             raw = command("sandbox-convert", [

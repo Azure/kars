@@ -159,15 +159,15 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VerifiedAgtProfile, FetchError> {
     let s = std::str::from_utf8(bytes)
         .map_err(|e| FetchError::CanonicalFormViolation(format!("utf-8: {e}")))?;
 
-    let doc: serde_yaml::Value = serde_yaml::from_str(s)
+    let doc: serde_json::Value = serde_saphyr::from_str(s)
         .map_err(|e| FetchError::CanonicalFormViolation(format!("yaml parse: {e}")))?;
 
     let map = doc
-        .as_mapping()
+        .as_object()
         .ok_or_else(|| FetchError::CanonicalFormViolation("top-level must be a mapping".into()))?;
 
     let version = map
-        .get(serde_yaml::Value::String("version".into()))
+        .get("version")
         .ok_or_else(|| FetchError::CanonicalFormViolation("missing `version`".into()))?
         .as_str()
         .ok_or_else(|| FetchError::CanonicalFormViolation("`version` must be a string".into()))?
@@ -179,7 +179,7 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VerifiedAgtProfile, FetchError> {
     }
 
     let agent = map
-        .get(serde_yaml::Value::String("agent".into()))
+        .get("agent")
         .ok_or_else(|| FetchError::CanonicalFormViolation("missing `agent`".into()))?
         .as_str()
         .ok_or_else(|| FetchError::CanonicalFormViolation("`agent` must be a string".into()))?
@@ -191,9 +191,9 @@ pub(crate) fn parse(bytes: &[u8]) -> Result<VerifiedAgtProfile, FetchError> {
     }
 
     let policies = map
-        .get(serde_yaml::Value::String("policies".into()))
+        .get("policies")
         .ok_or_else(|| FetchError::CanonicalFormViolation("missing `policies`".into()))?;
-    let policies_seq = policies.as_sequence().ok_or_else(|| {
+    let policies_seq = policies.as_array().ok_or_else(|| {
         FetchError::CanonicalFormViolation("`policies` must be a sequence".into())
     })?;
     let policies_count = policies_seq.len();
@@ -254,6 +254,41 @@ policies:
         let r = parse(yaml).unwrap();
         assert_eq!(r.agent, "with-comments");
         assert_eq!(r.policies_count, 1);
+    }
+
+    #[test]
+    fn parse_rejects_duplicate_mapping_keys() {
+        for yaml in [
+            "version: \"1.0\"\nagent: first\nagent: second\npolicies: []\n",
+            "version: \"1.0\"\nagent: test\npolicies:\n  - name: first\n    name: second\n",
+        ] {
+            assert!(matches!(
+                parse(yaml.as_bytes()),
+                Err(FetchError::CanonicalFormViolation(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn parse_rejects_excessive_yaml_depth() {
+        let yaml = format!(
+            "version: \"1.0\"\nagent: test\npolicies: {}{}\n",
+            "[".repeat(256),
+            "]".repeat(256)
+        );
+        assert!(matches!(
+            parse(yaml.as_bytes()),
+            Err(FetchError::CanonicalFormViolation(_))
+        ));
+    }
+
+    #[test]
+    fn parse_rejects_multiple_documents() {
+        let yaml = b"version: \"1.0\"\nagent: first\npolicies: []\n---\nversion: \"1.0\"\nagent: second\npolicies: []\n";
+        assert!(matches!(
+            parse(yaml),
+            Err(FetchError::CanonicalFormViolation(_))
+        ));
     }
 
     #[test]

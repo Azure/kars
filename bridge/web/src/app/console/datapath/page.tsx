@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 import { PageHeader, Stat, Badge } from "@/components/ui";
+import NavigationLink from "@/components/navigation-link";
 import { DatapathSetup } from "@/components/datapath-setup";
 import { LiveRefresh } from "@/components/live-refresh";
 import { getDatapathWitness } from "@/lib/bff";
@@ -81,10 +82,10 @@ export default async function DatapathWitnessPage() {
           An unavailable sample does not mean that no agents are running.
         </p>
         <p>
-          <a href="/workspace/agents" className="underline">Active agents</a> shows assignment-linked work.
-          {" "}<a href="/console/fleet" className="underline">Sandboxes</a> shows current infrastructure records.
-          {" "}<a href="/workspace/teams" className="underline">Teams</a> and
-          {" "}<a href="/workspace/missions" className="underline">Missions</a> retain run history and deliverables.
+          <NavigationLink href="/workspace/agents" className="underline">Active agents</NavigationLink> shows assignment-linked work.
+          {" "}<NavigationLink href="/console/fleet" className="underline">Sandboxes</NavigationLink> shows current infrastructure records.
+          {" "}<NavigationLink href="/workspace/teams" className="underline">Teams</NavigationLink> and
+          {" "}<NavigationLink href="/workspace/missions" className="underline">Missions</NavigationLink> retain run history and deliverables.
         </p>
       </div>
 

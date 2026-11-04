@@ -75,8 +75,15 @@ fn retained_node_capacity_blocks_headroom_without_changing_accounting_or_existin
     check(&account, Phase::Blocked, "False", "NodeCapacityReached");
     assert!(ready(&account).message.contains("not a spending limit"));
     assert_eq!(Store::ledger(&account).unwrap(), &retained);
-    assert!(account.status.as_ref().unwrap().conditions.iter()
-        .any(|condition| condition.type_ == "LedgerValid" && condition.status == "True"));
+    assert!(
+        account
+            .status
+            .as_ref()
+            .unwrap()
+            .conditions
+            .iter()
+            .any(|condition| condition.type_ == "LedgerValid" && condition.status == "True")
+    );
     crate::inference_budget::launch::capacity(&retained, "root").unwrap();
     assert!(retained.register_session(identity("still-allowed")).is_ok());
 }
@@ -97,8 +104,14 @@ fn retained_session_capacity_reports_storage_not_spending_and_preserves_replay_f
     check(&account, Phase::Blocked, "False", "SessionCapacityReached");
     assert!(ready(&account).message.contains("not a spending limit"));
     assert_eq!(Store::ledger(&account).unwrap(), &retained);
-    assert!(matches!(retained.register_session(identity("new")), Err(BudgetError::Capacity)));
-    assert!(matches!(retained.register_session(identity("retained-2")), Err(BudgetError::Identity)));
+    assert!(matches!(
+        retained.register_session(identity("new")),
+        Err(BudgetError::Capacity)
+    ));
+    assert!(matches!(
+        retained.register_session(identity("retained-2")),
+        Err(BudgetError::Identity)
+    ));
     assert!(!retained.register_session(identity("a")).unwrap().changed);
 }
 
@@ -109,12 +122,24 @@ fn top_up_status_and_launch_use_effective_ceiling_without_rewriting_original_gra
     ledger.meters.settled.tokens = 50;
     ledger.nodes.get_mut("root").unwrap().meters.settled.tokens = 50;
     ledger.validate().unwrap();
-    assert!(matches!(crate::inference_budget::launch::capacity(ledger, "root"), Err(BudgetError::Exhausted)));
+    assert!(matches!(
+        crate::inference_budget::launch::capacity(ledger, "root"),
+        Err(BudgetError::Exhausted)
+    ));
     *ledger = ledger.apply_token_top_up(&grant, 100).unwrap().next;
     crate::inference_budget::launch::capacity(ledger, "root").unwrap();
     account.status = Some(crate::inference_budget::status::project(&account, None));
     check(&account, Phase::Active, "True", "LedgerAvailable");
-    assert_eq!(account.status.as_ref().unwrap().effective_limits.unwrap().tokens, Some(150));
+    assert_eq!(
+        account
+            .status
+            .as_ref()
+            .unwrap()
+            .effective_limits
+            .unwrap()
+            .tokens,
+        Some(150)
+    );
     assert_eq!(account.spec.limits.tokens, Some(50));
     assert_eq!(Store::ledger(&account).unwrap().meters.settled.tokens, 50);
 }
@@ -518,7 +543,7 @@ fn helm_budget_account_reporting_matches_generated_schema() {
         }
         value
     }
-    let helm: serde_json::Value = serde_yaml::from_str(include_str!(
+    let helm: serde_json::Value = serde_saphyr::from_str(include_str!(
         "../../../deploy/helm/kars/templates/crd-karsbudgetaccount.yaml"
     ))
     .unwrap();

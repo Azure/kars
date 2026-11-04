@@ -311,9 +311,10 @@ mod tests {
         replaced.metadata.namespace = Some("another".into());
         assert!(!revision().matches(&replaced, &principal));
         replaced = task;
-        replaced.metadata.deletion_timestamp = Some(
-            k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()),
-        );
+        replaced.metadata.deletion_timestamp =
+            Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                k8s_openapi::jiff::Timestamp::now(),
+            ));
         assert!(!revision().matches(&replaced, &principal));
     }
 
@@ -692,9 +693,10 @@ mod tests {
                         .insert("kars.azure.com/run-requested".into(), "run-2".into());
                 }
                 "deleted" => {
-                    changed.metadata.deletion_timestamp = Some(
-                        k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()),
-                    )
+                    changed.metadata.deletion_timestamp =
+                        Some(k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(
+                            k8s_openapi::jiff::Timestamp::now(),
+                        ))
                 }
                 _ => {}
             }

@@ -1,6 +1,7 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
+use crate::providers::signing::sha256_hex;
 use k8s_openapi::api::core::v1::Secret;
 use kube::{
     Client,
@@ -8,7 +9,6 @@ use kube::{
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeMap;
 
 const PROVIDERS_SECRET: &str = "kars-inference-providers";
@@ -101,7 +101,7 @@ pub(super) fn provider_env_from() -> Value {
 fn provider_revision(secret: &Secret) -> String {
     let input = serde_json::to_vec(&(&secret.metadata.uid, &secret.data))
         .expect("Secret identity and data serialize");
-    format!("{:x}", Sha256::digest(input))
+    sha256_hex(&input)
 }
 
 /// Restart routers for changed credentials or source identity, not selection metadata.

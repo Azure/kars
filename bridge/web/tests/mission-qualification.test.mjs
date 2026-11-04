@@ -277,7 +277,7 @@ function flow({ canQualify = true, composeAvailable = true, initialObjective } =
     "@/lib/efficiency": load("lib/efficiency.ts"),
     "./intake-flow/helpers": load("app/workspace/new/intake-flow/helpers.ts"),
     "./intake-flow/qualification-choice": load("app/workspace/new/intake-flow/qualification-choice.tsx", { "react/jsx-runtime": jsxRuntime }),
-    "./intake-flow/review": { renderReview: props => ({ type: "review", props }) },
+    "./intake-flow/review": { renderReview: "review" },
     "./actions": {
       composeMissionAction: async (...args) => { composeCalls.push(args); return composeAvailable
         ? { available: true, proposal: { runtime: "Hermes", budget_tokens: 20000 }, rationale: null, source: "orchestrator" }

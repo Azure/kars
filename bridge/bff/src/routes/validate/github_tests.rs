@@ -20,12 +20,18 @@ fn principal() -> Principal {
 
 fn cluster(enrolled: bool, write: bool) -> (Cluster, Arc<Mutex<Vec<String>>>) {
     cluster_with_scopes(vec![(
-        if enrolled { vec!["owner/repo"] } else { vec!["owner/other"] },
+        if enrolled {
+            vec!["owner/repo"]
+        } else {
+            vec!["owner/other"]
+        },
         write,
     )])
 }
 
-fn cluster_with_scopes(scopes: Vec<(Vec<&'static str>, bool)>) -> (Cluster, Arc<Mutex<Vec<String>>>) {
+fn cluster_with_scopes(
+    scopes: Vec<(Vec<&'static str>, bool)>,
+) -> (Cluster, Arc<Mutex<Vec<String>>>) {
     let calls = Arc::new(Mutex::new(Vec::new()));
     let recorded = calls.clone();
     let connection_name = crate::kars::github_connection_name(&principal().sub);
@@ -123,13 +129,21 @@ async fn separate_repository_scopes_do_not_combine_write_authority() {
         ] {
             let result = cluster
                 .github_connection_grant(
-                    "work", &principal().sub,
-                    repos.iter().map(|repo| (*repo).into()).collect(), write,
+                    "work",
+                    &principal().sub,
+                    repos.iter().map(|repo| (*repo).into()).collect(),
+                    write,
                 )
                 .await;
             assert_eq!(result.is_ok(), allowed, "{repos:?}, write={write}");
             if let Ok(binding) = result {
-                assert_eq!(binding.repositories, repos.iter().map(|repo| repo.to_ascii_lowercase()).collect::<Vec<_>>());
+                assert_eq!(
+                    binding.repositories,
+                    repos
+                        .iter()
+                        .map(|repo| repo.to_ascii_lowercase())
+                        .collect::<Vec<_>>()
+                );
                 assert_eq!(binding.write, write);
             }
         }

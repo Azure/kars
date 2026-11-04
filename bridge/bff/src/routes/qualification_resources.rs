@@ -3,8 +3,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::providers::signing::sha256_hex;
 use kube::{ResourceExt, core::DynamicObject};
-use sha2::{Digest, Sha256};
 
 use crate::error::{AppError, AppResult};
 use crate::kars::{cluster::Cluster, task::KarsTask};
@@ -91,8 +91,8 @@ fn fingerprint(kind: &str, resource: &DynamicObject) -> AppResult<String> {
         "uid": uid, "spec": spec, "version": version,
     });
     Ok(format!(
-        "sha256:{:x}",
-        Sha256::digest(bound.to_string().as_bytes())
+        "sha256:{}",
+        sha256_hex(bound.to_string().as_bytes())
     ))
 }
 

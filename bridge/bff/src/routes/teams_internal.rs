@@ -316,7 +316,8 @@ pub async fn teams_command(
     let team_name = &req.team_name;
 
     // Enforce team ownership — same as browser handlers
-    let owned_team = crate::routes::teams::require_owned_team(cluster, ns, team_name, &principal).await?;
+    let owned_team =
+        crate::routes::teams::require_owned_team(cluster, ns, team_name, &principal).await?;
 
     match req.command.as_str() {
         "status" => {
@@ -386,7 +387,8 @@ pub async fn teams_command(
                     title: title.clone(),
                     ..Default::default()
                 }),
-            ).await?;
+            )
+            .await?;
             let task_id = task.id;
             Ok((
                 StatusCode::OK,

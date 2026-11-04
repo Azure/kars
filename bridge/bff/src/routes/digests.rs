@@ -32,12 +32,20 @@ pub struct DigestDto {
 
 fn token_usage(value: &serde_json::Value) -> (Option<i64>, Option<String>) {
     // Historical digests predate lifetime observations and contain root synthesis only.
-    let scope = value.get("tokens_spent_scope").and_then(|scope| scope.as_str())
+    let scope = value
+        .get("tokens_spent_scope")
+        .and_then(|scope| scope.as_str())
         .unwrap_or("RetainedRootSynthesis");
     if !matches!(scope, "GovernedInferenceLifetime" | "RetainedRootSynthesis") {
         return (None, None);
     }
-    (value.get("tokens_spent").and_then(|tokens| tokens.as_i64()).filter(|tokens| *tokens >= 0), Some(scope.into()))
+    (
+        value
+            .get("tokens_spent")
+            .and_then(|tokens| tokens.as_i64())
+            .filter(|tokens| *tokens >= 0),
+        Some(scope.into()),
+    )
 }
 
 /// `GET /api/digests` — the cross-team digest stream, newest first.
@@ -97,12 +105,25 @@ mod tests {
 
     #[test]
     fn token_usage_preserves_unavailable_and_scopes_historical_synthesis() {
-        assert_eq!(token_usage(&json!({"tokens_spent": 37488})), (Some(37488), Some("RetainedRootSynthesis".into())));
+        assert_eq!(
+            token_usage(&json!({"tokens_spent": 37488})),
+            (Some(37488), Some("RetainedRootSynthesis".into()))
+        );
         for tokens in [json!(86793), json!(0), json!(null), json!(-1)] {
-            let value = json!({"tokens_spent": tokens, "tokens_spent_scope":"GovernedInferenceLifetime"});
-            assert_eq!(token_usage(&value), (tokens.as_i64().filter(|tokens| *tokens >= 0), Some("GovernedInferenceLifetime".into())));
+            let value =
+                json!({"tokens_spent": tokens, "tokens_spent_scope":"GovernedInferenceLifetime"});
+            assert_eq!(
+                token_usage(&value),
+                (
+                    tokens.as_i64().filter(|tokens| *tokens >= 0),
+                    Some("GovernedInferenceLifetime".into())
+                )
+            );
         }
         assert_eq!(token_usage(&json!({})).0, None);
-        assert_eq!(token_usage(&json!({"tokens_spent": 37488, "tokens_spent_scope":"unknown"})), (None, None));
+        assert_eq!(
+            token_usage(&json!({"tokens_spent": 37488, "tokens_spent_scope":"unknown"})),
+            (None, None)
+        );
     }
 }

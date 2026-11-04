@@ -2,13 +2,13 @@
 // Licensed under the MIT License.
 
 use super::{AppState, memory_access::AuthorizedMemoryRequest};
+use crate::providers::signing::sha256_hex;
 use crate::providers::{AuditEvent, audit_now_ms};
 use axum::{
     http::StatusCode,
     response::{IntoResponse, Response},
 };
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::sync::atomic::{AtomicU64, Ordering};
 
 pub async fn authorize(
@@ -71,7 +71,7 @@ impl Observation {
                 audit_now_ms(),
                 NEXT.fetch_add(1, Ordering::Relaxed)
             ),
-            digest: format!("{:x}", Sha256::digest(body)),
+            digest: sha256_hex(body),
             binding,
             operation: operation.into(),
         };

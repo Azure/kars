@@ -40,11 +40,10 @@ fn bootstrap_model_preserves_the_explicit_core_provider_and_default() {
     ];
     for _ in 0..env.len() {
         env.rotate_left(1);
-        let model = configured_bootstrap_model(
-            &serde_json::from_value::<Vec<EnvVar>>(json!(env)).unwrap(),
-        )
-        .unwrap()
-        .unwrap();
+        let model =
+            configured_bootstrap_model(&serde_json::from_value::<Vec<EnvVar>>(json!(env)).unwrap())
+                .unwrap()
+                .unwrap();
         assert_eq!(model.provider, "github-copilot");
         assert_eq!(model.deployment, "selected-model");
     }
@@ -66,7 +65,10 @@ fn bootstrap_model_preserves_the_explicit_core_provider_and_default() {
             {"name":"KARS_TASK_DEFAULT_MODEL","valueFrom":{"configMapKeyRef":{"name":"settings","key":"model"}}},
         ]),
     ] {
-        assert!(configured_bootstrap_model(&serde_json::from_value::<Vec<EnvVar>>(env).unwrap()).is_err());
+        assert!(
+            configured_bootstrap_model(&serde_json::from_value::<Vec<EnvVar>>(env).unwrap())
+                .is_err()
+        );
     }
 }
 
@@ -149,12 +151,11 @@ async fn unregistered_bootstrap_default_cannot_be_discarded_by_a_provider_switch
     let cluster = super::Cluster {
         client: kube::Client::try_from(config).unwrap(),
     };
-    for error in [
-        cluster
-            .set_controller_catalog("new-model", Some("https://new.example"), None)
-            .await
-            .unwrap_err(),
-    ] {
+    for error in [cluster
+        .set_controller_catalog("new-model", Some("https://new.example"), None)
+        .await
+        .unwrap_err()]
+    {
         assert!(
             matches!(error, kube::Error::Api(status) if status.code == 409 && status.reason == "ProviderRegistrationRequired")
         );
@@ -190,7 +191,9 @@ async fn orchestrator_bootstrap_uses_the_controller_route_instead_of_a_fixed_pro
             Json(document).into_response()
         } else {
             assert_eq!(method, Method::GET);
-            if uri.path().ends_with("/inferencepolicies/bridge-orchestrator-inference")
+            if uri
+                .path()
+                .ends_with("/inferencepolicies/bridge-orchestrator-inference")
                 || uri.path().ends_with("/karssandboxes/bridge-orchestrator")
             {
                 return (StatusCode::NOT_FOUND, Json(json!({"kind":"Status", "apiVersion":"v1", "status":"Failure", "reason":"NotFound", "message":"not found", "code":404}))).into_response();
@@ -206,7 +209,12 @@ async fn orchestrator_bootstrap_uses_the_controller_route_instead_of_a_fixed_pro
             Some("gpt-5.4-mini"),
             None,
         ),
-        (None, r#"["gpt-4.1", "gpt-5.4-mini"]"#, Some("gpt-4.1"), None),
+        (
+            None,
+            r#"["gpt-4.1", "gpt-5.4-mini"]"#,
+            Some("gpt-4.1"),
+            None,
+        ),
         (None, "", None, None),
         (
             Some("selected-model"),

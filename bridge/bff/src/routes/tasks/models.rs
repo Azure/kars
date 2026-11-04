@@ -203,10 +203,20 @@ impl BlueprintDto {
 
 impl ExecutionPlanDto {
     pub(crate) fn github_write_enabled(&self) -> bool {
-        self.synthesis.capabilities.iter().any(|capability| capability == "github-pr")
-            || self.roles.iter().flat_map(|role| &role.phases).any(|phase| {
-                phase.capabilities.iter().any(|capability| capability == "github-pr")
-            })
+        self.synthesis
+            .capabilities
+            .iter()
+            .any(|capability| capability == "github-pr")
+            || self
+                .roles
+                .iter()
+                .flat_map(|role| &role.phases)
+                .any(|phase| {
+                    phase
+                        .capabilities
+                        .iter()
+                        .any(|capability| capability == "github-pr")
+                })
     }
 
     pub(crate) fn role_qualification_budget(

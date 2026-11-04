@@ -2,7 +2,10 @@
 // Licensed under the MIT License.
 
 use super::credentials;
-use crate::{crd::KarsSandbox, service_control::{self, TlsIdentity}};
+use crate::{
+    crd::KarsSandbox,
+    service_control::{self, TlsIdentity},
+};
 use k8s_openapi::api::core::v1::Namespace;
 use kube::Client;
 use serde_json::Value;
@@ -16,40 +19,64 @@ pub(super) async fn ensure(
     if !identity["task"].is_object() {
         return credentials::ensure(client, sandbox, namespace).await;
     }
-    let existing = match credentials::existing_configuration(client, sandbox, namespace, credentials::ADMIN).await {
-        Ok(configuration) => configuration,
-        Err(error @ credentials::IssuanceError::PrivacyPending) => return Err(error),
-        Err(error) => {
-            credentials::quarantine_on_privacy_loss(client, sandbox, namespace).await?;
-            return Err(error);
-        }
-    };
-    let existing = existing.map(serde_json::from_value::<TlsIdentity>)
+    let existing =
+        match credentials::existing_configuration(client, sandbox, namespace, credentials::ADMIN)
+            .await
+        {
+            Ok(configuration) => configuration,
+            Err(error @ credentials::IssuanceError::PrivacyPending) => return Err(error),
+            Err(error) => {
+                credentials::quarantine_on_privacy_loss(client, sandbox, namespace).await?;
+                return Err(error);
+            }
+        };
+    let existing = existing
+        .map(serde_json::from_value::<TlsIdentity>)
         .transpose()
         .map_err(|_| "Control TLS configuration invalid")?;
     let tls = prepare(identity, existing, chrono::Utc::now().timestamp())?;
-    let configuration = serde_json::to_string(&tls).map_err(|_| "Control TLS serialization failed")?;
-    credentials::ensure_bound(client, sandbox, namespace, credentials::ADMIN, Some(&configuration), None).await
+    let configuration =
+        serde_json::to_string(&tls).map_err(|_| "Control TLS serialization failed")?;
+    credentials::ensure_bound(
+        client,
+        sandbox,
+        namespace,
+        credentials::ADMIN,
+        Some(&configuration),
+        None,
+    )
+    .await
 }
 
-fn prepare(identity: &Value, existing: Option<TlsIdentity>, now: i64) -> Result<TlsIdentity, String> {
+fn prepare(
+    identity: &Value,
+    existing: Option<TlsIdentity>,
+    now: i64,
+) -> Result<TlsIdentity, String> {
     if let Some(existing) = existing.filter(|tls| tls.valid_for(identity, now + 172800)) {
         return Ok(existing);
     }
     let server_name = service_control::server_name(identity)?;
     let issued = crate::providers::sre_tls::issue_for(vec![server_name.clone()])?;
     Ok(TlsIdentity {
-        identity: identity.clone(), server_name, ca_pem: issued.ca,
-        certificate_pem: issued.certificate, private_key_pem: issued.private_key,
+        identity: identity.clone(),
+        server_name,
+        ca_pem: issued.ca,
+        certificate_pem: issued.certificate,
+        private_key_pem: issued.private_key,
         expires_at: issued.expires_at,
     })
 }
 
 pub(super) fn mount(pod: &mut Value) {
     if let Some(volume) = pod["volumes"].as_array_mut().and_then(|volumes| {
-        volumes.iter_mut().find(|volume| volume["name"] == "governed-services-control")
+        volumes
+            .iter_mut()
+            .find(|volume| volume["name"] == "governed-services-control")
     }) {
-        volume["secret"]["items"].as_array_mut().expect("control secret items")
+        volume["secret"]["items"]
+            .as_array_mut()
+            .expect("control secret items")
             .push(serde_json::json!({"key":"config.json","path":"config.json"}));
     }
 }
@@ -97,9 +124,24 @@ mod tests {
         mount(&mut pod);
         assert_eq!(pod["containers"][0]["volumeMounts"], json!([]));
         assert_eq!(pod["containers"][1]["volumeMounts"], json!([]));
-        assert_eq!(pod["volumes"][0]["secret"]["secretName"], "router-services-admin");
-        assert_eq!(pod["volumes"][0]["secret"]["items"].as_array().unwrap().len(), 2);
-        assert_eq!(ingress()["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/component"], "controller");
-        assert_eq!(ingress()["ports"], json!([{"port":service_control::PORT,"protocol":"TCP"}]));
+        assert_eq!(
+            pod["volumes"][0]["secret"]["secretName"],
+            "router-services-admin"
+        );
+        assert_eq!(
+            pod["volumes"][0]["secret"]["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            2
+        );
+        assert_eq!(
+            ingress()["from"][0]["podSelector"]["matchLabels"]["app.kubernetes.io/component"],
+            "controller"
+        );
+        assert_eq!(
+            ingress()["ports"],
+            json!([{"port":service_control::PORT,"protocol":"TCP"}])
+        );
     }
 }

@@ -48,7 +48,7 @@ anyhow.workspace = true
 async-trait.workspace = true
 
 # AGT governance (policy YAML parsing + native policy/trust/audit)
-serde_yaml = "0.9"
+serde-saphyr.workspace = true
 agentmesh.workspace = true
 agentmesh-mcp.workspace = true
 regex.workspace = true

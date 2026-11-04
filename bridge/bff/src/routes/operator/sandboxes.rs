@@ -681,12 +681,16 @@ mod tests {
             (403, "not authorized"),
             (503, "registered but unavailable"),
         ] {
-            let error = kube::Error::Api(kube::core::ErrorResponse {
-                status: "Failure".into(),
-                message: "RAW-API-BODY".into(),
-                reason: "Unhelpful parsing failure".into(),
-                code,
-            });
+            let error = kube::Error::Api(
+                kube::core::Status {
+                    status: Some(kube::core::response::StatusSummary::Failure),
+                    message: "RAW-API-BODY".into(),
+                    reason: "Unhelpful parsing failure".into(),
+                    code,
+                    ..Default::default()
+                }
+                .boxed(),
+            );
             let message = describe_metrics_error(&error);
             assert!(message.contains(explanation));
             assert!(!message.contains("RAW-API-BODY"));

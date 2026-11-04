@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Grafana configuration sidecar on Azure Linux 3
 
 This packages upstream `kiwigrid/k8s-sidecar` `2.7.3` on AL3 distroless Python
@@ -18,8 +21,15 @@ docker build --build-arg PIP_INDEX_URL=https://pypi.tuna.tsinghua.edu.cn/simple 
   -f sandbox-images/k8s-sidecar/Dockerfile -t kars-k8s-sidecar:latest .
 ```
 
-The ARM64 package was resolved on AL3 Python 3.12, checked against official PyPI
-release metadata before offline installation, and passed dependency checks.
+The current inputs update the pinned AL3 Python 3.12 base/runtime and certifi to
+2026.10.23. Both replacement CA bundles reject all four roots in the maintained
+Dex trust contract. The certifi wheel matches its official PyPI release hash.
+These checks do not qualify the rebuilt sidecar: its final image, dependency
+consistency, vulnerability scan and Kubernetes behavior must be rechecked.
+
+Before this trust update, the ARM64 package was resolved on AL3 Python 3.12,
+checked against official PyPI release metadata before offline installation, and
+passed dependency checks.
 The final-stage image passed non-root, read-only, offline imports including
 native YAML/CFFI/cryptography operations. Its complete supported-package scan
 covered 42 OS packages and all 22 locked Python dependencies with no HIGH or

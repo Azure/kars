@@ -1,4 +1,5 @@
-{{- define "kars.schemaHook.resources" -}}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- define "kars.schemaHook.resources" -}}
 {{/* Copyright (c) Microsoft Corporation.
 Licensed under the MIT License. */}}
 {{- $settings := .Values.schemaHook | default dict -}}

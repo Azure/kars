@@ -138,7 +138,7 @@ test("Team designation rejects nonoperators before compose or create; ordinary c
     assert.match((await api.createTeamAction({}, form())).error, /operator or admin/);
     assert.equal(api.calls.length, 0);
     await api.composeTeamAction("Ordinary work");
-    assert.deepEqual(api.calls[0], ["compose", "work", "Ordinary work", undefined, undefined]);
+    assert.deepEqual(api.calls[0], ["compose", "work", "Ordinary work", undefined, undefined, undefined]);
   }
 });
 
@@ -146,8 +146,9 @@ test("Team designation preserves mixed routes and finite budget, creates paused,
   for (const role of ["operator", "admin"]) {
     for (const launch of ["on", "off"]) {
       const api = newActions([role]);
-      await api.composeTeamAction("Review the docs", "profile", true);
-      assert.deepEqual(api.calls.shift(), ["compose", "work", "Review the docs", "profile", true]);
+      const spending = { budget_tokens: 10000, role_tokens: { researcher: 4000 } };
+      await api.composeTeamAction("Review the docs", "profile", true, spending);
+      assert.deepEqual(api.calls.shift(), ["compose", "work", "Review the docs", "profile", true, spending]);
       await redirected(api.createTeamAction({}, form({ launch })));
       assert.deepEqual(api.calls.map(call => call[0]), launch === "on" ? ["create", "POST", "get", "attempt"] : ["create", "POST"]);
       const body = api.calls[0][2];

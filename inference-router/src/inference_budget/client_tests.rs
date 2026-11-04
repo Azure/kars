@@ -380,6 +380,7 @@ async fn missing_usage_logs_safe_upstream_status_without_changing_liability() {
             } else {
                 parameter
             },
+            true,
         ));
     }
     cases.extend([
@@ -387,25 +388,29 @@ async fn missing_usage_logs_safe_upstream_status_without_changing_liability() {
             503,
             json!({"error":{"param":"tools","message":private}}).to_string(),
             "tools",
+            true,
         ),
         (
             200,
             json!({"error":{"param":"tools","message":private}}).to_string(),
             "unavailable",
+            false,
         ),
-        (400, private.to_owned(), "unavailable"),
+        (400, private.to_owned(), "unavailable", false),
         (
             400,
             json!({"error":{"param":[private],"message":private}}).to_string(),
             "unavailable",
+            false,
         ),
         (
             400,
             json!({"error":{"param":"tools","message":"x".repeat(65_536)}}).to_string(),
             "unavailable",
+            false,
         ),
     ]);
-    for (status, body, parameter) in cases {
+    for (status, body, parameter, preserve_provider_error) in cases {
         let fixture = Fixture::for_operation(100, false, Operation::Responses).await;
         let (_server, calendar) = accounting_server().await;
         let mut upstream = fixture.upstream();
@@ -430,7 +435,7 @@ async fn missing_usage_logs_safe_upstream_status_without_changing_liability() {
         let result = dispatch::finish(attempt, status_code, body.as_bytes())
             .with_subscriber(subscriber)
             .await;
-        if crate::proxy::failure::retryable_rejection(status_code) {
+        if preserve_provider_error {
             result.unwrap();
         } else {
             let error = result.unwrap_err();

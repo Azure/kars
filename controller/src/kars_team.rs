@@ -205,7 +205,8 @@ pub struct KarsTeamStatus {
     pub inference_budget_account: Option<crate::inference_budget_contract::AccountReference>,
     /// Verified lifetime limits and meters, refreshed with tokensObservedAt; absent on read failure.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub inference_budget_observation: Option<crate::inference_budget_contract::TeamBudgetObservation>,
+    pub inference_budget_observation:
+        Option<crate::inference_budget_contract::TeamBudgetObservation>,
     /// Lifecycle phase: `Forming` (validating + materializing), `Active`
     /// (running, cadence ticking), `Hibernating` (paused/idle), `Degraded`
     /// (envelope invalid — no authority to operate), `Retired`.
@@ -334,7 +335,11 @@ impl KarsTeam {
             errs.push(error);
         }
         if !self.spec.paused
-            && self.spec.blueprint.as_ref().is_some_and(|b| b.execution_plan.is_some())
+            && self
+                .spec
+                .blueprint
+                .as_ref()
+                .is_some_and(|b| b.execution_plan.is_some())
             && let Err(error) = crate::task_execution_plan::validate_reviewed_delegation_depth(
                 i64::from(self.spec.envelope.delegation_depth),
                 crate::task_execution_plan::REVIEWED_TEAM_DELEGATION_DEPTH,
@@ -375,7 +380,10 @@ impl KarsTeam {
             }
             let child = specs::member_spec(self, role);
             if !self.spec.paused
-                && child.blueprint.as_ref().is_some_and(|b| b.execution_plan.is_some())
+                && child
+                    .blueprint
+                    .as_ref()
+                    .is_some_and(|b| b.execution_plan.is_some())
                 && let Err(error) = crate::task_execution_plan::validate_reviewed_delegation_depth(
                     i64::from(child.envelope.delegation_depth),
                     crate::task_execution_plan::REVIEWED_TASK_DELEGATION_DEPTH,

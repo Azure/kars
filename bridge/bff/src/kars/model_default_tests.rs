@@ -7,10 +7,10 @@ use crate::kars::task::TaskModel;
 #[path = "component_model_tests.rs"]
 mod component_models;
 
-#[path = "provider_lifecycle_tests.rs"]
-mod provider_lifecycle;
 #[path = "foundry_catalog_tests.rs"]
 mod foundry_catalog;
+#[path = "provider_lifecycle_tests.rs"]
+mod provider_lifecycle;
 
 async fn model_fixture() -> (
     Cluster,

@@ -62,7 +62,11 @@ pub async fn get_diagnostics(State(state): State<AppState>) -> AppResult<Json<Di
         let age_secs = status
             .and_then(|s| s.start_time.as_ref())
             .or(p.metadata.creation_timestamp.as_ref())
-            .map(|t| (chrono::Utc::now() - t.0).num_seconds().max(0))
+            .map(|t| {
+                (chrono::Utc::now() - crate::kars::time::to_chrono(t.0))
+                    .num_seconds()
+                    .max(0)
+            })
             .unwrap_or(0);
 
         // Container-level waiting reasons (image pull, crashloop, config error).

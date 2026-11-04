@@ -49,10 +49,15 @@ pub(super) async fn orchestrator_complete(
     }
     let selected = cluster.bridge_orchestrator_model_route().await?;
     if let Some(model) = &selected {
-        cluster.wait_for_bridge_orchestrator_model(&model.provider, &model.deployment)
-            .await.map_err(anyhow::Error::msg)?;
+        cluster
+            .wait_for_bridge_orchestrator_model(&model.provider, &model.deployment)
+            .await
+            .map_err(anyhow::Error::msg)?;
     }
-    let default_model = selected.as_ref().map(|model| model.deployment.as_str()).unwrap_or(default_model);
+    let default_model = selected
+        .as_ref()
+        .map(|model| model.deployment.as_str())
+        .unwrap_or(default_model);
     if let Some((namespace, pod)) = funded_route {
         let content = orchestrator_via_router(
             cluster,
@@ -99,13 +104,19 @@ pub(super) async fn orchestrator_complete(
         .await
         {
             Ok(content) if !content.trim().is_empty() => {
-                return Ok((content, format!("{default_model} (bridge-orchestrator router)")));
+                return Ok((
+                    content,
+                    format!("{default_model} (bridge-orchestrator router)"),
+                ));
             }
             Ok(_) => failures.push(format!("{ns}/{pod}: router returned empty content")),
             Err(e) => failures.push(format!("{ns}/{pod}: {e}")),
         }
     }
-    anyhow::bail!("No candidate router completed the request: {}", failures.join("; "))
+    anyhow::bail!(
+        "No candidate router completed the request: {}",
+        failures.join("; ")
+    )
 }
 
 struct OrchestratorPrompt<'a> {
@@ -136,7 +147,9 @@ async fn orchestrator_via_router(
         let parsed: serde_json::Value = serde_json::from_str(&text)
             .map_err(|e| anyhow::anyhow!("router returned non-JSON: {e}"))?;
         if parsed.get("stop_reason").and_then(|value| value.as_str()) == Some("max_tokens") {
-            anyhow::bail!("Orchestrator response was truncated at the requested {max_tokens}-token output limit; no complete package was received");
+            anyhow::bail!(
+                "Orchestrator response was truncated at the requested {max_tokens}-token output limit; no complete package was received"
+            );
         }
         let content: String = parsed
             .get("content")
@@ -173,7 +186,9 @@ fn chat_completion_content(parsed: &serde_json::Value, max_tokens: u32) -> anyho
         Some("length") => anyhow::bail!(
             "Orchestrator response was truncated at the requested {max_tokens}-token output limit (including reasoning); no complete package was received"
         ),
-        Some("content_filter") => anyhow::bail!("Orchestrator response was blocked by the provider content filter"),
+        Some("content_filter") => {
+            anyhow::bail!("Orchestrator response was blocked by the provider content filter")
+        }
         _ => {}
     }
     choice["message"]["content"]

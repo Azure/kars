@@ -365,8 +365,16 @@ async fn granted_token_is_stored_before_authorized_and_late_failures_never_claim
             assert_eq!(status, StatusCode::CONFLICT);
             assert_eq!(body, contract()["storage_unconfirmed"]);
             assert!(api.secret["data"].get("COPILOT_GITHUB_TOKEN").is_none());
-            assert!(api.secret["data"].get("KARS_PROVIDER_GITHUB_COPILOT_TOKEN").is_none());
-            assert!(api.secret["data"].get("KARS_PROVIDER_GITHUB_COPILOT_ENDPOINT").is_none());
+            assert!(
+                api.secret["data"]
+                    .get("KARS_PROVIDER_GITHUB_COPILOT_TOKEN")
+                    .is_none()
+            );
+            assert!(
+                api.secret["data"]
+                    .get("KARS_PROVIDER_GITHUB_COPILOT_ENDPOINT")
+                    .is_none()
+            );
             assert!(!api.calls.iter().any(|(_, p)| p == MODELS));
         }
     }
@@ -376,12 +384,19 @@ fn assert_copilot_route(secret: &Value, token: &str) {
     use base64::Engine;
     let encoded = |value: &str| base64::engine::general_purpose::STANDARD.encode(value);
     assert_eq!(secret["data"]["COPILOT_GITHUB_TOKEN"], encoded(token));
-    assert_eq!(secret["data"]["KARS_PROVIDER_GITHUB_COPILOT_TOKEN"], encoded(token));
+    assert_eq!(
+        secret["data"]["KARS_PROVIDER_GITHUB_COPILOT_TOKEN"],
+        encoded(token)
+    );
     assert_eq!(
         secret["data"]["KARS_PROVIDER_GITHUB_COPILOT_ENDPOINT"],
         encoded("https://api.githubcopilot.com")
     );
-    assert!(secret["data"].get("KARS_PROVIDER_GITHUB_COPILOT_API_KEY").is_none());
+    assert!(
+        secret["data"]
+            .get("KARS_PROVIDER_GITHUB_COPILOT_API_KEY")
+            .is_none()
+    );
     assert_eq!(secret["data"]["UNRELATED"], "cHJlc2VydmVk");
 }
 
@@ -395,10 +410,13 @@ async fn copilot_explicit_save_binds_historical_connections_and_removal_retires_
         let f = fixture().await;
         {
             let mut api = f.api.lock().unwrap();
-            api.secret["data"]["COPILOT_GITHUB_TOKEN"] =
-                base64::engine::general_purpose::STANDARD.encode(PRIVATE).into();
+            api.secret["data"]["COPILOT_GITHUB_TOKEN"] = base64::engine::general_purpose::STANDARD
+                .encode(PRIVATE)
+                .into();
             api.secret["data"]["KARS_PROVIDER_GITHUB_COPILOT_API_KEY"] =
-                base64::engine::general_purpose::STANDARD.encode("obsolete-key").into();
+                base64::engine::general_purpose::STANDARD
+                    .encode("obsolete-key")
+                    .into();
         }
         let state = AppState::for_test_client(f.client.clone(), "kars-system");
         let Json(result) = put_additional_provider(
@@ -422,11 +440,15 @@ async fn copilot_explicit_save_binds_historical_connections_and_removal_retires_
                 base64::engine::general_purpose::STANDARD.encode("gpt-5-mini,gpt-4.1"),
             );
         }
-        let Json(removed) = delete_additional_provider(State(state), axum::extract::Path("github-copilot".into()))
-            .await
-            .unwrap();
+        let Json(removed) =
+            delete_additional_provider(State(state), axum::extract::Path("github-copilot".into()))
+                .await
+                .unwrap();
         assert_eq!(removed, json!({"removed":true,"tag":"github-copilot"}));
-        assert_eq!(f.api.lock().unwrap().secret["data"], json!({"UNRELATED":"cHJlc2VydmVk"}));
+        assert_eq!(
+            f.api.lock().unwrap().secret["data"],
+            json!({"UNRELATED":"cHJlc2VydmVk"})
+        );
     }
 }
 
@@ -437,11 +459,15 @@ async fn copilot_discovery_reads_enrolled_credentials_without_exposing_or_mutati
 
     for key in ["COPILOT_GITHUB_TOKEN", "KARS_PROVIDER_GITHUB_COPILOT_TOKEN"] {
         let f = fixture().await;
-        f.api.lock().unwrap().secret["data"][key] =
-            base64::engine::general_purpose::STANDARD.encode(PRIVATE).into();
+        f.api.lock().unwrap().secret["data"][key] = base64::engine::general_purpose::STANDARD
+            .encode(PRIVATE)
+            .into();
         let state = AppState::for_test_client(f.client.clone(), "kars-system");
         for supplied in [None, Some(" ")] {
-            assert_eq!(copilot_discovery_token(&state, supplied).await.unwrap(), PRIVATE);
+            assert_eq!(
+                copilot_discovery_token(&state, supplied).await.unwrap(),
+                PRIVATE
+            );
         }
         let api = f.api.lock().unwrap();
         assert!(api.calls.iter().any(|(_, path)| path == SECRET));
@@ -458,20 +484,28 @@ async fn copilot_discovery_prefers_named_credentials_and_preserves_explicit_toke
     let f = fixture().await;
     {
         let mut api = f.api.lock().unwrap();
-        api.secret["data"]["COPILOT_GITHUB_TOKEN"] =
-            base64::engine::general_purpose::STANDARD.encode("older-token").into();
+        api.secret["data"]["COPILOT_GITHUB_TOKEN"] = base64::engine::general_purpose::STANDARD
+            .encode("older-token")
+            .into();
         api.secret["data"]["KARS_PROVIDER_GITHUB_COPILOT_TOKEN"] =
-            base64::engine::general_purpose::STANDARD.encode(PRIVATE).into();
+            base64::engine::general_purpose::STANDARD
+                .encode(PRIVATE)
+                .into();
     }
     let state = AppState::for_test_client(f.client.clone(), "kars-system");
-    assert_eq!(copilot_discovery_token(&state, None).await.unwrap(), PRIVATE);
+    assert_eq!(
+        copilot_discovery_token(&state, None).await.unwrap(),
+        PRIVATE
+    );
     {
         let mut api = f.api.lock().unwrap();
         api.calls.clear();
         api.missing_grant = true;
     }
     assert_eq!(
-        copilot_discovery_token(&state, Some(" supplied-token ")).await.unwrap(),
+        copilot_discovery_token(&state, Some(" supplied-token "))
+            .await
+            .unwrap(),
         "supplied-token",
     );
     assert!(f.api.lock().unwrap().calls.is_empty());
@@ -488,7 +522,9 @@ async fn copilot_discovery_missing_or_unenrolled_credentials_fail_without_oauth(
             let mut api = f.api.lock().unwrap();
             if fault != "missing_token" {
                 api.secret["data"]["COPILOT_GITHUB_TOKEN"] =
-                    base64::engine::general_purpose::STANDARD.encode(PRIVATE).into();
+                    base64::engine::general_purpose::STANDARD
+                        .encode(PRIVATE)
+                        .into();
             }
             api.missing_grant = fault == "missing_grant";
             if fault == "disabled_grant" {
@@ -500,8 +536,11 @@ async fn copilot_discovery_missing_or_unenrolled_credentials_fail_without_oauth(
         let (status, _) = response(error).await;
         assert!(status.is_client_error() || status.is_server_error());
         let api = f.api.lock().unwrap();
-        assert!(api.calls.iter().all(|(method, path)|
-            *method == Method::GET && path != SEAT && path != MODELS));
+        assert!(
+            api.calls
+                .iter()
+                .all(|(method, path)| *method == Method::GET && path != SEAT && path != MODELS)
+        );
         if fault != "missing_token" {
             assert!(!api.calls.iter().any(|(_, path)| path == SECRET));
         }

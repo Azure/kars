@@ -129,10 +129,11 @@ impl Cluster {
         if current.uid() != expected.uid()
             || current.resource_version() != expected.resource_version()
         {
-            return Err(kube::Error::Api(kube::core::ErrorResponse {
-                status: "Failure".into(), reason: "Conflict".into(), code: 409,
+            return Err(kube::Error::Api(kube::core::Status {
+                status: Some(kube::core::response::StatusSummary::Failure), reason: "Conflict".into(), code: 409,
                 message: "Provider configuration changed during Foundry discovery; refresh and try again. Nothing was saved.".into(),
-            }));
+                ..Default::default()
+            }.boxed()));
         }
         let (before, after, patch) = catalog_patch(&current, project, models, api_key)?;
         self.validate_provider_update(&current, &before, &after)

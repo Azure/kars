@@ -366,20 +366,32 @@ fn peek_request_method_and_tool(body: &[u8]) -> (Option<String>, Option<String>)
 fn outcome_to_response(outcome: ProcessOutcome) -> Response {
     match outcome {
         ProcessOutcome::JsonRpcResponse { body, session_id } => {
-            let policy_denial = serde_json::from_slice::<serde_json::Value>(&body).ok()
-                .filter(|value| value["error"]["code"] == -32003
-                    && value["error"]["data"]["decision"] == "Blocked"
-                    && value["error"]["data"]["byPolicyKind"] == "KarsMemory");
+            let policy_denial = serde_json::from_slice::<serde_json::Value>(&body)
+                .ok()
+                .filter(|value| {
+                    value["error"]["code"] == -32003
+                        && value["error"]["data"]["decision"] == "Blocked"
+                        && value["error"]["data"]["byPolicyKind"] == "KarsMemory"
+                });
             let mut resp = (
-                if policy_denial.is_some() { StatusCode::FORBIDDEN } else { StatusCode::OK },
+                if policy_denial.is_some() {
+                    StatusCode::FORBIDDEN
+                } else {
+                    StatusCode::OK
+                },
                 [(header::CONTENT_TYPE, "application/json")],
                 body,
             )
                 .into_response();
             if policy_denial.is_some() {
-                resp.headers_mut().insert("x-kars-decision", HeaderValue::from_static("Blocked"));
-                resp.headers_mut().insert("x-kars-decision-by", HeaderValue::from_static("KarsMemory"));
-                resp.headers_mut().insert("x-kars-decision-reason", HeaderValue::from_static("memory scope is not authorized"));
+                resp.headers_mut()
+                    .insert("x-kars-decision", HeaderValue::from_static("Blocked"));
+                resp.headers_mut()
+                    .insert("x-kars-decision-by", HeaderValue::from_static("KarsMemory"));
+                resp.headers_mut().insert(
+                    "x-kars-decision-reason",
+                    HeaderValue::from_static("memory scope is not authorized"),
+                );
             }
             if let Some(sid) = session_id {
                 if let Ok(value) = HeaderValue::from_str(sid.as_str()) {
@@ -425,7 +437,8 @@ mod tests {
     async fn memory_policy_denial_has_truthful_status_and_preserves_rpc_identity() {
         let body = json!({"jsonrpc":"2.0","id":"memory-1","error":{"code":-32003,"data":{"decision":"Blocked","byPolicyKind":"KarsMemory","reason":"memory scope is not authorized"}}});
         let response = outcome_to_response(ProcessOutcome::JsonRpcResponse {
-            body: serde_json::to_vec(&body).unwrap(), session_id: Some(SessionId::try_new("session-1").unwrap()),
+            body: serde_json::to_vec(&body).unwrap(),
+            session_id: Some(SessionId::try_new("session-1").unwrap()),
         });
         let (status, headers, text) = body_text(response).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
@@ -441,7 +454,10 @@ mod tests {
             json!({"jsonrpc":"2.0","id":1,"result":{"error":{"code":-32003,"data":{"decision":"Blocked","byPolicyKind":"KarsMemory"}}}}),
             json!({"jsonrpc":"2.0","id":1,"error":{"code":-32000,"data":{"decision":"Blocked","byPolicyKind":"KarsMemory"}}}),
         ] {
-            let response = outcome_to_response(ProcessOutcome::JsonRpcResponse { body: serde_json::to_vec(&body).unwrap(), session_id: None });
+            let response = outcome_to_response(ProcessOutcome::JsonRpcResponse {
+                body: serde_json::to_vec(&body).unwrap(),
+                session_id: None,
+            });
             assert_eq!(response.status(), StatusCode::OK);
             assert!(!response.headers().contains_key("x-kars-decision"));
         }
@@ -672,7 +688,13 @@ mod tests {
     async fn platform_memory_foreign_scope_is_a_real_policy_denial() {
         let req_body = json!({"jsonrpc":"2.0","id":23,"method":"tools/call",
             "params":{"name":"foundry.memory","arguments":{"operation":"search","scope":"other-sandbox"}}});
-        let response = platform_app().oneshot(platform_post_body(req_body.to_string().as_bytes(), Some("application/json, text/event-stream"))).await.unwrap();
+        let response = platform_app()
+            .oneshot(platform_post_body(
+                req_body.to_string().as_bytes(),
+                Some("application/json, text/event-stream"),
+            ))
+            .await
+            .unwrap();
         let (status, headers, text) = body_text(response).await;
         assert_eq!(status, StatusCode::FORBIDDEN);
         assert_eq!(headers["x-kars-decision-by"], "KarsMemory");
@@ -844,7 +866,10 @@ mod tests {
         let upstream = MockServer::start().await;
         Mock::given(wm_method("POST"))
             .and(path_regex(r"^/memory_stores/.*:update_memories$"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(json!({"status": "completed", "update_id": "memory-11"})))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_json(json!({"status": "completed", "update_id": "memory-11"})),
+            )
             .mount(&upstream)
             .await;
 

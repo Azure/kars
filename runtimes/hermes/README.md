@@ -253,7 +253,8 @@ Hermes is installed editably from the exact `f97608f178d1ffeca59860195ab7da295f7
 source (0.21.5). `hermes-dependency-fixes.patch` pins AnyIO 4.14.2 and urllib3
 2.8.0 for CVE-2026-63374, CVE-2026-97687 and CVE-2026-97689, with exact-pin
 quarantine exceptions following the upstream convention. It also updates PyJWT and
-cryptography to 2.15.1 and 50.0.2, and the Undici 6 override, TUI dependency
+cryptography to 2.15.1 and 50.0.2, certifi to 2026.10.23 to remove a rejected
+root certificate, and the Undici 6 override, TUI dependency
 and two corresponding lock entries to 6.28.1. Other Node lock entries, including
 optional platform packages, are preserved. The fixed package's SHA-512 binds the
 public Microsoft npm mirror archive; all 176 files match the qualified vendor

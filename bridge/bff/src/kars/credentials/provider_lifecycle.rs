@@ -4,14 +4,15 @@
 use super::*;
 
 fn in_use(consumer: &str) -> kube::Error {
-    kube::Error::Api(kube::core::ErrorResponse {
-        status: "Failure".into(),
+    kube::Error::Api(kube::core::Status {
+        status: Some(kube::core::response::StatusSummary::Failure),
         reason: "ProviderInUse".into(),
         code: 409,
         message: format!(
             "Provider update would remove a route used by {consumer}. Select a replacement default in Configuration and update the referenced primary/fallback routes in Policies before removing this provider or model. Changing the default does not migrate existing orchestrator, SRE, or mission policies. Nothing was removed."
         ),
-    })
+        ..Default::default()
+    }.boxed())
 }
 
 fn models(keys: &BTreeMap<String, String>, prefix: &str) -> BTreeSet<String> {

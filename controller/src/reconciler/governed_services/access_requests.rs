@@ -5,6 +5,7 @@ use super::{
     control_client::{ControlClient, RequestEntry, RequestScope, Snapshot},
     identity_read_only,
 };
+use crate::providers::signing::sha256_hex;
 use crate::{
     crd::KarsSandbox,
     egress_approval::EgressApproval,
@@ -17,7 +18,6 @@ use crate::{
 use k8s_openapi::api::core::v1::Namespace;
 use kube::{Api, Client, ResourceExt, api::PostParams};
 use serde_json::json;
-use sha2::{Digest, Sha256};
 
 #[cfg(test)]
 #[path = "access_requests_tests.rs"]
@@ -32,7 +32,7 @@ const CONTEXT_ANNOTATIONS: [&str; 5] = [
 ];
 
 fn request_name(scope: &RequestScope, entry: &RequestEntry) -> String {
-    let digest = Sha256::digest(
+    let digest = sha256_hex(
         json!([
             scope.identity,
             scope.id,
@@ -42,7 +42,7 @@ fn request_name(scope: &RequestScope, entry: &RequestEntry) -> String {
         .to_string()
         .as_bytes(),
     );
-    format!("hitl-{}", &hex::encode(digest)[..48])
+    format!("hitl-{}", &digest[..48])
 }
 
 fn approval_document(

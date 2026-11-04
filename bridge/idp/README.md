@@ -3,7 +3,27 @@ Licensed under the MIT License. -->
 
 # Kars Dex security rebuild
 
-**Status: repaired Linux ARM64 image installed on Kind; Bridge → Headlamp
+**Current prepublication repair:** genuine Go 1.27.3 resolver output now selects
+`golang.org/x/net` 0.62.0 in both root and nested API graphs, including its required
+`x/crypto` 0.58.0 and `x/text` 0.43.0 dependency floors. The first executed resolver
+rejected the old 0.57.0 crypto request; its failure is retained. The regenerated
+locks were reviewed and promoted with unchanged upstream source baselines. Other
+module changes follow those dependency requirements; metadata was not hand-edited.
+All 47 packaging/source contracts passed, including rejection of stale nested API
+network dependencies even when artifact checksums are internally consistent.
+The updated graph passed native Linux ARM64 compilation, memory/SQLite refresh
+deadlock regressions, session/authflow/SAML and external-probe race tests, and the
+maintained upstream root/API/NTLM race-suite commands with compiler networking
+disabled. The current ARM64 image
+`sha256:d3c81488c6217e16adff93acb326bc5fd5b26439d6e324f1dd5584ca3a256b4f`
+passed the maintained AL3 base inventory/trust, native linkage, memory/SQLite OIDC,
+refresh rotation and SQLite restart/signing-continuity checks. Trivy 0.70.0, with
+its database updated November 4 at 19:02 UTC and freshly downloaded at 23:00 UTC,
+reported zero HIGH/CRITICAL vulnerabilities without ignores. This is not
+all-severity clearance, AMD64 validation or fresh-install acceptance. The
+installed results below apply only to the October 28 graph.
+
+**October 28 status: repaired Linux ARM64 image installed on Kind; Bridge → Headlamp
 automatic sign-in, directional sharing and confirmed logout accepted.** These
 results do not establish timed expiry, installed SQLite persistence, AMD64 or
 Azure/Entra acceptance. On October 28, 2026 the Go 1.27.3 build passed CGO
@@ -86,6 +106,50 @@ cross-signing roots, are absent. The maintained final-image gate verifies those
 fingerprints again against the unchanged AL3 bundle. This is trust-payload
 parity; the ARM64 final-image gate and fresh scan also passed. Live external
 connector acceptance remains separate.
+
+## Hermetic Google connector unit tests
+
+The November 4 network-isolated root race attempt reached the Google connector
+but failed when `Config.Open` fetched real Google discovery. That failed attempt
+is retained; its `TestGetGroups` setup panic is not a passing connector result.
+The maintained `scripts/upstream-tests.sh` now uses the checksum-pinned
+`patches/google-discovery-overlay.json` to add `google_discovery_test.go` virtually
+as `connector/google/kars_discovery_test.go`. No upstream test or assertion is
+replaced, and no production Go file, dependency lock or `source.sha256` entry
+changes. The script verifies the patch bundle and source inventory before tests,
+rejects an existing overlay target, and rechecks source after the root suite.
+
+The Google test binary installs its transport once before tests run and restores
+it afterward. Only the exact GET to Google's discovery URL is routed to a local
+`httptest` server; its document retains the real Google issuer and HTTPS endpoint
+identities, so normal OIDC issuer checking remains enabled. Existing numeric HTTP
+loopback Directory/GCE fixtures remain reachable without a proxy. Other external
+requests, including real token/JWKS requests, fail rather than falling back to
+DNS or live services. No TLS verification is disabled. The fixture is not compiled
+into the shipping binary; its reviewed bytes are disclosed with the existing
+patch bundle. This is unit-test isolation, **not Google login acceptance**.
+
+Run a fresh qualification attempt with the updated packaging bundle at
+`/packaging`, the unchanged reviewed source as the working directory, and the
+existing dependency cache under mandatory `network=none`:
+
+```sh
+sh /packaging/scripts/upstream-tests.sh
+```
+
+The script still runs the complete NTLM, root and nested API race suites with
+`-count=1`; only the root command gains
+`-overlay=/packaging/patches/google-discovery-overlay.json`. Keep its existing
+`/out/doc/ntlm-tests.json`, `upstream-tests.json` and `api-tests.json` evidence.
+Do not modify or replay a frozen failed attempt. Go race execution and actual
+external Google authentication remain separate, pending validation gates.
+
+Focused offline packaging contracts (no Go invocation or network; the shell
+orchestration tests use a command-recording shim):
+
+```sh
+PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s bridge/idp/tests -p 'test_google_discovery.py'
+```
 
 ## Persistent installed sessions
 

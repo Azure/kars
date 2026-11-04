@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # Governed persistent memory
 
 OpenClaw and Hermes use the same router-controlled memory operations in reviewed

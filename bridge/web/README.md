@@ -43,6 +43,15 @@ even when the source lockfile is patched. Dependency installation uses the
 configured approved npm registry; production builds and runtime execution
 need no package downloads.
 
+Mermaid remains at 11.16.1; its KaTeX dependency is explicitly overridden to
+0.18.2 for GHSA-238p-pmpm-9mq7. The override crosses Mermaid's declared KaTeX
+range, so `tests/math-renderer-security.test.mjs` exercises the renderer actually
+resolved by Mermaid, both MathML output modes, parse errors, and rejection of
+inherited trust for links and external resources. Mermaid's strict security
+mode and sanitization remain enabled. Remove the override when a validated
+Mermaid release itself requires a patched KaTeX version. These renderer tests
+do not replace browser validation of the packaged Bridge image.
+
 ## Session recovery
 
 Expired-session RSC navigation and prefetch requests receive a same-origin,

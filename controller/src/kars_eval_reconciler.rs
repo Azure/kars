@@ -211,7 +211,11 @@ async fn reconcile_inner(eval: Arc<KarsEval>, ctx: Arc<Ctx>) -> Result<Action, R
     .await?;
     let corpus = kars_eval_corpus::parse(&resolved.bytes)
         .map_err(|error| anyhow::anyhow!("resolved evaluation corpus changed: {error}"))?;
-    if corpus.cases.iter().any(|case| matches!(case.scenario, kars_eval_corpus::Scenario::MemoryRead { .. })) {
+    if corpus
+        .cases
+        .iter()
+        .any(|case| matches!(case.scenario, kars_eval_corpus::Scenario::MemoryRead { .. }))
+    {
         let target = memory::Target::resolve(&ctx.client, &eval).await?;
         intent = intent.with_memory(target)?;
         intent.revalidate(&ctx.client, &eval).await?;

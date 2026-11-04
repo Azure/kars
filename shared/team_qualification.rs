@@ -2,6 +2,7 @@
 // Licensed under the MIT License.
 
 //! One reviewed standing-Team attempt. This is authorization, never evidence.
+use crate::providers::signing::sha256_hex;
 use chrono::{DateTime, Utc};
 use kube::{
     Api, Client, ResourceExt,
@@ -9,7 +10,6 @@ use kube::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 pub const RECORD: &str = "kars.azure.com/team-qualification";
@@ -54,7 +54,7 @@ pub fn digest(value: &Value) -> String {
             _ => value.to_string(),
         }
     }
-    format!("sha256:{:x}", Sha256::digest(canonical(value).as_bytes()))
+    format!("sha256:{}", sha256_hex(canonical(value).as_bytes()))
 }
 
 pub fn package(team: &Value) -> String {
@@ -321,6 +321,23 @@ mod tests {
             request: format!("manual-1-{}", "b".repeat(64)),
         }
     }
+    #[test]
+    fn qualification_digest_preserves_canonical_bytes_and_prefix() {
+        let value = json!({"z":[2,1],"a":{"β":"Café\r\n"}});
+        assert_eq!(
+            digest(&value),
+            "sha256:e7b0dd2f3f59fe4495ba534e92fb15395717eab2ffd0401b74dc14577524ad46"
+        );
+        assert_eq!(
+            digest(&value),
+            digest(&json!({"a":{"β":"Café\r\n"},"z":[2,1]}))
+        );
+        assert_ne!(
+            digest(&value),
+            digest(&json!({"a":{"β":"Café\n"},"z":[2,1]}))
+        );
+    }
+
     #[test]
     fn exact_team_binding_rejects_replacement_edits_and_expiry_but_not_pause() {
         let t = team();

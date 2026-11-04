@@ -35,11 +35,18 @@ fn execution_plan_roundtrips_and_every_reviewed_field_changes_authority() {
         original["blueprint"]["executionPlan"]
     );
     let digest = spec.authorization_digest_with_model(&model);
-    for pointer in ["/blueprint/executionPlan/roles/0/phases/0", "/blueprint/executionPlan/synthesis"] {
+    for pointer in [
+        "/blueprint/executionPlan/roles/0/phases/0",
+        "/blueprint/executionPlan/synthesis",
+    ] {
         let mut changed = original.clone();
         changed.pointer_mut(pointer).unwrap()["executionMode"] = json!("native");
         let changed: KarsTaskSpec = serde_json::from_value(changed).unwrap();
-        assert_ne!(digest, changed.authorization_digest_with_model(&model), "{pointer}/executionMode");
+        assert_ne!(
+            digest,
+            changed.authorization_digest_with_model(&model),
+            "{pointer}/executionMode"
+        );
     }
     for (pointer, value) in [
         ("schema", json!("future-version")),
@@ -254,13 +261,19 @@ fn execution_plan_is_bounded_in_generated_task_and_team_schemas() {
                     assert_eq!(phase[field]["minimum"].as_f64(), Some(0.0));
                 }
                 assert_eq!(
-                    plan["properties"]["synthesis"]["properties"]["maxToolCalls"]["maximum"].as_f64(),
+                    plan["properties"]["synthesis"]["properties"]["maxToolCalls"]["maximum"]
+                        .as_f64(),
                     Some(f64::from(i32::MAX))
                 );
-                assert_eq!(plan["properties"]["roles"]["items"]["properties"]["phases"]["items"]["properties"]
-                    ["executionMode"], json!({"type":"string","enum":["native"]}));
-                assert_eq!(plan["properties"]["synthesis"]["properties"]["executionMode"],
-                    json!({"type":"string","enum":["native"]}));
+                assert_eq!(
+                    plan["properties"]["roles"]["items"]["properties"]["phases"]["items"]["properties"]
+                        ["executionMode"],
+                    json!({"type":"string","enum":["native"]})
+                );
+                assert_eq!(
+                    plan["properties"]["synthesis"]["properties"]["executionMode"],
+                    json!({"type":"string","enum":["native"]})
+                );
                 assert_eq!(
                     plan["properties"]["roles"]["items"]["properties"]["phases"]["maxItems"],
                     8

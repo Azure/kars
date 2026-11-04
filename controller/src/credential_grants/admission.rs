@@ -48,12 +48,8 @@ pub(super) async fn verify(client: &Client) -> Result<(), String> {
                     })
             })
             || binding.metadata.deletion_timestamp.is_some()
-            || binding.spec.as_ref().is_none_or(|s| {
-                s.policy_name.as_deref() != Some(name)
-                    || s.validation_actions
-                        .as_ref()
-                        .is_none_or(|actions| !actions.iter().any(|a| a == "Deny"))
-            })
+            || binding.spec.policy_name != name
+            || !binding.spec.validation_actions.iter().any(|a| a == "Deny")
         {
             return Err("Credential admission is not observed, type-checked and enforced".into());
         }

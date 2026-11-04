@@ -514,7 +514,9 @@ fn git_write_config(principal_sub: &str, repos: Vec<String>) -> GitWriteConfig {
     }
 }
 
-pub(crate) fn validate_bound_github_egress<'a>(hosts: impl Iterator<Item = &'a str>) -> AppResult<()> {
+pub(crate) fn validate_bound_github_egress<'a>(
+    hosts: impl Iterator<Item = &'a str>,
+) -> AppResult<()> {
     let conflicts = hosts
         .filter(|host| crate::kars::github_egress::opaque_github_egress(host))
         .collect::<std::collections::BTreeSet<_>>();

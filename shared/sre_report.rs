@@ -3,9 +3,9 @@
 
 //! Latest-only, advisory SRE reports. These records confer no remediation authority.
 
+use crate::providers::signing::sha256_hex;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
-use sha2::{Digest, Sha256};
 
 pub const NAME: &str = "sre-health-report";
 pub const NAMESPACE: &str = "kars-sre";
@@ -109,10 +109,7 @@ impl Input {
     }
 
     pub fn digest(&self) -> String {
-        format!(
-            "{:x}",
-            Sha256::digest(serde_json::to_vec(self).expect("report serializes"))
-        )
+        sha256_hex(&serde_json::to_vec(self).expect("report serializes"))
     }
 }
 
@@ -169,6 +166,14 @@ mod tests {
             interval_seconds: 900,
             timeout_seconds: 180,
         }
+    }
+
+    #[test]
+    fn report_digest_preserves_serialized_wire_bytes() {
+        assert_eq!(
+            input().digest(),
+            "8f0c8d31e360d95fcf8943c0b60311eb5b030e0529987f2f783a9f1078c13737"
+        );
     }
 
     #[test]

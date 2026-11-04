@@ -94,10 +94,13 @@ async fn github_setup_distinguishes_enrolled_empty_storage_without_exposing_cred
         }
         let app = crate::state::AppState::for_test_client(cluster.client.clone(), &namespace);
         let github = crate::routes::github::get_app(State(app)).await.unwrap().0;
-        assert_eq!(serde_json::to_value(github).unwrap(), json!({
-            "configured": scenario == "configured", "storage_ready": true,
-            "slug": null, "install_url": null,
-        }));
+        assert_eq!(
+            serde_json::to_value(github).unwrap(),
+            json!({
+                "configured": scenario == "configured", "storage_ready": true,
+                "slug": null, "install_url": null,
+            })
+        );
         let calls = &state.lock().unwrap().calls;
         assert_eq!(calls.len(), 3);
         assert!(calls.iter().all(|(method, _, _)| method == "GET"));
@@ -120,26 +123,41 @@ async fn github_setup_requires_enrollment_before_signing_or_verifying_a_submitte
             }
         }
         let app = crate::state::AppState::for_test_client(cluster.client.clone(), &namespace);
-        let error = crate::routes::github::put_app(State(app.clone()), axum::Json(
-            crate::routes::github::GithubAppRequest {
+        let error = crate::routes::github::put_app(
+            State(app.clone()),
+            axum::Json(crate::routes::github::GithubAppRequest {
                 app_id: "123".into(),
                 private_key: "-----BEGIN PRIVATE KEY----- invalid-test-fixture".into(),
-            },
-        )).await.unwrap_err();
+            }),
+        )
+        .await
+        .unwrap_err();
         if scenario == "ready" {
             assert!(matches!(error, crate::error::AppError::Rejected(_)));
         } else {
-            assert!(matches!(error, crate::error::AppError::CredentialAuthorityUnavailable));
+            assert!(matches!(
+                error,
+                crate::error::AppError::CredentialAuthorityUnavailable
+            ));
             let response = error.into_response();
             assert_eq!(response.status(), axum::http::StatusCode::CONFLICT);
-            let body = axum::body::to_bytes(response.into_body(), 4096).await.unwrap();
+            let body = axum::body::to_bytes(response.into_body(), 4096)
+                .await
+                .unwrap();
             let body: Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(body["error"]["code"], "credential_authority_unavailable");
-            assert!(body["error"]["message"].as_str().unwrap().contains("operator must enroll or repair"));
+            assert!(
+                body["error"]["message"]
+                    .as_str()
+                    .unwrap()
+                    .contains("operator must enroll or repair")
+            );
             assert!(!body.to_string().contains("invalid-test-fixture"));
             if scenario == "no-store" {
-                assert!(matches!(crate::routes::github::delete_app(State(app)).await,
-                    Err(crate::error::AppError::CredentialAuthorityUnavailable)));
+                assert!(matches!(
+                    crate::routes::github::delete_app(State(app)).await,
+                    Err(crate::error::AppError::CredentialAuthorityUnavailable)
+                ));
             }
         }
         assert!(state.lock().unwrap().calls.iter().all(|(method, path, _)| {
@@ -329,11 +347,14 @@ async fn optional_github_discovery_keeps_enrolled_store_validation() {
                     state.objects.get_mut(&path).unwrap()["type"] = "kubernetes.io/tls".into()
                 }
                 "stale" => {
-                    state.objects.get_mut(&grant).unwrap()["status"]["observedGeneration"] = 0.into()
+                    state.objects.get_mut(&grant).unwrap()["status"]["observedGeneration"] =
+                        0.into()
                 }
                 "replaced-namespace" => {
-                    state.objects.get_mut(&format!("/api/v1/namespaces/{namespace}")).unwrap()
-                        ["metadata"]["uid"] = "replacement".into()
+                    state
+                        .objects
+                        .get_mut(&format!("/api/v1/namespaces/{namespace}"))
+                        .unwrap()["metadata"]["uid"] = "replacement".into()
                 }
                 "terminating-secret" => {
                     state.objects.get_mut(&path).unwrap()["metadata"]["deletionTimestamp"] =
@@ -350,18 +371,26 @@ async fn optional_github_discovery_keeps_enrolled_store_validation() {
             assert!(!error.contains("PRIVATE_VALUE_SENTINEL"));
             assert!(!error.contains("test-key"));
             let app = crate::state::AppState::for_test_client(cluster.client.clone(), &namespace);
-            let discovery = crate::routes::github::get_app(State(app.clone())).await.unwrap_err();
-            let submission = crate::routes::github::put_app(State(app), axum::Json(
-                crate::routes::github::GithubAppRequest {
+            let discovery = crate::routes::github::get_app(State(app.clone()))
+                .await
+                .unwrap_err();
+            let submission = crate::routes::github::put_app(
+                State(app),
+                axum::Json(crate::routes::github::GithubAppRequest {
                     app_id: "123".into(),
                     private_key: "-----BEGIN PRIVATE KEY----- invalid-test-fixture".into(),
-                },
-            )).await.unwrap_err();
+                }),
+            )
+            .await
+            .unwrap_err();
             for error in [discovery, submission] {
                 if matches!(scenario, "forbidden" | "missing-secret") {
                     assert!(matches!(error, crate::error::AppError::Upstream(_)));
                 } else {
-                    assert!(matches!(error, crate::error::AppError::CredentialAuthorityUnavailable));
+                    assert!(matches!(
+                        error,
+                        crate::error::AppError::CredentialAuthorityUnavailable
+                    ));
                 }
                 assert!(!error.to_string().contains("invalid-test-fixture"));
             }

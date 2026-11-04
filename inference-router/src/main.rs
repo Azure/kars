@@ -842,7 +842,8 @@ fn build_platform_mcp_router(
     governance: Arc<kars_inference_router::governance::Governance>,
     telemetry: Option<Arc<kars_inference_router::task_telemetry::TaskTelemetry>>,
 ) -> Router {
-    let mut state = routes::McpRouteState::platform(memory_binding, policy_status, Some(governance));
+    let mut state =
+        routes::McpRouteState::platform(memory_binding, policy_status, Some(governance));
     state.task_telemetry = telemetry;
     tracing::info!(
         "Mounting /platform/mcp (Foundry-shim discovery surface, loopback-only, no OAuth)"

@@ -200,15 +200,17 @@ fn malformed_markers_fail_closed_and_cannot_be_inherited() {
 
 #[test]
 fn qualification_request_defaults_off_and_requires_a_boolean() {
-    let compose: crate::routes::compose::ComposeRequest =
-        serde_json::from_value(json!({"objective":"test"})).unwrap();
+    let compose: crate::routes::compose::ComposeRequest = serde_json::from_value(json!({
+        "objective":"test", "spending":{"budget_tokens":null,"role_tokens":{}}
+    }))
+    .unwrap();
     assert!(!compose.qualification_run);
     let validate: crate::routes::validate::ValidateRequest =
         serde_json::from_value(json!({})).unwrap();
     assert!(!validate.qualification_run);
     assert!(
         serde_json::from_value::<crate::routes::compose::ComposeRequest>(
-            json!({"objective":"test","qualification_run":"true"})
+            json!({"objective":"test","qualification_run":"true", "spending":{"budget_tokens":null,"role_tokens":{}}})
         )
         .is_err()
     );

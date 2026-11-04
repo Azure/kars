@@ -1,4 +1,5 @@
-{{- define "kars.sre.modelRoute" -}}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- define "kars.sre.modelRoute" -}}
 {{- $defaults := .Values.controller.inferenceDefaults | default dict -}}
 {{- $sre := .Values.sre | default dict -}}
 {{- $provider := $sre.provider | default $defaults.provider -}}

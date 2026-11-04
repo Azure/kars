@@ -20,9 +20,9 @@ export interface TaskExecutionEvidence {
 
 export class TaskExecutionError extends Error {
   readonly evidence: TaskExecutionEvidence;
-  readonly phase?: TaskPhaseEvidence;
-  readonly output?: string;
-  readonly artifacts?: MissionArtifacts;
+  declare readonly phase?: TaskPhaseEvidence;
+  declare readonly output?: string;
+  declare readonly artifacts?: MissionArtifacts;
   constructor(message: string, evidence: TaskExecutionEvidence, phase?: TaskPhaseEvidence, output?: string, artifacts?: MissionArtifacts) {
     super(message);
     this.name = "TaskExecutionError";

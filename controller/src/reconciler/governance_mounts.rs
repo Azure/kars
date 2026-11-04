@@ -491,7 +491,9 @@ mod tests {
 
         let server = MockServer::start().await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/namespaces/control/configmaps/karsmemory-demo-binding"))
+            .and(path(
+                "/api/v1/namespaces/control/configmaps/karsmemory-demo-binding",
+            ))
             .respond_with(ResponseTemplate::new(404).set_body_json(json!({
                 "apiVersion":"v1", "kind":"Status", "status":"Failure",
                 "reason":"NotFound", "message":"missing binding", "code":404
@@ -520,9 +522,12 @@ mod tests {
         assert!(matches!(outcome, MirrorOutcome::Skipped(_)));
         assert!(spec.get("volumes").is_none());
         assert!(spec["containers"][0].get("volumeMounts").is_none());
-        assert!(spec["containers"][0]["env"].as_array().unwrap().contains(
-            &json!({"name":"MEMORY_BINDING_REQUIRED", "value":"true"})
-        ));
+        assert!(
+            spec["containers"][0]["env"]
+                .as_array()
+                .unwrap()
+                .contains(&json!({"name":"MEMORY_BINDING_REQUIRED", "value":"true"}))
+        );
         assert!(spec["containers"][1].get("env").is_none());
     }
 

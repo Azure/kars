@@ -37,12 +37,11 @@ pub(crate) fn validate_revision_plan(
 ) -> AppResult<()> {
     if work::next_pending(items).is_some_and(|item| {
         work::revision_source(item).is_some() || work::revision_diagnostic_source(item).is_some()
-    })
-        && let Some(plan) = team
-            .spec
-            .blueprint
-            .as_ref()
-            .and_then(|blueprint| blueprint.execution_plan.as_ref())
+    }) && let Some(plan) = team
+        .spec
+        .blueprint
+        .as_ref()
+        .and_then(|blueprint| blueprint.execution_plan.as_ref())
     {
         crate::kars::task::execution_plan::validate_retained_input_execution(Some(plan), 1)
             .map_err(AppError::BadRequest)?;

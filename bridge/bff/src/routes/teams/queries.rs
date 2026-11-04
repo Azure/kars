@@ -45,7 +45,9 @@ pub struct TeamOutcomeSummaryDto {
     pub failed: i64,
 }
 
-pub(super) fn team_git_write_repos(blueprint: Option<&crate::kars::task::TaskBlueprint>) -> Vec<String> {
+pub(super) fn team_git_write_repos(
+    blueprint: Option<&crate::kars::task::TaskBlueprint>,
+) -> Vec<String> {
     let Some(blueprint) = blueprint else {
         return Vec::new();
     };
@@ -245,7 +247,7 @@ fn to_summary(team: &KarsTeam) -> TeamSummaryDto {
         .metadata
         .creation_timestamp
         .as_ref()
-        .map(|timestamp| timestamp.0.to_rfc3339());
+        .map(|timestamp| crate::kars::time::to_chrono(timestamp.0).to_rfc3339());
     let last_run_at = st.and_then(|status| status.last_run_at.clone());
     let last_success_at = st.and_then(|status| status.last_success_at.clone());
     let last_activity_at = [
@@ -603,7 +605,7 @@ pub async fn get_team(
             .metadata
             .creation_timestamp
             .as_ref()
-            .map(|timestamp| timestamp.0.to_rfc3339()),
+            .map(|timestamp| crate::kars::time::to_chrono(timestamp.0).to_rfc3339()),
         last_activity_at: [
             st.and_then(|status| status.last_activity_at.clone()),
             st.and_then(|status| status.last_run_at.clone()),
@@ -611,7 +613,7 @@ pub async fn get_team(
             team.metadata
                 .creation_timestamp
                 .as_ref()
-                .map(|timestamp| timestamp.0.to_rfc3339()),
+                .map(|timestamp| crate::kars::time::to_chrono(timestamp.0).to_rfc3339()),
         ]
         .into_iter()
         .flatten()

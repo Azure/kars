@@ -1274,12 +1274,12 @@ mod tests {
 
     #[test]
     fn mcp_server_crd_is_serde_round_trippable() {
-        // Round-trip through serde_yaml as `kubectl apply` would. A
+        // Round-trip through YAML as `kubectl apply` would. A
         // malformed CRD (e.g. `enum` set on a non-string node) would
         // fail to serialize. ValidationRule is part of the public
         // schema and must survive.
         let crd = mcp_server_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("productionMode"));
     }
@@ -1287,7 +1287,7 @@ mod tests {
     #[test]
     fn tool_policy_crd_is_serde_round_trippable() {
         let crd = tool_policy_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("sandboxMatchLabels"));
     }
@@ -1338,7 +1338,7 @@ mod tests {
     #[test]
     fn a2a_agent_crd_is_serde_round_trippable() {
         let crd = a2a_agent_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("signingKeys"));
     }
@@ -1393,7 +1393,7 @@ mod tests {
     #[test]
     fn inference_policy_crd_is_serde_round_trippable() {
         let crd = inference_policy_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("monthlyTokens"));
     }
@@ -1452,24 +1452,39 @@ mod tests {
     #[test]
     fn kars_memory_shared_grants_have_bounded_schema_and_exact_validation() {
         let crd = serde_json::to_value(kars_memory_crd()).unwrap();
-        let props = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]["properties"];
+        let props = &crd["spec"]["versions"][0]["schema"]["openAPIV3Schema"]["properties"]["spec"]
+            ["properties"];
         assert_eq!(props["storeName"]["maxLength"], 63);
         assert_eq!(props["scope"]["maxLength"], 256);
         assert_eq!(props["sharedScopes"]["maxItems"], 64);
         assert_eq!(props["sharedScopes"]["items"]["maxLength"], 256);
         assert_eq!(props["sharedScopes"]["items"]["type"], "string");
         let rules = kars_memory_validations();
-        let grants = rules.iter().find(|r| r.rule.contains("self.sharedScopes.all")).unwrap();
-        for invariant in ["<= 64", "<= 256", "s != self.scope", "filter(t, t == s).size() == 1", "(^|/)[.]{1,2}(/|$)"] {
+        let grants = rules
+            .iter()
+            .find(|r| r.rule.contains("self.sharedScopes.all"))
+            .unwrap();
+        for invariant in [
+            "<= 64",
+            "<= 256",
+            "s != self.scope",
+            "filter(t, t == s).size() == 1",
+            "(^|/)[.]{1,2}(/|$)",
+        ] {
             assert!(grants.rule.contains(invariant), "{invariant}");
         }
-        assert!(rules.iter().any(|r| r.rule.starts_with("!has(self.bundleRef)") && r.rule.contains("!has(self.sharedScopes)")));
+        assert!(
+            rules
+                .iter()
+                .any(|r| r.rule.starts_with("!has(self.bundleRef)")
+                    && r.rule.contains("!has(self.sharedScopes)"))
+        );
     }
 
     #[test]
     fn kars_memory_crd_is_serde_round_trippable() {
         let crd = kars_memory_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("storeName"));
         assert!(y.contains("scope"));
@@ -1529,7 +1544,7 @@ mod tests {
     #[test]
     fn kars_eval_crd_is_serde_round_trippable() {
         let crd = kars_eval_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("targetSandboxRef"));
         assert!(y.contains("corpus"));
@@ -1605,7 +1620,7 @@ mod tests {
     #[test]
     fn egress_approval_crd_is_serde_round_trippable() {
         let crd = egress_approval_crd();
-        let y = serde_yaml::to_string(&crd).expect("serializes");
+        let y = serde_saphyr::to_string(&crd).expect("serializes");
         assert!(y.contains("x-kubernetes-validations"));
         assert!(y.contains("sandbox"));
         assert!(y.contains("hosts"));

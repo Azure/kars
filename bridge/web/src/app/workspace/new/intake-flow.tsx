@@ -42,7 +42,7 @@ import type {
 
 import { modelKey } from "./intake-flow/helpers";
 import { recommendedStats as selectRecommendedStats, resolveRecommendedModel } from "@/lib/efficiency";
-import { renderReview } from "./intake-flow/review";
+import { renderReview as IntakeReview } from "./intake-flow/review";
 import { QualificationChoice } from "./intake-flow/qualification-choice";
 
 const EXAMPLES = [
@@ -587,7 +587,7 @@ export function IntakeFlow({ options, efficiency, initialObjective, canQualify =
   }
 
   // Step 2 — the editable package + hard launch gate.
-  return renderReview({
+  return <IntakeReview {...{
     canQualify,
     qualificationRun,
     changeQualification,
@@ -652,5 +652,5 @@ export function IntakeFlow({ options, efficiency, initialObjective, canQualify =
     setLaunch,
     state,
     goBack,
-  });
+  }} />;
 }

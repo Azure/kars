@@ -1,7 +1,5 @@
-# Copyright (c) Microsoft Corporation.
-# Licensed under the MIT License.
-
-{{- define "kars-bridge.bffDeployment" -}}
+{{/* Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. */}}{{- define "kars-bridge.bffDeployment" -}}
 {{ $qualification := .Values.bff.routeQualification | default dict -}}
 {{- $headlamp := .Values.headlamp | default dict -}}
 {{- if $headlamp.url -}}

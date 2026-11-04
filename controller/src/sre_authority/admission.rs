@@ -54,13 +54,12 @@ pub(super) async fn verify(client: &Client) -> Result<(), String> {
                 .and_then(|spec| spec.failure_policy.as_deref())
                 != Some("Fail")
             || !checked
-            || binding.spec.as_ref().is_none_or(|spec| {
-                spec.policy_name.as_deref() != Some(*name)
-                    || spec
-                        .validation_actions
-                        .as_ref()
-                        .is_none_or(|actions| !actions.iter().any(|action| action == "Deny"))
-            })
+            || binding.spec.policy_name != *name
+            || !binding
+                .spec
+                .validation_actions
+                .iter()
+                .any(|action| action == "Deny")
         {
             return Err(format!(
                 "SRE admission policy {name} is not observed, type-checked, and enforced; no privilege may be issued"

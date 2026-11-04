@@ -192,7 +192,8 @@ pub async fn authenticate(
     identity: &ExecutionIdentity,
     dispatch: bool,
 ) -> Result<(), StoreError> {
-    let (sandbox, binding) = authenticate_runtime(client, headers, account, identity, dispatch).await?;
+    let (sandbox, binding) =
+        authenticate_runtime(client, headers, account, identity, dispatch).await?;
     authenticate_ledger(client, account, identity, &sandbox, &binding, dispatch).await
 }
 
@@ -335,7 +336,10 @@ pub(super) async fn authenticate_ledger(
     binding: &RouterBinding,
     dispatch: bool,
 ) -> Result<(), StoreError> {
-    let ledger = account.status.as_ref().and_then(|status| status.ledger.as_ref())
+    let ledger = account
+        .status
+        .as_ref()
+        .and_then(|status| status.ledger.as_ref())
         .ok_or_else(|| denied_at("account_ledger"))?;
     if dispatch && ledger.phase != crate::inference_budget_contract::AccountPhase::Active {
         return Err(denied_at("account_phase"));
@@ -402,7 +406,7 @@ pub(super) async fn review_router_token(
             &TokenReview {
                 spec: TokenReviewSpec {
                     audiences: Some(vec![AUDIENCE.into()]),
-                    token: Some(bearer(headers)?.into()),
+                    token: bearer(headers)?.into(),
                 },
                 ..Default::default()
             },

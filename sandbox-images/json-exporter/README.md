@@ -1,3 +1,6 @@
+<!-- Copyright (c) Microsoft Corporation.
+Licensed under the MIT License. -->
+
 # JSON exporter on Azure Linux 3
 
 The AgentMesh monitoring exporter remains upstream `json_exporter` `0.7.0`.

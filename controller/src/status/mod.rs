@@ -440,7 +440,11 @@ fn build_unready_status_patch(
     let degraded = conditions::preserve_transition_time(
         conditions::find(prior_conditions, conditions::TYPE_DEGRADED),
         conditions::TYPE_DEGRADED,
-        if pending { conditions::status::FALSE } else { conditions::status::TRUE },
+        if pending {
+            conditions::status::FALSE
+        } else {
+            conditions::status::TRUE
+        },
         reason_value,
         message,
         generation,
@@ -456,7 +460,11 @@ fn build_unready_status_patch(
     let progressing = conditions::preserve_transition_time(
         conditions::find(prior_conditions, conditions::TYPE_PROGRESSING),
         conditions::TYPE_PROGRESSING,
-        if pending { conditions::status::TRUE } else { conditions::status::FALSE },
+        if pending {
+            conditions::status::TRUE
+        } else {
+            conditions::status::FALSE
+        },
         reason_value,
         message,
         generation,

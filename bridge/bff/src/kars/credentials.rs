@@ -240,12 +240,16 @@ impl Cluster {
         if current.uid().as_deref() != Some(uid)
             || current.resource_version().as_deref() != Some(version)
         {
-            return Err(kube::Error::Api(kube::core::ErrorResponse {
-                status: "Failure".into(),
-                reason: "Conflict".into(),
-                message: "Credential UID/resourceVersion changed before mutation".into(),
-                code: 409,
-            }));
+            return Err(kube::Error::Api(
+                kube::core::Status {
+                    status: Some(kube::core::response::StatusSummary::Failure),
+                    reason: "Conflict".into(),
+                    message: "Credential UID/resourceVersion changed before mutation".into(),
+                    code: 409,
+                    ..Default::default()
+                }
+                .boxed(),
+            ));
         }
         let mut data = serde_json::to_value(current.data.unwrap_or_default())
             .map_err(|_| failure("Credential data encoding failed"))?;
@@ -322,12 +326,16 @@ impl Cluster {
                 && (secret.uid().as_deref() != Some(uid)
                     || secret.resource_version().as_deref() != Some(version))
             {
-                return Err(kube::Error::Api(kube::core::ErrorResponse {
-                    status: "Failure".into(),
-                    reason: "Conflict".into(),
-                    message: "Integration store changed since registration started".into(),
-                    code: 409,
-                }));
+                return Err(kube::Error::Api(
+                    kube::core::Status {
+                        status: Some(kube::core::response::StatusSummary::Failure),
+                        reason: "Conflict".into(),
+                        message: "Integration store changed since registration started".into(),
+                        code: 409,
+                        ..Default::default()
+                    }
+                    .boxed(),
+                ));
             }
             let before = secret
                 .data
@@ -702,7 +710,11 @@ impl Cluster {
                         owner: Some(target.clone()),
                     },
                     reviewed.map(|review| &review.review),
-                    if keyless_binding { BindingRetry::Lifecycle(None) } else { BindingRetry::Never },
+                    if keyless_binding {
+                        BindingRetry::Lifecycle(None)
+                    } else {
+                        BindingRetry::Never
+                    },
                 )
                 .await?,
             )

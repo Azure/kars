@@ -390,9 +390,14 @@ pub(super) async fn ensure(
         .await?
         .status
         .context("memory TokenRequest omitted status")?;
+    let token = issued.token.context("memory TokenRequest omitted token")?;
+    let expires = issued
+        .expiration_timestamp
+        .context("memory TokenRequest omitted expiry")?
+        .0
+        .as_second();
     ensure!(
-        !issued.token.is_empty()
-            && issued.expiration_timestamp.0.as_second() > chrono::Utc::now().timestamp() + 600,
+        !token.is_empty() && expires > chrono::Utc::now().timestamp() + 600,
         "unusable memory credential"
     );
     let host: std::net::IpAddr = std::env::var("KUBERNETES_SERVICE_HOST")?.parse()?;
@@ -402,7 +407,7 @@ pub(super) async fn ensure(
     let address = std::net::SocketAddr::new(host, port);
     let ca =
         tokio::fs::read_to_string("/var/run/secrets/kubernetes.io/serviceaccount/ca.crt").await?;
-    let config = json!({"identity":id,"map_uid":map.uid(),"anchor_uid":anchor.uid(),"epoch":epoch,"api_url":format!("https://{address}"),"ca":ca,"token":issued.token,"expires_at":issued.expiration_timestamp.0.as_second(),"sandbox_uid":sandbox.uid()});
+    let config = json!({"identity":id,"map_uid":map.uid(),"anchor_uid":anchor.uid(),"epoch":epoch,"api_url":format!("https://{address}"),"ca":ca,"token":token,"expires_at":expires,"sandbox_uid":sandbox.uid()});
     publish_configuration(&secrets, &admin, &config).await
 }
 
@@ -490,7 +495,6 @@ pub(super) fn mount(pod: &mut Value) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use serde::Deserialize;
 
     #[tokio::test]
     async fn memory_anchor_current_epoch_needs_no_revocation() {
@@ -648,9 +652,7 @@ mod tests {
     fn builtin_memory_admission_template_matches_fail_closed_contract() {
         let template = include_str!("../../../deploy/helm/kars/templates/memory-namespace.yaml")
             .replace("{{ .Release.Namespace }}", "controller-system");
-        let docs: Vec<Value> = serde_yaml::Deserializer::from_str(&template)
-            .map(|d| Value::deserialize(d).unwrap())
-            .collect();
+        let docs: Vec<Value> = serde_saphyr::from_multiple(&template).unwrap();
         let policy = docs
             .iter()
             .find(|d| d["kind"] == "ValidatingAdmissionPolicy")

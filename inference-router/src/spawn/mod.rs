@@ -24,6 +24,15 @@ mod dev_profile_test;
 mod mcp_inherit_test;
 pub use docker::{delete_sandbox_docker, list_sandboxes_docker};
 
+async fn kubernetes_client() -> Result<Client, kube::Error> {
+    let config = kube::Config::infer()
+        .await
+        .map_err(kube::Error::InferConfig)?;
+    Client::try_from(crate::kube_client_config::preserve_request_semantics(
+        config,
+    ))
+}
+
 fn default_true() -> bool {
     true
 }
@@ -164,7 +173,7 @@ pub async fn create_sandbox(
         );
     }
 
-    let client = Client::try_default()
+    let client = kubernetes_client()
         .await
         .map_err(|e| format!("K8s client error: {e}"))?;
 
@@ -339,7 +348,7 @@ pub async fn create_sandbox(
 
 /// List sub-agents spawned by a parent sandbox.
 pub async fn list_sandboxes(parent_name: &str) -> Result<Vec<SubAgentEntry>, String> {
-    let client = Client::try_default()
+    let client = kubernetes_client()
         .await
         .map_err(|e| format!("K8s client error: {e}"))?;
 
@@ -407,7 +416,7 @@ pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
         return docker::get_sandbox_status_docker(name).await;
     }
 
-    let client = Client::try_default()
+    let client = kubernetes_client()
         .await
         .map_err(|e| format!("K8s client error: {e}"))?;
 
@@ -444,7 +453,7 @@ pub async fn get_sandbox_status(name: &str) -> Result<SpawnResponse, String> {
 
 /// Delete a sub-agent sandbox.
 pub async fn delete_sandbox(parent_name: &str, name: &str) -> Result<SpawnResponse, String> {
-    let client = Client::try_default()
+    let client = kubernetes_client()
         .await
         .map_err(|e| format!("K8s client error: {e}"))?;
 
@@ -495,7 +504,7 @@ pub async fn collect_sub_agent_snapshots(
         return docker::collect_sub_agent_snapshots_docker(parent_name).await;
     }
 
-    let client = Client::try_default()
+    let client = kubernetes_client()
         .await
         .map_err(|e| format!("K8s client error: {e}"))?;
 

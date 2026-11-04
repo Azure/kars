@@ -61,9 +61,10 @@ fn revision_source_skips_cancelled_or_failed_revisions_but_not_successful_replac
 
 #[tokio::test]
 async fn revision_input_admission_blocks_manual_and_cadence_before_task_creation() {
-    for (runtime, outcome) in ["OpenClaw", "Hermes"].into_iter().flat_map(|runtime| {
-        ["changes_requested", "failed"].map(|outcome| (runtime, outcome))
-    }) {
+    for (runtime, outcome) in ["OpenClaw", "Hermes"]
+        .into_iter()
+        .flat_map(|runtime| ["changes_requested", "failed"].map(|outcome| (runtime, outcome)))
+    {
         for trigger in ["manual", "cadence"] {
             for missing in ["capability", "allowance"] {
                 let mut team = requested_team();
@@ -373,7 +374,8 @@ async fn revision_failed_synthesis_recovers_all_specialists_as_unaccepted_withou
                     );
                 }
                 let mut next = failed.clone();
-                crate::reviewed_execution::seal_team_revision(&mut next, &documents, &roles).unwrap();
+                crate::reviewed_execution::seal_team_revision(&mut next, &documents, &roles)
+                    .unwrap();
                 assert!(
                     crate::reviewed_execution::retained_team_run(&client, &team, &failed)
                         .await

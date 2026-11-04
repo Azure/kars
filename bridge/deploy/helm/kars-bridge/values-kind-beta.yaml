@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Copyright (c) Microsoft Corporation. Licensed under the MIT License.
 # Pass BEFORE reviewed private operator values to the ordinary Bridge helm install.
 # Core must have completed the same profile; render-time live lookups fail closed.

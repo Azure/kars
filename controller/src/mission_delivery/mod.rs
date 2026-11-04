@@ -266,7 +266,10 @@ fn run_completed(task: &KarsTask) -> bool {
 
 /// Suppress workload mutation; only the Task reconciler verifies evidence and deletes compute.
 pub(crate) async fn terminal_run(client: &Client, sandbox: &KarsSandbox) -> Result<bool> {
-    Ok(task_for(client, sandbox).await?.as_ref().is_some_and(run_completed))
+    Ok(task_for(client, sandbox)
+        .await?
+        .as_ref()
+        .is_some_and(run_completed))
 }
 
 fn executable(task: &KarsTask, sandbox: &KarsSandbox) -> bool {

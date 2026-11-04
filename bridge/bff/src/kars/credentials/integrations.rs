@@ -40,10 +40,11 @@ impl Cluster {
         if current.uid() != expected.uid()
             || current.resource_version() != expected.resource_version()
         {
-            return Err(kube::Error::Api(kube::core::ErrorResponse {
-                status: "Failure".into(), reason: "Conflict".into(), code: 409,
+            return Err(kube::Error::Api(kube::core::Status {
+                status: Some(kube::core::response::StatusSummary::Failure), reason: "Conflict".into(), code: 409,
                 message: "Provider configuration changed while selecting the default; refresh and try again".into(),
-            }));
+                ..Default::default()
+            }.boxed()));
         }
         let mut annotations = current.metadata.annotations.unwrap_or_default();
         annotations.insert(

@@ -120,9 +120,10 @@ impl IntoResponse for Failure {
             StoreError::PrivacyPending => {
                 (StatusCode::SERVICE_UNAVAILABLE, "inference_privacy_pending")
             }
-            StoreError::Contention => {
-                (StatusCode::SERVICE_UNAVAILABLE, "inference_budget_contention")
-            }
+            StoreError::Contention => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "inference_budget_contention",
+            ),
             StoreError::Ledger(BudgetError::Exhausted) => {
                 (StatusCode::TOO_MANY_REQUESTS, "inference_budget_exhausted")
             }
@@ -358,11 +359,22 @@ pub(super) async fn authenticated_account(
         auth::authenticate(&broker.client, headers, &account, identity, dispatch).await?;
         return Ok(account);
     }
-    let (sandbox, binding) = auth::authenticate_runtime(
-        &broker.client, headers, &account, identity, dispatch,
-    ).await?;
-    let account = broker.store.for_identity(identity).read(root, account_uid).await?;
-    auth::authenticate_ledger(&broker.client, &account, identity, &sandbox, &binding, dispatch).await?;
+    let (sandbox, binding) =
+        auth::authenticate_runtime(&broker.client, headers, &account, identity, dispatch).await?;
+    let account = broker
+        .store
+        .for_identity(identity)
+        .read(root, account_uid)
+        .await?;
+    auth::authenticate_ledger(
+        &broker.client,
+        &account,
+        identity,
+        &sandbox,
+        &binding,
+        dispatch,
+    )
+    .await?;
     Ok(account)
 }
 
@@ -372,9 +384,14 @@ async fn catalog(
     Json(request): Json<BrokerRequest<SessionRequest>>,
 ) -> Result<Json<serde_json::Value>, Failure> {
     let account = authenticated_account(
-        &broker, &headers, &request.root, &request.payload.account_uid,
-        &request.payload.identity, true,
-    ).await?;
+        &broker,
+        &headers,
+        &request.root,
+        &request.payload.account_uid,
+        &request.payload.identity,
+        true,
+    )
+    .await?;
     let catalog = broker
         .settings
         .catalog(&broker.client, chrono::Utc::now().timestamp())
@@ -402,9 +419,14 @@ async fn session(
     Json(request): Json<BrokerRequest<SessionRequest>>,
 ) -> Result<Json<crate::inference_budget_contract::ledger::Session>, Failure> {
     authenticated_account(
-        &broker, &headers, &request.root, &request.payload.account_uid,
-        &request.payload.identity, true,
-    ).await?;
+        &broker,
+        &headers,
+        &request.root,
+        &request.payload.account_uid,
+        &request.payload.identity,
+        true,
+    )
+    .await?;
     let result = broker
         .store
         .for_identity(&request.payload.identity)
@@ -438,9 +460,14 @@ async fn reserve(
     Json(request): Json<BrokerRequest<ReserveRequest>>,
 ) -> Result<Json<crate::inference_budget_contract::ledger::Reservation>, Failure> {
     authenticated_account(
-        &broker, &headers, &request.root, &request.payload.account_uid,
-        &request.payload.identity, true,
-    ).await?;
+        &broker,
+        &headers,
+        &request.root,
+        &request.payload.account_uid,
+        &request.payload.identity,
+        true,
+    )
+    .await?;
     let now = chrono::Utc::now().timestamp();
     let catalog = broker.settings.catalog(&broker.client, now).await?;
     broker
@@ -477,9 +504,14 @@ async fn begin(
     Json(request): Json<BrokerRequest<AttemptCommand>>,
 ) -> Result<Json<crate::inference_budget_contract::ledger::Reservation>, Failure> {
     authenticated_account(
-        &broker, &headers, &request.root, &request.payload.account_uid,
-        &request.payload.identity, true,
-    ).await?;
+        &broker,
+        &headers,
+        &request.root,
+        &request.payload.account_uid,
+        &request.payload.identity,
+        true,
+    )
+    .await?;
     let now = chrono::Utc::now().timestamp();
     let catalog = broker.settings.catalog(&broker.client, now).await?;
     let result = super::topups::transact(
@@ -515,8 +547,14 @@ async fn settle(
 ) -> Result<Json<crate::inference_budget_contract::ledger::SettlementResult>, Failure> {
     let command = &request.payload.attempt;
     authenticated_account(
-        &broker, &headers, &request.root, &command.account_uid, &command.identity, false,
-    ).await?;
+        &broker,
+        &headers,
+        &request.root,
+        &command.account_uid,
+        &command.identity,
+        false,
+    )
+    .await?;
     // Settlement uses the accepted contract snapshot. A later tariff expiry or
     // policy change cannot erase already accepted liability.
     let result = broker

@@ -20,7 +20,9 @@ mod presentation;
 mod queries;
 mod reviewed_execution;
 mod reviewed_summary;
-pub(crate) use reviewed_execution::{read as read_reviewed_execution, read_live as read_reviewed_live, ReviewedPhaseDto};
+pub(crate) use reviewed_execution::{
+    ReviewedPhaseDto, read as read_reviewed_execution, read_live as read_reviewed_live,
+};
 mod revision;
 mod router_activity;
 pub(crate) use router_activity::ARTIFACT as ROUTER_OBSERVATIONS_ARTIFACT;

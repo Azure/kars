@@ -24,4 +24,5 @@ pub(crate) mod receipt_log;
 pub mod sre_action;
 pub mod task;
 pub mod team;
+pub(crate) mod time;
 mod workspace_credential_plan;

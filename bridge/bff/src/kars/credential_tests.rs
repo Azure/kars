@@ -333,9 +333,9 @@ async fn fixture() -> (Cluster, Arc<Mutex<TestApi>>, tokio::task::JoinHandle<()>
     let app = Router::new().fallback(handle).with_state(state.clone());
     let task = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
     let _ = rustls::crypto::aws_lc_rs::default_provider().install_default();
-    let client =
-        kube::Client::try_from(kube::Config::new(format!("http://{addr}").parse().unwrap()))
-            .unwrap();
+    let config =
+        Cluster::transport_config(kube::Config::new(format!("http://{addr}").parse().unwrap()));
+    let client = kube::Client::try_from(config).unwrap();
     (Cluster::for_test_client(client), state, task)
 }
 

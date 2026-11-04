@@ -235,7 +235,7 @@ comments **must** carry the two-line notice in its format's comment syntax:
 // Licensed under the MIT License.
 ```
 
-Use `//` for Rust, TypeScript/JavaScript (including TSX and MJS), and Bicep;
+Use `//` for Rust, Go, TypeScript/JavaScript (including TSX, MTS, MJS and CJS), and Bicep;
 `#` for shell/Python, YAML/TOML, Dockerfiles, Makefiles, ignore files, CODEOWNERS
 and environment examples; HTML comments for Markdown; CSS block comments for CSS;
 and Handlebars comments for `.hbs`. Plain YAML under a chart's `templates/`
@@ -247,7 +247,7 @@ whitespace**. A hash header before leading `{{- ... -}}` can be joined to
 
 Use `scripts/apply-copyright-headers.sh` rather than rewriting files manually.
 It preserves original body bytes, line endings, file modes, author notices,
-shebangs, Python encoding cookies, Docker parser directives, Markdown frontmatter,
+shebangs, Go build constraints, Python encoding cookies, Docker parser directives, Markdown frontmatter,
 CSS charset directives and frontend directive prologues. It is idempotent.
 For YAML with an incorrect comment style, it replaces only the exact existing
 Microsoft/MIT license prefix; original body bytes and author notices remain intact.
@@ -274,10 +274,18 @@ directory exemption for first-party sources.
 Generated status is never inferred from names such as `build`, `target`, `dist`,
 `coverage`, `.turbo`, `node_modules`, or the `.d.ts` suffix. Generated coverage
 requires an exact reviewed file entry with producer/provenance and a notice
-reference in `ci/copyright-coverage.json`. The current entries are only
-`tools/headlamp-plugin/dist/main.js` and `tools/headlamp-plugin/dist/package.json`.
+reference in `ci/copyright-coverage.json`. Entries include the packaged Headlamp
+bundle, resolved Dex and image dependency locks, and the packaged local Helm chart.
+Upstream archives and patches keep exact-path third-party coverage, never a
+format-wide exemption for new archives or source directories.
 Handwritten sources in output-named directories and authored declarations need
 normal headers; unknown first-party formats still fail.
+
+The two shared native-helper symlinks have exact-path rules with a reviewed
+repository-relative `target`. The checker validates the relative link destination
+and requires a regular, independently header-covered target with no symlink
+ancestors. It never follows or rewrites a link. Unreviewed, retargeted, broken,
+absolute or chained symlinks fail, as do regular files replacing a reviewed link.
 
 The embedded Helm AGT policy has a raw-byte digest contract: the controller
 publishes its exact bytes as `agt-profile.yaml`, and the router confirms a

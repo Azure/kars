@@ -19,8 +19,8 @@ mod status;
 pub mod store;
 pub mod team;
 mod topups;
-mod unbounded;
 pub mod transport;
+mod unbounded;
 
 pub fn start(client: kube::Client) {
     match config::Settings::from_env() {

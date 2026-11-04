@@ -3,9 +3,9 @@
 
 //! Private lexical memory. Deliberately separate from approved Team knowledge.
 
+use crate::providers::signing::sha256_hex;
 use anyhow::{Result, ensure};
 use serde::{Deserialize, Serialize};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 
 pub const MAX_BYTES: usize = 900 * 1024;
@@ -23,7 +23,7 @@ pub fn account_policy(controller_namespace: &str) -> serde_json::Value {
 }
 
 pub fn digest(value: impl AsRef<[u8]>) -> String {
-    format!("{:x}", Sha256::digest(value.as_ref()))
+    sha256_hex(value.as_ref())
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -195,6 +195,19 @@ mod tests {
             principal: "researcher".into(),
         }
     }
+    #[test]
+    fn memory_digest_preserves_full_sha256_bytes() {
+        assert_eq!(
+            digest(b""),
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        assert_eq!(
+            digest(b"abc"),
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad"
+        );
+        assert_ne!(digest(b"abc"), digest(b"abc\n"));
+    }
+
     #[test]
     fn builtin_memory_is_private_durable_and_not_approved_knowledge() {
         let identity = identity();

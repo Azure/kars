@@ -9,13 +9,13 @@ use crate::inference_budget_contract::{
     BudgetError, RootIdentity,
     ledger::{Ledger, Mutation},
 };
+use crate::inference_budget_contract::{ExecutionIdentity, ledger::HistoryRecord};
 use kube::{
     Api, Client, ResourceExt,
     api::{Patch, PatchParams, PostParams},
 };
 use serde_json::json;
 use std::collections::BTreeSet;
-use crate::inference_budget_contract::{ExecutionIdentity, ledger::HistoryRecord};
 
 #[path = "history_store.rs"]
 mod history;
@@ -84,7 +84,10 @@ impl Store {
         store
     }
 
-    pub fn for_authority(&self, authority: &crate::inference_budget_contract::TaskAuthority) -> Self {
+    pub fn for_authority(
+        &self,
+        authority: &crate::inference_budget_contract::TaskAuthority,
+    ) -> Self {
         let store = self.for_task(&authority.task.uid);
         match &authority.parent_uid {
             Some(parent) => store.for_task(parent),
@@ -94,7 +97,9 @@ impl Store {
 
     pub fn for_identity(&self, identity: &ExecutionIdentity) -> Self {
         let mut store = self.for_task(&identity.task_uid);
-        store.history_keys.insert(HistoryRecord::session_key(&identity.pod_uid));
+        store
+            .history_keys
+            .insert(HistoryRecord::session_key(&identity.pod_uid));
         store
     }
 
@@ -303,10 +308,20 @@ impl Store {
         if !self.history_keys.is_empty() {
             // A historical identity is restored with the account CAS, not
             // returned as an uncommitted, history-detached authorization view.
-            let (_, account) = self.transact_account(
-                root, account_uid, || async { Ok(()) },
-                |ledger, ()| Ok(Mutation { next: ledger.clone(), value: (), changed: false }),
-            ).await?;
+            let (_, account) = self
+                .transact_account(
+                    root,
+                    account_uid,
+                    || async { Ok(()) },
+                    |ledger, ()| {
+                        Ok(Mutation {
+                            next: ledger.clone(),
+                            value: (),
+                            changed: false,
+                        })
+                    },
+                )
+                .await?;
             return Ok(account);
         }
         let account = self.read_anchor(root, account_uid).await?;
@@ -360,7 +375,9 @@ impl Store {
         prepare: impl Fn() -> F,
         operation: impl Fn(&Ledger, P) -> Result<Mutation<T>, BudgetError>,
     ) -> Result<T, StoreError> {
-        self.transact_account(root, account_uid, prepare, operation).await.map(|(value, _)| value)
+        self.transact_account(root, account_uid, prepare, operation)
+            .await
+            .map(|(value, _)| value)
     }
 
     async fn transact_account<T, P, F: std::future::Future<Output = Result<P, StoreError>>>(
@@ -382,18 +399,26 @@ impl Store {
             let original = Self::ledger(&account)?;
             let mut ledger = original.clone();
             let mut history = history::Tree::new(self.history.clone(), &self.namespace, original);
-            let protected = tokio::time::timeout_at(deadline, history.hydrate(&mut ledger, &self.history_keys))
-                .await.map_err(|_| StoreError::Contention)??;
+            let protected =
+                tokio::time::timeout_at(deadline, history.hydrate(&mut ledger, &self.history_keys))
+                    .await
+                    .map_err(|_| StoreError::Contention)??;
             let mut mutation = loop {
                 // Re-read operator authority after conflicts and compaction;
                 // never carry a stale funding decision into a fresh balance.
                 let prepared = tokio::time::timeout_at(deadline, prepare())
-                    .await.map_err(|_| StoreError::Contention)??;
+                    .await
+                    .map_err(|_| StoreError::Contention)??;
                 match operation(&ledger, prepared) {
                     Ok(mutation) => break mutation,
                     Err(BudgetError::Capacity) => {
-                        if !tokio::time::timeout_at(deadline, history.archive(&mut ledger, &protected))
-                            .await.map_err(|_| StoreError::Contention)?? {
+                        if !tokio::time::timeout_at(
+                            deadline,
+                            history.archive(&mut ledger, &protected),
+                        )
+                        .await
+                        .map_err(|_| StoreError::Contention)??
+                        {
                             return Err(BudgetError::Capacity.into());
                         }
                     }
@@ -404,7 +429,8 @@ impl Store {
             // recovery transitions retain their exact snapshot/no-op semantics.
             if !self.history_keys.is_empty() {
                 tokio::time::timeout_at(deadline, history.archive(&mut mutation.next, &protected))
-                    .await.map_err(|_| StoreError::Contention)??;
+                    .await
+                    .map_err(|_| StoreError::Contention)??;
             }
             if mutation.next == *original {
                 return Ok((mutation.value, account));
@@ -417,7 +443,8 @@ impl Store {
                 return Err(StoreError::Contention);
             }
             tokio::time::timeout_at(deadline, history.flush())
-                .await.map_err(|_| StoreError::Contention)??;
+                .await
+                .map_err(|_| StoreError::Contention)??;
             // Merge-patching maps would retain compacted attempt rows. Replace
             // the status as one value using PUT with UID/RV preconditions.
             let mut next = account.clone();

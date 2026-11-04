@@ -18,7 +18,8 @@ pub fn schema(_: &mut schemars::SchemaGenerator) -> schemars::Schema {
     let objective = serde_json::json!({"type":"string","minLength":20,"maxLength":1200});
     let capabilities = serde_json::json!({"type":"array","maxItems":8,"default":[],
         "items":{"type":"string","enum":["filesystem-read","filesystem-write","shell","network","web-search","mcp","memory","github-pr","python-execute"]}});
-    let calls = serde_json::json!({"type":"integer","format":"int32","minimum":0,"maximum":i32::MAX});
+    let calls =
+        serde_json::json!({"type":"integer","format":"int32","minimum":0,"maximum":i32::MAX});
     let phases = serde_json::json!({"type":"array","minItems":1,"maxItems":8,"items":{
         "type":"object","required":["maxToolCalls","name","objective"],
         "properties":{

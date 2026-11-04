@@ -366,7 +366,7 @@ fn rejects_deleted_recreated_completed_or_unowned_records() {
     assert!(from_attempt(&changed, &task).is_none());
     changed = cm.clone();
     changed.metadata.deletion_timestamp = Some(
-        k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(chrono::Utc::now()),
+        k8s_openapi::apimachinery::pkg::apis::meta::v1::Time(k8s_openapi::jiff::Timestamp::now()),
     );
     assert!(from_attempt(&changed, &task).is_none());
     let mut changed_task = task.clone();

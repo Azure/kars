@@ -42,7 +42,11 @@ fn is_non_model_parameter_error(error: &serde_json::Value) -> bool {
     }
 }
 
-fn corrected_output_limit_request(status: StatusCode, response: &[u8], body: &[u8]) -> Option<Bytes> {
+fn corrected_output_limit_request(
+    status: StatusCode,
+    response: &[u8],
+    body: &[u8],
+) -> Option<Bytes> {
     if status != StatusCode::BAD_REQUEST {
         return None;
     }

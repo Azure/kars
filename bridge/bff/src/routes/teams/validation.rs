@@ -1186,10 +1186,12 @@ mod tests {
         let mut write = read.clone();
         write.synthesis.capabilities.push("github-pr".into());
         let saved_read = crate::kars::task::TaskBlueprint {
-            execution_plan: Some(read.clone().into_crd()), ..Default::default()
+            execution_plan: Some(read.clone().into_crd()),
+            ..Default::default()
         };
         let saved_write = crate::kars::task::TaskBlueprint {
-            execution_plan: Some(write.clone().into_crd()), ..Default::default()
+            execution_plan: Some(write.clone().into_crd()),
+            ..Default::default()
         };
         assert!(!team_github_write_enabled(Some(&read), None));
         assert!(team_github_write_enabled(Some(&write), None));

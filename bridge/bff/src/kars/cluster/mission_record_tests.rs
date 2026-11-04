@@ -367,11 +367,18 @@ async fn deliverable_index_joins_exact_ownership_and_revision_bound_files() {
     assert_eq!(current.output.evidence_key, "evidence-key");
     assert_eq!(current.output.data["ownerSub"], "subject-a");
     assert_eq!(current.output.data["displayName"], "Current mission title");
-    let producer: BTreeMap<String, String> = serde_json::from_value(maps[0]["data"].clone()).unwrap();
-    assert_eq!(current.output_sha256, Some(crate::providers::signing::sha256_hex(
-        &serde_json::to_vec(&producer).unwrap(),
-    )));
-    assert_eq!(current.task.as_ref().unwrap().metadata.uid.as_deref(), Some("task-uid"));
+    let producer: BTreeMap<String, String> =
+        serde_json::from_value(maps[0]["data"].clone()).unwrap();
+    assert_eq!(
+        current.output_sha256,
+        Some(crate::providers::signing::sha256_hex(
+            &serde_json::to_vec(&producer).unwrap(),
+        ))
+    );
+    assert_eq!(
+        current.task.as_ref().unwrap().metadata.uid.as_deref(),
+        Some("task-uid")
+    );
     assert_eq!(
         current.artifacts.as_ref().unwrap().data.as_ref().unwrap()["response.md"],
         "Useful briefing"

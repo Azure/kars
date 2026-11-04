@@ -42,7 +42,7 @@ fn requested_tier_roundtrips_and_helm_matches_generated_review_schema() {
         .take_while(|line| line.starts_with("                ") || line.trim().is_empty())
         .collect::<Vec<_>>()
         .join("\n");
-    let helm_field: serde_json::Value = serde_yaml::from_str(&schema).unwrap();
+    let helm_field: serde_json::Value = serde_saphyr::from_str(&schema).unwrap();
     let field = "/spec/versions/0/schema/openAPIV3Schema/properties/spec/properties/requestedTier";
     assert!(generated.pointer(field).is_some());
     assert_eq!(generated.pointer(field), Some(&helm_field));
@@ -205,10 +205,10 @@ fn spec_roundtrips_through_camelcase_yaml() {
         display_name: Some("payments-bugfix".into()),
         requested_tier: None,
     };
-    let yaml = serde_yaml::to_string(&spec).expect("serializes");
+    let yaml = serde_saphyr::to_string(&spec).expect("serializes");
     assert!(yaml.contains("authorityCeiling:"));
     assert!(yaml.contains("delegationDepth:"));
-    let back: KarsTaskSpec = serde_yaml::from_str(&yaml).expect("roundtrips");
+    let back: KarsTaskSpec = serde_saphyr::from_str(&yaml).expect("roundtrips");
     assert_eq!(back.envelope.tier, 3);
     assert_eq!(back.envelope.authority_ceiling, 3);
 }

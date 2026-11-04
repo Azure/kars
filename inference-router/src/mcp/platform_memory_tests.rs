@@ -25,8 +25,12 @@ async fn bound_dispatcher(server: &MockServer, scope: &str) -> PlatformDispatche
     use crate::memory_binding_loader::{LoadedMemoryBinding, empty_handle};
     let handle = empty_handle();
     *handle.write().await = Ok(Some(LoadedMemoryBinding {
-        digest: "test".into(), source_path: "binding.json".into(), store_name: "bound-store".into(),
-        scope: scope.into(), shared_scopes: vec![], raw: json!({}),
+        digest: "test".into(),
+        source_path: "binding.json".into(),
+        store_name: "bound-store".into(),
+        scope: scope.into(),
+        shared_scopes: vec![],
+        raw: json!({}),
     }));
     PlatformDispatcher::with_base_url(server.uri()).with_memory_binding(handle)
 }
@@ -331,12 +335,27 @@ async fn provision_retry_observes_terminal_failure_and_uses_memory_models() {
 
 #[tokio::test]
 async fn backend_selection_is_explicit_and_pinned_without_provider_inference() {
-    for (project, bound, expected) in [(false, false, false), (true, false, true), (false, true, true)] {
+    for (project, bound, expected) in [
+        (false, false, false),
+        (true, false, true),
+        (false, true, true),
+    ] {
         let mut dispatcher = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
         dispatcher.memory_foundry_configured = project;
-        assert_eq!(dispatcher.select_memory_backend(bound, false).await.unwrap(), expected);
+        assert_eq!(
+            dispatcher
+                .select_memory_backend(bound, false)
+                .await
+                .unwrap(),
+            expected
+        );
         dispatcher.memory_foundry_configured = !expected;
-        assert!(dispatcher.select_memory_backend(false, false).await.is_err());
+        assert!(
+            dispatcher
+                .select_memory_backend(false, false)
+                .await
+                .is_err()
+        );
         assert_eq!(dispatcher.memory_backend.get(), Some(&expected));
     }
     let mut dispatcher = PlatformDispatcher::with_base_url("http://127.0.0.1:1");
@@ -348,10 +367,15 @@ async fn backend_selection_is_explicit_and_pinned_without_provider_inference() {
 #[tokio::test]
 async fn configured_foundry_outage_never_switches_to_builtin() {
     let server = MockServer::start().await;
-    Mock::given(method("POST")).respond_with(ResponseTemplate::new(503))
-        .mount(&server).await;
+    Mock::given(method("POST"))
+        .respond_with(ResponseTemplate::new(503))
+        .mount(&server)
+        .await;
     let dispatcher = bound_dispatcher(&server, "handoff_partition").await;
-    let result = dispatcher.memory(&json!({"operation":"search"})).await.unwrap();
+    let result = dispatcher
+        .memory(&json!({"operation":"search"}))
+        .await
+        .unwrap();
     assert!(result.is_error);
     assert_eq!(dispatcher.memory_backend.get(), Some(&true));
     assert_eq!(server.received_requests().await.unwrap().len(), 1);

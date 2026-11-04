@@ -182,10 +182,26 @@ impl Cluster {
     /// locally, in-cluster ServiceAccount in production). Returns `None`-style
     /// errors as `anyhow` so the readiness probe can report honest status.
     pub async fn connect() -> anyhow::Result<Self> {
-        let client = Client::try_default().await?;
-        Ok(Self { client })
+        let config = kube::Config::infer()
+            .await
+            .map_err(kube::Error::InferConfig)?;
+        Ok(Self {
+            client: Client::try_from(Self::transport_config(config))?,
+        })
+    }
+
+    pub(super) fn transport_config(mut config: kube::Config) -> kube::Config {
+        // kube 4 enables transparent retries even for writes. Keep retries in
+        // the existing UID/resourceVersion-fenced operations, not the transport.
+        config.default_retry = false;
+        // Preserve kube 0.99's idle read timeout, including stalled watches.
+        config.read_timeout = Some(std::time::Duration::from_secs(295));
+        config
     }
 }
+
+#[cfg(test)]
+mod kube_compatibility_tests;
 
 #[cfg(test)]
 mod mission_record_tests;

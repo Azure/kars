@@ -1601,6 +1601,9 @@ describe("explicit mission attachments", () => {
   it("projects only cloned accounting evidence into execution errors", () => {
     const result = { model: "model", rounds: 1, output: "private draft", artifacts: { "a.md": "private" }, usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3, private: "data" } };
     const error = new TaskExecutionError("failed", result);
+    expect(error).not.toHaveProperty("artifacts");
+    expect(error).not.toHaveProperty("output");
+    expect(error).not.toHaveProperty("phase");
     result.usage.totalTokens = 9;
     expect(error.evidence).toEqual({ model: "model", rounds: 1, usage: { promptTokens: 1, completionTokens: 2, totalTokens: 3 } });
     expect(new TaskExecutionError("failed", { ...result, usage: null }).evidence.usage).toBeNull();

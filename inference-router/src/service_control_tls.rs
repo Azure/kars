@@ -1,7 +1,10 @@
 // Copyright (c) Microsoft Corporation.
 // Licensed under the MIT License.
 
-use crate::{routes::AppState, service_control::{self, TlsIdentity}};
+use crate::{
+    routes::AppState,
+    service_control::{self, TlsIdentity},
+};
 use std::path::Path;
 use tokio::net::TcpListener;
 
@@ -10,9 +13,14 @@ use tokio::net::TcpListener;
 mod tests;
 
 fn configuration(state: &AppState, bytes: &[u8]) -> Result<TlsIdentity, String> {
-    let scope = state.services.requests.scope().map_err(|_| "Control scope unavailable")?;
+    let scope = state
+        .services
+        .requests
+        .scope()
+        .map_err(|_| "Control scope unavailable")?;
     let identity = serde_json::to_value(&scope.identity).map_err(|_| "Control identity invalid")?;
-    let tls: TlsIdentity = serde_json::from_slice(bytes).map_err(|_| "Control TLS identity invalid")?;
+    let tls: TlsIdentity =
+        serde_json::from_slice(bytes).map_err(|_| "Control TLS identity invalid")?;
     if !state.services.control_configured()
         || !scope.identity.valid(&scope.identity.sandbox.name)
         || !tls.valid_for(&identity, chrono::Utc::now().timestamp())
@@ -23,7 +31,11 @@ fn configuration(state: &AppState, bytes: &[u8]) -> Result<TlsIdentity, String> 
 }
 
 pub async fn start(state: AppState) -> Result<Option<tokio::task::JoinHandle<()>>, String> {
-    let scope = state.services.requests.scope().map_err(|_| "Control scope unavailable")?;
+    let scope = state
+        .services
+        .requests
+        .scope()
+        .map_err(|_| "Control scope unavailable")?;
     if scope.identity.task.is_none() {
         return Ok(None);
     }
@@ -31,10 +43,18 @@ pub async fn start(state: AppState) -> Result<Option<tokio::task::JoinHandle<()>
         .map_err(|_| "Control TLS identity unavailable")?;
     let tls = configuration(&state, &bytes)?;
     let listener = crate::sre_proxy::Listener {
-        tcp: TcpListener::bind(("0.0.0.0", service_control::PORT)).await
+        tcp: TcpListener::bind(("0.0.0.0", service_control::PORT))
+            .await
             .map_err(|_| "Control TLS listener unavailable")?,
-        tls: crate::sre_proxy::tls_from_pem(tls.certificate_pem.as_bytes(), tls.private_key_pem.as_bytes())?,
+        tls: crate::sre_proxy::tls_from_pem(
+            tls.certificate_pem.as_bytes(),
+            tls.private_key_pem.as_bytes(),
+        )?,
     };
     let router = crate::routes::access_request_control_routes(state.clone()).with_state(state);
-    Ok(Some(crate::service_observation_tls::serve(listener, router, "service-control")))
+    Ok(Some(crate::service_observation_tls::serve(
+        listener,
+        router,
+        "service-control",
+    )))
 }

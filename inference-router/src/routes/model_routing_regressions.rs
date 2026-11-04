@@ -111,7 +111,9 @@ async fn output_limit_guidance_retries_once_without_changing_model_or_request_co
             }});
             Mock::given(body_partial_json(json!({"max_tokens":1024})))
                 .respond_with(ResponseTemplate::new(400).set_body_json(error.clone()))
-                .expect(1).mount(&primary).await;
+                .expect(1)
+                .mount(&primary)
+                .await;
             let success = json!({
                 "model":"gpt-6.1-sol", "choices":[{"message":{"content":"retained"}}],
                 "usage":{"prompt_tokens":20,"completion_tokens":10,"total_tokens":30}
@@ -122,11 +124,21 @@ async fn output_limit_guidance_retries_once_without_changing_model_or_request_co
                 ResponseTemplate::new(400).set_body_json(error.clone())
             };
             Mock::given(body_partial_json(json!({"max_completion_tokens":1024})))
-                .respond_with(template).expect(1).mount(&primary).await;
-            Mock::given(method("POST")).respond_with(ResponseTemplate::new(500))
-                .expect(0).mount(&default).await;
-            let state = state(config(&default.uri(), &[("primary", &primary.uri(), Some("key"))]));
-            let mut base = UpstreamConfig::azure(default.uri(), "true-default-model".into(), "test".into());
+                .respond_with(template)
+                .expect(1)
+                .mount(&primary)
+                .await;
+            Mock::given(method("POST"))
+                .respond_with(ResponseTemplate::new(500))
+                .expect(0)
+                .mount(&default)
+                .await;
+            let state = state(config(
+                &default.uri(),
+                &[("primary", &primary.uri(), Some("key"))],
+            ));
+            let mut base =
+                UpstreamConfig::azure(default.uri(), "true-default-model".into(), "test".into());
             base.provider_api_key = Some("default-key".into());
             let request = json!({
                 "model":"gpt-6.1-sol", "messages":[{"role":"user","content":"Export"}],
@@ -137,22 +149,37 @@ async fn output_limit_guidance_retries_once_without_changing_model_or_request_co
             let body = Bytes::from(serde_json::to_vec(&request).unwrap());
             let policy = policy("primary", "gpt-6.1-sol");
             let (status, response, selected) = if stream {
-                let (status, _, output, selected) = forward_stream_chat(
-                    &state, &base, &policy, HeaderMap::new(), body,
-                ).await.unwrap();
-                let response = output.try_fold(Vec::new(), |mut bytes, chunk| async move {
-                    bytes.extend_from_slice(&chunk); Ok(bytes)
-                }).await.unwrap();
+                let (status, _, output, selected) =
+                    forward_stream_chat(&state, &base, &policy, HeaderMap::new(), body)
+                        .await
+                        .unwrap();
+                let response = output
+                    .try_fold(Vec::new(), |mut bytes, chunk| async move {
+                        bytes.extend_from_slice(&chunk);
+                        Ok(bytes)
+                    })
+                    .await
+                    .unwrap();
                 (status, Bytes::from(response), selected)
             } else {
-                let (status, _, response, selected) = forward_chat(
-                    &state, &base, &policy, &HeaderMap::new(), body,
-                ).await.unwrap();
+                let (status, _, response, selected) =
+                    forward_chat(&state, &base, &policy, &HeaderMap::new(), body)
+                        .await
+                        .unwrap();
                 (status, response, selected)
             };
-            assert_eq!(status, if retry_succeeds { StatusCode::OK } else { StatusCode::BAD_REQUEST });
-            assert_eq!(serde_json::from_slice::<serde_json::Value>(&response).unwrap(),
-                if retry_succeeds { success } else { error });
+            assert_eq!(
+                status,
+                if retry_succeeds {
+                    StatusCode::OK
+                } else {
+                    StatusCode::BAD_REQUEST
+                }
+            );
+            assert_eq!(
+                serde_json::from_slice::<serde_json::Value>(&response).unwrap(),
+                if retry_succeeds { success } else { error }
+            );
             assert_eq!(selected.deployment, "gpt-6.1-sol");
             assert_eq!(selected.endpoint, primary.uri());
             assert!(state.unavailable_models.read().unwrap().is_empty());
@@ -161,7 +188,11 @@ async fn output_limit_guidance_retries_once_without_changing_model_or_request_co
             let first: serde_json::Value = serde_json::from_slice(&requests[0].body).unwrap();
             let second: serde_json::Value = serde_json::from_slice(&requests[1].body).unwrap();
             let mut expected = first.clone();
-            let limit = expected.as_object_mut().unwrap().remove("max_tokens").unwrap();
+            let limit = expected
+                .as_object_mut()
+                .unwrap()
+                .remove("max_tokens")
+                .unwrap();
             expected["max_completion_tokens"] = limit;
             assert_eq!(second, expected);
             assert_eq!(first["reasoning_effort"], request["reasoning_effort"]);
@@ -179,39 +210,92 @@ fn output_limit_correction_requires_explicit_guidance_and_unambiguous_positive_l
     }});
     let request = json!({"model":"selected-alias", "max_tokens":1024, "stream":true});
     let encode = |value: &serde_json::Value| serde_json::to_vec(value).unwrap();
-    let corrected = corrected_output_limit_request(StatusCode::BAD_REQUEST, &encode(&error), &encode(&request)).unwrap();
-    assert_eq!(serde_json::from_slice::<serde_json::Value>(&corrected).unwrap(),
-        json!({"model":"selected-alias", "max_completion_tokens":1024, "stream":true}));
-    for status in [StatusCode::OK, StatusCode::UNAUTHORIZED, StatusCode::NOT_FOUND, StatusCode::TOO_MANY_REQUESTS, StatusCode::INTERNAL_SERVER_ERROR] {
-        assert!(corrected_output_limit_request(status, &encode(&error), &encode(&request)).is_none());
+    let corrected =
+        corrected_output_limit_request(StatusCode::BAD_REQUEST, &encode(&error), &encode(&request))
+            .unwrap();
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&corrected).unwrap(),
+        json!({"model":"selected-alias", "max_completion_tokens":1024, "stream":true})
+    );
+    for status in [
+        StatusCode::OK,
+        StatusCode::UNAUTHORIZED,
+        StatusCode::NOT_FOUND,
+        StatusCode::TOO_MANY_REQUESTS,
+        StatusCode::INTERNAL_SERVER_ERROR,
+    ] {
+        assert!(
+            corrected_output_limit_request(status, &encode(&error), &encode(&request)).is_none()
+        );
     }
-    for body in [json!({}), json!(null), json!({"max_tokens":0}), json!({"max_tokens":-1}),
-        json!({"max_tokens":"1024"}), json!({"max_tokens":1.5}),
+    for body in [
+        json!({}),
+        json!(null),
+        json!({"max_tokens":0}),
+        json!({"max_tokens":-1}),
+        json!({"max_tokens":"1024"}),
+        json!({"max_tokens":1.5}),
         json!({"max_tokens":1024,"max_completion_tokens":1024}),
-        json!({"max_tokens":1024,"max_completion_tokens":null})] {
-        assert!(corrected_output_limit_request(StatusCode::BAD_REQUEST, &encode(&error), &encode(&body)).is_none());
+        json!({"max_tokens":1024,"max_completion_tokens":null}),
+    ] {
+        assert!(
+            corrected_output_limit_request(
+                StatusCode::BAD_REQUEST,
+                &encode(&error),
+                &encode(&body)
+            )
+            .is_none()
+        );
     }
-    for patch in [json!({"param":null}), json!({"param":"model"}), json!({"param":"temperature"}),
+    for patch in [
+        json!({"param":null}),
+        json!({"param":"model"}),
+        json!({"param":"temperature"}),
         json!({"message":"The max_completion_tokens field exists."}),
         json!({"message":"Use fewer max_tokens; max_completion_tokens is unsupported."}),
-        json!({"message":null})] {
+        json!({"message":null}),
+    ] {
         let mut modified = error.clone();
-        modified["error"].as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
-        assert!(corrected_output_limit_request(StatusCode::BAD_REQUEST, &encode(&modified), &encode(&request)).is_none());
+        modified["error"]
+            .as_object_mut()
+            .unwrap()
+            .extend(patch.as_object().unwrap().clone());
+        assert!(
+            corrected_output_limit_request(
+                StatusCode::BAD_REQUEST,
+                &encode(&modified),
+                &encode(&request)
+            )
+            .is_none()
+        );
     }
-    assert!(corrected_output_limit_request(StatusCode::BAD_REQUEST, b"{\"error\":", &encode(&request)).is_none());
-    assert!(corrected_output_limit_request(StatusCode::BAD_REQUEST, &encode(&error), b"{").is_none());
+    assert!(
+        corrected_output_limit_request(StatusCode::BAD_REQUEST, b"{\"error\":", &encode(&request))
+            .is_none()
+    );
+    assert!(
+        corrected_output_limit_request(StatusCode::BAD_REQUEST, &encode(&error), b"{").is_none()
+    );
 }
 
 #[test]
 fn parameter_errors_do_not_report_model_or_endpoint_unavailability() {
-    for parameter in ["max_tokens", "reasoning_effort", "temperature", "messages[0].role", "tools"] {
+    for parameter in [
+        "max_tokens",
+        "reasoning_effort",
+        "temperature",
+        "messages[0].role",
+        "tools",
+    ] {
         let error = json!({"error": {
             "param":parameter, "message":"Unsupported API parameter is not supported with this model."
         }});
         let bytes = serde_json::to_vec(&error).unwrap();
         assert!(!is_responses_only_error(&bytes), "{parameter}");
-        assert!(!is_model_unavailable_error(StatusCode::BAD_REQUEST, &bytes), "{parameter}");
+        assert!(
+            !is_model_unavailable_error(StatusCode::BAD_REQUEST, &bytes),
+            "{parameter}"
+        );
     }
 }
 
@@ -233,7 +317,9 @@ async fn foundry_request_incompatibility_recovers_without_changing_model() {
             .mount(&primary)
             .await;
         Mock::given(wiremock::matchers::path("/chat/completions"))
-            .and(body_partial_json(json!({"model":"gpt-6.1-sol", "max_completion_tokens":1024})))
+            .and(body_partial_json(
+                json!({"model":"gpt-6.1-sol", "max_completion_tokens":1024}),
+            ))
             .respond_with(ResponseTemplate::new(400).set_body_json(error))
             .expect(1)
             .mount(&primary)

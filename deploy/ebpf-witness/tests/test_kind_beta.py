@@ -1,3 +1,6 @@
+# Copyright (c) Microsoft Corporation.
+# Licensed under the MIT License.
+
 # Copyright (c) Microsoft Corporation. Licensed under the MIT License.
 """Actual Helm caller/profile checks. All identities, endpoints and APIs are offline fixtures."""
 import base64

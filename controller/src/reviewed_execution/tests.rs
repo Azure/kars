@@ -1213,7 +1213,10 @@ fn revision_snapshot_checks_content_provenance_and_existing_capacity() {
             }
             _ => unreachable!(),
         }
-        assert!(seal_team_revision(&mut root, &docs, &[]).is_err(), "{mutation}");
+        assert!(
+            seal_team_revision(&mut root, &docs, &[]).is_err(),
+            "{mutation}"
+        );
         assert!(!root.annotations().contains_key(TEAM_REVISION));
     }
     seal_team_revision(&mut root, &[valid], &[]).unwrap();
@@ -1263,7 +1266,10 @@ fn revision_diagnostic_snapshot_keeps_phase_producers_separate_and_sealed() {
             "order" => docs.swap(0, 1),
             _ => unreachable!(),
         }
-        assert!(seal_team_revision(&mut root, &docs, &[]).is_err(), "{mutation}");
+        assert!(
+            seal_team_revision(&mut root, &docs, &[]).is_err(),
+            "{mutation}"
+        );
         assert!(!root.annotations().contains_key(TEAM_REVISION));
     }
     seal_team_revision(&mut root, &valid, &[]).unwrap();

@@ -109,8 +109,14 @@ pub(super) async fn authorize_read(
         let allowances = super::unbounded::configured(&catalog)?;
         super::unbounded::validate_receipt(ledger, &allowances)?;
         let original = super::unbounded::verify_sources(
-            client, settings, &catalog, &allowances, &ledger.root, &ledger.account_uid,
-        ).await?;
+            client,
+            settings,
+            &catalog,
+            &allowances,
+            &ledger.root,
+            &ledger.account_uid,
+        )
+        .await?;
         super::unbounded::verify_original(ledger, original.as_ref())?;
         super::first_install::verify_renewal_intents(
             client,
@@ -146,8 +152,14 @@ pub(super) async fn transact<T>(
                 let grants = configured(&catalog)?;
                 let allowances = super::unbounded::configured(&catalog)?;
                 let original = super::unbounded::verify_sources(
-                    client, settings, &catalog, &allowances, root, account_uid,
-                ).await?;
+                    client,
+                    settings,
+                    &catalog,
+                    &allowances,
+                    root,
+                    account_uid,
+                )
+                .await?;
                 super::first_install::verify_renewal_intents(
                     client,
                     settings,

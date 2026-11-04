@@ -929,32 +929,45 @@ mod tests {
             json!({"sharedScopes": ["team_beta", "team_beta"]}),
         ] {
             let mut spec = json!({"sandboxRef":{"name":"x"},"storeName":"x","scope":"agent_x"});
-            spec.as_object_mut().unwrap().extend(changes.as_object().unwrap().clone());
+            spec.as_object_mut()
+                .unwrap()
+                .extend(changes.as_object().unwrap().clone());
             let memory = KarsMemory::new("x", serde_json::from_value(spec).unwrap());
             let (_, digest, degraded) = resolve_memory_source(&memory).await;
             assert!(digest.is_none());
             assert_eq!(degraded.unwrap().0, "InvalidSpec");
         }
-        let memory = KarsMemory::new("x", serde_json::from_value(json!({
-            "sandboxRef":{"name":"x"}, "storeName":"x", "scope":"agent_x",
-            "sharedScopes":["team_beta"]
-        })).unwrap());
+        let memory = KarsMemory::new(
+            "x",
+            serde_json::from_value(json!({
+                "sandboxRef":{"name":"x"}, "storeName":"x", "scope":"agent_x",
+                "sharedScopes":["team_beta"]
+            }))
+            .unwrap(),
+        );
         let (effective, digest, degraded) = resolve_memory_source(&memory).await;
         assert!(degraded.is_none());
         assert!(digest.is_none());
-        assert_eq!(compile_to_binding(&effective)["sharedScopes"], json!(["team_beta"]));
+        assert_eq!(
+            compile_to_binding(&effective)["sharedScopes"],
+            json!(["team_beta"])
+        );
     }
 
     #[tokio::test]
     async fn memory_bundle_rejects_even_empty_inline_shared_scopes_before_fetch() {
-        let memory = KarsMemory::new("x", serde_json::from_value(json!({
-            "sandboxRef":{"name":"x"}, "sharedScopes":[],
-            "bundleRef":{
-                "registry":"example.invalid", "repository":"memory",
-                "digest":format!("sha256:{}", "a".repeat(64)),
-                "artifactType":crate::policy_canonical::memory::MEMORY_BINDING_V1_MEDIA_TYPE
-            }
-        })).unwrap());
+        let memory = KarsMemory::new(
+            "x",
+            serde_json::from_value(json!({
+                "sandboxRef":{"name":"x"}, "sharedScopes":[],
+                "bundleRef":{
+                    "registry":"example.invalid", "repository":"memory",
+                    "digest":format!("sha256:{}", "a".repeat(64)),
+                    "artifactType":crate::policy_canonical::memory::MEMORY_BINDING_V1_MEDIA_TYPE
+                }
+            }))
+            .unwrap(),
+        );
         let (effective, digest, degraded) = resolve_memory_source(&memory).await;
         assert!(effective.store_name.is_none());
         assert!(effective.shared_scopes.is_none());
@@ -968,8 +981,11 @@ mod tests {
     fn memory_bundle_merge_preserves_grants_and_cr_selector() {
         let verified = crate::policy_canonical::memory::parse(
             br#"{"storeName":"x","scope":"agent_x","sharedScopes":["team_beta"]}"#,
-        ).unwrap();
-        let selector = crate::kars_memory::SandboxRef { name: "sandbox-x".into() };
+        )
+        .unwrap();
+        let selector = crate::kars_memory::SandboxRef {
+            name: "sandbox-x".into(),
+        };
         let effective = merge_bundle_with_selector(&selector, &verified);
         assert_eq!(effective.sandbox_ref.name, "sandbox-x");
         assert!(effective.bundle_ref.is_none());
