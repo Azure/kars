@@ -19,7 +19,8 @@
     "vite": "6.4.5"
   },
   "overrides": {
-    "vitest": "^4.1.8",
+    "vitest": "^4.1.12",
+    "@vitest/coverage-istanbul": "^4.1.12",
     "tmp": "^0.2.6"
   }
 }

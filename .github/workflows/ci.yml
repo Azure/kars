@@ -254,7 +254,7 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-      - run: npm install
+      - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
@@ -281,8 +281,8 @@ jobs:
       - name: "Build mesh-plugin (file: dep of runtime)"
         working-directory: mesh-plugin
         run: |
-          npm install && npm run build
-      - run: npm install
+          npm ci && npm run build
+      - run: npm ci
       - run: npm run typecheck
       - run: npm run lint
       - run: npm run build
@@ -301,13 +301,51 @@ jobs:
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: "22"
-      - run: npm install
+      - run: npm ci
       - run: npm run typecheck
       - run: npm run build
       - run: npm test
       - name: npm audit (Mesh Plugin dependencies)
         working-directory: mesh-plugin
         run: npm audit --audit-level=high
+
+  additional-typescript:
+    name: TypeScript (${{ matrix.directory }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        directory:
+          - runtimes/langgraph-ts
+          - tests/compat
+          - tests/conformance
+    defaults:
+      run:
+        working-directory: ${{ matrix.directory }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run build --if-present
+      - run: npm test
+      - run: npm audit --audit-level=high
+
+  headlamp-build:
+    name: Headlamp Plugin Build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: tools/headlamp-plugin
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: "22"
+      - run: npm ci
+      - run: npm run build
 
   python-sidecar:
     name: Python Lint & Test (AGT Sidecar)
@@ -672,31 +710,54 @@ jobs:
     needs: [changes, build-rust]
     if: needs.changes.outputs.code == 'true'
     runs-on: ubuntu-latest
-    # Phase 2 S16. Compiles + runs criterion benches and fails if median
-    # exceeds the value in `<crate>/benches/baselines.json` by more than 25%.
-    # Runs on every PR (cheap to compile) but only enforces regression on
-    # PRs that touch controller or router source paths — see paths filter
-    # in the workflow trigger when expanding to a separate workflow file.
+    # Compare base and head on the same runner/toolchain. Historical absolute
+    # timings vary with hosted-runner hardware and compiler optimizations.
+    # The tracked baseline JSON still defines required groups and the 25% limit.
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 2
       - uses: dtolnay/rust-toolchain@631a55b12751854ce901bb631d5902ceb48146f7 # stable
       - uses: Swatinem/rust-cache@f0d9c3887740aee45f6153b24b3a6b815192ec16 # v2
         with:
           shared-key: rust-glibc-release
           save-if: false
-      - name: Build benches (compile-only on every PR)
-        # Scope to the two benches we actually execute. `--workspace` would
-        # compile every bench target in every crate; we only run two.
+      - name: Test benchmark comparison
+        run: python3 -m unittest discover -s ci -p 'test_bench_regression.py'
+      - name: Measure base revision on the same runner
+        shell: bash
+        env:
+          BASE_REF: ${{ github.event.pull_request.base.sha || github.event.before || 'HEAD^' }}
+          CARGO_TARGET_DIR: ${{ github.workspace }}/target
         run: |
-          cargo bench --no-run --bench reconciler_bench --package kars-controller
-          cargo bench --no-run --bench proxy_bench --package kars-inference-router
+          set -euo pipefail
+          if [[ "$BASE_REF" =~ ^0+$ ]]; then
+            BASE_REF=HEAD^
+          fi
+          if ! git rev-parse --verify --end-of-options "${BASE_REF}^{commit}" >/dev/null 2>&1; then
+            git fetch --no-tags --depth=1 origin "$BASE_REF"
+          fi
+          base="$(git rev-parse --verify --end-of-options "${BASE_REF}^{commit}")"
+          git worktree add --detach .bench-base "$base"
+          (
+            cd .bench-base
+            cargo bench --locked --bench reconciler_bench --package kars-controller -- --output-format bencher \
+              | tee "$GITHUB_WORKSPACE/bench-base-controller.txt"
+            cargo bench --locked --bench proxy_bench --package kars-inference-router -- --output-format bencher \
+              | tee "$GITHUB_WORKSPACE/bench-base-router.txt"
+          )
+          git worktree remove .bench-base
       - name: Run controller bench + compare to baseline
+        shell: bash
         run: |
-          cargo bench --bench reconciler_bench -- --save-baseline pr --output-format bencher \
+          set -euo pipefail
+          cargo bench --locked --bench reconciler_bench --package kars-controller -- --output-format bencher \
             | tee bench-controller.txt
-          python3 ci/bench_regression.py controller/benches/baselines.json bench-controller.txt
+          python3 ci/bench_regression.py controller/benches/baselines.json bench-controller.txt bench-base-controller.txt
       - name: Run router bench + compare to baseline
+        shell: bash
         run: |
-          cargo bench --bench proxy_bench -- --save-baseline pr --output-format bencher \
+          set -euo pipefail
+          cargo bench --locked --bench proxy_bench --package kars-inference-router -- --output-format bencher \
             | tee bench-router.txt
-          python3 ci/bench_regression.py inference-router/benches/baselines.json bench-router.txt
+          python3 ci/bench_regression.py inference-router/benches/baselines.json bench-router.txt bench-base-router.txt

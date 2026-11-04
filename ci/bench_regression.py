@@ -15,7 +15,11 @@ Bencher format lines look like:
 
     test reconcile_decision/n=100 ... bench:           4500 ns/iter (+/- 100)
 
-Exit non-zero if any captured bench exceeds `baseline * (1 + threshold/100)`.
+An optional third file supplies baseline measurements from the base revision
+on the same runner. The JSON still defines the required groups and threshold.
+
+Exit non-zero if any required measurement is missing or a bench exceeds
+`baseline * (1 + threshold/100)`.
 
 Used by `.github/workflows/ci.yml`'s `Bench Regression` job. Keep this
 script tiny + dep-free (Python stdlib only) so it doesn't add CI install
@@ -43,43 +47,43 @@ def parse_bencher(text: str) -> dict[str, int]:
 
 
 def main(argv: list[str]) -> int:
-    if len(argv) < 3:
-        print("usage: bench_regression.py <baselines.json> <bencher.txt>", file=sys.stderr)
+    if len(argv) not in (3, 4):
+        print(
+            "usage: bench_regression.py <baselines.json> <bencher.txt> [base-bencher.txt]",
+            file=sys.stderr,
+        )
         return 2
     baselines = json.loads(Path(argv[1]).read_text())
     threshold_pct = baselines.get("_threshold_pct", 25)
     groups = baselines.get("groups", {})
     measured = parse_bencher(Path(argv[2]).read_text())
+    base_measured = parse_bencher(Path(argv[3]).read_text()) if len(argv) == 4 else None
 
     failures: list[str] = []
-    missing: list[str] = []
+    if not groups:
+        print("Bench regression FAIL: no required benchmark groups", file=sys.stderr)
+        return 1
     for name, info in groups.items():
-        baseline = info["median_ns"]
-        ceiling = baseline * (1 + threshold_pct / 100)
         if name not in measured:
-            # criterion's bencher format normalizes group/bench names; allow
-            # tolerant lookup so cosmetic renames don't fail-close.
-            missing.append(name)
+            failures.append(f"{name}: missing head measurement")
             continue
+        if base_measured is not None and name not in base_measured:
+            failures.append(f"{name}: missing base measurement")
+            continue
+        baseline = base_measured[name] if base_measured is not None else info["median_ns"]
+        ceiling = baseline * (1 + threshold_pct / 100)
         actual = measured[name]
         status = "OK" if actual <= ceiling else "REGRESSED"
         print(f"  {status:10s} {name:50s} {actual:8d}ns  (baseline {baseline}ns, ceiling {int(ceiling)}ns)")
         if actual > ceiling:
             failures.append(f"{name}: {actual}ns > ceiling {int(ceiling)}ns")
 
-    if missing:
-        # Missing benches are warnings, not failures — useful when the bench
-        # set evolves before the baseline json catches up. Tighten to fail
-        # once the matrix is stable.
-        for m in missing:
-            print(f"  WARN       {m}: no measurement (rename or new?)", file=sys.stderr)
-
     if failures:
         print("\nBench regression FAIL:", file=sys.stderr)
         for f in failures:
             print(f"  - {f}", file=sys.stderr)
         return 1
-    print(f"\nAll {len(groups) - len(missing)} bench groups within +{threshold_pct}% baseline.")
+    print(f"\nAll {len(groups)} bench groups within +{threshold_pct}% baseline.")
     return 0
 
 
