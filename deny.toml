@@ -61,6 +61,21 @@ ignore = [
     # `.cargo/audit.toml`. Re-evaluate when `getset` switches off
     # proc-macro-error2 or oci-client upgrades past getset 0.1.6.
     "RUSTSEC-2026-0173",
+    # RUSTSEC-2026-0387 — `crypto-bigint 0.5.5` timing variability.
+    # Pulled via elliptic-curve 0.13 → jsonwebtoken (rust_crypto) and
+    # sigstore → openidconnect / oci-client. Kars only *verifies*
+    # ES256/ES384 signatures against public keys (MCP OAuth JWKS,
+    # cosign policy verification); no EC private key is held, so the
+    # timing leak exposes no secret. Parents don't yet accept
+    # crypto-bigint >= 0.7.6. Expires 2027-02-04 — tracked in
+    # Azure/kars#594. Mirrors `.cargo/audit.toml`.
+    "RUSTSEC-2026-0387",
+    # RUSTSEC-2024-0449 — `unsafe-libyaml` is unmaintained (not a
+    # vulnerability). Pulled via serde_yaml from kube-client, AGT
+    # agentmesh, and our own crates; removing only our direct use
+    # would not drop it. Expires 2027-02-04 — tracked in
+    # Azure/kars#595. Mirrors `.cargo/audit.toml`.
+    "RUSTSEC-2024-0449",
 ]
 
 # ─── Licenses ───────────────────────────────────────────────────────────

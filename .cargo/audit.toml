@@ -81,4 +81,31 @@ ignore = [
     # TODO: drop this ignore when `getset` switches off `proc-macro-error2`
     # or when oci-client upgrades past `getset 0.1.6`.
     "RUSTSEC-2026-0173",
+    # RUSTSEC-2026-0387 — `crypto-bigint 0.5.5` timing variability in
+    # operations intended to be constant-time
+    # https://rustsec.org/advisories/RUSTSEC-2026-0387
+    #
+    # Severity: vulnerability; patched in crypto-bigint >= 0.7.6.
+    # Source: transitive only, via elliptic-curve 0.13.8 (ecdsa/p256/p384):
+    #   jsonwebtoken 10.4.0 (rust_crypto) → kars-inference-router, kars-controller
+    #   sigstore 0.14.0 → openidconnect 4.0.1 / oci-client → kars-controller
+    # Kars uses these curves only to *verify* signatures against public keys:
+    # ES256 OAuth access-token validation against JWKS
+    # (`inference-router/src/mcp/oauth.rs`) and cosign policy verification
+    # (`controller/src/policy_fetcher.rs`). No Kars code imports p256/p384/
+    # ecdsa directly and no EC private key is held by router or controller,
+    # so a timing leak over public inputs reveals no secret. Current parent
+    # releases do not accept elliptic-curve 0.14 / crypto-bigint 0.7.
+    # Expires 2027-02-04 — remove or re-justify; tracked in Azure/kars#594.
+    "RUSTSEC-2026-0387",
+    # RUSTSEC-2024-0449 — `unsafe-libyaml 0.2.11` is unmaintained
+    # https://rustsec.org/advisories/RUSTSEC-2024-0449
+    #
+    # Severity: informational ("unmaintained"), NOT a vulnerability.
+    # Source: serde_yaml 0.9.34+deprecated, used by kube-client 3.1.0,
+    # AGT agentmesh 4.0.0, and kars-controller / kars-inference-router /
+    # kars-cncf-conformance. Dropping only our direct serde_yaml use would
+    # not remove it while kube and agentmesh still depend on it.
+    # Expires 2027-02-04 — remove or re-justify; tracked in Azure/kars#595.
+    "RUSTSEC-2024-0449",
 ]

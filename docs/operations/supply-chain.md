@@ -26,6 +26,23 @@ actually check, and how to extend them.
 
 > **About SLSA.** On tagged release builds, `docker/build-push-action` runs with `provenance: true`, which makes BuildKit emit a SLSA-format build-provenance attestation alongside the image (attached to the registry as an OCI attestation manifest). Combined with the cosign keyless signature and the SPDX SBOM, every signed image has a verifiable record of *what* was built, *how* it was built, and *with what dependencies*. Verification recipes are below.
 
+## Dependency updates
+
+Dependency rollups must retain the audit gates and update related packages
+together. All CodeQL actions in a workflow must use the same release; Dependabot
+groups those updates to prevent initialization/analysis version mismatches.
+The mesh and OpenClaw packages override the vendored AGT SDK's `js-yaml` dependency
+to the patched 4.3.2 release without changing the SDK tarball.
+
+The benchmark gate compares the base revision with the candidate on the same
+runner and Rust toolchain, rather than treating historical hardware timings as
+an absolute limit. It retains the configured 25% regression threshold and fails
+when a required benchmark measurement is missing from either revision.
+
+TypeScript jobs install the committed lockfiles with `npm ci`. LangGraph and
+the compatibility/conformance test packages have dedicated typecheck, test,
+and audit rows; the Headlamp plugin has a build row.
+
 ## `deny.toml`
 
 `deny.toml` lives at the workspace root. It pins four sections:
@@ -40,6 +57,13 @@ actually check, and how to extend them.
   - `RUSTSEC-2023-0071` (rsa Marvin timing attack) — pulled by
     `jsonwebtoken` and `sigstore`. Neither call site does
     attacker-observable RSA decryption with secret keys.
+  - `RUSTSEC-2026-0387` (crypto-bigint 0.5 timing) — pulled by
+    `jsonwebtoken` and `sigstore` via `elliptic-curve` 0.13. Kars only
+    verifies EC signatures against public keys. Expires 2027-02-04;
+    tracked in Azure/kars#594.
+  - `RUSTSEC-2024-0449` (unsafe-libyaml unmaintained) — pulled by
+    `serde_yaml` via kube, AGT `agentmesh`, and Kars crates. Expires
+    2027-02-04; tracked in Azure/kars#595.
 - `[licenses]` — allow-list of SPDX identifiers. Adding a new
   third-party dependency that introduces a license outside the
   allow-list will fail CI.

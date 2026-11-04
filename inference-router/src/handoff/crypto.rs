@@ -117,10 +117,10 @@ pub fn encrypt_state(
     // Random 96-bit nonce.
     let mut nonce_bytes = [0u8; AES_NONCE_BYTES];
     rand::rng().fill(&mut nonce_bytes);
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce = Nonce::from(nonce_bytes);
 
     let ciphertext = cipher
-        .encrypt(nonce, plaintext)
+        .encrypt(&nonce, plaintext)
         .map_err(|e| format!("AES-GCM encrypt: {e}"))?;
 
     let verification_hash = hex_sha256(plaintext);
@@ -161,10 +161,11 @@ pub fn decrypt_state(blob: &EncryptedHandoffBlob, shared_secret: &[u8]) -> Resul
 
     let cipher = Aes256Gcm::new_from_slice(&key_bytes).map_err(|e| format!("AES key init: {e}"))?;
 
-    let nonce = Nonce::from_slice(&nonce_bytes);
+    let nonce =
+        Nonce::try_from(nonce_bytes.as_slice()).map_err(|e| format!("invalid nonce: {e}"))?;
 
     let plaintext = cipher
-        .decrypt(nonce, ciphertext.as_ref())
+        .decrypt(&nonce, ciphertext.as_ref())
         .map_err(|_| "AES-GCM decryption failed — wrong key or tampered ciphertext".to_string())?;
 
     // Verify integrity.
@@ -203,6 +204,23 @@ mod tests {
         let got = decrypt_state(&blob, secret).expect("decrypt");
         assert_eq!(got, pt);
         assert_eq!(blob.version, HANDOFF_STATE_VERSION);
+    }
+
+    #[test]
+    fn decrypt_preserves_v1_wire_format() {
+        // Independent Node.js HKDF-SHA256/AES-256-GCM vector; nonce 00..0b.
+        let blob = EncryptedHandoffBlob {
+            version: 1,
+            nonce: "AAECAwQFBgcICQoL".to_string(),
+            ciphertext: "BqrdwuR5nOLtgukg+7b+M/ryBKjbnfhb3TSGok83z6h8".to_string(),
+            hkdf_salt: "cmFuZG9tLXNhbHQtMTYhIQ==".to_string(),
+            verification_hash: "6aae0460789794f9f3432e4a9e229c7e0532220ec91133a9757650ab8a52c132"
+                .to_string(),
+        };
+        assert_eq!(
+            decrypt_state(&blob, b"shared-secret-32-bytes-aaaaaaaaa").expect("decrypt v1"),
+            b"legacy handoff v1"
+        );
     }
 
     #[test]
